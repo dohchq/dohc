@@ -2,6 +2,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  rename,
   rm,
   symlink,
   unlink,
@@ -17,6 +18,13 @@ import {
   writeUiStateFile,
 } from "./workspaceUiState";
 import { startWorkspaceWatch } from "./workspaceWatcher";
+
+vi.mock("node:fs/promises", async () => {
+  const actual = await vi.importActual<typeof import("node:fs/promises")>(
+    "node:fs/promises",
+  );
+  return { ...actual, rename: vi.fn(actual.rename) };
+});
 
 const roots: string[] = [];
 const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
@@ -50,6 +58,38 @@ describe("ui-state file store", () => {
     // Pretty-printed JSON with a trailing newline, like every .dohc file.
     const raw = await readFile(join(root, ".dohc", "ui-state.json"), "utf8");
     expect(raw.endsWith("\n")).toBe(true);
+  });
+
+  it("serializes a burst of writes and leaves the latest complete state", async () => {
+    const root = await tempRoot();
+    await Promise.all(
+      Array.from({ length: 40 }, (_, sequence) =>
+        writeUiStateFile(root, { ...STATE, sidebarWidth: 300 + sequence }),
+      ),
+    );
+
+    expect(await readUiStateFile(root)).toEqual({
+      ...STATE,
+      sidebarWidth: 339,
+    });
+    expect(
+      (await readdir(join(root, ".dohc"))).filter((name) => name.includes(".tmp-")),
+    ).toEqual([]);
+  });
+
+  it("retries a transient Windows rename failure and completes the write", async () => {
+    const root = await tempRoot();
+    const transient = Object.assign(new Error("file is temporarily busy"), {
+      code: "EBUSY",
+    });
+    const renameMock = vi.mocked(rename);
+    renameMock.mockClear();
+    renameMock.mockRejectedValueOnce(transient);
+
+    await expect(writeUiStateFile(root, STATE)).resolves.toBeUndefined();
+
+    expect(renameMock).toHaveBeenCalledTimes(2);
+    expect(await readUiStateFile(root)).toEqual(STATE);
   });
 
   it("a missing or corrupt file reads as null, never an error", async () => {

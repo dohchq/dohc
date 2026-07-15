@@ -75,6 +75,45 @@ describe("resolveWorkspaceImageSrc", () => {
     );
   });
 
+  it("lets a browser-hosted consumer serve an in-memory workspace asset", () => {
+    expect(
+      resolveWorkspaceImageSrc(
+        {
+          ...ctx,
+          resolveWorkspaceAssetUrl: (path) =>
+            path === "notes/assets/pic.png" ? "blob:demo-image" : null,
+        },
+        "assets/pic.png",
+      ),
+    ).toBe("blob:demo-image");
+  });
+
+  it("falls back to the desktop asset URL when a browser resolver has no match", () => {
+    expect(
+      resolveWorkspaceImageSrc(
+        { ...ctx, resolveWorkspaceAssetUrl: () => null },
+        "assets/pic.png",
+      ),
+    ).toBe("dohc-file://ws1/notes/assets/pic.png");
+  });
+
+  it("never delegates a path that escapes the workspace boundary", () => {
+    let calls = 0;
+    expect(
+      resolveWorkspaceImageSrc(
+        {
+          ...ctx,
+          resolveWorkspaceAssetUrl: () => {
+            calls += 1;
+            return "blob:outside";
+          },
+        },
+        "../../outside.png",
+      ),
+    ).toBe(BLOCKED_IMAGE_SRC);
+    expect(calls).toBe(0);
+  });
+
   it("percent-encodes each path segment", () => {
     expect(resolveWorkspaceImageSrc(ctx, "assets/my pic.png")).toBe(
       "dohc-file://ws1/notes/assets/my%20pic.png",

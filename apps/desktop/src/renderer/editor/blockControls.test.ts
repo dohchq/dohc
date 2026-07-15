@@ -9,23 +9,29 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { Editor } from "@tiptap/core";
+import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
+import { TableKit } from "@tiptap/extension-table";
+import { NodeSelection } from "@tiptap/pm/state";
 import { dohcMarkdownExtensions } from "./extensions";
 import {
   activeTurnIntoId,
+  BlockMenu,
   blockDragSlice,
   copyBlockAsMarkdown,
   deleteBlock,
+  deleteSelectedTopLevelBlock,
   duplicateBlock,
+  makeBlockControlsPlugin,
+  selectBlock,
   resolveTurnIntoDropdown,
   serializeBlockToMarkdown,
   topLevelBlockPos,
+  TurnIntoMenu,
   turnBlockInto,
   TURN_INTO_ENTRIES,
-  TurnIntoMenu,
 } from "./blockControls";
 
 function makeEditor(markdown: string): Editor {
@@ -40,6 +46,32 @@ function makeEditor(markdown: string): Editor {
     ],
     content: markdown,
     contentType: "markdown",
+  });
+}
+
+function makeEditorWithControls(content: Record<string, unknown>): Editor {
+  const controls = Extension.create({
+    name: "testBlockControls",
+    addProseMirrorPlugins() {
+      return [
+        makeBlockControlsPlugin({
+          onInsertRef: { current: vi.fn() },
+          onOpenMenuRef: { current: vi.fn() },
+        }),
+      ];
+    },
+  });
+  return new Editor({
+    element: document.createElement("div"),
+    extensions: [
+      StarterKit.configure({ trailingNode: false }),
+      ...dohcMarkdownExtensions,
+      TaskList,
+      TaskItem,
+      TableKit,
+      controls,
+    ],
+    content,
   });
 }
 
@@ -62,6 +94,36 @@ afterEach(() => {
   cleanup();
   while (editors.length) editors.pop()?.destroy();
   vi.restoreAllMocks();
+});
+
+describe("blockControls menu keyboard deletion", () => {
+  it.each(["Backspace", "Delete"])(
+    "routes %s to the selected block's delete action",
+    (key) => {
+      const onSelect = vi.fn();
+      render(
+        createElement(BlockMenu, {
+          state: {
+            open: true,
+            pos: 0,
+            x: 20,
+            y: 20,
+            maxHeight: 400,
+            placement: "below",
+          },
+          onSelect,
+          onClose: vi.fn(),
+        }),
+      );
+
+      fireEvent.keyDown(screen.getByRole("menu", { name: "block actions" }), {
+        key,
+      });
+      expect(onSelect).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: "action", id: "delete" }),
+      );
+    },
+  );
 });
 
 describe("blockControls duplicate", () => {
@@ -104,6 +166,161 @@ describe("blockControls delete", () => {
     const remaining = topLevelBlocks(editor);
     expect(remaining).toHaveLength(1);
     expect(editor.state.doc.child(0).textContent).toBe("First");
+  });
+
+  const deletableBlocks = [
+    ["code block", { type: "codeBlock", content: [{ type: "text", text: "code" }] }],
+    ["divider", { type: "horizontalRule" }],
+    [
+      "table",
+      {
+        type: "table",
+        content: [
+          {
+            type: "tableRow",
+            content: [
+              {
+                type: "tableCell",
+                content: [{ type: "paragraph", content: [{ type: "text", text: "cell" }] }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    ["math block", { type: "mathBlock", attrs: { tex: "1+1=2" } }],
+  ] as const;
+
+  it.each(
+    (["Backspace", "Delete"] as const).flatMap((key) =>
+      deletableBlocks.map(([label, target]) => [label, key, target] as const),
+    ),
+  )("deletes a selected %s with %s", (_label, key, target) => {
+    const editor = track(
+      makeEditorWithControls({
+        type: "doc",
+        content: [
+          { type: "paragraph", content: [{ type: "text", text: "Before" }] },
+          target,
+          { type: "paragraph", content: [{ type: "text", text: "After" }] },
+        ],
+      }),
+    );
+    const [, selected] = topLevelBlocks(editor);
+    selectBlock(editor, selected.pos);
+
+    const event = new KeyboardEvent("keydown", { key, bubbles: true });
+    editor.view.dom.dispatchEvent(event);
+
+    expect(topLevelBlocks(editor).map((block) => block.type)).toEqual([
+      "paragraph",
+      "paragraph",
+    ]);
+    expect(editor.state.doc.textContent).toBe("BeforeAfter");
+  });
+
+  it("does not delete a block for an ordinary text selection", () => {
+    const editor = track(
+      makeEditorWithControls({
+        type: "doc",
+        content: [
+          { type: "codeBlock", content: [{ type: "text", text: "code" }] },
+        ],
+      }),
+    );
+    editor.commands.setTextSelection(2);
+    expect(deleteSelectedTopLevelBlock(editor.view)).toBe(false);
+    expect(editor.state.doc.child(0).type.name).toBe("codeBlock");
+  });
+
+  it("does not delete a parent block for a nested node selection", () => {
+    const editor = track(
+      makeEditorWithControls({
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [
+              {
+                type: "image",
+                attrs: { src: "asset.png", alt: "asset", title: null },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    editor.view.dispatch(
+      editor.state.tr.setSelection(NodeSelection.create(editor.state.doc, 1)),
+    );
+
+    expect(deleteSelectedTopLevelBlock(editor.view)).toBe(false);
+    expect(editor.state.doc.child(0).type.name).toBe("paragraph");
+    expect(editor.state.doc.child(0).child(0).type.name).toBe("image");
+  });
+});
+
+describe("blockControls gutter coverage", () => {
+  it("renders one top-level gutter for every structural block", () => {
+    const editor = track(
+      makeEditorWithControls({
+        type: "doc",
+        content: [
+          { type: "paragraph", content: [{ type: "text", text: "Text" }] },
+          { type: "codeBlock", content: [{ type: "text", text: "code" }] },
+          { type: "horizontalRule" },
+          {
+            type: "table",
+            content: [
+              {
+                type: "tableRow",
+                content: [
+                  { type: "tableCell", content: [{ type: "paragraph" }] },
+                ],
+              },
+            ],
+          },
+          {
+            type: "taskList",
+            content: [
+              {
+                type: "taskItem",
+                attrs: { checked: false },
+                content: [
+                  { type: "paragraph", content: [{ type: "text", text: "Task" }] },
+                ],
+              },
+            ],
+          },
+          { type: "callout", attrs: { calloutType: "note", title: "", fold: "" }, content: [{ type: "paragraph" }] },
+          { type: "mathBlock", attrs: { tex: "x" } },
+          { type: "queryBlock", attrs: { info: "" }, content: [{ type: "text", text: "query" }] },
+        ],
+      }),
+    );
+
+    const controls = Array.from(
+      editor.view.dom.querySelectorAll<HTMLElement>(".dohc-block-affordance"),
+    );
+    expect(controls).toHaveLength(editor.state.doc.childCount);
+    expect(controls.map((control) => control.dataset.dohcBlockIndex)).toEqual(
+      Array.from({ length: editor.state.doc.childCount }, (_, index) => String(index)),
+    );
+    expect(controls.every((control) => control.parentElement === editor.view.dom)).toBe(true);
+
+    const code = editor.view.dom.querySelector<HTMLElement>(
+      '[data-dohc-block-index="1"].dohc-block-node',
+    );
+    code?.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    expect(controls[1]?.classList.contains("is-visible")).toBe(true);
+    expect(controls[0]?.classList.contains("is-visible")).toBe(false);
+
+    editor.view.dom.dispatchEvent(
+      new MouseEvent("mouseleave", { bubbles: true }),
+    );
+    expect(controls.every((control) => !control.classList.contains("is-visible"))).toBe(
+      true,
+    );
   });
 });
 
@@ -149,6 +366,27 @@ describe("blockControls turn into", () => {
 // same command-level path (resolve pos from selection -> turnBlockInto),
 // rather than re-testing turnBlockInto's own per-id branches above.
 describe("blockControls turn-into dropdown (bubble menu) command path", () => {
+  it("keeps option clicks inside a shadow-root dropdown", () => {
+    const editor = track(makeEditor("Some text"));
+    const host = document.createElement("div");
+    document.body.append(host);
+    const shadow = host.attachShadow({ mode: "open" });
+    const view = render(createElement(TurnIntoMenu, { editor }), {
+      container: shadow as unknown as HTMLElement,
+    });
+
+    fireEvent.click(view.getByTitle("Turn into"));
+    const heading = view.getByRole("option", { name: /Heading 1/ });
+    heading.dispatchEvent(
+      new MouseEvent("mousedown", { bubbles: true, composed: true }),
+    );
+    heading.dispatchEvent(new MouseEvent("click", { bubbles: true, composed: true }));
+
+    expect(editor.getJSON().content?.[0]?.type).toBe("heading");
+    expect(editor.getJSON().content?.[0]?.attrs?.level).toBe(1);
+    host.remove();
+  });
+
   it("resolves the top-level block position from a selection nested in its text", () => {
     const editor = track(makeEditor("Hello world"));
     editor.commands.setTextSelection(5);

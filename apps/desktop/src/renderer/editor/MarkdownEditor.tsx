@@ -6,7 +6,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type Dispatch,
   type ReactNode,
+  type SetStateAction,
 } from "react";
 import { Extension } from "@tiptap/core";
 import { EditorContent, useEditor } from "@tiptap/react";
@@ -16,8 +18,7 @@ import { Markdown } from "@tiptap/markdown";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
 import { Placeholder } from "@tiptap/extensions/placeholder";
-import { TrailingNode } from "@tiptap/extensions/trailing-node";
-import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Plugin, PluginKey, TextSelection } from "@tiptap/pm/state";
 import type { EditorView } from "@tiptap/pm/view";
 import {
   Bold,
@@ -75,6 +76,7 @@ import {
   CLOSED_SLASH_COMMAND_STATE,
   makeSlashCommandPlugin,
   runSlashCommand as runSlashCommandCore,
+  slashCommandStatesEqual,
   SlashCommandMenu,
   type SlashCommandId,
   type SlashCommandState,
@@ -103,6 +105,7 @@ import { makeCalloutChromePlugin } from "./calloutChrome";
 import { makeCodeHighlightPlugin } from "./codeHighlight";
 import { makeMermaidPreviewPlugin } from "./mermaidRender";
 import { OutlinePanel } from "./OutlinePanel";
+import { SafeTrailingNode } from "./safeTrailingNode";
 
 export type MarkdownEditorHandle = {
   focus: (position?: "start" | "end") => void;
@@ -135,6 +138,7 @@ export type MarkdownEditorProps = {
   path: string;
   knownFiles: ReadonlyArray<WikilinkFile>;
   onOpenWikilink?: (path: string) => void;
+  resolveWorkspaceAssetUrl?: (workspacePath: string) => string | null;
   autoFocus?: boolean;
   collab?: MarkdownEditorCollab | null;
   pendingUndo?: MarkdownEditorPendingUndo;
@@ -200,7 +204,7 @@ const COLLAB_STARTER_KIT = StarterKit.configure({
 const MARKDOWN_EXTENSION = Markdown.configure({
   indentation: { style: "space", size: 2 },
 });
-const TRAILING_NODE_EXTENSION = TrailingNode.configure({
+const TRAILING_NODE_EXTENSION = SafeTrailingNode.configure({
   node: "paragraph",
   notAfter: ["paragraph"],
 });
@@ -261,6 +265,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       onDirty,
       knownFiles,
       onOpenWikilink,
+      resolveWorkspaceAssetUrl,
       autoFocus,
       collab,
       pendingUndo,
@@ -306,10 +311,28 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       onOpenWikilink ?? null,
     );
 
+    // ProseMirror invokes menu handlers outside React's render cycle. Keep the
+    // imperative ref current in the same tick as the visual state so rapid
+    // typing/arrow keys never read the previous menu query or selection.
+    const publishSlashState = useCallback<
+      Dispatch<SetStateAction<SlashCommandState>>
+    >((update) => {
+      const current = slashStateRef.current;
+      const next = typeof update === "function" ? update(current) : update;
+      slashStateRef.current = next;
+      setSlashState((rendered) =>
+        slashCommandStatesEqual(rendered, next) ? rendered : next,
+      );
+    }, []);
+
     // Refs (not props) so the editorProps closures below — created once with
     // the editor — always resolve/write against the CURRENT document, even if
     // the same editor instance is reused across a path change.
-    const imageContextRef = useRef<ImageSrcContext>({ workspaceId, docPath: path });
+    const imageContextRef = useRef<ImageSrcContext>({
+      workspaceId,
+      docPath: path,
+      resolveWorkspaceAssetUrl,
+    });
     const pasteContextRef = useRef<ImagePasteContext>({
       workspaceId,
       docPath: path,
@@ -348,17 +371,17 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
     });
 
     useEffect(() => {
-      imageContextRef.current = { workspaceId, docPath: path };
+      imageContextRef.current = {
+        workspaceId,
+        docPath: path,
+        resolveWorkspaceAssetUrl,
+      };
       pasteContextRef.current = {
         ...pasteContextRef.current,
         workspaceId,
         docPath: path,
       };
-    }, [workspaceId, path]);
-
-    useEffect(() => {
-      slashStateRef.current = slashState;
-    }, [slashState]);
+    }, [workspaceId, path, resolveWorkspaceAssetUrl]);
 
     useEffect(() => {
       linkMenuStateRef.current = linkMenuState;
@@ -409,7 +432,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             return [
               makeSlashCommandPlugin({
                 stateRef: slashStateRef,
-                setState: setSlashState,
+                setState: publishSlashState,
                 runCommandRef: slashCommandRunnerRef,
               }),
               makeBlockControlsPlugin({
@@ -440,7 +463,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
             ];
           },
         }),
-      [],
+      [publishSlashState],
     );
 
     // Cmd/Ctrl+K registered via addKeyboardShortcuts on its own extension —
@@ -595,7 +618,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           // Offscreen/jsdom editors cannot always resolve coordinates.
         }
 
-        setSlashState({
+        publishSlashState({
           open: true,
           from: pos,
           to: pos,
@@ -608,7 +631,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           placement,
         });
       },
-      [editor],
+      [editor, publishSlashState],
     );
 
     const insertBlockAfter = useCallback(
@@ -666,11 +689,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           editor,
           id,
           slashStateRef.current,
-          setSlashState,
+          publishSlashState,
           insertImageAtSlash,
         );
       },
-      [editor, insertImageAtSlash],
+      [editor, insertImageAtSlash, publishSlashState],
     );
 
     useEffect(() => {
@@ -784,7 +807,10 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
           <BubbleMenu
             editor={editor}
             className="dohc-bubble-menu"
-            shouldShow={({ editor: instance }) => !instance.state.selection.empty}
+            shouldShow={({ editor: instance }) => {
+              const { selection } = instance.state;
+              return selection instanceof TextSelection && !selection.empty;
+            }}
           >
             <TurnIntoMenu editor={editor} />
             <span className="dohc-bubble-menu__divider" aria-hidden="true" />
@@ -839,7 +865,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               state={slashState}
               onSelect={runSlashCommand}
               onHover={(index) =>
-                setSlashState((current) =>
+                publishSlashState((current) =>
                   current.open ? { ...current, selected: index } : current,
                 )
               }

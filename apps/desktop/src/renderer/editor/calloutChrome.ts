@@ -147,26 +147,136 @@ function buildCalloutHeader(
   icon.className = "dohc-callout-icon";
   icon.appendChild(makeCalloutSvg(calloutIconPath(attrs.type), "dohc-callout-icon-svg"));
 
-  const select = document.createElement("select");
-  select.className = "dohc-callout-type-select";
-  select.setAttribute("aria-label", "callout type");
-  select.disabled = view.editable === false;
-  const hasKnownType = CALLOUT_TYPE_OPTIONS.some((option) => option.value === attrs.type);
+  const typePicker = document.createElement("div");
+  typePicker.className = "dohc-callout-type-picker";
+
+  const typeTrigger = document.createElement("button");
+  typeTrigger.type = "button";
+  typeTrigger.className = "dohc-callout-type-trigger";
+  typeTrigger.setAttribute("aria-label", "change callout type");
+  typeTrigger.setAttribute("aria-haspopup", "listbox");
+  typeTrigger.setAttribute("aria-expanded", "false");
+  typeTrigger.disabled = view.editable === false;
+
+  const hasKnownType = CALLOUT_TYPE_OPTIONS.some(
+    (option) => option.value === attrs.type,
+  );
   const typeOptions = hasKnownType
     ? CALLOUT_TYPE_OPTIONS
     : [{ value: attrs.type, label: attrs.type }, ...CALLOUT_TYPE_OPTIONS];
-  for (const option of typeOptions) {
-    const el = document.createElement("option");
-    el.value = option.value;
-    el.textContent = option.label;
-    select.appendChild(el);
+  const currentType = typeOptions.find((option) => option.value === attrs.type);
+  const typeLabel = document.createElement("span");
+  typeLabel.textContent = currentType?.label ?? attrs.type;
+  typeTrigger.append(
+    typeLabel,
+    makeCalloutSvg('<path d="m6 9 6 6 6-6"/>', "dohc-callout-type-chevron"),
+  );
+
+  const typeMenu = document.createElement("div");
+  typeMenu.className = "dohc-callout-type-menu";
+  typeMenu.setAttribute("role", "listbox");
+  typeMenu.setAttribute("aria-label", "callout type");
+  typeMenu.hidden = true;
+
+  const setTypeMenuOpen = (open: boolean) => {
+    typeMenu.hidden = !open;
+    typeTrigger.setAttribute("aria-expanded", String(open));
+    typePicker.classList.toggle("is-open", open);
+  };
+
+  const typeButtons: HTMLButtonElement[] = [];
+  const focusTypeButton = (index: number) => {
+    if (!typeButtons.length) return;
+    typeButtons[(index + typeButtons.length) % typeButtons.length]?.focus();
+  };
+
+  for (const [index, option] of typeOptions.entries()) {
+    const optionButton = document.createElement("button");
+    optionButton.type = "button";
+    optionButton.className = "dohc-callout-type-option";
+    optionButton.setAttribute("role", "option");
+    optionButton.setAttribute(
+      "aria-selected",
+      String(option.value === attrs.type),
+    );
+    optionButton.dataset.calloutType = option.value;
+    optionButton.textContent = option.label;
+    optionButton.addEventListener("mousedown", (event) => event.stopPropagation());
+    optionButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setTypeMenuOpen(false);
+      commitFocusedTitle();
+      const liveCallout = resolveCallout(view, getPos);
+      const liveType = liveCallout
+        ? String(liveCallout.attrs.calloutType ?? "note")
+        : null;
+      if (liveType !== null && option.value !== liveType) {
+        updateCalloutAttr(view, getPos, { calloutType: option.value });
+      } else {
+        typeTrigger.focus();
+      }
+    });
+    optionButton.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        setTypeMenuOpen(false);
+        typeTrigger.focus();
+      } else if (event.key === "ArrowDown") {
+        event.preventDefault();
+        event.stopPropagation();
+        focusTypeButton(index + 1);
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        event.stopPropagation();
+        focusTypeButton(index - 1);
+      } else if (event.key === "Home") {
+        event.preventDefault();
+        event.stopPropagation();
+        focusTypeButton(0);
+      } else if (event.key === "End") {
+        event.preventDefault();
+        event.stopPropagation();
+        focusTypeButton(typeButtons.length - 1);
+      }
+    });
+    typeButtons.push(optionButton);
+    typeMenu.appendChild(optionButton);
   }
-  select.value = attrs.type;
-  select.addEventListener("mousedown", (event) => event.stopPropagation());
-  select.addEventListener("click", (event) => event.stopPropagation());
-  select.addEventListener("change", () => {
-    updateCalloutAttr(view, getPos, { calloutType: select.value });
+
+  typeTrigger.addEventListener("mousedown", (event) => event.stopPropagation());
+  typeTrigger.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setTypeMenuOpen(typeMenu.hidden);
   });
+  typeTrigger.addEventListener("keydown", (event) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      event.stopPropagation();
+      setTypeMenuOpen(true);
+      focusTypeButton(
+        Math.max(
+          0,
+          typeOptions.findIndex((option) => option.value === attrs.type),
+        ),
+      );
+    } else if (event.key === "Escape" && !typeMenu.hidden) {
+      event.preventDefault();
+      event.stopPropagation();
+      setTypeMenuOpen(false);
+    }
+  });
+  typePicker.addEventListener("focusout", () => {
+    queueMicrotask(() => {
+      const root = typePicker.getRootNode();
+      const active =
+        root instanceof ShadowRoot ? root.activeElement : document.activeElement;
+      if (!typePicker.contains(active)) setTypeMenuOpen(false);
+    });
+  });
+  typePicker.append(typeTrigger, typeMenu);
 
   // Read the callout's CURRENT title from the live doc (not this render
   // closure's `attrs`, which goes stale the moment a remote/agent edit lands).
@@ -224,7 +334,7 @@ function buildCalloutHeader(
     input.value = liveCalloutTitle() ?? input.value;
   });
 
-  header.append(chevron, icon, select, input);
+  header.append(chevron, icon, typePicker, input);
   return header;
 }
 

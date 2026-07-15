@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, readFile, rename, writeFile } from "node:fs/promises";
+import { lstat, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 
@@ -13,6 +13,8 @@ import { resolveWorkspaceMetadataDir } from "./workspaceMetadata";
 // attached workspace can never route these writes outside the workspace.
 
 const UI_STATE_FILE = "ui-state.json";
+const writeQueues = new Map<string, Promise<void>>();
+const WINDOWS_RENAME_RETRY_CODES = new Set(["EACCES", "EBUSY", "EPERM"]);
 
 // The known WorkspaceUiState fields bound a LEGITIMATE file to a few KB; this
 // cap (with margin) only exists so a foreign multi-hundred-MB ui-state.json
@@ -36,7 +38,27 @@ export async function readUiStateFile(rootPath: string): Promise<unknown> {
   }
 }
 
-export async function writeUiStateFile(
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    ? String((error as { code?: unknown }).code)
+    : undefined;
+}
+
+async function renameWithRetry(source: string, destination: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(source, destination);
+      return;
+    } catch (error) {
+      if (attempt >= 5 || !WINDOWS_RENAME_RETRY_CODES.has(errorCode(error) ?? "")) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 8 * 2 ** attempt));
+    }
+  }
+}
+
+async function writeUiStateFileNow(
   rootPath: string,
   state: unknown,
 ): Promise<void> {
@@ -44,6 +66,29 @@ export async function writeUiStateFile(
   // Atomic temp+rename so a crash mid-write never truncates the state file
   // (agent-runs.json idiom; the unique suffix keeps concurrent writers apart).
   const tmp = `${path}.tmp-${process.pid}-${randomUUID()}`;
-  await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`);
-  await rename(tmp, path);
+  try {
+    await writeFile(tmp, `${JSON.stringify(state, null, 2)}\n`);
+    await renameWithRetry(tmp, path);
+  } finally {
+    // Failed rename attempts must not accumulate metadata temp files forever.
+    await rm(tmp, { force: true }).catch(() => undefined);
+  }
+}
+
+export function writeUiStateFile(
+  rootPath: string,
+  state: unknown,
+): Promise<void> {
+  // Renderer activity can emit several IPC writes in the same frame. Keep a
+  // per-workspace FIFO so Windows never has multiple rename-over-destination
+  // operations racing against the same ui-state.json file.
+  const previous = writeQueues.get(rootPath) ?? Promise.resolve();
+  const current = previous
+    .catch(() => undefined)
+    .then(() => writeUiStateFileNow(rootPath, state));
+  writeQueues.set(rootPath, current);
+
+  return current.finally(() => {
+    if (writeQueues.get(rootPath) === current) writeQueues.delete(rootPath);
+  });
 }

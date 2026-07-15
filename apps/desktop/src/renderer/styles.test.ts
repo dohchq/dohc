@@ -13,6 +13,20 @@ function cssRule(selector: string): string {
   return stylesCss.slice(open + 1, close);
 }
 
+function cssRuleForSelectorGroup(selectors: string[]): string {
+  const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
+  const expected = selectors.map(normalize);
+  const withoutComments = stylesCss.replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules = withoutComments.matchAll(/([^{}]+)\{([^{}]*)\}/g);
+  for (const match of rules) {
+    const actual = (match[1] ?? "").split(",").map(normalize);
+    if (expected.every((selector) => actual.includes(selector))) {
+      return match[2] ?? "";
+    }
+  }
+  throw new Error(`styles.css must contain selector group: ${selectors.join(", ")}`);
+}
+
 describe("markdown editor layout css", () => {
   it("sizes the Tiptap document to its pane instead of the viewport", () => {
     const editor = cssRule(".dohc-tiptap-editor");
@@ -41,6 +55,31 @@ describe("markdown editor layout css", () => {
     expect(ordered).toContain("list-style-type: decimal;");
     expect(taskList).toContain("list-style: none;");
     expect(listParagraph).toContain("min-height: 1.65em;");
+  });
+
+  it("keeps every slash-command block on the document writing axis", () => {
+    const topLevelBlock = cssRule(".dohc-notion-editor > *");
+    const callout = cssRule(".dohc-callout");
+    const mermaid = cssRule(".dohc-mermaid-preview");
+    const math = cssRule(".dohc-math-block");
+    const renderedMath = cssRuleForSelectorGroup([
+      ".dohc-math-block .katex-display",
+      ".dohc-math-block .katex-display > .katex",
+    ]);
+    const image = cssRule(".dohc-notion-editor > .dohc-editor-image");
+
+    expect(topLevelBlock).toContain("max-width: var(--dohc-editor-measure);");
+    expect(topLevelBlock).toContain("margin-left: auto;");
+    expect(topLevelBlock).toContain("margin-right: auto;");
+    expect(callout).toContain("margin: 14px auto;");
+    expect(mermaid).toContain("margin: 0 auto 12px;");
+    expect(math).toContain("margin: 0.6em auto;");
+    expect(math).toContain("text-align: left;");
+    expect(renderedMath).toContain("text-align: left;");
+    expect(image).toContain("max-width: min(100%, var(--dohc-editor-measure));");
+    expect(image).toContain(
+      "margin-inline-start: max(0px, calc((100% - var(--dohc-editor-measure)) / 2));",
+    );
   });
 });
 

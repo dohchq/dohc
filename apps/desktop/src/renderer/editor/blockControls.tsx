@@ -44,21 +44,6 @@ function stopEditorMouseEvent(event: Event) {
   event.stopPropagation();
 }
 
-function isBlockControlTarget(nodeName: string): boolean {
-  return [
-    "paragraph",
-    "heading",
-    "blockquote",
-    "callout",
-    "bulletList",
-    "orderedList",
-    "codeBlock",
-    "code_block",
-    "horizontalRule",
-    "table",
-  ].includes(nodeName);
-}
-
 // ── drag payload ──────────────────────────────────────────────────────────
 
 /**
@@ -130,8 +115,6 @@ function buildBlockControlDecorations(
   const decorations: Decoration[] = [];
 
   (doc as TopLevelDocLike).forEach((node, offset, index) => {
-    if (!isBlockControlTarget(node.type.name)) return;
-
     const pos = offset;
     decorations.push(
       Decoration.node(pos, pos + node.nodeSize, {
@@ -141,10 +124,11 @@ function buildBlockControlDecorations(
     );
     decorations.push(
       Decoration.widget(
-        pos + 1,
+        pos,
         (view) => {
           const wrap = document.createElement("span");
           wrap.className = "dohc-block-affordance";
+          wrap.setAttribute("data-dohc-block-index", String(index));
           wrap.setAttribute("contenteditable", "false");
 
           const plus = document.createElement("button");
@@ -205,12 +189,53 @@ function buildBlockControlDecorations(
           wrap.append(plus, handle);
           return wrap;
         },
-        { side: -1, key: `dohc-block-controls-${pos}` },
+        { side: -1, key: `dohc-block-controls-${index}-${pos}` },
       ),
     );
   });
 
   return DecorationSet.create(doc as never, decorations);
+}
+
+function setVisibleBlockControl(
+  view: EditorView,
+  target: EventTarget | null,
+  previousIndex: string | null | undefined,
+): string | null {
+  const element =
+    target instanceof Element
+      ? target
+      : target instanceof Node
+        ? target.parentElement
+        : null;
+  const owner = element?.closest<HTMLElement>("[data-dohc-block-index]");
+  const activeIndex = owner?.dataset.dohcBlockIndex ?? null;
+  if (activeIndex === previousIndex) return activeIndex;
+
+  view.dom
+    .querySelectorAll<HTMLElement>(".dohc-block-affordance")
+    .forEach((control) => {
+      control.classList.toggle(
+        "is-visible",
+        activeIndex !== null && control.dataset.dohcBlockIndex === activeIndex,
+      );
+    });
+  return activeIndex;
+}
+
+/** Delete a whole top-level block after it has been selected from its gutter.
+ * Text selections and nested node selections keep ProseMirror's native
+ * behavior, so Backspace inside code/table content never destroys the parent
+ * block accidentally. */
+export function deleteSelectedTopLevelBlock(view: EditorView): boolean {
+  const { state } = view;
+  const { selection } = state;
+  if (!(selection instanceof NodeSelection)) return false;
+  if (state.doc.resolve(selection.from).depth !== 0) return false;
+
+  view.dispatch(state.tr.deleteSelection().scrollIntoView());
+  view.focus();
+  return true;
 }
 
 export function makeBlockControlsPlugin({
@@ -220,6 +245,7 @@ export function makeBlockControlsPlugin({
   onInsertRef: RefObject<(pos: number) => void>;
   onOpenMenuRef: RefObject<(pos: number, rect: DOMRect) => void>;
 }) {
+  let activeBlockIndex: string | null | undefined;
   return new Plugin({
     key: blockControlsKey,
     state: {
@@ -228,12 +254,33 @@ export function makeBlockControlsPlugin({
       },
       apply(tr, old) {
         if (!tr.docChanged) return old.map(tr.mapping, tr.doc);
+        activeBlockIndex = undefined;
         return buildBlockControlDecorations(tr.doc, onInsertRef, onOpenMenuRef);
       },
     },
     props: {
       decorations(state) {
         return blockControlsKey.getState(state) as DecorationSet | undefined;
+      },
+      handleDOMEvents: {
+        mousemove(view, event) {
+          activeBlockIndex = setVisibleBlockControl(
+            view,
+            event.target,
+            activeBlockIndex,
+          );
+          return false;
+        },
+        mouseleave(view) {
+          activeBlockIndex = setVisibleBlockControl(view, null, activeBlockIndex);
+          return false;
+        },
+      },
+      handleKeyDown(view, event) {
+        if (event.key !== "Backspace" && event.key !== "Delete") return false;
+        if (!deleteSelectedTopLevelBlock(view)) return false;
+        event.preventDefault();
+        return true;
       },
     },
   });
@@ -557,6 +604,12 @@ export function BlockMenu({
           } else if (event.key === "Enter") {
             event.preventDefault();
             onSelect(BLOCK_MENU_ENTRIES[selected] ?? BLOCK_MENU_ENTRIES[0]);
+          } else if (event.key === "Backspace" || event.key === "Delete") {
+            event.preventDefault();
+            const deleteEntry = ACTION_ENTRIES.find(
+              (entry) => entry.kind === "action" && entry.id === "delete",
+            );
+            if (deleteEntry) onSelect(deleteEntry);
           } else if (event.key === "Escape") {
             event.preventDefault();
             onClose();
@@ -658,7 +711,8 @@ export function TurnIntoMenu({ editor }: { editor: Editor }) {
   useEffect(() => {
     if (!open) return;
     function onPointerDown(event: MouseEvent) {
-      if (containerRef.current?.contains(event.target as Node)) return;
+      const container = containerRef.current;
+      if (container && event.composedPath().includes(container)) return;
       setOpen(false);
     }
     window.addEventListener("mousedown", onPointerDown, true);

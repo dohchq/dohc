@@ -48,24 +48,18 @@ function RailButton(props: {
   badge?: "danger" | "success";
   // Numeric badge seam (Phase E5.0: search results count while showing).
   count?: number;
-  onClick: () => void;
+  onClick?: () => void;
   Icon: typeof Files;
 }) {
-  return (
-    <button
-      type="button"
-      data-testid={props.testId}
-      title={props.label}
-      aria-label={props.label}
-      aria-current={props.active ? "page" : undefined}
-      aria-pressed={props.pressed}
-      onClick={props.onClick}
-      className={`relative grid size-9 place-items-center rounded-lg transition-colors duration-100 ${
-        props.active || props.pressed
-          ? "bg-line/60 text-ink"
-          : "text-subtle hover:bg-line/50 hover:text-ink"
-      }`}
-    >
+  const className = `relative grid size-9 place-items-center rounded-lg transition-colors duration-100 ${
+    props.active || props.pressed
+      ? "bg-line/60 text-ink"
+      : props.onClick
+        ? "text-subtle hover:bg-line/50 hover:text-ink"
+        : "text-subtle"
+  }`;
+  const content = (
+    <>
       {props.active ? (
         <span
           aria-hidden
@@ -93,7 +87,25 @@ function RailButton(props: {
           {props.count > 99 ? "99+" : props.count}
         </span>
       ) : null}
+    </>
+  );
+  return props.onClick ? (
+    <button
+      type="button"
+      data-testid={props.testId}
+      title={props.label}
+      aria-label={props.label}
+      aria-current={props.active ? "page" : undefined}
+      aria-pressed={props.pressed}
+      onClick={props.onClick}
+      className={className}
+    >
+      {content}
     </button>
+  ) : (
+    <span data-testid={props.testId} aria-hidden="true" className={className}>
+      {content}
+    </span>
   );
 }
 
@@ -107,8 +119,8 @@ export function ActivityBar(props: {
   // workspace-engine-flagged workspaces; absent = no Chats entry at all.
   chats?: { visible: boolean; onToggle: () => void };
   onSelectView: (view: ViewId) => void;
-  onOpenCloud: () => void;
-  onOpenSettings: () => void;
+  onOpenCloud?: () => void;
+  onOpenSettings?: () => void;
 }) {
   return (
     <nav

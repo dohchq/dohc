@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { createElement } from "react";
+import { createElement, type SetStateAction } from "react";
 import {
   cleanup,
   fireEvent,
@@ -12,10 +12,11 @@ import userEvent from "@testing-library/user-event";
 import * as Y from "yjs";
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from "y-protocols/awareness";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Editor } from "@tiptap/core";
+import { Editor, Extension } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
 import { TaskItem, TaskList } from "@tiptap/extension-list";
+import { TableKit } from "@tiptap/extension-table";
 import { dohcMarkdownExtensions } from "./extensions";
 import { MarkdownEditor } from "./MarkdownEditor";
 import {
@@ -27,7 +28,9 @@ import {
   CLOSED_SLASH_COMMAND_STATE,
   filterSlashCommands,
   findSlashCommandMatch,
+  makeSlashCommandPlugin,
   runSlashCommand,
+  slashCommandStatesEqual,
   type SlashCommandState,
 } from "./slashCommands";
 
@@ -99,6 +102,67 @@ describe("MarkdownEditor slash commands", () => {
     expect(filterSlashCommands("image").map((item) => item.id)).toContain("image");
     expect(filterSlashCommands("photo").map((item) => item.id)).toEqual(["image"]);
     expect(filterSlashCommands("upload").map((item) => item.id)).toEqual(["image"]);
+  });
+
+  it("does not republish identical menu state on unrelated editor updates", () => {
+    let current: SlashCommandState = CLOSED_SLASH_COMMAND_STATE;
+    const stateRef = { current };
+    const setState = vi.fn((update: SetStateAction<SlashCommandState>) => {
+      current = typeof update === "function" ? update(current) : update;
+      stateRef.current = current;
+    });
+    const runCommandRef = { current: vi.fn() };
+    const slashExtension = Extension.create({
+      name: "testSlashCommands",
+      addProseMirrorPlugins() {
+        return [makeSlashCommandPlugin({ stateRef, setState, runCommandRef })];
+      },
+    });
+    const editor = new Editor({
+      element: document.createElement("div"),
+      extensions: [StarterKit.configure({ trailingNode: false }), slashExtension],
+      content: "",
+    });
+
+    editor.commands.insertContent("/");
+    expect(setState).toHaveBeenCalledTimes(1);
+    expect(current.open && current.query).toBe("");
+
+    editor.view.dom.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    editor.view.dom.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    );
+    expect(current.open && current.selected).toBe(2);
+    expect(setState).toHaveBeenCalledTimes(3);
+
+    editor.view.dispatch(editor.state.tr.setMeta("unrelated", true));
+    expect(setState).toHaveBeenCalledTimes(3);
+
+    editor.commands.insertContent("h");
+    expect(setState).toHaveBeenCalledTimes(4);
+    expect(current.open && current.query).toBe("h");
+    editor.destroy();
+  });
+
+  it("compares every field that can visibly move or select the menu", () => {
+    const state = {
+      open: true,
+      from: 1,
+      to: 2,
+      query: "h",
+      selected: 0,
+      x: 10,
+      y: 20,
+      bottom: null,
+      maxHeight: 300,
+      placement: "below",
+    } satisfies SlashCommandState;
+    expect(slashCommandStatesEqual(state, { ...state })).toBe(true);
+    expect(slashCommandStatesEqual(state, { ...state, selected: 1 })).toBe(false);
+    expect(slashCommandStatesEqual(state, { ...state, y: 21 })).toBe(false);
+    expect(slashCommandStatesEqual(state, CLOSED_SLASH_COMMAND_STATE)).toBe(false);
   });
 });
 
@@ -254,6 +318,25 @@ describe("MarkdownEditor code block continuation", () => {
     return handled === true;
   }
 
+  it("keeps code-block exit in the normal editor flow without a permanent plus button", () => {
+    const chromeExtension = Extension.create({
+      name: "testCodeBlockChrome",
+      addProseMirrorPlugins() {
+        return [makeCodeBlockChromePlugin()];
+      },
+    });
+    const editor = new Editor({
+      element: document.createElement("div"),
+      extensions: [StarterKit.configure({ trailingNode: false }), chromeExtension],
+      content: '<pre><code class="language-js">code</code></pre>',
+    });
+
+    expect(editor.view.dom.querySelector(".dohc-code-block-toolbar")).not.toBeNull();
+    expect(editor.view.dom.querySelector(".dohc-code-block-continuation")).toBeNull();
+    expect(editor.view.dom.querySelector(".dohc-code-block-continue-btn")).toBeNull();
+    editor.destroy();
+  });
+
   it("ArrowDown at end of a code block with content after falls through to native navigation", () => {
     const editor = makeEditor("```\ncode\n```\n\nSome text");
     const before = editor.getJSON();
@@ -286,47 +369,6 @@ describe("MarkdownEditor code block continuation", () => {
     editor.destroy();
   });
 
-  it("renders the add-paragraph strip only after a terminal code block", () => {
-    const trailing = makeEditor("```\ncode\n```");
-    trailing.registerPlugin(makeCodeBlockChromePlugin());
-    expect(
-      trailing.view.dom.querySelectorAll(".dohc-code-block-continuation"),
-    ).toHaveLength(1);
-    trailing.destroy();
-
-    // With content below, the next block is already the click target.
-    const followed = makeEditor("```\ncode\n```\n\nSome text");
-    followed.registerPlugin(makeCodeBlockChromePlugin());
-    expect(
-      followed.view.dom.querySelectorAll(".dohc-code-block-continuation"),
-    ).toHaveLength(0);
-    followed.destroy();
-  });
-
-  it("disables the continuation button in read-only views", () => {
-    const editor = makeEditor("```\ncode\n```", false);
-    editor.registerPlugin(makeCodeBlockChromePlugin());
-    const button = editor.view.dom.querySelector<HTMLButtonElement>(
-      ".dohc-code-block-continuation .dohc-code-block-continue-btn",
-    );
-
-    expect(button).not.toBeNull();
-    expect(button?.disabled).toBe(true);
-    editor.destroy();
-  });
-
-  it("clicking anywhere on the continuation strip appends a paragraph", () => {
-    const editor = makeEditor("```\ncode\n```");
-    editor.registerPlugin(makeCodeBlockChromePlugin());
-    const strip = editor.view.dom.querySelector(".dohc-code-block-continuation");
-    expect(strip).not.toBeNull();
-
-    fireEvent.click(strip!);
-    expect(editor.state.doc.childCount).toBe(2);
-    expect(editor.state.doc.child(1).type.name).toBe("paragraph");
-    expect(editor.state.doc.child(1).content.size).toBe(0);
-    editor.destroy();
-  });
 });
 
 describe("MarkdownEditor empty list item focus", () => {
@@ -358,6 +400,56 @@ describe("MarkdownEditor empty list item focus", () => {
 });
 
 describe("MarkdownEditor history", () => {
+  it("keeps malformed rich markdown from crashing the editor transaction loop", async () => {
+    const user = userEvent.setup();
+    const markdown = [
+      "- item",
+      "",
+      "> [!note]",
+      "",
+      "| Hello |     |     |     |     |",
+      "| ----- | --- | --- | --- | --- |",
+      "|       |     |     |     |     |",
+      "",
+      "$$1 + 1 = 2$$",
+    ].join("\n");
+    const parsed = new Editor({
+      element: document.createElement("div"),
+      extensions: [
+        StarterKit.configure({ trailingNode: false }),
+        ...dohcMarkdownExtensions,
+        TaskList,
+        TaskItem,
+        TableKit,
+        Markdown,
+      ],
+      content: markdown,
+      contentType: "markdown",
+    });
+
+    expect(() => parsed.state.doc.check()).not.toThrow();
+    parsed.destroy();
+
+    const view = render(
+      createElement(MarkdownEditor, {
+        value: markdown,
+        onDirty: vi.fn(),
+        workspaceId: "workspace-1",
+        path: "notes/rich.md",
+        knownFiles: [],
+      }),
+    );
+
+    try {
+      const editor = await screen.findByTestId("markdown-editor");
+      editor.focus();
+      await user.keyboard("stable");
+      expect(editor.textContent).toContain("stable");
+    } finally {
+      view.unmount();
+    }
+  });
+
   it("undoes and redoes a local edit in collaboration mode", async () => {
     const ydoc = new Y.Doc();
     const user = userEvent.setup();

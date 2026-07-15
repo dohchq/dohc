@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>dohc — a workspace for you and your agents</title>
+<meta name="description" content="dohc runs on your computer and keeps your work in files you control. Write documents, organize data, and build dashboards and workflows with your agents." />
+<meta property="og:title" content="dohc — a workspace for you and your agents" />
+<meta property="og:description" content="dohc runs on your computer and keeps your work in files you control. Write documents, organize data, and build dashboards and workflows with your agents." />
+<meta property="og:type" content="website" />
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2096%20104'%3E%3Cpath%20d='M48%2010c14%200%2025%209%2025%2023%200%205-2%209-4%2013%2010%205%2017%2015%2017%2027%200%2016-12%2027-29%2027-12%200-22-5-31-12L12%2078C8%2068%207%2056%2010%2044%2015%2023%2029%2010%2048%2010Z'%20fill='none'%20stroke='%232d342e'%20stroke-width='8'%20stroke-linejoin='round'/%3E%3Ccircle%20cx='38'%20cy='58'%20r='9'%20fill='%232d342e'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Homemade+Apple&family=IBM+Plex+Mono:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+<script>
+  // Set theme before first paint to avoid a flash.
+  (function () {
+    var saved = null;
+    try {
+      saved = localStorage.getItem('dohc-theme');
+    } catch (_) {
+      // Storage is optional in privacy-restricted browsers and embeds.
+    }
+    var dark = saved ? saved === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  })();
+</script>
+</head>
+<body>
+
+<svg class="os-symbols" aria-hidden="true">
+  <symbol id="os-download" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M12 3v12m0 0 5-5m-5 5-5-5M5 21h14"/></symbol>
+  <symbol id="os-windows" viewBox="0 0 24 24"><path d="M2 3.35 10.1 2.24v8.52H2V3.35Zm9.1-1.25L22 .6v10.16H11.1V2.1ZM2 12h8.1v8.52L2 19.4V12Zm9.1 0H22v10.16l-10.9-1.5V12Z"/></symbol>
+  <symbol id="os-apple" viewBox="0 0 24 24"><path d="M12.152 6.896c-.948 0-2.415-1.078-3.96-1.04-2.04.027-3.91 1.183-4.961 3.014-2.117 3.675-.546 9.103 1.519 12.09 1.013 1.454 2.208 3.09 3.792 3.039 1.52-.065 2.09-.987 3.935-.987 1.831 0 2.35.987 3.96.948 1.637-.026 2.676-1.48 3.676-2.948 1.156-1.688 1.636-3.325 1.662-3.415-.039-.013-3.182-1.221-3.22-4.857-.026-3.04 2.48-4.494 2.597-4.559-1.429-2.09-3.623-2.324-4.39-2.376-2-.156-3.675 1.09-4.61 1.09zM15.53 3.83c.843-1.012 1.4-2.427 1.245-3.83-1.207.052-2.662.805-3.532 1.818-.78.896-1.454 2.338-1.273 3.714 1.338.104 2.715-.688 3.559-1.701"/></symbol>
+  <symbol id="os-linux" viewBox="0 0 24 24"><path d="M12.504 0c-.155 0-.315.008-.48.021-4.226.333-3.105 4.807-3.17 6.298-.076 1.092-.3 1.953-1.05 3.02-.885 1.051-2.127 2.75-2.716 4.521-.278.832-.41 1.684-.287 2.489a.424.424 0 0 0-.11.135c-.26.268-.45.6-.663.839-.199.199-.485.267-.797.4-.313.136-.658.269-.864.68-.09.189-.136.394-.132.602 0 .199.027.4.055.536.058.399.116.728.04.97-.249.68-.28 1.145-.106 1.484.174.334.535.47.94.601.81.2 1.91.135 2.774.6.926.466 1.866.67 2.616.47.526-.116.97-.464 1.208-.946.587-.003 1.23-.269 2.26-.334.699-.058 1.574.267 2.577.2.025.134.063.198.114.333l.003.003c.391.778 1.113 1.132 1.884 1.071.771-.06 1.592-.536 2.257-1.306.631-.765 1.683-1.084 2.378-1.503.348-.199.629-.469.649-.853.023-.4-.2-.811-.714-1.376v-.097l-.003-.003c-.17-.2-.25-.535-.338-.926-.085-.401-.182-.786-.492-1.046h-.003c-.059-.054-.123-.067-.188-.135a.357.357 0 0 0-.19-.064c.431-1.278.264-2.55-.173-3.694-.533-1.41-1.465-2.638-2.175-3.483-.796-1.005-1.576-1.957-1.56-3.368.026-2.152.236-6.133-3.544-6.139zm.529 3.405h.013c.213 0 .396.062.584.198.19.135.33.332.438.533.105.259.158.459.166.724v.045a1.807 1.807 0 0 1-.152.661.953.953 0 0 1-.213.335c-.104-.045-.198-.064-.284-.133a1.312 1.312 0 0 0-.22-.066c.05-.06.146-.133.183-.198.053-.128.082-.264.088-.402a1.21 1.21 0 0 0-.061-.42c-.045-.134-.101-.2-.183-.333-.084-.066-.167-.132-.267-.132-.093 0-.176.03-.262.132a.8.8 0 0 0-.205.334 1.18 1.18 0 0 0-.09.419c.002.089.008.179.02.267-.193-.067-.438-.135-.607-.202a1.635 1.635 0 0 1-.018-.22 1.772 1.772 0 0 1 .15-.788c.082-.22.232-.406.43-.533a.985.985 0 0 1 .594-.2zm-2.962.059h.036c.142 0 .27.048.399.135.146.129.264.288.344.465.09.199.14.4.153.667.007.134.006.2-.002.266v.08c-.03.007-.056.018-.083.024-.152.055-.274.135-.393.2.012-.09.013-.18.003-.267-.012-.133-.04-.2-.082-.333a.613.613 0 0 0-.166-.267.248.248 0 0 0-.204-.064c-.071.006-.13.04-.186.132a.552.552 0 0 0-.12.27.944.944 0 0 0-.023.345c.012.135.037.2.08.334.046.134.098.2.166.268.01.009.02.018.034.024-.07.057-.117.07-.176.136a.304.304 0 0 1-.131.068 2.62 2.62 0 0 1-.275-.402 1.772 1.772 0 0 1-.155-.687 1.759 1.759 0 0 1 .08-.668 1.43 1.43 0 0 1 .283-.535c.128-.133.26-.2.418-.2zm1.37 1.706c.332 0 .733.065 1.216.399.293.2.523.269 1.055.468.255.136.405.266.478.399a.571.571 0 0 1 .016.339c-.123.31-.516.643-1.063.842-.268.135-.501.333-.775.465-.276.135-.588.292-1.012.267a1.139 1.139 0 0 1-.448-.067 3.566 3.566 0 0 1-.322-.198c-.195-.135-.363-.332-.612-.465-.4-.246-.616-.512-.686-.71-.07-.268-.005-.47.193-.6.224-.135.38-.271.483-.336.104-.074.143-.102.178-.134.169-.202.436-.47.839-.601.139-.036.294-.065.466-.065zm2.8 2.142c.358 1.417 1.196 3.475 1.735 4.473.286.534.855 1.659 1.102 3.024.156-.005.33.018.513.064.646-1.671-.546-3.467-1.089-3.966-.22-.2-.232-.335-.123-.335.59.534 1.365 1.572 1.646 2.757.13.535.16 1.104.021 1.67.067.028.135.06.205.067 1.032.534 1.413.938 1.23 1.537-.06-.003-.12 0-.196-.043.151-.467-.182-.825-1.065-1.224-.915-.4-1.646-.336-1.77.465-.008.043-.013.066-.018.135-.068.023-.139.053-.209.064-.43.268-.662.669-.793 1.187-.13.533-.17 1.156-.205 1.872-.02.334-.17.838-.319 1.35-1.5 1.072-3.58 1.538-5.348.334a2.645 2.645 0 0 0-.402-.533 1.45 1.45 0 0 0-.275-.333c.182 0 .338-.03.465-.067a.615.615 0 0 0 .314-.334c.108-.267 0-.697-.345-1.163-.345-.467-.931-.995-1.788-1.521-.63-.4-.986-.87-1.15-1.396-.165-.534-.143-1.085-.015-1.645.245-1.07.873-2.11 1.274-2.763.107-.065.037.135-.408.974-.396.751-1.14 2.497-.122 3.854a8.123 8.123 0 0 1 .647-2.876c.564-1.278 1.743-3.504 1.836-5.268.048.036.217.135.289.202.218.133.38.333.59.465.21.201.477.335.876.335.449.003.767-.131 1.034-.265.29-.134.52-.334.745-.4.467-.135.835-.402 1.044-.7zm2.185 8.958c.037.6.343 1.245.882 1.377.588.134 1.434-.333 1.791-.765l.211-.01c.315-.007.577.01.85.271.208.199.305.53.391.876.085.4.154.78.409 1.066.486.527.645.906.639 1.151-.015.262-.185.396-.498.595-.63.401-1.746.712-2.457 1.57-.618.737-1.37 1.14-2.036 1.191-.664.053-1.237-.2-1.574-.898-.21-.4-.12-1.025.056-1.69.176-.668.428-1.344.463-1.897.037-.714.076-1.335.195-1.814.12-.465.308-.797.686-1.006zm-10.814.049h.01c.053 0 .105.005.157.014.376.055.706.333 1.023.752l.91 1.664c.243.533.754 1.064 1.192 1.64.434.598.77 1.131.729 1.576-.057.744-.48 1.148-1.125 1.294-.645.135-1.52.002-2.395-.464-.968-.536-2.118-.469-2.857-.602-.369-.066-.61-.2-.723-.4-.11-.2-.113-.602.125-1.237.117-.334.03-.752-.027-1.118-.055-.401-.083-.71.043-.94.16-.334.396-.4.69-.533.294-.135.64-.202.917-.472.256-.268.445-.601.668-.838.19-.201.38-.336.663-.336z"/></symbol>
+</svg>
+
+<header class="nav">
+  <a class="nav-brand" href="#top" aria-label="dohc — home">
+    <svg class="mark" viewBox="0 0 96 104" aria-hidden="true">
+      <path d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
+            fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round"/>
+      <circle cx="38" cy="58" r="9" fill="currentColor"/>
+    </svg>
+    <span class="wordmark">dohc</span>
+  </a>
+  <nav class="nav-links" aria-label="Site">
+    <a href="#demo">try it</a>
+    <a href="#note">the note</a>
+    <a href="#onboard">on board</a>
+    <a href="#convictions">convictions</a>
+  </nav>
+  <div class="nav-end">
+    <button class="theme-toggle" type="button" aria-label="Toggle color theme" aria-pressed="false">
+      <span class="tt-light">dark</span><span class="tt-dark">light</span>
+    </button>
+    <a class="btn btn-small" href="#deal">download</a>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ============ hero ============ -->
+  <section class="hero">
+    <div class="hero-copy">
+      <h1 class="reveal d1">Put work in <em class="underlined">plain sight.<svg class="hand-underline" viewBox="0 0 220 22" preserveAspectRatio="none" aria-hidden="true"><path d="M6 14 C 60 4, 140 20, 214 9" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"/></svg></em></h1>
+      <p class="hero-sub reveal d2">
+        The local-first workspace for you and your agents.
+      </p>
+      <div class="hero-cta reveal d3">
+        <div class="download-control" data-download-control>
+          <a class="btn btn-primary download-primary" data-download-primary href="https://github.com/dohc-ai/dohc/releases">
+            <svg class="download-os-icon" aria-hidden="true"><use data-download-primary-icon href="#os-download"/></svg>
+            <span data-download-primary-label>Download dohc</span>
+          </a>
+          <div class="platform-selector">
+            <button class="btn btn-platforms" type="button" data-platform-toggle aria-expanded="false" aria-haspopup="menu">
+              Other platforms
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path class="platform-chevron-down" d="m6 9 6 6 6-6"/><path class="platform-chevron-up" d="m18 15-6-6-6 6"/></svg>
+            </button>
+            <div class="platform-menu" data-platform-menu role="menu" hidden>
+              <a href="https://github.com/dohc-ai/dohc/releases" role="menuitem" data-download-build="windows-x64">
+                <svg class="download-os-icon" aria-hidden="true"><use href="#os-windows"/></svg>
+                <span><strong>Windows</strong><small>.exe · x64</small></span>
+              </a>
+              <a href="https://github.com/dohc-ai/dohc/releases" role="menuitem" data-download-build="mac-arm64">
+                <svg class="download-os-icon" aria-hidden="true"><use href="#os-apple"/></svg>
+                <span><strong>macOS</strong><small>Apple silicon · .dmg</small></span>
+              </a>
+              <a href="https://github.com/dohc-ai/dohc/releases" role="menuitem" data-download-build="mac-x64">
+                <svg class="download-os-icon" aria-hidden="true"><use href="#os-apple"/></svg>
+                <span><strong>macOS</strong><small>Intel · .dmg</small></span>
+              </a>
+              <a href="https://github.com/dohc-ai/dohc/releases" role="menuitem" data-download-build="linux-x64">
+                <svg class="download-os-icon" aria-hidden="true"><use href="#os-linux"/></svg>
+                <span><strong>Linux</strong><small>AppImage · x64</small></span>
+              </a>
+              <a class="platform-menu-all" href="https://github.com/dohc-ai/dohc/releases" role="menuitem">All releases <span aria-hidden="true">↗</span></a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ interactive desktop demo ============ -->
+  <section class="section demo-section" id="demo" aria-label="Interactive dohc workspace demo">
+    <div class="demo-stage reveal">
+      <div id="desktop-demo" aria-label="Interactive demo of the dohc desktop app"></div>
+    </div>
+  </section>
+
+  <!-- ============ 01 · the note ============ -->
+  <section class="section" id="note">
+    <div class="section-head reveal">
+      <span class="index">01 · the inspiration</span>
+      <h2>One page was enough.</h2>
+      <p class="section-lede">
+        In 1976, Steve Jobs described the entire Apple-1 on a single handwritten
+        page — the chips, the memory, the terminal, the price. Anyone could read
+        it. Nothing was hidden. The spec <em>was</em> the product.
+      </p>
+      <p class="section-lede">
+        Fifty years later, your work is scattered across a hundred tabs, ten
+        tools, and one inbox — and now your agents work in places you can’t see
+        at all. dohc is our answer: put the whole workspace back on the page.
+      </p>
+    </div>
+
+    <div class="notes">
+      <figure class="artifact reveal" data-tilt="left">
+        <img src="assets/apple-1-note.jpg" width="488" height="628"
+             alt="Steve Jobs’s handwritten 1976 note describing the Apple-1 computer: chips used, 8K bytes of RAM, full CRT terminal, fully expandable, board only plus manual for $75 — “a real deal”." />
+        <figcaption><span class="mono">1976</span> — the Apple-1, one page. <span class="cap-muted">Steve Jobs, ballpoint.</span></figcaption>
+      </figure>
+
+      <figure class="artifact reveal d1" data-tilt="right">
+        <div class="paper" role="img" aria-label="A handwritten note in the same style, describing dohc: uses plain text, markdown, your own files. On board: documents, dashboards, full history of every edit. Agent terminal — input: what you mean, output: work you can read. Fully expandable via your agents. Zero lock-in, your files on your disk. Review gates for agent edits included. Sync and sharing on the way. App plus your workspace: free. A real deal.">
+          <span class="hole h1"></span><span class="hole h2"></span><span class="hole h3"></span>
+          <div class="paper-ink" aria-hidden="true">
+            <p class="p-title">dohc</p>
+            <p>uses&nbsp; plain text, markdown,<br /><span class="ind1">your own files</span> <span class="p-aside">(recommended<br />because agents<br />already speak it)</span></p>
+            <p><span class="p-u">on board</span>: &nbsp;documents, dashboards,<br /><span class="ind2">full history of every edit</span> <span class="p-small">(yours + your agents’)</span></p>
+            <p>agent terminal — <span class="p-small">input: what you mean<br /><span class="ind3">output: work you can read</span></span></p>
+            <p>fully expandable <span class="p-small">via your agents</span> — CRM,<br /><span class="ind1">trackers, dashboards, anything !!</span></p>
+            <p>review gates <span class="p-small">(for agent edits on board)</span> included.</p>
+            <p class="p-faded">sync + sharing&nbsp; on the way</p>
+            <p class="p-price"><span class="ind2">app + your workspace &nbsp;&nbsp;free.</span><br /><span class="ind3">a real deal(</span></p>
+            <p class="p-sig"><span class="ind2">dohc<br />your files, your disk<br />built with agents, for you</span></p>
+          </div>
+        </div>
+        <figcaption><span class="mono">2026</span> — dohc, one page. <span class="cap-muted">The whole idea still fits.</span></figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ============ 02 · on board ============ -->
+  <section class="section" id="onboard">
+    <div class="section-head reveal">
+      <span class="index">02 · on board</span>
+      <h2>The primitives, not the apps.</h2>
+      <p class="section-lede">
+        dohc doesn’t ship a CRM, a tracker, or a dashboard product. It ships the
+        sturdy pieces — and your agent assembles the workspace <em>you</em>
+        actually need out of them.
+      </p>
+    </div>
+    <dl class="spec">
+      <div class="spec-row reveal"><dt><span class="mono">a</span> documents</dt><dd>Plain-text first. Everything you and your agents make is a page you can open, diff, and edit.</dd></div>
+      <div class="spec-row reveal"><dt><span class="mono">b</span> entities &amp; links</dt><dd>People, projects, deals, anything — typed records that link into your documents and back.</dd></div>
+      <div class="spec-row reveal"><dt><span class="mono">c</span> dashboards &amp; views</dt><dd>Source-backed views over your real text. No second copy of the truth to keep in sync.</dd></div>
+      <div class="spec-row reveal"><dt><span class="mono">d</span> history &amp; provenance</dt><dd>Every edit is recorded — who, when, and why, whether it was you or an agent.</dd></div>
+      <div class="spec-row reveal"><dt><span class="mono">e</span> review gates</dt><dd>Agents propose; you approve. Locks and gates keep the pen in your hand.</dd></div>
+      <div class="spec-row reveal"><dt><span class="mono">f</span> skills</dt><dd>When an agent handles something well once, keep it. Repeated work becomes a playbook.</dd></div>
+      <div class="spec-row reveal"><dt><span class="mono">g</span> search</dt><dd>One index across documents, entities, history, and chats — because it’s all text.</dd></div>
+      <div class="spec-row reveal"><dt><span class="mono">h</span> local-first</dt><dd>Workspaces are folders on your disk. No backend required. Leave anytime with everything.</dd></div>
+    </dl>
+  </section>
+
+  <!-- ============ 03 · convictions ============ -->
+  <section class="section" id="convictions">
+    <div class="section-head reveal">
+      <span class="index">03 · convictions</span>
+      <h2>What we refuse to hide.</h2>
+    </div>
+    <div class="convictions">
+      <article class="conviction reveal">
+        <h3>Text is the primitive.</h3>
+        <p>A folder of well-structured text files and a capable agent could recreate most of dohc. dohc exists to make that easy, reliable, and powerful — the magic is a shared substrate humans and agents can both trust, not hidden state.</p>
+      </article>
+      <article class="conviction reveal d1">
+        <h3>Agents wrap tools, not the other way around.</h3>
+        <p>Deterministic software provides the sturdy pieces — storage, sync, permissions, history. Your agent uses them to build the workspace around your intent. Not old software with AI sprinkled in.</p>
+      </article>
+      <article class="conviction reveal">
+        <h3>Individual first.</h3>
+        <p>If dohc only works after a whole company adopts it, we built the wrong thing. It should feel valuable when the entire “organization” is one human and their agents.</p>
+      </article>
+      <article class="conviction reveal d1">
+        <h3>Open when shared, private when personal.</h3>
+        <p>Visibility comes from explicit boundaries, sharing, and consent — never accidental leakage. Your personal workspace is yours.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- ============ 04 · a real deal ============ -->
+  <section class="section deal" id="deal">
+    <div class="deal-inner reveal">
+      <span class="index">04 · the price line</span>
+      <h2>app + your workspace&ensp;&ensp;free.</h2>
+      <p class="deal-hand hand" aria-hidden="true">a real deal(</p>
+      <p class="section-lede deal-lede">
+        dohc is in early development — local-first on your desktop, no account,
+        no backend, your files on your disk. Follow along while we build it.
+      </p>
+      <div class="hero-cta">
+        <a class="btn btn-ghost" href="#top">Back to the top&ensp;↑</a>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer-brand">
+    <svg class="mark" viewBox="0 0 96 104" aria-hidden="true">
+      <path d="M48 10c14 0 25 9 25 23 0 5-2 9-4 13 10 5 17 15 17 27 0 16-12 27-29 27-12 0-22-5-31-12L12 78C8 68 7 56 10 44 15 23 29 10 48 10Z"
+            fill="none" stroke="currentColor" stroke-width="8" stroke-linejoin="round"/>
+      <circle cx="38" cy="58" r="9" fill="currentColor"/>
+    </svg>
+    <span class="wordmark">dohc</span>
+  </div>
+  <p class="footer-line">the quiet AI workspace · built by humans + agents · <span id="year">2026</span></p>
+  <p class="footer-fine">The 1976 Apple-1 note appears as historical inspiration. Apple is a trademark of Apple Inc.; dohc is not affiliated with Apple.</p>
+</footer>
+
+<script type="module" src="/src/main.tsx"></script>
+<script type="module" src="site.js"></script>
+</body>
+</html>

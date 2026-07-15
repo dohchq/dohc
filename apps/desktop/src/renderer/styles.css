@@ -258,10 +258,10 @@ body {
   -webkit-app-region: no-drag;
 }
 
-/* Tiptap document editor (E4): warm paper, a centered reading measure, dense
- * enough for daily work. --dohc-editor-measure is shared by the content
- * column AND the absolutely-positioned code-block toolbar so they can never
- * disagree about width. */
+/* Tiptap document editor (E4): warm paper with one shared writing axis, dense
+ * enough for daily work. --dohc-editor-measure is shared by the title, body
+ * blocks, rendered slash-command components, and absolutely-positioned code
+ * toolbar so every editable surface begins on the same left edge. */
 .dohc-tiptap-editor {
   --dohc-editor-measure: 720px;
   /* How far framed blocks (code, tables, callouts, mermaid previews) extend
@@ -276,6 +276,7 @@ body {
 }
 
 .dohc-notion-editor {
+  position: relative;
   box-sizing: border-box;
   min-height: 100%;
   /* Top matter (PageIdentity + inline properties) supplies the space above
@@ -291,7 +292,9 @@ body {
   user-select: text;
 }
 
-/* Centered column, like paper on a desk — not text pinned to the left rail. */
+/* Center the reading column in the pane. Every top-level block fills this
+ * measure, so its contents share one predictable left edge. Component rules
+ * that use margin shorthands must preserve the auto inline margins below. */
 .dohc-notion-editor > * {
   max-width: var(--dohc-editor-measure);
   margin-left: auto;
@@ -637,10 +640,20 @@ body {
  * blocks. The atom gets no default selected-state paint (prosemirror-view's
  * base stylesheet isn't loaded), so its selection outline is defined here. */
 .dohc-notion-editor .dohc-editor-image {
+  display: block;
   max-width: 100%;
   height: auto;
   border-radius: 6px;
   vertical-align: middle;
+}
+
+/* Images are replaced elements, so unlike normal block boxes they keep their
+ * intrinsic width. Anchor even a narrow image to the reading column's left
+ * edge instead of centering the bitmap or falling back to the pane gutter. */
+.dohc-notion-editor > .dohc-editor-image {
+  max-width: min(100%, var(--dohc-editor-measure));
+  margin-inline-start: max(0px, calc((100% - var(--dohc-editor-measure)) / 2));
+  margin-inline-end: 0;
 }
 
 .dohc-notion-editor .dohc-editor-image.ProseMirror-selectednode {
@@ -680,8 +693,12 @@ body {
 
 .dohc-block-affordance {
   position: absolute;
-  top: 0.2em;
-  left: -48px;
+  top: auto;
+  left: max(
+    8px,
+    calc(50% - (var(--dohc-editor-measure) / 2) - 48px)
+  );
+  transform: translateY(0.2em);
   z-index: 3;
   display: inline-flex;
   gap: 2px;
@@ -689,7 +706,8 @@ body {
   transition: opacity 120ms ease;
 }
 
-.dohc-block-node:hover .dohc-block-affordance,
+.dohc-block-affordance.is-visible,
+.dohc-block-affordance:hover,
 .dohc-block-affordance:focus-within {
   opacity: 1;
 }
@@ -897,56 +915,6 @@ body {
 
 .dohc-code-copy-btn {
   padding: 2px 7px;
-}
-
-/* Rendered only after a terminal code block (nothing below it): a quiet
- * strip for getting a cursor under the block. The whole strip is the click
- * target; hovering it reveals a gutter-style "+" that matches the
- * block-controls affordances (18px box, 120ms fade, --dohc-line fill). */
-.dohc-code-block-continuation {
-  display: flex;
-  align-items: center;
-  max-width: var(--dohc-editor-measure);
-  height: 26px;
-  margin-top: -4px;
-  cursor: text;
-}
-
-.dohc-code-block-continuation:has(> .dohc-code-block-continue-btn:disabled) {
-  display: none;
-}
-
-.dohc-code-block-continue-btn {
-  display: inline-grid;
-  width: 18px;
-  height: 18px;
-  place-items: center;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--dohc-subtle);
-  font-size: 13px;
-  line-height: 1;
-  cursor: pointer;
-  opacity: 0;
-  transition:
-    opacity 120ms ease,
-    background-color 100ms ease-out,
-    border-color 100ms ease-out,
-    color 100ms ease-out;
-}
-
-.dohc-code-block-continuation:hover .dohc-code-block-continue-btn,
-.dohc-code-block-continue-btn:focus-visible {
-  opacity: 1;
-}
-
-.dohc-code-block-continue-btn:hover,
-.dohc-code-block-continue-btn:focus-visible {
-  border-color: var(--dohc-line);
-  background: var(--dohc-line);
-  color: var(--dohc-ink);
 }
 
 /* Shared popover box treatment. `overflow` is deliberately NOT shared: the
@@ -1577,8 +1545,22 @@ body {
   padding: 0;
   opacity: 0;
   transition:
-    opacity 100ms ease,
+    opacity 120ms ease,
     background-color 100ms ease;
+}
+
+.dohc-table-node:hover .dohc-table-menu-btn,
+.dohc-table-node:hover .dohc-table-append,
+.dohc-table-node:focus-within .dohc-table-menu-btn,
+.dohc-table-node:focus-within .dohc-table-append,
+.dohc-table-grip.is-visible,
+.dohc-table-grip.is-open,
+.dohc-table-grip.is-dragging,
+.dohc-table-grip.is-drop-target,
+.dohc-table-grip:focus-visible,
+.dohc-table-menu-btn:focus-visible,
+.dohc-table-append:focus-visible {
+  opacity: 1;
 }
 
 /* Notion-style handles: a small pill centered above the hovered COLUMN /
@@ -1586,40 +1568,133 @@ body {
  * mousemove tracking, so exactly one column handle and one row handle show
  * at a time — not a bar on every row and column at once. */
 .dohc-table-grip {
-  /* Invisible handles must not eat clicks meant for the table margins. */
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  background: var(--dohc-bg);
+  color: var(--dohc-subtle);
+  font-family: ui-monospace, monospace;
+  font-size: 14px;
+  line-height: 1;
+  cursor: grab;
   pointer-events: none;
-  background: var(--dohc-line);
-  border-radius: 999px;
-  cursor: pointer;
+  touch-action: none;
+  user-select: none;
+  transition:
+    opacity 120ms ease,
+    color 120ms ease,
+    background-color 120ms ease,
+    box-shadow 120ms ease;
 }
 
 .dohc-table-grip.is-active,
+.dohc-table-grip.is-visible,
+.dohc-table-grip.is-open,
+.dohc-table-grip.is-dragging,
+.dohc-table-grip.is-drop-target,
 .dohc-table-grip:focus-visible {
   pointer-events: auto;
   opacity: 1;
 }
 
 .dohc-table-grip:hover,
-.dohc-table-grip:focus-visible {
-  background: var(--dohc-subtle);
+.dohc-table-grip:focus-visible,
+.dohc-table-grip.is-open {
+  background: var(--dohc-line);
+  color: var(--dohc-ink);
 }
 
-/* Column handle: floats just above the table's top edge, centered on the
- * (live-resized) column box. */
+.dohc-table-grip.is-dragging {
+  cursor: grabbing;
+  background: var(--dohc-line);
+  color: var(--dohc-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--dohc-accent) 28%, transparent);
+  transform: scale(1.08);
+}
+
+.dohc-table-grip--col.is-dragging {
+  transform: translateX(-50%) scale(1.08);
+}
+
+.dohc-table-grip--row.is-dragging {
+  transform: translateY(-50%) scale(1.08);
+}
+
+.dohc-table-grip.is-drop-target {
+  background: color-mix(in srgb, var(--dohc-accent) 16%, var(--dohc-bg));
+  color: var(--dohc-accent);
+  box-shadow: inset 0 0 0 1px var(--dohc-accent);
+}
+
+.dohc-table-node table.is-reordering,
+.dohc-table-node table.is-reordering * {
+  cursor: grabbing;
+}
+
+.dohc-table-node tr.dohc-table-drag-source > :is(td, th),
+.dohc-table-node :is(td, th).dohc-table-drag-source {
+  background: color-mix(in srgb, var(--dohc-accent) 7%, transparent);
+}
+
+.dohc-table-node tr.dohc-table-drop-before > :is(td, th) {
+  box-shadow: inset 0 3px 0 var(--dohc-accent);
+}
+
+.dohc-table-node tr.dohc-table-drop-after > :is(td, th) {
+  box-shadow: inset 0 -3px 0 var(--dohc-accent);
+}
+
+.dohc-table-node :is(td, th).dohc-table-drop-before {
+  box-shadow: inset 3px 0 0 var(--dohc-accent);
+}
+
+.dohc-table-node :is(td, th).dohc-table-drop-after {
+  box-shadow: inset -3px 0 0 var(--dohc-accent);
+}
+
+.dohc-table-drag-preview {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 9999;
+  border: 1px solid var(--dohc-line);
+  border-radius: 7px;
+  background: var(--dohc-panel);
+  padding: 6px 9px;
+  color: var(--dohc-ink);
+  box-shadow: 0 5px 16px rgba(28, 27, 24, 0.16);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.dohc-table-drag-status {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Notion-style six-dot handles follow the active cell: the column handle is
+ * centered above that column, and the row handle is centered beside that row.
+ * They stay nested in the anchor cell, so live column resizing still keeps
+ * them attached without JS measurements. */
 .dohc-table-grip--col {
-  top: -13px;
+  top: -21px;
   left: 50%;
-  width: 24px;
-  height: 8px;
   transform: translateX(-50%);
 }
 
-/* Row handle: floats just left of the table, centered on the row box. */
 .dohc-table-grip--row {
   top: 50%;
-  left: -13px;
-  width: 8px;
-  height: 24px;
+  left: -22px;
   transform: translateY(-50%);
 }
 
@@ -1634,8 +1709,8 @@ body {
 /* Table menu chip: the top-left outer corner (the spreadsheet "select-all"
  * corner where the handle strips meet). */
 .dohc-table-menu-btn {
-  top: -12px;
-  left: -12px;
+  top: -20px;
+  left: -21px;
   z-index: 5;
   display: inline-grid;
   place-items: center;
@@ -1710,7 +1785,7 @@ body {
 .dohc-table-menu {
   position: fixed;
   z-index: 70;
-  width: 190px;
+  width: 220px;
   overflow: auto;
   border: 1px solid var(--dohc-line);
   border-radius: 10px;
@@ -1739,6 +1814,7 @@ body {
   color: var(--dohc-ink);
   text-align: left;
   font-size: 12.5px;
+  cursor: pointer;
 }
 
 .dohc-table-menu__item.is-selected,
@@ -1748,6 +1824,14 @@ body {
 
 .dohc-table-menu__item--danger {
   color: var(--dohc-danger);
+}
+
+.dohc-table-menu__item--separated {
+  margin-top: 5px;
+  border-top: 1px solid var(--dohc-line);
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  padding-top: 9px;
 }
 
 /* Column resizing (TableKit's `resizable: true`, turned on in
@@ -2625,7 +2709,17 @@ body {
   height: 16px;
 }
 
-.dohc-callout-type-select {
+.dohc-callout-type-picker {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.dohc-callout-type-trigger {
+  display: inline-flex;
+  height: 24px;
+  align-items: center;
+  gap: 3px;
+  padding: 0 5px;
   flex: 0 0 auto;
   border: 0;
   border-radius: 5px;
@@ -2645,8 +2739,66 @@ body {
   text-transform: capitalize;
   cursor: pointer;
 }
-.dohc-callout-type-select:hover {
+.dohc-callout-type-trigger:hover,
+.dohc-callout-type-picker.is-open .dohc-callout-type-trigger {
   background: color-mix(in srgb, var(--dohc-callout-accent) 12%, transparent);
+}
+.dohc-callout-type-trigger:focus-visible {
+  outline: 2px solid
+    color-mix(in srgb, var(--dohc-callout-accent) 55%, transparent);
+  outline-offset: 1px;
+}
+.dohc-callout-type-chevron {
+  width: 12px;
+  height: 12px;
+  transition: transform 120ms ease-out;
+}
+.dohc-callout-type-picker.is-open .dohc-callout-type-chevron {
+  transform: rotate(180deg);
+}
+
+.dohc-callout-type-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 132px;
+  padding: 4px;
+  border: 1px solid var(--dohc-line);
+  border-radius: 8px;
+  background: var(--dohc-panel);
+  box-shadow:
+    0 1px 2px rgba(28, 27, 24, 0.05),
+    0 8px 24px rgba(28, 27, 24, 0.12);
+}
+[data-theme='dark'] .dohc-callout-type-menu {
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 10px 28px rgba(0, 0, 0, 0.45);
+}
+.dohc-callout-type-menu[hidden] {
+  display: none;
+}
+.dohc-callout-type-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dohc-ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+.dohc-callout-type-option:hover,
+.dohc-callout-type-option:focus-visible,
+.dohc-callout-type-option[aria-selected='true'] {
+  background: var(--dohc-line);
+  outline: none;
 }
 
 .dohc-callout-title-input {
@@ -3067,13 +3219,22 @@ mark.dohc-highlight,
    * rule outranks the editor's `> *` centering by source order). */
   margin: 0.6em auto;
   padding: 0.5em 0.75em;
-  text-align: center;
+  text-align: left;
   cursor: pointer;
   border-radius: 6px;
   overflow-x: auto;
 }
 .dohc-math-block:hover {
   background: color-mix(in srgb, var(--dohc-match) 8%, transparent);
+}
+
+/* KaTeX's bundled display rule centers the typeset child independently of
+ * our block wrapper. Keep the equation on the same writing axis as its source
+ * field and every other slash-command result. */
+.dohc-math-block .katex-display,
+.dohc-math-block .katex-display > .katex {
+  margin: 0;
+  text-align: left;
 }
 
 /* Empty math (e.g. a freshly inserted `$$` block) shows a calm hint so it is

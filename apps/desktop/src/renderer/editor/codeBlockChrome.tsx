@@ -306,48 +306,6 @@ function buildCodeLanguageDecorations(doc: unknown): DecorationSet {
         },
       ),
     );
-    // Only a terminal code block (nothing after it in its parent) gets the
-    // add-paragraph strip — anywhere else the block below is already the
-    // click target. Mirrors the ArrowDown-exit condition in
-    // makeCodeBlockContinuationPlugin.
-    const nextNode = (doc as DocLike).nodeAt(pos + node.nodeSize);
-    if (!nextNode) {
-      decorations.push(
-        Decoration.widget(
-          pos + node.nodeSize,
-          (view) => {
-            const wrap = document.createElement("div");
-            wrap.className = "dohc-code-block-continuation";
-            wrap.setAttribute("contenteditable", "false");
-
-            const button = document.createElement("button");
-            button.type = "button";
-            button.className = "dohc-code-block-continue-btn";
-            button.setAttribute("aria-label", "add paragraph below code block");
-            button.disabled = view.editable === false;
-            button.textContent = "+";
-
-            // The whole strip is the click target; the button is the
-            // hover-revealed affordance and the keyboard entry point (its
-            // Enter/Space click bubbles up to the strip).
-            wrap.addEventListener("mousedown", stopEditorMouseEvent);
-            wrap.addEventListener("click", (event) => {
-              stopEditorMouseEvent(event);
-              insertParagraphAfterBlock(view, pos);
-            });
-
-            wrap.append(button);
-            return wrap;
-          },
-          {
-            side: 1,
-            key: `code-continue-${pos}`,
-            ignoreSelection: true,
-            stopEvent: () => true,
-          },
-        ),
-      );
-    }
   });
 
   return DecorationSet.create(doc as never, decorations);

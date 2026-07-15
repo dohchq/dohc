@@ -357,8 +357,8 @@ function buildMermaidDecorationSet(
     )
     decorations.push(
       Decoration.widget(entry.end, buildMermaidPreviewWidget(entry.id), {
-        // side:0 — sorts before codeBlockChrome's side:1 continuation "+"
-        // button at the same position, so the diagram reads above it.
+        // Keep the preview immediately after its source fence at the same
+        // document boundary.
         side: 0,
         // Keyed by the STABLE widget id (not the doc position): ProseMirror's
         // widget equality is key-based, so an edit above the fence maps the
