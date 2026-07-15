@@ -46,11 +46,25 @@ describe("workspace headings", () => {
 
   it("does not treat a mixed backtick-and-tilde run as a code fence", () => {
     const headings = extractWorkspaceHeadings([
-      "```~",
+      "``~",
       "# Still visible",
     ].join("\n"));
 
     expect(headings.map((heading) => heading.text)).toEqual(["Still visible"]);
+  });
+
+  it("allows the opposite fence marker in a valid info string", () => {
+    const headings = extractWorkspaceHeadings([
+      "```~",
+      "# Hidden by backticks",
+      "```",
+      "~~~`js",
+      "## Hidden by tildes",
+      "~~~",
+      "## Visible",
+    ].join("\n"));
+
+    expect(headings.map((heading) => heading.text)).toEqual(["Visible"]);
   });
 
   it("resolves encoded anchors and falls back to text occurrence", () => {
