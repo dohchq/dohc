@@ -49,5 +49,20 @@ describe("chat file reference tokens", () => {
 
   it("does not span malformed or multiline tokens", () => {
     expect(extractChatFileReferences("@[missing @[docs/a.md\n#bad]")).toEqual([]);
+    expect(extractChatFileReferences("@[missing @[docs/a.md]]")).toEqual([]);
+  });
+
+  it("treats inline and fenced code references as inert", () => {
+    const body = [
+      "Use `@[docs/inline.md]` as an example.",
+      "```md",
+      "@[docs/fenced.md#scope]",
+      "```",
+      "Read @[docs/live.md#scope].",
+    ].join("\n");
+
+    expect(extractChatFileReferences(body)).toEqual([
+      { path: "docs/live.md", headingAnchor: "scope" },
+    ]);
   });
 });

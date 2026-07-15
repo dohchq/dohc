@@ -1060,6 +1060,28 @@ describe("MU-C0 verified chat authorship", () => {
       expect(await json(missing)).toMatchObject({ ok: false, code: "authorship_mismatch" });
       expect(await logOps(h)).toEqual([]);
     });
+
+    it(`rejects an entire ${opKind} batch when a later op forges its owner`, async () => {
+      const storage = await testStorage();
+      const h = handler(storage);
+      await createWorkspace(h);
+      const mixed = await h(
+        request(
+          "a",
+          "/sync/workspace-a/log",
+          jsonBody({
+            originId: "origin-a",
+            ops: [
+              receiverStateOp(0, opKind, "a"),
+              receiverStateOp(1, opKind, "victim"),
+            ],
+          }),
+        ),
+      );
+      expect(mixed.status).toBe(403);
+      expect(await json(mixed)).toMatchObject({ ok: false, code: "authorship_mismatch" });
+      expect(await logOps(h)).toEqual([]);
+    });
   }
 
   it("rejects a batch mixing one valid and one forged op ATOMICALLY (nothing admitted)", async () => {

@@ -1514,6 +1514,10 @@ export interface LinkedChatStore {
   setFollow(input: {
     workspaceId: WorkspaceId;
     ownerUserId: string;
+    // Supplied only when the trusted caller has a verified relay identity.
+    // Omit for signed-out/local-only state. When present it must equal
+    // ownerUserId before this mutation is admitted to the replication log.
+    replicationOwnerUserId?: string;
     targetKind: ChatFollowTargetKind;
     targetId: string;
     state: ChatFollowState;
@@ -1538,6 +1542,9 @@ export interface LinkedChatStore {
   markPersonalFeedSeen(input: {
     workspaceId: WorkspaceId;
     ownerUserId: string;
+    // Same verified-identity gate as setFollow. Signed-out read position is
+    // durable locally but intentionally absent from sync exports.
+    replicationOwnerUserId?: string;
     headCursor: string;
   }): Promise<ChatFeedReadState>;
   // --- Workspace-backed chat bookmarks -----------------------------------

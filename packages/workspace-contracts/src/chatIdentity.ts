@@ -2,7 +2,10 @@ import { z } from "zod";
 
 export const MAX_PREFERRED_NAME_LENGTH = 80;
 
-const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/;
+// Control characters, Unicode formatting controls (including bidi overrides
+// and isolates), and explicit line/paragraph separators can spoof or split a
+// visible author label even though the underlying authorization id is safe.
+const CONTROL_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 /**
  * The human-readable owner name used by chat authorship surfaces. This value is

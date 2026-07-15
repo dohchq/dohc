@@ -185,6 +185,10 @@ function stubEditorGlobals() {
     Number(setTimeout(() => callback(performance.now()), 16)),
   );
   vi.stubGlobal("cancelAnimationFrame", (handle: number) => clearTimeout(handle));
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value: vi.fn(),
+  });
 }
 
 // THE P1 trap (codex review): typing arms an 800ms autosave, and unmounting
@@ -394,10 +398,87 @@ describe("markdown editor unmount flush", () => {
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
+  it("navigates the rendered heading in a read-only shared document", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "# Hello\n\n## Exact destination\nBody\n",
+      truncated: false,
+    });
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="a.md" readOnly />,
+    );
+    await screen.findByTestId("view-markdown");
+    await waitFor(() =>
+      expect(screen.getByTestId("markdown-edit-toggle").textContent).toBe("Edit"),
+    );
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        readOnly
+        headingTarget={{ anchor: "exact-destination", nonce: 2 }}
+      />,
+    );
+
+    await waitFor(() => {
+      const destination = screen.getByRole("heading", {
+        name: "Exact destination",
+      });
+      expect(destination.scrollIntoView).toHaveBeenCalledWith({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+    expect(screen.getByTestId("markdown-edit-toggle").textContent).toBe("Edit");
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("keeps local source mode and selects the target heading line", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "---\ntitle: Plan\n---\n\n# Hello\n\nParagraph\n\n## Exact destination\nBody\n",
+      truncated: false,
+    });
+    let toggleSource: (() => void) | null = null;
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={(toggle) => {
+          toggleSource = toggle;
+        }}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    act(() => toggleSource?.());
+    const source = (await screen.findByTestId(
+      "markdown-editor",
+    )) as HTMLTextAreaElement;
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={(toggle) => {
+          toggleSource = toggle;
+        }}
+        headingTarget={{ anchor: "exact-destination", nonce: 3 }}
+      />,
+    );
+
+    const expected = lineSpanInText(source.value, 9);
+    await waitFor(() => {
+      expect(source.selectionStart).toBe(expected.start);
+      expect(source.selectionEnd).toBe(expected.end);
+    });
+    expect(screen.getByTestId("markdown-editor")).toBe(source);
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
   it("routes the document header share action to the active path", async () => {
     const user = userEvent.setup();
     const onSharePath = vi.fn();
-    render(
+    const view = render(
       <FileInspector
         workspaceId="ws-1"
         path="a.md"
@@ -513,7 +594,7 @@ describe("markdown editor unmount flush", () => {
   it("routes database share actions to their active file paths", async () => {
     const user = userEvent.setup();
     const onSharePath = vi.fn();
-    render(
+    const view = render(
       <FileInspector
         workspaceId="ws-1"
         path="data.sqlite"
@@ -652,7 +733,7 @@ describe("engine markdown source view", () => {
   }) {
     const { bridgeMock, pushRemoteMarkdown } = makeEngineBridge(DOC_MARKDOWN);
     vi.stubGlobal("dohcDesktop", bridgeMock);
-    render(
+    const view = render(
       <FileInspector
         workspaceId="ws-1"
         path="a.md"
@@ -666,7 +747,7 @@ describe("engine markdown source view", () => {
       {},
       { timeout: 5_000 },
     );
-    return { bridgeMock, pushRemoteMarkdown, toggle };
+    return { bridgeMock, pushRemoteMarkdown, toggle, view };
   }
 
   it("toggles a read-only source projection (frontmatter included) and back", async () => {
@@ -739,5 +820,24 @@ describe("engine markdown source view", () => {
     act(() => registered?.());
     expect(screen.getByTestId("view-markdown").hidden).toBe(false);
     expect(screen.queryByTestId("markdown-source-view")).toBeNull();
+  });
+
+  it("reveals the visible engine editor before applying a heading jump", async () => {
+    const user = userEvent.setup();
+    const { toggle, view } = await renderEngineDoc();
+    await user.click(toggle);
+    await screen.findByTestId("markdown-source-view", {}, { timeout: 5_000 });
+    expect(screen.getByTestId("view-markdown").hidden).toBe(true);
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        headingTarget={{ anchor: "plan", nonce: 3 }}
+      />,
+    );
+
+    await waitFor(() => expect(screen.queryByTestId("markdown-source-view")).toBeNull());
+    expect(screen.getByTestId("view-markdown").hidden).toBe(false);
   });
 });

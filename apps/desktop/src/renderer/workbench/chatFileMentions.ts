@@ -1,4 +1,5 @@
 import type { ChatFileReferenceInput } from "../../ipc/bridgeContract";
+import { codeRanges } from "@dohc/workspace-contracts/chat-mentions";
 
 const FILE_REFERENCE_RE = /@\[([^\]\r\n#]+?)(?:#([^\]\r\n]+))?\]/gu;
 
@@ -30,8 +31,15 @@ export interface ChatFileReferenceToken extends ChatFileReferenceInput {
 
 export function extractChatFileReferenceTokens(body: string): ChatFileReferenceToken[] {
   const tokens: ChatFileReferenceToken[] = [];
+  const inertRanges = codeRanges(body);
+  const inCode = (position: number) =>
+    inertRanges.some(([start, end]) => position >= start && position < end);
   FILE_REFERENCE_RE.lastIndex = 0;
   for (let match = FILE_REFERENCE_RE.exec(body); match; match = FILE_REFERENCE_RE.exec(body)) {
+    // A nested opener means the whole same-line construct is malformed. Do
+    // not reinterpret the inner-looking text as a second attachment token.
+    if (match[0].slice(2).includes("@[")) continue;
+    if (inCode(match.index)) continue;
     const path = match[1] ? decodeReferenceComponent(match[1].trim()) : undefined;
     if (!path) continue;
     const headingAnchor = match[2]

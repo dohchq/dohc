@@ -48,9 +48,10 @@ export function PreferredNameControl(props: {
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Enter") event.currentTarget.blur();
     if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
       setDraft(props.value ?? "");
       setError(null);
-      event.currentTarget.blur();
     }
   };
 

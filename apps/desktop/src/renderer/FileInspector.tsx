@@ -41,6 +41,7 @@ import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { IconButton, SectionLabel } from "./ui/controls";
 import { DocumentMenu } from "./DocumentMenu";
 import { EditorErrorBoundary } from "./editor/EditorErrorBoundary";
+import { extractWorkspaceHeadings } from "../workspaces/workspaceHeadings";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -619,16 +620,6 @@ function MarkdownView(props: {
     // Applied once per jump: nonce is the identity of one click.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollTargetNonce]);
-  const headingTargetNonce = props.headingTarget?.nonce;
-  useEffect(() => {
-    if (!props.headingTarget || props.truncated) return;
-    // Search-line jumps intentionally keep their established source-mode
-    // behavior when both targets are present.
-    if (props.scrollTarget?.path === props.path) return;
-    setMode("wysiwyg");
-    // Applied once per jump; nonce permits repeating the same anchor.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [headingTargetNonce]);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const wysiwygRef = useRef<MarkdownEditorHandle | null>(null);
   const latestDraft = useRef(props.body);
@@ -745,6 +736,91 @@ function MarkdownView(props: {
   // markdown patching (the invariant this must never become).
   const [showSource, setShowSource] = useState(false);
   const [sourceMarkdown, setSourceMarkdown] = useState<string | null>(null);
+  const readDocumentRef = useRef<HTMLDivElement | null>(null);
+  const [pendingRenderedHeadingIndex, setPendingRenderedHeadingIndex] = useState<
+    number | null
+  >(null);
+  const headingTargetNonce = props.headingTarget?.nonce;
+  useEffect(() => {
+    if (!props.headingTarget || props.truncated) return;
+    // Search-line jumps intentionally keep their established source-mode
+    // behavior when both targets are present.
+    if (props.scrollTarget?.path === props.path) return;
+    if (engineMode) {
+      // The engine editor owns canonical live content (which may be newer than
+      // the markdown cache below). Reveal it and let OutlinePanel resolve the
+      // target against that live Y.Doc.
+      setShowSource(false);
+      return;
+    }
+    const source = mode === "source" ? latestDraft.current : savedBody;
+    const markdown = markdownEditorBody(source);
+    const headings = extractWorkspaceHeadings(markdown);
+    let decodedAnchor = props.headingTarget.anchor;
+    try {
+      decodedAnchor = decodeURIComponent(decodedAnchor);
+    } catch {
+      // Keep malformed percent escapes literal, matching outline navigation.
+    }
+    const occurrence = props.headingTarget.occurrence;
+    const heading =
+      headings.find(
+        (candidate) =>
+          candidate.anchor === decodedAnchor &&
+          (occurrence === undefined || candidate.occurrence === occurrence),
+      ) ??
+      (occurrence === undefined
+        ? undefined
+        : headings.find(
+            (candidate) =>
+              candidate.occurrence === occurrence &&
+              candidate.anchor === `${decodedAnchor}-${occurrence}`,
+          ));
+    if (!heading) return;
+    if (mode === "source") {
+      // Local source is an intentional editing/viewing mode. Keep it visible
+      // and select the heading's real markdown line instead of replacing it
+      // with the rich editor merely to navigate.
+      const bodyOffset = source.length - markdown.length;
+      const frontmatterLineCount = (
+        source.slice(0, bodyOffset).match(/\n/g) ?? []
+      ).length;
+      setPendingScrollLine(heading.line + frontmatterLineCount);
+      return;
+    }
+    if (readOnly || mode === "read") {
+      // Read-only documents do not mount Tiptap, so navigate the rendered
+      // heading with the same document-order identity used by the parser.
+      setPendingRenderedHeadingIndex(headings.indexOf(heading));
+      return;
+    }
+    setMode("wysiwyg");
+    // Applied once per jump; nonce permits repeating the same anchor.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [headingTargetNonce]);
+  useEffect(() => {
+    if (pendingRenderedHeadingIndex === null || mode !== "read") return;
+    const container = readDocumentRef.current;
+    if (!container) return;
+    const applyTarget = () => {
+      const target = container.querySelectorAll<HTMLElement>(
+        "h1, h2, h3, h4, h5, h6",
+      )[pendingRenderedHeadingIndex];
+      if (!target) return false;
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      setPendingRenderedHeadingIndex(null);
+      return true;
+    };
+    if (applyTarget()) return;
+    // Large documents backfill rendered chunks during idle time. Observe that
+    // bounded subtree until the requested heading is committed rather than
+    // silently dropping an otherwise valid jump.
+    const observer = new MutationObserver(() => {
+      if (applyTarget()) observer.disconnect();
+    });
+    observer.observe(container, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [mode, pendingRenderedHeadingIndex]);
   useEffect(() => {
     if (!showSource || !engine.doc) {
       setSourceMarkdown(null);
@@ -1305,7 +1381,12 @@ function MarkdownView(props: {
               </Suspense>
             ) : null}
           </div>
-          <div className="dohc-readable-text p-6 text-[15px]">{renderedDocument}</div>
+          <div
+            ref={readDocumentRef}
+            className="dohc-readable-text p-6 text-[15px]"
+          >
+            {renderedDocument}
+          </div>
           {backlinks}
         </div>
       )}

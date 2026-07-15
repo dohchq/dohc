@@ -625,16 +625,16 @@ function BookmarkAction(props: {
         type="button"
         data-testid={props.testId}
         aria-pressed={props.active}
-        aria-label={props.active ? "Remove chat bookmark" : "Bookmark chat"}
+        aria-label={props.active ? "Remove chat bookmark" : "Bookmark chat as live file"}
         title={
           props.active
             ? "Remove bookmark (the Markdown file moves to Archived)"
-            : "Bookmark as a live Markdown file · Shift-click for a snapshot"
+            : "Bookmark as a live Markdown file"
         }
         disabled={props.busy}
         onClick={(event) => {
           event.stopPropagation();
-          props.onToggle(event.shiftKey ? "snapshot" : "live");
+          props.onToggle("live");
         }}
         className={`grid size-6 place-items-center rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50 ${
           props.active
@@ -644,6 +644,22 @@ function BookmarkAction(props: {
       >
         <Bookmark size={12} fill={props.active ? "currentColor" : "none"} aria-hidden />
       </button>
+      {!props.active ? (
+        <button
+          type="button"
+          data-testid={`${props.testId}-snapshot`}
+          aria-label="Bookmark chat as snapshot"
+          title="Bookmark as a static Markdown snapshot"
+          disabled={props.busy}
+          onClick={(event) => {
+            event.stopPropagation();
+            props.onToggle("snapshot");
+          }}
+          className="rounded px-1.5 py-1 font-mono text-[9px] text-subtle hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50"
+        >
+          snapshot
+        </button>
+      ) : null}
     </span>
   );
 }
@@ -1700,12 +1716,14 @@ export function ChatsView(props: {
         | { kind: "author"; threadId: string; messageId: string },
     ) => {
       const following = followedUi.has(key);
+      const token = liveToken.current;
       try {
         const result = await bridge().setChatFollow({
           workspaceId,
           target,
           state: following ? "unfollowed" : "following",
         });
+        if (token !== liveToken.current) return;
         setFollowedUi((current) => {
           const next = new Set(current);
           const durableKey = `${result.follow.targetKind}:${result.follow.targetId}`;
@@ -1717,6 +1735,7 @@ export function ChatsView(props: {
           return next;
         });
       } catch (error) {
+        if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not update that follow."));
       }
     },
@@ -1728,12 +1747,14 @@ export function ChatsView(props: {
       if (!channel.wireId) return;
       const key = `channel:${channel.wireId}`;
       const following = followedUi.has(key);
+      const token = liveToken.current;
       try {
         const result = await bridge().setChatFollow({
           workspaceId,
           target: { kind: "channel", channelId: channel.id },
           state: following ? "unfollowed" : "following",
         });
+        if (token !== liveToken.current) return;
         setFollowedUi((current) => {
           const next = new Set(current);
           const durableKey = `${result.follow.targetKind}:${result.follow.targetId}`;
@@ -1742,6 +1763,7 @@ export function ChatsView(props: {
           return next;
         });
       } catch (error) {
+        if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not update that channel follow."));
       }
     },
@@ -1906,7 +1928,13 @@ export function ChatsView(props: {
     startingDmRef.current = true;
     setStartingDm(true);
     try {
-      const result = await bridge().startDm({ workspaceId, recipients, body });
+      const fileReferences = extractChatFileReferences(body);
+      const result = await bridge().startDm({
+        workspaceId,
+        recipients,
+        body,
+        ...(fileReferences.length > 0 ? { fileReferences } : {}),
+      });
       if (token !== liveToken.current) return;
       setDmDraft("");
       setDmRecipients("");
@@ -2765,15 +2793,11 @@ export function ChatsView(props: {
               data-testid="chats-message-body"
               className="mb-0 mt-0.5 select-text cursor-text whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink"
             >
-              {mentionCandidates.length > 0 ? (
-                <MentionText
-                  body={comment.body}
-                  candidates={mentionCandidates}
-                  testId="chats-message-body"
-                />
-              ) : (
-                comment.body
-              )}
+              <MentionText
+                body={comment.body}
+                candidates={mentionCandidates}
+                testId="chats-message-body"
+              />
             </p>
             {commentAttachments.length > 0 ? (
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -3025,15 +3049,11 @@ export function ChatsView(props: {
                     data-testid="chats-message-body"
                     className="mb-0 mt-3 select-text cursor-text whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink"
                   >
-                    {mentionCandidates.length > 0 ? (
-                      <MentionText
-                        body={openingMessage.body}
-                        candidates={mentionCandidates}
-                        testId="chats-message-body"
-                      />
-                    ) : (
-                      openingMessage.body
-                    )}
+                    <MentionText
+                      body={openingMessage.body}
+                      candidates={mentionCandidates}
+                      testId="chats-message-body"
+                    />
                   </p>
                   {(attachmentsByMessage.get(openingMessage.id) ?? []).length > 0 ? (
                     <div

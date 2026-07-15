@@ -468,15 +468,11 @@ export function ChatMessageList(props: {
                   data-testid={`${props.testIdPrefix}-message-body`}
                   className="mb-0 mt-0.5 select-text cursor-text whitespace-pre-wrap break-words text-[12px] leading-5 text-muted"
                 >
-                  {candidates.length > 0 ? (
-                    <MentionText
-                      body={message.body}
-                      candidates={candidates}
-                      testId={`${props.testIdPrefix}-message-body`}
-                    />
-                  ) : (
-                    message.body
-                  )}
+                  <MentionText
+                    body={message.body}
+                    candidates={candidates}
+                    testId={`${props.testIdPrefix}-message-body`}
+                  />
                 </p>
                 {props.reactionControls ? (
                   <MessageReactions

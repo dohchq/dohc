@@ -88,6 +88,8 @@ import {
 
 export const LINKED_CHAT_STORE_RELATIVE_PATH = VERSIONED_TEXT_STORE_RELATIVE_PATH;
 export const LINKED_CHAT_PROJECTION_KIND = "thread";
+const CHAT_HEADING_TEXT_MAX_LENGTH = 300;
+const CHAT_HEADING_ANCHOR_MAX_LENGTH = 400;
 
 export type {
   ChannelThreadSummary,
@@ -399,12 +401,16 @@ type LocalAttachmentInput = {
   headingOccurrence?: number;
 };
 
-function normalizeHeadingField(value: unknown, label: string): string {
+function normalizeHeadingField(value: unknown, label: string, maxLength: number): string {
   if (typeof value !== "string") {
     throw new LinkedChatStoreError("invalid-path", `${label} is invalid.`);
   }
   const normalized = value.normalize("NFC").trim();
-  if (!normalized || normalized.length > 500 || PROJECTION_FIELD_CONTROL_CHAR.test(normalized)) {
+  if (
+    !normalized ||
+    normalized.length > maxLength ||
+    PROJECTION_FIELD_CONTROL_CHAR.test(normalized)
+  ) {
     throw new LinkedChatStoreError("invalid-path", `${label} is invalid.`);
   }
   return normalized;
@@ -445,10 +451,18 @@ function normalizeAttachments(
       );
     }
     const headingText = hasHeading
-      ? normalizeHeadingField(attachment.headingText, "Heading text")
+      ? normalizeHeadingField(
+          attachment.headingText,
+          "Heading text",
+          CHAT_HEADING_TEXT_MAX_LENGTH,
+        )
       : undefined;
     const headingAnchor = hasHeading
-      ? normalizeHeadingField(attachment.headingAnchor, "Heading anchor")
+      ? normalizeHeadingField(
+          attachment.headingAnchor,
+          "Heading anchor",
+          CHAT_HEADING_ANCHOR_MAX_LENGTH,
+        )
       : undefined;
     const headingOccurrence = hasHeading ? attachment.headingOccurrence : undefined;
     if (
@@ -852,11 +866,16 @@ function upsertFeedReadLww(
        updated_at_ms = excluded.updated_at_ms,
        origin_id = excluded.origin_id,
        origin_seq = excluded.origin_seq
-     WHERE excluded.updated_at_ms > chat_feed_read_state.updated_at_ms
-        OR (excluded.updated_at_ms = chat_feed_read_state.updated_at_ms
-            AND (excluded.origin_id > chat_feed_read_state.origin_id
-              OR (excluded.origin_id = chat_feed_read_state.origin_id
-                  AND excluded.origin_seq > chat_feed_read_state.origin_seq)))`,
+     WHERE excluded.last_seen_created_at_ms > chat_feed_read_state.last_seen_created_at_ms
+        OR (excluded.last_seen_created_at_ms = chat_feed_read_state.last_seen_created_at_ms
+            AND excluded.last_seen_message_id > chat_feed_read_state.last_seen_message_id)
+        OR (excluded.last_seen_created_at_ms = chat_feed_read_state.last_seen_created_at_ms
+            AND excluded.last_seen_message_id = chat_feed_read_state.last_seen_message_id
+            AND (excluded.updated_at_ms > chat_feed_read_state.updated_at_ms
+              OR (excluded.updated_at_ms = chat_feed_read_state.updated_at_ms
+                  AND (excluded.origin_id > chat_feed_read_state.origin_id
+                    OR (excluded.origin_id = chat_feed_read_state.origin_id
+                        AND excluded.origin_seq > chat_feed_read_state.origin_seq)))))`,
   ).run(
     workspaceId,
     payload.ownerUserId,
@@ -3059,6 +3078,15 @@ export function createLinkedChatStore(
       return serialize((db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Feed owner");
+        const replicationOwnerUserId = input.replicationOwnerUserId === undefined
+          ? undefined
+          : normalizeFeedIdentity(input.replicationOwnerUserId, "Replication feed owner");
+        if (replicationOwnerUserId !== undefined && replicationOwnerUserId !== ownerUserId) {
+          throw new LinkedChatStoreError(
+            "invalid-follow-target",
+            "Replication feed owner must match the local feed owner.",
+          );
+        }
         const targetKind = normalizeFollowTargetKind(input.targetKind);
         const targetId = normalizeFeedIdentity(input.targetId, "Follow target");
         const state = normalizeFollowState(input.state);
@@ -3119,14 +3147,16 @@ export function createLinkedChatStore(
         const originId = ensureOriginId(db, workspaceId);
         const originSeq = nextOriginSeq(db, workspaceId, originId);
         upsertFollowLww(db, workspaceId, payload, { originId, originSeq });
-        journalReplicationOp(db, {
-          workspaceId,
-          originId,
-          originSeq,
-          opKind: "chat.follow.set",
-          payload,
-          recordedAtMs: atMs,
-        });
+        if (replicationOwnerUserId !== undefined) {
+          journalReplicationOp(db, {
+            workspaceId,
+            originId,
+            originSeq,
+            opKind: "chat.follow.set",
+            payload,
+            recordedAtMs: atMs,
+          });
+        }
         const row = db
           .prepare(
             `SELECT * FROM chat_follows
@@ -3357,6 +3387,15 @@ export function createLinkedChatStore(
       return serialize((db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Feed owner");
+        const replicationOwnerUserId = input.replicationOwnerUserId === undefined
+          ? undefined
+          : normalizeFeedIdentity(input.replicationOwnerUserId, "Replication feed owner");
+        if (replicationOwnerUserId !== undefined && replicationOwnerUserId !== ownerUserId) {
+          throw new LinkedChatStoreError(
+            "invalid-follow-target",
+            "Replication feed owner must match the local feed owner.",
+          );
+        }
         const cursor = decodeFeedCursor(input.headCursor);
         const message = db
           .prepare(
@@ -3383,14 +3422,16 @@ export function createLinkedChatStore(
         const originId = ensureOriginId(db, workspaceId);
         const originSeq = nextOriginSeq(db, workspaceId, originId);
         upsertFeedReadLww(db, workspaceId, payload, { originId, originSeq });
-        journalReplicationOp(db, {
-          workspaceId,
-          originId,
-          originSeq,
-          opKind: "chat.feed.read.set",
-          payload,
-          recordedAtMs: atMs,
-        });
+        if (replicationOwnerUserId !== undefined) {
+          journalReplicationOp(db, {
+            workspaceId,
+            originId,
+            originSeq,
+            opKind: "chat.feed.read.set",
+            payload,
+            recordedAtMs: atMs,
+          });
+        }
         const row = db
           .prepare(
             `SELECT * FROM chat_feed_read_state
@@ -4114,8 +4155,8 @@ export function createLinkedChatStore(
                 typeof payload.headingAnchor !== "string" ||
                 payload.headingText.length === 0 ||
                 payload.headingAnchor.length === 0 ||
-                payload.headingText.length > 500 ||
-                payload.headingAnchor.length > 500 ||
+                payload.headingText.length > CHAT_HEADING_TEXT_MAX_LENGTH ||
+                payload.headingAnchor.length > CHAT_HEADING_ANCHOR_MAX_LENGTH ||
                 PROJECTION_FIELD_CONTROL_CHAR.test(payload.headingText) ||
                 PROJECTION_FIELD_CONTROL_CHAR.test(payload.headingAnchor) ||
                 !Number.isSafeInteger(payload.headingOccurrence) ||

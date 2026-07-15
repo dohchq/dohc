@@ -21,6 +21,13 @@ function baseGraph(): WorkspaceGraph {
   };
 }
 
+function baseObjectIds(): ReadonlyMap<string, string> {
+  return new Map([
+    ["docs/plan.md", "object-plan"],
+    ["docs/source.md", "object-source"],
+  ]);
+}
+
 describe("addChatMentionsToWorkspaceGraph", () => {
   it("returns the base graph by identity when chat mentions are off", () => {
     const base = baseGraph();
@@ -82,7 +89,12 @@ describe("addChatMentionsToWorkspaceGraph", () => {
       },
     ];
 
-    const graph = addChatMentionsToWorkspaceGraph(baseGraph(), mentions, true);
+    const graph = addChatMentionsToWorkspaceGraph(
+      baseGraph(),
+      mentions,
+      true,
+      baseObjectIds(),
+    );
     expect(graph.nodes.map((node) => node.kind)).toEqual([
       "file",
       "file",
@@ -144,11 +156,17 @@ describe("addChatMentionsToWorkspaceGraph", () => {
         heading: { anchor: "scope", occurrence: 1, text: "Scope" },
       },
     ];
-    const forward = addChatMentionsToWorkspaceGraph(baseGraph(), mentions, true);
+    const forward = addChatMentionsToWorkspaceGraph(
+      baseGraph(),
+      mentions,
+      true,
+      baseObjectIds(),
+    );
     const reversed = addChatMentionsToWorkspaceGraph(
       baseGraph(),
       [...mentions].reverse(),
       true,
+      baseObjectIds(),
     );
 
     expect(reversed).toEqual(forward);
@@ -168,9 +186,40 @@ describe("addChatMentionsToWorkspaceGraph", () => {
       filePath: "docs/plan.md",
       heading: { anchor: "notes", occurrence, text: "Notes" },
     }));
-    const graph = addChatMentionsToWorkspaceGraph(baseGraph(), mentions, true);
+    const graph = addChatMentionsToWorkspaceGraph(
+      baseGraph(),
+      mentions,
+      true,
+      baseObjectIds(),
+    );
 
     expect(graph.nodes.filter((node) => node.kind === "heading")).toHaveLength(2);
-    expect(graph.edges.filter((edge) => edge.kind === "heading-in-file")).toHaveLength(2);
+    expect(
+      graph.edges.filter((edge) => edge.kind === "heading-in-file"),
+    ).toHaveLength(2);
+  });
+
+  it("never binds an attachment to a same-path file with a different object identity", () => {
+    const graph = addChatMentionsToWorkspaceGraph(
+      baseGraph(),
+      [
+        {
+          threadId: "thread-shared",
+          threadTitle: "Shared workspace discussion",
+          messageId: "message-shared",
+          fileObjectId: "object-from-another-workspace",
+          filePath: "docs/plan.md",
+        },
+      ],
+      true,
+      baseObjectIds(),
+    );
+
+    expect(graph.nodes.some((node) => node.kind === "chat-thread")).toBe(
+      false,
+    );
+    expect(
+      graph.edges.some((edge) => edge.kind === "chat-mentions-file"),
+    ).toBe(false);
   });
 });

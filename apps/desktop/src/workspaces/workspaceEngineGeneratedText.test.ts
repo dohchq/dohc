@@ -171,4 +171,61 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     expect(await readFile(join(rootPath, toPath), "utf8")).toBe("# Retry\n");
     await capture.stop();
   });
+
+  it("fails closed when an archive retry finds edited or binary source content", async () => {
+    const scenarios: Array<{ name: string; replacement: string | Buffer }> = [
+      { name: "edited", replacement: "# User edit after the failed archive\n" },
+      { name: "binary", replacement: Buffer.from([0xff, 0x00, 0x01]) },
+    ];
+
+    for (const scenario of scenarios) {
+      const rootPath = await root();
+      const disk = createDefaultDiskWriter(rootPath);
+      let failDelete = true;
+      const capture = createWorkspaceEngineCapture({
+        workspaceId: `generated-archive-${scenario.name}-source-test`,
+        rootPath,
+        diskWriter: {
+          writeTextFile: disk.writeTextFile,
+          writeBinaryFile: disk.writeBinaryFile,
+          async deletePath(path) {
+            if (failDelete) {
+              failDelete = false;
+              throw new Error("injected delete failure");
+            }
+            await disk.deletePath(path);
+          },
+        },
+      });
+      const created = await capture.writeGeneratedTextFile({
+        path: `Bookmarks/Chats/${scenario.name}.md`,
+        text: "# Canonical archive\n",
+      });
+      const toPath = `Bookmarks/Chats/Archived/${scenario.name}.md`;
+
+      await expect(
+        capture.archiveGeneratedTextFile({
+          fromPath: created.path,
+          toPath,
+          expectedObjectId: created.objectId,
+        }),
+      ).rejects.toThrow(/injected delete failure/u);
+      await writeFile(join(rootPath, created.path), scenario.replacement);
+
+      await expect(
+        capture.archiveGeneratedTextFile({
+          fromPath: created.path,
+          toPath,
+          expectedObjectId: created.objectId,
+        }),
+      ).rejects.toThrow(/archive source changed before recovery/u);
+      expect(await readFile(join(rootPath, created.path))).toEqual(
+        Buffer.from(scenario.replacement),
+      );
+      expect(await readFile(join(rootPath, toPath), "utf8")).toBe(
+        "# Canonical archive\n",
+      );
+      await capture.stop();
+    }
+  });
 });

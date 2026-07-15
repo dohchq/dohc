@@ -51,4 +51,29 @@ describe("workspace headings", () => {
   it("normalizes formatting without discarding unicode", () => {
     expect(headingAnchorBase("**Über** `Plan`!" )).toBe("über-plan");
   });
+
+  it("preserves hashes in heading text unless closing hashes are whitespace-delimited", () => {
+    expect(
+      extractWorkspaceHeadings("## C#\n## Release notes ###\n").map(
+        ({ text, anchor }) => ({ text, anchor }),
+      ),
+    ).toEqual([
+      { text: "C#", anchor: "c" },
+      { text: "Release notes", anchor: "release-notes" },
+    ]);
+  });
+
+  it("gives symbol-only headings stable non-empty anchors and preserves duplicates", () => {
+    const firstBase = headingAnchorBase("🚀");
+    expect(firstBase).toMatch(/^section-[a-z0-9]+$/);
+    expect(headingAnchorBase("🚀")).toBe(firstBase);
+    expect(headingAnchorBase("!!!")).not.toBe("");
+
+    const headings = extractWorkspaceHeadings("# 🚀\nfirst\n# 🚀\nsecond\n# !!!");
+    expect(headings.map(({ anchor, occurrence }) => ({ anchor, occurrence }))).toEqual([
+      { anchor: firstBase, occurrence: 0 },
+      { anchor: `${firstBase}-1`, occurrence: 1 },
+      { anchor: headingAnchorBase("!!!"), occurrence: 0 },
+    ]);
+  });
 });

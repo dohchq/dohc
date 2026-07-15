@@ -122,4 +122,29 @@ describe("BacklinksPanel", () => {
     );
     expect(container.querySelector("[data-testid='backlinks']")).toBeNull();
   });
+
+  it("never renders results loaded for a previous workspace or path", async () => {
+    const never = new Promise<GetBacklinksResult>(() => undefined);
+    const getBacklinks = vi
+      .fn()
+      .mockResolvedValueOnce(TWO_SOURCES)
+      .mockReturnValueOnce(never);
+    vi.stubGlobal("dohcDesktop", { getBacklinks });
+    const view = render(
+      <BacklinksPanel workspaceId="ws-a" path="notes/target.md" />,
+    );
+
+    await screen.findByTestId("backlinks");
+    expect(screen.getByText("Alpha")).toBeTruthy();
+
+    view.rerender(
+      <BacklinksPanel workspaceId="ws-b" path="notes/other.md" />,
+    );
+    expect(screen.queryByTestId("backlinks")).toBeNull();
+    expect(screen.queryByText("Alpha")).toBeNull();
+    expect(getBacklinks).toHaveBeenLastCalledWith({
+      workspaceId: "ws-b",
+      path: "notes/other.md",
+    });
+  });
 });

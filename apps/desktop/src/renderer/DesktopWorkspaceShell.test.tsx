@@ -23,7 +23,13 @@ import type { MenuCommandId, SearchResultsEvent } from "../ipc/channels";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { rendererMarks } from "../performance/rendererMarks";
-import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
+import {
+  chatsNavigationRequiresRemount,
+  DesktopWorkspaceShell,
+  pendingHeadingTargetForOpen,
+  type Workspace,
+} from "./DesktopWorkspaceShell";
+import type { ChatsNav } from "./workbench/ChatsView";
 import {
   OPEN_EDITORS_DEFAULT_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
@@ -308,6 +314,60 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+});
+
+describe("targeted chat navigation", () => {
+  const threadNav = (threadId: string, focusMessageId?: string): ChatsNav => ({
+    level: "thread",
+    channel: {
+      id: "channel-1",
+      name: "general",
+      slug: "general",
+      kind: "channel",
+      createdAtMs: 0,
+      updatedAtMs: 0,
+      threadCount: 1,
+      unreadCount: 0,
+    },
+    thread: {
+      id: threadId,
+      channelId: "channel-1",
+      title: "Discussion",
+      createdAtMs: 0,
+      updatedAtMs: 0,
+      messageCount: 2,
+      lastReadSequence: 0,
+      unreadCount: 0,
+    },
+    ...(focusMessageId ? { focusMessageId } : {}),
+  });
+
+  it("remounts the live chat for a message backlink inside the current thread", () => {
+    expect(
+      chatsNavigationRequiresRemount(
+        threadNav("thread-1", "message-1"),
+        threadNav("thread-1", "message-2"),
+      ),
+    ).toBe(true);
+    expect(
+      chatsNavigationRequiresRemount(
+        threadNav("thread-1", "message-1"),
+        threadNav("thread-1"),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("heading-target file opens", () => {
+  it("clears a prior section command on an ordinary open", () => {
+    expect(
+      pendingHeadingTargetForOpen("a.md", { anchor: "old-section", nonce: 1 }),
+    ).toEqual({
+      path: "a.md",
+      target: { anchor: "old-section", nonce: 1 },
+    });
+    expect(pendingHeadingTargetForOpen("a.md")).toBeNull();
+  });
 });
 
 // THE merge-on-load race (codex P2): the load gate used to compare COMMITTED

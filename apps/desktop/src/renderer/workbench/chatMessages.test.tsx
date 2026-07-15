@@ -101,6 +101,34 @@ describe("chat authorship display", () => {
       "Ice's agent",
     );
   });
+
+  it("renders file chips without requiring a person or agent roster", () => {
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={[
+          {
+            id: "message-file",
+            threadId: "thread-1",
+            authorKind: "human",
+            authorDisplayName: "Ice",
+            body: "Read @[docs/plan.md#scope] and `@[docs/code.md]`.",
+            createdAtMs: 1_700_000_000_000,
+          },
+        ]}
+        loading={false}
+        emptyLabel="No messages"
+        endRef={createRef<HTMLDivElement>()}
+        mentionCandidates={[]}
+      />,
+    );
+
+    expect(screen.getAllByTestId("test-chat-message-body-file-mention")).toHaveLength(1);
+    expect(screen.getByTestId("test-chat-message-body-file-mention").textContent)
+      .toContain("plan.md#scope");
+    expect(screen.getByTestId("test-chat-message-body").textContent)
+      .toContain("@[docs/code.md]");
+  });
 });
 
 describe("message reactions (WS-MU-C2)", () => {

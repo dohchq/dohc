@@ -372,6 +372,27 @@ describe("ChatsView hybrid feed", () => {
     );
   });
 
+  it("offers a keyboard and touch accessible snapshot bookmark action", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ openingMessage: openingPreview() })],
+      viewerAuthorId: "you@example.com",
+    });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    const snapshot = await screen.findByRole("button", {
+      name: "Bookmark chat as snapshot",
+    });
+    await user.click(snapshot);
+
+    expect(bridgeMock.saveChatBookmark).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      target: { kind: "thread", threadId: "thread-1" },
+      mode: "snapshot",
+    });
+  });
+
   it("renders post cards with excerpts, reactions, decisions, comments, and agent treatment", async () => {
     const user = userEvent.setup();
     const reaction = {
@@ -1577,12 +1598,17 @@ describe("ChatsView direct messages", () => {
     renderView();
     await user.click(await screen.findByTestId("chats-new-dm"));
     await user.type(screen.getByTestId("chats-dm-recipients"), "bob@example.com");
-    await user.type(screen.getByTestId("chats-dm-new-composer"), "hello there{Enter}");
+    const composer = screen.getByTestId("chats-dm-new-composer");
+    fireEvent.change(composer, {
+      target: { value: "hello there @[docs/plan.md#scope]" },
+    });
+    fireEvent.keyDown(composer, { key: "Enter", code: "Enter" });
     await waitFor(() =>
       expect(bridgeMock.startDm).toHaveBeenCalledWith({
         workspaceId: "workspace-a",
         recipients: "bob@example.com",
-        body: "hello there",
+        body: "hello there @[docs/plan.md#scope]",
+        fileReferences: [{ path: "docs/plan.md", headingAnchor: "scope" }],
       }),
     );
     expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
@@ -2039,6 +2065,102 @@ describe("ChatsView expand-to-tab", () => {
       await oldFollows;
     });
     expect(follow.getAttribute("aria-label")).toBe("Follow #general");
+  });
+
+  it("drops an awaited follow toggle result and error after switching workspaces", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ wireId: "wire-1" })],
+      fileThreads: [],
+    });
+    let resolveToggle!: (value: {
+      follow: {
+        targetKind: "channel";
+        targetId: string;
+        state: "following";
+        updatedAtMs: number;
+      };
+    }) => void;
+    const toggle = new Promise<{
+      follow: {
+        targetKind: "channel";
+        targetId: string;
+        state: "following";
+        updatedAtMs: number;
+      };
+    }>((resolve) => {
+      resolveToggle = resolve;
+    });
+    bridgeMock.setChatFollow.mockImplementationOnce(() => toggle);
+
+    const { rerender } = render(
+      <ChatsView
+        workspaceId="workspace-old"
+        onOpenFileChat={vi.fn()}
+        onError={onError}
+      />,
+    );
+    const oldFollow = await screen.findByTestId("chats-channel-follow");
+    await user.click(oldFollow);
+    rerender(
+      <ChatsView
+        workspaceId="workspace-new"
+        onOpenFileChat={vi.fn()}
+        onError={onError}
+      />,
+    );
+
+    await act(async () => {
+      resolveToggle({
+        follow: {
+          targetKind: "channel",
+          targetId: "wire-1",
+          state: "following",
+          updatedAtMs: NOW,
+        },
+      });
+      await toggle;
+    });
+    expect((await screen.findByTestId("chats-channel-follow")).getAttribute("aria-label"))
+      .toBe("Follow #general");
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("does not surface a rejected follow toggle from the previous workspace", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ wireId: "wire-1" })],
+      fileThreads: [],
+    });
+    let rejectToggle!: (reason: unknown) => void;
+    const toggle = new Promise<never>((_resolve, reject) => {
+      rejectToggle = reject;
+    });
+    bridgeMock.setChatFollow.mockImplementationOnce(() => toggle);
+
+    const { rerender } = render(
+      <ChatsView
+        workspaceId="workspace-old"
+        onOpenFileChat={vi.fn()}
+        onError={onError}
+      />,
+    );
+    await user.click(await screen.findByTestId("chats-channel-follow"));
+    rerender(
+      <ChatsView
+        workspaceId="workspace-new"
+        onOpenFileChat={vi.fn()}
+        onError={onError}
+      />,
+    );
+
+    await act(async () => {
+      rejectToggle(new Error("old workspace is offline"));
+      await toggle.catch(() => undefined);
+    });
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("keeps a delayed bookmark response after immediate navigation", async () => {

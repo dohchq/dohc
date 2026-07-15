@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   ChatChannelRecord,
   ChatAttachmentRecord,
+  ChatBookmarkRecord,
+  ChatFileReferenceInput,
   ChannelThreadRecord,
   ChatRunRecordsForThreadResult,
   ChatDispatchStateForThreadPayload,
@@ -26,6 +28,7 @@ import {
   SendChatMessagePayload,
   SendChatMessageResult,
   SetChatReactionPayload,
+  StartDmPayload,
   ListWorkspaceVersionsResult,
   ResolveWorkspaceVersionConflictPayload,
   SwitchWorkspaceVersionPayload,
@@ -33,6 +36,7 @@ import {
   TryInVersionStateResult,
   TryInWorkspaceVersionPayload,
   WorkspaceUiState,
+  WorkspaceGraphResult,
   WorkspaceVersionConflict,
   ListSitesResult,
   SetUserSettingsPayload,
@@ -65,6 +69,94 @@ describe("chat IPC contract", () => {
       targetKind: "file",
       createdAtMs: 1,
     });
+  });
+
+  it("keeps DM file references and stored heading metadata on the same bounds", () => {
+    expect(
+      StartDmPayload.parse({
+        workspaceId: "workspace-a",
+        recipients: "bob@example.com",
+        body: "Read @[docs/plan.md#scope]",
+        fileReferences: [{ path: "docs/plan.md", headingAnchor: "scope" }],
+      }).fileReferences,
+    ).toEqual([{ path: "docs/plan.md", headingAnchor: "scope" }]);
+
+    const attachment = {
+      attachmentId: "attachment-1",
+      threadId: "thread-1",
+      messageId: "message-1",
+      targetKind: "file" as const,
+      headingText: "t".repeat(300),
+      headingAnchor: "a".repeat(400),
+      headingOccurrence: 0,
+      createdAtMs: 1,
+    };
+    expect(ChatAttachmentRecord.safeParse(attachment).success).toBe(true);
+    expect(
+      ChatAttachmentRecord.safeParse({ ...attachment, headingText: "t".repeat(301) }).success,
+    ).toBe(false);
+    expect(
+      ChatAttachmentRecord.safeParse({ ...attachment, headingAnchor: "a".repeat(401) }).success,
+    ).toBe(false);
+    expect(
+      ChatAttachmentRecord.safeParse({
+        ...attachment,
+        headingAnchor: undefined,
+        headingOccurrence: 0,
+      }).success,
+    ).toBe(false);
+    expect(
+      ChatFileReferenceInput.safeParse({
+        path: "docs/plan.md",
+        headingOccurrence: 0,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("keeps bookmark discriminator ids internally consistent", () => {
+    const common = {
+      bookmarkId: "bookmark-1",
+      mode: "live" as const,
+      destinationPath: "Bookmarks/thread.md",
+      state: "active" as const,
+      projectionState: "ready" as const,
+      generation: 1,
+      createdAtMs: 1,
+      updatedAtMs: 1,
+    };
+    expect(
+      ChatBookmarkRecord.safeParse({
+        ...common,
+        targetKind: "thread",
+        targetId: "thread-1",
+        threadId: "thread-1",
+      }).success,
+    ).toBe(true);
+    expect(
+      ChatBookmarkRecord.safeParse({
+        ...common,
+        targetKind: "thread",
+        targetId: "thread-other",
+        threadId: "thread-1",
+      }).success,
+    ).toBe(false);
+    expect(
+      ChatBookmarkRecord.safeParse({
+        ...common,
+        targetKind: "message",
+        targetId: "message-1",
+        threadId: "thread-1",
+      }).success,
+    ).toBe(false);
+    expect(
+      ChatBookmarkRecord.safeParse({
+        ...common,
+        targetKind: "message",
+        targetId: "message-other",
+        threadId: "thread-1",
+        messageId: "message-1",
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts additive channel-feed previews and batched run records", () => {
@@ -112,6 +204,52 @@ describe("chat IPC contract", () => {
         },
       }).runs["message-2"]?.runId,
     ).toBe("run-1");
+  });
+});
+
+describe("workspace graph IPC contract", () => {
+  const graph = (node: Record<string, unknown>) => ({
+    nodes: [node],
+    edges: [],
+    unresolvedLinks: 0,
+    scannedFileCount: 1,
+    omittedFileCount: 0,
+    truncatedFileCount: 0,
+  });
+  const common = { path: "node", title: "Node", incoming: 0, outgoing: 0 };
+
+  it("keeps legacy file nodes while requiring navigable metadata for typed nodes", () => {
+    expect(WorkspaceGraphResult.safeParse(graph({ ...common, path: "a.md" })).success)
+      .toBe(true);
+    expect(
+      WorkspaceGraphResult.safeParse(
+        graph({
+          ...common,
+          kind: "heading",
+          filePath: "a.md",
+          headingAnchor: "scope",
+        }),
+      ).success,
+    ).toBe(true);
+    expect(
+      WorkspaceGraphResult.safeParse(
+        graph({ ...common, kind: "chat-thread", threadId: "thread-1" }),
+      ).success,
+    ).toBe(true);
+
+    expect(
+      WorkspaceGraphResult.safeParse(
+        graph({ ...common, kind: "heading", filePath: "a.md" }),
+      ).success,
+    ).toBe(false);
+    expect(
+      WorkspaceGraphResult.safeParse(graph({ ...common, kind: "chat-thread" })).success,
+    ).toBe(false);
+    expect(
+      WorkspaceGraphResult.safeParse(
+        graph({ ...common, path: "a.md", threadId: "thread-on-file" }),
+      ).success,
+    ).toBe(false);
   });
 });
 

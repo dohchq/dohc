@@ -2432,7 +2432,18 @@ export function createWorkspaceEngineCapture(
           if (destination.contentKind === "binary") {
             throw new Error(`Generated Markdown archive is unexpectedly binary: ${toPath}`);
           }
+          const sourceDisk = await readDiskTextState(rootPath, fromPath);
           const destinationDisk = await readDiskTextState(rootPath, toPath);
+          if (
+            sourceDisk.kind === "binary" ||
+            sourceDisk.kind === "untracked-content" ||
+            sourceDisk.kind === "unreadable" ||
+            (sourceDisk.kind === "text" && sourceDisk.text !== destination.text)
+          ) {
+            throw new Error(
+              `Generated Markdown archive source changed before recovery: ${fromPath}`,
+            );
+          }
           if (
             destinationDisk.kind === "binary" ||
             destinationDisk.kind === "untracked-content" ||

@@ -409,8 +409,8 @@ describe("linked chat tools", () => {
     await withWorkspace(async (ctx) => {
       vi.stubEnv("DOHC_MCP_CLOUD_EMAIL", "ice@example.com");
       vi.stubEnv("DOHC_MCP_OWNER_NAME", "bad\u0001name");
-      vi.stubEnv("USERNAME", "");
-      vi.stubEnv("USER", "");
+      vi.stubEnv("USERNAME", "local-login");
+      vi.stubEnv("USER", "other-local-login");
       await writeFile(
         join(ctx.home, "dohc-cloud.json"),
         `${JSON.stringify({ version: 1, email: "credential@example.com" })}\n`,
@@ -457,8 +457,8 @@ describe("channel tools (PR 12/13 slice)", () => {
 
   it("lists channels (auto-creating general) and starts a chat as the agent", async () => {
     await withWorkspace(async (ctx) => {
-      vi.stubEnv("USERNAME", "");
-      vi.stubEnv("USER", "");
+      vi.stubEnv("USERNAME", "local-login");
+      vi.stubEnv("USER", "other-local-login");
       await seedEngineFlag(ctx);
       await seedManifest(ctx, "ws-channels");
 

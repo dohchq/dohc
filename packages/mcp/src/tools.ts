@@ -2338,8 +2338,7 @@ async function agentReplyDisplayName(ctx: ToolContext): Promise<string> {
   );
   const settingsOwner = ownerNameFromUnknown(settings?.profile?.preferredName);
   if (settingsOwner) return settingsOwner;
-  const account = process.env.USERNAME?.trim() || process.env.USER?.trim() || "You";
-  return `${account[0]?.toLocaleUpperCase() ?? ""}${account.slice(1)}`;
+  return "You";
 }
 
 // The VERIFIED opaque relay identity a signed-in agent send stamps on its chat

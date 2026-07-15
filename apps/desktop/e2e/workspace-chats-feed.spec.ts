@@ -176,6 +176,9 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await composer.press("Enter");
     const firstComment = commentWithBody(page, firstCommentBody);
     await expect(firstComment).toBeVisible();
+    const firstCommentId = await firstComment.getAttribute("data-message-id");
+    expect(firstCommentId).toBeTruthy();
+    if (!firstCommentId) throw new Error("first comment did not expose its message id");
 
     await composer.fill(interveningCommentBody);
     await composer.press("Enter");
@@ -190,9 +193,10 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     const nestedComment = commentWithBody(page, nestedCommentBody);
     await expect(nestedComment).toBeVisible();
     await expect(nestedComment).toHaveAttribute("data-thread-depth", "1");
-    await expect(
-      nestedComment.locator("xpath=ancestor::ol[@data-testid='chats-replies']"),
-    ).toHaveCount(1);
+    await expect(nestedComment).toHaveAttribute(
+      "data-parent-message-id",
+      firstCommentId,
+    );
     await expect(nestedComment.getByTestId("chats-reply-context")).toHaveText(
       "↳ replying to You",
     );

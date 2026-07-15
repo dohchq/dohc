@@ -26,10 +26,21 @@ function visibleHeadingText(value: string): string {
 // dohc emits: lower-case, punctuation removed, whitespace collapsed to '-'.
 // Unicode letters and numbers remain readable instead of being transliterated.
 export function headingAnchorBase(text: string): string {
-  return visibleHeadingText(text)
-    .toLocaleLowerCase()
+  const visible = visibleHeadingText(text).normalize("NFC").toLocaleLowerCase();
+  const slug = visible
     .replace(/[^\p{L}\p{N}\p{M}\s_-]/gu, "")
     .replace(/\s+/g, "-");
+  if (slug) return slug;
+
+  // Emoji- and punctuation-only headings are still valid Markdown headings.
+  // Give them a deterministic, non-empty identity instead of the empty anchor;
+  // duplicates continue through the normal `-1`, `-2`, ... occurrence path.
+  let hash = 0x811c9dc5;
+  for (const character of visible) {
+    hash ^= character.codePointAt(0) ?? 0;
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return visible ? `section-${(hash >>> 0).toString(36)}` : "section";
 }
 
 function lineRecords(markdown: string): Array<{ text: string; line: number; offset: number; end: number }> {
@@ -62,7 +73,9 @@ export function extractWorkspaceHeadings(markdown: string): WorkspaceHeading[] {
     }
     if (fence || /^(?: {4}|\t)/.test(row.text)) continue;
 
-    const atx = row.text.match(/^[ \t]{0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/);
+    const atx = row.text.match(
+      /^[ \t]{0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+[ \t]*)?$/,
+    );
     if (atx?.[1] && atx[2]) {
       const text = visibleHeadingText(atx[2]);
       if (text) {

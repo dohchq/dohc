@@ -436,21 +436,52 @@ export const ReadWorkspaceTextResult = z.object({
 });
 export type ReadWorkspaceTextResult = z.infer<typeof ReadWorkspaceTextResult>;
 
-const WorkspaceGraphNode = z.object({
+const WorkspaceGraphNodeBase = z.object({
   path: PATH_STRING,
   title: z.string().max(120),
   outgoing: z.number().int().nonnegative(),
   incoming: z.number().int().nonnegative(),
-  kind: z.enum(["file", "chat-thread", "heading"]).optional(),
+});
+const WorkspaceGraphFileNode = WorkspaceGraphNodeBase.extend({
+  // Legacy file graphs predate `kind`; accepting its absence keeps the base
+  // graph contract compatible while still rejecting chat/heading metadata.
+  kind: z.literal("file").optional(),
   filePath: PATH_STRING.optional(),
-  threadId: z.string().min(1).max(200).optional(),
+  threadId: z.never().optional(),
+  channelId: z.never().optional(),
+  channelWireId: z.never().optional(),
+  channelName: z.never().optional(),
+  channelSlug: z.never().optional(),
+  channelKind: z.never().optional(),
+  headingAnchor: z.never().optional(),
+}).strict();
+const WorkspaceGraphHeadingNode = WorkspaceGraphNodeBase.extend({
+  kind: z.literal("heading"),
+  filePath: PATH_STRING,
+  headingAnchor: z.string().min(1).max(400),
+  threadId: z.never().optional(),
+  channelId: z.never().optional(),
+  channelWireId: z.never().optional(),
+  channelName: z.never().optional(),
+  channelSlug: z.never().optional(),
+  channelKind: z.never().optional(),
+}).strict();
+const WorkspaceGraphChatThreadNode = WorkspaceGraphNodeBase.extend({
+  kind: z.literal("chat-thread"),
+  threadId: z.string().min(1).max(200),
   channelId: z.string().min(1).max(200).optional(),
   channelWireId: z.string().min(1).max(256).optional(),
   channelName: z.string().min(1).max(100).optional(),
   channelSlug: z.string().min(1).max(100).optional(),
   channelKind: z.enum(["channel", "dm", "agent"]).optional(),
-  headingAnchor: z.string().min(1).max(400).optional(),
-});
+  filePath: z.never().optional(),
+  headingAnchor: z.never().optional(),
+}).strict();
+const WorkspaceGraphNode = z.union([
+  WorkspaceGraphHeadingNode,
+  WorkspaceGraphChatThreadNode,
+  WorkspaceGraphFileNode,
+]);
 
 const WorkspaceGraphEdge = z.object({
   source: PATH_STRING,
@@ -737,6 +768,8 @@ export type RestoreEngineMomentFileResult = z.infer<
 const CHAT_THREAD_ID = z.string().min(1).max(200);
 const CHAT_MESSAGE_ID = z.string().min(1).max(200);
 const CHAT_BODY = z.string().min(1).max(65_536);
+const CHAT_HEADING_TEXT = z.string().trim().min(1).max(300);
+const CHAT_HEADING_ANCHOR = z.string().trim().min(1).max(400);
 
 export const ChatThreadRecord = z.object({
   id: CHAT_THREAD_ID,
@@ -753,10 +786,18 @@ export const ChatAttachmentRecord = z.object({
   targetKind: z.literal("file"),
   objectId: z.string().min(1).max(200).optional(),
   pathHint: PATH_STRING.optional(),
-  headingText: z.string().trim().min(1).max(300).optional(),
-  headingAnchor: z.string().trim().min(1).max(400).optional(),
+  headingText: CHAT_HEADING_TEXT.optional(),
+  headingAnchor: CHAT_HEADING_ANCHOR.optional(),
   headingOccurrence: z.number().int().nonnegative().optional(),
   createdAtMs: z.number(),
+}).superRefine((attachment, ctx) => {
+  if (attachment.headingOccurrence !== undefined && !attachment.headingAnchor) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["headingOccurrence"],
+      message: "heading occurrence requires a heading anchor",
+    });
+  }
 });
 export type ChatAttachmentRecord = z.infer<typeof ChatAttachmentRecord>;
 
@@ -765,8 +806,16 @@ export type ChatAttachmentRecord = z.infer<typeof ChatAttachmentRecord>;
 // Identity and authorization never cross this renderer boundary.
 export const ChatFileReferenceInput = z.object({
   path: PATH_STRING,
-  headingAnchor: z.string().trim().min(1).max(400).optional(),
+  headingAnchor: CHAT_HEADING_ANCHOR.optional(),
   headingOccurrence: z.number().int().nonnegative().optional(),
+}).superRefine((reference, ctx) => {
+  if (reference.headingOccurrence !== undefined && !reference.headingAnchor) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["headingOccurrence"],
+      message: "heading occurrence requires a heading anchor",
+    });
+  }
 });
 export type ChatFileReferenceInput = z.infer<typeof ChatFileReferenceInput>;
 
@@ -812,12 +861,8 @@ export type ListChatFileMentionsResult = z.infer<
   typeof ListChatFileMentionsResult
 >;
 
-export const ChatBookmarkRecord = z.object({
+const CHAT_BOOKMARK_RECORD_BASE = z.object({
   bookmarkId: z.string().min(1).max(200),
-  targetKind: z.enum(["message", "thread"]),
-  targetId: z.string().min(1).max(200),
-  threadId: CHAT_THREAD_ID,
-  messageId: CHAT_MESSAGE_ID.optional(),
   mode: z.enum(["live", "snapshot"]),
   destinationPath: PATH_STRING,
   state: z.enum(["active", "archived"]),
@@ -826,6 +871,33 @@ export const ChatBookmarkRecord = z.object({
   createdAtMs: z.number(),
   updatedAtMs: z.number(),
 });
+
+export const ChatBookmarkRecord = z
+  .discriminatedUnion("targetKind", [
+    CHAT_BOOKMARK_RECORD_BASE.extend({
+      targetKind: z.literal("thread"),
+      targetId: CHAT_THREAD_ID,
+      threadId: CHAT_THREAD_ID,
+      messageId: z.undefined().optional(),
+    }),
+    CHAT_BOOKMARK_RECORD_BASE.extend({
+      targetKind: z.literal("message"),
+      targetId: CHAT_MESSAGE_ID,
+      threadId: CHAT_THREAD_ID,
+      messageId: CHAT_MESSAGE_ID,
+    }),
+  ])
+  .superRefine((bookmark, ctx) => {
+    const canonicalTargetId =
+      bookmark.targetKind === "thread" ? bookmark.threadId : bookmark.messageId;
+    if (bookmark.targetId !== canonicalTargetId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["targetId"],
+        message: `bookmark targetId must match its ${bookmark.targetKind} id`,
+      });
+    }
+  });
 export type ChatBookmarkRecord = z.infer<typeof ChatBookmarkRecord>;
 
 export const ListChatBookmarksPayload = z.object({ workspaceId: WORKSPACE_ID });
@@ -1323,6 +1395,7 @@ export const StartDmPayload = z.object({
   // main; grants are addressed per recipient.
   recipients: z.string().min(3).max(2000),
   body: CHAT_BODY,
+  fileReferences: z.array(ChatFileReferenceInput).max(20).optional(),
 });
 export type StartDmPayload = z.infer<typeof StartDmPayload>;
 

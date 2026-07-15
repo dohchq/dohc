@@ -8,6 +8,12 @@ import { bridge } from "./bridge";
 
 type BacklinkSource = GetBacklinksResult["sources"][number];
 type BacklinkSnippet = BacklinkSource["snippets"][number];
+type LoadedBacklinks = {
+  workspaceId: string;
+  path: string;
+  sources: BacklinkSource[];
+  chatMentions: ChatFileMentionRecord[];
+};
 
 // Splits a snippet line into before / highlighted / after so the linked text
 // reads out of the surrounding line. Ranges come clamped from main, but this
@@ -40,10 +46,13 @@ export function BacklinksPanel(props: {
   onOpenPath?: (path: string) => void;
   onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
 }) {
-  const [sources, setSources] = useState<BacklinkSource[]>([]);
-  const [chatMentions, setChatMentions] = useState<ChatFileMentionRecord[]>([]);
+  const [loaded, setLoaded] = useState<LoadedBacklinks | null>(null);
   const [open, setOpen] = useState(true);
   const { workspaceId, path, refreshKey } = props;
+  const current =
+    loaded?.workspaceId === workspaceId && loaded.path === path ? loaded : null;
+  const sources = current?.sources ?? [];
+  const chatMentions = current?.chatMentions ?? [];
 
   useEffect(() => {
     const getBacklinks = bridge().getBacklinks;
@@ -62,14 +71,12 @@ export function BacklinksPanel(props: {
         // Guard the async response against a workspace/path switch mid-flight
         // (product invariant: a slow response must never repaint the wrong doc).
         if (active) {
-          setSources(result.sources);
-          setChatMentions(chats.mentions);
+          setLoaded({ workspaceId, path, sources: result.sources, chatMentions: chats.mentions });
         }
       })
       .catch(() => {
         if (active) {
-          setSources([]);
-          setChatMentions([]);
+          setLoaded({ workspaceId, path, sources: [], chatMentions: [] });
         }
       });
     return () => {
@@ -99,8 +106,7 @@ export function BacklinksPanel(props: {
     ])
       .then(([result, chats]) => {
         if (active) {
-          setSources(result.sources);
-          setChatMentions(chats.mentions);
+          setLoaded({ workspaceId, path, sources: result.sources, chatMentions: chats.mentions });
         }
       })
       .catch(() => undefined);

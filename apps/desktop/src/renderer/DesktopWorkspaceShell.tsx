@@ -161,6 +161,25 @@ function chatsDestinationKey(nav: ChatsNav | null): string {
   return nav.level;
 }
 
+export function chatsNavigationRequiresRemount(
+  current: ChatsNav | null,
+  next: ChatsNav,
+): boolean {
+  if (chatsDestinationKey(current) !== chatsDestinationKey(next)) return true;
+  // Message backlinks are commands, not durable conversation identity. Even
+  // when the destination thread is already live, remount it with the new
+  // focus target so ChatsView gets another chance to scroll (and so clicking
+  // the same backlink twice remains useful after the user has scrolled away).
+  return next.level === "thread" && Boolean(next.focusMessageId);
+}
+
+export function pendingHeadingTargetForOpen(
+  path: string,
+  target?: HeadingTarget,
+): { path: string; target: HeadingTarget } | null {
+  return target ? { path, target } : null;
+}
+
 export type Workspace = WorkspaceSummary;
 
 const LazyRelayShareDialog = lazy(() =>
@@ -1379,7 +1398,11 @@ export function DesktopWorkspaceShell(props: {
   // the mark fires once, OUTSIDE the functional updater — updaters must stay
   // side-effect-free (StrictMode/concurrent replays would re-fire them).
   const openFile = useCallback(
-    (path: string) => {
+    (path: string, target?: HeadingTarget) => {
+      // Heading jumps are one open command, never durable tab state. Every
+      // ordinary explorer/tab open therefore clears a prior jump before the
+      // file can become active again.
+      setHeadingTarget(pendingHeadingTargetForOpen(path, target));
       if (/\.(md|markdown)$/i.test(path)) preloadMarkdownEditor();
       if (openTab(wbRef.current, path) !== wbRef.current) {
         rendererMarks.mark("file-open-start");
@@ -1391,18 +1414,12 @@ export function DesktopWorkspaceShell(props: {
   );
   const openPathWithHeading = useCallback(
     (path: string, target?: string | HeadingTarget) => {
-      if (target) {
-        setHeadingTarget({
-          path,
-          target:
-            typeof target === "string"
-              ? { anchor: target, nonce: ++scrollNonce.current }
-              : target,
-        });
-      } else {
-        setHeadingTarget(null);
-      }
-      openFile(path);
+      openFile(
+        path,
+        typeof target === "string"
+          ? { anchor: target, nonce: ++scrollNonce.current }
+          : target,
+      );
     },
     [openFile],
   );
@@ -1437,6 +1454,7 @@ export function DesktopWorkspaceShell(props: {
     (nav: ChatsNav) => {
       const destinationChanged =
         chatsDestinationKey(chatsNav.current) !== chatsDestinationKey(nav);
+      const shouldRemount = chatsNavigationRequiresRemount(chatsNav.current, nav);
       chatsNav.current = nav;
       setSelectedChatsNav(nav);
       if (destinationChanged) {
@@ -1444,6 +1462,8 @@ export function DesktopWorkspaceShell(props: {
         // draft store is keyed per channel/thread, never seed one into a
         // different destination.
         chatsDrafts.current = null;
+      }
+      if (shouldRemount) {
         setChatsPageRevision((current) => current + 1);
       }
       mutateWb((state) => openTab(state, CHATS_TAB_PATH));

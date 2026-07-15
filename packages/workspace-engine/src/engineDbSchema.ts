@@ -13,6 +13,13 @@
 
 export const ENGINE_SCHEMA_VERSION = 1;
 export const ENGINE_SQLITE_BUSY_TIMEOUT_MS = 5_000;
+const DEFERRED_CHAT_PARENT_REPAIR_MIGRATION = "deferred-chat-parent-repair-v1";
+
+const ENGINE_MIGRATIONS_DDL = `
+  CREATE TABLE IF NOT EXISTS engine_migrations (
+    migration_id TEXT PRIMARY KEY
+  )
+`;
 
 export interface EngineSqliteStatement {
   all(...params: unknown[]): Array<Record<string, unknown>>;
@@ -753,6 +760,66 @@ function listUserTables(db: EngineSqliteDb): string[] {
     .map((row) => String(row.name));
 }
 
+function repairDeferredChatParentsOnce(
+  db: EngineSqliteDb,
+  corrupt: (cause?: unknown) => Error,
+): void {
+  db.exec(ENGINE_MIGRATIONS_DDL);
+  const migrationCompleted = () =>
+    db
+      .prepare("SELECT 1 FROM engine_migrations WHERE migration_id = ?")
+      .get(DEFERRED_CHAT_PARENT_REPAIR_MIGRATION);
+  // The common path stays read-only and never takes SQLite's writer lock.
+  if (migrationCompleted()) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    // Re-check after acquiring the writer lock: another process may have
+    // completed the repair between the fast-path read and this transaction.
+    if (!migrationCompleted()) {
+      // Older builds surfaced a replicated parent id immediately, even when
+      // its message had not arrived yet. Move genuinely absent parents into
+      // deferred state and discard cross-thread/self links. The marker is
+      // committed atomically with the repair, so a crash retries the entire
+      // migration while every later startup performs only the keyed lookup.
+      db.exec(`
+        INSERT OR IGNORE INTO chat_pending_message_parents (
+          workspace_id, child_message_id, thread_id, parent_message_id
+        )
+        SELECT child.workspace_id, child.message_id, child.thread_id, child.parent_message_id
+        FROM chat_messages child
+        WHERE child.parent_message_id IS NOT NULL
+          AND child.parent_message_id <> child.message_id
+          AND NOT EXISTS (
+            SELECT 1 FROM chat_messages parent
+            WHERE parent.workspace_id = child.workspace_id
+              AND parent.message_id = child.parent_message_id
+          );
+        UPDATE chat_messages AS child
+        SET parent_message_id = NULL
+        WHERE child.parent_message_id IS NOT NULL
+          AND (
+            child.parent_message_id = child.message_id
+            OR NOT EXISTS (
+              SELECT 1 FROM chat_messages parent
+              WHERE parent.workspace_id = child.workspace_id
+                AND parent.thread_id = child.thread_id
+                AND parent.message_id = child.parent_message_id
+            )
+          );
+      `);
+      db.prepare("INSERT INTO engine_migrations (migration_id) VALUES (?)").run(
+        DEFERRED_CHAT_PARENT_REPAIR_MIGRATION,
+      );
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw corrupt(error);
+  }
+}
+
 export function initializeOrValidateEngineSchema(
   db: EngineSqliteDb,
   corrupt: (cause?: unknown) => Error,
@@ -801,37 +868,7 @@ export function initializeOrValidateEngineSchema(
   ensureNullableColumn(db, "chat_messages", "author_user_id", "TEXT", corrupt);
   ensureNullableColumn(db, "chat_messages", "parent_message_id", "TEXT", corrupt);
   ensureNullableColumn(db, "chat_messages", "origin", "TEXT", corrupt);
-  // Older builds surfaced a replicated parent id immediately, even when its
-  // message had not arrived yet. Move only genuinely-absent parents into the
-  // durable deferred table; discard cross-thread/self links rather than ever
-  // activating them. This is idempotent and repairs an existing alpha store on
-  // first open without changing the schema version.
-  db.exec(`
-    INSERT OR IGNORE INTO chat_pending_message_parents (
-      workspace_id, child_message_id, thread_id, parent_message_id
-    )
-    SELECT child.workspace_id, child.message_id, child.thread_id, child.parent_message_id
-    FROM chat_messages child
-    WHERE child.parent_message_id IS NOT NULL
-      AND child.parent_message_id <> child.message_id
-      AND NOT EXISTS (
-        SELECT 1 FROM chat_messages parent
-        WHERE parent.workspace_id = child.workspace_id
-          AND parent.message_id = child.parent_message_id
-      );
-    UPDATE chat_messages AS child
-    SET parent_message_id = NULL
-    WHERE child.parent_message_id IS NOT NULL
-      AND (
-        child.parent_message_id = child.message_id
-        OR NOT EXISTS (
-          SELECT 1 FROM chat_messages parent
-          WHERE parent.workspace_id = child.workspace_id
-            AND parent.thread_id = child.thread_id
-            AND parent.message_id = child.parent_message_id
-        )
-      );
-  `);
+  repairDeferredChatParentsOnce(db, corrupt);
   ensureNullableColumn(db, "chat_attachments", "heading_text", "TEXT", corrupt);
   ensureNullableColumn(db, "chat_attachments", "heading_anchor", "TEXT", corrupt);
   ensureNullableColumn(db, "chat_attachments", "heading_occurrence", "INTEGER", corrupt);
@@ -880,6 +917,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
         id INTEGER PRIMARY KEY CHECK (id = 1),
         version INTEGER NOT NULL
       );
+      ${ENGINE_MIGRATIONS_DDL};
       CREATE TABLE IF NOT EXISTS blobs (
         sha256 TEXT PRIMARY KEY,
         byte_length INTEGER NOT NULL,

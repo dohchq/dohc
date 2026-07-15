@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MentionComposer } from "./MentionComposer";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { useState } from "react";
 
 const candidates: MentionCandidate[] = [
@@ -13,7 +14,11 @@ const candidates: MentionCandidate[] = [
 
 // A tiny controlled harness so the composer behaves like it does in ChatsView
 // (parent owns the value).
-function Harness(props: { onSend?: () => void; onEscape?: () => void }) {
+function Harness(props: {
+  onSend?: () => void;
+  onEscape?: () => void;
+  loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
+}) {
   const [value, setValue] = useState("");
   return (
     <MentionComposer
@@ -24,6 +29,10 @@ function Harness(props: { onSend?: () => void; onEscape?: () => void }) {
       placeholder="Write a message…"
       sendLabel="Send message"
       candidates={candidates}
+      fileCandidates={[{ path: "docs/plan.md", label: "Plan" }]}
+      {...(props.loadFileHeadings
+        ? { loadFileHeadings: props.loadFileHeadings }
+        : {})}
       onChange={setValue}
       onSend={props.onSend ?? (() => {})}
       {...(props.onEscape ? { onEscape: props.onEscape } : {})}
@@ -132,5 +141,72 @@ describe("MentionComposer autocomplete", () => {
     const menu = await screen.findByRole("listbox");
     expect(menu.getAttribute("aria-label")).toBe("Mention a person, agent, or file");
     expect(composer.getAttribute("aria-expanded")).toBe("true");
+    const options = within(menu).getAllByRole("option");
+    expect(composer.getAttribute("aria-activedescendant")).toBe(options[0]!.id);
+    await userEvent.keyboard("{ArrowDown}");
+    expect(composer.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
+  });
+
+  it("tracks the active file and heading option for assistive tech", async () => {
+    render(
+      <Harness
+        loadFileHeadings={() =>
+          Promise.resolve([
+            { text: "Scope", anchor: "scope", line: 3, level: 2, occurrence: 0 },
+          ])
+        }
+      />,
+    );
+    const composer = screen.getByTestId("chats-composer");
+    await userEvent.type(composer, "@plan");
+    await userEvent.click(await screen.findByTestId("chats-file-mention-option"));
+    const wholeFile = await screen.findByTestId("chats-file-mention-whole");
+    expect(composer.getAttribute("aria-activedescendant")).toBe(wholeFile.id);
+
+    const heading = await screen.findByTestId("chats-file-mention-heading");
+    await userEvent.keyboard("{ArrowDown}");
+    expect(composer.getAttribute("aria-activedescendant")).toBe(heading.id);
+  });
+
+  it("invalidates a pending heading load when Escape closes the file stage", async () => {
+    let resolveHeadings!: (headings: readonly WorkspaceHeadingRecord[]) => void;
+    const headings = new Promise<readonly WorkspaceHeadingRecord[]>((resolve) => {
+      resolveHeadings = resolve;
+    });
+    render(<Harness loadFileHeadings={() => headings} />);
+    const composer = screen.getByTestId("chats-composer");
+    await userEvent.type(composer, "@plan");
+    await userEvent.click(await screen.findByTestId("chats-file-mention-option"));
+    await screen.findByTestId("chats-file-mention-whole");
+
+    await userEvent.keyboard("{Escape}");
+    resolveHeadings([
+      { text: "Stale", anchor: "stale", line: 1, level: 1, occurrence: 0 },
+    ]);
+    await headings;
+    expect(screen.queryByTestId("chats-file-mention-heading")).toBeNull();
+  });
+
+  it("invalidates pending headings on blur and loader/workspace changes", async () => {
+    let resolveOld!: (headings: readonly WorkspaceHeadingRecord[]) => void;
+    const oldHeadings = new Promise<readonly WorkspaceHeadingRecord[]>((resolve) => {
+      resolveOld = resolve;
+    });
+    const oldLoader = () => oldHeadings;
+    const newLoader = () => Promise.resolve<readonly WorkspaceHeadingRecord[]>([]);
+    const { rerender } = render(<Harness loadFileHeadings={oldLoader} />);
+    const composer = screen.getByTestId("chats-composer");
+    await userEvent.type(composer, "@plan");
+    await userEvent.click(await screen.findByTestId("chats-file-mention-option"));
+    await screen.findByTestId("chats-file-mention-whole");
+
+    rerender(<Harness loadFileHeadings={newLoader} />);
+    fireEvent.blur(composer);
+    resolveOld([
+      { text: "Old workspace", anchor: "old", line: 1, level: 1, occurrence: 0 },
+    ]);
+    await oldHeadings;
+    expect(screen.queryByTestId("chats-mention-menu")).toBeNull();
+    expect(screen.queryByTestId("chats-file-mention-heading")).toBeNull();
   });
 });

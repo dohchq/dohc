@@ -1,11 +1,27 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SyncReplicationEnvelope } from "@dohc/workspace-contracts/engine";
 import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
-import { createLinkedChatStore } from "./linkedChatStore";
+import { LINKED_CHAT_STORE_RELATIVE_PATH, createLinkedChatStore } from "./linkedChatStore";
 import { applySyncQueues } from "./syncApply";
+import { exportSyncBundle } from "./syncFolder";
+
+interface RawSqliteStatement {
+  all(...params: unknown[]): Array<Record<string, unknown>>;
+}
+
+interface RawSqliteDb {
+  prepare(sql: string): RawSqliteStatement;
+  close(): void;
+}
+
+const requireModule = createRequire(import.meta.url);
+const { DatabaseSync } = requireModule("node:sqlite") as {
+  DatabaseSync: new (path: string) => RawSqliteDb;
+};
 
 let root: string;
 let now: number;
@@ -26,7 +42,137 @@ function storeAt(path = root) {
   });
 }
 
+function receiverStateReplicationOps(): SyncReplicationEnvelope[] {
+  const db = new DatabaseSync(join(root, LINKED_CHAT_STORE_RELATIVE_PATH));
+  try {
+    return db
+      .prepare(
+        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms
+         FROM replication_log
+         WHERE op_kind IN ('chat.follow.set', 'chat.feed.read.set')
+         ORDER BY origin_id, origin_seq`,
+      )
+      .all()
+      .map(
+        (row) =>
+          ({
+            workspaceId: String(row.workspace_id),
+            originId: String(row.origin_id),
+            originSeq: Number(row.origin_seq),
+            opKind: String(row.op_kind),
+            payload: JSON.parse(String(row.payload_json)),
+            recordedAtMs: Number(row.recorded_at_ms),
+          }) as SyncReplicationEnvelope,
+      );
+  } finally {
+    db.close();
+  }
+}
+
 describe("personal chat Feed", () => {
+  it("keeps signed-out receiver state local and journals only a verified matching owner", async () => {
+    const store = storeAt();
+    const general = await store.ensureGeneralChannel({ workspaceId: "ws" });
+    await store.startChannelThread({
+      workspaceId: "ws",
+      channelId: general.id,
+      author: { kind: "human", displayName: "Alice" },
+      authorUserId: "alice",
+      body: "Opening post",
+    });
+    await store.ensureDefaultChannelFollows({
+      workspaceId: "ws",
+      ownerUserId: "local-fallback",
+    });
+    const page = await store.listPersonalFeed({
+      workspaceId: "ws",
+      ownerUserId: "local-fallback",
+    });
+    expect(page.headCursor).toBeTruthy();
+    const beforeSignedOut = await exportSyncBundle({
+      rootDir: root,
+      workspaceId: "ws",
+      toDir: join(root, "export-before-signed-out"),
+    });
+
+    await store.setFollow({
+      workspaceId: "ws",
+      ownerUserId: "local-fallback",
+      targetKind: "person",
+      targetId: "alice",
+      state: "following",
+    });
+    await store.markPersonalFeedSeen({
+      workspaceId: "ws",
+      ownerUserId: "local-fallback",
+      headCursor: page.headCursor!,
+    });
+
+    expect(receiverStateReplicationOps()).toEqual([]);
+    expect(
+      await exportSyncBundle({
+        rootDir: root,
+        workspaceId: "ws",
+        toDir: join(root, "export-after-signed-out"),
+      }),
+    ).toMatchObject({ opCount: beforeSignedOut.opCount });
+    expect(
+      await store.listFollows({ workspaceId: "ws", ownerUserId: "local-fallback" }),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ targetKind: "person", targetId: "alice" }),
+      ]),
+    );
+    expect(
+      (await store.listPersonalFeed({ workspaceId: "ws", ownerUserId: "local-fallback" }))
+        .readState,
+    ).toMatchObject({ lastSeenMessageId: page.items[0]?.message.id });
+
+    await expect(
+      store.setFollow({
+        workspaceId: "ws",
+        ownerUserId: "local-fallback",
+        replicationOwnerUserId: "user-a",
+        targetKind: "person",
+        targetId: "alice",
+        state: "unfollowed",
+      }),
+    ).rejects.toThrow("Replication feed owner must match");
+
+    await store.setFollow({
+      workspaceId: "ws",
+      ownerUserId: "user-a",
+      replicationOwnerUserId: "user-a",
+      targetKind: "person",
+      targetId: "alice",
+      state: "following",
+    });
+    await store.markPersonalFeedSeen({
+      workspaceId: "ws",
+      ownerUserId: "user-a",
+      replicationOwnerUserId: "user-a",
+      headCursor: page.headCursor!,
+    });
+
+    expect(receiverStateReplicationOps()).toEqual([
+      expect.objectContaining({
+        opKind: "chat.follow.set",
+        payload: expect.objectContaining({ ownerUserId: "user-a" }),
+      }),
+      expect.objectContaining({
+        opKind: "chat.feed.read.set",
+        payload: expect.objectContaining({ ownerUserId: "user-a" }),
+      }),
+    ]);
+    expect(
+      await exportSyncBundle({
+        rootDir: root,
+        workspaceId: "ws",
+        toDir: join(root, "export-after-signed-in"),
+      }),
+    ).toMatchObject({ opCount: beforeSignedOut.opCount + 2 });
+  });
+
   it("derives a deduplicated, paginated Feed from channel, author, and thread follows", async () => {
     const store = storeAt();
     const general = await store.ensureGeneralChannel({ workspaceId: "ws" });
@@ -184,6 +330,59 @@ describe("personal chat Feed", () => {
     const rowB = await b.listPersonalFeed({ workspaceId: "ws", ownerUserId: "viewer" });
     expect(rowA.readState).toEqual(rowB.readState);
     expect(rowA.readState?.lastSeenMessageId).toBe("message-b");
+
+    await a.close();
+    await b.close();
+    await rm(aRoot, { recursive: true, force: true });
+    await rm(bRoot, { recursive: true, force: true });
+  });
+
+  it("does not regress a feed read boundary when a stale cursor arrives last", async () => {
+    const aRoot = await mkdtemp(join(tmpdir(), "dohc-feed-read-a-"));
+    const bRoot = await mkdtemp(join(tmpdir(), "dohc-feed-read-b-"));
+    const a = storeAt(aRoot);
+    const b = storeAt(bRoot);
+    const fresh: SyncReplicationEnvelope = {
+      workspaceId: "ws",
+      originId: "origin-fresh",
+      originSeq: 0,
+      opKind: "chat.feed.read.set",
+      payload: {
+        ownerUserId: "viewer",
+        lastSeenCreatedAtMs: 30,
+        lastSeenMessageId: "message-new",
+        atMs: 10,
+      },
+      recordedAtMs: 10,
+    };
+    const stale: SyncReplicationEnvelope = {
+      workspaceId: "ws",
+      originId: "origin-stale",
+      originSeq: 0,
+      opKind: "chat.feed.read.set",
+      payload: {
+        ownerUserId: "viewer",
+        lastSeenCreatedAtMs: 20,
+        lastSeenMessageId: "message-old",
+        // Wall-clock and replication metadata deliberately favor this stale
+        // operation so only feed-coordinate ordering can prevent regression.
+        atMs: 999,
+      },
+      recordedAtMs: 999,
+    };
+
+    await a.applyReplicationOp(fresh);
+    await a.applyReplicationOp(stale);
+    await b.applyReplicationOp(stale);
+    await b.applyReplicationOp(fresh);
+
+    const rowA = await a.listPersonalFeed({ workspaceId: "ws", ownerUserId: "viewer" });
+    const rowB = await b.listPersonalFeed({ workspaceId: "ws", ownerUserId: "viewer" });
+    expect(rowA.readState).toEqual(rowB.readState);
+    expect(rowA.readState).toMatchObject({
+      lastSeenCreatedAtMs: 30,
+      lastSeenMessageId: "message-new",
+    });
 
     await a.close();
     await b.close();

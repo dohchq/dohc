@@ -138,23 +138,26 @@ export function addChatMentionsToWorkspaceGraph(
   base: WorkspaceGraph,
   mentions: readonly AuthorizedChatFileGraphMention[],
   enabled: true,
+  baseFileObjectIds: ReadonlyMap<string, string>,
 ): WorkspaceGraphWithChatMentions;
 export function addChatMentionsToWorkspaceGraph(
   base: WorkspaceGraph,
   mentions: readonly AuthorizedChatFileGraphMention[],
   enabled: boolean,
+  baseFileObjectIds: ReadonlyMap<string, string> = new Map(),
 ): WorkspaceGraph | WorkspaceGraphWithChatMentions {
   if (!enabled) return base;
 
   const nodes = new Map<string, ChatMentionGraphNode>();
-  const basePaths = new Set(base.nodes.map((node) => node.path));
   for (const node of base.nodes) {
     const id = fileNodeId(node.path);
+    const objectId = baseFileObjectIds.get(node.path);
     nodes.set(id, {
       id,
       kind: "file",
       path: node.path,
       title: node.title,
+      ...(objectId ? { objectId } : {}),
       incoming: 0,
       outgoing: 0,
     });
@@ -175,14 +178,15 @@ export function addChatMentionsToWorkspaceGraph(
   // describe the same durable id, which also keeps output deterministic.
   const mentionMessages = new Map<string, Set<string>>();
   for (const mention of mentions) {
-    if (!basePaths.has(mention.filePath)) continue;
-    const fileId = fileNodeId(mention.filePath);
-    const existingFile = nodes.get(fileId);
-    if (existingFile?.kind === "file") {
-      if (!existingFile.objectId || mention.fileObjectId < existingFile.objectId) {
-        existingFile.objectId = mention.fileObjectId;
-      }
+    // pathHint is display/navigation metadata, never authorization or stable
+    // identity. A shared/cross-workspace attachment can legitimately carry a
+    // path that happens to exist here; only the current workspace object's id
+    // may bind that attachment to a graph node.
+    if (baseFileObjectIds.get(mention.filePath) !== mention.fileObjectId) {
+      continue;
     }
+    const fileId = fileNodeId(mention.filePath);
+    if (!nodes.has(fileId)) continue;
 
     const threadId = threadNodeId(mention.threadId);
     const threadTitle = stableText(mention.threadTitle);

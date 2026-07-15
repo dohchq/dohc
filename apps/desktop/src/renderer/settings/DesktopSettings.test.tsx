@@ -221,6 +221,29 @@ describe("DesktopSettings", () => {
     );
   });
 
+  it("cancels a preferred-name edit without saving or closing settings", async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="general"
+        onClose={onClose}
+      />,
+    );
+
+    const input = await screen.findByTestId("general-preferred-name-input");
+    bridge.setUserSettings.mockClear();
+    await user.type(input, "Unsaved name");
+    await user.keyboard("{Escape}");
+
+    expect((input as HTMLInputElement).value).toBe("");
+    expect(bridge.setUserSettings).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByTestId("settings-dialog")).toBeTruthy();
+  });
+
   it("rolls back optimistic appearance changes when save fails", async () => {
     const user = userEvent.setup();
     bridge.setUserSettings.mockRejectedValueOnce(new Error("Disk full"));
@@ -295,6 +318,25 @@ describe("DesktopSettings", () => {
     expect(probes).toHaveLength(2);
     expect(probes[0]?.textContent).toContain("Installed · sign-in not verified");
     expect(probes[1]?.textContent).toContain("Not found");
+  });
+
+  it("does not claim an enabled MCP server is connected", async () => {
+    mcpEnabled = true;
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="agents"
+        onClose={() => {}}
+      />,
+    );
+
+    expect((await screen.findByTestId("agent-setup-status")).textContent).toContain(
+      "Needs setup",
+    );
+    expect(screen.getByTestId("agent-setup-mcp-action").textContent).toContain(
+      "MCP enabled · copy config below",
+    );
   });
 
   it("shows the trusted runner controls and persists command, toggle, and timeout", async () => {

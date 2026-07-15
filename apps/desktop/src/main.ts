@@ -22,7 +22,6 @@ import {
 import { existsSync, statSync } from "node:fs";
 import { mkdir, readdir } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { userInfo } from "node:os";
 import {
   AttachWorkspaceFolderPayload,
   CreateLocalWorkspacePayload,
@@ -1573,17 +1572,35 @@ function engineSearchStoreFor(workspace: {
   return store;
 }
 
+async function activeEngineFileIndex(workspace: {
+  workspaceId: string;
+  rootPath: string;
+}): Promise<{
+  pathByObjectId: Map<string, string>;
+  objectIdByPath: Map<string, string>;
+}> {
+  const texts = engineSearchStoreFor(workspace);
+  const active = await texts.getActiveVersion({ workspaceId: workspace.workspaceId });
+  if (!active) {
+    return { pathByObjectId: new Map(), objectIdByPath: new Map() };
+  }
+  const files = await texts.listTextFiles({
+    workspaceId: workspace.workspaceId,
+    versionId: active.id,
+  });
+  return {
+    pathByObjectId: new Map(files.map((file) => [file.objectId, file.path])),
+    objectIdByPath: new Map(files.map((file) => [file.path, file.objectId])),
+  };
+}
+
 // The human author every renderer-sent chat message is attributed to. Main
 // derives it — the renderer never supplies identity. At alpha the desktop's
 // preferred local profile name. Email remains an auth/contact identifier and
 // is never reused as a public chat display name.
 let cachedPreferredName: string | undefined;
 function localUserDisplayName(): string {
-  if (cachedPreferredName) return cachedPreferredName;
-  const account = userInfo().username.trim();
-  return account
-    ? `${account[0]?.toLocaleUpperCase() ?? ""}${account.slice(1)}`
-    : "You";
+  return cachedPreferredName ?? "You";
 }
 
 // The opaque per-install reactor id used when signed out (no cloud user id). A
@@ -3086,6 +3103,7 @@ function registerIpcHandlers(): void {
         ] as const),
       ),
     );
+    const activeFiles = await activeEngineFileIndex(engineWorkspace);
     const authorizedMentions = (
       await Promise.all(
         threads.map(async (thread) => {
@@ -3093,15 +3111,23 @@ function registerIpcHandlers(): void {
             engineWorkspace.workspaceId,
             thread.id,
           );
-          return attachments.flatMap((attachment) =>
-            attachment.pathHint && attachment.objectId
-              ? [
-                  {
+          return attachments.flatMap((attachment) => {
+            // Stable object identity owns path resolution. A hint is usable
+            // only for legacy/opaque rows where no object identity exists; an
+            // object that disappeared from the active version fails closed.
+            const filePath = attachment.objectId
+              ? activeFiles.pathByObjectId.get(attachment.objectId)
+              : attachment.pathHint;
+            const fileObjectId =
+              attachment.objectId ??
+              (filePath ? activeFiles.objectIdByPath.get(filePath) : undefined);
+            return filePath && fileObjectId
+              ? [{
                     threadId: thread.id,
                     threadTitle: thread.title,
                     messageId: attachment.messageId,
-                    fileObjectId: attachment.objectId,
-                    filePath: attachment.pathHint,
+                    fileObjectId,
+                    filePath,
                     ...(thread.channelId && graphChannels.get(thread.channelId)
                       ? {
                           channel: {
@@ -3124,10 +3150,9 @@ function registerIpcHandlers(): void {
                           },
                         }
                       : {}),
-                  },
-                ]
-              : [],
-          );
+                  }]
+              : [];
+          });
         }),
       )
     ).flat();
@@ -3135,6 +3160,7 @@ function registerIpcHandlers(): void {
       graph,
       authorizedMentions,
       true,
+      activeFiles.objectIdByPath,
     );
     const filePathsById = new Map(
       overlaid.nodes
@@ -3145,7 +3171,14 @@ function registerIpcHandlers(): void {
       ...overlaid,
       nodes: overlaid.nodes.map((node) =>
         node.kind === "file"
-          ? { ...node, path: node.path, kind: "file" as const, filePath: node.path }
+          ? {
+              path: node.path,
+              kind: "file" as const,
+              filePath: node.path,
+              title: node.title,
+              incoming: node.incoming,
+              outgoing: node.outgoing,
+            }
           : node.kind === "chat-thread"
             ? {
                 path: node.id,
@@ -4810,6 +4843,7 @@ function registerIpcHandlers(): void {
       workspaceId: workspace.workspaceId,
       ...(objectId ? { objectId } : { pathHint: input.path }),
     });
+    const activeFiles = await activeEngineFileIndex(workspace);
     const mentionChannelWireIds = new Map(
       await Promise.all(
         [...new Set(mentions.flatMap((mention) => mention.channel ? [mention.channel.id] : []))]
@@ -4823,34 +4857,42 @@ function registerIpcHandlers(): void {
       ),
     );
     return ListChatFileMentionsResult.parse({
-      mentions: mentions.map((mention) => ({
-        attachment: chatAttachmentForIpc(mention.attachment),
-        message: chatMessageForIpc(mention.message),
-        thread: chatThreadForIpc(mention.thread),
-        ...(mention.channel
-          ? {
-              channelId: mention.channel.id,
-              ...(mentionChannelWireIds.get(mention.channel.id)
-                ? { channelWireId: mentionChannelWireIds.get(mention.channel.id)! }
-                : {}),
-              channelName: mention.channel.name,
-              channelSlug: mention.channel.slug,
-              channelKind: mention.channel.kind,
-            }
-          : {}),
-      })),
+      mentions: mentions.flatMap((mention) => {
+        const currentPath = mention.attachment.objectId
+          ? activeFiles.pathByObjectId.get(mention.attachment.objectId)
+          : mention.attachment.pathHint;
+        if (!currentPath) return [];
+        return [{
+          attachment: chatAttachmentForIpc({
+            ...mention.attachment,
+            pathHint: currentPath,
+          }),
+          message: chatMessageForIpc(mention.message),
+          thread: chatThreadForIpc(mention.thread),
+          ...(mention.channel
+            ? {
+                channelId: mention.channel.id,
+                ...(mentionChannelWireIds.get(mention.channel.id)
+                  ? { channelWireId: mentionChannelWireIds.get(mention.channel.id)! }
+                  : {}),
+                channelName: mention.channel.name,
+                channelSlug: mention.channel.slug,
+                channelKind: mention.channel.kind,
+              }
+            : {}),
+        }];
+      }),
     });
   });
 
   ipcMain.handle(CHANNELS.listChatBookmarks, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatBookmarksPayload.parse(payload);
-    const { workspace, capture } = await requireEngineCapture(
+    const { workspace } = await requireEngineCapture(
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
     await warmCredentialCache();
-    await materializePendingChatBookmarks(workspace, capture);
     const bookmarks = await linkedChatStoreFor(workspace).listBookmarks({
       workspaceId: workspace.workspaceId,
       ownerUserId: localUserId(),
@@ -4867,6 +4909,7 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    assertWritableWorkspace(workspace);
     await warmCredentialCache();
     const store = linkedChatStoreFor(workspace);
     const threads = await store.listThreads({ workspaceId: workspace.workspaceId });
@@ -4906,6 +4949,7 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    assertWritableWorkspace(workspace);
     await warmCredentialCache();
     const ownerUserId = localUserId();
     const archived = await withChatBookmarkRun(
@@ -5015,7 +5059,9 @@ function registerIpcHandlers(): void {
       body: input.body,
       ...(attachments.length > 0 ? { attachments } : {}),
     });
-    void materializePendingChatBookmarks(workspace, capture);
+    void materializePendingChatBookmarks(workspace, capture).catch((error) => {
+      console.error("[desktop] chat bookmark projection:", error);
+    });
     // MU-C4: if this thread lives in a joined shared channel, push it out
     // promptly (fire-and-forget; the sync cadence is the backstop).
     void syncWorkspaceSharedChannels(workspace.workspaceId);
@@ -5309,14 +5355,17 @@ function registerIpcHandlers(): void {
       targetKind = message.author.kind === "agent" ? "agent" : "person";
       targetId = message.authorUserId;
     }
+    const ownerUserId = localUserId();
+    const replicationOwnerUserId = relayAuthorUserId();
     const follow = await store.setFollow({
       workspaceId: workspace.workspaceId,
-      ownerUserId: localUserId(),
+      ownerUserId,
+      ...(replicationOwnerUserId ? { replicationOwnerUserId } : {}),
       targetKind,
       targetId,
       state: input.state,
     });
-    activity.queueCloudSync(workspace.workspaceId);
+    if (replicationOwnerUserId) activity.queueCloudSync(workspace.workspaceId);
     notifyRenderer();
     return SetChatFollowResult.parse({ follow: chatFollowForIpc(follow) });
   });
@@ -5402,12 +5451,15 @@ function registerIpcHandlers(): void {
       "Chats are not enabled for this workspace.",
     );
     await warmCredentialCache();
+    const ownerUserId = localUserId();
+    const replicationOwnerUserId = relayAuthorUserId();
     await linkedChatStoreFor(workspace).markPersonalFeedSeen({
       workspaceId: workspace.workspaceId,
-      ownerUserId: localUserId(),
+      ownerUserId,
+      ...(replicationOwnerUserId ? { replicationOwnerUserId } : {}),
       headCursor: input.headCursor,
     });
-    activity.queueCloudSync(workspace.workspaceId);
+    if (replicationOwnerUserId) activity.queueCloudSync(workspace.workspaceId);
   });
 
   ipcMain.handle(CHANNELS.createChatChannel, async (event, payload) => {
@@ -5481,7 +5533,9 @@ function registerIpcHandlers(): void {
       body: input.body,
       ...(attachments.length > 0 ? { attachments } : {}),
     });
-    void materializePendingChatBookmarks(workspace, capture);
+    void materializePendingChatBookmarks(workspace, capture).catch((error) => {
+      console.error("[desktop] chat bookmark projection:", error);
+    });
     void syncWorkspaceSharedChannels(workspace.workspaceId);
     activity.queueCloudSync(workspace.workspaceId);
     void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
@@ -5787,7 +5841,10 @@ function registerIpcHandlers(): void {
     // a synced workspace — the DM's canonical log is this workspace's relay
     // bucket, so an unsynced workspace could never deliver it.
     const { workspace, remote } = await remoteForWorkspace(input.workspaceId);
-    await requireEngineCapture(input.workspaceId, "Chats are not enabled for this workspace.");
+    const { capture } = await requireEngineCapture(
+      input.workspaceId,
+      "Chats are not enabled for this workspace.",
+    );
     await warmCredentialCache();
     const relay = dmRelayConnection();
     const authorUserId = relayAuthorUserId();
@@ -5799,6 +5856,13 @@ function registerIpcHandlers(): void {
     if (selfEmail && recipients.includes(selfEmail)) {
       throw new Error("A direct message needs a recipient other than yourself.");
     }
+    // Resolve mentions before creating/granting a DM so an invalid or stale
+    // heading cannot leave behind a partially initialized conversation.
+    const attachments = await resolveChatFileReferences(
+      workspace,
+      capture,
+      input.fileReferences,
+    );
     const store = linkedChatStoreFor(workspace);
     // A DM's identity is its LIVE grant recipient set — NOT its (truncatable,
     // collidable) display name. Enumerate live chat-channel grants keyed by
@@ -5912,6 +5976,7 @@ function registerIpcHandlers(): void {
           author,
           authorUserId,
           body: input.body,
+          ...(attachments.length > 0 ? { attachments } : {}),
         })
       : (
           await store.startChannelThread({
@@ -5920,6 +5985,7 @@ function registerIpcHandlers(): void {
             author,
             authorUserId,
             body: input.body,
+            ...(attachments.length > 0 ? { attachments } : {}),
           })
         ).message;
     // Replicate promptly: the channel/thread/message ops are journaled but chat

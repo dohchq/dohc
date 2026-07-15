@@ -12,9 +12,24 @@ import { bridge } from "../bridge";
 type WorkspaceGraphNode = WorkspaceGraphResult["nodes"][number];
 
 type GraphState =
-  | { status: "loading"; graph: WorkspaceGraphResult | null; error: null }
-  | { status: "ready"; graph: WorkspaceGraphResult; error: null }
-  | { status: "error"; graph: WorkspaceGraphResult | null; error: string };
+  | {
+      workspaceId: string;
+      status: "loading";
+      graph: WorkspaceGraphResult | null;
+      error: null;
+    }
+  | {
+      workspaceId: string;
+      status: "ready";
+      graph: WorkspaceGraphResult;
+      error: null;
+    }
+  | {
+      workspaceId: string;
+      status: "error";
+      graph: WorkspaceGraphResult | null;
+      error: string;
+    };
 
 type GraphPoint = WorkspaceGraphNode & {
   x: number;
@@ -641,6 +656,7 @@ export function GraphView(props: {
   const chatMentionsEnabled =
     props.chatMentionsAvailable === true && includeChatMentions;
   const [state, setState] = useState<GraphState>({
+    workspaceId: props.workspaceId,
     status: "loading",
     graph: null,
     error: null,
@@ -653,8 +669,10 @@ export function GraphView(props: {
   useEffect(() => {
     let cancelled = false;
     setState((current) => ({
+      workspaceId: props.workspaceId,
       status: "loading",
-      graph: current.graph,
+      graph:
+        current.workspaceId === props.workspaceId ? current.graph : null,
       error: null,
     }));
     void bridge()
@@ -663,13 +681,22 @@ export function GraphView(props: {
         includeChatMentions: chatMentionsEnabled,
       })
       .then((graph) => {
-        if (!cancelled) setState({ status: "ready", graph, error: null });
+        if (!cancelled) {
+          setState({
+            workspaceId: props.workspaceId,
+            status: "ready",
+            graph,
+            error: null,
+          });
+        }
       })
       .catch((error: unknown) => {
         if (cancelled) return;
         setState((current) => ({
+          workspaceId: props.workspaceId,
           status: "error",
-          graph: current.graph,
+          graph:
+            current.workspaceId === props.workspaceId ? current.graph : null,
           error: error instanceof Error ? error.message : "Graph failed to load",
         }));
       });
@@ -678,7 +705,16 @@ export function GraphView(props: {
     };
   }, [chatMentionsEnabled, props.workspaceId, props.refreshKey, reloadNonce]);
 
-  const graph = state.graph ?? EMPTY_GRAPH;
+  const scopedState: GraphState =
+    state.workspaceId === props.workspaceId
+      ? state
+      : {
+          workspaceId: props.workspaceId,
+          status: "loading",
+          graph: null,
+          error: null,
+        };
+  const graph = scopedState.graph ?? EMPTY_GRAPH;
   const rows = useMemo(
     () => [...graph.nodes].sort(compareGraphNodes(props.activePath)),
     [graph.nodes, props.activePath],
@@ -688,7 +724,11 @@ export function GraphView(props: {
   return (
     <div
       data-testid="graph-view"
-      data-state={state.status === "loading" && !state.graph ? "loading" : state.status}
+      data-state={
+        scopedState.status === "loading" && !scopedState.graph
+          ? "loading"
+          : scopedState.status
+      }
       data-variant={variant}
       className={
         variant === "page"
@@ -745,13 +785,13 @@ export function GraphView(props: {
         </button>
       </div>
 
-      {state.status === "error" ? (
+      {scopedState.status === "error" ? (
         <div className="border-b border-line px-3 py-2 text-[11px] text-danger">
-          {state.error}
+          {scopedState.error}
         </div>
       ) : null}
 
-      {state.status === "loading" && !state.graph ? (
+      {scopedState.status === "loading" && !scopedState.graph ? (
         <div className="flex flex-1 items-center justify-center px-4 text-xs text-muted">
           Building graph…
         </div>
@@ -790,11 +830,8 @@ export function GraphView(props: {
                       onClick={() =>
                         node.kind === "chat-thread"
                           ? props.onOpenChatThread?.(node)
-                          : node.headingAnchor
-                            ? props.onOpenPath(
-                                node.filePath ?? node.path,
-                                node.headingAnchor,
-                              )
+                          : node.kind === "heading"
+                            ? props.onOpenPath(node.filePath, node.headingAnchor)
                             : props.onOpenPath(node.filePath ?? node.path)
                       }
                       className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-75 ${

@@ -1,5 +1,5 @@
 import { Send } from "lucide-react";
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   activeMentionQuery,
   applyMentionCompletion,
@@ -53,6 +53,8 @@ export function MentionComposer(props: {
     loading: boolean;
   } | null>(null);
   const fileRequest = useRef(0);
+  const currentFileLoader = useRef(props.loadFileHeadings);
+  currentFileLoader.current = props.loadFileHeadings;
   // When we complete a mention we must reposition the caret AFTER React commits
   // the new value; this holds the pending caret target for the layout effect.
   const pendingCaret = useRef<number | null>(null);
@@ -91,6 +93,14 @@ export function MentionComposer(props: {
       setCaret(target);
     }
   }, [props.value]);
+
+  useEffect(() => {
+    // The loader is scoped to the active workspace. A response started with
+    // the previous callback must never populate the next workspace's menu.
+    fileRequest.current += 1;
+    setFileStage(null);
+    setHighlight(0);
+  }, [props.loadFileHeadings]);
 
   const syncCaret = useCallback(() => {
     const node = textareaRef.current;
@@ -144,7 +154,7 @@ export function MentionComposer(props: {
       }
       void load(candidate.path)
         .then((headings) => {
-          if (request !== fileRequest.current) return;
+          if (request !== fileRequest.current || load !== currentFileLoader.current) return;
           setFileStage({
             path: candidate.path,
             label: candidate.label,
@@ -153,7 +163,7 @@ export function MentionComposer(props: {
           });
         })
         .catch(() => {
-          if (request !== fileRequest.current) return;
+          if (request !== fileRequest.current || load !== currentFileLoader.current) return;
           setFileStage({ path: candidate.path, label: candidate.label, headings: [], loading: false });
         });
     },
@@ -198,6 +208,7 @@ export function MentionComposer(props: {
         if (event.key === "Escape") {
           // Close the menu first; a second Escape reaches the parent (back-out).
           event.stopPropagation();
+          fileRequest.current += 1;
           if (fileStage) {
             setFileStage(null);
             setHighlight(0);
@@ -224,6 +235,13 @@ export function MentionComposer(props: {
 
   const listboxId = `${props.composerId}-mentions`;
   const boundedHighlight = Math.min(highlight, Math.max(0, menuLength - 1));
+  const activeDescendant = !showMenu
+    ? undefined
+    : fileStage
+      ? `${listboxId}-file-section-${boundedHighlight}`
+      : boundedHighlight < matches.length
+        ? `${listboxId}-${matches[boundedHighlight]?.id}`
+        : `${listboxId}-file-${boundedHighlight - matches.length}`;
 
   return (
     <form
@@ -371,6 +389,7 @@ export function MentionComposer(props: {
         role="combobox"
         aria-expanded={showMenu}
         aria-controls={showMenu ? listboxId : undefined}
+        aria-activedescendant={activeDescendant}
         aria-autocomplete="list"
         onChange={(event) => {
           const nextValue = event.target.value;
@@ -391,6 +410,7 @@ export function MentionComposer(props: {
           );
         }}
         onBlur={() => {
+          fileRequest.current += 1;
           setMenuOpen(false);
           setFileStage(null);
         }}

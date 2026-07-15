@@ -138,7 +138,11 @@ export function AgentsMcpSettings(props: {
 
   const enabled = status?.mcpEnabled ?? false;
   const runnerConfigured = runner.command.trim().length > 0;
-  const setupReady = Boolean(preferredName) && (runner.enabled || enabled);
+  // An enabled MCP server only means it is available to connect to. We do not
+  // have a trusted session signal proving that an external client copied the
+  // configuration and connected, so only the in-app runner can make this
+  // guide ready.
+  const setupReady = Boolean(preferredName) && runner.enabled;
 
   const toggle = useCallback(async () => {
     const version = requestVersionRef.current;
@@ -317,7 +321,7 @@ export function AgentsMcpSettings(props: {
               onClick={() => void toggle()}
               className="mt-2 rounded-md border border-line bg-bg px-2.5 py-1 text-[10px] font-medium text-muted hover:text-ink disabled:opacity-50"
             >
-              {enabled ? "MCP connected · manage below" : "Enable MCP"}
+              {enabled ? "MCP enabled · copy config below" : "Enable MCP"}
             </button>
           </div>
         </div>

@@ -507,6 +507,10 @@ describe("phase-one linked chat model", () => {
     });
     await engine.store.close();
     rawDbFor(engine, (db) => {
+      // Model a store created before the one-time repair marker existed.
+      db.prepare(
+        "DELETE FROM engine_migrations WHERE migration_id = ?",
+      ).run("deferred-chat-parent-repair-v1");
       db.prepare(
         "UPDATE chat_messages SET parent_message_id = ? WHERE workspace_id = ? AND message_id = ?",
       ).run(first.message.id, WORKSPACE_ID, second.message.id);
@@ -530,6 +534,17 @@ describe("phase-one linked chat model", () => {
               "SELECT COUNT(*) AS count FROM chat_pending_message_parents WHERE workspace_id = ?",
             )
             .get(WORKSPACE_ID)?.count,
+        ),
+      ),
+    ).toBe(1);
+    expect(
+      rawDbFor(engine, (db) =>
+        Number(
+          db
+            .prepare(
+              "SELECT COUNT(*) AS count FROM engine_migrations WHERE migration_id = ?",
+            )
+            .get("deferred-chat-parent-repair-v1")?.count,
         ),
       ),
     ).toBe(1);
@@ -855,6 +870,79 @@ describe("phase-one linked chat model", () => {
     await expect(receiver.store.applyReplicationOp(invalid)).rejects.toMatchObject({
       code: "state-corrupt",
     });
+  });
+
+  it("never persists heading metadata that the desktop IPC contract cannot read", async () => {
+    const engine = await makeEngine("attachment-heading-bounds");
+    const receiver = await makeEngine("attachment-heading-bounds-receiver");
+    const channel = await engine.store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const boundary = await engine.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Boundary heading",
+      attachments: [{
+        objectId: "object-boundary",
+        headingText: "t".repeat(300),
+        headingAnchor: "a".repeat(400),
+        headingOccurrence: 0,
+      }],
+    });
+    expect(boundary.message.attachments[0]).toMatchObject({
+      headingText: "t".repeat(300),
+      headingAnchor: "a".repeat(400),
+    });
+    for (const op of replicationOps(engine)) await receiver.store.applyReplicationOp(op);
+    expect((await receiver.store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: boundary.thread.id,
+    }))[0]?.attachments[0]).toMatchObject({
+      headingText: "t".repeat(300),
+      headingAnchor: "a".repeat(400),
+    });
+
+    const attachmentOp = replicationOps(engine).find(
+      (op) => op.opKind === "chat.attachment.add",
+    );
+    if (!attachmentOp || attachmentOp.opKind !== "chat.attachment.add") {
+      throw new Error("Expected a heading attachment op.");
+    }
+    await expect(receiver.store.applyReplicationOp({
+      ...attachmentOp,
+      originId: "origin-oversized-heading",
+      originSeq: 0,
+      payload: { ...attachmentOp.payload, headingText: "t".repeat(301) },
+    })).rejects.toMatchObject({ code: "state-corrupt" });
+
+    await expect(engine.store.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: boundary.thread.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Too much heading text",
+      attachments: [{
+        objectId: "object-long-text",
+        headingText: "t".repeat(301),
+        headingAnchor: "valid-anchor",
+        headingOccurrence: 0,
+      }],
+    })).rejects.toMatchObject({ code: "invalid-path" });
+    await expect(engine.store.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: boundary.thread.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Too much heading anchor",
+      attachments: [{
+        objectId: "object-long-anchor",
+        headingText: "Valid heading",
+        headingAnchor: "a".repeat(401),
+        headingOccurrence: 0,
+      }],
+    })).rejects.toMatchObject({ code: "invalid-path" });
+
+    expect(await engine.store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: boundary.thread.id,
+    })).toHaveLength(1);
   });
 
   it("applies redacted attachment ops idempotently without file metadata", async () => {
