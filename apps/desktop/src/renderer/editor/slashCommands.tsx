@@ -175,7 +175,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     label: "Math block",
     hint: "TeX equation with $$",
     glyph: "∑",
-    aliases: ["math", "equation", "tex", "latex", "katex", "formula"],
+    aliases: ["math", "equation", "tex", "latex", "katex"],
   },
   {
     id: "divider",

@@ -33,21 +33,6 @@ function firstUnescapedIndex(src: string, pattern: RegExp): number {
   return match.index + (match[1]?.length ?? 0)
 }
 
-function textContent(node: { content?: Array<{ text?: string }> }): string {
-  return node.content?.map((child) => child.text ?? '').join('') ?? ''
-}
-
-function queryFenceInfo(lang: unknown): { isQuery: boolean; info: string } {
-  const normalized = String(lang ?? '').trim()
-  const [language = '', ...infoParts] = normalized.split(/\s+/)
-  return {
-    isQuery:
-      language.toLowerCase() === 'query' ||
-      language.toLowerCase() === 'dohc-query',
-    info: infoParts.join(' '),
-  }
-}
-
 function findClosingWikilink(src: string): number {
   for (let index = 2; index < src.length - 1; index += 1) {
     if (src[index] === '\\') {
@@ -445,114 +430,6 @@ const DohcInlineAtom = Node.create({
     `{{${node.attrs?.source || `atom:${node.attrs?.atomId ?? ''}`}}}`,
 })
 
-const DohcFormula = Node.create({
-  name: 'formula',
-  priority: 1000,
-  inline: true,
-  group: 'inline',
-  atom: true,
-
-  addAttributes() {
-    return {
-      expression: { default: '' },
-      source: { default: '' },
-    }
-  },
-
-  parseHTML() {
-    return [{ tag: 'span[data-dohc-formula]' }]
-  },
-
-  renderHTML({ node }) {
-    return [
-      'span',
-      { 'data-dohc-formula': node.attrs.expression },
-      `{{${node.attrs.source || `formula:${node.attrs.expression ?? ''}`}}}`,
-    ]
-  },
-
-  markdownTokenizer: {
-    name: 'formula',
-    level: 'inline',
-    start: '{{formula:',
-    tokenize(src) {
-      const match = firstTokenMatch(src, /^\{\{formula:([^}]+)\}\}/)
-      if (!match) return undefined
-      const [raw, expression = ''] = match
-      return {
-        type: 'formula',
-        raw,
-        expression: expression.trim(),
-        source: raw.slice(2, -2),
-      }
-    },
-  },
-
-  parseMarkdown: (token, helpers) =>
-    helpers.createNode('formula', {
-      expression: token.expression,
-      source: token.source,
-    }),
-
-  renderMarkdown: (node) =>
-    `{{${node.attrs?.source || `formula:${node.attrs?.expression ?? ''}`}}}`,
-})
-
-const DohcQueryBlock = Node.create({
-  name: 'queryBlock',
-  priority: 1000,
-  group: 'block',
-  content: 'text*',
-  marks: '',
-  code: true,
-  defining: true,
-
-  addAttributes() {
-    return {
-      info: { default: '' },
-    }
-  },
-
-  parseHTML() {
-    return [{ tag: 'pre[data-dohc-query-block]' }]
-  },
-
-  renderHTML() {
-    return ['pre', { 'data-dohc-query-block': 'true' }, ['code', 0]]
-  },
-
-  markdownTokenName: 'code',
-
-  parseMarkdown: (token, helpers) => {
-    const fence = queryFenceInfo(token.lang)
-    // DEFER for a non-query fence so an ordinary ```lang code block falls
-    // through to the default code-fence handler (StarterKit codeBlock) instead
-    // of being dropped. In @tiptap/markdown the type-valid defer signal is an
-    // EMPTY result array: the dispatcher treats a `[]` (or otherwise empty)
-    // parse result as "this handler produced nothing — try the next handler,
-    // then the built-in fallback" (see MarkdownManager.parseToken). `null` is
-    // NOT a permitted MarkdownParseResult. A code-fence round-trip test locks it.
-    if (!fence.isQuery) return []
-    return helpers.createNode(
-      'queryBlock',
-      { info: fence.info },
-      token.text ? [helpers.createTextNode(token.text)] : [],
-    )
-  },
-
-  renderMarkdown: (node, helpers) => {
-    const info =
-      typeof node.attrs?.info === 'string' && node.attrs.info.trim()
-        ? ` ${node.attrs.info.trim()}`
-        : ''
-    return [
-      `\`\`\`dohc-query${info}`,
-      textContent(node) || helpers.renderChildren(node.content || []),
-      '```',
-    ].join('\n')
-  },
-})
-
 // Obsidian callout syntax: a blockquote whose first line is `[!type]` with an
 // optional fold flag (`-` folded, `+` open) and an optional title, e.g.
 // `> [!note]- My title`. Unknown callout types are preserved verbatim (styled
@@ -653,7 +530,6 @@ const INLINE_CALLOUT_CHILD_TYPES = new Set([
   'escapedPunctuation',
   'wikilink',
   'inlineAtom',
-  'formula',
 ])
 
 type CalloutParseHelpers = {
@@ -1124,8 +1000,6 @@ export const dohcMarkdownExtensions = [
   DohcEscapedPunctuation,
   DohcWikilink,
   DohcInlineAtom,
-  DohcFormula,
-  DohcQueryBlock,
   DohcCallout,
   DohcHighlight,
   DohcMathInline,

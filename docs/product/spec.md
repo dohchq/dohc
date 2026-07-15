@@ -16,13 +16,9 @@ separate collaboration server.
 - **Atoms** — plain-text markdown files in a per-user vault. Each has a
   rename-proof `id:` (frontmatter), a `title:`, and optional user
   properties. Wikilinks (`[[path]]`) connect atoms.
-- **Inline atoms** — `{key: value}` captures inside prose, and `{= … }`
-  formulas that compute live from other files (e.g.
-  `{= sum(logs.2025_07_*.billable)}`). Computed values render after the
-  token and update as the underlying files change.
-- **Live queries** — block-level live lists/tables backed by inspectable
-  fenced `query` source. They are for repeating collections; inline atoms
-  and formulas remain the live scalar/value syntax.
+- **Inline atoms** — `{key: value}` captures inside prose. They remain literal,
+  inspectable markdown values; dohc does not execute expressions embedded in
+  documents.
 - **Sites** — normal browser-viewable website folders anywhere in the
   workspace. dohc detects `index.html`, web package scripts/dependencies,
   common framework config, build outputs, and optional `dohc.json` metadata.
@@ -33,7 +29,7 @@ separate collaboration server.
 - **SQLite database files** — first-class workspace files stored outside
   markdown atoms. Raw SQLite bytes are never CRDT-synced.
 - **Entities** — a flexible store (people, projects, clients, …) with
-  user-declared types, shown through live queries and sites.
+  user-declared types, shown through source-backed sites and tables.
 - **Folders** — organize atoms; support icons, colors, stars, and
   drag-and-drop move with wikilink-rewrite cascade.
 

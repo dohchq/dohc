@@ -37,9 +37,8 @@ export type WikilinkFile = {
    *  name/title or the body's first H1. May be null; fallbacks to
    *  the leaf of the path (e.g. `a`). */
   title?: string | null
-  /** D4.8e — rename-proof fileId from frontmatter. Used by the
-   *  formula plugin to resolve `{= id.key }` references to the
-   *  file's current title. */
+  /** D4.8e — rename-proof fileId from frontmatter. Consumers use it to
+   *  keep references stable when the file path changes. */
   fileId?: string | null
 }
 

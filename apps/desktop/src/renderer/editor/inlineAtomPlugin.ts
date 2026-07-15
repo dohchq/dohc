@@ -42,7 +42,7 @@ export type PMDocLike = {
 export type AtomRange = {
   from: number
   to: number
-  kind: 'value' | 'liveTotal' | 'formula'
+  kind: 'value'
 }
 
 /** A node is "code" (verbatim) if it is a code block or carries an
@@ -76,12 +76,6 @@ export function computeAtomRanges(doc: PMDocLike): AtomRange[] {
     if (isCodeBlock(parent)) return
     if ((node.marks ?? []).some(isCodeMark)) return
     for (const atom of parseInlineAtoms(node.text)) {
-      // atom-address-v1 Phase 3: `{= … }` formulas now ALSO get a
-      // range — the token is styled (dohc-atom-formula) and the
-      // formula widget anchors its computed value at `to`. v0 inputs
-      // contain no `{= }`, so every v0 decoration is byte-identical
-      // (Phase 2's parse-only `continue` is intentionally removed
-      // here — this is the documented Phase-2→3 contract change).
       ranges.push({ from: pos + atom.start, to: pos + atom.end, kind: atom.kind })
     }
   })

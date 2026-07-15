@@ -233,8 +233,8 @@ Created `docs/development/v2-current-editor-behavior.md` with concrete preserve/
 - Create: `tests/fixtures/markdown-corpus/wikilinks.md`
 - Create: `tests/fixtures/markdown-corpus/frontmatter.md`
 - Create: `tests/fixtures/markdown-corpus/lists-tables.md`
-- Create: `tests/fixtures/markdown-corpus/math-code-query.md`
-- Create: `tests/fixtures/markdown-corpus/inline-atoms-formulas.md`
+- Create: `tests/fixtures/markdown-corpus/math-code.md`
+- Create: `tests/fixtures/markdown-corpus/inline-atoms.md`
 
 - [x] **Step 1: Add wikilink fixture**
 
@@ -291,12 +291,12 @@ Create `tests/fixtures/markdown-corpus/lists-tables.md`:
 | Beta | 2 | has `inline code` |
 ```
 
-- [x] **Step 4: Add math/code/query fixture**
+- [x] **Step 4: Add math/code fixture**
 
-Create `tests/fixtures/markdown-corpus/math-code-query.md`:
+Create `tests/fixtures/markdown-corpus/math-code.md`:
 
 ````markdown
-# Math Code Query
+# Math And Code
 
 Inline math $E = mc^2$ should survive.
 
@@ -308,23 +308,16 @@ $$
 export const value = "[[not a wikilink inside code]]";
 ```
 
-```dohc-query
-tag:v2 status:open
-```
 ````
 
-- [x] **Step 5: Add inline atom/formula fixture**
+- [x] **Step 5: Add inline atom fixture**
 
-Create `tests/fixtures/markdown-corpus/inline-atoms-formulas.md`:
+Create `tests/fixtures/markdown-corpus/inline-atoms.md`:
 
 ```markdown
-# Inline Atoms And Formulas
+# Inline Atoms
 
 Reference inline atom: {{atom:atom_123 title="Alpha"}}
-
-Formula block:
-
-{{formula:sum revenue where month = "May"}}
 
 Mixed paragraph with {{atom:atom_456}} and [[Related Note]].
 ```

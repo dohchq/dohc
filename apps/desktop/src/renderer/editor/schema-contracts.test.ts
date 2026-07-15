@@ -9,7 +9,7 @@ import {
 
 describe('dohc v2 schema contracts', () => {
   it('pins schema version and canonical Y.Doc fields', () => {
-    expect(DOHC_V2_SCHEMA_VERSION).toBe(1)
+    expect(DOHC_V2_SCHEMA_VERSION).toBe(2)
     expect(DOHC_V2_YDOC_FIELDS).toEqual(['body', 'frontmatter', 'meta'])
   })
 
@@ -29,8 +29,6 @@ describe('dohc v2 schema contracts', () => {
       'escapedPunctuation',
       'wikilink',
       'inlineAtom',
-      'formula',
-      'queryBlock',
       'callout',
       'highlight',
       'mathInline',
@@ -41,12 +39,7 @@ describe('dohc v2 schema contracts', () => {
   })
 
   it('keeps AI-native custom constructs first-class and markdown-expressible', () => {
-    expect(FIRST_CLASS_V2_CONSTRUCTS).toEqual([
-      'wikilink',
-      'inlineAtom',
-      'formula',
-      'queryBlock',
-    ])
+    expect(FIRST_CLASS_V2_CONSTRUCTS).toEqual(['wikilink', 'inlineAtom'])
     for (const name of FIRST_CLASS_V2_CONSTRUCTS) {
       const spec = DOHC_V2_CONSTRUCTS.find((c) => c.name === name)
       expect(spec?.canonical).toBe('tiptap-node')
