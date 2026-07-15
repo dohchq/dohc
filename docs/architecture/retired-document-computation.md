@@ -18,6 +18,11 @@ The retirement boundary is explicit:
 - Imported or existing Markdown text is never deleted merely because it
   resembles retired syntax.
 
+The retired ProseMirror node types never shipped to users, so there is no
+production Y.Doc migration. Development-only Y.Docs that materialized those
+nodes must be rebuilt from their Markdown projection; the persisted Y.Doc field
+shape remains schema version `1`.
+
 Reintroducing document computation requires a new product decision and a
 complete implementation: syntax, execution, authorization, dependency
 tracking, rendering, failure behavior, and tests. Parser-only placeholders are

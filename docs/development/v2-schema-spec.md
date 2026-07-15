@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-25
 **Status:** Phase 1.1 schema contract
-**Schema version:** `2`
+**Schema version:** `1`
 **Decision:** Tiptap OSS-only remains the default. Lexical remains the escape hatch if this schema cannot be implemented without paid/pro/private Tiptap packages or hidden non-markdown state.
 
 ## Source Links
@@ -171,7 +171,9 @@ Projection output must include:
 
 ## Schema Versioning
 
-`meta.schemaVersion` starts at `2`.
+`meta.schemaVersion` starts at `1`. Removing editor-only construct registrations
+does not change the persisted `body`/`frontmatter`/`meta` field shape and therefore
+does not require a schema-version bump.
 
 Rules:
 

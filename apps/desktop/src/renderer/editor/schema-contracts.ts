@@ -1,4 +1,4 @@
-export const DOHC_V2_SCHEMA_VERSION = 2
+export const DOHC_V2_SCHEMA_VERSION = 1
 
 export const DOHC_V2_YDOC_FIELDS = ['body', 'frontmatter', 'meta'] as const
 

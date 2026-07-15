@@ -9,7 +9,7 @@ import {
 
 describe('dohc v2 schema contracts', () => {
   it('pins schema version and canonical Y.Doc fields', () => {
-    expect(DOHC_V2_SCHEMA_VERSION).toBe(2)
+    expect(DOHC_V2_SCHEMA_VERSION).toBe(1)
     expect(DOHC_V2_YDOC_FIELDS).toEqual(['body', 'frontmatter', 'meta'])
   })
 

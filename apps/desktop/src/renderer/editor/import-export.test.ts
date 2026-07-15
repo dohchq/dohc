@@ -85,6 +85,22 @@ describe('desktop editor markdown round-trip', () => {
     expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
   })
 
+  it('preserves retired document-computation syntax as inert markdown', () => {
+    const input = [
+      'Retired expressions stay literal: {{formula:SUM(hours)}} and {= 1 + 2}.',
+      '',
+      '```query',
+      'from tasks',
+      '```',
+      '',
+      '```dohc-query',
+      'sum(hours)',
+      '```',
+    ].join('\n')
+
+    expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
+  })
+
   it('is IDEMPOTENT: a second round-trip is a no-op (the byte-stable-on-disk gate)', () => {
     // The round-trip normalizes on the FIRST pass (list markers, escaping,
     // frontmatter key order) but must be stable thereafter — the desktop only

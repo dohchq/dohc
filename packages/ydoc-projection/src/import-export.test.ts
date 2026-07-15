@@ -101,6 +101,22 @@ describe('hocuspocus markdown import/export', () => {
     expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
   })
 
+  it('preserves retired document-computation syntax as inert markdown', () => {
+    const input = [
+      'Retired expressions stay literal: {{formula:SUM(hours)}} and {= 1 + 2}.',
+      '',
+      '```query',
+      'from tasks',
+      '```',
+      '',
+      '```dohc-query',
+      'sum(hours)',
+      '```',
+    ].join('\n')
+
+    expect(yDocToMarkdown(markdownToYDoc(input))).toBe(input)
+  })
+
   it('preserves task lists instead of degrading them to plain bullets', () => {
     const input = ['- [ ] migrate rich collab', '- [x] keep checked state'].join('\n')
     const output = yDocToMarkdown(markdownToYDoc(input))
