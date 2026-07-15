@@ -286,7 +286,7 @@ body {
 .hand-underline path {
   stroke-dasharray: 240;
   stroke-dashoffset: 240;
-  animation: draw-underline 2.6s cubic-bezier(0.65, 0, 0.35, 1) 0.7s infinite;
+  animation: draw-underline 2.6s cubic-bezier(0.65, 0, 0.35, 1) 0.7s 3 forwards;
 }
 
 @keyframes draw-underline {
@@ -295,13 +295,9 @@ body {
     stroke-dashoffset: 240;
   }
   10% { opacity: 1; }
-  44%, 68% {
+  44%, 100% {
     opacity: 1;
     stroke-dashoffset: 0;
-  }
-  92%, 100% {
-    opacity: 0;
-    stroke-dashoffset: -240;
   }
 }
 
