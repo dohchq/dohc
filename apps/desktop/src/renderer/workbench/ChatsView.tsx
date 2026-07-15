@@ -804,7 +804,7 @@ function AddressedToMe(props: {
 export function ChatsView(props: {
   workspaceId: string;
   // Jump a file-linked Chat to where it lives: the file's side rail.
-  onOpenFileChat: (thread: FileChatThreadRecord) => void;
+  onOpenFileChat: (thread: FileChatThreadRecord, focusMessageId?: string) => void;
   // The shell's normal file navigation path. Attachment chips use it when
   // present; tests/embedded surfaces may omit it and receive a titled chip.
   onOpenPath?: (path: string, headingAnchor?: string) => void;
@@ -1294,8 +1294,22 @@ export function ChatsView(props: {
     [workspaceId],
   );
 
+  const channelIsLocked = useCallback(
+    (channel: ChatChannelRecord) => {
+      const joined = channel.wireId
+        ? channelShares?.joined.find((row) => row.channelWireId === channel.wireId)
+        : undefined;
+      return (
+        readOnly ||
+        (joined !== undefined &&
+          (joined.access === "read-only" || joined.ended))
+      );
+    },
+    [channelShares, readOnly],
+  );
+
   const applyThreadSnapshot = useCallback(
-    (threadId: string, snapshot: ThreadSnapshot) => {
+    (threadId: string, snapshot: ThreadSnapshot, markRead: boolean) => {
       setMessages(snapshot.messages);
       setReactions(snapshot.reactions);
       setDecisions(snapshot.decisions);
@@ -1306,7 +1320,7 @@ export function ChatsView(props: {
       // Everything on screen is read: advance the monotonic cursor and clear
       // this thread's badge locally so back-navigation is immediately honest.
       const upToSequence = snapshot.messages.length;
-      if (!readOnly) {
+      if (markRead) {
         setChannelThreads((current) =>
           current.map((entry) =>
             entry.id === threadId ? { ...entry, unreadCount: 0 } : entry,
@@ -1320,7 +1334,7 @@ export function ChatsView(props: {
           });
       }
     },
-    [readOnly, workspaceId],
+    [workspaceId],
   );
 
   const openThread = useCallback(
@@ -1358,7 +1372,7 @@ export function ChatsView(props: {
         ) {
           return;
         }
-        applyThreadSnapshot(thread.id, snapshot);
+        applyThreadSnapshot(thread.id, snapshot, !channelIsLocked(channel));
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not load this chat."));
@@ -1371,7 +1385,7 @@ export function ChatsView(props: {
         }
       }
     },
-    [applyThreadSnapshot, loadThreadSnapshot, props],
+    [applyThreadSnapshot, channelIsLocked, loadThreadSnapshot, props],
   );
 
   // Main emits workspaceActivity for CLI writes, follow mutations, runner
@@ -1394,7 +1408,11 @@ export function ChatsView(props: {
             ) {
               return;
             }
-            applyThreadSnapshot(threadId, snapshot);
+            applyThreadSnapshot(
+              threadId,
+              snapshot,
+              !channelIsLocked(nav.channel),
+            );
             setMessagesLoading(false);
           })
           .catch(() => {
@@ -1435,6 +1453,7 @@ export function ChatsView(props: {
   }, [
     applyChannelSnapshot,
     applyThreadSnapshot,
+    channelIsLocked,
     loadChannelSnapshot,
     loadThreadSnapshot,
     nav,
@@ -2521,7 +2540,12 @@ export function ChatsView(props: {
                   ? `${item.authorFollowTarget.targetKind}:${item.authorFollowTarget.targetId}`
                   : null;
                 const threadKey = `thread:${item.thread.id}`;
-                const canOpen = item.channel !== undefined;
+                const fileThread = item.channel
+                  ? null
+                  : overview.fileThreads.find((thread) => thread.id === item.thread.id) ?? {
+                      ...item.thread,
+                      path: null,
+                    };
                 const bookmark = bookmarkFor("message", item.message.id);
                 const bookmarkKey = `message:${item.message.id}`;
                 const hasFileMentions = extractChatFileReferences(item.message.body).length > 0;
@@ -2535,11 +2559,13 @@ export function ChatsView(props: {
                       <div className="min-w-0 flex-1">
                         <button
                           type="button"
-                          disabled={!canOpen}
                           onClick={() => {
-                            if (!item.channel) return;
-                          openConversation({
-                            level: "thread",
+                            if (!item.channel) {
+                              props.onOpenFileChat(fileThread!, item.message.id);
+                              return;
+                            }
+                            openConversation({
+                              level: "thread",
                               channel: {
                                 ...item.channel,
                                 wireId: item.channel.wireId,
@@ -2548,17 +2574,17 @@ export function ChatsView(props: {
                                 threadCount: 0,
                                 unreadCount: 0,
                               },
-                            thread: {
-                              ...item.thread,
-                              channelId: item.channel.id,
-                              messageCount: 0,
-                              lastReadSequence: 0,
-                              unreadCount: 0,
-                            },
-                            focusMessageId: item.message.id,
-                          });
+                              thread: {
+                                ...item.thread,
+                                channelId: item.channel.id,
+                                messageCount: 0,
+                                lastReadSequence: 0,
+                                unreadCount: 0,
+                              },
+                              focusMessageId: item.message.id,
+                            });
                           }}
-                          className="block w-full text-left disabled:cursor-default"
+                          className="block w-full text-left"
                         >
                           <span className="block text-[10px] text-subtle">
                             {item.channel ? `#${item.channel.name} · ` : ""}
@@ -2820,10 +2846,7 @@ export function ChatsView(props: {
 
   if (nav.level === "thread") {
     const threadJoined = joinedFor(nav.channel);
-    const threadLocked =
-      readOnly ||
-      (threadJoined !== null &&
-        (threadJoined.access === "read-only" || threadJoined.ended));
+    const threadLocked = channelIsLocked(nav.channel);
     const openingMessage = messages[0] ?? null;
     const comments = messages.slice(1);
     const threadBookmark = bookmarkFor("thread", nav.thread.id);
@@ -3367,10 +3390,7 @@ export function ChatsView(props: {
 
   if (nav.level === "channel") {
     const channelJoined = joinedFor(nav.channel);
-    const channelLocked =
-      readOnly ||
-      (channelJoined !== null &&
-        (channelJoined.access === "read-only" || channelJoined.ended));
+    const channelLocked = channelIsLocked(nav.channel);
     const channelGrants = nav.channel.wireId
       ? grantedByWire.get(nav.channel.wireId) ?? []
       : [];

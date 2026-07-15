@@ -70,6 +70,18 @@ describe("workspace headings", () => {
   it("resolves encoded anchors and falls back to text occurrence", () => {
     const headings = extractWorkspaceHeadings("## Café plan\nA\n## Café plan\nB");
     expect(findWorkspaceHeading(headings, { anchor: "caf%C3%A9-plan" })?.line).toBe(1);
+    expect(
+      findWorkspaceHeading(headings, {
+        anchor: "caf%C3%A9-plan",
+        occurrence: 1,
+      })?.line,
+    ).toBe(3);
+    expect(
+      findWorkspaceHeading(headings, {
+        anchor: "caf%C3%A9-plan-1",
+        occurrence: 1,
+      })?.line,
+    ).toBe(3);
     expect(findWorkspaceHeading(headings, { text: "Café plan", occurrence: 1 })?.line).toBe(3);
   });
 

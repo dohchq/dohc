@@ -155,7 +155,16 @@ export function findWorkspaceHeading(
       })()
     : undefined;
   if (decodedAnchor) {
-    const exact = headings.find((heading) => heading.anchor === decodedAnchor);
+    const requestedOccurrence = input.occurrence;
+    const suffixedAnchor =
+      requestedOccurrence !== undefined && requestedOccurrence > 0
+        ? `${decodedAnchor}-${requestedOccurrence}`
+        : decodedAnchor;
+    const exact = headings.find(
+      (heading) =>
+        (heading.anchor === decodedAnchor || heading.anchor === suffixedAnchor) &&
+        (requestedOccurrence === undefined || heading.occurrence === requestedOccurrence),
+    );
     if (exact) return exact;
   }
   if (input.text) {

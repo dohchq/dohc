@@ -5,15 +5,21 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SyncReplicationEnvelope } from "@dohc/workspace-contracts/engine";
 import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
-import { LINKED_CHAT_STORE_RELATIVE_PATH, createLinkedChatStore } from "./linkedChatStore";
+import {
+  CHAT_FILE_MENTION_MAX_RESULTS,
+  LINKED_CHAT_STORE_RELATIVE_PATH,
+  createLinkedChatStore,
+} from "./linkedChatStore";
 import { applySyncQueues } from "./syncApply";
 import { exportSyncBundle } from "./syncFolder";
 
 interface RawSqliteStatement {
   all(...params: unknown[]): Array<Record<string, unknown>>;
+  run(...params: unknown[]): { changes: number };
 }
 
 interface RawSqliteDb {
+  exec(sql: string): void;
   prepare(sql: string): RawSqliteStatement;
   close(): void;
 }
@@ -603,6 +609,80 @@ describe("chat file section mentions", () => {
       expect.arrayContaining(["object-plan", "object-brief"]),
     );
     expect(mentions[1]?.channel?.id).toBe(channel.id);
+  });
+
+  it("caps inverse mentions before hydration while retaining the newest results", async () => {
+    const store = storeAt();
+    const channel = await store.ensureGeneralChannel({ workspaceId: "ws" });
+    const started = await store.startChannelThread({
+      workspaceId: "ws",
+      channelId: channel.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Opening",
+    });
+    const totalMentions = CHAT_FILE_MENTION_MAX_RESULTS + 1;
+    const db = new DatabaseSync(join(root, LINKED_CHAT_STORE_RELATIVE_PATH));
+    try {
+      db.exec("BEGIN IMMEDIATE");
+      const insertMessage = db.prepare(
+        `INSERT INTO chat_messages (
+           workspace_id, thread_id, message_order, message_id, author_kind,
+           author_display_name, body, created_at_ms
+         ) VALUES (?, ?, ?, ?, 'human', 'Ice', ?, ?)`,
+      );
+      const insertAttachment = db.prepare(
+        `INSERT INTO chat_attachments (
+           workspace_id, attachment_id, thread_id, message_id, target_kind,
+           object_id, path_hint, created_at_ms
+         ) VALUES (?, ?, ?, ?, 'file', 'object-cap', 'docs/cap.md', ?)`,
+      );
+      for (let index = 0; index < totalMentions; index += 1) {
+        const suffix = index.toString().padStart(4, "0");
+        const messageId = `message-cap-${suffix}`;
+        const createdAtMs = 10_000 + index;
+        insertMessage.run(
+          "ws",
+          started.thread.id,
+          index + 1,
+          messageId,
+          `Mention ${index}`,
+          createdAtMs,
+        );
+        insertAttachment.run(
+          "ws",
+          `attachment-cap-${suffix}`,
+          started.thread.id,
+          messageId,
+          createdAtMs,
+        );
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      try {
+        db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    } finally {
+      db.close();
+    }
+
+    const mentionPrepare = vi.spyOn(DatabaseSync.prototype, "prepare");
+    const mentions = await (async () => {
+      try {
+        const result = await store.listFileMentions({
+          workspaceId: "ws",
+          objectId: "object-cap",
+        });
+        expect(mentionPrepare).toHaveBeenCalledTimes(5);
+        return result;
+      } finally {
+        mentionPrepare.mockRestore();
+      }
+    })();
+    expect(mentions).toHaveLength(CHAT_FILE_MENTION_MAX_RESULTS);
+    expect(mentions[0]?.message.body).toBe(`Mention ${totalMentions - 1}`);
+    expect(mentions.at(-1)?.message.body).toBe("Mention 1");
+    expect(mentions.some((mention) => mention.message.body === "Mention 0")).toBe(false);
   });
 });
 

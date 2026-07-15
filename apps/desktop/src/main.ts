@@ -418,6 +418,11 @@ import {
   extractWorkspaceHeadings,
   findWorkspaceHeading,
 } from "./workspaces/workspaceHeadings";
+import {
+  assertChatFollowWriteAllowed,
+  listChatFollowsReadOnlySafe,
+  markPersonalFeedSeenReadOnlySafe,
+} from "./workspaces/chatFollowAccess";
 import { addChatMentionsToWorkspaceGraph } from "./workspaces/chatMentionGraphOverlay";
 import { formatChatBookmarkProjection } from "./workspaces/chatBookmarkProjection";
 import {
@@ -5309,13 +5314,16 @@ function registerIpcHandlers(): void {
     await warmCredentialCache();
     const store = linkedChatStoreFor(workspace);
     const ownerUserId = localUserId();
-    await store.ensureDefaultChannelFollows({
-      workspaceId: workspace.workspaceId,
-      ownerUserId,
-    });
-    const follows = await store.listFollows({
-      workspaceId: workspace.workspaceId,
-      ownerUserId,
+    const follows = await listChatFollowsReadOnlySafe({
+      readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
+      seedDefaults: () => store.ensureDefaultChannelFollows({
+        workspaceId: workspace.workspaceId,
+        ownerUserId,
+      }),
+      list: () => store.listFollows({
+        workspaceId: workspace.workspaceId,
+        ownerUserId,
+      }),
     });
     return ListChatFollowsResult.parse({ follows: follows.map(chatFollowForIpc) });
   });
@@ -5327,6 +5335,10 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    assertChatFollowWriteAllowed({
+      readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
+      reject: () => assertWritableWorkspace(workspace),
+    });
     await warmCredentialCache();
     const store = linkedChatStoreFor(workspace);
     let targetKind: "person" | "agent" | "channel" | "thread";
@@ -5381,10 +5393,12 @@ function registerIpcHandlers(): void {
     await syncWorkspaceSharedChannels(workspace.workspaceId);
     const store = linkedChatStoreFor(workspace);
     const ownerUserId = localUserId();
-    await store.ensureDefaultChannelFollows({
-      workspaceId: workspace.workspaceId,
-      ownerUserId,
-    });
+    if (!sharedViewOf(workspace.workspaceId)) {
+      await store.ensureDefaultChannelFollows({
+        workspaceId: workspace.workspaceId,
+        ownerUserId,
+      });
+    }
     const page = await store.listPersonalFeed({
       workspaceId: workspace.workspaceId,
       ownerUserId,
@@ -5450,16 +5464,21 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
-    await warmCredentialCache();
-    const ownerUserId = localUserId();
-    const replicationOwnerUserId = relayAuthorUserId();
-    await linkedChatStoreFor(workspace).markPersonalFeedSeen({
-      workspaceId: workspace.workspaceId,
-      ownerUserId,
-      ...(replicationOwnerUserId ? { replicationOwnerUserId } : {}),
-      headCursor: input.headCursor,
+    await markPersonalFeedSeenReadOnlySafe({
+      readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
+      mark: async () => {
+        await warmCredentialCache();
+        const ownerUserId = localUserId();
+        const replicationOwnerUserId = relayAuthorUserId();
+        await linkedChatStoreFor(workspace).markPersonalFeedSeen({
+          workspaceId: workspace.workspaceId,
+          ownerUserId,
+          ...(replicationOwnerUserId ? { replicationOwnerUserId } : {}),
+          headCursor: input.headCursor,
+        });
+        if (replicationOwnerUserId) activity.queueCloudSync(workspace.workspaceId);
+      },
     });
-    if (replicationOwnerUserId) activity.queueCloudSync(workspace.workspaceId);
   });
 
   ipcMain.handle(CHANNELS.createChatChannel, async (event, payload) => {

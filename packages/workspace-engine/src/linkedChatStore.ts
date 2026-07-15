@@ -88,6 +88,7 @@ import {
 
 export const LINKED_CHAT_STORE_RELATIVE_PATH = VERSIONED_TEXT_STORE_RELATIVE_PATH;
 export const LINKED_CHAT_PROJECTION_KIND = "thread";
+export const CHAT_FILE_MENTION_MAX_RESULTS = 2_000;
 const CHAT_HEADING_TEXT_MAX_LENGTH = 300;
 const CHAT_HEADING_ANCHOR_MAX_LENGTH = 400;
 
@@ -2805,9 +2806,10 @@ export function createLinkedChatStore(
                 AND m.thread_id = a.thread_id
                 AND m.message_id = a.message_id
                WHERE a.workspace_id = ? AND ${objectId ? "a.object_id = ?" : "a.path_hint = ?"}
-               ORDER BY a.created_at_ms DESC, a.attachment_id DESC`,
+               ORDER BY a.created_at_ms DESC, a.attachment_id DESC
+               LIMIT ?`,
             )
-            .all(workspaceId, objectId ?? pathHint);
+            .all(workspaceId, objectId ?? pathHint, CHAT_FILE_MENTION_MAX_RESULTS);
           if (rows.length === 0) return [];
           const messageIdsJson = jsonIdSet(
             rows.map((row) => stringValue(row.message_id)),

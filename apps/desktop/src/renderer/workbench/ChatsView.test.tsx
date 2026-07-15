@@ -607,6 +607,45 @@ describe("ChatsView hybrid feed", () => {
     );
   });
 
+  it("opens a channel-less file Chat in its file panel at the feed message", async () => {
+    const onOpenFileChat = vi.fn();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [fileThread],
+    });
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          message: message({
+            id: "message-file-update",
+            threadId: fileThread.id,
+            body: "Updated the linked document",
+          }),
+          thread: {
+            id: fileThread.id,
+            title: fileThread.title,
+            createdAtMs: fileThread.createdAtMs,
+            updatedAtMs: fileThread.updatedAtMs,
+          },
+          reactions: [],
+          matchedBy: ["thread"],
+        },
+      ],
+    });
+    renderView(onOpenFileChat);
+
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const update = await screen.findByText("Updated the linked document");
+    const openButton = update.closest("button") as HTMLButtonElement;
+    expect(openButton.disabled).toBe(false);
+    await userEvent.click(openButton);
+
+    expect(onOpenFileChat).toHaveBeenCalledWith(
+      fileThread,
+      "message-file-update",
+    );
+  });
+
   it("bookmarks a post into a live workspace Markdown projection", async () => {
     const user = userEvent.setup();
     bridgeMock.listChannelThreads.mockResolvedValue({
@@ -1738,7 +1777,12 @@ describe("ChatsView shared channels (MU-C4)", () => {
       items: [
         {
           message: message({ body: "Shared update", threadId: "thread-1" }),
-          thread: thread({ channelId: "channel-team" }),
+          thread: thread({
+            channelId: "channel-team",
+            messageCount: 1,
+            lastReadSequence: 0,
+            unreadCount: 1,
+          }),
           channel: {
             id: "channel-team",
             wireId: "wire-team",
@@ -1765,6 +1809,46 @@ describe("ChatsView shared channels (MU-C4)", () => {
       "read-only for you",
     );
     expect(screen.queryByTestId("chats-composer")).toBeNull();
+    expect(bridgeMock.markChatThreadRead).not.toHaveBeenCalled();
+  });
+
+  it("does not mark a thread read after its joined channel has ended", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [],
+      joined: [
+        {
+          shareId: "share-in",
+          channelWireId: "wire-team",
+          access: "read-write",
+          granterEmail: "owner@example.com",
+          ended: true,
+        },
+      ],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [
+        thread({
+          channelId: "channel-team",
+          messageCount: 1,
+          lastReadSequence: 0,
+          unreadCount: 1,
+        }),
+      ],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    renderView();
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await userEvent.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-thread-view");
+
+    expect(screen.queryByTestId("chats-composer")).toBeNull();
+    expect(bridgeMock.markChatThreadRead).not.toHaveBeenCalled();
   });
 
   it("keeps a read-write joined channel's composer and blocks it once the share ends", async () => {

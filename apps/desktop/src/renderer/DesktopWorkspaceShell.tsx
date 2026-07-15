@@ -1735,8 +1735,11 @@ export function DesktopWorkspaceShell(props: {
   // it lives — the file (when it still resolves) plus the panel on the
   // thread.
   const openFileChatInPanel = useCallback(
-    (thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number; path: string | null }) => {
-      openChatThreadInPanel(thread);
+    (
+      thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number; path: string | null },
+      focusMessageId?: string,
+    ) => {
+      openChatThreadInPanel(thread, focusMessageId);
       if (thread.path) openFile(thread.path);
     },
     [openChatThreadInPanel, openFile],
