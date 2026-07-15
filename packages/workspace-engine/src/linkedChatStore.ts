@@ -4203,6 +4203,7 @@ export function createLinkedChatStore(
               : {}),
             createdAtMs: payload.createdAtMs,
           });
+          markLiveBookmarksPending(db, workspaceId, payload.threadId, payload.createdAtMs);
         } else if (input.opKind === "chat.follow.set") {
           const payload = input.payload;
           if (

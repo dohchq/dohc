@@ -2503,8 +2503,8 @@ export function ChatsView(props: {
                           disabled={!canOpen}
                           onClick={() => {
                             if (!item.channel) return;
-                            openConversation({
-                              level: "thread",
+                          openConversation({
+                            level: "thread",
                               channel: {
                                 ...item.channel,
                                 wireId: item.channel.wireId,
@@ -2513,14 +2513,15 @@ export function ChatsView(props: {
                                 threadCount: 0,
                                 unreadCount: 0,
                               },
-                              thread: {
-                                ...item.thread,
-                                channelId: item.channel.id,
-                                messageCount: 0,
-                                lastReadSequence: 0,
-                                unreadCount: 0,
-                              },
-                            });
+                            thread: {
+                              ...item.thread,
+                              channelId: item.channel.id,
+                              messageCount: 0,
+                              lastReadSequence: 0,
+                              unreadCount: 0,
+                            },
+                            focusMessageId: item.message.id,
+                          });
                           }}
                           className="block w-full text-left disabled:cursor-default"
                         >
@@ -2913,38 +2914,39 @@ export function ChatsView(props: {
               flush
             />
             {!threadLocked ? (
-              <>
-                <button
-                  type="button"
-                  data-testid="chats-comment-reply"
-                  onClick={() => beginReply(comment)}
-                  className="rounded hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-                >
-                  Reply
-                </button>
-                <BookmarkAction
-                  active={Boolean(commentBookmark)}
-                  busy={bookmarkBusy.has(commentBookmarkKey)}
-                  destinationPath={commentBookmark?.destinationPath}
-                  onToggle={(mode) =>
-                    void toggleBookmark({
-                      target: {
-                        kind: "message",
-                        threadId: nav.thread.id,
-                        messageId: comment.id,
-                      },
-                      mode,
-                    })
-                  }
-                  onOpen={
-                    commentBookmark && props.onOpenPath
-                      ? () => props.onOpenPath?.(commentBookmark.destinationPath)
-                      : undefined
-                  }
-                  testId="chats-message-bookmark"
-                />
-              </>
+              <button
+                type="button"
+                data-testid="chats-comment-reply"
+                onClick={() => beginReply(comment)}
+                className="rounded hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+              >
+                Reply
+              </button>
             ) : null}
+            <BookmarkAction
+              active={Boolean(commentBookmark)}
+              busy={bookmarkBusy.has(commentBookmarkKey)}
+              destinationPath={commentBookmark?.destinationPath}
+              onToggle={
+                threadLocked
+                  ? undefined
+                  : (mode) =>
+                      void toggleBookmark({
+                        target: {
+                          kind: "message",
+                          threadId: nav.thread.id,
+                          messageId: comment.id,
+                        },
+                        mode,
+                      })
+              }
+              onOpen={
+                commentBookmark && props.onOpenPath
+                  ? () => props.onOpenPath?.(commentBookmark.destinationPath)
+                  : undefined
+              }
+              testId="chats-message-bookmark"
+            />
             {replyCount > 0 ? (
               <span data-testid="chats-reply-count">
                 {replyCount} {replyCount === 1 ? "reply" : "replies"}
@@ -3186,34 +3188,35 @@ export function ChatsView(props: {
                     {runRecords[openingMessage.id] ? (
                       <RunChip run={runRecords[openingMessage.id]} />
                     ) : null}
-                    {!threadLocked ? (
-                      <BookmarkAction
-                        active={Boolean(bookmarkFor("message", openingMessage.id))}
-                        busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
-                        destinationPath={
-                          bookmarkFor("message", openingMessage.id)?.destinationPath
-                        }
-                        onToggle={(mode) =>
-                          void toggleBookmark({
-                            target: {
-                              kind: "message",
-                              threadId: nav.thread.id,
-                              messageId: openingMessage.id,
-                            },
-                            mode,
-                          })
-                        }
-                        onOpen={
-                          bookmarkFor("message", openingMessage.id) && props.onOpenPath
-                            ? () =>
-                                props.onOpenPath?.(
-                                  bookmarkFor("message", openingMessage.id)!.destinationPath,
-                                )
-                            : undefined
-                        }
-                        testId="chats-message-bookmark"
-                      />
-                    ) : null}
+                    <BookmarkAction
+                      active={Boolean(bookmarkFor("message", openingMessage.id))}
+                      busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
+                      destinationPath={
+                        bookmarkFor("message", openingMessage.id)?.destinationPath
+                      }
+                      onToggle={
+                        threadLocked
+                          ? undefined
+                          : (mode) =>
+                              void toggleBookmark({
+                                target: {
+                                  kind: "message",
+                                  threadId: nav.thread.id,
+                                  messageId: openingMessage.id,
+                                },
+                                mode,
+                              })
+                      }
+                      onOpen={
+                        bookmarkFor("message", openingMessage.id) && props.onOpenPath
+                          ? () =>
+                              props.onOpenPath?.(
+                                bookmarkFor("message", openingMessage.id)!.destinationPath,
+                              )
+                          : undefined
+                      }
+                      testId="chats-message-bookmark"
+                    />
                   </div>
                 </article>
 

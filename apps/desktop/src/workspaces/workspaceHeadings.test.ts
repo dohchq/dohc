@@ -44,6 +44,15 @@ describe("workspace headings", () => {
     expect(headings.map((heading) => heading.text)).toEqual(["Visible"]);
   });
 
+  it("does not treat a mixed backtick-and-tilde run as a code fence", () => {
+    const headings = extractWorkspaceHeadings([
+      "```~",
+      "# Still visible",
+    ].join("\n"));
+
+    expect(headings.map((heading) => heading.text)).toEqual(["Still visible"]);
+  });
+
   it("resolves encoded anchors and falls back to text occurrence", () => {
     const headings = extractWorkspaceHeadings("## Café plan\nA\n## Café plan\nB");
     expect(findWorkspaceHeading(headings, { anchor: "caf%C3%A9-plan" })?.line).toBe(1);

@@ -138,6 +138,62 @@ describe("LinkedChatsPanel initialThread consumption", () => {
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
     expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1);
   });
+
+  it("lands on a focused message and honors a repeated open of the same thread", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        {
+          id: "message-1",
+          threadId: searchThread.id,
+          authorKind: "human",
+          authorDisplayName: "Ice",
+          body: "First update",
+          createdAtMs: 1_700_000_000_000,
+        },
+        {
+          id: "message-2",
+          threadId: searchThread.id,
+          authorKind: "human",
+          authorDisplayName: "Ice",
+          body: "Second update",
+          createdAtMs: 1_700_000_001_000,
+        },
+      ],
+    });
+    const scrolledMessageIds: Array<string | null> = [];
+    vi.mocked(Element.prototype.scrollIntoView).mockImplementation(function (
+      this: Element,
+    ) {
+      scrolledMessageIds.push(this.getAttribute("data-message-id"));
+    });
+
+    const { rerender } = render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        initialThread={{ ...searchThread }}
+        initialFocusMessageId="message-1"
+        onError={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText("First update")).toBeTruthy();
+    await waitFor(() => expect(scrolledMessageIds).toContain("message-1"));
+
+    scrolledMessageIds.length = 0;
+    rerender(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        initialThread={{ ...searchThread }}
+        initialFocusMessageId="message-2"
+        onError={() => undefined}
+      />,
+    );
+
+    await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(scrolledMessageIds).toContain("message-2"));
+  });
 });
 
 describe("LinkedChatsPanel shared-workspace read-only boundary", () => {

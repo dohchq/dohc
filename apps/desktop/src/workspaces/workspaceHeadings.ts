@@ -72,7 +72,7 @@ export function extractWorkspaceHeadings(markdown: string): WorkspaceHeading[] {
 
   for (let index = 0; index < lines.length; index += 1) {
     const row = lines[index]!;
-    const fenceMatch = row.text.match(/^[ \t]{0,3}([`~]{3,})(.*)$/);
+    const fenceMatch = row.text.match(/^[ \t]{0,3}(`{3,}|~{3,})(?![`~])(.*)$/);
     if (fenceMatch?.[1]) {
       const marker = fenceMatch[1][0] as "`" | "~";
       if (!fence) fence = { marker, length: fenceMatch[1].length };

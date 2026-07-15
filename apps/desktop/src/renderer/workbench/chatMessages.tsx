@@ -464,6 +464,7 @@ export function ChatMessageList(props: {
               <li
                 key={message.id}
                 data-testid={`${props.testIdPrefix}-message`}
+                data-message-id={message.id}
                 className="group"
               >
                 <span className="flex items-baseline gap-1.5">

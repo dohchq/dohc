@@ -45,6 +45,7 @@ export function LinkedChatsPanel(props: {
   filePath: string | null;
   readOnly?: boolean;
   initialThread?: ChatThreadRecord | null;
+  initialFocusMessageId?: string;
   // Fired once when initialThread is consumed so the parent can clear the
   // state it minted for this open. Without that clear, every remount of this
   // panel (History <-> Chats toggle) resets consumedInitialThread and
@@ -69,6 +70,7 @@ export function LinkedChatsPanel(props: {
   // in order (see runReactionToggle).
   const reactionSeq = useRef(new Map<string, number>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const threadViewRef = useRef<HTMLDivElement | null>(null);
 
   const refreshThreads = useCallback(async () => {
     if (!filePath) return;
@@ -109,7 +111,7 @@ export function LinkedChatsPanel(props: {
   }, [filePath, refreshThreads]);
 
   const openThread = useCallback(
-    async (thread: ChatThreadRecord) => {
+    async (thread: ChatThreadRecord, focusMessageId?: string) => {
       const token = ++liveToken.current;
       setActiveThread(thread);
       setMessages([]);
@@ -124,10 +126,19 @@ export function LinkedChatsPanel(props: {
         setMessages(result.messages);
         setReactions(reactionResult.reactions);
         setViewerAuthorId(reactionResult.viewerAuthorId);
-        // Land on the most recent message, matching the post-send scroll.
-        requestAnimationFrame(() =>
-          messagesEndRef.current?.scrollIntoView({ block: "end" }),
-        );
+        requestAnimationFrame(() => {
+          const focusedMessage = focusMessageId
+            ? Array.from(
+                threadViewRef.current?.querySelectorAll<HTMLElement>("[data-message-id]") ??
+                  [],
+              ).find((element) => element.dataset.messageId === focusMessageId)
+            : undefined;
+          // A file mention lands on the exact referenced message. Ordinary
+          // thread opens retain the established latest-message landing.
+          (focusedMessage ?? messagesEndRef.current)?.scrollIntoView({
+            block: focusedMessage ? "center" : "end",
+          });
+        });
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not load this chat."));
@@ -149,9 +160,14 @@ export function LinkedChatsPanel(props: {
     if (!props.initialThread) return;
     if (consumedInitialThread.current === props.initialThread) return;
     consumedInitialThread.current = props.initialThread;
-    void openThread(props.initialThread);
+    void openThread(props.initialThread, props.initialFocusMessageId);
     props.onInitialThreadConsumed?.();
-  }, [openThread, props.initialThread, props.onInitialThreadConsumed]);
+  }, [
+    openThread,
+    props.initialFocusMessageId,
+    props.initialThread,
+    props.onInitialThreadConsumed,
+  ]);
 
   const createChat = useCallback(
     async (title: string) => {
@@ -239,7 +255,11 @@ export function LinkedChatsPanel(props: {
 
   if (activeThread) {
     return (
-      <div data-testid="linked-chat-thread" className="flex min-h-0 flex-1 flex-col">
+      <div
+        ref={threadViewRef}
+        data-testid="linked-chat-thread"
+        className="flex min-h-0 flex-1 flex-col"
+      >
         <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-line px-2">
           <button
             type="button"

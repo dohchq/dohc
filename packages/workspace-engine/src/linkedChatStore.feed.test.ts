@@ -833,5 +833,42 @@ describe("workspace-backed chat bookmarks", () => {
         bookmarkId: snapshot.bookmarkId,
       }),
     ).toMatchObject({ generation: 1, projectionState: "ready" });
+
+    await store.markBookmarkReady({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      bookmarkId: live.bookmarkId,
+      generation: 2,
+    });
+    await store.applyReplicationOp({
+      workspaceId: "ws",
+      originId: "remote",
+      originSeq: 1,
+      opKind: "chat.attachment.add",
+      payload: {
+        attachmentId: "remote-attachment",
+        threadId: started.thread.id,
+        messageId: "remote-message",
+        targetKind: "file",
+        pathHint: "docs/remote-plan.md",
+        createdAtMs: 9_001,
+      },
+      recordedAtMs: 9_001,
+    });
+
+    expect(
+      await store.findBookmark({
+        workspaceId: "ws",
+        ownerUserId: "viewer",
+        bookmarkId: live.bookmarkId,
+      }),
+    ).toMatchObject({ generation: 3, projectionState: "pending" });
+    expect(
+      await store.findBookmark({
+        workspaceId: "ws",
+        ownerUserId: "viewer",
+        bookmarkId: snapshot.bookmarkId,
+      }),
+    ).toMatchObject({ generation: 1, projectionState: "ready" });
   });
 });

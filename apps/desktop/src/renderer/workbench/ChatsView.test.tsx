@@ -465,9 +465,125 @@ describe("ChatsView shared-workspace read-only boundary", () => {
     expect(bridgeMock.resolveChatDecision).not.toHaveBeenCalled();
     expect(bridgeMock.archiveChatBookmark).not.toHaveBeenCalled();
   });
+
+  it("keeps existing opening-message and comment bookmarks openable without mutation", async () => {
+    const onOpenPath = vi.fn();
+    const sharedChannel = channel({ wireId: "wire-1" });
+    bridgeMock.listChatBookmarks.mockResolvedValue({
+      bookmarks: [
+        {
+          bookmarkId: "bookmark-opening",
+          targetKind: "message",
+          targetId: "message-1",
+          threadId: "thread-1",
+          messageId: "message-1",
+          mode: "live",
+          destinationPath: "Bookmarks/Chats/opening.md",
+          state: "active",
+          projectionState: "ready",
+          generation: 1,
+          createdAtMs: NOW,
+          updatedAtMs: NOW,
+        },
+        {
+          bookmarkId: "bookmark-comment",
+          targetKind: "message",
+          targetId: "message-2",
+          threadId: "thread-1",
+          messageId: "message-2",
+          mode: "snapshot",
+          destinationPath: "Bookmarks/Chats/comment.md",
+          state: "active",
+          projectionState: "ready",
+          generation: 1,
+          createdAtMs: NOW,
+          updatedAtMs: NOW,
+        },
+      ],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message(),
+        message({
+          id: "message-2",
+          parentMessageId: "message-1",
+          body: "A bookmarked comment",
+        }),
+      ],
+    });
+
+    renderView(vi.fn(), vi.fn(), {
+      readOnly: true,
+      variant: "page",
+      onOpenPath,
+      initialNav: {
+        level: "thread",
+        channel: sharedChannel,
+        thread: thread(),
+      },
+    });
+
+    const opening = await screen.findByTitle("Bookmarks/Chats/opening.md");
+    const comment = await screen.findByTitle("Bookmarks/Chats/comment.md");
+    await userEvent.click(opening);
+    await userEvent.click(comment);
+
+    expect(onOpenPath).toHaveBeenNthCalledWith(1, "Bookmarks/Chats/opening.md");
+    expect(onOpenPath).toHaveBeenNthCalledWith(2, "Bookmarks/Chats/comment.md");
+    expect(screen.queryByTestId("chats-message-bookmark")).toBeNull();
+    expect(bridgeMock.archiveChatBookmark).not.toHaveBeenCalled();
+    expect(bridgeMock.saveChatBookmark).not.toHaveBeenCalled();
+  });
 });
 
 describe("ChatsView hybrid feed", () => {
+  it("focuses the selected non-opening message when a feed item opens its thread", async () => {
+    const onNavChange = vi.fn();
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          message: message({
+            id: "message-comment",
+            body: "Selected comment",
+          }),
+          thread: thread(),
+          channel: {
+            id: "channel-1",
+            name: "general",
+            slug: "general",
+            kind: "channel",
+          },
+          reactions: [],
+          matchedBy: ["thread"],
+        },
+      ],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message(),
+        message({
+          id: "message-comment",
+          parentMessageId: "message-1",
+          body: "Selected comment",
+        }),
+      ],
+    });
+    renderView(vi.fn(), vi.fn(), { variant: "page", onNavChange });
+
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const selected = await screen.findByText("Selected comment");
+    await userEvent.click(selected.closest("button")!);
+
+    await waitFor(() =>
+      expect(onNavChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          level: "thread",
+          focusMessageId: "message-comment",
+        }),
+      ),
+    );
+  });
+
   it("bookmarks a post into a live workspace Markdown projection", async () => {
     const user = userEvent.setup();
     bridgeMock.listChannelThreads.mockResolvedValue({

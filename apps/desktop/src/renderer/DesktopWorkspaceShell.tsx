@@ -173,6 +173,87 @@ export function chatsNavigationRequiresRemount(
   return next.level === "thread" && Boolean(next.focusMessageId);
 }
 
+type ChatOpenTarget =
+  | { surface: "channel"; nav: Extract<ChatsNav, { level: "thread" }> }
+  | {
+      surface: "file";
+      thread: Pick<ChatThreadRecord, "id" | "title" | "createdAtMs" | "updatedAtMs">;
+      focusMessageId?: string;
+    }
+  | { surface: "overview" };
+
+export function chatMentionOpenTarget(mention: ChatFileMentionRecord): ChatOpenTarget {
+  if (!mention.channelId || !mention.channelName) {
+    return {
+      surface: "file",
+      thread: mention.thread,
+      focusMessageId: mention.message.id,
+    };
+  }
+  return {
+    surface: "channel",
+    nav: {
+      level: "thread",
+      channel: {
+        id: mention.channelId,
+        wireId: mention.channelWireId,
+        name: mention.channelName,
+        slug: mention.channelSlug ?? mention.channelName,
+        kind: mention.channelKind ?? "channel",
+        createdAtMs: 0,
+        updatedAtMs: 0,
+        threadCount: 0,
+        unreadCount: 0,
+      },
+      thread: {
+        ...mention.thread,
+        channelId: mention.channelId,
+        messageCount: 0,
+        lastReadSequence: 0,
+        unreadCount: 0,
+      },
+      focusMessageId: mention.message.id,
+    },
+  };
+}
+
+export function graphChatOpenTarget(
+  node: WorkspaceGraphResult["nodes"][number],
+): ChatOpenTarget {
+  if (node.kind !== "chat-thread" || !node.threadId) return { surface: "overview" };
+  const thread = {
+    id: node.threadId,
+    title: node.title,
+    createdAtMs: 0,
+    updatedAtMs: 0,
+  };
+  if (!node.channelId || !node.channelName) return { surface: "file", thread };
+  return {
+    surface: "channel",
+    nav: {
+      level: "thread",
+      channel: {
+        id: node.channelId,
+        wireId: node.channelWireId,
+        name: node.channelName,
+        slug: node.channelSlug ?? node.channelName,
+        kind: node.channelKind ?? "channel",
+        createdAtMs: 0,
+        updatedAtMs: 0,
+        threadCount: 0,
+        unreadCount: 0,
+      },
+      thread: {
+        ...thread,
+        channelId: node.channelId,
+        messageCount: 0,
+        lastReadSequence: 0,
+        unreadCount: 0,
+      },
+    },
+  };
+}
+
 export function pendingHeadingTargetForOpen(
   path: string,
   target?: HeadingTarget,
@@ -1225,7 +1306,10 @@ export function DesktopWorkspaceShell(props: {
   // Which surface the right-hand Chats panel shows (all chats vs the active
   // file's). Runtime-only — not persisted.
   const [chatsPanelTab, setChatsPanelTab] = useState<ChatsPanelTab>("all");
-  const [searchChatThread, setSearchChatThread] = useState<ChatThreadRecord | null>(null);
+  const [searchChatTarget, setSearchChatTarget] = useState<{
+    thread: ChatThreadRecord;
+    focusMessageId?: string;
+  } | null>(null);
   // "Try it in a version" (PR 0N-2): the workspace's live try session —
   // running banner or the run's review card. Refreshed with history (the
   // manager pings the same workspace-activity channel on every transition).
@@ -1470,69 +1554,58 @@ export function DesktopWorkspaceShell(props: {
     },
     [mutateWb],
   );
+  // The ONE way a chat thread lands in the Chats panel (search hits, file
+  // mentions without channel metadata, and the Chats view "Files" grouping
+  // all route here): hand the known thread to the panel's consume-once seam,
+  // switch to "This file", and force the panel visible.
+  const openChatThreadInPanel = useCallback(
+    (
+      thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number },
+      focusMessageId?: string,
+    ) => {
+      setSearchChatTarget({
+        thread: {
+          id: thread.id,
+          title: thread.title,
+          createdAtMs: thread.createdAtMs,
+          updatedAtMs: thread.updatedAtMs,
+        },
+        ...(focusMessageId ? { focusMessageId } : {}),
+      });
+      setChatsPanelTab("file");
+      mutateWb((state) => ({ ...state, chatsVisible: true }));
+    },
+    [mutateWb],
+  );
   const openChatMention = useCallback(
     (mention: ChatFileMentionRecord) => {
-      if (!mention.channelId || !mention.channelName) {
+      const target = chatMentionOpenTarget(mention);
+      if (target.surface === "file") {
+        openChatThreadInPanel(target.thread, target.focusMessageId);
+        return;
+      }
+      if (target.surface === "overview") {
         openChatsTab();
         return;
       }
-      openChatsNavInTab({
-        level: "thread",
-        channel: {
-          id: mention.channelId,
-          wireId: mention.channelWireId,
-          name: mention.channelName,
-          slug: mention.channelSlug ?? mention.channelName,
-          kind: mention.channelKind ?? "channel",
-          createdAtMs: 0,
-          updatedAtMs: 0,
-          threadCount: 0,
-          unreadCount: 0,
-        },
-        thread: {
-          ...mention.thread,
-          channelId: mention.channelId,
-          messageCount: 0,
-          lastReadSequence: 0,
-          unreadCount: 0,
-        },
-        focusMessageId: mention.message.id,
-      });
+      openChatsNavInTab(target.nav);
     },
-    [openChatsNavInTab, openChatsTab],
+    [openChatThreadInPanel, openChatsNavInTab, openChatsTab],
   );
   const openGraphChatThread = useCallback(
     (node: WorkspaceGraphResult["nodes"][number]) => {
-      if (!node.threadId || !node.channelId || !node.channelName) {
+      const target = graphChatOpenTarget(node);
+      if (target.surface === "file") {
+        openChatThreadInPanel(target.thread);
+        return;
+      }
+      if (target.surface === "overview") {
         openChatsTab();
         return;
       }
-      openChatsNavInTab({
-        level: "thread",
-        channel: {
-          id: node.channelId,
-          wireId: node.channelWireId,
-          name: node.channelName,
-          slug: node.channelSlug ?? node.channelName,
-          kind: node.channelKind ?? "channel",
-          createdAtMs: 0,
-          updatedAtMs: 0,
-          threadCount: 0,
-          unreadCount: 0,
-        },
-        thread: {
-          id: node.threadId,
-          channelId: node.channelId,
-          title: node.title,
-          createdAtMs: 0,
-          updatedAtMs: 0,
-          messageCount: 0,
-          lastReadSequence: 0,
-          unreadCount: 0,
-        },
-      });
+      openChatsNavInTab(target.nav);
     },
-    [openChatsNavInTab, openChatsTab],
+    [openChatThreadInPanel, openChatsNavInTab, openChatsTab],
   );
   // Engine history diff (flagged workspaces): one tab per moment.
   const openMomentDiffTab = useCallback(
@@ -1567,24 +1640,6 @@ export function DesktopWorkspaceShell(props: {
       openFile(path);
     },
     [mutateWb, openFile],
-  );
-
-  // The ONE way a chat thread lands in the Chats panel (search hits and the
-  // Chats view "Files" grouping both route here): hand the thread to the
-  // panel's consume-once initialThread seam, switch to the "This file" tab,
-  // and force the panel visible.
-  const openChatThreadInPanel = useCallback(
-    (thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number }) => {
-      setSearchChatThread({
-        id: thread.id,
-        title: thread.title,
-        createdAtMs: thread.createdAtMs,
-        updatedAtMs: thread.updatedAtMs,
-      });
-      setChatsPanelTab("file");
-      mutateWb((state) => ({ ...state, chatsVisible: true }));
-    },
-    [mutateWb],
   );
 
   // Chats view "Files" grouping cross-link: a file-linked Chat opens where
@@ -2847,8 +2902,9 @@ export function DesktopWorkspaceShell(props: {
                     workspaceId={workspaceId}
                     filePath={activeDocumentPath}
                     readOnly={Boolean(shareView)}
-                    initialThread={searchChatThread}
-                    onInitialThreadConsumed={() => setSearchChatThread(null)}
+                    initialThread={searchChatTarget?.thread ?? null}
+                    initialFocusMessageId={searchChatTarget?.focusMessageId}
+                    onInitialThreadConsumed={() => setSearchChatTarget(null)}
                     onOpenPath={openPathWithHeading}
                     onError={(message) => setShellError(message)}
                   />
