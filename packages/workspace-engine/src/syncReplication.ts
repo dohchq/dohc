@@ -23,6 +23,8 @@ export type {
   ChatAttachmentAddPayload,
   ChatChannelCreatePayload,
   ChatDecisionSetPayload,
+  ChatFeedReadSetPayload,
+  ChatFollowSetPayload,
   ChatMessageAppendPayload,
   ChatReactionSetPayload,
   ChatThreadCreatePayload,

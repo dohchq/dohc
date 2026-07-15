@@ -43,6 +43,7 @@ import {
   type VersionedTextMomentSummary,
   type VersionedTextStore,
 } from "@dohc/workspace-engine";
+import { PreferredName } from "@dohc/workspace-contracts/chat-identity";
 import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
@@ -2320,21 +2321,25 @@ async function requireEngineChats(
   return { ok: true, workspaceId };
 }
 
-// The reply author's display name — the SAME derivation the desktop uses for
-// its local user (main.ts localUserDisplayName): the dohc Cloud email when a
-// session exists, else "You". Rendered by every shared surface as
-// "<User Name>'s agent".
+function ownerNameFromUnknown(value: unknown): string | undefined {
+  const parsed = PreferredName.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+// Display identity is profile-owned, not inferred from an auth email. The
+// opaque cloud user id below remains the authorization/provenance key.
 async function agentReplyDisplayName(ctx: ToolContext): Promise<string> {
-  if (nonEmptyString(process.env.DOHC_MCP_CLOUD_EMAIL)) {
-    return process.env.DOHC_MCP_CLOUD_EMAIL;
-  }
-  const credentials = await readJson<{ version?: unknown; email?: unknown }>(
-    join(ctx.home, "dohc-cloud.json"),
+  const environmentOwner = ownerNameFromUnknown(process.env.DOHC_MCP_OWNER_NAME);
+  if (environmentOwner) return environmentOwner;
+  const settings = await readJson<{
+    profile?: { preferredName?: unknown };
+  }>(
+    join(ctx.home, "dohc-settings.json"),
   );
-  if (credentials?.version === 1 && nonEmptyString(credentials.email)) {
-    return credentials.email;
-  }
-  return "You";
+  const settingsOwner = ownerNameFromUnknown(settings?.profile?.preferredName);
+  if (settingsOwner) return settingsOwner;
+  const account = process.env.USERNAME?.trim() || process.env.USER?.trim() || "You";
+  return `${account[0]?.toLocaleUpperCase() ?? ""}${account.slice(1)}`;
 }
 
 // The VERIFIED opaque relay identity a signed-in agent send stamps on its chat

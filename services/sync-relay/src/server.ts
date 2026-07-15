@@ -982,6 +982,11 @@ const CHAT_OP_POLICY: Record<string, ChatOpPolicy> = {
   // Authored ops: the author field MUST equal the authenticated pusher.
   "chat.message.append": { kind: "authored", field: "authorUserId", onMissing: "stamp" },
   "chat.reaction.set": { kind: "authored", field: "authorId", onMissing: "reject" },
+  // Receiver-private state still rides the owner's ordinary workspace log.
+  // It never appears in a channel share, and the authenticated pusher must be
+  // the receiver named by the durable record.
+  "chat.follow.set": { kind: "authored", field: "ownerUserId", onMissing: "reject" },
+  "chat.feed.read.set": { kind: "authored", field: "ownerUserId", onMissing: "reject" },
 };
 
 // Verifies (and, for message.append, STAMPS) chat authorship on the RAW op

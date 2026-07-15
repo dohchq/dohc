@@ -7,12 +7,25 @@ import type {
   ChatAgentReadState,
   ChatActor,
   ChatAttachment,
+  ChatBookmark,
+  ChatBookmarkMode,
+  ChatBookmarkProjectionState,
+  ChatBookmarkState,
+  ChatBookmarkTargetKind,
+  ChatBookmarkTransitionResult,
   ChatChannel,
   ChatChannelId,
   ChatChannelKind,
   ChatChannelSummary,
   ChatDecisionRecord,
   ChatDecisionState,
+  ChatFeedItem,
+  ChatFeedPage,
+  ChatFeedReadState,
+  ChatFileMention,
+  ChatFollow,
+  ChatFollowState,
+  ChatFollowTargetKind,
   ChatMessage,
   ChatMessageId,
   ChatReaction,
@@ -68,6 +81,8 @@ import {
   type ChatDecisionSetPayload,
   type ChatMessageAppendPayload,
   type ChatReactionSetPayload,
+  type ChatFeedReadSetPayload,
+  type ChatFollowSetPayload,
   type ChatThreadCreatePayload,
 } from "./syncReplication";
 
@@ -79,12 +94,25 @@ export type {
   ChatAgentReadState,
   ChatActor,
   ChatAttachment,
+  ChatBookmark,
+  ChatBookmarkMode,
+  ChatBookmarkProjectionState,
+  ChatBookmarkState,
+  ChatBookmarkTargetKind,
+  ChatBookmarkTransitionResult,
   ChatChannel,
   ChatChannelId,
   ChatChannelKind,
   ChatChannelSummary,
   ChatDecisionRecord,
   ChatDecisionState,
+  ChatFeedItem,
+  ChatFeedPage,
+  ChatFeedReadState,
+  ChatFileMention,
+  ChatFollow,
+  ChatFollowState,
+  ChatFollowTargetKind,
   ChatMessage,
   ChatMessageId,
   ChatReaction,
@@ -363,15 +391,34 @@ function normalizeMessageOrigin(origin: "cli" | undefined): "cli" | undefined {
   return origin;
 }
 
+type LocalAttachmentInput = {
+  objectId: WorkspaceObjectId;
+  pathHint?: string;
+  headingText?: string;
+  headingAnchor?: string;
+  headingOccurrence?: number;
+};
+
+function normalizeHeadingField(value: unknown, label: string): string {
+  if (typeof value !== "string") {
+    throw new LinkedChatStoreError("invalid-path", `${label} is invalid.`);
+  }
+  const normalized = value.normalize("NFC").trim();
+  if (!normalized || normalized.length > 500 || PROJECTION_FIELD_CONTROL_CHAR.test(normalized)) {
+    throw new LinkedChatStoreError("invalid-path", `${label} is invalid.`);
+  }
+  return normalized;
+}
+
 function normalizeAttachments(
-  attachments: Array<{ objectId: WorkspaceObjectId; pathHint?: string }> | undefined,
-): Array<{ objectId: WorkspaceObjectId; pathHint?: string }> {
+  attachments: LocalAttachmentInput[] | undefined,
+): LocalAttachmentInput[] {
   if (attachments === undefined) return [];
   if (!Array.isArray(attachments)) {
     throw new LinkedChatStoreError("invalid-path", "Message attachments are invalid.");
   }
-  const normalized: Array<{ objectId: WorkspaceObjectId; pathHint?: string }> = [];
-  const seenObjectIds = new Set<WorkspaceObjectId>();
+  const normalized: LocalAttachmentInput[] = [];
+  const seenTargets = new Set<string>();
   for (const attachment of attachments) {
     if (!attachment || typeof attachment !== "object") {
       throw new LinkedChatStoreError("invalid-path", "Message attachment is invalid.");
@@ -383,11 +430,43 @@ function normalizeAttachments(
       throw new LinkedChatStoreError("invalid-path", "Message attachment is invalid.");
     }
     const objectId = normalizeObjectId(attachment.objectId);
-    if (seenObjectIds.has(objectId)) continue;
-    seenObjectIds.add(objectId);
     const pathHint =
       attachment.pathHint === undefined ? undefined : normalizePathHint(attachment.pathHint);
-    normalized.push({ objectId, ...(pathHint !== undefined ? { pathHint } : {}) });
+    const headingFields = [
+      attachment.headingText,
+      attachment.headingAnchor,
+      attachment.headingOccurrence,
+    ];
+    const hasHeading = headingFields.some((value) => value !== undefined);
+    if (hasHeading && headingFields.some((value) => value === undefined)) {
+      throw new LinkedChatStoreError(
+        "invalid-path",
+        "A section mention requires heading text, anchor, and occurrence.",
+      );
+    }
+    const headingText = hasHeading
+      ? normalizeHeadingField(attachment.headingText, "Heading text")
+      : undefined;
+    const headingAnchor = hasHeading
+      ? normalizeHeadingField(attachment.headingAnchor, "Heading anchor")
+      : undefined;
+    const headingOccurrence = hasHeading ? attachment.headingOccurrence : undefined;
+    if (
+      headingOccurrence !== undefined &&
+      (!Number.isSafeInteger(headingOccurrence) || headingOccurrence < 0)
+    ) {
+      throw new LinkedChatStoreError("invalid-path", "Heading occurrence is invalid.");
+    }
+    const targetKey = `${objectId}\u0000${headingAnchor ?? ""}\u0000${headingOccurrence ?? ""}`;
+    if (seenTargets.has(targetKey)) continue;
+    seenTargets.add(targetKey);
+    normalized.push({
+      objectId,
+      ...(pathHint !== undefined ? { pathHint } : {}),
+      ...(headingText !== undefined ? { headingText } : {}),
+      ...(headingAnchor !== undefined ? { headingAnchor } : {}),
+      ...(headingOccurrence !== undefined ? { headingOccurrence } : {}),
+    });
   }
   return normalized;
 }
@@ -641,14 +720,348 @@ function reactionFromRow(row: Record<string, unknown>): ChatReaction {
   };
 }
 
-function attachmentIdFor(messageId: ChatMessageId, objectId: WorkspaceObjectId): string {
-  return createHash("sha256").update(`${messageId}file${objectId}`, "utf8").digest("hex");
+function normalizeFeedIdentity(value: string, label: string): string {
+  if (typeof value !== "string") {
+    throw new LinkedChatStoreError("invalid-follow-target", `${label} is invalid.`);
+  }
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 256 || PROJECTION_FIELD_CONTROL_CHAR.test(normalized)) {
+    throw new LinkedChatStoreError("invalid-follow-target", `${label} is invalid.`);
+  }
+  return normalized;
+}
+
+function normalizeFollowTargetKind(value: ChatFollowTargetKind): ChatFollowTargetKind {
+  if (value !== "person" && value !== "agent" && value !== "channel" && value !== "thread") {
+    throw new LinkedChatStoreError("invalid-follow-target", "Follow target kind is invalid.");
+  }
+  return value;
+}
+
+function normalizeFollowState(value: ChatFollowState): ChatFollowState {
+  if (value !== "following" && value !== "unfollowed") {
+    throw new LinkedChatStoreError("invalid-follow-target", "Follow state is invalid.");
+  }
+  return value;
+}
+
+function followFromRow(row: Record<string, unknown>): ChatFollow {
+  return {
+    workspaceId: stringValue(row.workspace_id),
+    ownerUserId: normalizeFeedIdentity(stringValue(row.owner_user_id), "Feed owner"),
+    targetKind: normalizeFollowTargetKind(stringValue(row.target_kind) as ChatFollowTargetKind),
+    targetId: normalizeFeedIdentity(stringValue(row.target_id), "Follow target"),
+    state: normalizeFollowState(stringValue(row.state) as ChatFollowState),
+    updatedAtMs: numberValue(row.updated_at_ms),
+  };
+}
+
+function feedReadStateFromRow(row: Record<string, unknown>): ChatFeedReadState {
+  return {
+    workspaceId: stringValue(row.workspace_id),
+    ownerUserId: normalizeFeedIdentity(stringValue(row.owner_user_id), "Feed owner"),
+    lastSeenCreatedAtMs: numberValue(row.last_seen_created_at_ms),
+    lastSeenMessageId: stringValue(row.last_seen_message_id),
+    updatedAtMs: numberValue(row.updated_at_ms),
+  };
+}
+
+interface FeedCursorValue {
+  createdAtMs: number;
+  messageId: string;
+}
+
+function encodeFeedCursor(value: FeedCursorValue): string {
+  return Buffer.from(JSON.stringify([value.createdAtMs, value.messageId]), "utf8").toString(
+    "base64url",
+  );
+}
+
+function decodeFeedCursor(cursor: string): FeedCursorValue {
+  try {
+    if (typeof cursor !== "string" || !cursor || cursor.length > 512) throw new Error();
+    const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as unknown;
+    if (
+      !Array.isArray(decoded) ||
+      decoded.length !== 2 ||
+      typeof decoded[0] !== "number" ||
+      !Number.isFinite(decoded[0]) ||
+      typeof decoded[1] !== "string" ||
+      !decoded[1] ||
+      decoded[1].length > 256
+    ) {
+      throw new Error();
+    }
+    return { createdAtMs: decoded[0], messageId: decoded[1] };
+  } catch {
+    throw new LinkedChatStoreError("invalid-follow-target", "Feed cursor is invalid.");
+  }
+}
+
+function upsertFollowLww(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  payload: ChatFollowSetPayload,
+  origin: { originId: string; originSeq: number },
+): void {
+  db.prepare(
+    `INSERT INTO chat_follows (
+       workspace_id, owner_user_id, target_kind, target_id, state,
+       updated_at_ms, origin_id, origin_seq
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(workspace_id, owner_user_id, target_kind, target_id) DO UPDATE SET
+       state = excluded.state,
+       updated_at_ms = excluded.updated_at_ms,
+       origin_id = excluded.origin_id,
+       origin_seq = excluded.origin_seq
+     WHERE excluded.updated_at_ms > chat_follows.updated_at_ms
+        OR (excluded.updated_at_ms = chat_follows.updated_at_ms
+            AND (CASE excluded.state WHEN 'unfollowed' THEN 1 ELSE 0 END) >
+                (CASE chat_follows.state WHEN 'unfollowed' THEN 1 ELSE 0 END))
+        OR (excluded.updated_at_ms = chat_follows.updated_at_ms
+            AND excluded.state = chat_follows.state
+            AND (excluded.origin_id > chat_follows.origin_id
+              OR (excluded.origin_id = chat_follows.origin_id
+                  AND excluded.origin_seq > chat_follows.origin_seq)))`,
+  ).run(
+    workspaceId,
+    payload.ownerUserId,
+    payload.targetKind,
+    payload.targetId,
+    payload.state,
+    payload.atMs,
+    origin.originId,
+    origin.originSeq,
+  );
+}
+
+function upsertFeedReadLww(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  payload: ChatFeedReadSetPayload,
+  origin: { originId: string; originSeq: number },
+): void {
+  db.prepare(
+    `INSERT INTO chat_feed_read_state (
+       workspace_id, owner_user_id, last_seen_created_at_ms, last_seen_message_id,
+       updated_at_ms, origin_id, origin_seq
+     ) VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(workspace_id, owner_user_id) DO UPDATE SET
+       last_seen_created_at_ms = excluded.last_seen_created_at_ms,
+       last_seen_message_id = excluded.last_seen_message_id,
+       updated_at_ms = excluded.updated_at_ms,
+       origin_id = excluded.origin_id,
+       origin_seq = excluded.origin_seq
+     WHERE excluded.updated_at_ms > chat_feed_read_state.updated_at_ms
+        OR (excluded.updated_at_ms = chat_feed_read_state.updated_at_ms
+            AND (excluded.origin_id > chat_feed_read_state.origin_id
+              OR (excluded.origin_id = chat_feed_read_state.origin_id
+                  AND excluded.origin_seq > chat_feed_read_state.origin_seq)))`,
+  ).run(
+    workspaceId,
+    payload.ownerUserId,
+    payload.lastSeenCreatedAtMs,
+    payload.lastSeenMessageId,
+    payload.atMs,
+    origin.originId,
+    origin.originSeq,
+  );
+}
+
+function normalizeBookmarkTargetKind(value: ChatBookmarkTargetKind): ChatBookmarkTargetKind {
+  if (value !== "message" && value !== "thread") {
+    throw new LinkedChatStoreError("invalid-follow-target", "Bookmark target kind is invalid.");
+  }
+  return value;
+}
+
+function normalizeBookmarkMode(value: ChatBookmarkMode): ChatBookmarkMode {
+  if (value !== "live" && value !== "snapshot") {
+    throw new LinkedChatStoreError("invalid-follow-target", "Bookmark mode is invalid.");
+  }
+  return value;
+}
+
+function normalizeBookmarkState(value: unknown): ChatBookmarkState {
+  const state = stringValue(value);
+  if (state !== "active" && state !== "archived") throw corruptStore();
+  return state;
+}
+
+function normalizeBookmarkProjectionState(value: unknown): ChatBookmarkProjectionState {
+  const state = stringValue(value);
+  if (state !== "pending" && state !== "ready" && state !== "failed" && state !== "stale") {
+    throw corruptStore();
+  }
+  return state;
+}
+
+function normalizeBookmarkReason(value: string, required: boolean): string | undefined {
+  if (typeof value !== "string") {
+    throw new LinkedChatStoreError("invalid-message-body", "Bookmark failure reason is invalid.");
+  }
+  const normalized = value.trim();
+  if ((required && !normalized) || normalized.length > 2_000) {
+    throw new LinkedChatStoreError("invalid-message-body", "Bookmark failure reason is invalid.");
+  }
+  return normalized || undefined;
+}
+
+function bookmarkIdFor(ownerUserId: string, targetKind: ChatBookmarkTargetKind, targetId: string) {
+  const digest = createHash("sha256")
+    .update(`${ownerUserId}\u0000${targetKind}\u0000${targetId}`, "utf8")
+    .digest();
+  return `bookmark_${base32LowercaseNoPadding(digest.subarray(0, 16))}`;
+}
+
+const BOOKMARK_SELECT_SQL = `SELECT b.*,
+  o.generation AS outbox_generation,
+  o.projected_generation AS outbox_projected_generation,
+  o.projection_state AS outbox_projection_state,
+  o.last_projected_at_ms AS outbox_last_projected_at_ms,
+  o.failure_reason AS outbox_failure_reason
+  FROM chat_bookmarks b
+  JOIN chat_bookmark_outbox o
+    ON o.workspace_id = b.workspace_id AND o.bookmark_id = b.bookmark_id`;
+
+function bookmarkFromRow(row: Record<string, unknown>): ChatBookmark {
+  const messageId = optionalString(row.message_id);
+  const lastProjectedAtMs =
+    row.outbox_last_projected_at_ms === null || row.outbox_last_projected_at_ms === undefined
+      ? undefined
+      : numberValue(row.outbox_last_projected_at_ms);
+  const failureReason = optionalString(row.outbox_failure_reason);
+  const targetKind = normalizeBookmarkTargetKind(
+    stringValue(row.target_kind) as ChatBookmarkTargetKind,
+  );
+  const mode = normalizeBookmarkMode(stringValue(row.mode) as ChatBookmarkMode);
+  const generation = numberValue(row.outbox_generation);
+  const projectedGeneration = numberValue(row.outbox_projected_generation);
+  if (
+    !Number.isSafeInteger(generation) ||
+    generation < 1 ||
+    !Number.isSafeInteger(projectedGeneration) ||
+    projectedGeneration < 0 ||
+    projectedGeneration > generation ||
+    (targetKind === "message") !== (messageId !== undefined)
+  ) {
+    throw corruptStore();
+  }
+  return {
+    bookmarkId: stringValue(row.bookmark_id),
+    workspaceId: stringValue(row.workspace_id),
+    ownerUserId: normalizeFeedIdentity(stringValue(row.owner_user_id), "Bookmark owner"),
+    targetKind,
+    targetId: stringValue(row.target_id),
+    threadId: stringValue(row.thread_id),
+    ...(messageId ? { messageId } : {}),
+    mode,
+    destinationPath: stringValue(row.destination_path),
+    state: normalizeBookmarkState(row.state),
+    generation,
+    projectedGeneration,
+    projectionState: normalizeBookmarkProjectionState(row.outbox_projection_state),
+    createdAtMs: numberValue(row.created_at_ms),
+    updatedAtMs: numberValue(row.updated_at_ms),
+    ...(lastProjectedAtMs !== undefined ? { lastProjectedAtMs } : {}),
+    ...(failureReason ? { failureReason } : {}),
+  };
+}
+
+function requireBookmark(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  ownerUserId: string,
+  bookmarkId: string,
+): ChatBookmark {
+  const row = db
+    .prepare(`${BOOKMARK_SELECT_SQL} WHERE b.workspace_id = ? AND b.owner_user_id = ? AND b.bookmark_id = ?`)
+    .get(workspaceId, ownerUserId, bookmarkId);
+  if (!row) {
+    throw new LinkedChatStoreError("invalid-follow-target", "Chat bookmark was not found.");
+  }
+  return bookmarkFromRow(row);
+}
+
+function queueBookmarkGeneration(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  bookmarkId: string,
+  atMs: number,
+): void {
+  const result = db
+    .prepare(
+      `UPDATE chat_bookmark_outbox
+       SET generation = generation + 1,
+           projection_state = 'pending',
+           failure_reason = NULL,
+           updated_at_ms = ?
+       WHERE workspace_id = ? AND bookmark_id = ?`,
+    )
+    .run(atMs, workspaceId, bookmarkId);
+  if (result.changes !== 1) throw corruptStore();
+}
+
+function markLiveBookmarksPending(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  threadId: ChatThreadId,
+  atMs: number,
+): void {
+  db.prepare(
+    `UPDATE chat_bookmark_outbox
+     SET generation = generation + 1,
+         projection_state = 'pending',
+         failure_reason = NULL,
+         updated_at_ms = ?
+     WHERE workspace_id = ? AND bookmark_id IN (
+       SELECT bookmark_id FROM chat_bookmarks
+       WHERE workspace_id = ? AND thread_id = ? AND mode = 'live' AND state = 'active'
+     )`,
+  ).run(atMs, workspaceId, workspaceId, threadId);
+}
+
+function attachmentIdFor(
+  messageId: ChatMessageId,
+  objectId: WorkspaceObjectId,
+  headingAnchor?: string,
+  headingOccurrence?: number,
+): string {
+  if (headingAnchor === undefined && headingOccurrence === undefined) {
+    return createHash("sha256").update(`${messageId}file${objectId}`, "utf8").digest("hex");
+  }
+  return createHash("sha256")
+    .update(
+      `${messageId}\u0000file\u0000${objectId}\u0000${headingAnchor ?? ""}\u0000${headingOccurrence ?? ""}`,
+      "utf8",
+    )
+    .digest("hex");
 }
 
 function attachmentFromRow(row: Record<string, unknown>): ChatAttachment {
   if (stringValue(row.target_kind) !== "file") throw corruptStore();
   const objectId = optionalString(row.object_id);
   const pathHint = optionalString(row.path_hint);
+  const headingText = optionalString(row.heading_text);
+  const headingAnchor = optionalString(row.heading_anchor);
+  const rawHeadingOccurrence = row.heading_occurrence;
+  const headingOccurrence =
+    rawHeadingOccurrence === null || rawHeadingOccurrence === undefined
+      ? undefined
+      : numberValue(rawHeadingOccurrence);
+  const headingParts = [headingText, headingAnchor, headingOccurrence];
+  if (
+    headingParts.some((part) => part !== undefined) &&
+    headingParts.some((part) => part === undefined)
+  ) {
+    throw corruptStore();
+  }
+  if (
+    headingOccurrence !== undefined &&
+    (!Number.isSafeInteger(headingOccurrence) || headingOccurrence < 0)
+  ) {
+    throw corruptStore();
+  }
   return {
     attachmentId: stringValue(row.attachment_id),
     threadId: stringValue(row.thread_id),
@@ -656,6 +1069,9 @@ function attachmentFromRow(row: Record<string, unknown>): ChatAttachment {
     targetKind: "file",
     ...(objectId !== undefined ? { objectId } : {}),
     ...(pathHint !== undefined ? { pathHint } : {}),
+    ...(headingText !== undefined ? { headingText } : {}),
+    ...(headingAnchor !== undefined ? { headingAnchor } : {}),
+    ...(headingOccurrence !== undefined ? { headingOccurrence } : {}),
     createdAtMs: numberValue(row.created_at_ms),
   };
 }
@@ -730,8 +1146,8 @@ function insertAttachment(
   db.prepare(
     `INSERT OR IGNORE INTO chat_attachments (
        workspace_id, attachment_id, thread_id, message_id, target_kind,
-       object_id, path_hint, created_at_ms
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       object_id, path_hint, heading_text, heading_anchor, heading_occurrence, created_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     workspaceId,
     payload.attachmentId,
@@ -740,6 +1156,9 @@ function insertAttachment(
     payload.targetKind,
     payload.objectId ?? null,
     payload.pathHint ?? null,
+    payload.headingText ?? null,
+    payload.headingAnchor ?? null,
+    payload.headingOccurrence ?? null,
     payload.createdAtMs,
   );
 }
@@ -793,17 +1212,27 @@ function addLocalAttachments(input: {
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
   messageId: ChatMessageId;
-  attachments: Array<{ objectId: WorkspaceObjectId; pathHint?: string }>;
+  attachments: LocalAttachmentInput[];
   createdAtMs: number;
 }): ChatAttachment[] {
   return input.attachments.map((attachment) => {
     const payload: ChatAttachmentAddPayload = {
-      attachmentId: attachmentIdFor(input.messageId, attachment.objectId),
+      attachmentId: attachmentIdFor(
+        input.messageId,
+        attachment.objectId,
+        attachment.headingAnchor,
+        attachment.headingOccurrence,
+      ),
       threadId: input.threadId,
       messageId: input.messageId,
       targetKind: "file",
       objectId: attachment.objectId,
       ...(attachment.pathHint !== undefined ? { pathHint: attachment.pathHint } : {}),
+      ...(attachment.headingText !== undefined ? { headingText: attachment.headingText } : {}),
+      ...(attachment.headingAnchor !== undefined ? { headingAnchor: attachment.headingAnchor } : {}),
+      ...(attachment.headingOccurrence !== undefined
+        ? { headingOccurrence: attachment.headingOccurrence }
+        : {}),
       createdAtMs: input.createdAtMs,
     };
     insertAttachment(input.db, input.workspaceId, payload);
@@ -820,6 +1249,11 @@ function addLocalAttachments(input: {
       targetKind: payload.targetKind,
       objectId: attachment.objectId,
       ...(payload.pathHint !== undefined ? { pathHint: payload.pathHint } : {}),
+      ...(payload.headingText !== undefined ? { headingText: payload.headingText } : {}),
+      ...(payload.headingAnchor !== undefined ? { headingAnchor: payload.headingAnchor } : {}),
+      ...(payload.headingOccurrence !== undefined
+        ? { headingOccurrence: payload.headingOccurrence }
+        : {}),
       createdAtMs: payload.createdAtMs,
     };
   });
@@ -948,6 +1382,85 @@ function requireWorkspaceThread(
     "thread-not-found",
     `Thread ${threadId} was not found in workspace ${workspaceId}.`,
   );
+}
+
+function workspaceThreadHasMessage(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  threadId: ChatThreadId,
+  messageId: ChatMessageId,
+): boolean {
+  return !!db
+    .prepare(
+      `SELECT 1 FROM chat_messages
+       WHERE workspace_id = ? AND thread_id = ? AND message_id = ?`,
+    )
+    .get(workspaceId, threadId, messageId);
+}
+
+function workspaceMessageThreadId(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  messageId: ChatMessageId,
+): ChatThreadId | undefined {
+  const row = db
+    .prepare("SELECT thread_id FROM chat_messages WHERE workspace_id = ? AND message_id = ?")
+    .get(workspaceId, messageId);
+  return row ? stringValue(row.thread_id) : undefined;
+}
+
+function deferReplicatedMessageParent(input: {
+  db: SqliteDb;
+  workspaceId: WorkspaceId;
+  threadId: ChatThreadId;
+  childMessageId: ChatMessageId;
+  parentMessageId: ChatMessageId;
+}): void {
+  input.db
+    .prepare(
+      `INSERT INTO chat_pending_message_parents (
+         workspace_id, child_message_id, thread_id, parent_message_id
+       ) VALUES (?, ?, ?, ?)`,
+    )
+    .run(
+      input.workspaceId,
+      input.childMessageId,
+      input.threadId,
+      input.parentMessageId,
+    );
+}
+
+function resolveReplicatedMessageParentClaims(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  parentThreadId: ChatThreadId,
+  parentMessageId: ChatMessageId,
+): void {
+  // Message ids are workspace-unique. Once an id materializes in one thread,
+  // every claim from another thread is permanently invalid and is discarded.
+  db.prepare(
+    `DELETE FROM chat_pending_message_parents
+     WHERE workspace_id = ? AND parent_message_id = ? AND thread_id <> ?`,
+  ).run(workspaceId, parentMessageId, parentThreadId);
+  db.prepare(
+    `UPDATE chat_messages
+     SET parent_message_id = ?
+     WHERE workspace_id = ? AND thread_id = ? AND message_id IN (
+       SELECT child_message_id FROM chat_pending_message_parents
+       WHERE workspace_id = ? AND thread_id = ? AND parent_message_id = ?
+     )`,
+  ).run(
+    parentMessageId,
+    workspaceId,
+    parentThreadId,
+    workspaceId,
+    parentThreadId,
+    parentMessageId,
+  );
+  db.prepare(
+    `DELETE FROM chat_pending_message_parents
+     WHERE workspace_id = ? AND thread_id = ? AND parent_message_id = ?`,
+  ).run(workspaceId, parentThreadId, parentMessageId);
 }
 
 function requireWorkspaceChannel(
@@ -1764,6 +2277,7 @@ export function createLinkedChatStore(
           body,
           recordedAtMs,
         );
+        markLiveBookmarksPending(db, workspaceId, threadId, recordedAtMs);
         indexMessageMentions({
           db,
           workspaceId,
@@ -2021,6 +2535,15 @@ export function createLinkedChatStore(
         const thread = requireWorkspaceThread(db, workspaceId, input.threadId);
         const authorUserId = normalizeAuthorUserId(input.authorUserId);
         const parentMessageId = normalizeParentMessageId(input.parentMessageId);
+        if (
+          parentMessageId !== undefined &&
+          !workspaceThreadHasMessage(db, workspaceId, thread.id, parentMessageId)
+        ) {
+          throw new LinkedChatStoreError(
+            "message-not-found",
+            "Reply parent was not found in this chat thread.",
+          );
+        }
         const origin = normalizeMessageOrigin(input.origin);
         const attachments = normalizeAttachments(input.attachments);
         const message: ChatMessage = {
@@ -2054,6 +2577,7 @@ export function createLinkedChatStore(
           message.body,
           message.createdAtMs,
         );
+        markLiveBookmarksPending(db, workspaceId, thread.id, message.createdAtMs);
         indexMessageMentions({
           db,
           workspaceId,
@@ -2198,6 +2722,62 @@ export function createLinkedChatStore(
         return withDb((db) => {
           const thread = requireWorkspaceThread(db, workspaceId, threadId);
           return attachmentsForThread(db, workspaceId, thread.id).map(cloneJson);
+        });
+      });
+    },
+
+    listFileMentions(input) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const objectId =
+          input.objectId === undefined ? undefined : normalizeObjectId(input.objectId);
+        const pathHint =
+          input.pathHint === undefined ? undefined : normalizePathHint(input.pathHint);
+        if (objectId === undefined && pathHint === undefined) {
+          throw new LinkedChatStoreError(
+            "invalid-path",
+            "A file mention lookup requires an object id or path hint.",
+          );
+        }
+        return withDb((db) => {
+          // Stable object identity wins when both are supplied. Path is a
+          // legacy/display fallback and must not broaden an object-id lookup to
+          // a different file that later reused the same path.
+          const rows = db
+            .prepare(
+              `SELECT a.* FROM chat_attachments a
+               JOIN chat_messages m
+                 ON m.workspace_id = a.workspace_id
+                AND m.thread_id = a.thread_id
+                AND m.message_id = a.message_id
+               WHERE a.workspace_id = ? AND ${objectId ? "a.object_id = ?" : "a.path_hint = ?"}
+               ORDER BY a.created_at_ms DESC, a.attachment_id DESC`,
+            )
+            .all(workspaceId, objectId ?? pathHint);
+          return rows.map((row): ChatFileMention => {
+            const attachment = attachmentFromRow(row);
+            const messageRow = db
+              .prepare(
+                `SELECT * FROM chat_messages
+                 WHERE workspace_id = ? AND thread_id = ? AND message_id = ?`,
+              )
+              .get(workspaceId, attachment.threadId, attachment.messageId);
+            if (!messageRow) throw corruptStore();
+            const message = messageFromRow(messageRow);
+            message.attachments = attachmentsForThread(db, workspaceId, message.threadId).filter(
+              (candidate) => candidate.messageId === message.id,
+            );
+            const thread = requireWorkspaceThread(db, workspaceId, message.threadId);
+            const channel = thread.channelId
+              ? requireWorkspaceChannel(db, workspaceId, thread.channelId)
+              : undefined;
+            return cloneJson({
+              attachment,
+              message,
+              thread,
+              ...(channel ? { channel } : {}),
+            });
+          });
         });
       });
     },
@@ -2475,6 +3055,624 @@ export function createLinkedChatStore(
       });
     },
 
+    setFollow(input) {
+      return serialize((db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Feed owner");
+        const targetKind = normalizeFollowTargetKind(input.targetKind);
+        const targetId = normalizeFeedIdentity(input.targetId, "Follow target");
+        const state = normalizeFollowState(input.state);
+
+        if (targetKind === "channel") {
+          const row = db
+            .prepare(
+              `SELECT c.kind FROM chat_channel_wire_ids w
+               JOIN chat_channels c
+                 ON c.workspace_id = w.workspace_id AND c.channel_id = w.channel_id
+               WHERE w.workspace_id = ? AND w.wire_id = ?`,
+            )
+            .get(workspaceId, targetId);
+          if (!row || stringValue(row.kind) === "dm") {
+            throw new LinkedChatStoreError("invalid-follow-target", "Channel is not followable.");
+          }
+        } else if (targetKind === "thread") {
+          const thread = requireWorkspaceThread(db, workspaceId, targetId);
+          if (thread.channelId) {
+            const channel = requireWorkspaceChannel(db, workspaceId, thread.channelId);
+            if (channel.kind === "dm") {
+              throw new LinkedChatStoreError("invalid-follow-target", "DM threads are not followable.");
+            }
+          }
+        } else {
+          const authorKind = targetKind === "agent" ? "agent" : "human";
+          const row = db
+            .prepare(
+              `SELECT 1 FROM chat_messages m
+               JOIN chat_threads t
+                 ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id
+               LEFT JOIN chat_channels c
+                 ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id
+               WHERE m.workspace_id = ? AND m.author_user_id = ? AND m.author_kind = ?
+                 AND (t.channel_id IS NULL OR c.kind <> 'dm')
+               LIMIT 1`,
+            )
+            .get(workspaceId, targetId, authorKind);
+          if (!row) {
+            throw new LinkedChatStoreError("invalid-follow-target", "Chat author is not followable.");
+          }
+        }
+
+        const prior = db
+          .prepare(
+            `SELECT updated_at_ms FROM chat_follows
+             WHERE workspace_id = ? AND owner_user_id = ? AND target_kind = ? AND target_id = ?`,
+          )
+          .get(workspaceId, ownerUserId, targetKind, targetId);
+        const atMs = Math.max(nowMs(), prior ? numberValue(prior.updated_at_ms) + 1 : 0);
+        const payload: ChatFollowSetPayload = {
+          ownerUserId,
+          targetKind,
+          targetId,
+          state,
+          atMs,
+        };
+        const originId = ensureOriginId(db, workspaceId);
+        const originSeq = nextOriginSeq(db, workspaceId, originId);
+        upsertFollowLww(db, workspaceId, payload, { originId, originSeq });
+        journalReplicationOp(db, {
+          workspaceId,
+          originId,
+          originSeq,
+          opKind: "chat.follow.set",
+          payload,
+          recordedAtMs: atMs,
+        });
+        const row = db
+          .prepare(
+            `SELECT * FROM chat_follows
+             WHERE workspace_id = ? AND owner_user_id = ? AND target_kind = ? AND target_id = ?`,
+          )
+          .get(workspaceId, ownerUserId, targetKind, targetId);
+        if (!row) throw corruptStore();
+        return cloneJson(followFromRow(row));
+      });
+    },
+
+    listFollows(input) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Feed owner");
+        const state = input.state === undefined ? undefined : normalizeFollowState(input.state);
+        return withDb((db) =>
+          db
+            .prepare(
+              `SELECT * FROM chat_follows
+               WHERE workspace_id = ? AND owner_user_id = ?
+                 ${state === undefined ? "" : "AND state = ?"}
+               ORDER BY target_kind, target_id`,
+            )
+            .all(...(state === undefined ? [workspaceId, ownerUserId] : [workspaceId, ownerUserId, state]))
+            .map(followFromRow)
+            .map(cloneJson),
+        );
+      });
+    },
+
+    ensureDefaultChannelFollows(input) {
+      return serialize((db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Feed owner");
+        const rows = db
+          .prepare(
+            `SELECT DISTINCT w.wire_id FROM chat_channels c
+             JOIN chat_channel_wire_ids w
+               ON w.workspace_id = c.workspace_id AND w.channel_id = c.channel_id
+             WHERE c.workspace_id = ? AND c.kind <> 'dm'`,
+          )
+          .all(workspaceId);
+        const insert = db.prepare(
+          `INSERT OR IGNORE INTO chat_follows (
+             workspace_id, owner_user_id, target_kind, target_id, state,
+             updated_at_ms, origin_id, origin_seq
+           ) VALUES (?, ?, 'channel', ?, 'following', 0, 'seed', 0)`,
+        );
+        for (const row of rows) insert.run(workspaceId, ownerUserId, stringValue(row.wire_id));
+      });
+    },
+
+    listPersonalFeed(input) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Feed owner");
+        const cursor = input.cursor === undefined ? undefined : decodeFeedCursor(input.cursor);
+        const limit = input.limit ?? 20;
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+          throw new LinkedChatStoreError("invalid-follow-target", "Feed page limit is invalid.");
+        }
+        return withDb((db) => {
+          const candidateRows = (after: FeedCursorValue | undefined, count: number) =>
+            db
+              .prepare(
+                `SELECT m.message_id, m.thread_id, m.message_order, m.created_at_ms
+                 FROM chat_messages m
+                 JOIN chat_threads t
+                   ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id
+                 LEFT JOIN chat_channels c
+                   ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id
+                 WHERE m.workspace_id = ?
+                   AND (t.channel_id IS NULL OR c.kind <> 'dm')
+                   AND (
+                     EXISTS (
+                       SELECT 1 FROM chat_follows f
+                       WHERE f.workspace_id = m.workspace_id
+                         AND f.owner_user_id = ? AND f.state = 'following'
+                         AND f.target_kind = CASE m.author_kind
+                           WHEN 'agent' THEN 'agent' ELSE 'person' END
+                         AND f.target_id = m.author_user_id
+                     )
+                     OR EXISTS (
+                       SELECT 1 FROM chat_follows f
+                       WHERE f.workspace_id = m.workspace_id
+                         AND f.owner_user_id = ? AND f.state = 'following'
+                         AND f.target_kind = 'thread' AND f.target_id = m.thread_id
+                     )
+                     OR (m.message_order = 0 AND EXISTS (
+                       SELECT 1 FROM chat_channel_wire_ids w
+                       JOIN chat_follows f
+                         ON f.workspace_id = w.workspace_id
+                        AND f.owner_user_id = ? AND f.state = 'following'
+                        AND f.target_kind = 'channel' AND f.target_id = w.wire_id
+                       WHERE w.workspace_id = t.workspace_id AND w.channel_id = t.channel_id
+                     ))
+                   )
+                   ${after ? "AND (m.created_at_ms < ? OR (m.created_at_ms = ? AND m.message_id < ?))" : ""}
+                 ORDER BY m.created_at_ms DESC, m.message_id DESC
+                 LIMIT ?`,
+              )
+              .all(
+                workspaceId,
+                ownerUserId,
+                ownerUserId,
+                ownerUserId,
+                ...(after ? [after.createdAtMs, after.createdAtMs, after.messageId] : []),
+                count,
+              );
+
+          const rows = candidateRows(cursor, limit + 1);
+          const pageRows = rows.slice(0, limit);
+          const activeFollows = db
+            .prepare(
+              `SELECT * FROM chat_follows
+               WHERE workspace_id = ? AND owner_user_id = ? AND state = 'following'`,
+            )
+            .all(workspaceId, ownerUserId)
+            .map(followFromRow);
+          const follows = new Set(
+            activeFollows.map((follow) => `${follow.targetKind}\u0000${follow.targetId}`),
+          );
+
+          const messageForId = (messageId: string): ChatMessage | undefined => {
+            const row = db
+              .prepare("SELECT * FROM chat_messages WHERE workspace_id = ? AND message_id = ?")
+              .get(workspaceId, messageId);
+            if (!row) return undefined;
+            const message = messageFromRow(row);
+            return {
+              ...message,
+              attachments: attachmentsForThread(db, workspaceId, message.threadId).filter(
+                (attachment) => attachment.messageId === message.id,
+              ),
+            };
+          };
+
+          const items = pageRows.map((candidate): ChatFeedItem => {
+            const messageId = stringValue(candidate.message_id);
+            const message = messageForId(messageId);
+            if (!message) throw corruptStore();
+            const thread = requireWorkspaceThread(db, workspaceId, message.threadId);
+            const channel = thread.channelId
+              ? requireWorkspaceChannel(db, workspaceId, thread.channelId)
+              : undefined;
+            if (channel?.kind === "dm") throw corruptStore();
+            const openingRow = db
+              .prepare(
+                `SELECT message_id FROM chat_messages
+                 WHERE workspace_id = ? AND thread_id = ? AND message_order = 0`,
+              )
+              .get(workspaceId, thread.id);
+            const openingId = openingRow ? stringValue(openingRow.message_id) : undefined;
+            const openingMessage =
+              openingId && openingId !== message.id ? messageForId(openingId) : undefined;
+            const parentMessage = message.parentMessageId
+              ? messageForId(message.parentMessageId)
+              : undefined;
+            if (parentMessage && parentMessage.threadId !== thread.id) throw corruptStore();
+            const reactions = db
+              .prepare(
+                `SELECT r.* FROM chat_reactions r
+                 WHERE r.workspace_id = ? AND r.thread_id = ?
+                   AND r.message_id = ? AND r.state = 'added'
+                 ORDER BY r.at_ms, r.reaction_id`,
+              )
+              .all(workspaceId, thread.id, message.id)
+              .map(reactionFromRow);
+            const matchedBy: ChatFollowTargetKind[] = [];
+            if (
+              message.authorUserId &&
+              follows.has(
+                `${message.author.kind === "agent" ? "agent" : "person"}\u0000${message.authorUserId}`,
+              )
+            ) {
+              matchedBy.push(message.author.kind === "agent" ? "agent" : "person");
+            }
+            if (follows.has(`thread\u0000${thread.id}`)) matchedBy.push("thread");
+            if (numberValue(candidate.message_order) === 0 && channel) {
+              const wireId = wireIdForChannelId(db, workspaceId, channel.id);
+              if (wireId && follows.has(`channel\u0000${wireId}`)) matchedBy.push("channel");
+            }
+            return cloneJson({
+              message,
+              thread,
+              ...(channel ? { channel } : {}),
+              ...(parentMessage ? { parentMessage } : {}),
+              ...(openingMessage ? { openingMessage } : {}),
+              reactions,
+              matchedBy,
+            });
+          });
+          const first = candidateRows(undefined, 1)[0];
+          const last = pageRows.at(-1);
+          const readRow = db
+            .prepare(
+              `SELECT * FROM chat_feed_read_state
+               WHERE workspace_id = ? AND owner_user_id = ?`,
+            )
+            .get(workspaceId, ownerUserId);
+          const page: ChatFeedPage = {
+            items,
+            ...(rows.length > limit && last
+              ? {
+                  nextCursor: encodeFeedCursor({
+                    createdAtMs: numberValue(last.created_at_ms),
+                    messageId: stringValue(last.message_id),
+                  }),
+                }
+              : {}),
+            ...(first
+              ? {
+                  headCursor: encodeFeedCursor({
+                    createdAtMs: numberValue(first.created_at_ms),
+                    messageId: stringValue(first.message_id),
+                  }),
+                }
+              : {}),
+            ...(readRow ? { readState: feedReadStateFromRow(readRow) } : {}),
+          };
+          return cloneJson(page);
+        });
+      });
+    },
+
+    markPersonalFeedSeen(input) {
+      return serialize((db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Feed owner");
+        const cursor = decodeFeedCursor(input.headCursor);
+        const message = db
+          .prepare(
+            `SELECT 1 FROM chat_messages
+             WHERE workspace_id = ? AND message_id = ? AND created_at_ms = ?`,
+          )
+          .get(workspaceId, cursor.messageId, cursor.createdAtMs);
+        if (!message) {
+          throw new LinkedChatStoreError("invalid-follow-target", "Feed cursor is stale.");
+        }
+        const current = db
+          .prepare(
+            `SELECT updated_at_ms FROM chat_feed_read_state
+             WHERE workspace_id = ? AND owner_user_id = ?`,
+          )
+          .get(workspaceId, ownerUserId);
+        const atMs = Math.max(nowMs(), current ? numberValue(current.updated_at_ms) + 1 : 0);
+        const payload: ChatFeedReadSetPayload = {
+          ownerUserId,
+          lastSeenCreatedAtMs: cursor.createdAtMs,
+          lastSeenMessageId: cursor.messageId,
+          atMs,
+        };
+        const originId = ensureOriginId(db, workspaceId);
+        const originSeq = nextOriginSeq(db, workspaceId, originId);
+        upsertFeedReadLww(db, workspaceId, payload, { originId, originSeq });
+        journalReplicationOp(db, {
+          workspaceId,
+          originId,
+          originSeq,
+          opKind: "chat.feed.read.set",
+          payload,
+          recordedAtMs: atMs,
+        });
+        const row = db
+          .prepare(
+            `SELECT * FROM chat_feed_read_state
+             WHERE workspace_id = ? AND owner_user_id = ?`,
+          )
+          .get(workspaceId, ownerUserId);
+        if (!row) throw corruptStore();
+        return cloneJson(feedReadStateFromRow(row));
+      });
+    },
+
+    saveBookmark(input) {
+      return serialize((db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Bookmark owner");
+        const targetKind = normalizeBookmarkTargetKind(input.targetKind);
+        const targetId = normalizeFeedIdentity(input.targetId, "Bookmark target");
+        const mode = normalizeBookmarkMode(input.mode);
+        const destinationPath = normalizePathHint(input.destinationPath);
+        let threadId: string;
+        let messageId: string | undefined;
+        if (targetKind === "thread") {
+          threadId = requireWorkspaceThread(db, workspaceId, targetId).id;
+        } else {
+          const row = db
+            .prepare(
+              `SELECT thread_id FROM chat_messages
+               WHERE workspace_id = ? AND message_id = ?`,
+            )
+            .get(workspaceId, targetId);
+          if (!row) {
+            throw new LinkedChatStoreError("message-not-found", "Bookmark message was not found.");
+          }
+          threadId = requireWorkspaceThread(db, workspaceId, stringValue(row.thread_id)).id;
+          messageId = targetId;
+        }
+        const atMs = nowMs();
+        const existing = db
+          .prepare(
+            `SELECT bookmark_id FROM chat_bookmarks
+             WHERE workspace_id = ? AND owner_user_id = ?
+               AND target_kind = ? AND target_id = ?`,
+          )
+          .get(workspaceId, ownerUserId, targetKind, targetId);
+        let bookmarkId: string;
+        if (existing) {
+          bookmarkId = stringValue(existing.bookmark_id);
+          db.prepare(
+            `UPDATE chat_bookmarks
+             SET thread_id = ?, message_id = ?, mode = ?, destination_path = ?,
+                 state = 'active', updated_at_ms = ?
+             WHERE workspace_id = ? AND bookmark_id = ?`,
+          ).run(
+            threadId,
+            messageId ?? null,
+            mode,
+            destinationPath,
+            atMs,
+            workspaceId,
+            bookmarkId,
+          );
+          queueBookmarkGeneration(db, workspaceId, bookmarkId, atMs);
+        } else {
+          bookmarkId = bookmarkIdFor(ownerUserId, targetKind, targetId);
+          db.prepare(
+            `INSERT INTO chat_bookmarks (
+               workspace_id, bookmark_id, owner_user_id, target_kind, target_id,
+               thread_id, message_id, mode, destination_path, state,
+               created_at_ms, updated_at_ms
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+          ).run(
+            workspaceId,
+            bookmarkId,
+            ownerUserId,
+            targetKind,
+            targetId,
+            threadId,
+            messageId ?? null,
+            mode,
+            destinationPath,
+            atMs,
+            atMs,
+          );
+          db.prepare(
+            `INSERT INTO chat_bookmark_outbox (
+               workspace_id, bookmark_id, generation, projected_generation,
+               projection_state, last_projected_at_ms, failure_reason, updated_at_ms
+             ) VALUES (?, ?, 1, 0, 'pending', NULL, NULL, ?)`,
+          ).run(workspaceId, bookmarkId, atMs);
+        }
+        return cloneJson(requireBookmark(db, workspaceId, ownerUserId, bookmarkId));
+      });
+    },
+
+    listBookmarks(input) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Bookmark owner");
+        const state = input.state;
+        if (state !== undefined && state !== "active" && state !== "archived") {
+          throw new LinkedChatStoreError("invalid-follow-target", "Bookmark state is invalid.");
+        }
+        return withDb((db) =>
+          db
+            .prepare(
+              `${BOOKMARK_SELECT_SQL}
+               WHERE b.workspace_id = ? AND b.owner_user_id = ?
+                 ${state ? "AND b.state = ?" : ""}
+               ORDER BY b.updated_at_ms DESC, b.bookmark_id`,
+            )
+            .all(...(state ? [workspaceId, ownerUserId, state] : [workspaceId, ownerUserId]))
+            .map(bookmarkFromRow)
+            .map(cloneJson),
+        );
+      });
+    },
+
+    findBookmark(input) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Bookmark owner");
+        const bookmarkId = normalizeFeedIdentity(input.bookmarkId, "Bookmark id");
+        return withDb((db) => {
+          const row = db
+            .prepare(
+              `${BOOKMARK_SELECT_SQL}
+               WHERE b.workspace_id = ? AND b.owner_user_id = ? AND b.bookmark_id = ?`,
+            )
+            .get(workspaceId, ownerUserId, bookmarkId);
+          return row ? cloneJson(bookmarkFromRow(row)) : null;
+        });
+      });
+    },
+
+    archiveBookmark(input) {
+      return serialize((db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Bookmark owner");
+        const bookmarkId = normalizeFeedIdentity(input.bookmarkId, "Bookmark id");
+        const current = requireBookmark(db, workspaceId, ownerUserId, bookmarkId);
+        if (current.state === "active") {
+          const atMs = nowMs();
+          db.prepare(
+            `UPDATE chat_bookmarks SET state = 'archived', updated_at_ms = ?
+             WHERE workspace_id = ? AND bookmark_id = ?`,
+          ).run(atMs, workspaceId, bookmarkId);
+          // Archive is a durable projection action, not a filesystem side
+          // effect that happens before state changes. The generation bump is
+          // both its crash-retry token and a CAS fence against a stale active
+          // writer completing after this transition.
+          queueBookmarkGeneration(db, workspaceId, bookmarkId, atMs);
+        }
+        return cloneJson(requireBookmark(db, workspaceId, ownerUserId, bookmarkId));
+      });
+    },
+
+    listPendingBookmarks(input) {
+      return afterWrites(async () => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Bookmark owner");
+        const limit = input.limit ?? 50;
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+          throw new LinkedChatStoreError("invalid-follow-target", "Bookmark limit is invalid.");
+        }
+        return withDb((db) =>
+          db
+            .prepare(
+              `${BOOKMARK_SELECT_SQL}
+               WHERE b.workspace_id = ? AND b.owner_user_id = ?
+                 AND o.projection_state = 'pending'
+               ORDER BY o.updated_at_ms, b.bookmark_id
+               LIMIT ?`,
+            )
+            .all(workspaceId, ownerUserId, limit)
+            .map(bookmarkFromRow)
+            .map(cloneJson),
+        );
+      });
+    },
+
+    markBookmarkPending(input) {
+      return serialize((db) => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Bookmark owner");
+        const bookmarkId = normalizeFeedIdentity(input.bookmarkId, "Bookmark id");
+        requireBookmark(db, workspaceId, ownerUserId, bookmarkId);
+        queueBookmarkGeneration(db, workspaceId, bookmarkId, nowMs());
+        return cloneJson(requireBookmark(db, workspaceId, ownerUserId, bookmarkId));
+      });
+    },
+
+    markBookmarkReady(input) {
+      return serialize((db): ChatBookmarkTransitionResult => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Bookmark owner");
+        const bookmarkId = normalizeFeedIdentity(input.bookmarkId, "Bookmark id");
+        requireBookmark(db, workspaceId, ownerUserId, bookmarkId);
+        if (!Number.isSafeInteger(input.generation) || input.generation < 1) {
+          throw new LinkedChatStoreError("invalid-follow-target", "Bookmark generation is invalid.");
+        }
+        const projectedAtMs = input.projectedAtMs ?? nowMs();
+        if (!Number.isFinite(projectedAtMs)) {
+          throw new LinkedChatStoreError("invalid-follow-target", "Projection time is invalid.");
+        }
+        const result = db
+          .prepare(
+            `UPDATE chat_bookmark_outbox
+             SET projected_generation = ?, projection_state = 'ready',
+                 last_projected_at_ms = ?, failure_reason = NULL, updated_at_ms = ?
+             WHERE workspace_id = ? AND bookmark_id = ? AND generation = ?
+               AND projection_state = 'pending'`,
+          )
+          .run(
+            input.generation,
+            projectedAtMs,
+            projectedAtMs,
+            workspaceId,
+            bookmarkId,
+            input.generation,
+          );
+        return cloneJson({
+          bookmark: requireBookmark(db, workspaceId, ownerUserId, bookmarkId),
+          applied: result.changes === 1,
+        });
+      });
+    },
+
+    markBookmarkFailed(input) {
+      return serialize((db): ChatBookmarkTransitionResult => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Bookmark owner");
+        const bookmarkId = normalizeFeedIdentity(input.bookmarkId, "Bookmark id");
+        requireBookmark(db, workspaceId, ownerUserId, bookmarkId);
+        if (!Number.isSafeInteger(input.generation) || input.generation < 1) {
+          throw new LinkedChatStoreError("invalid-follow-target", "Bookmark generation is invalid.");
+        }
+        const failureReason = normalizeBookmarkReason(input.failureReason, true)!;
+        const atMs = nowMs();
+        const result = db
+          .prepare(
+            `UPDATE chat_bookmark_outbox
+             SET projection_state = 'failed', failure_reason = ?, updated_at_ms = ?
+             WHERE workspace_id = ? AND bookmark_id = ? AND generation = ?
+               AND projection_state = 'pending'`,
+          )
+          .run(failureReason, atMs, workspaceId, bookmarkId, input.generation);
+        return cloneJson({
+          bookmark: requireBookmark(db, workspaceId, ownerUserId, bookmarkId),
+          applied: result.changes === 1,
+        });
+      });
+    },
+
+    markBookmarkStale(input) {
+      return serialize((db): ChatBookmarkTransitionResult => {
+        const workspaceId = normalizeWorkspaceId(input.workspaceId);
+        const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Bookmark owner");
+        const bookmarkId = normalizeFeedIdentity(input.bookmarkId, "Bookmark id");
+        requireBookmark(db, workspaceId, ownerUserId, bookmarkId);
+        if (!Number.isSafeInteger(input.generation) || input.generation < 1) {
+          throw new LinkedChatStoreError("invalid-follow-target", "Bookmark generation is invalid.");
+        }
+        const failureReason =
+          input.failureReason === undefined
+            ? undefined
+            : normalizeBookmarkReason(input.failureReason, false);
+        const atMs = nowMs();
+        const result = db
+          .prepare(
+            `UPDATE chat_bookmark_outbox
+             SET projection_state = 'stale', failure_reason = ?, updated_at_ms = ?
+             WHERE workspace_id = ? AND bookmark_id = ? AND generation = ?
+               AND projection_state = 'pending'`,
+          )
+          .run(failureReason ?? null, atMs, workspaceId, bookmarkId, input.generation);
+        return cloneJson({
+          bookmark: requireBookmark(db, workspaceId, ownerUserId, bookmarkId),
+          applied: result.changes === 1,
+        });
+      });
+    },
+
     applyReplicationOp(input): Promise<SyncApplyResult> {
       return serialize((db) => {
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
@@ -2735,7 +3933,27 @@ export function createLinkedChatStore(
           ) {
             throw corruptStore();
           }
-          requireWorkspaceThread(db, workspaceId, payload.threadId);
+          const thread = requireWorkspaceThread(db, workspaceId, payload.threadId);
+          const parentMessageId = optionalString(payload.parentMessageId);
+          let storedParentMessageId: string | null = null;
+          let deferredParentMessageId: string | undefined;
+          if (parentMessageId !== undefined) {
+            const existingParentThreadId =
+              parentMessageId === payload.messageId
+                ? thread.id
+                : workspaceMessageThreadId(db, workspaceId, parentMessageId);
+            if (existingParentThreadId === thread.id && parentMessageId !== payload.messageId) {
+              storedParentMessageId = parentMessageId;
+            } else if (existingParentThreadId === undefined) {
+              // Child-first is a valid cross-origin arrival order. Persist the
+              // claim separately and keep the visible relationship NULL until
+              // this exact parent later arrives in the same thread.
+              deferredParentMessageId = parentMessageId;
+            }
+            // An already-known parent in another thread (or a self-parent)
+            // remains NULL without poisoning the replication origin. This is
+            // the parent-first half of the same deterministic convergence rule.
+          }
           if (
             !db
               .prepare("SELECT 1 FROM chat_messages WHERE workspace_id = ? AND message_id = ?")
@@ -2749,7 +3967,6 @@ export function createLinkedChatStore(
             // chat.reaction.set note below). Absent on solo/legacy ops (persisted
             // as NULL). Never derived from the display name.
             const authorUserId = optionalString(payload.authorUserId) ?? null;
-            const parentMessageId = optionalString(payload.parentMessageId) ?? null;
             const origin = payload.origin ?? null;
             db.prepare(
               `INSERT INTO chat_messages (
@@ -2764,11 +3981,27 @@ export function createLinkedChatStore(
               payload.authorKind,
               payload.authorDisplayName,
               authorUserId,
-              parentMessageId,
+              storedParentMessageId,
               origin,
               payload.body,
               payload.createdAtMs,
             );
+            if (deferredParentMessageId !== undefined) {
+              deferReplicatedMessageParent({
+                db,
+                workspaceId,
+                threadId: thread.id,
+                childMessageId: payload.messageId,
+                parentMessageId: deferredParentMessageId,
+              });
+            }
+            resolveReplicatedMessageParentClaims(
+              db,
+              workspaceId,
+              thread.id,
+              payload.messageId,
+            );
+            markLiveBookmarksPending(db, workspaceId, payload.threadId, payload.createdAtMs);
             indexMessageMentions({
               db,
               workspaceId,
@@ -2848,6 +4081,12 @@ export function createLinkedChatStore(
           );
         } else if (input.opKind === "chat.attachment.add") {
           const payload = input.payload;
+          const headingParts = [
+            payload.headingText,
+            payload.headingAnchor,
+            payload.headingOccurrence,
+          ];
+          const hasHeading = headingParts.some((part) => part !== undefined);
           if (
             typeof payload.attachmentId !== "string" ||
             payload.attachmentId.length === 0 ||
@@ -2860,8 +4099,27 @@ export function createLinkedChatStore(
               (typeof payload.objectId !== "string" ||
                 payload.objectId.length === 0 ||
                 payload.objectId.length > 200 ||
-                payload.attachmentId !== attachmentIdFor(payload.messageId, payload.objectId))) ||
+                payload.attachmentId !==
+                  attachmentIdFor(
+                    payload.messageId,
+                    payload.objectId,
+                    payload.headingAnchor,
+                    payload.headingOccurrence,
+                  ))) ||
             (payload.pathHint !== undefined && !isNormalizedPathHint(payload.pathHint)) ||
+            (hasHeading &&
+              (payload.objectId === undefined ||
+                headingParts.some((part) => part === undefined) ||
+                typeof payload.headingText !== "string" ||
+                typeof payload.headingAnchor !== "string" ||
+                payload.headingText.length === 0 ||
+                payload.headingAnchor.length === 0 ||
+                payload.headingText.length > 500 ||
+                payload.headingAnchor.length > 500 ||
+                PROJECTION_FIELD_CONTROL_CHAR.test(payload.headingText) ||
+                PROJECTION_FIELD_CONTROL_CHAR.test(payload.headingAnchor) ||
+                !Number.isSafeInteger(payload.headingOccurrence) ||
+                (payload.headingOccurrence as number) < 0)) ||
             typeof payload.createdAtMs !== "number" ||
             !Number.isFinite(payload.createdAtMs)
           ) {
@@ -2874,7 +4132,55 @@ export function createLinkedChatStore(
             targetKind: "file",
             ...(payload.objectId !== undefined ? { objectId: payload.objectId } : {}),
             ...(payload.pathHint !== undefined ? { pathHint: payload.pathHint } : {}),
+            ...(payload.headingText !== undefined ? { headingText: payload.headingText } : {}),
+            ...(payload.headingAnchor !== undefined ? { headingAnchor: payload.headingAnchor } : {}),
+            ...(payload.headingOccurrence !== undefined
+              ? { headingOccurrence: payload.headingOccurrence }
+              : {}),
             createdAtMs: payload.createdAtMs,
+          });
+        } else if (input.opKind === "chat.follow.set") {
+          const payload = input.payload;
+          if (
+            typeof payload.ownerUserId !== "string" ||
+            payload.ownerUserId.length === 0 ||
+            payload.ownerUserId.length > 256 ||
+            (payload.targetKind !== "person" &&
+              payload.targetKind !== "agent" &&
+              payload.targetKind !== "channel" &&
+              payload.targetKind !== "thread") ||
+            typeof payload.targetId !== "string" ||
+            payload.targetId.length === 0 ||
+            payload.targetId.length > 256 ||
+            (payload.state !== "following" && payload.state !== "unfollowed") ||
+            typeof payload.atMs !== "number" ||
+            !Number.isFinite(payload.atMs)
+          ) {
+            throw corruptStore();
+          }
+          upsertFollowLww(db, workspaceId, payload, {
+            originId: input.originId,
+            originSeq: input.originSeq,
+          });
+        } else if (input.opKind === "chat.feed.read.set") {
+          const payload = input.payload;
+          if (
+            typeof payload.ownerUserId !== "string" ||
+            payload.ownerUserId.length === 0 ||
+            payload.ownerUserId.length > 256 ||
+            typeof payload.lastSeenCreatedAtMs !== "number" ||
+            !Number.isFinite(payload.lastSeenCreatedAtMs) ||
+            typeof payload.lastSeenMessageId !== "string" ||
+            payload.lastSeenMessageId.length === 0 ||
+            payload.lastSeenMessageId.length > 256 ||
+            typeof payload.atMs !== "number" ||
+            !Number.isFinite(payload.atMs)
+          ) {
+            throw corruptStore();
+          }
+          upsertFeedReadLww(db, workspaceId, payload, {
+            originId: input.originId,
+            originSeq: input.originSeq,
           });
         } else if (input.opKind === "chat.reaction.set") {
           const payload = input.payload;

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   renderChannels,
   renderGrep,
+  renderInbox,
   renderShowMarkdown,
   renderThreads,
   type ShowResult,
@@ -57,7 +58,7 @@ describe("markdown renderers", () => {
       Right now versioning pops a merge dialog...
       [attach: q3-plan.md]
 
-      **Ice** · 2026-07-03T05:06:07.000Z · msg_reply · replying to msg_root · run rn_77xy
+      **Ice's agent** · 2026-07-03T05:06:07.000Z · msg_reply · replying to msg_root · run rn_77xy
       Risk: block forks need a stable blockId.
       "
     `);
@@ -134,6 +135,36 @@ describe("markdown renderers", () => {
     ).toContain("[unread] · th_unread");
   });
 
+  it("labels agent authors in inbox mentions without relabeling humans", () => {
+    const common = {
+      channel: engineering,
+      threadId: "th_8f2k1c",
+      createdAtMs: Date.parse("2026-07-03T05:06:07.000Z"),
+    };
+    expect(
+      renderInbox({
+        threads: [],
+        mentions: [
+          {
+            ...common,
+            messageId: "msg_agent",
+            author: { kind: "agent", displayName: "Ice" },
+            text: "Agent update",
+          },
+          {
+            ...common,
+            messageId: "msg_human",
+            author: { kind: "human", displayName: "Ice de Vera" },
+            text: "Human update",
+          },
+        ],
+      }),
+    ).toBe(
+      "@mention · #engineering · th_8f2k1c · msg_agent · Ice's agent · 2026-07-03  Agent update\n" +
+        "@mention · #engineering · th_8f2k1c · msg_human · Ice de Vera · 2026-07-03  Human update",
+    );
+  });
+
   it("renders ripgrep-shaped matches, context messages, and thread-only output", () => {
     const result = {
       matches: [
@@ -158,7 +189,7 @@ describe("markdown renderers", () => {
     };
     expect(renderGrep(result, { filesWithMatches: false, context: 1 })).toMatchInlineSnapshot(`
       "#engineering th_8f2k1c msg_root Ice de Vera 2026-07-03  - Earlier context
-      #engineering th_8f2k1c msg_reply Ice 2026-07-03  stable blockId"
+      #engineering th_8f2k1c msg_reply Ice's agent 2026-07-03  stable blockId"
     `);
     expect(renderGrep(result, { filesWithMatches: true, context: 1 })).toBe("th_8f2k1c");
     expect(

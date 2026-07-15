@@ -16,6 +16,7 @@ import { AGENT_CHANNEL_WIRE_ID, LINKED_CHAT_STORE_RELATIVE_PATH, createLinkedCha
 interface RawSqliteStatement {
   all(...params: unknown[]): Array<Record<string, unknown>>;
   get(...params: unknown[]): Record<string, unknown> | undefined;
+  run(...params: unknown[]): unknown;
 }
 
 interface RawSqliteDb {
@@ -275,7 +276,7 @@ describe("phase-one linked chat model", () => {
     });
   });
 
-  it("round-trips parent ids and accepts a replicated child before its parent", async () => {
+  it("defers a replicated child parent until that parent arrives in the same thread", async () => {
     const engine = await makeEngine("parents");
     const channel = await engine.store.ensureGeneralChannel({
       workspaceId: WORKSPACE_ID,
@@ -311,6 +312,23 @@ describe("phase-one linked chat model", () => {
         createdAtMs: 3000,
       }),
     );
+    expect(
+      (await engine.store.listMessages({
+        workspaceId: WORKSPACE_ID,
+        threadId: started.thread.id,
+      })).find((message) => message.id === "remote-child")?.parentMessageId,
+    ).toBeUndefined();
+    expect(
+      rawDbFor(engine, (db) =>
+        Number(
+          db
+            .prepare(
+              "SELECT COUNT(*) AS count FROM chat_pending_message_parents WHERE workspace_id = ?",
+            )
+            .get(WORKSPACE_ID)?.count,
+        ),
+      ),
+    ).toBe(1);
     await engine.store.applyReplicationOp(
       messageEnvelope({
         originId: "origin-parent",
@@ -337,6 +355,202 @@ describe("phase-one linked chat model", () => {
     expect(messages.find((message) => message.id === localChild.id)?.parentMessageId).toBe(localParent.id);
     expect(messages.find((message) => message.id === "remote-child")?.parentMessageId).toBe("remote-parent");
     expect(messages.find((message) => message.id === "legacy-message")?.parentMessageId).toBeUndefined();
+    expect(
+      rawDbFor(engine, (db) =>
+        Number(
+          db
+            .prepare(
+              "SELECT COUNT(*) AS count FROM chat_pending_message_parents WHERE workspace_id = ?",
+            )
+            .get(WORKSPACE_ID)?.count,
+        ),
+      ),
+    ).toBe(0);
+  });
+
+  it("keeps local parents strict and never activates replicated cross-thread parents", async () => {
+    const engine = await makeEngine("parent-integrity");
+    const channel = await engine.store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const first = await engine.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "First opening",
+    });
+    const second = await engine.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Second opening",
+    });
+
+    await expect(
+      engine.store.sendMessage({
+        workspaceId: WORKSPACE_ID,
+        threadId: first.thread.id,
+        parentMessageId: "message-does-not-exist",
+        author: { kind: "human", displayName: "You" },
+        body: "Missing local parent",
+      }),
+    ).rejects.toMatchObject({ code: "message-not-found" });
+    await expect(
+      engine.store.sendMessage({
+        workspaceId: WORKSPACE_ID,
+        threadId: second.thread.id,
+        parentMessageId: first.message.id,
+        author: { kind: "human", displayName: "You" },
+        body: "Cross-thread local parent",
+      }),
+    ).rejects.toMatchObject({ code: "message-not-found" });
+
+    await expect(
+      engine.store.applyReplicationOp(
+        messageEnvelope({
+          originId: "origin-missing-parent",
+          threadId: first.thread.id,
+          messageId: "remote-missing-parent",
+          parentMessageId: "message-does-not-exist",
+          body: "Missing remote parent",
+          createdAtMs: 5000,
+        }),
+      ),
+    ).resolves.toMatchObject({ status: "applied" });
+    expect(
+      (await engine.store.listMessages({
+        workspaceId: WORKSPACE_ID,
+        threadId: first.thread.id,
+      })).find((message) => message.id === "remote-missing-parent")?.parentMessageId,
+    ).toBeUndefined();
+    await expect(
+      engine.store.applyReplicationOp(
+        messageEnvelope({
+          originId: "origin-cross-thread-parent",
+          threadId: second.thread.id,
+          messageId: "remote-cross-thread-parent",
+          parentMessageId: first.message.id,
+          body: "Cross-thread remote parent",
+          createdAtMs: 5001,
+        }),
+      ),
+    ).resolves.toMatchObject({ status: "applied" });
+
+    await expect(
+      engine.store.applyReplicationOp(
+        messageEnvelope({
+          originId: "origin-child-first-cross-thread",
+          threadId: second.thread.id,
+          messageId: "remote-child-first-cross-thread",
+          parentMessageId: "future-parent-in-other-thread",
+          body: "Child before cross-thread parent",
+          createdAtMs: 5002,
+        }),
+      ),
+    ).resolves.toMatchObject({ status: "applied" });
+    await expect(
+      engine.store.applyReplicationOp(
+        messageEnvelope({
+          originId: "origin-future-cross-thread-parent",
+          threadId: first.thread.id,
+          messageId: "future-parent-in-other-thread",
+          body: "Parent materialized elsewhere",
+          createdAtMs: 5003,
+        }),
+      ),
+    ).resolves.toMatchObject({ status: "applied" });
+
+    const secondMessages = await engine.store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: second.thread.id,
+    });
+    expect(
+      secondMessages.find((message) => message.id === "remote-child-first-cross-thread")
+        ?.parentMessageId,
+    ).toBeUndefined();
+    expect(
+      secondMessages.find((message) => message.id === "remote-cross-thread-parent")
+        ?.parentMessageId,
+    ).toBeUndefined();
+    expect(
+      rawDbFor(engine, (db) =>
+        Number(
+          db
+            .prepare(
+              `SELECT COUNT(*) AS count FROM chat_pending_message_parents
+               WHERE workspace_id = ? AND parent_message_id = ?`,
+            )
+            .get(WORKSPACE_ID, "future-parent-in-other-thread")?.count,
+        ),
+      ),
+    ).toBe(0);
+  });
+
+  it("migrates legacy unresolved parents into deferred state and removes cross-thread links", async () => {
+    const engine = await makeEngine("parent-migration");
+    const channel = await engine.store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const first = await engine.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "First opening",
+    });
+    const second = await engine.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Second opening",
+    });
+    const unresolvedChild = await engine.store.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: second.thread.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Legacy unresolved child",
+    });
+    await engine.store.close();
+    rawDbFor(engine, (db) => {
+      db.prepare(
+        "UPDATE chat_messages SET parent_message_id = ? WHERE workspace_id = ? AND message_id = ?",
+      ).run(first.message.id, WORKSPACE_ID, second.message.id);
+      db.prepare(
+        "UPDATE chat_messages SET parent_message_id = ? WHERE workspace_id = ? AND message_id = ?",
+      ).run("future-same-thread-parent", WORKSPACE_ID, unresolvedChild.id);
+    });
+
+    engine.store = createLinkedChatStore(engine.root);
+    let messages = await engine.store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: second.thread.id,
+    });
+    expect(messages.find((message) => message.id === second.message.id)?.parentMessageId).toBeUndefined();
+    expect(messages.find((message) => message.id === unresolvedChild.id)?.parentMessageId).toBeUndefined();
+    expect(
+      rawDbFor(engine, (db) =>
+        Number(
+          db
+            .prepare(
+              "SELECT COUNT(*) AS count FROM chat_pending_message_parents WHERE workspace_id = ?",
+            )
+            .get(WORKSPACE_ID)?.count,
+        ),
+      ),
+    ).toBe(1);
+
+    await engine.store.applyReplicationOp(
+      messageEnvelope({
+        originId: "origin-migrated-parent",
+        threadId: second.thread.id,
+        messageId: "future-same-thread-parent",
+        body: "Deferred parent arrived",
+        createdAtMs: 6000,
+      }),
+    );
+    messages = await engine.store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: second.thread.id,
+    });
+    expect(messages.find((message) => message.id === unresolvedChild.id)?.parentMessageId).toBe(
+      "future-same-thread-parent",
+    );
+    expect(messages.find((message) => message.id === second.message.id)?.parentMessageId).toBeUndefined();
   });
 
   it("orders messages by created time and message id instead of arrival order", async () => {

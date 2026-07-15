@@ -64,6 +64,16 @@ async function seedManifest(ctx: ToolContext, workspaceId: string): Promise<void
   );
 }
 
+async function seedPreferredName(
+  ctx: ToolContext,
+  preferredName: unknown,
+): Promise<void> {
+  await writeFile(
+    join(ctx.home, "dohc-settings.json"),
+    `${JSON.stringify({ version: 1, profile: { preferredName } }, null, 2)}\n`,
+  );
+}
+
 // Seeds a tracked file + a linked chat directly in the engine stores (the
 // same seeded-state pattern the desktop chats E2E uses).
 async function seedLinkedChat(ctx: ToolContext, workspaceId: string) {
@@ -296,6 +306,7 @@ describe("linked chat tools", () => {
     await withWorkspace(async (ctx) => {
       await seedEngineFlag(ctx);
       await seedManifest(ctx, "ws-chats");
+      await seedPreferredName(ctx, "  Ice  ");
       const { thread } = await seedLinkedChat(ctx, "ws-chats");
 
       const listed = await listFileChats(ctx, { path: "notes/agenda.md" });
@@ -330,9 +341,8 @@ describe("linked chat tools", () => {
         },
       });
 
-      // Signed out: the reply's display name is "You" (the SAME rule the
-      // desktop's localUserDisplayName applies) — shared surfaces render it
-      // as "You's agent".
+      // MCP persists the profile-owned raw name. Presentation surfaces add
+      // the possessive agent label without changing durable authorship.
       const reply = await replyToChat(ctx, {
         threadId: thread.id,
         body: "Done — trimmed it to three items.",
@@ -341,7 +351,7 @@ describe("linked chat tools", () => {
         ok: true,
         message: {
           authorKind: "agent",
-          authorDisplayName: "You",
+          authorDisplayName: "Ice",
           body: "Done — trimmed it to three items.",
         },
       });
@@ -355,22 +365,64 @@ describe("linked chat tools", () => {
       });
       expect(messages.map((message) => message.author)).toEqual([
         { kind: "human", displayName: "Ice de Vera" },
-        { kind: "agent", displayName: "You" },
+        { kind: "agent", displayName: "Ice" },
       ]);
       await chats.close();
     });
   });
 
-  it("uses the dohc Cloud email for the agent's on-behalf-of name when present", async () => {
+  it("uses the preferred profile name and never substitutes a cloud email", async () => {
     await withWorkspace(async (ctx) => {
       vi.stubEnv("DOHC_MCP_CLOUD_EMAIL", "ice@example.com");
+      await writeFile(
+        join(ctx.home, "dohc-cloud.json"),
+        `${JSON.stringify({ version: 1, email: "credential@example.com" })}\n`,
+      );
+      await seedPreferredName(ctx, "Ice de Vera");
       await seedEngineFlag(ctx);
       await seedManifest(ctx, "ws-chats");
       const { thread } = await seedLinkedChat(ctx, "ws-chats");
       const reply = await replyToChat(ctx, { threadId: thread.id, body: "On it." });
       expect(reply).toMatchObject({
         ok: true,
-        message: { authorKind: "agent", authorDisplayName: "ice@example.com" },
+        message: { authorKind: "agent", authorDisplayName: "Ice de Vera" },
+      });
+    });
+  });
+
+  it("prefers a validated DOHC_MCP_OWNER_NAME over persisted settings", async () => {
+    await withWorkspace(async (ctx) => {
+      vi.stubEnv("DOHC_MCP_OWNER_NAME", "  Icy  ");
+      await seedPreferredName(ctx, "Ice");
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, "ws-chats");
+      const { thread } = await seedLinkedChat(ctx, "ws-chats");
+      const reply = await replyToChat(ctx, { threadId: thread.id, body: "On it." });
+      expect(reply).toMatchObject({
+        ok: true,
+        message: { authorKind: "agent", authorDisplayName: "Icy" },
+      });
+    });
+  });
+
+  it("ignores cloud email when no valid owner name is configured", async () => {
+    await withWorkspace(async (ctx) => {
+      vi.stubEnv("DOHC_MCP_CLOUD_EMAIL", "ice@example.com");
+      vi.stubEnv("DOHC_MCP_OWNER_NAME", "bad\u0001name");
+      vi.stubEnv("USERNAME", "");
+      vi.stubEnv("USER", "");
+      await writeFile(
+        join(ctx.home, "dohc-cloud.json"),
+        `${JSON.stringify({ version: 1, email: "credential@example.com" })}\n`,
+      );
+      await seedPreferredName(ctx, " ");
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, "ws-chats");
+      const { thread } = await seedLinkedChat(ctx, "ws-chats");
+      const reply = await replyToChat(ctx, { threadId: thread.id, body: "On it." });
+      expect(reply).toMatchObject({
+        ok: true,
+        message: { authorKind: "agent", authorDisplayName: "You" },
       });
     });
   });
@@ -405,6 +457,8 @@ describe("channel tools (PR 12/13 slice)", () => {
 
   it("lists channels (auto-creating general) and starts a chat as the agent", async () => {
     await withWorkspace(async (ctx) => {
+      vi.stubEnv("USERNAME", "");
+      vi.stubEnv("USER", "");
       await seedEngineFlag(ctx);
       await seedManifest(ctx, "ws-channels");
 

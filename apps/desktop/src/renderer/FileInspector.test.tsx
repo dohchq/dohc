@@ -13,6 +13,7 @@ import {
   lineSpanInText,
   markdownEditorBody,
   mergeMarkdownEditorBody,
+  resolveWikilinkNavigation,
 } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 
@@ -37,6 +38,37 @@ describe("lineSpanInText (search scroll-to-line, Phase E5.0)", () => {
   it("clamps a line past the end to the last line", () => {
     expect(lineSpanInText(text, 99)).toEqual({ start: 19, end: 25 });
     expect(lineSpanInText("", 5)).toEqual({ start: 0, end: 0 });
+  });
+});
+
+describe("resolveWikilinkNavigation", () => {
+  const files = [
+    { path: "notes/plan.md", title: "Plan" },
+    { path: "today.md", title: "Today" },
+  ];
+
+  it("opens file fragments as an exact heading target", () => {
+    expect(
+      resolveWikilinkNavigation("notes/plan.md#next-steps", "today.md", files, 7),
+    ).toEqual({
+      path: "notes/plan.md",
+      headingTarget: { anchor: "next-steps", nonce: 7 },
+    });
+  });
+
+  it("keeps fragment-only links in the current file and preserves encoded anchors", () => {
+    expect(
+      resolveWikilinkNavigation("#caf%C3%A9-plan", "today.md", files, 8),
+    ).toEqual({
+      path: "today.md",
+      headingTarget: { anchor: "caf%C3%A9-plan", nonce: 8 },
+    });
+  });
+
+  it("preserves whole-file wikilink resolution without manufacturing a target", () => {
+    expect(resolveWikilinkNavigation("notes/plan", "today.md", files, 9)).toEqual({
+      path: "notes/plan.md",
+    });
   });
 });
 

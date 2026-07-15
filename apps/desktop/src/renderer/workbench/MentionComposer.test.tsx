@@ -130,7 +130,7 @@ describe("MentionComposer autocomplete", () => {
     expect(composer.getAttribute("role")).toBe("combobox");
     await userEvent.type(composer, "@");
     const menu = await screen.findByRole("listbox");
-    expect(menu.getAttribute("aria-label")).toBe("Mention a person or agent");
+    expect(menu.getAttribute("aria-label")).toBe("Mention a person, agent, or file");
     expect(composer.getAttribute("aria-expanded")).toBe("true");
   });
 });

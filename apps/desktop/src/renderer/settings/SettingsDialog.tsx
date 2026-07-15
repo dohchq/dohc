@@ -29,6 +29,7 @@ import {
 import { bridge } from "../bridge";
 import { applyAppearanceSettings } from "../theme";
 import { AgentsMcpSettings } from "./AgentsMcpSettings";
+import { PreferredNameControl } from "./PreferredNameControl";
 import { SegmentedControl, SettingRow, SwitchControl, TextControl } from "./SettingRow";
 import { SharedByMeList } from "./SharedByMeList";
 import { SharedWithMeList } from "./SharedWithMeList";
@@ -551,6 +552,13 @@ export function SettingsDialog(props: {
             <AgentsMcpSettings
               workspaceId={props.workspaceId}
               workspacePath={props.workspacePath}
+              preferredName={userSettings.profile.preferredName}
+              onPreferredNameChange={(preferredName) =>
+                saveUserSettings({
+                  ...userSettings,
+                  profile: preferredName ? { preferredName } : {},
+                })
+              }
               runner={userSettings.runner}
               onRunnerChange={(runner) =>
                 saveUserSettings({
@@ -818,6 +826,32 @@ export function SettingsDialog(props: {
       default:
         return (
           <div data-testid="settings-section-general">
+            <SettingRow
+              title="Your name"
+              description="dohc uses this name for human messages and attributes local-agent work to you. It is display-only; permissions use your verified identity."
+              modified={isModified(
+                userSettings.profile.preferredName,
+                DEFAULT_USER_SETTINGS.profile.preferredName,
+              )}
+              onReset={() =>
+                void saveUserSettings({
+                  ...userSettings,
+                  profile: {},
+                })
+              }
+              testId="settings-row-preferred-name"
+            >
+              <PreferredNameControl
+                value={userSettings.profile.preferredName}
+                onChange={(preferredName) =>
+                  saveUserSettings({
+                    ...userSettings,
+                    profile: preferredName ? { preferredName } : {},
+                  })
+                }
+                testIdPrefix="general-preferred-name"
+              />
+            </SettingRow>
             <SettingRow
               title="Current workspace"
               description="Settings in the Workspace scope apply only to this registered local folder."

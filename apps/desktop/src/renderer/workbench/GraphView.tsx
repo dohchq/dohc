@@ -424,7 +424,8 @@ function GraphMap(props: {
   graph: WorkspaceGraphResult;
   activePath: string | null;
   variant: GraphVariant;
-  onOpenPath: (path: string) => void;
+  onOpenPath: (path: string, headingAnchor?: string) => void;
+  onOpenChatThread?: (node: WorkspaceGraphNode) => void;
 }) {
   const layout = GRAPH_LAYOUT[props.variant];
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -443,6 +444,18 @@ function GraphMap(props: {
     () => new Map(points.map((point) => [point.path, point])),
     [points],
   );
+
+  function openNode(path: string) {
+    const node = byPath.get(path);
+    if (!node) return;
+    if (node.kind === "chat-thread") {
+      props.onOpenChatThread?.(node);
+      return;
+    }
+    const targetPath = node.filePath ?? node.path;
+    if (node.headingAnchor) props.onOpenPath(targetPath, node.headingAnchor);
+    else props.onOpenPath(targetPath);
+  }
 
   function pointFromPointer(event: React.PointerEvent<SVGElement>) {
     const rect = svgRef.current?.getBoundingClientRect();
@@ -481,7 +494,7 @@ function GraphMap(props: {
     ) {
       svg?.releasePointerCapture(event.pointerId);
     }
-    if (shouldOpen) props.onOpenPath(drag.path);
+    if (shouldOpen) openNode(drag.path);
   }
 
   return (
@@ -538,6 +551,7 @@ function GraphMap(props: {
             key={node.path}
             data-testid="graph-node"
             data-path={node.path}
+            data-kind={node.kind ?? "file"}
             role="button"
             tabIndex={0}
             aria-label={`Open or focus ${node.path}`}
@@ -562,7 +576,7 @@ function GraphMap(props: {
             onKeyDown={(event) => {
               if (event.key === "Enter" || event.key === " ") {
                 event.preventDefault();
-                props.onOpenPath(node.path);
+                openNode(node.path);
               }
             }}
           >
@@ -616,11 +630,16 @@ export function GraphView(props: {
   workspaceId: string;
   activePath: string | null;
   refreshKey: string;
-  onOpenPath: (path: string) => void;
+  onOpenPath: (path: string, headingAnchor?: string) => void;
+  onOpenChatThread?: (node: WorkspaceGraphNode) => void;
+  chatMentionsAvailable?: boolean;
   variant?: GraphVariant;
 }) {
   const variant = props.variant ?? "panel";
   const [reloadNonce, setReloadNonce] = useState(0);
+  const [includeChatMentions, setIncludeChatMentions] = useState(false);
+  const chatMentionsEnabled =
+    props.chatMentionsAvailable === true && includeChatMentions;
   const [state, setState] = useState<GraphState>({
     status: "loading",
     graph: null,
@@ -639,7 +658,10 @@ export function GraphView(props: {
       error: null,
     }));
     void bridge()
-      .readWorkspaceGraph({ workspaceId: props.workspaceId })
+      .readWorkspaceGraph({
+        workspaceId: props.workspaceId,
+        includeChatMentions: chatMentionsEnabled,
+      })
       .then((graph) => {
         if (!cancelled) setState({ status: "ready", graph, error: null });
       })
@@ -654,7 +676,7 @@ export function GraphView(props: {
     return () => {
       cancelled = true;
     };
-  }, [props.workspaceId, props.refreshKey, reloadNonce]);
+  }, [chatMentionsEnabled, props.workspaceId, props.refreshKey, reloadNonce]);
 
   const graph = state.graph ?? EMPTY_GRAPH;
   const rows = useMemo(
@@ -694,12 +716,30 @@ export function GraphView(props: {
             {notice}
           </span>
         ) : null}
+        {props.chatMentionsAvailable ? (
+          <button
+            type="button"
+            data-testid="graph-chat-mentions-toggle"
+            aria-pressed={includeChatMentions}
+            title="Show chat and heading mentions"
+            onClick={() => setIncludeChatMentions((value) => !value)}
+            className={`ml-auto rounded-md border px-2 py-1 text-[10px] transition-colors ${
+              includeChatMentions
+                ? "border-accent/50 bg-accent/10 text-accent"
+                : "border-line text-subtle hover:bg-line/40 hover:text-ink"
+            }`}
+          >
+            Chat mentions
+          </button>
+        ) : (
+          <span className="ml-auto" />
+        )}
         <button
           type="button"
           aria-label="Refresh graph"
           title="Refresh graph"
           onClick={load}
-          className="ml-auto grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
+          className="grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink"
         >
           <RefreshCw size={13} aria-hidden />
         </button>
@@ -733,6 +773,7 @@ export function GraphView(props: {
             activePath={props.activePath}
             variant={variant}
             onOpenPath={props.onOpenPath}
+            onOpenChatThread={props.onOpenChatThread}
           />
           {variant === "page" ? null : (
             <div className="flex min-h-0 flex-1 flex-col">
@@ -746,7 +787,16 @@ export function GraphView(props: {
                       data-testid="graph-file-row"
                       data-path={node.path}
                       data-active={active ? "true" : "false"}
-                      onClick={() => props.onOpenPath(node.path)}
+                      onClick={() =>
+                        node.kind === "chat-thread"
+                          ? props.onOpenChatThread?.(node)
+                          : node.headingAnchor
+                            ? props.onOpenPath(
+                                node.filePath ?? node.path,
+                                node.headingAnchor,
+                              )
+                            : props.onOpenPath(node.filePath ?? node.path)
+                      }
                       className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-75 ${
                         active
                           ? "bg-line text-ink"
@@ -761,7 +811,11 @@ export function GraphView(props: {
                           {node.title}
                         </span>
                         <span className="block truncate font-mono text-[10px] text-subtle">
-                          {node.path}
+                          {node.kind === "heading"
+                            ? node.filePath
+                            : node.kind === "chat-thread"
+                              ? "Chat thread"
+                              : node.path}
                         </span>
                       </span>
                       <span className="font-mono text-[10px] text-subtle">

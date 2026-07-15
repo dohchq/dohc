@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PreferredName } from "@dohc/workspace-contracts/chat-identity";
 
 export const THEME_MODES = ["system", "light", "dark"] as const;
 export type ThemeMode = (typeof THEME_MODES)[number];
@@ -27,6 +28,12 @@ export const DEFAULT_RUNNER_SETTINGS: RunnerSettings = {
 
 export const DesktopUserSettings = z.object({
   version: z.literal(1),
+  // Added after the original v1 settings shipped. The default makes old v1
+  // files migrate in place instead of failing the strict top-level parse and
+  // resetting unrelated preferences.
+  profile: z.object({
+    preferredName: PreferredName.optional(),
+  }).strict().default({}),
   appearance: z.object({
     themeMode: z.enum(THEME_MODES),
     density: z.enum(DENSITY_MODES),
@@ -51,6 +58,7 @@ export type DesktopUserSettings = z.infer<typeof DesktopUserSettings>;
 
 export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
   version: 1,
+  profile: {},
   appearance: {
     themeMode: "system",
     density: "comfortable",
@@ -82,7 +90,8 @@ export const DesktopUserSettingsResult = z.object({
 export type DesktopUserSettingsResult = z.infer<typeof DesktopUserSettingsResult>;
 
 export type DesktopUserSettingsPatch =
-  Partial<Omit<DesktopUserSettings, "appearance" | "general" | "editor" | "notifications" | "runner">> & {
+  Partial<Omit<DesktopUserSettings, "profile" | "appearance" | "general" | "editor" | "notifications" | "runner">> & {
+    profile?: Partial<DesktopUserSettings["profile"]>;
     appearance?: Partial<DesktopUserSettings["appearance"]>;
     general?: Partial<DesktopUserSettings["general"]>;
     editor?: Partial<DesktopUserSettings["editor"]>;
@@ -114,6 +123,7 @@ export function mergeDesktopUserSettings(
   return DesktopUserSettings.parse({
     ...current,
     ...patch,
+    profile: { ...current.profile, ...patch.profile },
     appearance: { ...current.appearance, ...patch.appearance },
     general: { ...current.general, ...patch.general },
     editor: { ...current.editor, ...patch.editor },

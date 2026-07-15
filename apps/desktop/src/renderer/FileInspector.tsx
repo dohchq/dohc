@@ -19,6 +19,7 @@ import {
   type RefAttributes,
 } from "react";
 import type * as Y from "yjs";
+import type { ChatFileMentionRecord } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { IncrementalMarkdownDocument } from "./markdown/IncrementalMarkdownDocument";
 import { bridge } from "./bridge";
@@ -32,6 +33,7 @@ import type {
   MarkdownEditorHandle,
   MarkdownEditorProps,
 } from "./editor/MarkdownEditor";
+import type { HeadingNavigationTarget } from "./editor/OutlinePanel";
 import type { PropertiesPanelProps } from "./PropertiesPanel";
 import { PageIdentity } from "./PageIdentity";
 import { BacklinksPanel } from "./BacklinksPanel";
@@ -80,6 +82,41 @@ export interface ScrollTarget {
   path: string;
   line: number;
   nonce: number;
+}
+
+export type HeadingTarget = HeadingNavigationTarget;
+
+export type WikilinkNavigation = {
+  path: string;
+  headingTarget?: HeadingTarget;
+};
+
+/** Resolve a rich-editor wikilink without treating its `#fragment` as part of
+ * the filename. Fragment-only links stay in the current file; file fragments
+ * retain the existing known-file/fallback path resolution. */
+export function resolveWikilinkNavigation(
+  target: string,
+  currentPath: string,
+  knownFiles: ReadonlyArray<WikilinkFile>,
+  nonce: number,
+): WikilinkNavigation {
+  const hashIndex = target.indexOf("#");
+  const fileTarget = hashIndex === -1 ? target : target.slice(0, hashIndex);
+  const fragment = hashIndex === -1 ? "" : target.slice(hashIndex + 1);
+  let path = currentPath;
+  if (fileTarget) {
+    const normalized = fileTarget.replace(/\.md$/i, "");
+    const match =
+      knownFiles.find((file) => file.path.replace(/\.md$/i, "") === normalized) ??
+      knownFiles.find((file) => file.path === fileTarget);
+    path = match?.path ?? `${normalized}.md`;
+  }
+  return {
+    path,
+    ...(fragment
+      ? { headingTarget: { anchor: fragment, nonce } }
+      : {}),
+  };
 }
 
 export type PendingFileUndo = {
@@ -524,7 +561,9 @@ function MarkdownView(props: {
   truncatedNotice?: React.ReactNode;
   // A pending search-result jump for this path (Phase E5.0).
   scrollTarget?: ScrollTarget;
-  onOpenPath?: (path: string) => void;
+  headingTarget?: HeadingTarget;
+  onOpenPath?: (path: string, headingTarget?: HeadingTarget) => void;
+  onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
   onSharePath?: (path: string) => void;
   onSaveStateChange?: (state: "saved" | "saving" | "error") => void;
   registerDraftFlush?: (flush: (() => Promise<void>) | null) => void;
@@ -580,6 +619,16 @@ function MarkdownView(props: {
     // Applied once per jump: nonce is the identity of one click.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scrollTargetNonce]);
+  const headingTargetNonce = props.headingTarget?.nonce;
+  useEffect(() => {
+    if (!props.headingTarget || props.truncated) return;
+    // Search-line jumps intentionally keep their established source-mode
+    // behavior when both targets are present.
+    if (props.scrollTarget?.path === props.path) return;
+    setMode("wysiwyg");
+    // Applied once per jump; nonce permits repeating the same anchor.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [headingTargetNonce]);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const wysiwygRef = useRef<MarkdownEditorHandle | null>(null);
   const latestDraft = useRef(props.body);
@@ -904,12 +953,15 @@ function MarkdownView(props: {
     return () => window.removeEventListener("keydown", onKeyDown);
   });
 
+  const wikilinkNavigationNonce = useRef(0);
   function openWikilink(target: string) {
-    const normalized = target.replace(/\.md$/i, "");
-    const match =
-      knownFiles.find((file) => file.path.replace(/\.md$/i, "") === normalized) ??
-      knownFiles.find((file) => file.path === target);
-    props.onOpenPath?.(match?.path ?? `${normalized}.md`);
+    const navigation = resolveWikilinkNavigation(
+      target,
+      props.path,
+      knownFiles,
+      ++wikilinkNavigationNonce.current,
+    );
+    props.onOpenPath?.(navigation.path, navigation.headingTarget);
   }
 
   // Unmount flush — silent loss is never acceptable. Closing/switching the
@@ -964,6 +1016,7 @@ function MarkdownView(props: {
       path={props.path}
       refreshKey={props.refreshKey}
       onOpenPath={props.onOpenPath}
+      onOpenChatMention={props.onOpenChatMention}
     />
   );
 
@@ -1093,6 +1146,7 @@ function MarkdownView(props: {
                 path={props.path}
                 knownFiles={knownFiles}
                 onOpenWikilink={openWikilink}
+                headingTarget={props.headingTarget}
                 pendingUndo={editorPendingUndo}
                 onPendingUndoConsumed={props.onPendingUndoConsumed}
                 collab={{
@@ -1224,6 +1278,7 @@ function MarkdownView(props: {
                 path={props.path}
                 knownFiles={knownFiles}
                 onOpenWikilink={openWikilink}
+                headingTarget={props.headingTarget}
                 pendingUndo={editorPendingUndo}
                 onPendingUndoConsumed={props.onPendingUndoConsumed}
                 collab={null}
@@ -1875,10 +1930,14 @@ export function FileInspector(props: {
   workspaceId: string;
   path: string;
   refreshKey?: number;
-  onOpenPath?: (path: string) => void;
+  onOpenPath?: (path: string, headingTarget?: HeadingTarget) => void;
+  onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
   // A pending search-result jump (Phase E5.0). Consumed (onScrollConsumed)
   // once a mounted view applied it, so plain re-opens never re-jump.
   scrollTarget?: ScrollTarget;
+  // A pending file/section mention or fragment-link jump. Unlike a search
+  // target this stays in the rich editor and lands on the rendered heading.
+  headingTarget?: HeadingTarget;
   onScrollConsumed?: () => void;
   // Editor save-state seam for the tab strip's dirty indicator. Editable
   // source/table/document views all report through the same small contract.
@@ -1967,7 +2026,9 @@ export function FileInspector(props: {
             truncated={truncated}
             truncatedNotice={truncatedNotice}
             scrollTarget={props.scrollTarget}
+            headingTarget={props.headingTarget}
             onOpenPath={props.onOpenPath}
+            onOpenChatMention={props.onOpenChatMention}
             onSharePath={props.onSharePath}
             onSaveStateChange={props.onSaveStateChange}
             registerDraftFlush={props.registerDraftFlush}

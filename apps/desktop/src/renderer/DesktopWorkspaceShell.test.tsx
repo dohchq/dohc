@@ -11,6 +11,8 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
+  ChatChannelRecord,
+  FileChatThreadRecord,
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
   UpdateStateEvent,
@@ -275,7 +277,13 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       ],
       activeVersionId: "main",
     })),
-    listChatChannels: vi.fn(async () => ({ channels: [], fileThreads: [] })),
+    listChatChannels: vi.fn(
+      async (): Promise<{
+        channels: ChatChannelRecord[];
+        fileThreads: FileChatThreadRecord[];
+      }> => ({ channels: [], fileThreads: [] }),
+    ),
+    listChannelThreads: vi.fn(async () => ({ threads: [] })),
     listChatChannelShares: vi.fn(async () => {
       // Sharing is optional; ChatsView downgrades a rejection to "none".
       throw new Error("sharing unavailable in shell tests");
@@ -358,9 +366,9 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
     expect((await screen.findByTestId("side-panel")).style.width).toBe("320px");
     // chatsVisible is stored true, but this workspace is engine-off: the
-    // Chats panel (and its activity-bar toggle) must not exist at all.
+    // Chats panel (and its titlebar toggle) must not exist at all.
     expect(screen.queryByTestId("chats-panel")).toBeNull();
-    expect(screen.queryByTestId("activity-chats")).toBeNull();
+    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
   });
 });
 
@@ -905,13 +913,13 @@ describe("chats panel (right side)", () => {
 
     await screen.findByText("a.md");
     expect(screen.queryByTestId("chats-panel")).toBeNull();
-    expect(screen.queryByTestId("activity-chats")).toBeNull();
+    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
     // The old history rail is gone for good — no timeline, no restore stub.
     expect(screen.queryByTestId("history-timeline")).toBeNull();
     expect(screen.queryByTestId("history-restore")).toBeNull();
   });
 
-  it("toggles from the activity bar and hides entirely when collapsed", async () => {
+  it("toggles from the titlebar and hides entirely when collapsed", async () => {
     const bridge = makeEngineBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -919,8 +927,9 @@ describe("chats panel (right side)", () => {
     // Hidden by default (VS Code secondary-sidebar grammar).
     await screen.findByText("a.md");
     expect(screen.queryByTestId("chats-panel")).toBeNull();
+    expect(screen.queryByTestId("activity-chats")).toBeNull();
 
-    await user.click(await screen.findByTestId("activity-chats"));
+    await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
 
     await user.click(screen.getByTestId("chats-panel-collapse"));
@@ -928,8 +937,64 @@ describe("chats panel (right side)", () => {
     // Collapsed means GONE — no 36px stub squatting on the right edge.
     expect(screen.queryByTestId("history-restore")).toBeNull();
 
-    await user.click(screen.getByTestId("activity-chats"));
+    await user.click(screen.getByTestId("titlebar-chats-sidebar"));
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
+  });
+
+  it("keeps the navigator open and switches the editor between channels", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listChatChannels.mockResolvedValue({
+      channels: [
+        {
+          id: "channel-1",
+          name: "general",
+          slug: "general",
+          kind: "channel" as const,
+          createdAtMs: 1_700_000_000_000,
+          updatedAtMs: 1_700_000_000_000,
+          threadCount: 0,
+          unreadCount: 0,
+        },
+        {
+          id: "channel-2",
+          name: "random",
+          slug: "random",
+          kind: "channel" as const,
+          createdAtMs: 1_700_000_000_001,
+          updatedAtMs: 1_700_000_000_001,
+          threadCount: 0,
+          unreadCount: 0,
+        },
+      ],
+      fileThreads: [],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
+    const panel = await screen.findByTestId("chats-panel");
+    const channelButtons = within(panel).getAllByTestId("chats-channel");
+    await user.click(channelButtons[0]!);
+
+    const channelView = await screen.findByTestId("chats-channel-view");
+    expect(channelView.dataset.variant).toBe("page");
+    expect(channelButtons).toHaveLength(2);
+    await waitFor(() => expect(channelButtons[0]?.dataset.active).toBe("true"));
+    expect(bridge.listChannelThreads).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      channelId: "channel-1",
+    });
+
+    await user.click(channelButtons[1]!);
+    await waitFor(() => {
+      expect(screen.getByTestId("chats-channel-title").textContent).toBe("random");
+    });
+    expect(screen.getByTestId("chats-panel")).toBeTruthy();
+    expect(channelButtons[1]?.dataset.active).toBe("true");
+    expect(bridge.listChannelThreads).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      channelId: "channel-2",
+    });
   });
 
   it("restores the stored width and can be resized from its left edge", async () => {
@@ -971,7 +1036,7 @@ describe("chats panel (right side)", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    await user.click(await screen.findByTestId("activity-chats"));
+    await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
     await screen.findByTestId("chats-panel");
     await user.click(screen.getByTestId("chats-panel-tab-file"));
 

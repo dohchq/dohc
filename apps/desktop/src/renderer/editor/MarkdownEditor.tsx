@@ -104,7 +104,11 @@ import { makeBlockExitPlugin } from "./blockExit";
 import { makeCalloutChromePlugin } from "./calloutChrome";
 import { makeCodeHighlightPlugin } from "./codeHighlight";
 import { makeMermaidPreviewPlugin } from "./mermaidRender";
-import { OutlinePanel } from "./OutlinePanel";
+import {
+  OutlinePanel,
+  makeHeadingFlashPlugin,
+  type HeadingNavigationTarget,
+} from "./OutlinePanel";
 import { SafeTrailingNode } from "./safeTrailingNode";
 
 export type MarkdownEditorHandle = {
@@ -138,6 +142,7 @@ export type MarkdownEditorProps = {
   path: string;
   knownFiles: ReadonlyArray<WikilinkFile>;
   onOpenWikilink?: (path: string) => void;
+  headingTarget?: HeadingNavigationTarget;
   resolveWorkspaceAssetUrl?: (workspacePath: string) => string | null;
   autoFocus?: boolean;
   collab?: MarkdownEditorCollab | null;
@@ -273,6 +278,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
       onDirty,
       knownFiles,
       onOpenWikilink,
+      headingTarget,
       resolveWorkspaceAssetUrl,
       autoFocus,
       collab,
@@ -454,6 +460,7 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               makeMentionPlugin((state) => setMentionState(state)),
               makeEmojiPlugin((state) => setEmojiState(state)),
               wikilinkClickPlugin,
+              makeHeadingFlashPlugin(),
               makeLinkMenuPlugin({ stateRef: linkMenuStateRef, setState: setLinkMenuState }),
               makeCodeBlockChromePlugin(),
               // After the slash-command plugin (menu keeps ArrowDown while
@@ -810,7 +817,11 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
          * in styles.css for the full mechanism. */}
         <div className="dohc-editor-surface">
           <EditorContent editor={editor} />
-          <OutlinePanel editor={editor} containerRef={containerRef} />
+          <OutlinePanel
+            editor={editor}
+            containerRef={containerRef}
+            headingTarget={headingTarget}
+          />
         </div>
         {editor ? <FindReplaceBar editor={editor} /> : null}
         {editor && chromeReady ? (

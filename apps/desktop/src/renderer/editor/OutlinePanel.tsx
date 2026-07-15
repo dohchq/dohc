@@ -12,6 +12,8 @@
 
 import { useEffect, useRef, useState, type RefObject } from "react";
 import type { Editor } from "@tiptap/core";
+import { Plugin, PluginKey } from "@tiptap/pm/state";
+import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import {
   extractOutline,
   resolveActiveHeadingIndex,
@@ -19,12 +21,74 @@ import {
 } from "./outline";
 import { useDebouncedWordCount } from "./wordCount";
 import { prefersReducedMotion } from "../reducedMotion";
+import { headingAnchorBase } from "../../workspaces/workspaceHeadings";
 
 // How far below the viewport's top edge a heading must scroll before it's
 // considered "reached" — keeps the very top heading active for a beat
 // after the user starts scrolling, instead of flipping the instant a new
 // heading's pixel crosses y=0.
 const ACTIVE_HEADING_READING_OFFSET = 72;
+
+type HeadingFlashState = {
+  token: number | null;
+  decorations: DecorationSet;
+};
+
+type HeadingFlashMeta =
+  | { kind: "show"; pos: number; token: number }
+  | { kind: "clear"; token: number };
+
+export const headingFlashPluginKey = new PluginKey<HeadingFlashState>(
+  "dohc-heading-target-flash",
+);
+
+/** A node decoration keeps the flash inside ProseMirror's render lifecycle.
+ * Directly mutating a heading class is interpreted as an editor DOM change and
+ * can be replaced by block-control decorations before the user sees it. */
+export function makeHeadingFlashPlugin(): Plugin<HeadingFlashState> {
+  return new Plugin<HeadingFlashState>({
+    key: headingFlashPluginKey,
+    state: {
+      init: () => ({ token: null, decorations: DecorationSet.empty }),
+      apply(transaction, current) {
+        const meta = transaction.getMeta(headingFlashPluginKey) as
+          | HeadingFlashMeta
+          | undefined;
+        if (meta?.kind === "show") {
+          const node = transaction.doc.nodeAt(meta.pos);
+          if (!node) return { token: null, decorations: DecorationSet.empty };
+          return {
+            token: meta.token,
+            decorations: DecorationSet.create(transaction.doc, [
+              Decoration.node(meta.pos, meta.pos + node.nodeSize, {
+                class: "dohc-outline-target-flash",
+              }),
+            ]),
+          };
+        }
+        if (meta?.kind === "clear") {
+          return meta.token === current.token
+            ? { token: null, decorations: DecorationSet.empty }
+            : current;
+        }
+        return {
+          ...current,
+          decorations: current.decorations.map(
+            transaction.mapping,
+            transaction.doc,
+          ),
+        };
+      },
+    },
+    props: {
+      decorations(state) {
+        return headingFlashPluginKey.getState(state)?.decorations ?? null;
+      },
+    },
+  });
+}
+
+let nextHeadingFlashToken = 0;
 
 function findScrollParent(el: HTMLElement | null): HTMLElement | null {
   let node = el?.parentElement ?? null;
@@ -41,25 +105,127 @@ function findScrollParent(el: HTMLElement | null): HTMLElement | null {
 /** Scroll the editor to a heading, briefly flashing it, and (when the
  *  editor is editable) moving the cursor there. Read-only mode still gets
  *  the scroll + flash, just no cursor move. */
-function scrollToHeading(editor: Editor, heading: OutlineHeading) {
+function scrollToHeading(
+  editor: Editor,
+  heading: OutlineHeading,
+  moveCursor = true,
+): (() => void) | undefined {
   try {
-    const { node } = editor.view.domAtPos(heading.pos, 1);
-    let el: Node | null = node;
-    while (el && el.nodeType !== Node.ELEMENT_NODE) el = el.parentNode;
-    const target = el as HTMLElement | null;
-    if (!target) return;
+    // Move the selection first: selection-driven decorations can replace the
+    // rendered block node, so resolving the DOM before this transaction would
+    // flash a detached heading instead of the one the user sees.
+    if (moveCursor && editor.isEditable) {
+      editor.chain().setTextSelection(heading.pos + 1).run();
+    }
+    const flashToken = ++nextHeadingFlashToken;
+    editor.view.dispatch(
+      editor.state.tr.setMeta(headingFlashPluginKey, {
+        kind: "show",
+        pos: heading.pos,
+        token: flashToken,
+      } satisfies HeadingFlashMeta),
+    );
+    const clearFlash = () => {
+      if (editor.isDestroyed) return;
+      editor.view.dispatch(
+        editor.state.tr.setMeta(headingFlashPluginKey, {
+          kind: "clear",
+          token: flashToken,
+        } satisfies HeadingFlashMeta),
+      );
+    };
+    const resolveElement = (): HTMLElement | null => {
+      // Resolve by document-order index against the live editor DOM. Some
+      // decoration plugins briefly retain stale position→DOM mappings while
+      // replacing block nodes, but heading order remains identical.
+      const headingIndex = extractOutline(editor.state.doc).findIndex(
+        (candidate) => candidate.pos === heading.pos,
+      );
+      if (headingIndex < 0) return null;
+      return (
+        editor.view.dom.querySelectorAll<HTMLElement>("h1, h2, h3, h4, h5, h6")[
+          headingIndex
+        ] ?? null
+      );
+    };
+    const target = resolveElement();
+    if (!target) {
+      clearFlash();
+      return;
+    }
     target.scrollIntoView({
       behavior: prefersReducedMotion() ? "auto" : "smooth",
       block: "start",
     });
-    target.classList.add("dohc-outline-target-flash");
-    window.setTimeout(() => target.classList.remove("dohc-outline-target-flash"), 900);
-    if (editor.isEditable) {
-      editor.chain().setTextSelection(heading.pos).run();
-    }
+    const flashTimer = window.setTimeout(clearFlash, 900);
+    return () => {
+      window.clearTimeout(flashTimer);
+      clearFlash();
+    };
   } catch {
     // Offscreen/jsdom editors cannot always resolve DOM positions.
   }
+}
+
+/** A one-shot navigation request. `nonce` lets callers repeat a jump to the
+ * same heading without changing the stable anchor identity. */
+export type HeadingNavigationTarget = {
+  anchor: string;
+  occurrence?: number;
+  nonce: number;
+};
+
+type AnchoredOutlineHeading = {
+  heading: OutlineHeading;
+  anchor: string;
+  anchorBase: string;
+  occurrence: number;
+};
+
+function decodeHeadingAnchor(anchor: string): string {
+  try {
+    return decodeURIComponent(anchor);
+  } catch {
+    return anchor;
+  }
+}
+
+/** Resolve editor headings with the same base + numeric-suffix convention as
+ * workspaceHeadings. Supporting both the canonical unique anchor (`plan-1`)
+ * and `{ anchor: "plan", occurrence: 1 }` keeps navigation exact for records
+ * that store the duplicate ordinal separately. */
+export function resolveOutlineHeadingTarget(
+  headings: readonly OutlineHeading[],
+  target: Pick<HeadingNavigationTarget, "anchor" | "occurrence">,
+): OutlineHeading | null {
+  const counts = new Map<string, number>();
+  const anchored: AnchoredOutlineHeading[] = headings.map((heading) => {
+    const anchorBase = headingAnchorBase(heading.text);
+    const occurrence = counts.get(anchorBase) ?? 0;
+    counts.set(anchorBase, occurrence + 1);
+    return {
+      heading,
+      anchorBase,
+      occurrence,
+      anchor: occurrence === 0 ? anchorBase : `${anchorBase}-${occurrence}`,
+    };
+  });
+  const anchor = decodeHeadingAnchor(target.anchor);
+  const exact = anchored.find(
+    (heading) =>
+      heading.anchor === anchor &&
+      (target.occurrence === undefined || heading.occurrence === target.occurrence),
+  );
+  if (exact) return exact.heading;
+  if (target.occurrence !== undefined) {
+    return (
+      anchored.find(
+        (heading) =>
+          heading.anchorBase === anchor && heading.occurrence === target.occurrence,
+      )?.heading ?? null
+    );
+  }
+  return null;
 }
 
 export type OutlinePanelProps = {
@@ -67,9 +233,10 @@ export type OutlinePanelProps = {
   /** The `.dohc-tiptap-editor` container — used only to find the
    *  scrollable ancestor for active-heading tracking. */
   containerRef: RefObject<HTMLDivElement | null>;
+  headingTarget?: HeadingNavigationTarget;
 };
 
-export function OutlinePanel({ editor, containerRef }: OutlinePanelProps) {
+export function OutlinePanel({ editor, containerRef, headingTarget }: OutlinePanelProps) {
   const [headings, setHeadings] = useState<OutlineHeading[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
   const wordCount = useDebouncedWordCount(editor);
@@ -126,6 +293,40 @@ export function OutlinePanel({ editor, containerRef }: OutlinePanelProps) {
     headingsRef.current = headings;
     scheduleActiveUpdateRef.current?.();
   }, [headings]);
+
+  // Apply an external heading jump once per target identity. If a collaborative
+  // document has not received that heading yet, keep one lightweight editor
+  // update listener until it appears instead of silently losing the jump.
+  useEffect(() => {
+    if (!editor || !headingTarget) return;
+    let cleanupFlash: (() => void) | undefined;
+    let firstFrame = 0;
+    let secondFrame = 0;
+    const applyTarget = () => {
+      const heading = resolveOutlineHeadingTarget(
+        extractOutline(editor.state.doc),
+        headingTarget,
+      );
+      if (!heading) return;
+      editor.off("update", applyTarget);
+      cleanupFlash = scrollToHeading(editor, heading, false);
+    };
+    // The editor installs selection/block decorations during its first paint.
+    // Wait until that two-frame setup settles so the highlighted DOM node is
+    // not immediately replaced underneath the flash.
+    firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => {
+        applyTarget();
+        if (!cleanupFlash) editor.on("update", applyTarget);
+      });
+    });
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      cancelAnimationFrame(secondFrame);
+      editor.off("update", applyTarget);
+      cleanupFlash?.();
+    };
+  }, [editor, headingTarget?.anchor, headingTarget?.occurrence, headingTarget?.nonce]);
 
   // Track scroll to resolve which section is active. Attaches once per
   // editor/containerRef (NOT per headings change — see headingsRef above),

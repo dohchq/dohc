@@ -394,7 +394,7 @@ export async function openHistoryView(page: Page): Promise<void> {
 export async function openFileChatsPanel(page: Page): Promise<void> {
   const panel = page.getByTestId("chats-panel");
   if (!(await panel.isVisible())) {
-    await page.getByTestId("activity-chats").click();
+    await page.getByTestId("titlebar-chats-sidebar").click();
     await expect(panel).toBeVisible();
   }
   await page.getByTestId("chats-panel-tab-file").click();

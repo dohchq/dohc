@@ -8,7 +8,6 @@ import {
   FileText,
   Lock,
   Maximize2,
-  MessagesSquare,
   PanelRight,
   RefreshCw,
   Search,
@@ -28,6 +27,7 @@ import {
   type ReactNode,
 } from "react";
 import type {
+  ChatFileMentionRecord,
   ChatThreadRecord,
   CloudStatusResult,
   EngineMomentDetailRecord,
@@ -35,6 +35,7 @@ import type {
   SyncStatusResult,
   TryInVersionRunState,
   WorkbenchMenuCommand,
+  WorkspaceGraphResult,
   WorkspaceFileEntry,
   WorkspaceSummary,
 } from "../ipc/bridgeContract";
@@ -50,6 +51,7 @@ import {
   classifyForView,
   FileInspector,
   preloadMarkdownEditor,
+  type HeadingTarget,
   type ScrollTarget,
 } from "./FileInspector";
 import type { WikilinkFile } from "./editor/wikilinkPlugin";
@@ -96,7 +98,11 @@ import {
   TryInVersionReviewCard,
 } from "./workbench/TryInVersion";
 // Type-only: erased at compile time, so the ChatsView chunk stays lazy.
-import type { ChatsDrafts, ChatsNav } from "./workbench/ChatsView";
+import type {
+  AgentSetupSummary,
+  ChatsDrafts,
+  ChatsNav,
+} from "./workbench/ChatsView";
 import {
   activateTab,
   closeTab,
@@ -145,6 +151,14 @@ import {
 // from an agent/open flow ("Shared-With-Me/…") renders read-only too.
 function isMountedSharePath(path: string | null): boolean {
   return !!path && isSharedWithMePath(path);
+}
+
+function chatsDestinationKey(nav: ChatsNav | null): string {
+  if (!nav) return "channels";
+  if (nav.level === "channel") return `channel:${nav.channel.id}`;
+  if (nav.level === "thread") return `thread:${nav.thread.id}`;
+  if (nav.level === "dm") return `dm:${nav.dm.channelId}`;
+  return nav.level;
 }
 
 export type Workspace = WorkspaceSummary;
@@ -816,6 +830,8 @@ export function DesktopWorkspaceShell(props: {
   const [quickOpenOpen, setQuickOpenOpen] = useState(false);
   const [cloudOpen, setCloudOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSectionId | null>(null);
+  const [agentSetup, setAgentSetup] = useState<AgentSetupSummary | null>(null);
+  const agentSetupRequestRef = useRef(0);
   // Relay-share dialog target (PR 18): a path (file/folder) or a version.
   const [shareTarget, setShareTarget] = useState<{
     path?: string;
@@ -849,6 +865,32 @@ export function DesktopWorkspaceShell(props: {
     [],
   );
   const closeSettings = useCallback(() => setSettingsSection(null), []);
+
+  // Refresh after Settings closes as well as on workspace changes. A request
+  // version prevents a slow response for workspace A from painting workspace B.
+  useEffect(() => {
+    const version = agentSetupRequestRef.current + 1;
+    agentSetupRequestRef.current = version;
+    void Promise.all([
+      bridge().getUserSettings(),
+      bridge().getAgentRunStatus({ workspaceId: props.workspace.workspaceId }),
+    ])
+      .then(([user, run]) => {
+        if (agentSetupRequestRef.current !== version) return;
+        setAgentSetup({
+          preferredName: user.settings.profile.preferredName,
+          runnerConfigured: user.settings.runner.command.trim().length > 0,
+          runnerEnabled: user.settings.runner.enabled,
+          mcpEnabled: run.mcpEnabled,
+        });
+      })
+      .catch(() => {
+        if (agentSetupRequestRef.current === version) setAgentSetup(null);
+      });
+    return () => {
+      if (agentSetupRequestRef.current === version) agentSetupRequestRef.current += 1;
+    };
+  }, [props.workspace.workspaceId, settingsSection]);
 
   // Imperative flush for the active editor's unsaved draft (registered by
   // the mounted MarkdownView). Explorer ops await it BEFORE their disk ops:
@@ -1012,6 +1054,10 @@ export function DesktopWorkspaceShell(props: {
   const [searchScrollTarget, setSearchScrollTarget] = useState<ScrollTarget | null>(
     null,
   );
+  const [headingTarget, setHeadingTarget] = useState<{
+    path: string;
+    target: HeadingTarget;
+  } | null>(null);
   const scrollNonce = useRef(0);
   const consumeScrollTarget = useCallback(() => setSearchScrollTarget(null), []);
 
@@ -1343,24 +1389,39 @@ export function DesktopWorkspaceShell(props: {
     },
     [mutateWb],
   );
+  const openPathWithHeading = useCallback(
+    (path: string, target?: string | HeadingTarget) => {
+      if (target) {
+        setHeadingTarget({
+          path,
+          target:
+            typeof target === "string"
+              ? { anchor: target, nonce: ++scrollNonce.current }
+              : target,
+        });
+      } else {
+        setHeadingTarget(null);
+      }
+      openFile(path);
+    },
+    [openFile],
+  );
   const openGraphTab = useCallback(() => {
     mutateWb((state) => openTab(state, GRAPH_TAB_PATH));
   }, [mutateWb]);
   const openHistoryTab = useCallback(() => {
     mutateWb((state) => openTab(state, HISTORY_TAB_PATH));
   }, [mutateWb]);
-  // Chats expand-to-tab. Chats is a LIVE surface (presence lease, IPC-backed
-  // state, labeled composer ids), so unlike graph/history at most ONE
-  // ChatsView is ever mounted: while the chats tab is ACTIVE the side panel
-  // shows a note instead of a second instance, and an inactive tab is
-  // unmounted anyway (only the active tab renders). This ref is chats' ONE
-  // current position (runtime-only): whichever instance is live reports into
-  // it, and whichever instance mounts next seeds from it — expanding opens
-  // the tab on the panel's conversation, and closing (or leaving) the tab
-  // hands the conversation back to the panel.
+  // The editor owns the live conversation while the right panel remains a
+  // lightweight Slack-style navigator. The ref seeds editor remounts without
+  // making draft keystrokes rerender the shell; selectedNav is only updated on
+  // navigation so the panel can highlight the active destination.
   const chatsNav = useRef<ChatsNav | null>(null);
+  const [selectedChatsNav, setSelectedChatsNav] = useState<ChatsNav | null>(null);
+  const [chatsPageRevision, setChatsPageRevision] = useState(0);
   const onChatsNav = useCallback((nav: ChatsNav) => {
     chatsNav.current = nav;
+    setSelectedChatsNav(nav);
   }, []);
   // Unsent drafts ride the same handoff: mirrored live (a ref write per
   // keystroke, no re-render) and seeded into the next mount, so expanding
@@ -1372,6 +1433,87 @@ export function DesktopWorkspaceShell(props: {
   const openChatsTab = useCallback(() => {
     mutateWb((state) => openTab(state, CHATS_TAB_PATH));
   }, [mutateWb]);
+  const openChatsNavInTab = useCallback(
+    (nav: ChatsNav) => {
+      const destinationChanged =
+        chatsDestinationKey(chatsNav.current) !== chatsDestinationKey(nav);
+      chatsNav.current = nav;
+      setSelectedChatsNav(nav);
+      if (destinationChanged) {
+        // Drafts are scoped to the conversation they were typed in. Until the
+        // draft store is keyed per channel/thread, never seed one into a
+        // different destination.
+        chatsDrafts.current = null;
+        setChatsPageRevision((current) => current + 1);
+      }
+      mutateWb((state) => openTab(state, CHATS_TAB_PATH));
+    },
+    [mutateWb],
+  );
+  const openChatMention = useCallback(
+    (mention: ChatFileMentionRecord) => {
+      if (!mention.channelId || !mention.channelName) {
+        openChatsTab();
+        return;
+      }
+      openChatsNavInTab({
+        level: "thread",
+        channel: {
+          id: mention.channelId,
+          wireId: mention.channelWireId,
+          name: mention.channelName,
+          slug: mention.channelSlug ?? mention.channelName,
+          kind: mention.channelKind ?? "channel",
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          threadCount: 0,
+          unreadCount: 0,
+        },
+        thread: {
+          ...mention.thread,
+          channelId: mention.channelId,
+          messageCount: 0,
+          lastReadSequence: 0,
+          unreadCount: 0,
+        },
+        focusMessageId: mention.message.id,
+      });
+    },
+    [openChatsNavInTab, openChatsTab],
+  );
+  const openGraphChatThread = useCallback(
+    (node: WorkspaceGraphResult["nodes"][number]) => {
+      if (!node.threadId || !node.channelId || !node.channelName) {
+        openChatsTab();
+        return;
+      }
+      openChatsNavInTab({
+        level: "thread",
+        channel: {
+          id: node.channelId,
+          wireId: node.channelWireId,
+          name: node.channelName,
+          slug: node.channelSlug ?? node.channelName,
+          kind: node.channelKind ?? "channel",
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          threadCount: 0,
+          unreadCount: 0,
+        },
+        thread: {
+          id: node.threadId,
+          channelId: node.channelId,
+          title: node.title,
+          createdAtMs: 0,
+          updatedAtMs: 0,
+          messageCount: 0,
+          lastReadSequence: 0,
+          unreadCount: 0,
+        },
+      });
+    },
+    [openChatsNavInTab, openChatsTab],
+  );
   // Engine history diff (flagged workspaces): one tab per moment.
   const openMomentDiffTab = useCallback(
     (momentId: string) => {
@@ -2185,9 +2327,8 @@ export function DesktopWorkspaceShell(props: {
     </>
   );
 
-  // ONE prop bundle for both ChatsView mounts (panel and page) so the live,
-  // presence-bearing surface can never drift between the two call sites —
-  // they differ only by `variant`.
+  // The editor is the one live conversation surface. It owns presence,
+  // drafts, and navigation state.
   const chatsViewProps = {
     workspaceId,
     initialNav: chatsNav.current ?? undefined,
@@ -2195,11 +2336,31 @@ export function DesktopWorkspaceShell(props: {
     onNavChange: onChatsNav,
     onDraftsChange: onChatsDrafts,
     onOpenFileChat: openFileChatInPanel,
-    onOpenPath: openFile,
+    onOpenPath: openPathWithHeading,
     onError: setShellError,
     mentionCandidates,
+    workspaceFiles: files,
     addressedToMe,
     collaboration: chatCollaboration,
+    agentSetup,
+    onSetupAgent: () => openSettings("agents"),
+  } as const;
+  // The panel intentionally stays on the overview and only selects editor
+  // destinations. While the Chats editor is active, disable its collaboration
+  // transport so the navigator cannot create a duplicate presence lease.
+  const chatsNavigatorProps = {
+    workspaceId,
+    selectedNav: selectedChatsNav ?? undefined,
+    onOpenInTab: openChatsNavInTab,
+    onOpenFileChat: openFileChatInPanel,
+    onOpenPath: openPathWithHeading,
+    onError: setShellError,
+    mentionCandidates,
+    workspaceFiles: files,
+    addressedToMe,
+    collaboration: isChatsTabPath(wb.activeTab) ? null : chatCollaboration,
+    agentSetup,
+    onSetupAgent: () => openSettings("agents"),
   } as const;
 
   return (
@@ -2220,6 +2381,18 @@ export function DesktopWorkspaceShell(props: {
         onSwitchWorkspace={props.onSwitchWorkspace}
         onOpenShare={() => setOpenShareOpen(true)}
         onQuickOpen={() => setQuickOpenOpen(true)}
+        primarySidebar={{
+          visible: wb.sidebarVisible,
+          onToggle: () => mutateWb(toggleSidebar),
+        }}
+        {...(versionsEnabled
+          ? {
+              chatsSidebar: {
+                visible: wb.chatsVisible,
+                onToggle: () => mutateWb(toggleChats),
+              },
+            }
+          : {})}
       />
       {shellError ? (
         <div
@@ -2290,14 +2463,6 @@ export function DesktopWorkspaceShell(props: {
           activeView={wb.activeView}
           sidebarVisible={wb.sidebarVisible}
           hasConflict={syncStatus?.state === "conflict"}
-          {...(versionsEnabled
-            ? {
-                chats: {
-                  visible: wb.chatsVisible,
-                  onToggle: () => mutateWb(toggleChats),
-                },
-              }
-            : {})}
           searchResultCount={
             search.model.totalMatches > 0 ? search.model.totalMatches : undefined
           }
@@ -2366,7 +2531,9 @@ export function DesktopWorkspaceShell(props: {
                   workspaceId={workspaceId}
                   activePath={activeDocumentPath}
                   refreshKey={graphKey}
-                  onOpenPath={openFile}
+                  onOpenPath={openPathWithHeading}
+                  onOpenChatThread={openGraphChatThread}
+                  chatMentionsAvailable={versionsEnabled}
                   variant="panel"
                 />
               </Suspense>
@@ -2376,7 +2543,7 @@ export function DesktopWorkspaceShell(props: {
                   workspaceId={workspaceId}
                   files={files}
                   refreshKey={sitesRefreshKey}
-                  onOpenPath={openFile}
+                  onOpenPath={openPathWithHeading}
                 />
               </Suspense>
             ) : wb.activeView === "history" ? (
@@ -2481,7 +2648,9 @@ export function DesktopWorkspaceShell(props: {
                   workspaceId={workspaceId}
                   activePath={activeDocumentPath}
                   refreshKey={graphKey}
-                  onOpenPath={openFile}
+                  onOpenPath={openPathWithHeading}
+                  onOpenChatThread={openGraphChatThread}
+                  chatMentionsAvailable={versionsEnabled}
                   variant="page"
                 />
               </Suspense>
@@ -2523,7 +2692,11 @@ export function DesktopWorkspaceShell(props: {
             ) : isChatsTabPath(wb.activeTab) ? (
               versionsEnabled ? (
                 <Suspense fallback={<PanelLoading label="Chats" />}>
-                  <LazyChatsView {...chatsViewProps} variant="page" />
+                  <LazyChatsView
+                    key={`${workspaceId}:${chatsPageRevision}`}
+                    {...chatsViewProps}
+                    variant="page"
+                  />
                 </Suspense>
               ) : (
                 <div
@@ -2559,8 +2732,14 @@ export function DesktopWorkspaceShell(props: {
                 // lineage ONLY on an active-version change — versionEpoch alone,
                 // NOT history growth (which must not churn the live session).
                 engineVersionKey={versionEpoch}
-                onOpenPath={openFile}
+                onOpenPath={openPathWithHeading}
+                onOpenChatMention={openChatMention}
                 scrollTarget={searchScrollTarget ?? undefined}
+                headingTarget={
+                  headingTarget?.path === wb.activeTab
+                    ? headingTarget.target
+                    : undefined
+                }
                 onScrollConsumed={consumeScrollTarget}
                 onSaveStateChange={onSaveStateChange}
                 registerDraftFlush={registerDraftFlush}
@@ -2608,7 +2787,7 @@ export function DesktopWorkspaceShell(props: {
 
         {/* Chats panel — the right-hand secondary sidebar (flagged
             workspaces only). Hidden entirely while collapsed; the
-            activity-bar Chats button, Ctrl+Alt+B, or the toggle-chats
+            titlebar Chats button, Ctrl+Alt+B, or the toggle-chats
             command bring it back. History lives in the left History view
             and the history tab — never here. */}
         {versionsEnabled && wb.chatsVisible ? (
@@ -2649,21 +2828,9 @@ export function DesktopWorkspaceShell(props: {
                     onError={(message) => setShellError(message)}
                   />
                 </Suspense>
-              ) : isChatsTabPath(wb.activeTab) ? (
-                // The chats TAB is live — never mount a second chat client
-                // (duplicate presence lease, composer ids, diverging state).
-                <div
-                  data-testid="chats-panel-deferred"
-                  className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center"
-                >
-                  <MessagesSquare size={16} aria-hidden className="text-subtle" />
-                  <span className="text-xs text-muted">
-                    Chats are open as a tab.
-                  </span>
-                </div>
               ) : (
                 <Suspense fallback={<PanelLoading label="Chats" />}>
-                  <LazyChatsView {...chatsViewProps} />
+                  <LazyChatsView {...chatsNavigatorProps} />
                 </Suspense>
               )}
             </ErrorBoundary>

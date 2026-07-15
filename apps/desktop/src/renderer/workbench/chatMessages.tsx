@@ -1,4 +1,4 @@
-import { SmilePlus, Send } from "lucide-react";
+import { FileText, SmilePlus, Send } from "lucide-react";
 import {
   Fragment,
   useEffect,
@@ -7,6 +7,7 @@ import {
   useState,
   type Dispatch,
   type MutableRefObject,
+  type ReactNode,
   type RefObject,
   type SetStateAction,
 } from "react";
@@ -16,6 +17,7 @@ import {
   toMentionSegments,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
+import { extractChatFileReferenceTokens } from "./chatFileMentions";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
 // the workspace Chats view render messages and composers through these SAME
@@ -163,6 +165,49 @@ export function MentionText(props: {
 }) {
   // Chips are code-aware too: an @handle inside inline code / a fenced block
   // reads as code text, not a mention chip.
+  const renderText = (text: string, prefix: string) =>
+    toMentionSegments(text, props.candidates, { ignoreCode: true }).map(
+      (segment, index) =>
+        segment.type === "mention" ? (
+          <span
+            key={`${prefix}m${index}`}
+            data-testid={props.testId ? `${props.testId}-mention` : undefined}
+            data-mention-kind={segment.candidate.kind}
+            className="rounded bg-accent/15 px-1 font-medium text-accent"
+          >
+            {segment.text}
+          </span>
+        ) : (
+          <Fragment key={`${prefix}t${index}`}>{segment.text}</Fragment>
+        ),
+    );
+  const fileTokens = extractChatFileReferenceTokens(props.body);
+  if (fileTokens.length > 0) {
+    const content: ReactNode[] = [];
+    let cursor = 0;
+    fileTokens.forEach((token, index) => {
+      if (token.start > cursor) {
+        content.push(...renderText(props.body.slice(cursor, token.start), `f${index}:`));
+      }
+      content.push(
+        <span
+          key={`file:${token.start}`}
+          data-testid={props.testId ? `${props.testId}-file-mention` : undefined}
+          className="inline-flex items-center gap-1 rounded bg-line/50 px-1 text-muted"
+          title={token.text}
+        >
+          <FileText size={11} aria-hidden />
+          {token.path.split("/").at(-1)}
+          {token.headingAnchor ? `#${token.headingAnchor}` : ""}
+        </span>,
+      );
+      cursor = token.end;
+    });
+    if (cursor < props.body.length) {
+      content.push(...renderText(props.body.slice(cursor), "tail:"));
+    }
+    return <>{content}</>;
+  }
   const segments = toMentionSegments(props.body, props.candidates, { ignoreCode: true });
   return (
     <>

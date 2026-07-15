@@ -1,16 +1,25 @@
 import {
   ArrowLeft,
   AtSign,
+  Bookmark,
   Bot,
   Copy,
   FileText,
   Hash,
   MessagesSquare,
   Plus,
+  Rss,
   Square,
   Users,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type {
   ChannelThreadRecord,
   ChatAttachmentRecord,
@@ -19,12 +28,15 @@ import type {
   ChatDecisionRecord,
   ChatDispatchStateForThreadResult,
   ChatMessageRecord,
+  ChatBookmarkRecord,
+  ChatFeedItemRecord,
   ChatReactionRecord,
   ChatRunRecord,
   DmRecord,
   FileChatThreadRecord,
   JoinedSharedChannelRow,
   ListChatChannelSharesResult,
+  WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { AgentNotification } from "./agentNotifications";
@@ -39,7 +51,9 @@ import {
   type ChatReactionControls,
 } from "./chatMessages";
 import { MentionComposer } from "./MentionComposer";
+import { extractChatFileReferences } from "./chatFileMentions";
 import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
+import { agentDisplayLabel } from "@dohc/workspace-contracts/chat-identity";
 import { PresenceFaces, TypingIndicator } from "../collab/PresenceIndicators";
 import { usePresence } from "../collab/usePresence";
 import type {
@@ -67,6 +81,13 @@ export interface ChatPresenceCollaboration {
   transportForScope: (scope: PresenceScope) => PresenceTransport;
   clientId: string;
   displayName: string;
+}
+
+export interface AgentSetupSummary {
+  preferredName?: string;
+  runnerConfigured: boolean;
+  runnerEnabled: boolean;
+  mcpEnabled: boolean;
 }
 
 // The Chats view (PR 13, WS-E): workspace Chats organized in channels, plus
@@ -102,8 +123,14 @@ type OverviewState =
 // (onNavChange) and a freshly expanded tab starts there (initialNav).
 export type ChatsNav =
   | { level: "channels" }
+  | { level: "feed" }
   | { level: "channel"; channel: ChatChannelRecord }
-  | { level: "thread"; channel: ChatChannelRecord; thread: ChannelThreadRecord }
+  | {
+      level: "thread";
+      channel: ChatChannelRecord;
+      thread: ChannelThreadRecord;
+      focusMessageId?: string;
+    }
   // Direct messages (WS-MU-C3): one running conversation per DM (the
   // anti-forum rule), plus a one-step "new message" composer.
   | { level: "dm"; dm: DmRecord }
@@ -150,6 +177,50 @@ interface ThreadSnapshot {
 interface ChannelSnapshot {
   threads: ChannelThreadRecord[];
   feedPosts: Record<string, FeedPostData>;
+}
+
+interface ThreadCommentNode {
+  message: ChatMessageRecord;
+  replies: ThreadCommentNode[];
+}
+
+// The store keeps the true parent id for every reply. Turn the chronological
+// message stream into a display tree without trusting malformed relationships:
+// missing parents, self-links, and cycles stay visible as top-level comments.
+function buildThreadCommentTree(
+  openingMessageId: string,
+  comments: readonly ChatMessageRecord[],
+): ThreadCommentNode[] {
+  const nodes: ThreadCommentNode[] = comments.map((message) => ({
+    message,
+    replies: [],
+  }));
+  const byId = new Map(nodes.map((node) => [node.message.id, node]));
+  const roots: ThreadCommentNode[] = [];
+
+  const createsCycle = (messageId: string, parentId: string): boolean => {
+    const seen = new Set([messageId]);
+    let cursor: string | undefined = parentId;
+    while (cursor && cursor !== openingMessageId) {
+      if (seen.has(cursor)) return true;
+      seen.add(cursor);
+      cursor = byId.get(cursor)?.message.parentMessageId;
+    }
+    return false;
+  };
+
+  for (const node of nodes) {
+    const parentId = node.message.parentMessageId;
+    const parent =
+      parentId && parentId !== openingMessageId ? byId.get(parentId) : undefined;
+    if (parent && !createsCycle(node.message.id, parentId!)) {
+      parent.replies.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+
+  return roots;
 }
 
 const IDLE_DISPATCH_STATE: ChatDispatchStateForThreadResult = {
@@ -244,15 +315,23 @@ function DecisionStatus(props: {
 
 function AttachmentChip(props: {
   attachment: ChatAttachmentRecord;
-  onOpenPath?: (path: string) => void;
+  onOpenPath?: (path: string, headingAnchor?: string) => void;
 }) {
   const label = pathBasename(props.attachment.pathHint);
+  const title = `${props.attachment.pathHint ?? label}${
+    props.attachment.headingText ? `#${props.attachment.headingText}` : ""
+  }`;
   const className =
     "inline-flex items-center gap-1 rounded-full border border-line bg-panel-2 px-2 py-0.5 font-mono text-[10px] text-muted";
   const content = (
     <>
       <FileText size={11} aria-hidden className="shrink-0" />
       <span className="max-w-56 truncate">{label}</span>
+      {props.attachment.headingText ? (
+        <span className="max-w-48 truncate text-subtle">
+          #{props.attachment.headingText}
+        </span>
+      ) : null}
     </>
   );
   if (props.attachment.pathHint && props.onOpenPath) {
@@ -260,8 +339,15 @@ function AttachmentChip(props: {
       <button
         type="button"
         data-testid="chats-attachment-chip"
-        title={props.attachment.pathHint}
-        onClick={() => props.onOpenPath?.(props.attachment.pathHint ?? "")}
+        title={title}
+        onClick={() => {
+          const path = props.attachment.pathHint ?? "";
+          if (props.attachment.headingAnchor) {
+            props.onOpenPath?.(path, props.attachment.headingAnchor);
+          } else {
+            props.onOpenPath?.(path);
+          }
+        }}
         className={`${className} cursor-pointer hover:border-muted/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent`}
       >
         {content}
@@ -271,7 +357,6 @@ function AttachmentChip(props: {
   return (
     <span
       data-testid="chats-attachment-chip"
-      title={props.attachment.pathHint}
       className={className}
     >
       {content}
@@ -396,6 +481,10 @@ function PostCard(props: {
   data: FeedPostData;
   reactionControls: ChatReactionControls;
   onOpen: () => void;
+  bookmark?: ChatBookmarkRecord;
+  bookmarkBusy?: boolean;
+  onToggleBookmark?: (mode: "live" | "snapshot") => void;
+  onOpenBookmark?: () => void;
 }) {
   const message = props.data.openingMessage;
   const isAgent = message?.authorKind === "agent";
@@ -486,6 +575,16 @@ function PostCard(props: {
           </span>
         ) : null}
         <span className="min-w-2 flex-1" />
+        {props.onToggleBookmark ? (
+          <BookmarkAction
+            active={Boolean(props.bookmark)}
+            busy={props.bookmarkBusy}
+            destinationPath={props.bookmark?.destinationPath}
+            onToggle={props.onToggleBookmark}
+            onOpen={props.onOpenBookmark}
+            testId="chats-post-bookmark"
+          />
+        ) : null}
         <span
           data-testid="chats-post-comment-count"
           className="font-mono text-[11px] text-subtle"
@@ -494,6 +593,58 @@ function PostCard(props: {
         </span>
       </div>
     </li>
+  );
+}
+
+function BookmarkAction(props: {
+  active: boolean;
+  busy?: boolean;
+  destinationPath?: string;
+  onToggle: (mode: "live" | "snapshot") => void;
+  onOpen?: () => void;
+  testId: string;
+}) {
+  return (
+    <span className="inline-flex items-center gap-1">
+      {props.active && props.onOpen ? (
+        <button
+          type="button"
+          data-testid={`${props.testId}-open`}
+          aria-label="Open bookmarked chat file"
+          title={props.destinationPath ?? "Open bookmarked chat file"}
+          onClick={(event) => {
+            event.stopPropagation();
+            props.onOpen?.();
+          }}
+          className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+        >
+          <FileText size={12} aria-hidden />
+        </button>
+      ) : null}
+      <button
+        type="button"
+        data-testid={props.testId}
+        aria-pressed={props.active}
+        aria-label={props.active ? "Remove chat bookmark" : "Bookmark chat"}
+        title={
+          props.active
+            ? "Remove bookmark (the Markdown file moves to Archived)"
+            : "Bookmark as a live Markdown file · Shift-click for a snapshot"
+        }
+        disabled={props.busy}
+        onClick={(event) => {
+          event.stopPropagation();
+          props.onToggle(event.shiftKey ? "snapshot" : "live");
+        }}
+        className={`grid size-6 place-items-center rounded focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50 ${
+          props.active
+            ? "text-accent hover:bg-line/50"
+            : "text-subtle hover:bg-line/50 hover:text-ink"
+        }`}
+      >
+        <Bookmark size={12} fill={props.active ? "currentColor" : "none"} aria-hidden />
+      </button>
+    </span>
   );
 }
 
@@ -636,14 +787,19 @@ export function ChatsView(props: {
   onOpenFileChat: (thread: FileChatThreadRecord) => void;
   // The shell's normal file navigation path. Attachment chips use it when
   // present; tests/embedded surfaces may omit it and receive a titled chip.
-  onOpenPath?: (path: string) => void;
+  onOpenPath?: (path: string, headingAnchor?: string) => void;
   onError: (message: string) => void;
   // @-mention roster for this workspace (the user + available agents). When
   // provided, the composer offers autocomplete and messages render chips.
   mentionCandidates?: readonly MentionCandidate[];
+  workspaceFiles?: readonly WorkspaceFileEntry[];
   // "Addressed to me" inbox: agent asks / requests waiting on the user.
   addressedToMe?: readonly AgentNotification[];
   onOpenAddressed?: (notification: AgentNotification) => void;
+  // Main-derived settings/status summary. The CTA only navigates to settings;
+  // Chats never configures executables or grants capabilities itself.
+  agentSetup?: AgentSetupSummary | null;
+  onSetupAgent?: () => void;
   // Ephemeral presence/typing transport, present ONLY under collaboration.
   collaboration?: ChatPresenceCollaboration | null;
   // Where this view lives: the side panel (default) or a full editor tab.
@@ -661,6 +817,13 @@ export function ChatsView(props: {
   // Reports every navigation so the shell can seed the next mount (panel or
   // expanded tab) with this instance's current conversation.
   onNavChange?: (nav: ChatsNav) => void;
+  // The compact panel is a navigator: selecting a conversation can hand its
+  // destination to the shell so it opens in the editor instead of replacing
+  // the panel's list. The page variant always navigates in place.
+  onOpenInTab?: (nav: ChatsNav) => void;
+  // Active editor destination, used by a persistent panel navigator to mark
+  // the selected channel or DM without navigating the panel itself.
+  selectedNav?: ChatsNav;
   // Reports every draft edit (ref-cheap in the shell) so unsent input
   // survives the panel/tab handoff.
   onDraftsChange?: (drafts: ChatsDrafts) => void;
@@ -668,6 +831,21 @@ export function ChatsView(props: {
   const { workspaceId, onNavChange, onDraftsChange } = props;
   const collaboration = props.collaboration ?? null;
   const mentionCandidates = props.mentionCandidates ?? [];
+  const fileMentionCandidates = useMemo(
+    () =>
+      (props.workspaceFiles ?? [])
+        .filter((file) => file.kind === "file" && /\.md$/i.test(file.path))
+        .map((file) => ({
+          path: file.path,
+          label: file.path.split("/").at(-1)?.replace(/\.md$/i, "") ?? file.path,
+        })),
+    [props.workspaceFiles],
+  );
+  const loadFileHeadings = useCallback(
+    async (path: string) =>
+      (await bridge().listWorkspaceHeadings({ workspaceId, path })).headings,
+    [workspaceId],
+  );
   const variant = props.variant ?? "panel";
   // Page variant: cap the list-like surfaces at the thread column's width.
   const pageColumn = variant === "page" ? "mx-auto w-full max-w-[640px]" : "";
@@ -675,6 +853,14 @@ export function ChatsView(props: {
   const [nav, setNav] = useState<Nav>({ level: "channels" });
   const [channelThreads, setChannelThreads] = useState<ChannelThreadRecord[]>([]);
   const [feedPosts, setFeedPosts] = useState<Record<string, FeedPostData>>({});
+  const [personalFeed, setPersonalFeed] = useState<ChatFeedItemRecord[]>([]);
+  const [personalFeedLoading, setPersonalFeedLoading] = useState(false);
+  const [personalFeedNextCursor, setPersonalFeedNextCursor] = useState<string | undefined>();
+  const [bookmarks, setBookmarks] = useState<ChatBookmarkRecord[]>([]);
+  const [bookmarkBusy, setBookmarkBusy] = useState<Set<string>>(() => new Set());
+  const bookmarkRequest = useRef(0);
+  const [followedUi, setFollowedUi] = useState<Set<string>>(() => new Set());
+  const followRequest = useRef(0);
   const [threadsLoading, setThreadsLoading] = useState(false);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
   const [messagesLoading, setMessagesLoading] = useState(false);
@@ -738,6 +924,7 @@ export function ChatsView(props: {
   const reactionSeq = useRef(new Map<string, number>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const messageNodes = useRef(new Map<string, HTMLElement>());
+  const focusedMessageJump = useRef<string | null>(null);
 
   const refreshOverview = useCallback(async () => {
     const token = ++liveToken.current;
@@ -767,6 +954,40 @@ export function ChatsView(props: {
         status: "unavailable",
         message: ipcErrorMessage(error, "Could not load Chats."),
       });
+    }
+  }, [workspaceId]);
+
+  const refreshBookmarks = useCallback(async () => {
+    const request = ++bookmarkRequest.current;
+    const desktopBridge = bridge();
+    // Older preload fixtures deliberately omit newly added additive surfaces.
+    if (typeof desktopBridge.listChatBookmarks !== "function") return;
+    try {
+      const result = await desktopBridge.listChatBookmarks({ workspaceId });
+      if (request !== bookmarkRequest.current) return;
+      setBookmarks(result.bookmarks.filter((bookmark) => bookmark.state === "active"));
+    } catch {
+      // A projection problem must not make the core chat surface unavailable.
+    }
+  }, [workspaceId]);
+
+  const refreshFollows = useCallback(async () => {
+    const request = ++followRequest.current;
+    const desktopBridge = bridge();
+    if (typeof desktopBridge.listChatFollows !== "function") return;
+    try {
+      const result = await desktopBridge.listChatFollows({ workspaceId });
+      if (request !== followRequest.current) return;
+      setFollowedUi(
+        new Set(
+          result.follows
+            .filter((follow) => follow.state === "following")
+            .map((follow) => `${follow.targetKind}:${follow.targetId}`),
+        ),
+      );
+    } catch {
+      // Feed follows are additive; a transient sync failure must not make
+      // channels or messages unavailable.
     }
   }, [workspaceId]);
 
@@ -816,13 +1037,90 @@ export function ChatsView(props: {
     setDmAvailable(false);
     setDmRecipients("");
     setDmDraft("");
+    setBookmarks([]);
+    setBookmarkBusy(new Set());
+    setFollowedUi(new Set());
     setOverview({ status: "loading" });
     void refreshOverview();
     void refreshDms();
+    void refreshBookmarks();
+    void refreshFollows();
     return () => {
       liveToken.current += 1;
+      bookmarkRequest.current += 1;
+      followRequest.current += 1;
     };
-  }, [refreshDms, refreshOverview]);
+  }, [refreshBookmarks, refreshDms, refreshFollows, refreshOverview]);
+
+  const bookmarkFor = useCallback(
+    (targetKind: "message" | "thread", targetId: string) =>
+      bookmarks.find(
+        (bookmark) =>
+          bookmark.targetKind === targetKind && bookmark.targetId === targetId,
+      ),
+    [bookmarks],
+  );
+
+  const toggleBookmark = useCallback(
+    async (input: {
+      target:
+        | { kind: "thread"; threadId: string }
+        | { kind: "message"; threadId: string; messageId: string };
+      mode: "live" | "snapshot";
+    }) => {
+      const targetId =
+        input.target.kind === "thread"
+          ? input.target.threadId
+          : input.target.messageId;
+      const key = `${input.target.kind}:${targetId}`;
+      if (bookmarkBusy.has(key)) return;
+      const existing = bookmarkFor(input.target.kind, targetId);
+      const request = bookmarkRequest.current;
+      setBookmarkBusy((current) => new Set(current).add(key));
+      try {
+        if (existing) {
+          await bridge().archiveChatBookmark({
+            workspaceId,
+            bookmarkId: existing.bookmarkId,
+          });
+          if (request !== bookmarkRequest.current) return;
+          setBookmarks((current) =>
+            current.filter(
+              (bookmark) => bookmark.bookmarkId !== existing.bookmarkId,
+            ),
+          );
+        } else {
+          const result = await bridge().saveChatBookmark({
+            workspaceId,
+            target: input.target,
+            mode: input.mode,
+          });
+          if (request !== bookmarkRequest.current) return;
+          setBookmarks((current) => [
+            ...current.filter(
+              (bookmark) => bookmark.bookmarkId !== result.bookmark.bookmarkId,
+            ),
+            result.bookmark,
+          ]);
+        }
+      } catch (error) {
+        if (request === bookmarkRequest.current) {
+          props.onError(
+            ipcErrorMessage(error, "Could not update this bookmark."),
+          );
+        }
+      } finally {
+        if (request === bookmarkRequest.current) {
+          setBookmarkBusy((current) => {
+            const next = new Set(current);
+            next.delete(key);
+            return next;
+          });
+        }
+      }
+    },
+    [bookmarkBusy, bookmarkFor, props.onError, workspaceId],
+  );
 
   // Gentle DM poll while the view is open: the other side's messages arrive
   // by relay pull, and the sync is cursor-based (no changes = no work). While a
@@ -966,10 +1264,20 @@ export function ChatsView(props: {
   );
 
   const openThread = useCallback(
-    async (channel: ChatChannelRecord, thread: ChannelThreadRecord) => {
+    async (
+      channel: ChatChannelRecord,
+      thread: ChannelThreadRecord,
+      focusMessageId?: string,
+    ) => {
       const token = ++liveToken.current;
       const refreshSeq = ++threadRefreshSeq.current;
-      setNav({ level: "thread", channel, thread });
+      setNav({
+        level: "thread",
+        channel,
+        thread,
+        ...(focusMessageId ? { focusMessageId } : {}),
+      });
+      focusedMessageJump.current = null;
       setMessages([]);
       setReactions([]);
       setDecisions([]);
@@ -1006,14 +1314,16 @@ export function ChatsView(props: {
     [applyThreadSnapshot, loadThreadSnapshot, props],
   );
 
-  // Main emits workspaceActivity for CLI writes, runner reports/failures, and
-  // run-record completion. Treat it as an invalidation for whichever Chats
-  // surface is open. Every response carries both the navigation token and a
-  // per-surface request sequence so a slow refresh cannot repaint a newer one.
+  // Main emits workspaceActivity for CLI writes, follow mutations, runner
+  // reports/failures, and run-record completion. Treat it as an invalidation
+  // for every mounted Chats surface. Every response carries either the follow
+  // request sequence or both the navigation token and a per-surface request
+  // sequence so a slow refresh cannot repaint a newer one.
   useEffect(() => {
-    if (nav.level === "thread") {
-      const threadId = nav.thread.id;
-      return bridge().onWorkspaceActivity(() => {
+    return bridge().onWorkspaceActivity(() => {
+      void refreshFollows();
+      if (nav.level === "thread") {
+        const threadId = nav.thread.id;
         const token = liveToken.current;
         const refreshSeq = ++threadRefreshSeq.current;
         void loadThreadSnapshot(threadId)
@@ -1035,11 +1345,10 @@ export function ChatsView(props: {
               setMessagesLoading(false);
             }
           });
-      });
-    }
-    if (nav.level === "channel") {
-      const channelId = nav.channel.id;
-      return bridge().onWorkspaceActivity(() => {
+        return;
+      }
+      if (nav.level === "channel") {
+        const channelId = nav.channel.id;
         const token = liveToken.current;
         const refreshSeq = ++channelRefreshSeq.current;
         void loadChannelSnapshot(channelId)
@@ -1061,15 +1370,15 @@ export function ChatsView(props: {
               setThreadsLoading(false);
             }
           });
-      });
-    }
-    return undefined;
+      }
+    });
   }, [
     applyChannelSnapshot,
     applyThreadSnapshot,
     loadChannelSnapshot,
     loadThreadSnapshot,
     nav,
+    refreshFollows,
   ]);
 
   // The anti-forum move: typing in the channel composer STARTS the chat.
@@ -1087,6 +1396,9 @@ export function ChatsView(props: {
         workspaceId,
         channelId: channel.id,
         body,
+        ...(extractChatFileReferences(body).length > 0
+          ? { fileReferences: extractChatFileReferences(body) }
+          : {}),
       });
       if (token !== liveToken.current) return;
       setNewThreadBody("");
@@ -1133,6 +1445,9 @@ export function ChatsView(props: {
         threadId: nav.thread.id,
         ...(parentMessageId ? { parentMessageId } : {}),
         body,
+        ...(extractChatFileReferences(body).length > 0
+          ? { fileReferences: extractChatFileReferences(body) }
+          : {}),
       });
       if (token !== liveToken.current) return;
       sentMessage = result.message;
@@ -1331,6 +1646,128 @@ export function ChatsView(props: {
     [loadDmConversation, props],
   );
 
+  const loadPersonalFeed = useCallback(
+    async (cursor?: string) => {
+      const token = liveToken.current;
+      setPersonalFeedLoading(true);
+      try {
+        const page = await bridge().listPersonalChatFeed({
+          workspaceId,
+          ...(cursor ? { cursor } : {}),
+          limit: 30,
+        });
+        if (token !== liveToken.current) return;
+        setPersonalFeed((current) => (cursor ? [...current, ...page.items] : page.items));
+        setPersonalFeedNextCursor(page.nextCursor);
+        if (!cursor && page.headCursor) {
+          void bridge().markPersonalChatFeedSeen({
+            workspaceId,
+            headCursor: page.headCursor,
+          });
+        }
+      } catch (error) {
+        if (token === liveToken.current) {
+          props.onError(ipcErrorMessage(error, "Could not load your Feed."));
+        }
+      } finally {
+        if (token === liveToken.current) setPersonalFeedLoading(false);
+      }
+    },
+    [props.onError, workspaceId],
+  );
+
+  const openFeed = useCallback(() => {
+    const target: ChatsNav = { level: "feed" };
+    if (variant === "panel" && props.onOpenInTab) {
+      props.onOpenInTab(target);
+      return;
+    }
+    liveToken.current += 1;
+    setNav(target);
+    setPersonalFeed([]);
+    setPersonalFeedNextCursor(undefined);
+  }, [props.onOpenInTab, variant]);
+
+  useEffect(() => {
+    if (nav.level === "feed") void loadPersonalFeed();
+  }, [loadPersonalFeed, nav.level]);
+
+  const toggleFeedFollow = useCallback(
+    async (
+      key: string,
+      target:
+        | { kind: "thread"; threadId: string }
+        | { kind: "author"; threadId: string; messageId: string },
+    ) => {
+      const following = followedUi.has(key);
+      try {
+        const result = await bridge().setChatFollow({
+          workspaceId,
+          target,
+          state: following ? "unfollowed" : "following",
+        });
+        setFollowedUi((current) => {
+          const next = new Set(current);
+          const durableKey = `${result.follow.targetKind}:${result.follow.targetId}`;
+          if (result.follow.state === "following") next.add(durableKey);
+          else next.delete(durableKey);
+          // The optimistic key is normally the durable key. Deleting it too
+          // also repairs any older message-scoped UI key without a reload.
+          if (durableKey !== key) next.delete(key);
+          return next;
+        });
+      } catch (error) {
+        props.onError(ipcErrorMessage(error, "Could not update that follow."));
+      }
+    },
+    [followedUi, props.onError, workspaceId],
+  );
+
+  const toggleChannelFollow = useCallback(
+    async (channel: ChatChannelRecord) => {
+      if (!channel.wireId) return;
+      const key = `channel:${channel.wireId}`;
+      const following = followedUi.has(key);
+      try {
+        const result = await bridge().setChatFollow({
+          workspaceId,
+          target: { kind: "channel", channelId: channel.id },
+          state: following ? "unfollowed" : "following",
+        });
+        setFollowedUi((current) => {
+          const next = new Set(current);
+          const durableKey = `${result.follow.targetKind}:${result.follow.targetId}`;
+          if (result.follow.state === "following") next.add(durableKey);
+          else next.delete(durableKey);
+          return next;
+        });
+      } catch (error) {
+        props.onError(ipcErrorMessage(error, "Could not update that channel follow."));
+      }
+    },
+    [followedUi, props.onError, workspaceId],
+  );
+
+  const openConversation = useCallback(
+    (
+      target: Extract<
+        ChatsNav,
+        { level: "channel" | "thread" | "dm" | "feed" }
+      >,
+    ) => {
+      if (variant === "panel" && props.onOpenInTab) {
+        props.onOpenInTab(target);
+        return;
+      }
+      if (target.level === "feed") openFeed();
+      else if (target.level === "channel") void openChannel(target.channel);
+      else if (target.level === "thread") {
+        void openThread(target.channel, target.thread, target.focusMessageId);
+      } else void openDm(target.dm);
+    },
+    [openChannel, openDm, openFeed, openThread, props.onOpenInTab, variant],
+  );
+
   // Expand-to-tab seam, outbound: report where this view is (and what's
   // typed) so the shell can seed the next mount with this instance's current
   // conversation and unsent drafts. While a seed is still PENDING the
@@ -1377,8 +1814,11 @@ export function ChatsView(props: {
     handoffReportBlocked.current = false;
     const seed = props.initialNav;
     if (seed) {
-      if (seed.level === "channel") void openChannel(seed.channel);
-      else if (seed.level === "thread") void openThread(seed.channel, seed.thread);
+      if (seed.level === "feed") openFeed();
+      else if (seed.level === "channel") void openChannel(seed.channel);
+      else if (seed.level === "thread") {
+        void openThread(seed.channel, seed.thread, seed.focusMessageId);
+      }
       else if (seed.level === "dm") void openDm(seed.dm);
       else if (seed.level === "dm-new") setNav({ level: "dm-new" });
     }
@@ -1397,6 +1837,7 @@ export function ChatsView(props: {
   }, [
     openChannel,
     openDm,
+    openFeed,
     openThread,
     overview.status,
     props.initialDrafts,
@@ -1433,7 +1874,14 @@ export function ChatsView(props: {
     sendingRef.current = true;
     setSending(true);
     try {
-      const result = await bridge().sendChatMessage({ workspaceId, threadId, body });
+      const result = await bridge().sendChatMessage({
+        workspaceId,
+        threadId,
+        body,
+        ...(extractChatFileReferences(body).length > 0
+          ? { fileReferences: extractChatFileReferences(body) }
+          : {}),
+      });
       if (token !== liveToken.current) return;
       setMessages((current) => [...current, result.message]);
       setComposer("");
@@ -1729,10 +2177,11 @@ export function ChatsView(props: {
       // Re-open the channel so thread ordering/badges reflect what happened
       // inside the thread.
       void openChannel(nav.channel);
-    } else if (nav.level === "channel") {
+    } else if (nav.level === "channel" || nav.level === "feed") {
       setNav({ level: "channels" });
       setChannelThreads([]);
       setFeedPosts({});
+      setPersonalFeed([]);
       void refreshOverview();
     } else if (nav.level === "dm" || nav.level === "dm-new") {
       setNav({ level: "channels" });
@@ -1778,11 +2227,6 @@ export function ChatsView(props: {
     return result;
   }, [attachments, messages]);
 
-  const messagesById = useMemo(
-    () => new Map(messages.map((message) => [message.id, message])),
-    [messages],
-  );
-
   const scrollToMessage = useCallback((messageId: string) => {
     const node = messageNodes.current.get(messageId);
     if (!node) return;
@@ -1795,6 +2239,22 @@ export function ChatsView(props: {
       }
     }, 1_200);
   }, []);
+
+  useEffect(() => {
+    if (
+      nav.level !== "thread" ||
+      !nav.focusMessageId ||
+      messagesLoading ||
+      !messages.some((message) => message.id === nav.focusMessageId)
+    ) {
+      return;
+    }
+    const jumpKey = `${nav.thread.id}:${nav.focusMessageId}`;
+    if (focusedMessageJump.current === jumpKey) return;
+    focusedMessageJump.current = jumpKey;
+    const frame = requestAnimationFrame(() => scrollToMessage(nav.focusMessageId!));
+    return () => cancelAnimationFrame(frame);
+  }, [messages, messagesLoading, nav, scrollToMessage]);
 
   const beginReply = useCallback((message: ChatMessageRecord) => {
     setReplyTarget({
@@ -1935,6 +2395,163 @@ export function ChatsView(props: {
     );
   }
 
+  if (nav.level === "feed") {
+    return (
+      <div
+        data-testid="chats-personal-feed"
+        data-variant={variant}
+        className="flex min-h-0 flex-1 flex-col"
+        onKeyDownCapture={onKeyDownCapture}
+      >
+        <BackHeader
+          label="Feed"
+          testId="chats-feed"
+          onBack={goBack}
+          icon={<Rss size={12} aria-hidden className="shrink-0 text-subtle" />}
+        />
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <div className={`px-3 pb-12 pt-3 sm:px-4 ${pageColumn}`}>
+            {personalFeed.length === 0 && !personalFeedLoading ? (
+              <div className="rounded-xl border border-line bg-panel px-5 py-8 text-center">
+                <Rss size={18} aria-hidden className="mx-auto mb-2 text-subtle" />
+                <p className="m-0 text-[13px] font-medium text-ink">You’re caught up</p>
+                <p className="mx-auto mb-0 mt-1 max-w-sm text-[11px] leading-5 text-subtle">
+                  Follow people, agents, channels, or individual threads. New updates will collect here.
+                </p>
+              </div>
+            ) : null}
+            <div className="flex flex-col gap-3">
+              {personalFeed.map((item) => {
+                const authorKey = item.authorFollowTarget
+                  ? `${item.authorFollowTarget.targetKind}:${item.authorFollowTarget.targetId}`
+                  : null;
+                const threadKey = `thread:${item.thread.id}`;
+                const canOpen = item.channel !== undefined;
+                const bookmark = bookmarkFor("message", item.message.id);
+                const bookmarkKey = `message:${item.message.id}`;
+                return (
+                  <article
+                    key={item.message.id}
+                    data-testid="chats-feed-item"
+                    className="rounded-xl border border-line bg-panel px-4 py-3"
+                  >
+                    <div className="flex items-start gap-2">
+                      <button
+                        type="button"
+                        disabled={!canOpen}
+                        onClick={() => {
+                          if (!item.channel) return;
+                          openConversation({
+                            level: "thread",
+                            channel: {
+                              ...item.channel,
+                              wireId: item.channel.wireId,
+                              createdAtMs: 0,
+                              updatedAtMs: 0,
+                              threadCount: 0,
+                              unreadCount: 0,
+                            },
+                            thread: {
+                              ...item.thread,
+                              channelId: item.channel.id,
+                              messageCount: 0,
+                              lastReadSequence: 0,
+                              unreadCount: 0,
+                            },
+                          });
+                        }}
+                        className="min-w-0 flex-1 text-left disabled:cursor-default"
+                      >
+                        <span className="block text-[10px] text-subtle">
+                          {item.channel ? `#${item.channel.name} · ` : ""}
+                          {formatChatTime(item.message.createdAtMs).label}
+                        </span>
+                        <span className="mt-0.5 block text-[12px] font-medium text-ink">
+                          {chatAuthorLabel(item.message)}
+                        </span>
+                        <span className="mt-1 block whitespace-pre-wrap text-[13px] leading-5 text-ink">
+                          <MentionText body={item.message.body} candidates={mentionCandidates} />
+                        </span>
+                      </button>
+                    </div>
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-line/60 pt-2">
+                      {authorKey ? (
+                        <button
+                          type="button"
+                          data-testid="chats-feed-follow-author"
+                          onClick={() =>
+                            void toggleFeedFollow(authorKey, {
+                              kind: "author",
+                              threadId: item.thread.id,
+                              messageId: item.message.id,
+                            })
+                          }
+                          className="rounded-md px-2 py-1 text-[10px] text-muted hover:bg-line/40 hover:text-ink"
+                        >
+                          {followedUi.has(authorKey) ? "Following author" : "Follow author"}
+                        </button>
+                      ) : null}
+                      <button
+                        type="button"
+                        data-testid="chats-feed-follow-thread"
+                        onClick={() =>
+                          void toggleFeedFollow(threadKey, {
+                            kind: "thread",
+                            threadId: item.thread.id,
+                          })
+                        }
+                        className="rounded-md px-2 py-1 text-[10px] text-muted hover:bg-line/40 hover:text-ink"
+                      >
+                        {followedUi.has(threadKey) ? "Following thread" : "Follow thread"}
+                      </button>
+                      <BookmarkAction
+                        active={Boolean(bookmark)}
+                        busy={bookmarkBusy.has(bookmarkKey)}
+                        destinationPath={bookmark?.destinationPath}
+                        onToggle={(mode) =>
+                          void toggleBookmark({
+                            target: {
+                              kind: "message",
+                              threadId: item.thread.id,
+                              messageId: item.message.id,
+                            },
+                            mode,
+                          })
+                        }
+                        onOpen={
+                          bookmark && props.onOpenPath
+                            ? () => props.onOpenPath?.(bookmark.destinationPath)
+                            : undefined
+                        }
+                        testId="chats-feed-bookmark"
+                      />
+                      <span className="ml-auto text-[9px] uppercase tracking-wide text-subtle">
+                        {item.matchedBy.join(" · ")}
+                      </span>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+            {personalFeedLoading ? (
+              <p className="py-5 text-center text-[11px] text-subtle">Loading updates…</p>
+            ) : null}
+            {personalFeedNextCursor && !personalFeedLoading ? (
+              <button
+                type="button"
+                data-testid="chats-feed-more"
+                onClick={() => void loadPersonalFeed(personalFeedNextCursor)}
+                className="mt-4 h-8 w-full rounded-md border border-line text-[11px] text-muted hover:bg-line/40 hover:text-ink"
+              >
+                Load older updates
+              </button>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (nav.level === "dm-new") {
     return (
       <div
@@ -1977,6 +2594,8 @@ export function ChatsView(props: {
             placeholder="Write the first message…"
             sendLabel="Start conversation"
             candidates={mentionCandidates}
+            fileCandidates={fileMentionCandidates}
+            loadFileHeadings={loadFileHeadings}
             onChange={setDmDraft}
             onSend={() => void startDm()}
           />
@@ -2037,6 +2656,8 @@ export function ChatsView(props: {
               placeholder={`Message ${dm.peerLabel}…`}
               sendLabel="Send message"
               candidates={mentionCandidates}
+              fileCandidates={fileMentionCandidates}
+              loadFileHeadings={loadFileHeadings}
               onChange={(value) => {
                 setComposer(value);
                 presence.setTyping(value.trim().length > 0);
@@ -2063,10 +2684,188 @@ export function ChatsView(props: {
       (threadJoined.access === "read-only" || threadJoined.ended);
     const openingMessage = messages[0] ?? null;
     const comments = messages.slice(1);
+    const threadBookmark = bookmarkFor("thread", nav.thread.id);
+    const threadBookmarkKey = `thread:${nav.thread.id}`;
     const reactionControls: ChatReactionControls = {
       reactions,
       viewerAuthorId,
       onToggle: toggleReaction,
+    };
+    const commentTree = openingMessage
+      ? buildThreadCommentTree(openingMessage.id, comments)
+      : [];
+    const renderThreadComment = (
+      node: ThreadCommentNode,
+      depth: number,
+      parent: ChatMessageRecord | null,
+    ): ReactNode => {
+      const comment = node.message;
+      const commentTime = formatChatTime(comment.createdAtMs);
+      const commentDecision = decisionsByMessage.get(comment.id);
+      const commentAttachments = attachmentsByMessage.get(comment.id) ?? [];
+      const isAgent = comment.authorKind === "agent";
+      const replyCount = node.replies.length;
+      const commentBookmark = bookmarkFor("message", comment.id);
+      const commentBookmarkKey = `message:${comment.id}`;
+      return (
+        <li
+          key={comment.id}
+          ref={(element) => {
+            if (element) messageNodes.current.set(comment.id, element);
+            else messageNodes.current.delete(comment.id);
+          }}
+          data-testid="chats-message"
+          data-message-id={comment.id}
+          data-parent-message-id={comment.parentMessageId}
+          data-thread-depth={depth}
+          data-author-kind={comment.authorKind}
+          className={`group flex min-w-0 flex-col transition-shadow ${
+            flashMessageId === comment.id
+              ? "rounded-xl ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+              : ""
+          }`}
+        >
+          {parent ? (
+            <button
+              type="button"
+              data-testid="chats-reply-context"
+              onClick={() => scrollToMessage(parent.id)}
+              className="mb-1 w-fit rounded px-2 text-left font-mono text-[10px] text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              ↳ replying to {chatAuthorLabel(parent)}
+            </button>
+          ) : null}
+          <div
+            data-testid="chats-comment-bubble"
+            style={
+              isAgent
+                ? {
+                    borderLeftColor:
+                      "color-mix(in oklab, var(--dohc-agent) 55%, var(--dohc-line))",
+                  }
+                : undefined
+            }
+            className={`w-fit max-w-[92%] rounded-xl border border-line bg-panel-2 px-3.5 py-2 ${
+              isAgent ? "border-l-2" : ""
+            }`}
+          >
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span
+                data-testid="chats-message-author"
+                data-author-kind={comment.authorKind}
+                className={`text-[13px] font-semibold ${
+                  isAgent ? "text-agent" : "text-ink"
+                }`}
+              >
+                {chatAuthorLabel(comment)}
+              </span>
+              {isAgent ? <AgentBadge testIdPrefix="chats-comment" /> : null}
+            </div>
+            <p
+              data-testid="chats-message-body"
+              className="mb-0 mt-0.5 select-text cursor-text whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink"
+            >
+              {mentionCandidates.length > 0 ? (
+                <MentionText
+                  body={comment.body}
+                  candidates={mentionCandidates}
+                  testId="chats-message-body"
+                />
+              ) : (
+                comment.body
+              )}
+            </p>
+            {commentAttachments.length > 0 ? (
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                {commentAttachments.map((attachment) => (
+                  <AttachmentChip
+                    key={attachment.attachmentId}
+                    attachment={attachment}
+                    onOpenPath={props.onOpenPath}
+                  />
+                ))}
+              </div>
+            ) : null}
+            {commentDecision ? (
+              <div className="mt-2">
+                <DecisionStatus
+                  decision={commentDecision}
+                  onResolve={
+                    commentDecision.state === "open"
+                      ? () => beginResolve(comment)
+                      : undefined
+                  }
+                  testIdPrefix="chats-comment"
+                />
+              </div>
+            ) : null}
+          </div>
+          <div className="flex flex-wrap items-center gap-3 px-2 pt-1 font-mono text-[11px] text-subtle">
+            <MessageReactions
+              testIdPrefix="chats"
+              messageId={comment.id}
+              records={reactionsByMessage.get(comment.id) ?? []}
+              controls={reactionControls}
+              flush
+            />
+            <button
+              type="button"
+              data-testid="chats-comment-reply"
+              onClick={() => beginReply(comment)}
+              className="rounded hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+            >
+              Reply
+            </button>
+            <BookmarkAction
+              active={Boolean(commentBookmark)}
+              busy={bookmarkBusy.has(commentBookmarkKey)}
+              destinationPath={commentBookmark?.destinationPath}
+              onToggle={(mode) =>
+                void toggleBookmark({
+                  target: {
+                    kind: "message",
+                    threadId: nav.thread.id,
+                    messageId: comment.id,
+                  },
+                  mode,
+                })
+              }
+              onOpen={
+                commentBookmark && props.onOpenPath
+                  ? () => props.onOpenPath?.(commentBookmark.destinationPath)
+                  : undefined
+              }
+              testId="chats-message-bookmark"
+            />
+            {replyCount > 0 ? (
+              <span data-testid="chats-reply-count">
+                {replyCount} {replyCount === 1 ? "reply" : "replies"}
+              </span>
+            ) : null}
+            {runRecords[comment.id] ? <RunChip run={runRecords[comment.id]} /> : null}
+            <time
+              data-testid="chats-message-time"
+              dateTime={commentTime.iso}
+              title={commentTime.iso}
+            >
+              {commentTime.label}
+            </time>
+          </div>
+          {replyCount > 0 ? (
+            <ol
+              data-testid="chats-replies"
+              aria-label={`Replies to ${chatAuthorLabel(comment)}`}
+              className={`relative mt-3 list-none space-y-3 border-l border-line/80 p-0 pl-3 sm:pl-4 ${
+                depth < 3 ? "ml-3 sm:ml-5" : "ml-0"
+              }`}
+            >
+              {node.replies.map((reply) =>
+                renderThreadComment(reply, depth + 1, comment),
+              )}
+            </ol>
+          ) : null}
+        </li>
+      );
     };
     return (
       <div
@@ -2080,20 +2879,39 @@ export function ChatsView(props: {
           testId="chats-thread"
           onBack={goBack}
           action={
-            dispatchState.liveRun ? (
-              <button
-                type="button"
-                data-testid="chats-stop-agent-run"
-                aria-label="Stop agent run"
-                title="Stop agent run"
-                disabled={dispatchActionBusy}
-                onClick={() => void stopThreadRun()}
-                className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 font-mono text-[10px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-default disabled:opacity-50"
-              >
-                <Square size={8} fill="currentColor" aria-hidden />
-                Stop
-              </button>
-            ) : undefined
+            <span className="inline-flex items-center gap-1">
+              <BookmarkAction
+                active={Boolean(threadBookmark)}
+                busy={bookmarkBusy.has(threadBookmarkKey)}
+                destinationPath={threadBookmark?.destinationPath}
+                onToggle={(mode) =>
+                  void toggleBookmark({
+                    target: { kind: "thread", threadId: nav.thread.id },
+                    mode,
+                  })
+                }
+                onOpen={
+                  threadBookmark && props.onOpenPath
+                    ? () => props.onOpenPath?.(threadBookmark.destinationPath)
+                    : undefined
+                }
+                testId="chats-thread-bookmark"
+              />
+              {dispatchState.liveRun ? (
+                <button
+                  type="button"
+                  data-testid="chats-stop-agent-run"
+                  aria-label="Stop agent run"
+                  title="Stop agent run"
+                  disabled={dispatchActionBusy}
+                  onClick={() => void stopThreadRun()}
+                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-line px-1.5 font-mono text-[10px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:cursor-default disabled:opacity-50"
+                >
+                  <Square size={8} fill="currentColor" aria-hidden />
+                  Stop
+                </button>
+              ) : null}
+            </span>
           }
           trailing={
             <>
@@ -2255,6 +3073,32 @@ export function ChatsView(props: {
                     {runRecords[openingMessage.id] ? (
                       <RunChip run={runRecords[openingMessage.id]} />
                     ) : null}
+                    <BookmarkAction
+                      active={Boolean(bookmarkFor("message", openingMessage.id))}
+                      busy={bookmarkBusy.has(`message:${openingMessage.id}`)}
+                      destinationPath={
+                        bookmarkFor("message", openingMessage.id)?.destinationPath
+                      }
+                      onToggle={(mode) =>
+                        void toggleBookmark({
+                          target: {
+                            kind: "message",
+                            threadId: nav.thread.id,
+                            messageId: openingMessage.id,
+                          },
+                          mode,
+                        })
+                      }
+                      onOpen={
+                        bookmarkFor("message", openingMessage.id) && props.onOpenPath
+                          ? () =>
+                              props.onOpenPath?.(
+                                bookmarkFor("message", openingMessage.id)!.destinationPath,
+                              )
+                          : undefined
+                      }
+                      testId="chats-message-bookmark"
+                    />
                   </div>
                 </article>
 
@@ -2269,139 +3113,7 @@ export function ChatsView(props: {
                 </div>
 
                 <ol data-testid="chats-comments" className="m-0 list-none space-y-3 p-0 pt-2">
-                  {comments.map((comment, index) => {
-                    const previousMessage = messages[index];
-                    const parent = comment.parentMessageId
-                      ? messagesById.get(comment.parentMessageId)
-                      : undefined;
-                    const showReplyContext =
-                      comment.parentMessageId !== undefined &&
-                      comment.parentMessageId !== previousMessage?.id;
-                    const commentTime = formatChatTime(comment.createdAtMs);
-                    const commentDecision = decisionsByMessage.get(comment.id);
-                    const commentAttachments = attachmentsByMessage.get(comment.id) ?? [];
-                    const isAgent = comment.authorKind === "agent";
-                    return (
-                      <li
-                        key={comment.id}
-                        ref={(node) => {
-                          if (node) messageNodes.current.set(comment.id, node);
-                          else messageNodes.current.delete(comment.id);
-                        }}
-                        data-testid="chats-message"
-                        data-message-id={comment.id}
-                        data-author-kind={comment.authorKind}
-                        className={`group flex flex-col transition-shadow ${
-                          flashMessageId === comment.id
-                            ? "rounded-xl ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
-                            : ""
-                        }`}
-                      >
-                        {showReplyContext ? (
-                          <button
-                            type="button"
-                            data-testid="chats-reply-context"
-                            onClick={() => scrollToMessage(comment.parentMessageId ?? "")}
-                            className="mb-1 w-fit rounded px-2 text-left font-mono text-[10px] text-subtle hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-                          >
-                            ↳ replying to {parent ? chatAuthorLabel(parent) : "message"}
-                          </button>
-                        ) : null}
-                        <div
-                          data-testid="chats-comment-bubble"
-                          style={
-                            isAgent
-                              ? {
-                                  borderLeftColor:
-                                    "color-mix(in oklab, var(--dohc-agent) 55%, var(--dohc-line))",
-                                }
-                              : undefined
-                          }
-                          className={`w-fit max-w-[92%] rounded-xl border border-line bg-panel-2 px-3.5 py-2 ${
-                            isAgent ? "border-l-2" : ""
-                          }`}
-                        >
-                          <div className="flex flex-wrap items-center gap-1.5">
-                            <span
-                              data-testid="chats-message-author"
-                              data-author-kind={comment.authorKind}
-                              className={`text-[13px] font-semibold ${
-                                isAgent ? "text-agent" : "text-ink"
-                              }`}
-                            >
-                              {chatAuthorLabel(comment)}
-                            </span>
-                            {isAgent ? <AgentBadge testIdPrefix="chats-comment" /> : null}
-                          </div>
-                          <p
-                            data-testid="chats-message-body"
-                            className="mb-0 mt-0.5 select-text cursor-text whitespace-pre-wrap break-words text-[13px] leading-relaxed text-ink"
-                          >
-                            {mentionCandidates.length > 0 ? (
-                              <MentionText
-                                body={comment.body}
-                                candidates={mentionCandidates}
-                                testId="chats-message-body"
-                              />
-                            ) : (
-                              comment.body
-                            )}
-                          </p>
-                          {commentAttachments.length > 0 ? (
-                            <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                              {commentAttachments.map((attachment) => (
-                                <AttachmentChip
-                                  key={attachment.attachmentId}
-                                  attachment={attachment}
-                                  onOpenPath={props.onOpenPath}
-                                />
-                              ))}
-                            </div>
-                          ) : null}
-                          {commentDecision ? (
-                            <div className="mt-2">
-                              <DecisionStatus
-                                decision={commentDecision}
-                                onResolve={
-                                  commentDecision.state === "open"
-                                    ? () => beginResolve(comment)
-                                    : undefined
-                                }
-                                testIdPrefix="chats-comment"
-                              />
-                            </div>
-                          ) : null}
-                        </div>
-                        <div className="flex flex-wrap items-center gap-3 px-2 pt-1 font-mono text-[11px] text-subtle">
-                          <MessageReactions
-                            testIdPrefix="chats"
-                            messageId={comment.id}
-                            records={reactionsByMessage.get(comment.id) ?? []}
-                            controls={reactionControls}
-                            flush
-                          />
-                          <button
-                            type="button"
-                            data-testid="chats-comment-reply"
-                            onClick={() => beginReply(comment)}
-                            className="rounded hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
-                          >
-                            Reply
-                          </button>
-                          {runRecords[comment.id] ? (
-                            <RunChip run={runRecords[comment.id]} />
-                          ) : null}
-                          <time
-                            data-testid="chats-message-time"
-                            dateTime={commentTime.iso}
-                            title={commentTime.iso}
-                          >
-                            {commentTime.label}
-                          </time>
-                        </div>
-                      </li>
-                    );
-                  })}
+                  {commentTree.map((node) => renderThreadComment(node, 0, null))}
                 </ol>
                 <div ref={messagesEndRef} />
               </>
@@ -2477,6 +3189,8 @@ export function ChatsView(props: {
               placeholder="Write a comment…  @ to mention"
               sendLabel="Send message"
               candidates={mentionCandidates}
+              fileCandidates={fileMentionCandidates}
+              loadFileHeadings={loadFileHeadings}
               onChange={(value) => {
                 setComposer(value);
                 presence.setTyping(value.trim().length > 0);
@@ -2558,6 +3272,53 @@ export function ChatsView(props: {
             ) : undefined
           }
         />
+        {nav.channel.kind === "agent" && props.agentSetup ? (
+          <div
+            data-testid="chats-agent-setup-card"
+            data-state={
+              props.agentSetup.preferredName &&
+              (props.agentSetup.runnerEnabled || props.agentSetup.mcpEnabled)
+                ? "ready"
+                : "needs-setup"
+            }
+            className="flex shrink-0 items-center gap-3 border-b border-line bg-panel-2/50 px-3 py-2.5"
+          >
+            <span className="grid size-7 shrink-0 place-items-center rounded-md border border-agent/30 bg-bg text-agent">
+              <Bot size={14} aria-hidden />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p data-testid="chats-agent-setup-name" className="m-0 truncate text-[12px] font-medium text-ink">
+                {props.agentSetup.preferredName
+                  ? agentDisplayLabel(props.agentSetup.preferredName)
+                  : "Set up your agent"}
+              </p>
+              <p className="m-0 mt-0.5 truncate text-[10px] text-subtle">
+                {!props.agentSetup.preferredName
+                  ? "Choose your name so agent work is attributed correctly."
+                  : props.agentSetup.runnerEnabled
+                    ? "Chat runner ready"
+                    : props.agentSetup.mcpEnabled
+                      ? "Connected through workspace MCP"
+                      : props.agentSetup.runnerConfigured
+                        ? "Runner configured · dispatch is off"
+                        : "Connect a local agent to reply and work in this workspace."}
+              </p>
+            </div>
+            {props.onSetupAgent ? (
+              <button
+                type="button"
+                data-testid="chats-agent-setup-action"
+                onClick={props.onSetupAgent}
+                className="shrink-0 rounded-md border border-line bg-bg px-2.5 py-1 text-[10px] font-medium text-muted hover:text-ink"
+              >
+                {props.agentSetup.preferredName &&
+                (props.agentSetup.runnerEnabled || props.agentSetup.mcpEnabled)
+                  ? "Manage"
+                  : "Set up"}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         {channelJoined !== null ? (
           <div
             data-testid="chats-joined-banner"
@@ -2672,6 +3433,8 @@ export function ChatsView(props: {
                   }
                   sendLabel="Start post"
                   candidates={mentionCandidates}
+                  fileCandidates={fileMentionCandidates}
+                  loadFileHeadings={loadFileHeadings}
                   onChange={setNewThreadBody}
                   onSend={() => void startThread()}
                 />
@@ -2702,6 +3465,8 @@ export function ChatsView(props: {
                     reactions: [],
                     viewerAuthorId: "",
                   };
+                  const bookmark = bookmarkFor("thread", thread.id);
+                  const bookmarkKey = `thread:${thread.id}`;
                   return (
                     <PostCard
                       key={thread.id}
@@ -2712,7 +3477,22 @@ export function ChatsView(props: {
                         viewerAuthorId: post.viewerAuthorId,
                         onToggle: (input) => toggleFeedReaction(thread.id, input),
                       }}
-                      onOpen={() => void openThread(nav.channel, thread)}
+                      onOpen={() =>
+                        openConversation({ level: "thread", channel: nav.channel, thread })
+                      }
+                      bookmark={bookmark}
+                      bookmarkBusy={bookmarkBusy.has(bookmarkKey)}
+                      onToggleBookmark={(mode) =>
+                        void toggleBookmark({
+                          target: { kind: "thread", threadId: thread.id },
+                          mode,
+                        })
+                      }
+                      onOpenBookmark={
+                        bookmark && props.onOpenPath
+                          ? () => props.onOpenPath?.(bookmark.destinationPath)
+                          : undefined
+                      }
                     />
                   );
                 })}
@@ -2731,6 +3511,13 @@ export function ChatsView(props: {
     );
   }
 
+  const selectedChannelId =
+    props.selectedNav?.level === "channel" || props.selectedNav?.level === "thread"
+      ? props.selectedNav.channel.id
+      : null;
+  const selectedDmId =
+    props.selectedNav?.level === "dm" ? props.selectedNav.dm.channelId : null;
+
   return (
     <div
       data-testid="chats-view"
@@ -2743,6 +3530,24 @@ export function ChatsView(props: {
           notifications={props.addressedToMe ?? []}
           onOpen={props.onOpenAddressed}
         />
+        <section className="border-b border-line" aria-label="Feed">
+          <button
+            type="button"
+            data-testid="chats-feed-link"
+            data-active={props.selectedNav?.level === "feed" ? "true" : "false"}
+            aria-current={props.selectedNav?.level === "feed" ? "page" : undefined}
+            onClick={() => openConversation({ level: "feed" })}
+            className={`flex w-full cursor-pointer items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent ${
+              props.selectedNav?.level === "feed" ? "bg-panel-2" : ""
+            }`}
+          >
+            <Rss size={13} aria-hidden className="shrink-0 text-accent" />
+            <span className="min-w-0 flex-1">
+              <span className="block text-[12px] font-medium text-ink">Feed</span>
+              <span className="block text-[10px] text-subtle">Updates from what you follow</span>
+            </span>
+          </button>
+        </section>
         {agentChannel ? (
           <section data-testid="chats-my-agent-section" aria-label="My agent">
             <p className="mb-0 mt-3 px-3 text-[10px] font-semibold uppercase tracking-wide text-subtle">
@@ -2752,8 +3557,14 @@ export function ChatsView(props: {
               type="button"
               data-testid="chats-my-agent"
               data-channel-id={agentChannel.id}
-              onClick={() => void openChannel(agentChannel)}
-              className="flex w-full cursor-pointer items-center gap-1.5 border-b border-line px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+              data-active={selectedChannelId === agentChannel.id ? "true" : "false"}
+              aria-current={selectedChannelId === agentChannel.id ? "page" : undefined}
+              onClick={() =>
+                openConversation({ level: "channel", channel: agentChannel })
+              }
+              className={`flex w-full cursor-pointer items-center gap-1.5 border-b border-line px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent ${
+                selectedChannelId === agentChannel.id ? "bg-panel-2" : ""
+              }`}
             >
               <span
                 data-testid="chats-my-agent-glyph"
@@ -2794,14 +3605,20 @@ export function ChatsView(props: {
                 ? `Shared with ${grants.length}`
                 : null;
             return (
-              <li key={channel.id} className="border-b border-line">
+              <li key={channel.id} className="flex items-stretch border-b border-line">
                 <button
                   type="button"
                   data-testid="chats-channel"
                   data-channel-id={channel.id}
                   data-channel-slug={channel.slug}
-                  onClick={() => void openChannel(channel)}
-                  className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+                  data-active={selectedChannelId === channel.id ? "true" : "false"}
+                  aria-current={selectedChannelId === channel.id ? "page" : undefined}
+                  onClick={() =>
+                    openConversation({ level: "channel", channel })
+                  }
+                  className={`flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent ${
+                    selectedChannelId === channel.id ? "bg-panel-2" : ""
+                  }`}
                 >
                   <Hash size={13} aria-hidden className="shrink-0 text-subtle" />
                   <span className="min-w-0 flex-1">
@@ -2825,6 +3642,28 @@ export function ChatsView(props: {
                   ) : null}
                   <UnreadPill count={channel.unreadCount} testId="chats-channel-unread" />
                 </button>
+                {channel.wireId ? (
+                  <button
+                    type="button"
+                    data-testid="chats-channel-follow"
+                    data-channel-id={channel.id}
+                    aria-pressed={followedUi.has(`channel:${channel.wireId}`)}
+                    aria-label={`${
+                      followedUi.has(`channel:${channel.wireId}`) ? "Unfollow" : "Follow"
+                    } #${channel.name}`}
+                    title={`${
+                      followedUi.has(`channel:${channel.wireId}`) ? "Unfollow" : "Follow"
+                    } #${channel.name}`}
+                    onClick={() => void toggleChannelFollow(channel)}
+                    className={`grid w-9 shrink-0 place-items-center transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent ${
+                      followedUi.has(`channel:${channel.wireId}`)
+                        ? "text-accent"
+                        : "text-subtle"
+                    }`}
+                  >
+                    <Rss size={12} aria-hidden />
+                  </button>
+                ) : null}
               </li>
             );
           })}
@@ -2841,8 +3680,12 @@ export function ChatsView(props: {
                     type="button"
                     data-testid="chats-dm-item"
                     data-channel-id={dm.channelId}
-                    onClick={() => void openDm(dm)}
-                    className="flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent"
+                    data-active={selectedDmId === dm.channelId ? "true" : "false"}
+                    aria-current={selectedDmId === dm.channelId ? "page" : undefined}
+                    onClick={() => openConversation({ level: "dm", dm })}
+                    className={`flex w-full cursor-pointer items-center gap-1.5 px-3 py-2 text-left transition-colors hover:bg-panel-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-accent ${
+                      selectedDmId === dm.channelId ? "bg-panel-2" : ""
+                    }`}
                   >
                     <AtSign size={13} aria-hidden className="shrink-0 text-subtle" />
                     <span className="min-w-0 flex-1">

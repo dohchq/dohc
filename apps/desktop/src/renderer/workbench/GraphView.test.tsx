@@ -10,6 +10,35 @@ afterEach(() => {
 });
 
 describe("GraphView", () => {
+  it("hides chat mentions when Chats is unavailable", async () => {
+    const readWorkspaceGraph = vi.fn(async () => ({
+      nodes: [],
+      edges: [],
+      unresolvedLinks: 0,
+      scannedFileCount: 0,
+      omittedFileCount: 0,
+      truncatedFileCount: 0,
+    }));
+    vi.stubGlobal("dohcDesktop", { readWorkspaceGraph });
+
+    render(
+      <GraphView
+        workspaceId="ws-unflagged"
+        activePath={null}
+        refreshKey="0"
+        chatMentionsAvailable={false}
+        onOpenPath={vi.fn()}
+      />,
+    );
+
+    await waitFor(() => expect(readWorkspaceGraph).toHaveBeenCalled());
+    expect(screen.queryByTestId("graph-chat-mentions-toggle")).toBeNull();
+    expect(readWorkspaceGraph).toHaveBeenCalledWith({
+      workspaceId: "ws-unflagged",
+      includeChatMentions: false,
+    });
+  });
+
   it("loads the workspace graph and opens a clicked document", async () => {
     const onOpenPath = vi.fn();
     vi.stubGlobal("dohcDesktop", {

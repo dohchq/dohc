@@ -201,7 +201,7 @@ test("@ui-audit capture baseline screenshots", async () => {
     await shot(page, "07-search-light");
 
     // 08 — chats panel (right-hand secondary sidebar)
-    await page.getByTestId("activity-chats").click();
+    await page.getByTestId("titlebar-chats-sidebar").click();
     await page.waitForTimeout(800);
     await shot(page, "08-chats-light");
     await setTheme(page, "dark");

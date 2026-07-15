@@ -88,10 +88,12 @@ function postCard(page: Page, title: string): Locator {
 
 function commentWithBody(page: Page, body: string): Locator {
   return page
-    .locator('li[data-testid="chats-message"]')
-    .filter({
-      has: page.getByTestId("chats-message-body").filter({ hasText: body }),
-    });
+    .locator(
+      'li[data-testid="chats-message"] > [data-testid="chats-comment-bubble"] > [data-testid="chats-message-body"]',
+    )
+    .filter({ hasText: body })
+    .locator("..")
+    .locator("..");
 }
 
 async function addReaction(message: Locator, emoji: string): Promise<void> {
@@ -135,7 +137,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await openWorkspaceFromFirstRun(desktop.page, temp);
     let page = desktop.page;
 
-    await page.getByTestId("activity-chats").click();
+    await page.getByTestId("titlebar-chats-sidebar").click();
     await expect(page.getByTestId("chats-view")).toBeVisible();
 
     // Channels remain a human/UI action. Creating one opens its feed
@@ -187,6 +189,10 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await composer.press("Enter");
     const nestedComment = commentWithBody(page, nestedCommentBody);
     await expect(nestedComment).toBeVisible();
+    await expect(nestedComment).toHaveAttribute("data-thread-depth", "1");
+    await expect(
+      nestedComment.locator("xpath=ancestor::ol[@data-testid='chats-replies']"),
+    ).toHaveCount(1);
     await expect(nestedComment.getByTestId("chats-reply-context")).toHaveText(
       "↳ replying to You",
     );
@@ -286,7 +292,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await openWorkspaceFromFirstRun(desktop.page, temp);
     page = desktop.page;
     if (!(await page.getByTestId("chats-view").isVisible())) {
-      await page.getByTestId("activity-chats").click();
+      await page.getByTestId("titlebar-chats-sidebar").click();
     }
 
     const persistedChannel = page

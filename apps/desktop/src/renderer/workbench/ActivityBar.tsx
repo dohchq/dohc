@@ -3,12 +3,10 @@ import {
   Files,
   Globe2,
   History,
-  MessagesSquare,
   Search,
   Settings,
   Workflow,
 } from "lucide-react";
-import { Fragment } from "react";
 import { VIEW_IDS, type ViewId } from "./workbenchState";
 
 // VS Code-style activity bar: 48px icon rail, leftmost column of the
@@ -41,9 +39,6 @@ function RailButton(props: {
   label: string;
   testId: string;
   active?: boolean;
-  // Toggle buttons (the Chats panel) speak aria-pressed instead of the
-  // view buttons' aria-current — a panel is shown/hidden, not navigated to.
-  pressed?: boolean;
   // Badge dot seam (conflicts, running agent — more arrive in later phases).
   badge?: "danger" | "success";
   // Numeric badge seam (Phase E5.0: search results count while showing).
@@ -52,7 +47,7 @@ function RailButton(props: {
   Icon: typeof Files;
 }) {
   const className = `relative grid size-9 place-items-center rounded-lg transition-colors duration-100 ${
-    props.active || props.pressed
+    props.active
       ? "bg-line/60 text-ink"
       : props.onClick
         ? "text-subtle hover:bg-line/50 hover:text-ink"
@@ -96,7 +91,6 @@ function RailButton(props: {
       title={props.label}
       aria-label={props.label}
       aria-current={props.active ? "page" : undefined}
-      aria-pressed={props.pressed}
       onClick={props.onClick}
       className={className}
     >
@@ -115,9 +109,6 @@ export function ActivityBar(props: {
   hasConflict: boolean;
   // Content-search results count (Phase E5.0); undefined = no badge.
   searchResultCount?: number;
-  // The right-hand Chats panel toggle. Chats exists only for
-  // workspace-engine-flagged workspaces; absent = no Chats entry at all.
-  chats?: { visible: boolean; onToggle: () => void };
   onSelectView: (view: ViewId) => void;
   onOpenCloud?: () => void;
   onOpenSettings?: () => void;
@@ -129,29 +120,17 @@ export function ActivityBar(props: {
       className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-line bg-panel py-2"
     >
       {VIEW_IDS.map((view) => (
-        <Fragment key={view}>
-          {/* Chats keeps its old slot (after Search) but toggles the RIGHT
-              panel — it is not a side-panel view. */}
-          {view === "graph" && props.chats ? (
-            <RailButton
-              testId="activity-chats"
-              label="Chats"
-              pressed={props.chats.visible}
-              onClick={props.chats.onToggle}
-              Icon={MessagesSquare}
-            />
-          ) : null}
-          <RailButton
-            testId={`activity-${view}`}
-            label={LABELS[view]}
-            // The rail reflects a collapsed panel: no active mark while hidden.
-            active={props.sidebarVisible && props.activeView === view}
-            badge={view === "explorer" && props.hasConflict ? "danger" : undefined}
-            count={view === "search" ? props.searchResultCount : undefined}
-            onClick={() => props.onSelectView(view)}
-            Icon={ICONS[view]}
-          />
-        </Fragment>
+        <RailButton
+          key={view}
+          testId={`activity-${view}`}
+          label={LABELS[view]}
+          // The rail reflects a collapsed panel: no active mark while hidden.
+          active={props.sidebarVisible && props.activeView === view}
+          badge={view === "explorer" && props.hasConflict ? "danger" : undefined}
+          count={view === "search" ? props.searchResultCount : undefined}
+          onClick={() => props.onSelectView(view)}
+          Icon={ICONS[view]}
+        />
       ))}
       <div className="mt-auto flex flex-col items-center gap-1 border-t border-line pt-2">
         {/* Labels deliberately differ from the status bar's "Connect dohc

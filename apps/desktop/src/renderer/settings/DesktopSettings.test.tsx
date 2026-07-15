@@ -49,6 +49,26 @@ const bridge = {
     mcpEnabled = false;
   }),
   runnerSelfTest: vi.fn(async () => ({ ok: true, detail: "self-test ok" })),
+  probeAgentDrivers: vi.fn(async () => ({
+    drivers: [
+      {
+        id: "codex-app-server",
+        displayName: "Codex",
+        installed: true,
+        version: "codex 1.0",
+        auth: { status: "unknown" as const, label: "CLI login" },
+        models: [],
+      },
+      {
+        id: "claude-acp",
+        displayName: "Claude",
+        installed: false,
+        auth: { status: "unknown" as const },
+        models: [],
+      },
+    ],
+    session: null,
+  })),
   getUpdateState: vi.fn(async () => (updateReady ? readyUpdateState : idleUpdateState)),
   checkForUpdates: vi.fn(async (): Promise<{
     checked: boolean;
@@ -176,6 +196,31 @@ describe("DesktopSettings", () => {
     expect(bridge.setTitlebarTheme).toHaveBeenCalledWith({ theme: "dark" });
   });
 
+  it("saves a preferred name and previews agent attribution", async () => {
+    const user = userEvent.setup();
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="general"
+        onClose={() => {}}
+      />,
+    );
+
+    const input = await screen.findByTestId("general-preferred-name-input");
+    await user.type(input, "Ice");
+    expect(screen.getByTestId("general-preferred-name-preview").textContent).toContain(
+      "Ice's agent",
+    );
+    await user.tab();
+
+    await waitFor(() =>
+      expect(bridge.setUserSettings).toHaveBeenCalledWith({
+        settings: expect.objectContaining({ profile: { preferredName: "Ice" } }),
+      }),
+    );
+  });
+
   it("rolls back optimistic appearance changes when save fails", async () => {
     const user = userEvent.setup();
     bridge.setUserSettings.mockRejectedValueOnce(new Error("Disk full"));
@@ -245,6 +290,11 @@ describe("DesktopSettings", () => {
     expect(snippet.textContent).toContain("/home/ice/dohc/personal");
     // Usage examples are present.
     expect(screen.getByText(/Create a finance app/i)).toBeTruthy();
+    expect(screen.getByTestId("agent-setup-guide")).toBeTruthy();
+    const probes = await screen.findAllByTestId("agent-probe-row");
+    expect(probes).toHaveLength(2);
+    expect(probes[0]?.textContent).toContain("Installed · sign-in not verified");
+    expect(probes[1]?.textContent).toContain("Not found");
   });
 
   it("shows the trusted runner controls and persists command, toggle, and timeout", async () => {

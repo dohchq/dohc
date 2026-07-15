@@ -12,6 +12,7 @@ import type {
   showResultSchema,
   threadsResultSchema,
 } from "./protocol";
+import { renderAuthorDisplayName } from "./chatIdentity";
 import { renderThreadMarkdown } from "./threadMarkdown";
 
 export type ChannelsResult = z.infer<typeof channelsResultSchema>;
@@ -75,7 +76,7 @@ export function renderInbox(result: InboxResult): string {
   }
   for (const mention of result.mentions) {
     lines.push(
-      `@mention · #${mention.channel.slug} · ${mention.threadId} · ${mention.messageId} · ${lineSafe(mention.author.displayName)} · ${dateOnly(mention.createdAtMs)}  ${lineSafe(mention.text)}`,
+      `@mention · #${mention.channel.slug} · ${mention.threadId} · ${mention.messageId} · ${lineSafe(renderAuthorDisplayName(mention.author))} · ${dateOnly(mention.createdAtMs)}  ${lineSafe(mention.text)}`,
     );
   }
   return lines.join("\n");
@@ -102,7 +103,7 @@ function renderGrepLine(
   context: boolean,
 ): string {
   const contextMarker = context ? "- " : "";
-  return `#${match.channel.slug} ${match.threadId} ${message.messageId} ${lineSafe(message.author.displayName)} ${dateOnly(message.createdAtMs)}  ${contextMarker}${lineSafe(message.text)}`;
+  return `#${match.channel.slug} ${match.threadId} ${message.messageId} ${lineSafe(renderAuthorDisplayName(message.author))} ${dateOnly(message.createdAtMs)}  ${contextMarker}${lineSafe(message.text)}`;
 }
 
 export function renderGrep(
