@@ -1296,9 +1296,14 @@ export function ChatsView(props: {
 
   const channelIsLocked = useCallback(
     (channel: ChatChannelRecord) => {
-      const joined = channel.wireId
-        ? channelShares?.joined.find((row) => row.channelWireId === channel.wireId)
-        : undefined;
+      let joined: JoinedSharedChannelRow | undefined;
+      if (channel.wireId) {
+        // Match joinedByWire's last-write-wins semantics so every channel
+        // access decision resolves the same canonical grant row.
+        for (const row of channelShares?.joined ?? []) {
+          if (row.channelWireId === channel.wireId) joined = row;
+        }
+      }
       return (
         readOnly ||
         (joined !== undefined &&
