@@ -13,25 +13,9 @@ describe("system theme app icon", () => {
     expect(systemThemeIconFileName(true)).toBe("icon-dark.png");
   });
 
-  it("uses Windows' system-chrome preference instead of an app override", () => {
-    expect(
-      shouldUseDarkSystemIcon("win32", {
-        shouldUseDarkColors: false,
-        shouldUseDarkColorsForSystemIntegratedUI: true,
-      }),
-    ).toBe(true);
-    expect(
-      shouldUseDarkSystemIcon("linux", {
-        shouldUseDarkColors: true,
-        shouldUseDarkColorsForSystemIntegratedUI: false,
-      }),
-    ).toBe(true);
-    expect(
-      shouldUseDarkSystemIcon("darwin", {
-        shouldUseDarkColors: false,
-        shouldUseDarkColorsForSystemIntegratedUI: true,
-      }),
-    ).toBe(false);
+  it("uses Electron's resolved system appearance", () => {
+    expect(shouldUseDarkSystemIcon({ shouldUseDarkColors: true })).toBe(true);
+    expect(shouldUseDarkSystemIcon({ shouldUseDarkColors: false })).toBe(false);
   });
 
   it.each(["win32", "linux"] as const)(

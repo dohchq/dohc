@@ -2118,7 +2118,7 @@ function desktopIconDirectory(): string {
 function currentDesktopIconPath(): string | null {
   return resolveSystemThemeIconPath(
     desktopIconDirectory(),
-    shouldUseDarkSystemIcon(process.platform, nativeTheme),
+    shouldUseDarkSystemIcon(nativeTheme),
   );
 }
 

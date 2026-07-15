@@ -5,7 +5,6 @@ export type SystemThemeIcon = "light" | "dark";
 
 type NativeThemeIconState = {
   shouldUseDarkColors: boolean;
-  shouldUseDarkColorsForSystemIntegratedUI?: boolean;
 };
 
 type IconWindow = {
@@ -13,20 +12,13 @@ type IconWindow = {
 };
 
 /**
- * Windows exposes separate app and system appearance preferences. The desktop
- * icon belongs to system chrome, so follow that signal there; Electron's
- * general dark-color signal follows the OS on macOS and Linux.
+ * Follow Electron's resolved system appearance. The desktop app does not
+ * override nativeTheme.themeSource, so this signal tracks the OS on every
+ * supported platform.
  */
 export function shouldUseDarkSystemIcon(
-  platform: NodeJS.Platform,
   theme: NativeThemeIconState,
 ): boolean {
-  if (
-    platform === "win32" &&
-    typeof theme.shouldUseDarkColorsForSystemIntegratedUI === "boolean"
-  ) {
-    return theme.shouldUseDarkColorsForSystemIntegratedUI;
-  }
   return theme.shouldUseDarkColors;
 }
 

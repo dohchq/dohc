@@ -172,7 +172,7 @@ export function createMainWindow(options?: {
     : join(import.meta.dirname, "../../build");
   const iconPath = resolveSystemThemeIconPath(
     iconDirectory,
-    shouldUseDarkSystemIcon(process.platform, nativeTheme),
+    shouldUseDarkSystemIcon(nativeTheme),
   );
 
   const window = new BrowserWindow({
