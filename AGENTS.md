@@ -138,6 +138,9 @@ Claude is not setup to review PRs automatically (not part of my subscription), s
 
 These are meant to steer us in the right direction. They are not hard-set, but we should default to following them. If you think one should be ignored, be very loud and cear about that and get approval from us before doing it.
 
+- After a PR is merged, delete its remote branch from GitHub unless the user
+  explicitly asks to keep it or another open PR still depends on it. Verify the
+  remote ref is gone. Do not delete the local branch or worktree unless asked.
 - Brand identity is final: lowercase `dohc`, the drop-lobe mark, warm
   paper + graphite. There must be no legacy product identity in shipping
   source — `src/__tests__/brandNoLegacy.test.ts` enforces this.
