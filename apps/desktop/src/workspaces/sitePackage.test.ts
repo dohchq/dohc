@@ -2,7 +2,13 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nativeTmpdir } from "./testTemp";
-import { discoverSiteRoots, getSitePackage, listSitePackages } from "./sitePackage";
+import {
+  discoverSiteRoots,
+  getSitePackage,
+  listSitePackages,
+  sharedStaticEntryRelativeToSite,
+  shareMountRootForSite,
+} from "./sitePackage";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
 import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 
@@ -46,6 +52,51 @@ describe("discoverSiteRoots", () => {
   });
 });
 
+describe("shareMountRootForSite", () => {
+  it("identifies the containing collaboration mount without narrowing to the site", () => {
+    expect(shareMountRootForSite("shared-with-me/alex/portal")).toBe(
+      "shared-with-me/alex",
+    );
+    expect(shareMountRootForSite("shared-with-me/alex")).toBe("shared-with-me/alex");
+    expect(shareMountRootForSite("Shared-With-Me./alex/portal")).toBe(
+      "shared-with-me/alex",
+    );
+    expect(shareMountRootForSite("sites/shared-with-me/alex")).toBeNull();
+    expect(shareMountRootForSite("shared-with-me")).toBeNull();
+    expect(shareMountRootForSite(".")).toBeNull();
+  });
+
+  it("selects a built artifact rather than a package source entry for shared sites", async () => {
+    await mkdir(join(root, "shared-with-me", "alex", "portal", "dist"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(root, "shared-with-me", "alex", "portal", "package.json"),
+      JSON.stringify({ scripts: { build: "vite build" }, dependencies: { vite: "latest" } }),
+    );
+    await writeFile(
+      join(root, "shared-with-me", "alex", "portal", "index.html"),
+      '<script type="module" src="/src.ts"></script>',
+    );
+    await writeFile(
+      join(root, "shared-with-me", "alex", "portal", "dist", "index.html"),
+      "built",
+    );
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "shared-with-me/alex/portal",
+    );
+    expect(site).toBeDefined();
+    expect(sharedStaticEntryRelativeToSite(site!)).toBe("dist/index.html");
+    expect(
+      sharedStaticEntryRelativeToSite({
+        ...site!,
+        sourceFiles: site!.sourceFiles.filter((path) => !path.endsWith("dist/index.html")),
+      }),
+    ).toBeNull();
+  });
+});
+
 describe("listSitePackages", () => {
   it("returns static and package sites with inferred scripts and manager", async () => {
     await mkdir(join(root, "report"), { recursive: true });
@@ -66,6 +117,24 @@ describe("listSitePackages", () => {
       packageManager: "pnpm",
       scripts: { dev: "vite", build: "vite build" },
     });
+  });
+
+  it("marks mounted sites with share authority and keeps owned sites unrestricted", async () => {
+    await mkdir(join(root, "owned"), { recursive: true });
+    await writeFile(join(root, "owned", "index.html"), "owned");
+    await mkdir(join(root, "shared-with-me", "alex", "portal"), { recursive: true });
+    await writeFile(
+      join(root, "shared-with-me", "alex", "portal", "index.html"),
+      "shared",
+    );
+
+    const sites = await listSitePackages(root);
+    expect(sites.find((site) => site.root === "owned")?.authority).toEqual({
+      kind: "workspace",
+    });
+    expect(
+      sites.find((site) => site.root === "shared-with-me/alex/portal")?.authority,
+    ).toEqual({ kind: "share", mountRoot: "shared-with-me/alex" });
   });
 
   it("uses dohc.json title and surfaces invalid config diagnostics", async () => {

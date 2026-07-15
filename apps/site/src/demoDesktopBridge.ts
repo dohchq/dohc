@@ -459,6 +459,7 @@ const demoBridge = {
           buildOutputs: ["dist"],
           sourceFiles: ["projects/launch-plan.md"],
           diagnostics: [],
+          authority: { kind: "workspace" as const },
         },
       ],
     };

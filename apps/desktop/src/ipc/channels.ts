@@ -454,6 +454,7 @@ export const CHANNELS = {
   getSitePackage: "desktop:get-site-package",
   startSitePreview: "desktop:start-site-preview",
   stopSitePreview: "desktop:stop-site-preview",
+  invokeSiteSdk: "desktop:invoke-site-sdk",
   openExternalUrl: "desktop:open-external-url",
   cloudLoginStart: "desktop:cloud-login-start",
   cloudLoginPoll: "desktop:cloud-login-poll",

@@ -819,6 +819,8 @@ export function DesktopWorkspaceShell(props: {
   // Relay-share dialog target (PR 18): a path (file/folder) or a version.
   const [shareTarget, setShareTarget] = useState<{
     path?: string;
+    paths?: string[];
+    label?: string;
     versionId?: string;
     versionName?: string;
   } | null>(null);
@@ -2539,6 +2541,10 @@ export function DesktopWorkspaceShell(props: {
                   <LazySitePreviewPage
                     workspaceId={workspaceId}
                     siteRoot={activeSiteRoot}
+                    onOpenPath={openFile}
+                    {...(shareView
+                      ? {}
+                      : { onShareSite: setShareTarget })}
                   />
                 </Suspense>
               ) : (

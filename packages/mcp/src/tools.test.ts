@@ -972,20 +972,47 @@ describe("mcp tools operate on allowed paths", () => {
         packagePath: "todo/package.json",
         dependency: "@dohc/sdk",
       });
-      const sdkPackageJson = JSON.parse(
-        await readFile(TEST_SDK_PACKAGE_JSON_PATH, "utf8"),
-      ) as { version: string };
       const packageJson = JSON.parse(await readFile(join(ctx.root, "todo/package.json"), "utf8"));
       expect(packageJson.dependencies).toMatchObject({
-        "@dohc/sdk": `^${sdkPackageJson.version}`,
+        "@dohc/sdk": "file:vendor/dohc-sdk",
       });
+      await expect(
+        readFile(join(ctx.root, "todo/vendor/dohc-sdk/dist/index.js"), "utf8"),
+      ).resolves.toContain("createDohcClient");
       expect(result.ok ? result.usage : "").toContain('import { dohc } from "@dohc/sdk"');
+    });
+  });
+
+  it("add_sdk gives plain static sites a browser-resolvable vendored import", async () => {
+    await withWorkspace(async (ctx) => {
+      await mkdir(join(ctx.root, "static-report"), { recursive: true });
+      await writeFile(
+        join(ctx.root, "static-report", "index.html"),
+        "<!doctype html><h1>Report</h1>\n",
+      );
+
+      const result = await addSiteSdk(ctx, { siteRoot: "static-report" });
+
+      expect(result).toMatchObject({
+        ok: true,
+        importMode: "vendored-browser-module",
+      });
+      expect(result.ok ? result.usage : "").toContain(
+        'import { dohc } from "./vendor/dohc-sdk/dist/index.js"',
+      );
+      await expect(
+        readFile(join(ctx.root, "static-report/vendor/dohc-sdk/dist/index.js"), "utf8"),
+      ).resolves.toContain("createDohcClient");
     });
   });
 
   it("add_sdk refreshes the SDK dependency range when package metadata changes", async () => {
     await withWorkspace(async (ctx) => {
-      const sdkPackageJsonPath = join(ctx.home, "sdk-package.json");
+      const sdkDir = join(ctx.home, "sdk-package");
+      const sdkPackageJsonPath = join(sdkDir, "package.json");
+      await mkdir(join(sdkDir, "dist"), { recursive: true });
+      await writeFile(join(sdkDir, "dist/index.js"), "export const version = 'test';\n");
+      await writeFile(join(sdkDir, "dist/index.d.ts"), "export declare const version: string;\n");
       await writeFile(sdkPackageJsonPath, `${JSON.stringify({ version: "1.0.0" })}\n`);
       const customCtx = { ...ctx, sdkPackageJsonPath };
       await createSite(customCtx, { path: "todo", title: "Todo" });
@@ -1001,7 +1028,13 @@ describe("mcp tools operate on allowed paths", () => {
         ok: true,
       });
       const packageJson = JSON.parse(await readFile(join(ctx.root, "todo/package.json"), "utf8"));
-      expect(packageJson.dependencies).toMatchObject({ "@dohc/sdk": "^2.0.0" });
+      expect(packageJson.dependencies).toMatchObject({
+        "@dohc/sdk": "file:vendor/dohc-sdk",
+      });
+      const vendoredPackage = JSON.parse(
+        await readFile(join(ctx.root, "todo/vendor/dohc-sdk/package.json"), "utf8"),
+      );
+      expect(vendoredPackage.version).toBe("2.0.0");
     });
   });
 

@@ -39,6 +39,12 @@ function staticSiteFromFiles(files: WorkspaceFileEntry[]): SitePackageInfo[] {
         buildOutputs: [],
         sourceFiles: [file.path],
         diagnostics: [],
+        authority: root.startsWith("shared-with-me/")
+          ? {
+              kind: "share" as const,
+              mountRoot: root.split("/").slice(0, 2).join("/"),
+            }
+          : { kind: "workspace" as const },
       };
     });
 }
@@ -71,14 +77,6 @@ function useSites(workspaceId: string, files: WorkspaceFileEntry[], refreshKey =
     return { status: "ready", sites: staticSiteFromFiles(files) };
   }
   return state;
-}
-
-function siteMeta(site: SitePackageInfo): string {
-  const parts: string[] = [site.kind, site.confidence];
-  if (site.packageManager) parts.push(site.packageManager);
-  if (site.scripts.dev) parts.push("dev");
-  if (site.scripts.build || site.buildOutputs.length > 0) parts.push("build");
-  return parts.join(" · ");
 }
 
 function siteDiagnosticLabel(site: SitePackageInfo): string | null {
@@ -119,9 +117,12 @@ export function SitesView(props: {
           <span className="max-w-sm text-xs text-muted">{state.message}</span>
         </div>
       ) : sites.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-center">
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
           <Globe2 size={18} aria-hidden className="text-subtle" />
-          <span className="text-xs text-muted">No sites</span>
+          <span className="text-xs font-medium text-ink">No sites yet</span>
+          <span className="max-w-52 text-xs leading-relaxed text-muted">
+            Ask your agent to create a site for this workspace.
+          </span>
         </div>
       ) : (
         <ul className="m-0 flex min-h-0 flex-1 list-none flex-col gap-2 overflow-y-auto p-2">
@@ -148,6 +149,14 @@ export function SitesView(props: {
                       <span className="truncate text-[13px] font-medium text-ink">
                         {site.title}
                       </span>
+                      {site.authority.kind === "share" ? (
+                        <span
+                          data-testid="sites-shared-label"
+                          className="shrink-0 text-[11px] text-muted"
+                        >
+                          Shared
+                        </span>
+                      ) : null}
                       {diagnosticLabel ? (
                         <span
                           data-testid="sites-diagnostic-indicator"
@@ -170,9 +179,6 @@ export function SitesView(props: {
                     </span>
                     <span className="mt-0.5 block truncate font-mono text-[11px] text-subtle">
                       {site.root}
-                    </span>
-                    <span className="mt-1.5 block truncate font-mono text-[11px] text-muted">
-                      {siteMeta(site)}
                     </span>
                     {diagnosticLabel ? (
                       <span

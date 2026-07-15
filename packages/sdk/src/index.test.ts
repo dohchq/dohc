@@ -69,6 +69,32 @@ describe("@dohc/sdk", () => {
     ]);
   });
 
+  it("never presents a bounded file prefix as a complete read", async () => {
+    const client = createDohcClient({
+      transport: {
+        async request(method) {
+          if (method === "capabilities") {
+            return {
+              files: { read: true, write: true },
+              collections: { read: false },
+              provenance: { record: false },
+            };
+          }
+          return { text: "bounded prefix", truncated: true };
+        },
+      },
+    });
+
+    await expect(client.files.readInfo("large.txt")).resolves.toEqual({
+      text: "bounded prefix",
+      truncated: true,
+    });
+    await expect(client.files.read("large.txt")).rejects.toMatchObject({
+      code: DohcSdkErrorCodes.responseTruncated,
+      message: expect.stringMatching(/read-modify-write/i),
+    });
+  });
+
   it("caches capabilities for repeated high-level operations", async () => {
     const calls: Array<{ method: string; params?: unknown }> = [];
     const client = createDohcClient({
@@ -566,5 +592,180 @@ describe("@dohc/sdk", () => {
       message: expect.stringMatching(/files\.read.*disabled/i),
     });
     expect(calls).toEqual([{ method: "capabilities", params: undefined }]);
+  });
+
+  it("exposes the expanded dohc capability surface without hiding host extensions", async () => {
+    const calls: Array<{ method: string; params?: unknown }> = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method, params) {
+          calls.push({ method, params });
+          if (method === "capabilities") {
+            return {
+              files: { read: true, write: true, list: true, watch: true },
+              collections: { read: true },
+              provenance: { record: true },
+              workspace: { search: true },
+              databases: { read: true, edit: true },
+              ui: { open: true },
+              future: { teleport: true },
+            };
+          }
+          if (method === "files.list") return [{ path: "notes/today.md", kind: "file" }];
+          if (method === "workspace.search") return [{ path: "notes/today.md", score: 1 }];
+          if (method === "collections.list") return [{ id: "one" }];
+          if (method === "databases.read") return { rows: [{ id: 1 }] };
+          if (method === "databases.edit") return { changes: 1 };
+          if (method === "future.teleport") return { arrived: true };
+          return { ok: true };
+        },
+      },
+    });
+
+    await expect(client.capabilities()).resolves.toMatchObject({
+      future: { teleport: true },
+    });
+    await expect(client.files.list("notes", { recursive: true })).resolves.toHaveLength(1);
+    await expect(client.files.write("notes/today.md", "hello", { overwrite: true })).resolves.toEqual({ ok: true });
+    await expect(client.workspace.search("today", { limit: 10 })).resolves.toHaveLength(1);
+    await expect(client.databases.read<{ rows: unknown[] }>({
+      path: "data/tasks.sqlite",
+      query: "select * from tasks",
+    })).resolves.toEqual({ rows: [{ id: 1 }] });
+    await expect(client.databases.edit({
+      path: "data/tasks.sqlite",
+      operations: [{ op: "update", id: 1 }],
+    })).resolves.toEqual({ changes: 1 });
+    await expect(client.ui.open("dohc://atom/today", { position: "new-tab" })).resolves.toEqual({ ok: true });
+    await expect(client.collections.list("tasks", { limit: 5 })).resolves.toEqual([{ id: "one" }]);
+    await expect(client.provenance.record({ summary: "Updated", source: "site" })).resolves.toBeUndefined();
+    await expect(client.invoke<{ arrived: boolean }>("future.teleport", { to: "home" })).resolves.toEqual({ arrived: true });
+
+    expect(calls).toContainEqual({
+      method: "files.write",
+      params: { path: "notes/today.md", text: "hello", overwrite: true },
+    });
+    expect(calls).toContainEqual({
+      method: "ui.open",
+      params: { target: "dohc://atom/today", position: "new-tab" },
+    });
+    expect(calls).toContainEqual({
+      method: "provenance.record",
+      params: { summary: "Updated", source: "site" },
+    });
+  });
+
+  it("supports transport subscriptions and removes event listeners on unsubscribe", async () => {
+    const harness = createWindowHarness();
+    const transport = createPostMessageTransport({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+    const events: unknown[] = [];
+    const pendingSubscription = transport.subscribe!(
+      "files.watch",
+      { path: "notes" },
+      (event) => events.push(event),
+    );
+    const subscribeRequest = harness.messages[0] as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: subscribeRequest.id,
+      ok: true,
+      result: { subscriptionId: "sub_1" },
+    });
+    const unsubscribe = await pendingSubscription;
+
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      type: "event",
+      subscriptionId: "sub_1",
+      event: "changed",
+      data: { path: "notes/today.md" },
+    });
+    expect(events).toEqual([{
+      event: "changed",
+      data: { path: "notes/today.md" },
+    }]);
+
+    const pendingUnsubscribe = unsubscribe();
+    const unsubscribeRequest = harness.messages.at(-1) as { id: string; method: string; params: unknown };
+    expect(unsubscribeRequest).toMatchObject({
+      method: "subscriptions.unsubscribe",
+      params: { subscriptionId: "sub_1" },
+    });
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: unsubscribeRequest.id,
+      ok: true,
+      result: { ok: true },
+    });
+    await pendingUnsubscribe;
+    expect(harness.listeners.size).toBe(0);
+  });
+
+  it("aborts postMessage requests and cleans up their listeners", async () => {
+    const harness = createWindowHarness();
+    const controller = new AbortController();
+    const transport = createPostMessageTransport({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+
+    const pending = transport.request("workspace.search", { query: "today" }, {
+      signal: controller.signal,
+    });
+    expect(harness.listeners.size).toBe(1);
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ code: DohcSdkErrorCodes.aborted });
+    expect(harness.listeners.size).toBe(0);
+  });
+
+  it("uses a transport subscription for files.watch and reports unsupported transports", async () => {
+    const events: unknown[] = [];
+    const unsubscribe = vi.fn(async () => undefined);
+    const client = createDohcClient({
+      transport: {
+        async request(method) {
+          if (method === "capabilities") {
+            return {
+              files: { read: true, write: true, watch: true },
+              collections: { read: true },
+              provenance: { record: true },
+            };
+          }
+          return {};
+        },
+        async subscribe<T>(
+          method: string,
+          params: unknown,
+          listener: (event: { event: string; data: T }) => void,
+        ) {
+          expect(method).toBe("files.watch");
+          expect(params).toEqual({ path: "notes" });
+          listener({ event: "changed", data: { path: "notes/today.md" } as T });
+          return unsubscribe;
+        },
+      },
+    });
+    await expect(client.files.watch("notes", (event) => events.push(event))).resolves.toBe(unsubscribe);
+    expect(events).toHaveLength(1);
+
+    const unsupported = createDohcClient({
+      transport: {
+        async request() {
+          return {
+            files: { read: true, write: true, watch: true },
+            collections: { read: true },
+            provenance: { record: true },
+          };
+        },
+      },
+    });
+    await expect(unsupported.files.watch("notes", () => undefined)).rejects.toMatchObject({
+      code: DohcSdkErrorCodes.subscriptionsUnsupported,
+    });
   });
 });

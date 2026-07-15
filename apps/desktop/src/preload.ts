@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   CreateLocalWorkspacePayload,
   DohcDesktopBridge,
+  InvokeSiteSdkPayload,
   ListSitesPayload,
   MenuCommand,
   SetUserSettingsPayload,
@@ -117,6 +118,8 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.startSitePreview, payload),
   stopSitePreview: (payload: StopSitePreviewPayload) =>
     ipcRenderer.invoke(CHANNELS.stopSitePreview, payload),
+  invokeSiteSdk: (payload: InvokeSiteSdkPayload) =>
+    ipcRenderer.invoke(CHANNELS.invokeSiteSdk, payload),
   openExternalUrl: (payload) =>
     ipcRenderer.invoke(CHANNELS.openExternalUrl, payload),
   cloudLoginStart: (payload) =>

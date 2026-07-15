@@ -1489,6 +1489,10 @@ const SitePackageInfo = z.object({
   buildOutputs: z.array(PATH_STRING).max(100),
   sourceFiles: z.array(PATH_STRING).max(1000),
   diagnostics: z.array(SiteDiagnostic).max(100),
+  authority: z.discriminatedUnion("kind", [
+    z.object({ kind: z.literal("workspace") }),
+    z.object({ kind: z.literal("share"), mountRoot: PATH_STRING }),
+  ]),
 });
 export type SitePackageInfo = z.infer<typeof SitePackageInfo>;
 
@@ -1557,6 +1561,10 @@ export const StartSitePreviewResult = z.object({
   mode: SitePreviewMode,
   url: LoopbackPreviewUrl,
   logs: z.array(SiteLogEntry).max(500),
+  // null means the locally-owned site has the current user's full workspace
+  // authority. Shared sites are constrained to their materialized share mount.
+  // Main derives this from siteRoot; the renderer is never authoritative.
+  sdkScopeRoot: SITE_ROOT_STRING.nullable().default(null),
   build: z
     .object({
       ok: z.boolean(),
@@ -1576,6 +1584,19 @@ export const StopSitePreviewPayload = z.object({
 export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
 export const StopSitePreviewResult = z.void();
 export type StopSitePreviewResult = z.infer<typeof StopSitePreviewResult>;
+
+// Sites never supply user or workspace identity. The containing renderer
+// identifies the open site and main re-derives its owned/share authority.
+export const InvokeSiteSdkPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  siteRoot: SITE_ROOT_STRING,
+  method: z.string().min(1).max(200),
+  params: z.unknown().optional(),
+});
+export type InvokeSiteSdkPayload = z.infer<typeof InvokeSiteSdkPayload>;
+
+export const InvokeSiteSdkResult = z.object({ result: z.unknown() });
+export type InvokeSiteSdkResult = z.infer<typeof InvokeSiteSdkResult>;
 
 // dohc Cloud login (device-authorization flow): the desktop shows a short
 // code, the user approves in the system browser, the desktop polls. The
@@ -2392,6 +2413,7 @@ export interface DohcDesktopBridge {
   getSitePackage(payload: SitePackagePayload): Promise<SitePackageResult>;
   startSitePreview(payload: StartSitePreviewPayload): Promise<StartSitePreviewResult>;
   stopSitePreview(payload: StopSitePreviewPayload): Promise<StopSitePreviewResult>;
+  invokeSiteSdk(payload: InvokeSiteSdkPayload): Promise<InvokeSiteSdkResult>;
   openExternalUrl(payload: OpenExternalUrlPayload): Promise<void>;
   cloudLoginStart(payload: CloudLoginStartPayload): Promise<CloudLoginStartResult>;
   cloudLoginPoll(): Promise<CloudLoginPollResult>;

@@ -347,6 +347,7 @@ describe("site IPC contract", () => {
             buildOutputs: ["dist"],
             sourceFiles: ["client-portal/index.html", "client-portal/package.json"],
             diagnostics: [],
+            authority: { kind: "workspace" },
           },
         ],
       }).sites[0]?.root,
@@ -368,6 +369,7 @@ describe("site IPC contract", () => {
             buildOutputs: [],
             sourceFiles: [],
             diagnostics: [],
+            authority: { kind: "workspace" },
           },
         ],
       }).sites[0]?.entryPath,
@@ -393,6 +395,7 @@ describe("site IPC contract", () => {
         mode: "build",
         url: "http://127.0.0.1:4173/",
         logs: [{ stream: "stdout", text: "built", at: 1 }],
+        sdkScopeRoot: null,
         build: {
           ok: true,
           command: "pnpm",
@@ -408,6 +411,7 @@ describe("site IPC contract", () => {
         mode: "static",
         url: "http://localhost:4173/",
         logs: [],
+        sdkScopeRoot: "shared-with-me/alex",
       }).logs,
     ).toEqual([]);
     expect(

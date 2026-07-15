@@ -1,5 +1,6 @@
 import {
   discoverSites,
+  isSharedWithMePath,
   parseDohcSiteConfig,
   type SiteDiagnostic,
   type SitePackageManager,
@@ -30,6 +31,9 @@ export interface SitePackageInfo {
   buildOutputs: string[];
   sourceFiles: string[];
   diagnostics: SiteDiagnostic[];
+  authority:
+    | { kind: "workspace" }
+    | { kind: "share"; mountRoot: string };
 }
 
 function normalizeRoot(root: string): string {
@@ -55,6 +59,47 @@ function isUnder(root: string, path: string): boolean {
   // under it should be detected and previewed like any other local website.
   if (normalized === ".") return !path.startsWith(".dohc/");
   return path === normalized || path.startsWith(`${normalized}/`);
+}
+
+/**
+ * Returns the collaboration mount that owns a site, if any. Mounted shares
+ * always have the shape shared-with-me/<label>/...; keeping the mount root on
+ * the detected package lets preview/runtime surfaces preserve that authority
+ * without treating the shared files as an owned workspace site.
+ */
+export function shareMountRootForSite(root: string): string | null {
+  const parts = normalizeRoot(root).split("/");
+  if (
+    parts.length < 2 ||
+    !isSharedWithMePath(root) ||
+    !parts[1] ||
+    parts[1] === "." ||
+    parts[1] === ".."
+  ) {
+    return null;
+  }
+  return `shared-with-me/${parts[1]}`;
+}
+
+/** A materialized build output that can be served without executing site code. */
+export function builtEntryRelativeToSite(site: SitePackageInfo): string | null {
+  for (const output of site.buildOutputs) {
+    const relativeEntry = `${output}/index.html`;
+    const workspaceEntry = joinSitePath(site.root, relativeEntry);
+    if (site.sourceFiles.includes(workspaceEntry)) return relativeEntry;
+  }
+  return null;
+}
+
+/**
+ * Shared package sites run only the browser artifact selected by their owner.
+ * A source index.html from Vite/React/etc. is not a runnable static artifact.
+ */
+export function sharedStaticEntryRelativeToSite(site: SitePackageInfo): string | null {
+  const built = builtEntryRelativeToSite(site);
+  if (built) return built;
+  if (site.packagePath || site.scripts.build || site.buildOutputs.length > 0) return null;
+  return entryRelativeToSite(site);
 }
 
 function packagePathFor(root: string, sourceFiles: string[]): string | null {
@@ -96,6 +141,7 @@ function mapWorkspaceSite(
     .filter((path) => isUnder(root, path))
     .sort();
   const entryPath = entryPathFor(root, site.entry);
+  const shareMountRoot = shareMountRootForSite(root);
   return {
     root,
     title: site.title,
@@ -110,6 +156,9 @@ function mapWorkspaceSite(
     buildOutputs: site.buildOutputs,
     sourceFiles,
     diagnostics: site.diagnostics,
+    authority: shareMountRoot
+      ? { kind: "share", mountRoot: shareMountRoot }
+      : { kind: "workspace" },
   };
 }
 

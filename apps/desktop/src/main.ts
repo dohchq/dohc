@@ -78,6 +78,8 @@ import {
   ImportToDatabaseResult,
   ImportWorkspaceFilesPayload,
   ImportWorkspaceFilesResult,
+  InvokeSiteSdkPayload,
+  InvokeSiteSdkResult,
   DesktopMarksResult,
   LaunchMarksResult,
   ListSitesPayload,
@@ -356,6 +358,7 @@ import {
 } from "./agents/desktopAgentDispatchStore";
 import {
   buildOutputSiteRoot,
+  sharedStaticEntryRelativeToSite,
   entryRelativeToSite,
   getSitePackage,
   listSitePackages,
@@ -371,6 +374,7 @@ import {
   type SiteProcessHandle,
   type StaticSitePreview,
 } from "./workspaces/siteRunner";
+import { invokeSiteSdkHost } from "./workspaces/siteSdkHost";
 import {
   mediaTypeForExtension,
   readWorkspaceAsset,
@@ -693,6 +697,7 @@ type SitePreviewStartInput = {
   mode: "static" | "dev" | "build";
   isCurrent: () => boolean;
   signal: AbortSignal;
+  sdkScopeRoot: string | null;
 };
 
 async function rememberCurrentSitePreviewHandle(
@@ -731,8 +736,16 @@ async function startPreviewForSiteUnlocked(
   }
 
   if (input.mode === "static") {
+    const entry = input.site.authority.kind === "share"
+      ? sharedStaticEntryRelativeToSite(input.site) ?? undefined
+      : entryRelativeToSite(input.site) ?? undefined;
+    if (input.site.authority.kind === "share" && !entry) {
+      throw new Error(
+        "This shared package does not include a built site artifact. Ask the owner to build and share it again.",
+      );
+    }
     const handle = await startStaticSitePreview(input.workspaceRoot, input.site.root, {
-      entry: entryRelativeToSite(input.site) ?? undefined,
+      entry,
     });
     await rememberCurrentSitePreviewHandle(key, handle, input.isCurrent);
     return {
@@ -740,6 +753,7 @@ async function startPreviewForSiteUnlocked(
       mode: input.mode,
       url: handle.url,
       logs: [],
+      sdkScopeRoot: input.sdkScopeRoot,
     };
   }
 
@@ -762,6 +776,7 @@ async function startPreviewForSiteUnlocked(
       mode: input.mode,
       url: handle.url,
       logs: handle.logs(),
+      sdkScopeRoot: input.sdkScopeRoot,
     };
   }
 
@@ -821,6 +836,7 @@ async function startPreviewForSiteUnlocked(
     mode: input.mode,
     url: handle.url,
     logs,
+    sdkScopeRoot: input.sdkScopeRoot,
     ...(build ? { build } : {}),
   };
 }
@@ -1263,7 +1279,27 @@ function mcpConfigFor(
 } {
   const command = process.env.DOHC_MCP_COMMAND?.trim() || "dohc-mcp";
   const home = stateDir();
-  const sdkPackageJsonPath = process.env.DOHC_SDK_PACKAGE_JSON?.trim();
+  const configuredSdkPackageJsonPath = process.env.DOHC_SDK_PACKAGE_JSON?.trim();
+  const packagedSdkPackageJsonPath = join(
+    process.resourcesPath,
+    "sdk-package",
+    "package.json",
+  );
+  const developmentSdkPackageJsonPath = resolve(
+    app.getAppPath(),
+    "..",
+    "..",
+    "packages",
+    "sdk",
+    "package.json",
+  );
+  const sdkPackageJsonPath =
+    configuredSdkPackageJsonPath ||
+    (existsSync(packagedSdkPackageJsonPath)
+      ? packagedSdkPackageJsonPath
+      : existsSync(developmentSdkPackageJsonPath)
+        ? developmentSdkPackageJsonPath
+        : undefined);
   const sdkDependencyRange = process.env.DOHC_SDK_DEPENDENCY_RANGE?.trim();
   const args = ["--workspace", rootPath, "--home", home];
   // Shared views hand out a READ-ONLY MCP profile: the launched server never
@@ -4002,12 +4038,11 @@ function registerIpcHandlers(): void {
     try {
       const workspace = requireWorkspace(input.workspaceId);
       assertSitePreviewMode(workspace.workspaceId, input.mode);
-      // Mounted shares are someone else's code AND previews carry host-scoped
-      // SDK reads, so EVERY preview mode is refused for shared-with-me roots
-      // (stricter than a shared view, whose whole workspace IS the share).
-      if (isSharedWithMePath(input.siteRoot)) {
+      // A mounted share may provide a ready browser artifact, but must never
+      // cause package/configured commands from somebody else to execute.
+      if (isSharedWithMePath(input.siteRoot) && input.mode !== "static") {
         throw new Error(
-          "This site arrived through a share. Previews run with workspace access, so copy the site into your own files to run it.",
+          "Sites opened from shared-with-me use the static preview. Copy it into your own files to run dev or build commands.",
         );
       }
       const site = await getSitePackage(workspace.rootPath, input.siteRoot);
@@ -4020,6 +4055,12 @@ function registerIpcHandlers(): void {
           mode: input.mode,
           isCurrent,
           signal: pendingStart.controller.signal,
+          sdkScopeRoot:
+            site.authority.kind === "share"
+              ? site.authority.mountRoot
+              : sharedViewOf(workspace.workspaceId)
+                ? "."
+                : null,
         }),
       );
     } finally {
@@ -4035,6 +4076,31 @@ function registerIpcHandlers(): void {
       sitePreviewKey(input.workspaceId, input.siteRoot),
       () => stopSitePreviewHandle(input.workspaceId, input.siteRoot),
     );
+  });
+
+  ipcMain.handle(CHANNELS.invokeSiteSdk, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = InvokeSiteSdkPayload.parse(payload);
+    const workspace = requireWorkspace(input.workspaceId);
+    const site = await getSitePackage(workspace.rootPath, input.siteRoot);
+    if (!site) throw new Error(`Not a detected site: ${input.siteRoot}`);
+    const sharedView = sharedViewOf(workspace.workspaceId);
+    const scopeRoot =
+      site.authority.kind === "share"
+        ? site.authority.mountRoot
+        : sharedView
+          ? "."
+          : null;
+    const result = await invokeSiteSdkHost(
+      {
+        workspaceRoot: workspace.rootPath,
+        scopeRoot,
+        writable: !sharedView && site.authority.kind === "workspace",
+      },
+      input.method,
+      input.params,
+    );
+    return InvokeSiteSdkResult.parse({ result });
   });
 
   ipcMain.handle(CHANNELS.openWorkspace, async (event, payload) => {
