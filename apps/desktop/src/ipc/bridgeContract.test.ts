@@ -146,6 +146,15 @@ describe("chat IPC contract", () => {
         targetKind: "message",
         targetId: "message-1",
         threadId: "thread-1",
+        messageId: "message-1",
+      }).success,
+    ).toBe(true);
+    expect(
+      ChatBookmarkRecord.safeParse({
+        ...common,
+        targetKind: "message",
+        targetId: "message-1",
+        threadId: "thread-1",
       }).success,
     ).toBe(false);
     expect(

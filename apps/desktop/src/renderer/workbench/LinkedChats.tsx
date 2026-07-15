@@ -49,6 +49,7 @@ export function LinkedChatsPanel(props: {
   // panel (History <-> Chats toggle) resets consumedInitialThread and
   // re-opens the stale thread.
   onInitialThreadConsumed?: () => void;
+  onOpenPath?: (path: string, headingAnchor?: string) => void;
   onError: (message: string) => void;
 }) {
   const { workspaceId, filePath } = props;
@@ -262,6 +263,7 @@ export function LinkedChatsPanel(props: {
           loading={messagesLoading}
           emptyLabel={`No messages yet${filePath ? ` about ${basename(filePath)}` : ""}.`}
           endRef={messagesEndRef}
+          onOpenPath={props.onOpenPath}
           reactionControls={{
             reactions,
             viewerAuthorId,

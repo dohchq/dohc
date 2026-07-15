@@ -753,6 +753,14 @@ describe("workspace-backed chat bookmarks", () => {
     expect(
       await store.listPendingBookmarks({ workspaceId: "ws", ownerUserId: "viewer" }),
     ).toEqual([]);
+    await expect(
+      store.markBookmarkReady({
+        workspaceId: "ws",
+        ownerUserId: "viewer",
+        bookmarkId: saved.bookmarkId,
+        generation: 0,
+      }),
+    ).rejects.toMatchObject({ code: "invalid-bookmark-target" });
     expect(await store.listBookmarks({ workspaceId: "ws", ownerUserId: "viewer", state: "active" })).toEqual([]);
     expect(await store.listBookmarks({ workspaceId: "ws", ownerUserId: "viewer", state: "archived" })).toHaveLength(1);
   });

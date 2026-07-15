@@ -125,10 +125,43 @@ describe("chat authorship display", () => {
     );
 
     expect(screen.getAllByTestId("test-chat-message-body-file-mention")).toHaveLength(1);
-    expect(screen.getByTestId("test-chat-message-body-file-mention").textContent)
-      .toContain("plan.md#scope");
+    const fileChip = screen.getByTestId("test-chat-message-body-file-mention");
+    expect(fileChip.textContent).toContain("plan.md#scope");
+    expect(fileChip.tagName).toBe("SPAN");
+    expect(fileChip.getAttribute("role")).toBeNull();
     expect(screen.getByTestId("test-chat-message-body").textContent)
       .toContain("@[docs/code.md]");
+  });
+
+  it("opens a file mention at its heading through the shared message list", () => {
+    const onOpenPath = vi.fn();
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={[
+          {
+            id: "message-file",
+            threadId: "thread-1",
+            authorKind: "human",
+            authorDisplayName: "Ice",
+            body: "Read @[docs/plan.md#scope].",
+            createdAtMs: 1_700_000_000_000,
+          },
+        ]}
+        loading={false}
+        emptyLabel="No messages"
+        endRef={createRef<HTMLDivElement>()}
+        onOpenPath={onOpenPath}
+      />,
+    );
+
+    const fileChip = screen.getByRole("button", {
+      name: "Open docs/plan.md at #scope",
+    });
+    expect(fileChip).toBe(screen.getByTestId("test-chat-message-body-file-mention"));
+    fireEvent.click(fileChip);
+    expect(onOpenPath).toHaveBeenCalledOnce();
+    expect(onOpenPath).toHaveBeenCalledWith("docs/plan.md", "scope");
   });
 
   it("classifies mention code ranges across the whole message when file chips split rendering", () => {

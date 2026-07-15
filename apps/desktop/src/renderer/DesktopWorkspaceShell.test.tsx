@@ -299,12 +299,15 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
   });
 }
 
-function renderShell(bridge: ReturnType<typeof makeBridge>) {
+function renderShell(
+  bridge: ReturnType<typeof makeBridge>,
+  workspace: Workspace = WORKSPACE,
+) {
   vi.stubGlobal("dohcDesktop", bridge);
   return render(
     <DesktopWorkspaceShell
-      workspace={WORKSPACE}
-      workspaces={[WORKSPACE]}
+      workspace={workspace}
+      workspaces={[workspace]}
       onSwitchWorkspace={() => {}}
     />,
   );
@@ -1055,6 +1058,53 @@ describe("chats panel (right side)", () => {
       workspaceId: WORKSPACE.workspaceId,
       channelId: "channel-2",
     });
+  });
+
+  it("keeps both shared-view Chats mounts read-only", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const startChannelThread = vi.fn();
+    Object.assign(bridge, { startChannelThread });
+    const sharedWorkspace: Workspace = {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-view-1",
+        granterEmail: "owner@example.com",
+      },
+    };
+    bridge.listChatChannels.mockResolvedValue({
+      channels: [
+        {
+          id: "channel-1",
+          wireId: "wire-1",
+          name: "general",
+          slug: "general",
+          kind: "channel",
+          createdAtMs: 1_700_000_000_000,
+          updatedAtMs: 1_700_000_000_000,
+          threadCount: 0,
+          unreadCount: 0,
+        },
+      ],
+      fileThreads: [],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge, sharedWorkspace);
+
+    const panel = await screen.findByTestId("chats-panel");
+    expect(
+      await within(panel).findByTestId("chats-workspace-readonly-note"),
+    ).toBeTruthy();
+    expect(within(panel).queryByTestId("chats-new-channel")).toBeNull();
+    expect(within(panel).queryByTestId("chats-channel-follow")).toBeNull();
+    expect(bridge.syncDms).not.toHaveBeenCalled();
+
+    await user.click(within(panel).getByTestId("chats-channel"));
+    const page = await screen.findByTestId("chats-channel-view");
+    expect(page.dataset.variant).toBe("page");
+    expect(within(page).getByTestId("chats-readonly-note")).toBeTruthy();
+    expect(within(page).queryByTestId("chats-new-thread-composer")).toBeNull();
+    expect(within(page).queryByTestId("chats-share-channel")).toBeNull();
+    expect(startChannelThread).not.toHaveBeenCalled();
   });
 
   it("restores the stored width and can be resized from its left edge", async () => {

@@ -348,6 +348,125 @@ describe("ChatsView channels", () => {
   });
 });
 
+describe("ChatsView shared-workspace read-only boundary", () => {
+  it("keeps the panel navigator readable while removing every overview/channel mutation", async () => {
+    const sharedChannel = channel({ wireId: "wire-1", threadCount: 1 });
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [sharedChannel],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [
+        {
+          shareId: "share-received",
+          channelWireId: "wire-received",
+          granterEmail: "owner@example.com",
+          access: "read-write",
+          ended: false,
+        },
+      ],
+      joined: [],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ openingMessage: openingPreview() })],
+    });
+
+    renderView(vi.fn(), vi.fn(), { readOnly: true });
+
+    expect(await screen.findByTestId("chats-channel")).toBeTruthy();
+    expect(screen.queryByTestId("chats-channel-follow")).toBeNull();
+    expect(screen.queryByTestId("chats-new-channel")).toBeNull();
+    expect(screen.queryByTestId("chats-new-dm")).toBeNull();
+    expect(screen.queryByTestId("chats-join-shared")).toBeNull();
+    expect(screen.getByTestId("chats-workspace-readonly-note")).toBeTruthy();
+    expect(bridgeMock.syncDms).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByTestId("chats-channel"));
+    expect(await screen.findByTestId("chats-post-card")).toBeTruthy();
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    expect(screen.queryByTestId("chats-share-channel")).toBeNull();
+    expect(screen.queryByTestId("chats-post-bookmark")).toBeNull();
+    expect(screen.queryByTestId("chats-post-add-reaction")).toBeNull();
+    expect(screen.getByTestId("chats-readonly-note")).toBeTruthy();
+
+    expect(bridgeMock.setChatFollow).not.toHaveBeenCalled();
+    expect(bridgeMock.saveChatBookmark).not.toHaveBeenCalled();
+    expect(bridgeMock.setChatReaction).not.toHaveBeenCalled();
+    expect(bridgeMock.startChannelThread).not.toHaveBeenCalled();
+    expect(bridgeMock.shareChatChannel).not.toHaveBeenCalled();
+  });
+
+  it("keeps the page thread readable without reply, decision, bookmark, or cursor writes", async () => {
+    const sharedChannel = channel({ wireId: "wire-1" });
+    const sharedThread = thread();
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message(),
+        message({
+          id: "message-2",
+          parentMessageId: "message-1",
+          body: "A decision",
+        }),
+      ],
+    });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({
+      decisions: [
+        {
+          threadId: "thread-1",
+          messageId: "message-2",
+          state: "open",
+          createdAtMs: NOW,
+          resolvedAtMs: null,
+          resolvedByMessageId: null,
+        },
+      ],
+    });
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [
+        {
+          reactionId: "reaction-1",
+          messageId: "message-2",
+          threadId: "thread-1",
+          emoji: "👍",
+          authorId: "someone@example.com",
+          authorKind: "human",
+          authorDisplayName: "Someone",
+          state: "added",
+        },
+      ],
+      viewerAuthorId: "you@example.com",
+    });
+
+    renderView(vi.fn(), vi.fn(), {
+      readOnly: true,
+      variant: "page",
+      initialNav: {
+        level: "thread",
+        channel: sharedChannel,
+        thread: sharedThread,
+      },
+    });
+
+    expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
+    expect(await screen.findByText("A decision")).toBeTruthy();
+    expect(
+      (screen.getByTestId("chats-reaction-pill") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(screen.queryByTestId("chats-add-reaction")).toBeNull();
+    expect(screen.queryByTestId("chats-comment-reply")).toBeNull();
+    expect(screen.queryByTestId("chats-message-bookmark")).toBeNull();
+    expect(screen.queryByTestId("chats-composer")).toBeNull();
+    expect(screen.queryByRole("button", { name: /resolve/i })).toBeNull();
+    expect(screen.getByTestId("chats-readonly-note")).toBeTruthy();
+
+    expect(bridgeMock.markChatThreadRead).not.toHaveBeenCalled();
+    expect(bridgeMock.sendChatMessage).not.toHaveBeenCalled();
+    expect(bridgeMock.resolveChatDecision).not.toHaveBeenCalled();
+    expect(bridgeMock.archiveChatBookmark).not.toHaveBeenCalled();
+  });
+});
+
 describe("ChatsView hybrid feed", () => {
   it("bookmarks a post into a live workspace Markdown projection", async () => {
     const user = userEvent.setup();
@@ -553,6 +672,39 @@ describe("ChatsView My agent", () => {
     expect(screen.getByTestId("chats-agent-setup-action").textContent).toBe("Manage");
     await user.click(screen.getByTestId("chats-agent-setup-action"));
     expect(onSetupAgent).toHaveBeenCalledOnce();
+  });
+
+  it("does not present an enabled MCP server as a connected agent", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [
+        channel({
+          id: "channel-agent",
+          name: "agent-internal",
+          slug: "agent",
+          kind: "agent",
+        }),
+      ],
+      fileThreads: [],
+    });
+    renderView(vi.fn(), vi.fn(), {
+      agentSetup: {
+        preferredName: "Ice",
+        runnerConfigured: false,
+        runnerEnabled: false,
+        mcpEnabled: true,
+      },
+      onSetupAgent: vi.fn(),
+    });
+
+    await user.click(await screen.findByTestId("chats-my-agent"));
+    expect((await screen.findByTestId("chats-agent-setup-card")).dataset.state).toBe(
+      "needs-setup",
+    );
+    expect(screen.getByTestId("chats-agent-setup-card").textContent).toContain(
+      "Workspace MCP enabled · copy its config into your agent.",
+    );
+    expect(screen.getByTestId("chats-agent-setup-action").textContent).toBe("Set up");
   });
 });
 

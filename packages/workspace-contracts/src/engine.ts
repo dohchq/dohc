@@ -1069,6 +1069,7 @@ export type LinkedChatStoreErrorCode =
   | "decision-not-found"
   | "invalid-channel-kind"
   | "invalid-channel-name"
+  | "invalid-bookmark-target"
   | "invalid-follow-target"
   | "invalid-message-body"
   | "message-not-found"

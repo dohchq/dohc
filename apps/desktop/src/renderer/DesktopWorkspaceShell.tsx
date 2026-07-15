@@ -2351,6 +2351,7 @@ export function DesktopWorkspaceShell(props: {
   // drafts, and navigation state.
   const chatsViewProps = {
     workspaceId,
+    readOnly: Boolean(shareView),
     initialNav: chatsNav.current ?? undefined,
     initialDrafts: chatsDrafts.current ?? undefined,
     onNavChange: onChatsNav,
@@ -2361,7 +2362,7 @@ export function DesktopWorkspaceShell(props: {
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
-    collaboration: chatCollaboration,
+    collaboration: shareView ? null : chatCollaboration,
     agentSetup,
     onSetupAgent: () => openSettings("agents"),
   } as const;
@@ -2370,6 +2371,7 @@ export function DesktopWorkspaceShell(props: {
   // transport so the navigator cannot create a duplicate presence lease.
   const chatsNavigatorProps = {
     workspaceId,
+    readOnly: Boolean(shareView),
     selectedNav: selectedChatsNav ?? undefined,
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
@@ -2378,7 +2380,8 @@ export function DesktopWorkspaceShell(props: {
     mentionCandidates,
     workspaceFiles: files,
     addressedToMe,
-    collaboration: isChatsTabPath(wb.activeTab) ? null : chatCollaboration,
+    collaboration:
+      shareView || isChatsTabPath(wb.activeTab) ? null : chatCollaboration,
     agentSetup,
     onSetupAgent: () => openSettings("agents"),
   } as const;
@@ -2845,6 +2848,7 @@ export function DesktopWorkspaceShell(props: {
                     filePath={activeDocumentPath}
                     initialThread={searchChatThread}
                     onInitialThreadConsumed={() => setSearchChatThread(null)}
+                    onOpenPath={openPathWithHeading}
                     onError={(message) => setShellError(message)}
                   />
                 </Suspense>

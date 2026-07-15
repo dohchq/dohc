@@ -7,10 +7,12 @@ import { GraphView } from "./GraphView";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function graph(path: string): WorkspaceGraphResult {
@@ -259,5 +261,73 @@ describe("GraphView", () => {
       rows.find((row) => row.getAttribute("data-path") === chatNode.path)!,
     );
     expect(onOpenChatThread).toHaveBeenCalledWith(expect.objectContaining(chatNode));
+  });
+
+  it("clears mention nodes when chat access is revoked even if the replacement fails", async () => {
+    const disabledGraph = deferred<WorkspaceGraphResult>();
+    const overlayGraph: WorkspaceGraphResult = {
+      nodes: [
+        {
+          path: "chat-thread:thread-sensitive",
+          kind: "chat-thread",
+          threadId: "thread-sensitive",
+          title: "Sensitive discussion",
+          incoming: 0,
+          outgoing: 0,
+        },
+      ],
+      edges: [],
+      unresolvedLinks: 0,
+      scannedFileCount: 0,
+      omittedFileCount: 0,
+      truncatedFileCount: 0,
+    };
+    const readWorkspaceGraph = vi.fn(
+      (input: { includeChatMentions?: boolean }) =>
+        input.includeChatMentions
+          ? Promise.resolve(overlayGraph)
+          : readWorkspaceGraph.mock.calls.length === 1
+            ? Promise.resolve(graph("safe.md"))
+            : disabledGraph.promise,
+    );
+    vi.stubGlobal("dohcDesktop", { readWorkspaceGraph });
+
+    const { rerender } = render(
+      <GraphView
+        workspaceId="ws-graph"
+        activePath={null}
+        refreshKey="0"
+        chatMentionsAvailable
+        onOpenPath={vi.fn()}
+      />,
+    );
+    await screen.findByRole("button", { name: "Open or focus safe.md" });
+    await userEvent.click(screen.getByTestId("graph-chat-mentions-toggle"));
+    expect(await screen.findAllByText("Sensitive discussion")).not.toHaveLength(0);
+
+    rerender(
+      <GraphView
+        workspaceId="ws-graph"
+        activePath={null}
+        refreshKey="0"
+        chatMentionsAvailable={false}
+        onOpenPath={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("Sensitive discussion")).toBeNull();
+    expect(screen.getByText("Building graph…")).toBeTruthy();
+
+    await act(async () => {
+      disabledGraph.reject(new Error("access revoked"));
+      try {
+        await disabledGraph.promise;
+      } catch {
+        // The component owns and renders this expected load failure.
+      }
+    });
+
+    expect(screen.queryByText("Sensitive discussion")).toBeNull();
+    expect(screen.getByText("access revoked")).toBeTruthy();
   });
 });

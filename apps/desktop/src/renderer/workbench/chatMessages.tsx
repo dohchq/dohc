@@ -161,6 +161,7 @@ export function MentionText(props: {
   body: string;
   candidates: readonly MentionCandidate[];
   testId?: string;
+  onOpenPath?: (path: string, headingAnchor?: string) => void;
 }) {
   // Classify code ranges once, against the complete message. File chips split
   // the rendered output into pieces, but must not reset Markdown fence state
@@ -184,18 +185,39 @@ export function MentionText(props: {
     const fileToken = fileTokens[fileIndex];
     if (fileToken && (!mention || fileToken.start < mention.start)) {
       if (fileToken.start > cursor) content.push(props.body.slice(cursor, fileToken.start));
-      content.push(
-        <span
-          key={`file:${fileToken.start}`}
-          data-testid={props.testId ? `${props.testId}-file-mention` : undefined}
-          className="inline-flex items-center gap-1 rounded bg-line/50 px-1 text-muted"
-          title={fileToken.text}
-        >
+      const testId = props.testId ? `${props.testId}-file-mention` : undefined;
+      const chipContent = (
+        <>
           <FileText size={11} aria-hidden />
           {fileToken.path.split("/").at(-1)}
           {fileToken.headingAnchor ? `#${fileToken.headingAnchor}` : ""}
-        </span>,
+        </>
       );
+      const className = "inline-flex items-center gap-1 rounded bg-line/50 px-1 text-muted";
+      content.push(props.onOpenPath ? (
+        <button
+          type="button"
+          key={`file:${fileToken.start}`}
+          data-testid={testId}
+          aria-label={`Open ${fileToken.path}${
+            fileToken.headingAnchor ? ` at #${fileToken.headingAnchor}` : ""
+          }`}
+          className={`${className} cursor-pointer hover:bg-line hover:text-ink`}
+          title={fileToken.text}
+          onClick={() => props.onOpenPath?.(fileToken.path, fileToken.headingAnchor)}
+        >
+          {chipContent}
+        </button>
+      ) : (
+        <span
+          key={`file:${fileToken.start}`}
+          data-testid={testId}
+          className={className}
+          title={fileToken.text}
+        >
+          {chipContent}
+        </span>
+      ));
       cursor = fileToken.end;
       fileIndex += 1;
       continue;
@@ -235,6 +257,7 @@ export interface ChatReactionControls {
     nextState: "added" | "removed";
   }) => void;
   emojiChoices?: readonly string[];
+  readOnly?: boolean;
 }
 
 // "Alice, Bob's agent reacted" — agent reactors read as "<name>'s agent".
@@ -326,13 +349,14 @@ export function MessageReactions(props: {
           data-emoji={group.emoji}
           data-mine={group.mine ? "true" : "false"}
           aria-pressed={group.mine}
+          disabled={props.controls.readOnly}
           // The emoji glyph is aria-hidden, so without this the button announces
           // as just its count. Expose emoji + count + reactor names, e.g.
           // "👍 3 — Ice, Ice's agent".
           aria-label={`${group.emoji} ${group.records.length} — ${reactionerNames(group.records)}`}
           title={`${reactionerNames(group.records)} reacted with ${group.emoji}`}
           onClick={() => toggle(group.emoji, group.mine)}
-          className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] leading-none transition-colors ${
+          className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] leading-none transition-colors disabled:cursor-default ${
             group.mine
               ? "border-accent bg-accent/15 text-accent"
               : "border-line bg-bg text-muted hover:border-accent/60"
@@ -342,21 +366,23 @@ export function MessageReactions(props: {
           <span className="tabular-nums">{group.records.length}</span>
         </button>
       ))}
-      <button
-        ref={triggerRef}
-        type="button"
-        data-testid={`${props.testIdPrefix}-add-reaction`}
-        aria-label="Add reaction"
-        aria-haspopup="true"
-        aria-expanded={pickerOpen}
-        aria-controls={pickerOpen ? pickerId : undefined}
-        title="Add reaction"
-        onClick={() => setPickerOpen((open) => !open)}
-        className="grid size-5 place-items-center rounded-full border border-transparent text-subtle opacity-0 transition-opacity hover:border-line hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
-      >
-        <SmilePlus size={13} aria-hidden />
-      </button>
-      {pickerOpen ? (
+      {!props.controls.readOnly ? (
+        <button
+          ref={triggerRef}
+          type="button"
+          data-testid={`${props.testIdPrefix}-add-reaction`}
+          aria-label="Add reaction"
+          aria-haspopup="true"
+          aria-expanded={pickerOpen}
+          aria-controls={pickerOpen ? pickerId : undefined}
+          title="Add reaction"
+          onClick={() => setPickerOpen((open) => !open)}
+          className="grid size-5 place-items-center rounded-full border border-transparent text-subtle opacity-0 transition-opacity hover:border-line hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+        >
+          <SmilePlus size={13} aria-hidden />
+        </button>
+      ) : null}
+      {pickerOpen && !props.controls.readOnly ? (
         // A lightweight quick-pick, NOT an APG menu: role="group" with plain
         // toggle <button>s (each Tab-stoppable, aria-pressed reflecting the
         // viewer's state). We deliberately don't claim role="menu"/menuitem*,
@@ -406,6 +432,9 @@ export function ChatMessageList(props: {
   endRef: RefObject<HTMLDivElement | null>;
   // When provided, message bodies render @-mention chips for these handles.
   mentionCandidates?: readonly MentionCandidate[];
+  // File-reference tokens become navigation buttons when the host can open
+  // workspace paths; embedded/read-only hosts keep the same non-interactive chip.
+  onOpenPath?: (path: string, headingAnchor?: string) => void;
   // When provided, each message gets a reaction row (pills + quick-pick).
   reactionControls?: ChatReactionControls;
 }) {
@@ -461,6 +490,7 @@ export function ChatMessageList(props: {
                     body={message.body}
                     candidates={candidates}
                     testId={`${props.testIdPrefix}-message-body`}
+                    onOpenPath={props.onOpenPath}
                   />
                 </p>
                 {props.reactionControls ? (

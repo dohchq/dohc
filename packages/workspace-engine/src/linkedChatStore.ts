@@ -920,14 +920,14 @@ function upsertFeedReadLww(
 
 function normalizeBookmarkTargetKind(value: ChatBookmarkTargetKind): ChatBookmarkTargetKind {
   if (value !== "message" && value !== "thread") {
-    throw new LinkedChatStoreError("invalid-follow-target", "Bookmark target kind is invalid.");
+    throw new LinkedChatStoreError("invalid-bookmark-target", "Bookmark target kind is invalid.");
   }
   return value;
 }
 
 function normalizeBookmarkMode(value: ChatBookmarkMode): ChatBookmarkMode {
   if (value !== "live" && value !== "snapshot") {
-    throw new LinkedChatStoreError("invalid-follow-target", "Bookmark mode is invalid.");
+    throw new LinkedChatStoreError("invalid-bookmark-target", "Bookmark mode is invalid.");
   }
   return value;
 }
@@ -1028,7 +1028,7 @@ function requireBookmark(
     .prepare(`${BOOKMARK_SELECT_SQL} WHERE b.workspace_id = ? AND b.owner_user_id = ? AND b.bookmark_id = ?`)
     .get(workspaceId, ownerUserId, bookmarkId);
   if (!row) {
-    throw new LinkedChatStoreError("invalid-follow-target", "Chat bookmark was not found.");
+    throw new LinkedChatStoreError("invalid-bookmark-target", "Chat bookmark was not found.");
   }
   return bookmarkFromRow(row);
 }
@@ -3555,7 +3555,7 @@ export function createLinkedChatStore(
         const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Bookmark owner");
         const state = input.state;
         if (state !== undefined && state !== "active" && state !== "archived") {
-          throw new LinkedChatStoreError("invalid-follow-target", "Bookmark state is invalid.");
+          throw new LinkedChatStoreError("invalid-bookmark-target", "Bookmark state is invalid.");
         }
         return withDb((db) =>
           db
@@ -3617,7 +3617,7 @@ export function createLinkedChatStore(
         const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Bookmark owner");
         const limit = input.limit ?? 50;
         if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
-          throw new LinkedChatStoreError("invalid-follow-target", "Bookmark limit is invalid.");
+          throw new LinkedChatStoreError("invalid-bookmark-target", "Bookmark limit is invalid.");
         }
         return withDb((db) =>
           db
@@ -3653,11 +3653,11 @@ export function createLinkedChatStore(
         const bookmarkId = normalizeFeedIdentity(input.bookmarkId, "Bookmark id");
         requireBookmark(db, workspaceId, ownerUserId, bookmarkId);
         if (!Number.isSafeInteger(input.generation) || input.generation < 1) {
-          throw new LinkedChatStoreError("invalid-follow-target", "Bookmark generation is invalid.");
+          throw new LinkedChatStoreError("invalid-bookmark-target", "Bookmark generation is invalid.");
         }
         const projectedAtMs = input.projectedAtMs ?? nowMs();
         if (!Number.isFinite(projectedAtMs)) {
-          throw new LinkedChatStoreError("invalid-follow-target", "Projection time is invalid.");
+          throw new LinkedChatStoreError("invalid-bookmark-target", "Projection time is invalid.");
         }
         const result = db
           .prepare(
@@ -3689,7 +3689,7 @@ export function createLinkedChatStore(
         const bookmarkId = normalizeFeedIdentity(input.bookmarkId, "Bookmark id");
         requireBookmark(db, workspaceId, ownerUserId, bookmarkId);
         if (!Number.isSafeInteger(input.generation) || input.generation < 1) {
-          throw new LinkedChatStoreError("invalid-follow-target", "Bookmark generation is invalid.");
+          throw new LinkedChatStoreError("invalid-bookmark-target", "Bookmark generation is invalid.");
         }
         const failureReason = normalizeBookmarkReason(input.failureReason, true)!;
         const atMs = nowMs();
@@ -3715,7 +3715,7 @@ export function createLinkedChatStore(
         const bookmarkId = normalizeFeedIdentity(input.bookmarkId, "Bookmark id");
         requireBookmark(db, workspaceId, ownerUserId, bookmarkId);
         if (!Number.isSafeInteger(input.generation) || input.generation < 1) {
-          throw new LinkedChatStoreError("invalid-follow-target", "Bookmark generation is invalid.");
+          throw new LinkedChatStoreError("invalid-bookmark-target", "Bookmark generation is invalid.");
         }
         const failureReason =
           input.failureReason === undefined

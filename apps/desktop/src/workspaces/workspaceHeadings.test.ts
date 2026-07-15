@@ -35,6 +35,8 @@ describe("workspace headings", () => {
     const headings = extractWorkspaceHeadings([
       "```md",
       "# hidden",
+      "```not-a-close",
+      "## still hidden",
       "```",
       "    ## also hidden",
       "## Visible",

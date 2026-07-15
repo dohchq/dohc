@@ -15,10 +15,13 @@ describe("chat identity", () => {
   it("bounds and validates names", () => {
     expect(PreferredName.safeParse("x".repeat(MAX_PREFERRED_NAME_LENGTH)).success).toBe(true);
     expect(PreferredName.safeParse("x".repeat(MAX_PREFERRED_NAME_LENGTH + 1)).success).toBe(false);
+    expect(PreferredName.safeParse("می\u200cثم").success).toBe(true);
+    expect(PreferredName.safeParse("Ice 👩\u200d💻").success).toBe(true);
     expect(PreferredName.safeParse("Ice\u0000Admin").success).toBe(false);
     expect(PreferredName.safeParse("Ice\u202eAdmin").success).toBe(false);
     expect(PreferredName.safeParse("Ice\u2066Admin\u2069").success).toBe(false);
     expect(PreferredName.safeParse("Ice\u200eAdmin").success).toBe(false);
+    expect(PreferredName.safeParse("Ice\u200bAdmin").success).toBe(false);
     expect(PreferredName.safeParse("Ice\u2028Admin").success).toBe(false);
     expect(PreferredName.safeParse("Ice\u2029Admin").success).toBe(false);
   });

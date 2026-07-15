@@ -5,7 +5,9 @@ export const MAX_PREFERRED_NAME_LENGTH = 80;
 // Control characters, Unicode formatting controls (including bidi overrides
 // and isolates), and explicit line/paragraph separators can spoof or split a
 // visible author label even though the underlying authorization id is safe.
-const CONTROL_CHARACTERS = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+// ZWNJ and ZWJ are the two intentional exceptions: they are required for
+// ordinary Persian orthography and joined emoji sequences, respectively.
+const CONTROL_CHARACTERS = /(?:[\p{Cc}\p{Zl}\p{Zp}]|(?![\u200c\u200d])\p{Cf})/u;
 
 /**
  * The human-readable owner name used by chat authorship surfaces. This value is
