@@ -537,6 +537,29 @@ describe("ChatsView shared-workspace read-only boundary", () => {
 });
 
 describe("ChatsView hybrid feed", () => {
+  it("consumes a rejected best-effort Feed seen cursor", async () => {
+    const onError = vi.fn();
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [],
+      headCursor: "1700000000000:message-1",
+    });
+    bridgeMock.markPersonalChatFeedSeen.mockRejectedValue(
+      new Error("cursor storage unavailable"),
+    );
+    renderView(vi.fn(), onError);
+
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByTestId("chats-personal-feed");
+    await waitFor(() =>
+      expect(bridgeMock.markPersonalChatFeedSeen).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        headCursor: "1700000000000:message-1",
+      }),
+    );
+    await act(async () => Promise.resolve());
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it("focuses the selected non-opening message when a feed item opens its thread", async () => {
     const onNavChange = vi.fn();
     bridgeMock.listPersonalChatFeed.mockResolvedValue({
@@ -1477,6 +1500,25 @@ describe("ChatsView read cursors", () => {
     await waitFor(() =>
       expect(screen.getAllByTestId("chats-thread-unread")).toHaveLength(1),
     );
+  });
+
+  it("keeps an unread thread unread when the workspace is read-only", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ messageCount: 3, lastReadSequence: 1, unreadCount: 2 })],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [message(), message({ id: "m2" }), message({ id: "m3" })],
+    });
+    renderView(vi.fn(), vi.fn(), { readOnly: true });
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    expect((await screen.findByTestId("chats-thread-unread")).textContent).toBe("2");
+    await userEvent.click(screen.getByTestId("chats-thread"));
+    await screen.findByTestId("chats-thread-view");
+    expect(bridgeMock.markChatThreadRead).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByTestId("chats-thread-back"));
+    expect((await screen.findByTestId("chats-thread-unread")).textContent).toBe("2");
   });
 });
 
@@ -2477,5 +2519,117 @@ describe("ChatsView expand-to-tab", () => {
     await waitFor(() =>
       expect(screen.getByTestId("chats-feed-bookmark").getAttribute("aria-pressed")).toBe("true"),
     );
+  });
+
+  it("does not let an older bookmark list erase a completed mutation", async () => {
+    let resolveBookmarks!: (value: { bookmarks: ChatBookmarkRecord[] }) => void;
+    const delayedBookmarks = new Promise<{ bookmarks: ChatBookmarkRecord[] }>((resolve) => {
+      resolveBookmarks = resolve;
+    });
+    bridgeMock.listChatBookmarks.mockImplementationOnce(() => delayedBookmarks);
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          message: message(),
+          thread: thread(),
+          channel: { id: "channel-1", name: "general", slug: "general", kind: "channel" },
+          reactions: [],
+          matchedBy: ["channel"],
+        },
+      ],
+    });
+    bridgeMock.saveChatBookmark.mockResolvedValue({
+      bookmark: {
+        bookmarkId: "bookmark-message-1",
+        targetKind: "message",
+        targetId: "message-1",
+        threadId: "thread-1",
+        messageId: "message-1",
+        mode: "live",
+        destinationPath: "Bookmarks/Chats/Friday--message-1.md",
+        state: "active",
+        projectionState: "ready",
+        generation: 1,
+        createdAtMs: NOW,
+        updatedAtMs: NOW,
+      },
+    });
+
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const bookmarkButton = await screen.findByTestId("chats-feed-bookmark");
+    await userEvent.click(bookmarkButton);
+    await waitFor(() => expect(bookmarkButton.getAttribute("aria-pressed")).toBe("true"));
+
+    await act(async () => {
+      resolveBookmarks({ bookmarks: [] });
+      await delayedBookmarks;
+    });
+    expect(bookmarkButton.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("drops a bookmark mutation result and busy cleanup from an old workspace", async () => {
+    let resolveSave!: (value: { bookmark: ChatBookmarkRecord }) => void;
+    const delayedSave = new Promise<{ bookmark: ChatBookmarkRecord }>((resolve) => {
+      resolveSave = resolve;
+    });
+    bridgeMock.saveChatBookmark.mockImplementationOnce(() => delayedSave);
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          message: message(),
+          thread: thread(),
+          channel: { id: "channel-1", name: "general", slug: "general", kind: "channel" },
+          reactions: [],
+          matchedBy: ["channel"],
+        },
+      ],
+    });
+
+    const { rerender } = render(
+      <ChatsView
+        workspaceId="workspace-old"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const oldButton = await screen.findByTestId("chats-feed-bookmark");
+    await userEvent.click(oldButton);
+    expect((oldButton as HTMLButtonElement).disabled).toBe(true);
+
+    rerender(
+      <ChatsView
+        workspaceId="workspace-new"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const newButton = await screen.findByTestId("chats-feed-bookmark");
+    expect((newButton as HTMLButtonElement).disabled).toBe(false);
+    expect(newButton.getAttribute("aria-pressed")).toBe("false");
+
+    await act(async () => {
+      resolveSave({
+        bookmark: {
+          bookmarkId: "bookmark-old-workspace",
+          targetKind: "message",
+          targetId: "message-1",
+          threadId: "thread-1",
+          messageId: "message-1",
+          mode: "live",
+          destinationPath: "Bookmarks/Chats/old.md",
+          state: "active",
+          projectionState: "ready",
+          generation: 1,
+          createdAtMs: NOW,
+          updatedAtMs: NOW,
+        },
+      });
+      await delayedSave;
+    });
+    expect(newButton.getAttribute("aria-pressed")).toBe("false");
+    expect((newButton as HTMLButtonElement).disabled).toBe(false);
   });
 });

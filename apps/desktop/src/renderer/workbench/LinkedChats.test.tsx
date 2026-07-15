@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -193,6 +193,85 @@ describe("LinkedChatsPanel initialThread consumption", () => {
 
     await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(scrolledMessageIds).toContain("message-2"));
+  });
+
+  it("drops a deferred scroll after a newer thread open supersedes its request", async () => {
+    const secondThread = {
+      ...searchThread,
+      id: "thread-2",
+      title: "Second discussion",
+    };
+    bridgeMock.listChatMessages.mockImplementation(
+      async ({ threadId }: { threadId: string }) => ({
+        messages: threadId === searchThread.id
+          ? [{
+              id: "shared-message",
+              threadId,
+              authorKind: "human" as const,
+              authorDisplayName: "Ice",
+              body: "Old thread message",
+              createdAtMs: 1,
+            }]
+          : [
+              {
+                id: "shared-message",
+                threadId,
+                authorKind: "human" as const,
+                authorDisplayName: "Ice",
+                body: "Same id in the new DOM",
+                createdAtMs: 2,
+              },
+              {
+                id: "new-focus",
+                threadId,
+                authorKind: "human" as const,
+                authorDisplayName: "Ice",
+                body: "New focus",
+                createdAtMs: 3,
+              },
+            ],
+      }),
+    );
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    const scrolledMessageIds: Array<string | null> = [];
+    vi.mocked(Element.prototype.scrollIntoView).mockImplementation(function (
+      this: Element,
+    ) {
+      scrolledMessageIds.push(this.getAttribute("data-message-id"));
+    });
+
+    const view = render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        initialThread={{ ...searchThread }}
+        initialFocusMessageId="shared-message"
+        onError={() => undefined}
+      />,
+    );
+    await screen.findByText("Old thread message");
+    await waitFor(() => expect(frames).toHaveLength(1));
+
+    view.rerender(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        initialThread={{ ...secondThread }}
+        initialFocusMessageId="new-focus"
+        onError={() => undefined}
+      />,
+    );
+    await screen.findByText("New focus");
+    await waitFor(() => expect(frames).toHaveLength(2));
+
+    act(() => frames[0]?.(0));
+    expect(scrolledMessageIds).toEqual([]);
+    act(() => frames[1]?.(1));
+    expect(scrolledMessageIds).toEqual(["new-focus"]);
   });
 });
 

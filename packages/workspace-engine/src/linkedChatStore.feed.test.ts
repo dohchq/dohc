@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SyncReplicationEnvelope } from "@dohc/workspace-contracts/engine";
 import { closeTrackedEngineDbHandlesForTest } from "./engineDbSchema";
 import { LINKED_CHAT_STORE_RELATIVE_PATH, createLinkedChatStore } from "./linkedChatStore";
@@ -20,7 +20,10 @@ interface RawSqliteDb {
 
 const requireModule = createRequire(import.meta.url);
 const { DatabaseSync } = requireModule("node:sqlite") as {
-  DatabaseSync: new (path: string) => RawSqliteDb;
+  DatabaseSync: {
+    new (path: string): RawSqliteDb;
+    prototype: Pick<RawSqliteDb, "prepare">;
+  };
 };
 
 let root: string;
@@ -191,6 +194,7 @@ describe("personal chat Feed", () => {
       author: { kind: "human", displayName: "Alice" },
       authorUserId: "alice",
       body: "Opening post",
+      attachments: [{ objectId: "object-opening", pathHint: "docs/opening.md" }],
     });
     const reply = await store.sendMessage({
       workspaceId: "ws",
@@ -199,6 +203,15 @@ describe("personal chat Feed", () => {
       authorUserId: "alice",
       parentMessageId: started.message.id,
       body: "A reply",
+      attachments: [{ objectId: "object-reply", pathHint: "docs/reply.md" }],
+    });
+    const replyReaction = await store.setReaction({
+      workspaceId: "ws",
+      threadId: started.thread.id,
+      messageId: reply.id,
+      emoji: "👍",
+      author: { authorId: "viewer", kind: "human", displayName: "Viewer" },
+      state: "added",
     });
     await store.startChannelThread({
       workspaceId: "ws",
@@ -230,15 +243,32 @@ describe("personal chat Feed", () => {
       state: "following",
     });
 
-    const first = await store.listPersonalFeed({
-      workspaceId: "ws",
-      ownerUserId: "viewer",
-      limit: 1,
-    });
+    const feedPrepare = vi.spyOn(DatabaseSync.prototype, "prepare");
+    const first = await (async () => {
+      try {
+        const page = await store.listPersonalFeed({
+          workspaceId: "ws",
+          ownerUserId: "viewer",
+          limit: 1,
+        });
+        expect(feedPrepare).toHaveBeenCalledTimes(10);
+        return page;
+      } finally {
+        feedPrepare.mockRestore();
+      }
+    })();
     expect(first.items).toHaveLength(1);
     expect(first.items[0]?.message.id).toBe(reply.id);
+    expect(first.items[0]?.message.attachments).toEqual([
+      expect.objectContaining({ objectId: "object-reply" }),
+    ]);
     expect(first.items[0]?.matchedBy).toEqual(["person", "thread"]);
     expect(first.items[0]?.parentMessage?.id).toBe(started.message.id);
+    expect(first.items[0]?.parentMessage?.attachments).toEqual([
+      expect.objectContaining({ objectId: "object-opening" }),
+    ]);
+    expect(first.items[0]?.openingMessage).toEqual(first.items[0]?.parentMessage);
+    expect(first.items[0]?.reactions).toEqual([replyReaction]);
     expect(first.nextCursor).toBeTruthy();
     expect(first.headCursor).toBeTruthy();
 
@@ -535,6 +565,7 @@ describe("chat file section mentions", () => {
           headingAnchor: "pricing-assumptions",
           headingOccurrence: 0,
         },
+        { objectId: "object-brief", pathHint: "docs/brief.md" },
       ],
     });
     await store.sendMessage({
@@ -545,10 +576,19 @@ describe("chat file section mentions", () => {
       attachments: [{ objectId: "object-plan", pathHint: "docs/plan.md" }],
     });
 
-    const mentions = await store.listFileMentions({
-      workspaceId: "ws",
-      objectId: "object-plan",
-    });
+    const mentionPrepare = vi.spyOn(DatabaseSync.prototype, "prepare");
+    const mentions = await (async () => {
+      try {
+        const result = await store.listFileMentions({
+          workspaceId: "ws",
+          objectId: "object-plan",
+        });
+        expect(mentionPrepare).toHaveBeenCalledTimes(5);
+        return result;
+      } finally {
+        mentionPrepare.mockRestore();
+      }
+    })();
     expect(mentions.map((mention) => mention.message.body)).toEqual([
       "Whole file too.",
       "See the pricing assumptions.",
@@ -558,6 +598,10 @@ describe("chat file section mentions", () => {
       headingAnchor: "pricing-assumptions",
       headingOccurrence: 0,
     });
+    expect(mentions[1]?.message.attachments).toHaveLength(2);
+    expect(mentions[1]?.message.attachments.map((attachment) => attachment.objectId)).toEqual(
+      expect.arrayContaining(["object-plan", "object-brief"]),
+    );
     expect(mentions[1]?.channel?.id).toBe(channel.id);
   });
 });

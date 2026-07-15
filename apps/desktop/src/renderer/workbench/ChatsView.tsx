@@ -883,7 +883,13 @@ export function ChatsView(props: {
   const [personalFeedNextCursor, setPersonalFeedNextCursor] = useState<string | undefined>();
   const [bookmarks, setBookmarks] = useState<ChatBookmarkRecord[]>([]);
   const [bookmarkBusy, setBookmarkBusy] = useState<Set<string>>(() => new Set());
-  const bookmarkRequest = useRef(0);
+  // Bookmark list reads and mutations are independent request streams. A
+  // mutation invalidates any older list read, while per-key mutation
+  // generations let unrelated bookmark writes finish concurrently.
+  const bookmarkWorkspaceGeneration = useRef(0);
+  const bookmarkListGeneration = useRef(0);
+  const bookmarkMutationGeneration = useRef(0);
+  const bookmarkMutationByKey = useRef(new Map<string, number>());
   const [followedUi, setFollowedUi] = useState<Set<string>>(() => new Set());
   const followRequest = useRef(0);
   const [threadsLoading, setThreadsLoading] = useState(false);
@@ -983,13 +989,21 @@ export function ChatsView(props: {
   }, [workspaceId]);
 
   const refreshBookmarks = useCallback(async () => {
-    const request = ++bookmarkRequest.current;
+    const workspaceGeneration = bookmarkWorkspaceGeneration.current;
+    const listGeneration = ++bookmarkListGeneration.current;
+    const mutationGeneration = bookmarkMutationGeneration.current;
     const desktopBridge = bridge();
     // Older preload fixtures deliberately omit newly added additive surfaces.
     if (typeof desktopBridge.listChatBookmarks !== "function") return;
     try {
       const result = await desktopBridge.listChatBookmarks({ workspaceId });
-      if (request !== bookmarkRequest.current) return;
+      if (
+        workspaceGeneration !== bookmarkWorkspaceGeneration.current ||
+        listGeneration !== bookmarkListGeneration.current ||
+        mutationGeneration !== bookmarkMutationGeneration.current
+      ) {
+        return;
+      }
       setBookmarks(result.bookmarks.filter((bookmark) => bookmark.state === "active"));
     } catch {
       // A projection problem must not make the core chat surface unavailable.
@@ -1036,6 +1050,10 @@ export function ChatsView(props: {
   // Workspace switch: drop everything stale and reload from the top.
   useEffect(() => {
     liveToken.current += 1;
+    bookmarkWorkspaceGeneration.current += 1;
+    bookmarkListGeneration.current += 1;
+    bookmarkMutationGeneration.current += 1;
+    bookmarkMutationByKey.current.clear();
     setNav({ level: "channels" });
     setChannelThreads([]);
     setFeedPosts({});
@@ -1073,7 +1091,10 @@ export function ChatsView(props: {
     void refreshFollows();
     return () => {
       liveToken.current += 1;
-      bookmarkRequest.current += 1;
+      bookmarkWorkspaceGeneration.current += 1;
+      bookmarkListGeneration.current += 1;
+      bookmarkMutationGeneration.current += 1;
+      bookmarkMutationByKey.current.clear();
       followRequest.current += 1;
     };
   }, [refreshBookmarks, refreshDms, refreshFollows, refreshOverview]);
@@ -1100,9 +1121,18 @@ export function ChatsView(props: {
           ? input.target.threadId
           : input.target.messageId;
       const key = `${input.target.kind}:${targetId}`;
-      if (bookmarkBusy.has(key)) return;
+      if (bookmarkBusy.has(key) || bookmarkMutationByKey.current.has(key)) return;
       const existing = bookmarkFor(input.target.kind, targetId);
-      const request = bookmarkRequest.current;
+      const workspaceGeneration = bookmarkWorkspaceGeneration.current;
+      const mutationGeneration = ++bookmarkMutationGeneration.current;
+      // A list response that began before this write reflects older storage
+      // and must never erase the mutation result when it eventually resolves.
+      bookmarkListGeneration.current += 1;
+      bookmarkMutationByKey.current.set(key, mutationGeneration);
+      const mutationIsCurrent = () =>
+        workspaceGeneration === bookmarkWorkspaceGeneration.current &&
+        bookmarkMutationByKey.current.get(key) === mutationGeneration;
+      if (!mutationIsCurrent()) return;
       setBookmarkBusy((current) => new Set(current).add(key));
       try {
         if (existing) {
@@ -1110,7 +1140,7 @@ export function ChatsView(props: {
             workspaceId,
             bookmarkId: existing.bookmarkId,
           });
-          if (request !== bookmarkRequest.current) return;
+          if (!mutationIsCurrent()) return;
           setBookmarks((current) =>
             current.filter(
               (bookmark) => bookmark.bookmarkId !== existing.bookmarkId,
@@ -1122,7 +1152,7 @@ export function ChatsView(props: {
             target: input.target,
             mode: input.mode,
           });
-          if (request !== bookmarkRequest.current) return;
+          if (!mutationIsCurrent()) return;
           setBookmarks((current) => [
             ...current.filter(
               (bookmark) => bookmark.bookmarkId !== result.bookmark.bookmarkId,
@@ -1131,18 +1161,19 @@ export function ChatsView(props: {
           ]);
         }
       } catch (error) {
-        if (request === bookmarkRequest.current) {
+        if (mutationIsCurrent()) {
           props.onError(
             ipcErrorMessage(error, "Could not update this bookmark."),
           );
         }
       } finally {
-        if (request === bookmarkRequest.current) {
+        if (mutationIsCurrent()) {
           setBookmarkBusy((current) => {
             const next = new Set(current);
             next.delete(key);
             return next;
           });
+          bookmarkMutationByKey.current.delete(key);
         }
       }
     },
@@ -1275,12 +1306,12 @@ export function ChatsView(props: {
       // Everything on screen is read: advance the monotonic cursor and clear
       // this thread's badge locally so back-navigation is immediately honest.
       const upToSequence = snapshot.messages.length;
-      setChannelThreads((current) =>
-        current.map((entry) =>
-          entry.id === threadId ? { ...entry, unreadCount: 0 } : entry,
-        ),
-      );
       if (!readOnly) {
+        setChannelThreads((current) =>
+          current.map((entry) =>
+            entry.id === threadId ? { ...entry, unreadCount: 0 } : entry,
+          ),
+        );
         void bridge()
           .markChatThreadRead({ workspaceId, threadId, upToSequence })
           .catch(() => {
@@ -1695,10 +1726,14 @@ export function ChatsView(props: {
         setPersonalFeed((current) => (cursor ? [...current, ...page.items] : page.items));
         setPersonalFeedNextCursor(page.nextCursor);
         if (!readOnly && !cursor && page.headCursor) {
-          void bridge().markPersonalChatFeedSeen({
-            workspaceId,
-            headCursor: page.headCursor,
-          });
+          void bridge()
+            .markPersonalChatFeedSeen({
+              workspaceId,
+              headCursor: page.headCursor,
+            })
+            .catch(() => {
+              // Best-effort cursor: the next Feed open can retry.
+            });
         }
       } catch (error) {
         if (token === liveToken.current) {

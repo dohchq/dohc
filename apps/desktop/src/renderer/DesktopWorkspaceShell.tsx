@@ -30,6 +30,7 @@ import type {
   ChatFileMentionRecord,
   ChatThreadRecord,
   CloudStatusResult,
+  DmRecord,
   EngineMomentDetailRecord,
   EngineMomentRecord,
   SyncStatusResult,
@@ -173,8 +174,15 @@ export function chatsNavigationRequiresRemount(
   return next.level === "thread" && Boolean(next.focusMessageId);
 }
 
+export interface DmChatLocator {
+  channelId?: string;
+  channelWireId?: string;
+  threadId: string;
+}
+
 type ChatOpenTarget =
   | { surface: "channel"; nav: Extract<ChatsNav, { level: "thread" }> }
+  | ({ surface: "dm" } & DmChatLocator)
   | {
       surface: "file";
       thread: Pick<ChatThreadRecord, "id" | "title" | "createdAtMs" | "updatedAtMs">;
@@ -183,6 +191,14 @@ type ChatOpenTarget =
   | { surface: "overview" };
 
 export function chatMentionOpenTarget(mention: ChatFileMentionRecord): ChatOpenTarget {
+  if (mention.channelKind === "dm") {
+    return {
+      surface: "dm",
+      channelId: mention.channelId,
+      channelWireId: mention.channelWireId,
+      threadId: mention.thread.id,
+    };
+  }
   if (!mention.channelId || !mention.channelName) {
     return {
       surface: "file",
@@ -227,6 +243,14 @@ export function graphChatOpenTarget(
     createdAtMs: 0,
     updatedAtMs: 0,
   };
+  if (node.channelKind === "dm") {
+    return {
+      surface: "dm",
+      channelId: node.channelId,
+      channelWireId: node.channelWireId,
+      threadId: node.threadId,
+    };
+  }
   if (!node.channelId || !node.channelName) return { surface: "file", thread };
   return {
     surface: "channel",
@@ -252,6 +276,22 @@ export function graphChatOpenTarget(
       },
     },
   };
+}
+
+export function resolveCanonicalDm(
+  locator: DmChatLocator,
+  dms: readonly DmRecord[],
+): DmRecord | null {
+  // A renderer-supplied graph/backlink row is only a locator. Never construct
+  // a DM record from its display metadata: require a canonical main-derived DM
+  // with the same running thread and every available stable channel identity.
+  if (!locator.channelId && !locator.channelWireId) return null;
+  return dms.find(
+    (dm) =>
+      dm.threadId === locator.threadId &&
+      (!locator.channelId || dm.channelId === locator.channelId) &&
+      (!locator.channelWireId || dm.channelWireId === locator.channelWireId),
+  ) ?? null;
 }
 
 export function pendingHeadingTargetForOpen(
@@ -1520,7 +1560,15 @@ export function DesktopWorkspaceShell(props: {
   const chatsNav = useRef<ChatsNav | null>(null);
   const [selectedChatsNav, setSelectedChatsNav] = useState<ChatsNav | null>(null);
   const [chatsPageRevision, setChatsPageRevision] = useState(0);
+  const dmNavigationRequest = useRef({ workspaceId, sequence: 0 });
+  if (dmNavigationRequest.current.workspaceId !== workspaceId) {
+    dmNavigationRequest.current = {
+      workspaceId,
+      sequence: dmNavigationRequest.current.sequence + 1,
+    };
+  }
   const onChatsNav = useCallback((nav: ChatsNav) => {
+    dmNavigationRequest.current.sequence += 1;
     chatsNav.current = nav;
     setSelectedChatsNav(nav);
   }, []);
@@ -1532,10 +1580,12 @@ export function DesktopWorkspaceShell(props: {
     chatsDrafts.current = drafts;
   }, []);
   const openChatsTab = useCallback(() => {
+    dmNavigationRequest.current.sequence += 1;
     mutateWb((state) => openTab(state, CHATS_TAB_PATH));
   }, [mutateWb]);
   const openChatsNavInTab = useCallback(
     (nav: ChatsNav) => {
+      dmNavigationRequest.current.sequence += 1;
       const destinationChanged =
         chatsDestinationKey(chatsNav.current) !== chatsDestinationKey(nav);
       const shouldRemount = chatsNavigationRequiresRemount(chatsNav.current, nav);
@@ -1554,6 +1604,36 @@ export function DesktopWorkspaceShell(props: {
     },
     [mutateWb],
   );
+  const openCanonicalDmInTab = useCallback(
+    async (locator: DmChatLocator) => {
+      const request = {
+        workspaceId,
+        sequence: dmNavigationRequest.current.sequence + 1,
+      };
+      dmNavigationRequest.current = request;
+      try {
+        const result = await bridge().syncDms({ workspaceId });
+        if (
+          dmNavigationRequest.current.workspaceId !== request.workspaceId ||
+          dmNavigationRequest.current.sequence !== request.sequence
+        ) return;
+        const dm = result.available ? resolveCanonicalDm(locator, result.dms) : null;
+        if (!dm) {
+          openChatsTab();
+          return;
+        }
+        openChatsNavInTab({ level: "dm", dm });
+      } catch {
+        if (
+          dmNavigationRequest.current.workspaceId === request.workspaceId &&
+          dmNavigationRequest.current.sequence === request.sequence
+        ) {
+          openChatsTab();
+        }
+      }
+    },
+    [openChatsNavInTab, openChatsTab, workspaceId],
+  );
   // The ONE way a chat thread lands in the Chats panel (search hits, file
   // mentions without channel metadata, and the Chats view "Files" grouping
   // all route here): hand the known thread to the panel's consume-once seam,
@@ -1563,6 +1643,7 @@ export function DesktopWorkspaceShell(props: {
       thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number },
       focusMessageId?: string,
     ) => {
+      dmNavigationRequest.current.sequence += 1;
       setSearchChatTarget({
         thread: {
           id: thread.id,
@@ -1588,9 +1669,13 @@ export function DesktopWorkspaceShell(props: {
         openChatsTab();
         return;
       }
+      if (target.surface === "dm") {
+        void openCanonicalDmInTab(target);
+        return;
+      }
       openChatsNavInTab(target.nav);
     },
-    [openChatThreadInPanel, openChatsNavInTab, openChatsTab],
+    [openCanonicalDmInTab, openChatThreadInPanel, openChatsNavInTab, openChatsTab],
   );
   const openGraphChatThread = useCallback(
     (node: WorkspaceGraphResult["nodes"][number]) => {
@@ -1603,9 +1688,13 @@ export function DesktopWorkspaceShell(props: {
         openChatsTab();
         return;
       }
+      if (target.surface === "dm") {
+        void openCanonicalDmInTab(target);
+        return;
+      }
       openChatsNavInTab(target.nav);
     },
-    [openChatThreadInPanel, openChatsNavInTab, openChatsTab],
+    [openCanonicalDmInTab, openChatThreadInPanel, openChatsNavInTab, openChatsTab],
   );
   // Engine history diff (flagged workspaces): one tab per moment.
   const openMomentDiffTab = useCallback(

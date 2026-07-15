@@ -167,6 +167,10 @@ function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+function jsonIdSet(values: Iterable<string>): string {
+  return JSON.stringify([...new Set(values)]);
+}
+
 function storePath(rootDir: string): string {
   return join(rootDir, LINKED_CHAT_STORE_RELATIVE_PATH);
 }
@@ -2804,23 +2808,87 @@ export function createLinkedChatStore(
                ORDER BY a.created_at_ms DESC, a.attachment_id DESC`,
             )
             .all(workspaceId, objectId ?? pathHint);
+          if (rows.length === 0) return [];
+          const messageIdsJson = jsonIdSet(
+            rows.map((row) => stringValue(row.message_id)),
+          );
+          const messageRows = db
+            .prepare(
+              `SELECT * FROM chat_messages
+               WHERE workspace_id = ?
+                 AND message_id IN (SELECT value FROM json_each(?))`,
+            )
+            .all(workspaceId, messageIdsJson);
+          const messagesById = new Map(
+            messageRows.map((row) => {
+              const message = messageFromRow(row);
+              return [message.id, message] as const;
+            }),
+          );
+          const attachmentsByMessageId = new Map<ChatMessageId, ChatAttachment[]>();
+          for (const row of db
+            .prepare(
+              `SELECT a.* FROM chat_attachments a
+               JOIN chat_messages m
+                 ON m.workspace_id = a.workspace_id
+                AND m.thread_id = a.thread_id
+                AND m.message_id = a.message_id
+               WHERE a.workspace_id = ?
+                 AND a.message_id IN (SELECT value FROM json_each(?))
+               ORDER BY a.created_at_ms, a.attachment_id`,
+            )
+            .all(workspaceId, messageIdsJson)) {
+            const attachment = attachmentFromRow(row);
+            const existing = attachmentsByMessageId.get(attachment.messageId) ?? [];
+            existing.push(attachment);
+            attachmentsByMessageId.set(attachment.messageId, existing);
+          }
+          const threadIdsJson = jsonIdSet(
+            Array.from(messagesById.values(), (message) => message.threadId),
+          );
+          const threadsById = new Map(
+            db
+              .prepare(
+                `${THREAD_SELECT_SQL}
+                 WHERE t.workspace_id = ?
+                   AND t.thread_id IN (SELECT value FROM json_each(?))`,
+              )
+              .all(workspaceId, threadIdsJson)
+              .map((row) => {
+                const thread = threadFromRow(row);
+                return [thread.id, thread] as const;
+              }),
+          );
+          const channelIds = Array.from(threadsById.values(), (thread) => thread.channelId)
+            .filter((channelId): channelId is ChatChannelId => channelId !== undefined);
+          const channelIdsJson = jsonIdSet(channelIds);
+          const channelsById = new Map(
+            (channelIds.length === 0
+              ? []
+              : db
+                  .prepare(
+                    `SELECT * FROM chat_channels
+                     WHERE workspace_id = ?
+                       AND channel_id IN (SELECT value FROM json_each(?))`,
+                  )
+                  .all(workspaceId, channelIdsJson)
+            ).map((row) => {
+              const channel = channelFromRow(row);
+              return [channel.id, channel] as const;
+            }),
+          );
           return rows.map((row): ChatFileMention => {
             const attachment = attachmentFromRow(row);
-            const messageRow = db
-              .prepare(
-                `SELECT * FROM chat_messages
-                 WHERE workspace_id = ? AND thread_id = ? AND message_id = ?`,
-              )
-              .get(workspaceId, attachment.threadId, attachment.messageId);
-            if (!messageRow) throw corruptStore();
-            const message = messageFromRow(messageRow);
-            message.attachments = attachmentsForThread(db, workspaceId, message.threadId).filter(
-              (candidate) => candidate.messageId === message.id,
-            );
-            const thread = requireWorkspaceThread(db, workspaceId, message.threadId);
-            const channel = thread.channelId
-              ? requireWorkspaceChannel(db, workspaceId, thread.channelId)
-              : undefined;
+            const storedMessage = messagesById.get(attachment.messageId);
+            if (!storedMessage) throw corruptStore();
+            const message = {
+              ...storedMessage,
+              attachments: attachmentsByMessageId.get(storedMessage.id) ?? [],
+            };
+            const thread = threadsById.get(message.threadId);
+            if (!thread) throw corruptStore();
+            const channel = thread.channelId ? channelsById.get(thread.channelId) : undefined;
+            if (thread.channelId && !channel) throw corruptStore();
             return cloneJson({
               attachment,
               message,
@@ -3288,51 +3356,177 @@ export function createLinkedChatStore(
             activeFollows.map((follow) => `${follow.targetKind}\u0000${follow.targetId}`),
           );
 
-          const messageForId = (messageId: string): ChatMessage | undefined => {
-            const row = db
-              .prepare("SELECT * FROM chat_messages WHERE workspace_id = ? AND message_id = ?")
-              .get(workspaceId, messageId);
-            if (!row) return undefined;
+          const candidateMessageIdsJson = jsonIdSet(
+            pageRows.map((candidate) => stringValue(candidate.message_id)),
+          );
+          const hydratedMessageRows = pageRows.length === 0
+            ? []
+            : db
+                .prepare(
+                  `SELECT hydrated.* FROM chat_messages hydrated
+                   WHERE hydrated.workspace_id = ? AND (
+                     hydrated.message_id IN (SELECT value FROM json_each(?))
+                     OR hydrated.message_id IN (
+                       SELECT candidate.parent_message_id FROM chat_messages candidate
+                       WHERE candidate.workspace_id = ?
+                         AND candidate.message_id IN (SELECT value FROM json_each(?))
+                         AND candidate.parent_message_id IS NOT NULL
+                     )
+                     OR hydrated.message_id IN (
+                       SELECT opening.message_id FROM chat_messages candidate
+                       JOIN chat_messages opening
+                         ON opening.workspace_id = candidate.workspace_id
+                        AND opening.thread_id = candidate.thread_id
+                        AND opening.message_order = 0
+                       WHERE candidate.workspace_id = ?
+                         AND candidate.message_id IN (SELECT value FROM json_each(?))
+                     )
+                   )`,
+                )
+                .all(
+                  workspaceId,
+                  candidateMessageIdsJson,
+                  workspaceId,
+                  candidateMessageIdsJson,
+                  workspaceId,
+                  candidateMessageIdsJson,
+                );
+          const storedMessagesById = new Map<ChatMessageId, ChatMessage>();
+          const openingMessageIdByThread = new Map<ChatThreadId, ChatMessageId>();
+          for (const row of hydratedMessageRows) {
             const message = messageFromRow(row);
-            return {
-              ...message,
-              attachments: attachmentsForThread(db, workspaceId, message.threadId).filter(
-                (attachment) => attachment.messageId === message.id,
-              ),
-            };
-          };
-
-          const items = pageRows.map((candidate): ChatFeedItem => {
-            const messageId = stringValue(candidate.message_id);
-            const message = messageForId(messageId);
+            storedMessagesById.set(message.id, message);
+            if (numberValue(row.message_order) === 0) {
+              openingMessageIdByThread.set(message.threadId, message.id);
+            }
+          }
+          const candidateMessages = pageRows.map((candidate) => {
+            const message = storedMessagesById.get(stringValue(candidate.message_id));
             if (!message) throw corruptStore();
-            const thread = requireWorkspaceThread(db, workspaceId, message.threadId);
-            const channel = thread.channelId
-              ? requireWorkspaceChannel(db, workspaceId, thread.channelId)
-              : undefined;
-            if (channel?.kind === "dm") throw corruptStore();
-            const openingRow = db
+            return message;
+          });
+          const hydratedMessageIdsJson = jsonIdSet(storedMessagesById.keys());
+          const attachmentsByMessageId = new Map<ChatMessageId, ChatAttachment[]>();
+          if (storedMessagesById.size > 0) {
+            for (const row of db
               .prepare(
-                `SELECT message_id FROM chat_messages
-                 WHERE workspace_id = ? AND thread_id = ? AND message_order = 0`,
+                `SELECT a.* FROM chat_attachments a
+                 JOIN chat_messages m
+                   ON m.workspace_id = a.workspace_id
+                  AND m.thread_id = a.thread_id
+                  AND m.message_id = a.message_id
+                 WHERE a.workspace_id = ?
+                   AND a.message_id IN (SELECT value FROM json_each(?))
+                 ORDER BY a.message_id, a.created_at_ms, a.attachment_id`,
               )
-              .get(workspaceId, thread.id);
-            const openingId = openingRow ? stringValue(openingRow.message_id) : undefined;
-            const openingMessage =
-              openingId && openingId !== message.id ? messageForId(openingId) : undefined;
-            const parentMessage = message.parentMessageId
-              ? messageForId(message.parentMessageId)
-              : undefined;
-            if (parentMessage && parentMessage.threadId !== thread.id) throw corruptStore();
-            const reactions = db
+              .all(workspaceId, hydratedMessageIdsJson)) {
+              const attachment = attachmentFromRow(row);
+              const existing = attachmentsByMessageId.get(attachment.messageId) ?? [];
+              existing.push(attachment);
+              attachmentsByMessageId.set(attachment.messageId, existing);
+            }
+          }
+          const messagesById = new Map(
+            Array.from(storedMessagesById, ([messageId, message]) => [
+              messageId,
+              {
+                ...message,
+                attachments: attachmentsByMessageId.get(messageId) ?? [],
+              },
+            ] as const),
+          );
+          const threadIdsJson = jsonIdSet(
+            candidateMessages.map((message) => message.threadId),
+          );
+          const threadsById = new Map(
+            (candidateMessages.length === 0
+              ? []
+              : db
+                  .prepare(
+                    `${THREAD_SELECT_SQL}
+                     WHERE t.workspace_id = ?
+                       AND t.thread_id IN (SELECT value FROM json_each(?))`,
+                  )
+                  .all(workspaceId, threadIdsJson)
+            ).map((row) => {
+              const thread = threadFromRow(row);
+              return [thread.id, thread] as const;
+            }),
+          );
+          const channelIds = Array.from(threadsById.values(), (thread) => thread.channelId)
+            .filter((channelId): channelId is ChatChannelId => channelId !== undefined);
+          const channelIdsJson = jsonIdSet(channelIds);
+          const channelsById = new Map(
+            (channelIds.length === 0
+              ? []
+              : db
+                  .prepare(
+                    `SELECT * FROM chat_channels
+                     WHERE workspace_id = ?
+                       AND channel_id IN (SELECT value FROM json_each(?))`,
+                  )
+                  .all(workspaceId, channelIdsJson)
+            ).map((row) => {
+              const channel = channelFromRow(row);
+              return [channel.id, channel] as const;
+            }),
+          );
+          const reactionsByMessageId = new Map<ChatMessageId, ChatReaction[]>();
+          if (candidateMessages.length > 0) {
+            for (const row of db
               .prepare(
                 `SELECT r.* FROM chat_reactions r
-                 WHERE r.workspace_id = ? AND r.thread_id = ?
-                   AND r.message_id = ? AND r.state = 'added'
-                 ORDER BY r.at_ms, r.reaction_id`,
+                 JOIN chat_messages m
+                   ON m.workspace_id = r.workspace_id
+                  AND m.thread_id = r.thread_id
+                  AND m.message_id = r.message_id
+                 WHERE r.workspace_id = ?
+                   AND r.message_id IN (SELECT value FROM json_each(?))
+                   AND r.state = 'added'
+                 ORDER BY r.message_id, r.at_ms, r.reaction_id`,
               )
-              .all(workspaceId, thread.id, message.id)
-              .map(reactionFromRow);
+              .all(workspaceId, candidateMessageIdsJson)) {
+              const reaction = reactionFromRow(row);
+              const existing = reactionsByMessageId.get(reaction.messageId) ?? [];
+              existing.push(reaction);
+              reactionsByMessageId.set(reaction.messageId, existing);
+            }
+          }
+          const wireIdByChannelId = new Map<ChatChannelId, string>();
+          if (channelIds.length > 0) {
+            for (const row of db
+              .prepare(
+                `SELECT channel_id, wire_id FROM chat_channel_wire_ids
+                 WHERE workspace_id = ?
+                   AND channel_id IN (SELECT value FROM json_each(?))
+                 ORDER BY channel_id, wire_id`,
+              )
+              .all(workspaceId, channelIdsJson)) {
+              const channelId = stringValue(row.channel_id);
+              if (!wireIdByChannelId.has(channelId)) {
+                wireIdByChannelId.set(channelId, stringValue(row.wire_id));
+              }
+            }
+          }
+
+          const items = pageRows.map((candidate, index): ChatFeedItem => {
+            const storedMessage = candidateMessages[index];
+            if (!storedMessage) throw corruptStore();
+            const message = messagesById.get(storedMessage.id);
+            if (!message) throw corruptStore();
+            const thread = threadsById.get(message.threadId);
+            if (!thread) throw corruptStore();
+            const channel = thread.channelId ? channelsById.get(thread.channelId) : undefined;
+            if (thread.channelId && !channel) throw corruptStore();
+            if (channel?.kind === "dm") throw corruptStore();
+            const openingId = openingMessageIdByThread.get(thread.id);
+            const openingMessage =
+              openingId && openingId !== message.id ? messagesById.get(openingId) : undefined;
+            const parentMessage = message.parentMessageId
+              ? messagesById.get(message.parentMessageId)
+              : undefined;
+            if (parentMessage && parentMessage.threadId !== thread.id) throw corruptStore();
+            const reactions = reactionsByMessageId.get(message.id) ?? [];
             const matchedBy: ChatFollowTargetKind[] = [];
             if (
               message.authorUserId &&
@@ -3344,7 +3538,7 @@ export function createLinkedChatStore(
             }
             if (follows.has(`thread\u0000${thread.id}`)) matchedBy.push("thread");
             if (numberValue(candidate.message_order) === 0 && channel) {
-              const wireId = wireIdForChannelId(db, workspaceId, channel.id);
+              const wireId = wireIdByChannelId.get(channel.id);
               if (wireId && follows.has(`channel\u0000${wireId}`)) matchedBy.push("channel");
             }
             return cloneJson({

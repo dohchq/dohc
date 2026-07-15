@@ -29,6 +29,7 @@ import {
   DesktopWorkspaceShell,
   graphChatOpenTarget,
   pendingHeadingTargetForOpen,
+  resolveCanonicalDm,
   type Workspace,
 } from "./DesktopWorkspaceShell";
 import type { ChatsNav } from "./workbench/ChatsView";
@@ -459,6 +460,72 @@ describe("targeted chat navigation", () => {
       expect(mentionTarget.nav.thread.id).toBe("thread-channel");
       expect(mentionTarget.nav.focusMessageId).toBe("message-channel");
     }
+  });
+
+  it("routes DM mentions and graph nodes only through a matching canonical DM", () => {
+    const dm = {
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      name: "alice@example.com",
+      peerLabel: "Alice",
+      role: "owner" as const,
+      shareId: null,
+      threadId: "dm-thread",
+      unreadCount: 1,
+      connected: true,
+    };
+    const mentionTarget = chatMentionOpenTarget({
+      attachment: {
+        attachmentId: "attachment-dm",
+        messageId: "message-dm",
+        threadId: "dm-thread",
+        targetKind: "file",
+        createdAtMs: 0,
+      },
+      message: {
+        id: "message-dm",
+        threadId: "dm-thread",
+        authorKind: "human",
+        authorDisplayName: "Alice",
+        body: "DM attachment",
+        createdAtMs: 0,
+      },
+      thread: {
+        id: "dm-thread",
+        title: "Direct message",
+        createdAtMs: 0,
+        updatedAtMs: 0,
+      },
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      channelName: "alice@example.com",
+      channelKind: "dm",
+    });
+    expect(mentionTarget).toEqual({
+      surface: "dm",
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      threadId: "dm-thread",
+    });
+    if (mentionTarget.surface !== "dm") throw new Error("Expected DM target");
+    expect(resolveCanonicalDm(mentionTarget, [dm])).toEqual(dm);
+    expect(resolveCanonicalDm({ ...mentionTarget, threadId: "other-thread" }, [dm]))
+      .toBeNull();
+    expect(resolveCanonicalDm({ ...mentionTarget, channelWireId: "other-wire" }, [dm]))
+      .toBeNull();
+
+    expect(graphChatOpenTarget({
+      path: "chat-thread:dm-thread",
+      kind: "chat-thread",
+      threadId: "dm-thread",
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      channelName: "alice@example.com",
+      channelKind: "dm",
+      title: "Direct message",
+      incoming: 1,
+      outgoing: 0,
+    })).toEqual(mentionTarget);
   });
 });
 

@@ -127,6 +127,11 @@ export function LinkedChatsPanel(props: {
         setReactions(reactionResult.reactions);
         setViewerAuthorId(reactionResult.viewerAuthorId);
         requestAnimationFrame(() => {
+          // Rendering is deferred one frame so the freshly loaded messages
+          // exist in the DOM. Re-check the same request token inside that
+          // deferred callback: another thread/file/workspace may have opened
+          // after the response committed but before this frame ran.
+          if (token !== liveToken.current) return;
           const focusedMessage = focusMessageId
             ? Array.from(
                 threadViewRef.current?.querySelectorAll<HTMLElement>("[data-message-id]") ??
