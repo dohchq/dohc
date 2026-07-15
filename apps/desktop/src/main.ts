@@ -358,8 +358,7 @@ import {
 } from "./agents/desktopAgentDispatchStore";
 import {
   buildOutputSiteRoot,
-  sharedStaticEntryRelativeToSite,
-  entryRelativeToSite,
+  staticPreviewTargetForSite,
   getSitePackage,
   listSitePackages,
   type SitePackageInfo,
@@ -736,15 +735,14 @@ async function startPreviewForSiteUnlocked(
   }
 
   if (input.mode === "static") {
-    const entry = input.site.authority.kind === "share"
-      ? sharedStaticEntryRelativeToSite(input.site) ?? undefined
-      : entryRelativeToSite(input.site) ?? undefined;
+    const target = staticPreviewTargetForSite(input.site);
+    const entry = target.entry ?? undefined;
     if (input.site.authority.kind === "share" && !entry) {
       throw new Error(
         "This shared package does not include a built site artifact. Ask the owner to build and share it again.",
       );
     }
-    const handle = await startStaticSitePreview(input.workspaceRoot, input.site.root, {
+    const handle = await startStaticSitePreview(input.workspaceRoot, target.root, {
       entry,
     });
     await rememberCurrentSitePreviewHandle(key, handle, input.isCurrent);

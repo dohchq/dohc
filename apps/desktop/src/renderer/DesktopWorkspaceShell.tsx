@@ -2541,6 +2541,7 @@ export function DesktopWorkspaceShell(props: {
                   <LazySitePreviewPage
                     workspaceId={workspaceId}
                     siteRoot={activeSiteRoot}
+                    sharedView={!!shareView}
                     onOpenPath={openFile}
                     {...(shareView
                       ? {}

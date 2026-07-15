@@ -594,6 +594,40 @@ describe("@dohc/sdk", () => {
     expect(calls).toEqual([{ method: "capabilities", params: undefined }]);
   });
 
+  it("does not let files.write options replace validated reserved fields", async () => {
+    const calls: Array<{ method: string; params?: unknown }> = [];
+    const client = createDohcClient({
+      transport: {
+        async request(method, params) {
+          calls.push({ method, params });
+          if (method === "capabilities") {
+            return {
+              files: { read: true, write: true },
+              collections: { read: false },
+              provenance: { record: false },
+            };
+          }
+          return { ok: true };
+        },
+      },
+    });
+
+    await client.files.write("safe/status.txt", "validated", {
+      path: "../outside.txt",
+      text: "overridden",
+      overwrite: true,
+    });
+
+    expect(calls.at(-1)).toEqual({
+      method: "files.write",
+      params: {
+        overwrite: true,
+        path: "safe/status.txt",
+        text: "validated",
+      },
+    });
+  });
+
   it("exposes the expanded dohc capability surface without hiding host extensions", async () => {
     const calls: Array<{ method: string; params?: unknown }> = [];
     const client = createDohcClient({

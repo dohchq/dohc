@@ -82,13 +82,27 @@ export function shareMountRootForSite(root: string): string | null {
 }
 
 /** A materialized build output that can be served without executing site code. */
-export function builtEntryRelativeToSite(site: SitePackageInfo): string | null {
+export function builtOutputRelativeToSite(site: SitePackageInfo): string | null {
   for (const output of site.buildOutputs) {
     const relativeEntry = `${output}/index.html`;
     const workspaceEntry = joinSitePath(site.root, relativeEntry);
-    if (site.sourceFiles.includes(workspaceEntry)) return relativeEntry;
+    if (site.sourceFiles.includes(workspaceEntry)) return output;
   }
   return null;
+}
+
+export function builtEntryRelativeToSite(site: SitePackageInfo): string | null {
+  const output = builtOutputRelativeToSite(site);
+  return output ? `${output}/index.html` : null;
+}
+
+function needsBuiltArtifact(site: SitePackageInfo): boolean {
+  return Boolean(
+    site.scripts.dev ||
+    site.scripts.start ||
+    site.scripts.build ||
+    site.buildOutputs.length > 0
+  );
 }
 
 /**
@@ -98,8 +112,25 @@ export function builtEntryRelativeToSite(site: SitePackageInfo): string | null {
 export function sharedStaticEntryRelativeToSite(site: SitePackageInfo): string | null {
   const built = builtEntryRelativeToSite(site);
   if (built) return built;
-  if (site.packagePath || site.scripts.build || site.buildOutputs.length > 0) return null;
+  if (needsBuiltArtifact(site)) return null;
   return entryRelativeToSite(site);
+}
+
+/**
+ * Resolves the HTTP document root separately from its entry. Build tools emit
+ * root-absolute asset URLs, so serving dist/index.html from the source root
+ * would incorrectly resolve /assets/* beside dist rather than inside it.
+ */
+export function staticPreviewTargetForSite(site: SitePackageInfo): {
+  root: string;
+  entry: string | null;
+} {
+  if (site.authority.kind === "share") {
+    const output = builtOutputRelativeToSite(site);
+    if (output) return { root: buildOutputSiteRoot(site, output), entry: "index.html" };
+    return { root: site.root, entry: sharedStaticEntryRelativeToSite(site) };
+  }
+  return { root: site.root, entry: entryRelativeToSite(site) };
 }
 
 function packagePathFor(root: string, sourceFiles: string[]): string | null {

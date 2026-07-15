@@ -37,13 +37,18 @@ function modeLabel(mode: SitePreviewMode): string {
   return "Static";
 }
 
-function availableModes(site: SitePackageInfo): SitePreviewMode[] {
+function availableModes(
+  site: SitePackageInfo,
+  sharedView = false,
+): SitePreviewMode[] {
   const modes: SitePreviewMode[] = [];
   const sharedStaticEntry = presentBuildOutput(site) ??
-    (!site.packagePath && !site.scripts.build && site.buildOutputs.length === 0
+    (!needsBuiltArtifact(site)
       ? site.entryPath
       : null);
-  if (site.authority.kind === "share") return sharedStaticEntry ? ["static"] : [];
+  if (sharedView || site.authority.kind === "share") {
+    return sharedStaticEntry ? ["static"] : [];
+  }
   if (site.entryPath) modes.push("static");
   if (site.scripts.dev || site.scripts.start) modes.push("dev");
   if (site.scripts.build || site.buildOutputs.length > 0) modes.push("build");
@@ -81,10 +86,13 @@ function preferredMode(
   site: SitePackageInfo,
   modes: SitePreviewMode[],
   workspaceId: string,
+  sharedView = false,
 ): SitePreviewMode | null {
   const stored = readStoredMode(workspaceId, site.root, modes);
   if (stored) return stored;
-  if (site.authority.kind === "share") return modes.includes("static") ? "static" : null;
+  if (sharedView || site.authority.kind === "share") {
+    return modes.includes("static") ? "static" : null;
+  }
   if (modes.includes("dev")) return "dev";
   if (site.kind !== "static" && modes.includes("build")) return "build";
   if (modes.includes("static")) return "static";
@@ -116,12 +124,21 @@ function artifactPath(site: SitePackageInfo, output: string): string {
   return site.root === "." ? output : `${site.root}/${output}`;
 }
 
+function needsBuiltArtifact(site: SitePackageInfo): boolean {
+  return Boolean(
+    site.scripts.dev ||
+    site.scripts.start ||
+    site.scripts.build ||
+    site.buildOutputs.length > 0
+  );
+}
+
 /** Produces a relay selector containing the runnable browser artifact only. */
 export function shareTargetForSite(site: SitePackageInfo): SiteShareTarget | null {
   if (site.authority.kind === "share") return null;
   const output = presentBuildOutput(site);
   if (output) return { paths: [artifactPath(site, output)], label: site.title };
-  if (site.packagePath || site.scripts.build || site.buildOutputs.length > 0) return null;
+  if (needsBuiltArtifact(site)) return null;
   if (site.root !== ".") return { paths: [site.root], label: site.title };
 
   const entryTop = site.entryPath?.includes("/") ? site.entryPath.split("/")[0] : null;
@@ -129,6 +146,7 @@ export function shareTargetForSite(site: SitePackageInfo): SiteShareTarget | nul
     if (!SHAREABLE_BROWSER_FILE_RE.test(path)) return false;
     const parts = path.split("/");
     return parts.length === 1 ||
+      path.startsWith("vendor/dohc-sdk/") ||
       (!!parts[0] && (ROOT_SITE_ASSET_DIRS.has(parts[0]) || parts[0] === entryTop));
   });
   return paths.length > 0 && paths.length <= 100
@@ -195,6 +213,7 @@ function siteFrameUrl(url: string): string {
 export function SitePreviewPage(props: {
   workspaceId: string;
   siteRoot: string;
+  sharedView?: boolean;
   onShareSite?: (target: SiteShareTarget) => void;
   onOpenPath?: (path: string) => void;
 }) {
@@ -208,6 +227,7 @@ export function SitePreviewPage(props: {
   const autoStartKeyRef = useRef<string | null>(null);
   const loadRequestRef = useRef(0);
   const previewStartRequestRef = useRef(0);
+  const shareRequestRef = useRef(0);
   const sdkGenerationRef = useRef(0);
   const sdkContextRef = useRef("");
   const stoppingRef = useRef(false);
@@ -217,6 +237,7 @@ export function SitePreviewPage(props: {
 
   const reloadSite = useCallback(async () => {
     const request = ++loadRequestRef.current;
+    shareRequestRef.current += 1;
     setLoad({ status: "loading" });
     setPreview(null);
     previewRef.current = null;
@@ -247,6 +268,7 @@ export function SitePreviewPage(props: {
     void reloadSite();
     return () => {
       loadRequestRef.current += 1;
+      shareRequestRef.current += 1;
     };
   }, [reloadSite]);
 
@@ -317,8 +339,8 @@ export function SitePreviewPage(props: {
   }, [props.onOpenPath, props.siteRoot, props.workspaceId]);
 
   const modes = useMemo(
-    () => (load.status === "ready" ? availableModes(load.site) : []),
-    [load],
+    () => (load.status === "ready" ? availableModes(load.site, props.sharedView) : []),
+    [load, props.sharedView],
   );
   const previewUrlAllowed = preview ? isLoopbackOrigin(preview.url) : false;
 
@@ -354,50 +376,62 @@ export function SitePreviewPage(props: {
   }, [props.siteRoot, props.workspaceId]);
 
   const prepareShare = useCallback(async (site: SitePackageInfo) => {
+    const request = ++shareRequestRef.current;
+    const requestContext = sdkContext;
+    const isCurrent = () =>
+      request === shareRequestRef.current &&
+      requestContext === sdkContextRef.current;
     try {
       let latest = site;
       let target = shareTargetForSite(latest);
       if (
         !target &&
-        (latest.packagePath || latest.scripts.build || latest.buildOutputs.length > 0)
+        needsBuiltArtifact(latest)
       ) {
         if (!latest.scripts.build) {
-          setActionError("This package needs a static build before it can be shared.");
+          if (isCurrent()) {
+            setActionError("This package needs a static build before it can be shared.");
+          }
           return;
         }
         const built = await start("build");
-        if (!built) return;
+        if (!built || !isCurrent()) return;
         const refreshed = await bridge().getSitePackage({
           workspaceId: props.workspaceId,
           path: props.siteRoot,
         });
+        if (!isCurrent()) return;
         if (refreshed) latest = refreshed;
         target = shareTargetForSite(latest);
       }
       if (!target) {
-        setActionError(
-          latest.root === "."
-            ? "This root site has too many or no identifiable browser assets. Move it into its own folder before sharing."
-            : "This site does not have a runnable static artifact to share.",
-        );
+        if (isCurrent()) {
+          setActionError(
+            latest.root === "."
+              ? "This root site has too many or no identifiable browser assets. Move it into its own folder before sharing."
+              : "This site does not have a runnable static artifact to share.",
+          );
+        }
         return;
       }
-      props.onShareSite?.(target);
+      if (isCurrent()) props.onShareSite?.(target);
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : "Could not prepare this site for sharing.");
+      if (isCurrent()) {
+        setActionError(error instanceof Error ? error.message : "Could not prepare this site for sharing.");
+      }
     }
-  }, [props.onShareSite, props.siteRoot, props.workspaceId, start]);
+  }, [props.onShareSite, props.siteRoot, props.workspaceId, sdkContext, start]);
 
   useEffect(() => {
     if (load.status !== "ready" || load.site.root !== props.siteRoot || preview) return;
-    const mode = preferredMode(load.site, modes, props.workspaceId);
+    const mode = preferredMode(load.site, modes, props.workspaceId, props.sharedView);
     if (!mode) return;
 
     const autoStartKey = `${props.workspaceId}:${props.siteRoot}:${mode}`;
     if (autoStartKeyRef.current === autoStartKey) return;
     autoStartKeyRef.current = autoStartKey;
     void start(mode);
-  }, [load, modes, preview, props.siteRoot, props.workspaceId, start]);
+  }, [load, modes, preview, props.sharedView, props.siteRoot, props.workspaceId, start]);
 
   async function stop() {
     const request = ++previewStartRequestRef.current;

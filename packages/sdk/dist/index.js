@@ -451,7 +451,10 @@ export function createDohcClient(options = {}) {
                     throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "File contents must be a string.");
                 }
                 await requireCapability("files", "write");
-                return request("files.write", { path, text, ...options }, requestOptions);
+                // Reserved fields are authoritative after validation. The permissive
+                // options bag is intentionally forward-compatible, but must never be
+                // able to replace the path/text that were just validated above.
+                return request("files.write", { ...options, path, text }, requestOptions);
             },
             watch: async (path, listener, requestOptions) => {
                 assertWorkspacePath(path);

@@ -8,8 +8,10 @@ import {
   listSitePackages,
   sharedStaticEntryRelativeToSite,
   shareMountRootForSite,
+  staticPreviewTargetForSite,
 } from "./sitePackage";
 import { SHARED_WITH_ME_FOLDER } from "./createWorkspaceFolder";
+import { startStaticSitePreview } from "./siteRunner";
 import type { WorkspaceFileEntry } from "../ipc/bridgeContract";
 
 let root: string;
@@ -67,7 +69,7 @@ describe("shareMountRootForSite", () => {
   });
 
   it("selects a built artifact rather than a package source entry for shared sites", async () => {
-    await mkdir(join(root, "shared-with-me", "alex", "portal", "dist"), {
+    await mkdir(join(root, "shared-with-me", "alex", "portal", "dist", "assets"), {
       recursive: true,
     });
     await writeFile(
@@ -80,7 +82,11 @@ describe("shareMountRootForSite", () => {
     );
     await writeFile(
       join(root, "shared-with-me", "alex", "portal", "dist", "index.html"),
-      "built",
+      '<script src="/assets/main.js"></script>',
+    );
+    await writeFile(
+      join(root, "shared-with-me", "alex", "portal", "dist", "assets", "main.js"),
+      "window.built = true;",
     );
 
     const site = (await listSitePackages(root)).find(
@@ -88,12 +94,49 @@ describe("shareMountRootForSite", () => {
     );
     expect(site).toBeDefined();
     expect(sharedStaticEntryRelativeToSite(site!)).toBe("dist/index.html");
+    expect(staticPreviewTargetForSite(site!)).toEqual({
+      root: "shared-with-me/alex/portal/dist",
+      entry: "index.html",
+    });
+    const target = staticPreviewTargetForSite(site!);
+    const preview = await startStaticSitePreview(root, target.root, {
+      entry: target.entry ?? undefined,
+    });
+    try {
+      await expect(
+        fetch(new URL("/assets/main.js", preview.url)).then((response) => response.text()),
+      ).resolves.toContain("window.built = true");
+    } finally {
+      await preview.stop();
+    }
     expect(
       sharedStaticEntryRelativeToSite({
         ...site!,
         sourceFiles: site!.sourceFiles.filter((path) => !path.endsWith("dist/index.html")),
       }),
     ).toBeNull();
+  });
+
+  it("keeps a dependency-only static package shareable without a build", async () => {
+    await mkdir(join(root, "shared-with-me", "alex", "plain"), { recursive: true });
+    await writeFile(
+      join(root, "shared-with-me", "alex", "plain", "index.html"),
+      '<script type="module" src="./app.js"></script>',
+    );
+    await writeFile(
+      join(root, "shared-with-me", "alex", "plain", "package.json"),
+      JSON.stringify({ dependencies: { "@dohc/sdk": "file:vendor/dohc-sdk" } }),
+    );
+
+    const site = (await listSitePackages(root)).find(
+      (candidate) => candidate.root === "shared-with-me/alex/plain",
+    );
+    expect(site?.packagePath).toBe("shared-with-me/alex/plain/package.json");
+    expect(sharedStaticEntryRelativeToSite(site!)).toBe("index.html");
+    expect(staticPreviewTargetForSite(site!)).toEqual({
+      root: "shared-with-me/alex/plain",
+      entry: "index.html",
+    });
   });
 });
 
