@@ -1302,6 +1302,11 @@ export function ChatsView(props: {
 
   const channelIsLocked = useCallback(
     (channel: ChatChannelRecord) => {
+      // Share metadata is the authority for whether this local row is owned
+      // or joined. If that authority is unavailable, fail closed: treating an
+      // unknown joined channel as local would re-enable writes and read-cursor
+      // mutations across a permission boundary.
+      if (readOnly || channelShares === null) return true;
       let joined: JoinedSharedChannelRow | undefined;
       if (channel.wireId) {
         // Match joinedByWire's last-write-wins semantics so every channel
@@ -1311,9 +1316,8 @@ export function ChatsView(props: {
         }
       }
       return (
-        readOnly ||
-        (joined !== undefined &&
-          (joined.access === "read-only" || joined.ended))
+        joined !== undefined &&
+        (joined.access === "read-only" || joined.ended)
       );
     },
     [channelShares, readOnly],
@@ -1734,7 +1738,7 @@ export function ChatsView(props: {
       setMessages(result.messages);
       setReactions(reactionResult.reactions);
       setViewerAuthorId(reactionResult.viewerAuthorId);
-      if (!readOnly) {
+      if (!readOnly && dm.connected) {
         void bridge()
           .markChatThreadRead({
             workspaceId,
@@ -1764,11 +1768,13 @@ export function ChatsView(props: {
       try {
         await loadDmConversation(dm, token);
         if (token !== liveToken.current) return;
-        setDms((current) =>
-          current.map((entry) =>
-            entry.channelId === dm.channelId ? { ...entry, unreadCount: 0 } : entry,
-          ),
-        );
+        if (!readOnly && dm.connected) {
+          setDms((current) =>
+            current.map((entry) =>
+              entry.channelId === dm.channelId ? { ...entry, unreadCount: 0 } : entry,
+            ),
+          );
+        }
         requestAnimationFrame(() => {
           if (token === liveToken.current) {
             messagesEndRef.current?.scrollIntoView({ block: "end" });
@@ -1781,7 +1787,7 @@ export function ChatsView(props: {
         if (token === liveToken.current) setMessagesLoading(false);
       }
     },
-    [loadDmConversation, props],
+    [loadDmConversation, props, readOnly],
   );
 
   const openFeed = useCallback(() => {

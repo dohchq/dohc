@@ -1722,7 +1722,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
   const teamChannel = () =>
     channel({ id: "channel-team", name: "team", slug: "team", wireId: "wire-team" });
 
-  it("hides every sharing affordance when the sharing surface is unavailable (solo unchanged)", async () => {
+  it("fails closed when sharing metadata is unavailable", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [teamChannel()],
       fileThreads: [],
@@ -1736,6 +1736,56 @@ describe("ChatsView shared channels (MU-C4)", () => {
     await userEvent.click(screen.getByTestId("chats-channel"));
     await screen.findByTestId("chats-channel-view");
     expect(screen.queryByTestId("chats-share-channel")).toBeNull();
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    expect(screen.getByTestId("chats-readonly-note").textContent).toContain(
+      "read-only for you",
+    );
+  });
+
+  it("keeps an owned local channel writable after authoritative empty share metadata", async () => {
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [],
+      joined: [],
+    });
+    renderView();
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-channel-view");
+    expect(screen.getByTestId("chats-new-thread-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
+  });
+
+  it("uses the last authoritative joined row when duplicate wire rows exist", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [],
+      joined: [
+        {
+          shareId: "share-old",
+          channelWireId: "wire-team",
+          access: "read-only",
+          granterEmail: "owner@example.com",
+          ended: false,
+        },
+        {
+          shareId: "share-current",
+          channelWireId: "wire-team",
+          access: "read-write",
+          granterEmail: "owner@example.com",
+          ended: false,
+        },
+      ],
+    });
+    renderView();
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    expect(await screen.findByTestId("chats-new-thread-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
   });
 
   it("marks a granted channel as shared and manages members through the share panel", async () => {
@@ -2077,7 +2127,10 @@ describe("ChatsView direct messages", () => {
 
   it("opens a DM into its single running conversation and sends on Enter", async () => {
     const user = userEvent.setup();
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
+    const pendingRefresh = new Promise<never>(() => undefined);
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({ available: true, dms: [dm({ unreadCount: 2 })] })
+      .mockImplementation(() => pendingRefresh);
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
         message({ id: "m-1", threadId: "thread-dm-1", authorDisplayName: "bob@example.com", body: "hey" }),
@@ -2110,6 +2163,25 @@ describe("ChatsView direct messages", () => {
     );
     const updated = await screen.findAllByTestId("chats-dm-message-body");
     expect(updated[updated.length - 1].textContent).toBe("hi bob");
+
+    await user.click(screen.getByTestId("chats-dm-back"));
+    await screen.findByTestId("chats-dm-item");
+    expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
+  });
+
+  it("does not advance a DM read cursor in a read-only workspace", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [message({ id: "m-1", threadId: "thread-dm-1", body: "shared DM" })],
+    });
+    renderView(vi.fn(), vi.fn(), {
+      readOnly: true,
+      variant: "page",
+      initialNav: { level: "dm", dm: dm({ unreadCount: 2 }) },
+    });
+
+    expect(await screen.findByText("shared DM")).toBeTruthy();
+    expect(screen.getByTestId("chats-workspace-readonly-note")).toBeTruthy();
+    expect(bridgeMock.markChatThreadRead).not.toHaveBeenCalled();
   });
 
   it("starts a new DM from the recipient step and opens the conversation", async () => {
@@ -2163,10 +2235,20 @@ describe("ChatsView direct messages", () => {
 
   it("closes the composer for an ended DM but keeps the conversation readable", async () => {
     const user = userEvent.setup();
-    bridgeMock.syncDms.mockResolvedValue({
-      available: true,
-      dms: [dm({ role: "participant", peerLabel: "alice@example.com", connected: false })],
-    });
+    const pendingRefresh = new Promise<never>(() => undefined);
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({
+        available: true,
+        dms: [
+          dm({
+            role: "participant",
+            peerLabel: "alice@example.com",
+            connected: false,
+            unreadCount: 2,
+          }),
+        ],
+      })
+      .mockImplementation(() => pendingRefresh);
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [message({ id: "m-1", threadId: "thread-dm-1", body: "old message" })],
     });
@@ -2176,6 +2258,10 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryByTestId("chats-dm-composer")).toBeNull();
     const bodies = await screen.findAllByTestId("chats-dm-message-body");
     expect(bodies.map((el) => el.textContent)).toEqual(["old message"]);
+    expect(bridgeMock.markChatThreadRead).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("chats-dm-back"));
+    expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe("2");
   });
 });
 
