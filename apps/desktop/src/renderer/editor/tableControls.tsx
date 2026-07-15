@@ -1241,6 +1241,7 @@ function configureRowResize(
   const detach = () => {
     ownerWindow.removeEventListener("pointermove", onPointerMove, true);
     ownerWindow.removeEventListener("pointerup", onPointerUp, true);
+    ownerWindow.removeEventListener("mouseup", onMouseUp, true);
     ownerWindow.removeEventListener("pointercancel", onPointerCancel, true);
     ownerWindow.removeEventListener("keydown", onKeyDown, true);
   };
@@ -1305,6 +1306,10 @@ function configureRowResize(
     finish(false);
   }
 
+  function onMouseUp(event: MouseEvent): void {
+    if (event.button === 0) finish(true);
+  }
+
   function onKeyDown(event: KeyboardEvent): void {
     if (event.key !== "Escape") return;
     event.preventDefault();
@@ -1347,6 +1352,7 @@ function configureRowResize(
     }
     ownerWindow.addEventListener("pointermove", onPointerMove, true);
     ownerWindow.addEventListener("pointerup", onPointerUp, true);
+    ownerWindow.addEventListener("mouseup", onMouseUp, true);
     ownerWindow.addEventListener("pointercancel", onPointerCancel, true);
     ownerWindow.addEventListener("keydown", onKeyDown, true);
   });
@@ -1586,6 +1592,7 @@ function setActiveTableControls(
 function buildTableControlDecorations(
   doc: PMNode,
   runtime: TableControlsRuntime,
+  rowResizeEnabled: boolean,
 ): DecorationSet {
   const decorations: Decoration[] = [];
 
@@ -1660,7 +1667,7 @@ function buildTableControlDecorations(
       // than TableMap's first logical slot. A rowspan from the row above can
       // own that logical slot, but each editable row still needs its own
       // height control and row node position.
-      if (rowNode.childCount > 0) {
+      if (rowResizeEnabled && rowNode.childCount > 0) {
         const currentRowPos = rowPos;
         const resizeCellPos = rowPos + 1;
         decorations.push(
@@ -1731,8 +1738,11 @@ function sizeAllAppendStrips(view: EditorView): void {
 
 type HoveredTable = { table: HTMLElement; col: number; row: number };
 
-export function makeTableControlsPlugin(): Plugin {
+export function makeTableControlsPlugin(
+  options: { rowResizeEnabled?: boolean } = {},
+): Plugin {
   const runtime = createTableControlsRuntime();
+  const rowResizeEnabled = options.rowResizeEnabled ?? true;
   let activeControls: ActiveTableControls | undefined;
   // Notion reveals ONE column handle (above the hovered column) and ONE row
   // handle (beside the hovered row) — not chrome on every row/column at
@@ -1826,12 +1836,16 @@ export function makeTableControlsPlugin(): Plugin {
     key: tableControlsKey,
     state: {
       init(_, instance) {
-        return buildTableControlDecorations(instance.doc, runtime);
+        return buildTableControlDecorations(
+          instance.doc,
+          runtime,
+          rowResizeEnabled,
+        );
       },
       apply(tr, old) {
         if (!tr.docChanged) return old.map(tr.mapping, tr.doc);
         activeControls = undefined;
-        return buildTableControlDecorations(tr.doc, runtime);
+        return buildTableControlDecorations(tr.doc, runtime, rowResizeEnabled);
       },
     },
     props: {

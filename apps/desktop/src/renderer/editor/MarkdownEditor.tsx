@@ -467,11 +467,13 @@ const MarkdownEditorInner = forwardRef<MarkdownEditorHandle, MarkdownEditorInner
               makeMermaidPreviewPlugin(),
               makeEmptyListItemFocusPlugin(),
               makeInlineAtomPlugin(),
-              makeTableControlsPlugin(),
+              makeTableControlsPlugin({
+                rowResizeEnabled: Boolean(collab?.ydoc),
+              }),
             ];
           },
         }),
-      [publishSlashState],
+      [collab?.ydoc, publishSlashState],
     );
 
     // Cmd/Ctrl+K registered via addKeyboardShortcuts on its own extension —
