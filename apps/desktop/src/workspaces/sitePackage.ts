@@ -211,9 +211,9 @@ function referencesFromBrowserText(text: string, sourcePath: string): string[] {
   };
 
   if (/\.html?$/i.test(sourcePath)) {
-    const attribute = /\b(src|href|poster|data|srcset)\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})')/gi;
+    const attribute = /\b(src|href|poster|data|srcset)\s*=\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^\s"'=<>`]{1,2048}))/gi;
     for (const match of text.matchAll(attribute)) {
-      const value = (match[2] ?? match[3])?.trim();
+      const value = (match[2] ?? match[3] ?? match[4])?.trim();
       if (!value) continue;
       if (match[1]?.toLowerCase() !== "srcset") {
         references.push(value);

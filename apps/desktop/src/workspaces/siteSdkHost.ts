@@ -5,8 +5,8 @@ import {
   validateUserWritePath,
 } from "@dohc/workspace-core";
 import { rgPath } from "@vscode/ripgrep";
-import { basename } from "node:path";
-import { realpath } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { realpath, stat } from "node:fs/promises";
 import {
   createWorkspaceTextExclusive,
   readWorkspaceText,
@@ -110,6 +110,12 @@ function capabilities(context: SiteSdkHostContext) {
   };
 }
 
+function assertSitePreviewActive(context: SiteSdkHostContext): void {
+  if (context.signal?.aborted) {
+    throw new Error("Site preview is no longer active.");
+  }
+}
+
 async function listVisibleFiles(context: SiteSdkHostContext, params: unknown) {
   const input = params === undefined ? {} : record(params);
   const requestedRoot = input.path === undefined ? "." : validatedPath(input.path, "read");
@@ -129,16 +135,28 @@ async function listVisibleFiles(context: SiteSdkHostContext, params: unknown) {
   return files;
 }
 
-function scopedIncludeGlob(scopeRoot: string | null, requestedPath: unknown): string | undefined {
+async function scopedIncludeGlob(
+  workspaceRoot: string,
+  scopeRoot: string | null,
+  requestedPath: unknown,
+): Promise<string | undefined> {
   const scope = normalizeScopeRoot(scopeRoot);
   const path = requestedPath === undefined ? null : validatedPath(requestedPath, "read");
   const roots = [scope, path].filter((part): part is string => Boolean(part && part !== "."));
-  return roots.length > 0 ? `${roots.join("/")}/**` : undefined;
+  if (roots.length === 0) return undefined;
+  const scopedPath = roots.join("/");
+  try {
+    if ((await stat(join(workspaceRoot, scopedPath))).isFile()) return scopedPath;
+  } catch {
+    // A missing path simply produces no rg matches through the directory glob.
+  }
+  return `${scopedPath}/**`;
 }
 
 async function searchVisibleWorkspace(context: SiteSdkHostContext, params: unknown) {
   const input = record(params);
   const query = text(input.query, "query", 2_000);
+  const includeGlob = await scopedIncludeGlob(context.workspaceRoot, context.scopeRoot, input.path);
   const requestedLimit =
     typeof input.limit === "number" && Number.isInteger(input.limit)
       ? input.limit
@@ -150,9 +168,7 @@ async function searchVisibleWorkspace(context: SiteSdkHostContext, params: unkno
     ...(typeof input.wholeWord === "boolean" ? { wholeWord: input.wholeWord } : {}),
     ...(typeof input.regex === "boolean" ? { regex: input.regex } : {}),
     ...(typeof input.excludeGlob === "string" ? { excludeGlob: input.excludeGlob } : {}),
-    ...(scopedIncludeGlob(context.scopeRoot, input.path)
-      ? { includeGlob: scopedIncludeGlob(context.scopeRoot, input.path) }
-      : {}),
+    ...(includeGlob ? { includeGlob } : {}),
   };
   const root = await realpath(context.workspaceRoot);
   if (context.signal?.aborted) {
@@ -236,6 +252,7 @@ export async function invokeSiteSdkHost(
   method: string,
   params?: unknown,
 ): Promise<unknown> {
+  if (method !== "capabilities") assertSitePreviewActive(context);
   switch (method) {
     case "capabilities":
       return capabilities(context);
@@ -276,6 +293,7 @@ export async function invokeSiteSdkHost(
       const body = typeof input.text === "string" ? input.text : null;
       if (body === null) throw new Error("files.write text must be a string.");
       if (input.overwrite === false) {
+        assertSitePreviewActive(context);
         try {
           await createWorkspaceTextExclusive(context.workspaceRoot, path, body);
         } catch (error) {
@@ -286,6 +304,7 @@ export async function invokeSiteSdkHost(
         }
         return { path };
       }
+      assertSitePreviewActive(context);
       await restoreWorkspaceText(context.workspaceRoot, path, body);
       return { path };
     }
@@ -311,6 +330,7 @@ export async function invokeSiteSdkHost(
       const path = siteSdkWorkspacePath(null, input.path, "write");
       const [edit] = databaseEdits(input);
       await readDatabaseSnapshot(context.workspaceRoot, path);
+      assertSitePreviewActive(context);
       return applyDatabaseEdit(
         context.workspaceRoot,
         path,

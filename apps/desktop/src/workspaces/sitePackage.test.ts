@@ -233,7 +233,7 @@ describe("listSitePackages", () => {
         '<link rel="manifest" href="./site.webmanifest">',
         '<img src="./assets/hero.avif">',
         '<script src="./vendor/dohc-sdk/index.js"></script>',
-        '<script src="./app.js"></script>',
+        '<script src=./app.js></script>',
       ].join(""),
     );
     await writeFile(

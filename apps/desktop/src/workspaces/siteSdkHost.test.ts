@@ -193,6 +193,35 @@ describe("site SDK host authority", () => {
     ).rejects.toThrow(/preview is no longer active/i);
   });
 
+  it("rejects file writes after preview authority is revoked", async () => {
+    const root = await workspace();
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      invokeSiteSdkHost(
+        { workspaceRoot: root, scopeRoot: null, writable: true, signal: controller.signal },
+        "files.write",
+        { path: "notes/stale.txt", text: "must not be written" },
+      ),
+    ).rejects.toThrow(/preview is no longer active/i);
+    await expect(readFile(join(root, "notes", "stale.txt"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("searches an exact requested file as well as directory descendants", async () => {
+    const root = await workspace();
+
+    await expect(
+      invokeSiteSdkHost(
+        { workspaceRoot: root, scopeRoot: null, writable: true },
+        "workspace.search",
+        { query: "hello", path: "notes/today.md" },
+      ),
+    ).resolves.toContainEqual(expect.objectContaining({ path: "notes/today.md" }));
+  });
+
   it("kills an in-flight search when preview authority is revoked", async () => {
     const root = await workspace();
     const controller = new AbortController();
