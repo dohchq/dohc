@@ -1087,6 +1087,10 @@ describe("chats panel (right side)", () => {
       ],
       fileThreads: [],
     });
+    bridge.listFileChats.mockResolvedValue({
+      fileObjectId: null,
+      threads: [],
+    });
     const user = userEvent.setup();
     renderShell(bridge, sharedWorkspace);
 
@@ -1105,6 +1109,13 @@ describe("chats panel (right side)", () => {
     expect(within(page).queryByTestId("chats-new-thread-composer")).toBeNull();
     expect(within(page).queryByTestId("chats-share-channel")).toBeNull();
     expect(startChannelThread).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("tab-b.md"));
+    await user.click(within(panel).getByTestId("chats-panel-tab-file"));
+    expect(
+      await within(panel).findByTestId("linked-chat-readonly-note"),
+    ).toBeTruthy();
+    expect(within(panel).queryByTestId("linked-chat-new")).toBeNull();
   });
 
   it("restores the stored width and can be resized from its left edge", async () => {

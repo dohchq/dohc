@@ -2846,6 +2846,7 @@ export function DesktopWorkspaceShell(props: {
                   <LazyLinkedChatsPanel
                     workspaceId={workspaceId}
                     filePath={activeDocumentPath}
+                    readOnly={Boolean(shareView)}
                     initialThread={searchChatThread}
                     onInitialThreadConsumed={() => setSearchChatThread(null)}
                     onOpenPath={openPathWithHeading}

@@ -43,6 +43,7 @@ type ThreadsState =
 export function LinkedChatsPanel(props: {
   workspaceId: string;
   filePath: string | null;
+  readOnly?: boolean;
   initialThread?: ChatThreadRecord | null;
   // Fired once when initialThread is consumed so the parent can clear the
   // state it minted for this open. Without that clear, every remount of this
@@ -53,6 +54,7 @@ export function LinkedChatsPanel(props: {
   onError: (message: string) => void;
 }) {
   const { workspaceId, filePath } = props;
+  const readOnly = props.readOnly === true;
   const [threadsState, setThreadsState] = useState<ThreadsState>({ status: "loading" });
   const [activeThread, setActiveThread] = useState<ChatThreadRecord | null>(null);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
@@ -153,6 +155,7 @@ export function LinkedChatsPanel(props: {
 
   const createChat = useCallback(
     async (title: string) => {
+      if (readOnly) return;
       if (!filePath) return;
       const trimmed = title.trim();
       if (trimmed.length === 0) return;
@@ -176,10 +179,11 @@ export function LinkedChatsPanel(props: {
         props.onError(ipcErrorMessage(error, "Could not start a chat for this file."));
       }
     },
-    [filePath, openThread, props, workspaceId],
+    [filePath, openThread, props, readOnly, workspaceId],
   );
 
   const sendMessage = useCallback(async () => {
+    if (readOnly) return;
     const thread = activeThread;
     const body = composer.trim();
     if (!thread || body.length === 0 || sending) return;
@@ -206,13 +210,14 @@ export function LinkedChatsPanel(props: {
       // sends, so an unconditional reset is race-free.
       setSending(false);
     }
-  }, [activeThread, composer, props, sending, workspaceId]);
+  }, [activeThread, composer, props, readOnly, sending, workspaceId]);
 
   // Reactions (WS-MU-C2): optimistic toggle of the viewer's own reaction with
   // rollback-on-failure and per-cell ordering, then reconcile to the canonical
   // server list. Shared with the Chats view so behavior can never drift.
   const toggleReaction = useCallback(
     (input: { messageId: string; emoji: string; nextState: "added" | "removed" }) => {
+      if (readOnly) return;
       const thread = activeThread;
       if (!thread) return;
       runReactionToggle(
@@ -229,7 +234,7 @@ export function LinkedChatsPanel(props: {
         input,
       );
     },
-    [activeThread, props, viewerAuthorId, workspaceId],
+    [activeThread, props, readOnly, viewerAuthorId, workspaceId],
   );
 
   if (activeThread) {
@@ -268,18 +273,28 @@ export function LinkedChatsPanel(props: {
             reactions,
             viewerAuthorId,
             onToggle: toggleReaction,
+            readOnly,
           }}
         />
-        <ChatComposer
-          testIdPrefix="linked-chat"
-          composerId="linked-chat-composer"
-          value={composer}
-          sending={sending}
-          placeholder="Write a message…"
-          sendLabel="Send message"
-          onChange={setComposer}
-          onSend={() => void sendMessage()}
-        />
+        {readOnly ? (
+          <p
+            data-testid="linked-chat-readonly-note"
+            className="m-0 shrink-0 border-t border-line px-3 py-2 text-[11px] text-subtle"
+          >
+            This shared workspace is read-only. You can still read this chat.
+          </p>
+        ) : (
+          <ChatComposer
+            testIdPrefix="linked-chat"
+            composerId="linked-chat-composer"
+            value={composer}
+            sending={sending}
+            placeholder="Write a message…"
+            sendLabel="Send message"
+            onChange={setComposer}
+            onSend={() => void sendMessage()}
+          />
+        )}
       </div>
     );
   }
@@ -333,7 +348,9 @@ export function LinkedChatsPanel(props: {
             <span className="text-xs text-muted">
               No chats about this file yet.
             </span>
-            <span className="text-[11px] text-subtle">Start one.</span>
+            <span className="text-[11px] text-subtle">
+              {readOnly ? "This shared workspace is read-only." : "Start one."}
+            </span>
           </div>
         ) : (
           <ul className="m-0 list-none p-0">
@@ -359,7 +376,14 @@ export function LinkedChatsPanel(props: {
         )}
       </div>
       <div className="shrink-0 border-t border-line p-2">
-        {threadsState.fileObjectId === null ? (
+        {readOnly ? (
+          <p
+            data-testid="linked-chat-readonly-note"
+            className="m-0 px-1 text-[11px] leading-4 text-subtle"
+          >
+            This shared workspace is read-only. You can still read its chats.
+          </p>
+        ) : threadsState.fileObjectId === null ? (
           <p className="m-0 px-1 text-[11px] leading-4 text-subtle">
             Chats aren't available for this file yet — only text files dohc
             tracks can have Chats.
