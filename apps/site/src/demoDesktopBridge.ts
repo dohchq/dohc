@@ -458,7 +458,9 @@ const demoBridge = {
           scripts: { build: "dohc site build" },
           buildOutputs: ["dist"],
           sourceFiles: ["projects/launch-plan.md"],
+          shareManifest: null,
           diagnostics: [],
+          authority: { kind: "workspace" as const },
         },
       ],
     };

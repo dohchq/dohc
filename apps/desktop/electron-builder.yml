@@ -25,6 +25,15 @@ files:
   - dist/**
 asar: true
 extraResources:
+  # Sites receive an offline, version-matched SDK through dohc_add_sdk. The
+  # MCP tool vendors these browser files into the site, so npm publication or
+  # network access is never required for a production desktop install.
+  - from: ../../packages/sdk/package.json
+    to: sdk-package/package.json
+  - from: ../../packages/sdk/dist
+    to: sdk-package/dist
+    filter:
+      - "**/*"
   - from: build/icon.png
     to: tray-icon.png
   - from: build/icon.png

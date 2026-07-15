@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { symlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -230,6 +230,17 @@ function siteRuntimePaths(): { viteBin: string; sdkEntry: string } {
   return { viteBin, sdkEntry };
 }
 
+async function selectPreviewMode(
+  page: Page,
+  mode: "static" | "dev" | "build",
+): Promise<void> {
+  const option = page.getByTestId(`site-preview-${mode}`);
+  if (!(await option.isVisible())) {
+    await page.getByTestId("site-preview-options").click();
+  }
+  await option.click();
+}
+
 test("@sites detects agent-created websites and previews static, dev, and build modes", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -252,7 +263,7 @@ test("@sites detects agent-created websites and previews static, dev, and build 
     const staticRow = desktop.page.getByTestId("sites-row").filter({ hasText: "Static Report" });
     await expect(staticRow).toBeVisible();
     await staticRow.click();
-    await desktop.page.getByTestId("site-preview-static").click();
+    await selectPreviewMode(desktop.page, "static");
     await expect(
       desktop.page.frameLocator('[data-testid="site-preview-frame"]').getByRole("heading", {
         name: "Static Report",
@@ -263,14 +274,14 @@ test("@sites detects agent-created websites and previews static, dev, and build 
     await expect(packageRow).toBeVisible();
     await packageRow.click();
 
-    await desktop.page.getByTestId("site-preview-dev").click();
+    await selectPreviewMode(desktop.page, "dev");
     await expect(
       desktop.page.frameLocator('[data-testid="site-preview-frame"]').getByRole("heading", {
         name: "Dev Preview",
       }),
     ).toBeVisible();
 
-    await desktop.page.getByTestId("site-preview-build").click();
+    await selectPreviewMode(desktop.page, "build");
     await expect(
       desktop.page.frameLocator('[data-testid="site-preview-frame"]').getByRole("heading", {
         name: "Built Preview",
@@ -280,7 +291,7 @@ test("@sites detects agent-created websites and previews static, dev, and build 
     const sdkRow = desktop.page.getByTestId("sites-row").filter({ hasText: "SDK Site" });
     await expect(sdkRow).toBeVisible();
     await sdkRow.click();
-    await desktop.page.getByTestId("site-preview-dev").click();
+    await selectPreviewMode(desktop.page, "dev");
     await expect(
       desktop.page.frameLocator('[data-testid="site-preview-frame"]').getByText("SDK says: Local data from dohc"),
     ).toBeVisible();
@@ -322,7 +333,7 @@ test("@sites SDK respects workspace boundaries", async () => {
     const boundaryRow = desktop.page.getByTestId("sites-row").filter({ hasText: "Boundary Site" });
     await expect(boundaryRow).toBeVisible();
     await boundaryRow.click();
-    await desktop.page.getByTestId("site-preview-dev").click();
+    await selectPreviewMode(desktop.page, "dev");
 
     const output = desktop.page.frameLocator('[data-testid="site-preview-frame"]').locator("#sdk-output");
     await expect(output).toContainText(/SDK denied: .*?escapes workspace/i);
@@ -347,12 +358,12 @@ test("@sites surfaces dev and build preview failures", async () => {
     await expect(brokenRow).toBeVisible();
     await brokenRow.click();
 
-    await desktop.page.getByTestId("site-preview-dev").click();
+    await selectPreviewMode(desktop.page, "dev");
     const previewError = desktop.page.getByTestId("site-preview-error");
     await expect(previewError).toContainText("exited before it was ready");
     await expect(previewError).toContainText("code=2");
 
-    await desktop.page.getByTestId("site-preview-build").click();
+    await selectPreviewMode(desktop.page, "build");
     await expect(previewError).toContainText("Site build failed");
     await expect(previewError).toContainText("build failed intentionally");
   } finally {

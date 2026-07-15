@@ -323,7 +323,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_add_sdk",
     {
       description:
-        "Add the optional @dohc/sdk dependency to a normal website package so agents can enhance it with dohc-aware reads later.",
+        "Install the bundled @dohc/sdk into a website package for workspace files, search, databases, navigation, and future dohc capabilities.",
       inputSchema: {
         siteRoot: z.string().min(1).max(4096),
       },

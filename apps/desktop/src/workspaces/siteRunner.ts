@@ -1,3 +1,4 @@
+import { hasIgnoredSegment } from "@dohc/workspace-core";
 import { spawn, type ChildProcess } from "node:child_process";
 import { constants } from "node:fs";
 import { access, readFile, realpath, stat } from "node:fs/promises";
@@ -109,6 +110,9 @@ function assertContainedFilePath(path: string, label: string): void {
   ) {
     throw new Error(`Invalid ${label}: ${path}`);
   }
+  if (hasIgnoredSegment(path)) {
+    throw new Error(`Invalid ${label}: reserved metadata path ${path}`);
+  }
 }
 
 function pushLog(logs: SiteLogEntry[], stream: SiteLogEntry["stream"], text: string): void {
@@ -163,6 +167,11 @@ export async function startStaticSitePreview(
       ) {
         response.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
         response.end("Invalid path");
+        return;
+      }
+      if (hasIgnoredSegment(relativePath)) {
+        response.writeHead(403, { "content-type": "text/plain; charset=utf-8" });
+        response.end("Forbidden");
         return;
       }
       const target = join(root, relativePath);

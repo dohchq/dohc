@@ -1371,10 +1371,10 @@ const SITE_SOURCE_EXTENSIONS = new Set([
 ]);
 const MAX_SITE_TEST_BYTES = 2 * 1024 * 1024;
 const MAX_SITE_SCAN_DEPTH = 100;
-let cachedDohcSdkDependencyRange: {
+let cachedDohcSdkPackageVersion: {
   packageJsonPath: string;
   mtimeMs: number;
-  range: string;
+  version: string;
 } | null = null;
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1450,12 +1450,15 @@ async function readJsonDetailed<T>(
   }
 }
 
-async function dohcSdkDependencyRange(ctx: ToolContext): Promise<string> {
-  const explicitRange = ctx.sdkDependencyRange?.trim();
-  if (explicitRange) return explicitRange;
+type DohcSdkDependency =
+  | { specifier: string; sourceDir: null }
+  | { specifier: string; sourceDir: string; version: string };
 
+async function dohcSdkDependency(ctx: ToolContext): Promise<DohcSdkDependency> {
+  const explicitRange = ctx.sdkDependencyRange?.trim();
   const packageJsonPath = ctx.sdkPackageJsonPath?.trim();
   if (!packageJsonPath) {
+    if (explicitRange) return { specifier: explicitRange, sourceDir: null };
     throw new Error(
       "MCP server configuration is missing @dohc/sdk package metadata; launch with --sdk-package-json or set DOHC_SDK_PACKAGE_JSON",
     );
@@ -1463,10 +1466,14 @@ async function dohcSdkDependencyRange(ctx: ToolContext): Promise<string> {
 
   const packageStat = await stat(packageJsonPath);
   if (
-    cachedDohcSdkDependencyRange?.packageJsonPath === packageJsonPath &&
-    cachedDohcSdkDependencyRange.mtimeMs === packageStat.mtimeMs
+    cachedDohcSdkPackageVersion?.packageJsonPath === packageJsonPath &&
+    cachedDohcSdkPackageVersion.mtimeMs === packageStat.mtimeMs
   ) {
-    return cachedDohcSdkDependencyRange.range;
+    return {
+      specifier: explicitRange || "file:vendor/dohc-sdk",
+      sourceDir: dirname(packageJsonPath),
+      version: cachedDohcSdkPackageVersion.version,
+    };
   }
 
   const pkg = await readJson<{ version?: unknown }>(packageJsonPath);
@@ -1474,9 +1481,12 @@ async function dohcSdkDependencyRange(ctx: ToolContext): Promise<string> {
   if (!version) {
     throw new Error(`Unable to read @dohc/sdk version from ${packageJsonPath}`);
   }
-  const range = `^${version}`;
-  cachedDohcSdkDependencyRange = { packageJsonPath, mtimeMs: packageStat.mtimeMs, range };
-  return range;
+  cachedDohcSdkPackageVersion = { packageJsonPath, mtimeMs: packageStat.mtimeMs, version };
+  return {
+    specifier: explicitRange || "file:vendor/dohc-sdk",
+    sourceDir: dirname(packageJsonPath),
+    version,
+  };
 }
 
 async function detectSiteAt(ctx: ToolContext, absolute: string, root: string): Promise<WorkspaceSite | null> {
@@ -2059,6 +2069,10 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
   if (!root.ok) return root;
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
+  // Detect before adding package.json: creating package metadata must not turn
+  // a plain static site into a package-import workflow that browsers cannot
+  // actually resolve without a bundler.
+  const detectedSite = await detectSiteAt(ctx, root.absolute, root.normalized);
 
   const packagePath = join(root.absolute, "package.json");
   const existingBytes = await readFile(packagePath).catch((error: unknown) => {
@@ -2077,6 +2091,13 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
       };
     }
   }
+  const siteRootNames = new Set(
+    (await readdir(root.absolute, { withFileTypes: true })).map((entry) => entry.name),
+  );
+  const usesPackageModuleResolution =
+    Boolean(frameworkConfigName(siteRootNames)) ||
+    hasWebDependency(existing) ||
+    Object.keys(readPackageScripts(existing)).length > 0;
   const packageJson = ensureObject(existing);
   packageJson.private = packageJson.private ?? true;
   packageJson.type = packageJson.type ?? "module";
@@ -2084,17 +2105,79 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
     typeof packageJson.name === "string" && packageJson.name.trim()
       ? packageJson.name
       : packageNameFromPath(root.normalized);
-  let sdkRange: string;
+  let sdk: DohcSdkDependency;
   try {
-    sdkRange = await dohcSdkDependencyRange(ctx);
+    sdk = await dohcSdkDependency(ctx);
   } catch (error) {
     return {
       ok: false as const,
       reason: failureReason(error, "unable to resolve @dohc/sdk dependency range"),
     };
   }
+  if (!usesPackageModuleResolution && !sdk.sourceDir) {
+    return {
+      ok: false as const,
+      reason:
+        "A plain static site needs bundled @dohc/sdk browser files; configure sdkPackageJsonPath so add_sdk can create a browser-resolvable import.",
+    };
+  }
+  if (sdk.sourceDir) {
+    let sdkJavaScript: string;
+    let sdkTypes: string;
+    try {
+      [sdkJavaScript, sdkTypes] = await Promise.all([
+        readFile(join(sdk.sourceDir, "dist", "index.js"), "utf8"),
+        readFile(join(sdk.sourceDir, "dist", "index.d.ts"), "utf8"),
+      ]);
+    } catch (error) {
+      return {
+        ok: false as const,
+        reason: failureReason(error, "unable to read the bundled @dohc/sdk browser files"),
+      };
+    }
+    const vendorFiles = [
+      {
+        path: "vendor/dohc-sdk/package.json",
+        content: `${JSON.stringify(
+          {
+            name: "@dohc/sdk",
+            version: sdk.version,
+            type: "module",
+            types: "./dist/index.d.ts",
+            exports: {
+              ".": { types: "./dist/index.d.ts", import: "./dist/index.js" },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+      },
+      {
+        path: "vendor/dohc-sdk/dist/index.js",
+        content: sdkJavaScript,
+      },
+      {
+        path: "vendor/dohc-sdk/dist/index.d.ts",
+        content: sdkTypes,
+      },
+    ];
+    for (const file of vendorFiles) {
+      const path = relativeJoin(root.normalized, file.path);
+      const existing = await readFile(join(ctx.root, path)).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      });
+      const writtenVendor = await writeWorkspaceFile(ctx, {
+        path,
+        content: file.content,
+        expectedSha256: sha256(existing ?? new Uint8Array()),
+        summary: `MCP installed the bundled @dohc/sdk in ${root.normalized}`,
+      });
+      if (!writtenVendor.ok) return writtenVendor;
+    }
+  }
   const dependencies = ensureObject(packageJson.dependencies);
-  dependencies["@dohc/sdk"] = sdkRange;
+  dependencies["@dohc/sdk"] = sdk.specifier;
   packageJson.dependencies = dependencies;
 
   const normalizedPackagePath = relativeJoin(root.normalized, "package.json");
@@ -2106,6 +2189,8 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
   });
   if (!written.ok) return written;
 
+  const useVendoredBrowserImport = !usesPackageModuleResolution && sdk.sourceDir !== null;
+
   return {
     ok: true as const,
     siteRoot: root.normalized,
@@ -2116,7 +2201,10 @@ export async function addSiteSdk(ctx: ToolContext, args: { siteRoot: string }) {
     ...("recordedBy" in written
       ? { recordedBy: written.recordedBy }
       : { historyRecording: written.historyRecording }),
-    usage: `import { dohc } from "@dohc/sdk";\nconst text = await dohc.files.read("notes/today.md");`,
+    importMode: useVendoredBrowserImport ? "vendored-browser-module" : "package",
+    usage: useVendoredBrowserImport
+      ? `import { dohc } from "./vendor/dohc-sdk/dist/index.js";\nconst text = await dohc.files.read("notes/today.md");`
+      : `import { dohc } from "@dohc/sdk";\nconst text = await dohc.files.read("notes/today.md");`,
   };
 }
 

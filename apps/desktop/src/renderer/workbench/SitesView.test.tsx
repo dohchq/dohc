@@ -18,7 +18,9 @@ const site: SitePackageInfo = {
   scripts: { dev: "vite", build: "vite build" },
   buildOutputs: ["dist"],
   sourceFiles: ["client-portal/index.html", "client-portal/package.json"],
+  shareManifest: null,
   diagnostics: [],
+  authority: { kind: "workspace" },
 };
 
 const bridgeMock = {
@@ -110,8 +112,31 @@ describe("SitesView", () => {
       />,
     );
 
-    expect(await screen.findByText("No sites")).toBeTruthy();
+    expect(await screen.findByText("No sites yet")).toBeTruthy();
+    expect(screen.getByText("Ask your agent to create a site for this workspace.")).toBeTruthy();
     expect(screen.getByTestId("sites-count").textContent).toContain("0 sites");
+  });
+
+  it("labels sites opened from a mounted share", async () => {
+    bridgeMock.listSites.mockResolvedValueOnce({
+      sites: [
+        {
+          ...site,
+          root: "shared-with-me/alex/client-portal",
+          authority: { kind: "share", mountRoot: "shared-with-me/alex" },
+        },
+      ],
+    });
+    render(
+      <SitesView
+        workspaceId="ws-sites"
+        files={[]}
+        onOpenPath={vi.fn()}
+      />,
+    );
+
+    await screen.findByText("Client Portal");
+    expect(screen.getByTestId("sites-shared-label").textContent).toBe("Shared");
   });
 
   it("surfaces site diagnostics", async () => {

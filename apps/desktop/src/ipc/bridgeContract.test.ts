@@ -12,10 +12,14 @@ import {
   EngineMomentDetailRecord,
   ExportDocumentFilePayload,
   ExportDocumentFileResult,
+  InvokeSiteSdkPayload,
   ListEngineMomentsPayload,
   ListEngineMomentsResult,
   ListFileChatsPayload,
   PRESENCE_STATE_MAX_BYTES,
+  SITE_SDK_PARAMS_MAX_BYTES,
+  SITE_SDK_PARAMS_MAX_DEPTH,
+  SITE_SDK_PARAMS_MAX_VALUES,
   PresencePublishPayload,
   presenceStateWithinCap,
   RestoreEngineMomentFileResult,
@@ -44,6 +48,7 @@ import {
   UpdateCheckResult,
   UpdateStateEvent,
   WriteClipboardTextPayload,
+  parseInvokeSiteSdkPayloadForIpc,
 } from "./bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
@@ -346,7 +351,9 @@ describe("site IPC contract", () => {
             scripts: { dev: "vite", build: "vite build" },
             buildOutputs: ["dist"],
             sourceFiles: ["client-portal/index.html", "client-portal/package.json"],
+            shareManifest: null,
             diagnostics: [],
+            authority: { kind: "workspace" },
           },
         ],
       }).sites[0]?.root,
@@ -367,11 +374,65 @@ describe("site IPC contract", () => {
             scripts: {},
             buildOutputs: [],
             sourceFiles: [],
+            shareManifest: null,
             diagnostics: [],
+            authority: { kind: "workspace" },
           },
         ],
       }).sites[0]?.entryPath,
     ).toBeNull();
+  });
+
+  it("requires a mount root for shared-site authority", () => {
+    const sharedSite = {
+      root: "shared-with-me/alex/report",
+      title: "Report",
+      kind: "static",
+      confidence: "high",
+      entryPath: "shared-with-me/alex/report/index.html",
+      configPath: null,
+      packagePath: null,
+      packageManager: null,
+      scripts: {},
+      configuredScripts: {},
+      buildOutputs: [],
+      sourceFiles: ["shared-with-me/alex/report/index.html"],
+      shareManifest: {
+        entryPath: "shared-with-me/alex/report/index.html",
+        assets: [],
+      },
+      diagnostics: [],
+    };
+    expect(
+      ListSitesResult.safeParse({
+        sites: [
+          {
+            ...sharedSite,
+            authority: { kind: "share", mountRoot: "shared-with-me/alex" },
+          },
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      ListSitesResult.safeParse({
+        sites: [{ ...sharedSite, authority: { kind: "share" } }],
+      }).success,
+    ).toBe(false);
+    expect(
+      ListSitesResult.safeParse({
+        sites: [{ ...sharedSite, authority: { kind: "share", mountRoot: "." } }],
+      }).success,
+    ).toBe(false);
+    expect(
+      ListSitesResult.safeParse({
+        sites: [
+          {
+            ...sharedSite,
+            authority: { kind: "share", mountRoot: "shared-with-me/someone-else" },
+          },
+        ],
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts bounded preview start/result payloads", () => {
@@ -393,6 +454,7 @@ describe("site IPC contract", () => {
         mode: "build",
         url: "http://127.0.0.1:4173/",
         logs: [{ stream: "stdout", text: "built", at: 1 }],
+        sdkScopeRoot: null,
         build: {
           ok: true,
           command: "pnpm",
@@ -408,6 +470,7 @@ describe("site IPC contract", () => {
         mode: "static",
         url: "http://localhost:4173/",
         logs: [],
+        sdkScopeRoot: "shared-with-me/alex",
       }).logs,
     ).toEqual([]);
     expect(
@@ -524,6 +587,78 @@ describe("site IPC contract", () => {
           logs: [],
         }).success,
       ).toBe(false);
+    }
+  });
+
+  it("accepts realistic JSON-safe SDK params at the preload IPC boundary", () => {
+    const text = "x".repeat(2 * 1024 * 1024);
+    expect(
+      parseInvokeSiteSdkPayloadForIpc({
+        workspaceId: "ws-sites",
+        siteRoot: "report",
+        method: "files.write",
+        params: {
+          path: "exports/report.txt",
+          text,
+          overwrite: true,
+          metadata: { tags: ["quarterly", "approved"], score: 0.95 },
+        },
+      }).params,
+    ).toMatchObject({ path: "exports/report.txt", overwrite: true });
+  });
+
+  it("rejects oversized, excessively deep, and over-populated SDK params", () => {
+    const base = {
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      method: "files.write",
+    };
+    const oversized = {
+      ...base,
+      params: { text: "x".repeat(SITE_SDK_PARAMS_MAX_BYTES + 1) },
+    };
+    expect(() => parseInvokeSiteSdkPayloadForIpc(oversized)).toThrow(/JSON-safe/);
+    expect(
+      InvokeSiteSdkPayload.safeParse({
+        ...base,
+        params: oversized.params,
+      }).success,
+    ).toBe(false);
+
+    let deep: Record<string, unknown> = {};
+    const root = deep;
+    for (let depth = 0; depth <= SITE_SDK_PARAMS_MAX_DEPTH; depth += 1) {
+      const child: Record<string, unknown> = {};
+      deep.child = child;
+      deep = child;
+    }
+    expect(InvokeSiteSdkPayload.safeParse({ ...base, params: root }).success).toBe(false);
+
+    expect(
+      InvokeSiteSdkPayload.safeParse({
+        ...base,
+        params: Array.from({ length: SITE_SDK_PARAMS_MAX_VALUES }, () => null),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects SDK params that are not a finite, acyclic JSON data tree", () => {
+    const base = {
+      workspaceId: "ws-sites",
+      siteRoot: "report",
+      method: "databases.edit",
+    };
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+
+    for (const params of [
+      cyclic,
+      { value: Number.POSITIVE_INFINITY },
+      { value: BigInt(1) },
+      { value: new Uint8Array([1, 2, 3]) },
+      ["first", , "third"],
+    ]) {
+      expect(InvokeSiteSdkPayload.safeParse({ ...base, params }).success).toBe(false);
     }
   });
 });

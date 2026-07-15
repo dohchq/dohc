@@ -63,6 +63,26 @@ describe("startStaticSitePreview", () => {
       /Invalid site entry/,
     );
   });
+
+  it("never serves nested dohc metadata from a static site root", async () => {
+    await mkdir(join(root, "site", "nested", ".dohc"), { recursive: true });
+    await writeFile(join(root, "site", "index.html"), "public");
+    await writeFile(join(root, "site", "nested", ".dohc", "secret.txt"), "secret");
+
+    const preview = await startStaticSitePreview(root, "site");
+    try {
+      const direct = await fetch(new URL("/nested/.dohc/secret.txt", preview.url));
+      expect(direct.status).toBe(403);
+      const encoded = await fetch(new URL("/nested/%2edohc/secret.txt", preview.url));
+      expect(encoded.status).toBe(403);
+    } finally {
+      await preview.stop();
+    }
+
+    await expect(
+      startStaticSitePreview(root, "site", { entry: "nested/.dohc/secret.txt" }),
+    ).rejects.toThrow(/reserved metadata path/);
+  });
 });
 
 describe("package manager helpers", () => {

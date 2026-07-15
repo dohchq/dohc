@@ -4,25 +4,57 @@ export declare const DohcSdkErrorCodes: {
     readonly hostMissingOrigin: "DOHC_HOST_MISSING_ORIGIN";
     readonly hostTimeout: "DOHC_HOST_TIMEOUT";
     readonly badResponse: "DOHC_BAD_RESPONSE";
+    readonly capabilityDisabled: "DOHC_CAPABILITY_DISABLED";
+    readonly invalidInput: "DOHC_INVALID_INPUT";
+    readonly aborted: "DOHC_ABORTED";
+    readonly subscriptionsUnsupported: "DOHC_SUBSCRIPTIONS_UNSUPPORTED";
+    readonly responseTruncated: "DOHC_RESPONSE_TRUNCATED";
 };
 export type DohcSdkErrorCode = (typeof DohcSdkErrorCodes)[keyof typeof DohcSdkErrorCodes] | (string & {});
+/**
+ * Capabilities describe what the current dohc context can do. They are an
+ * availability map, not a permission-request API. Hosts may add capabilities
+ * without requiring an SDK release.
+ */
+export type DohcCapabilityGroup = Record<string, boolean | undefined>;
 export type DohcCapabilityMap = {
-    files: {
+    files: DohcCapabilityGroup & {
         read: boolean;
         write: boolean;
+        list?: boolean;
+        watch?: boolean;
     };
-    collections: {
+    collections: DohcCapabilityGroup & {
         read: boolean;
+        list?: boolean;
     };
-    provenance: {
+    provenance: DohcCapabilityGroup & {
         record: boolean;
     };
+    workspace?: DohcCapabilityGroup & {
+        search?: boolean;
+    };
+    databases?: DohcCapabilityGroup & {
+        read?: boolean;
+        edit?: boolean;
+    };
+    ui?: DohcCapabilityGroup & {
+        open?: boolean;
+    };
+    [namespace: string]: DohcCapabilityGroup | undefined;
 };
 export type DohcSdkRequestMessage = {
     protocol: typeof DOHC_SDK_PROTOCOL;
     id: string;
     method: string;
     params?: unknown;
+};
+export type DohcSdkEventMessage<T = unknown> = {
+    protocol: typeof DOHC_SDK_PROTOCOL;
+    type: "event";
+    subscriptionId: string;
+    event: string;
+    data: T;
 };
 export type DohcSdkResponseMessage = {
     protocol: typeof DOHC_SDK_PROTOCOL;
@@ -38,9 +70,83 @@ export type DohcSdkResponseMessage = {
         message: string;
     };
 };
+export type DohcRequestOptions = {
+    signal?: AbortSignal;
+    /** Overrides the transport's default timeout for this request. */
+    timeoutMs?: number;
+};
+export type DohcSubscriptionEvent<T = unknown> = {
+    event: string;
+    data: T;
+};
+export type DohcUnsubscribe = () => Promise<void>;
 export interface DohcTransport {
-    request(method: string, params?: unknown): Promise<unknown>;
+    request(method: string, params?: unknown, options?: DohcRequestOptions): Promise<unknown>;
+    subscribe?<T = unknown>(method: string, params: unknown, listener: (event: DohcSubscriptionEvent<T>) => void, options?: DohcRequestOptions): Promise<DohcUnsubscribe>;
 }
+export type DohcFileEntry = {
+    path: string;
+    name?: string;
+    kind?: "file" | "directory" | (string & {});
+    size?: number;
+    modifiedAt?: number | string;
+    [key: string]: unknown;
+};
+export type DohcFileReadResult = {
+    text: string;
+    /** True when the host returned only a bounded prefix of the file. */
+    truncated: boolean;
+};
+export type DohcFileListOptions = {
+    recursive?: boolean;
+    includeHidden?: boolean;
+    [key: string]: unknown;
+};
+export type DohcFileWriteOptions = {
+    create?: boolean;
+    overwrite?: boolean;
+    [key: string]: unknown;
+};
+export type DohcFileWatchEvent = {
+    path: string;
+    kind?: "created" | "changed" | "deleted" | "renamed" | (string & {});
+    [key: string]: unknown;
+};
+export type DohcSearchOptions = {
+    path?: string;
+    limit?: number;
+    types?: string[];
+    [key: string]: unknown;
+};
+export type DohcSearchResult = {
+    path?: string;
+    title?: string;
+    excerpt?: string;
+    score?: number;
+    [key: string]: unknown;
+};
+export type DohcDatabaseReadRequest = {
+    path: string;
+    query?: string;
+    params?: unknown[] | Record<string, unknown>;
+    [key: string]: unknown;
+};
+export type DohcDatabaseEditRequest = {
+    path: string;
+    query?: string;
+    params?: unknown[] | Record<string, unknown>;
+    /** The production dohc host currently accepts exactly one structured operation per call. */
+    operations?: [unknown];
+    [key: string]: unknown;
+};
+export type DohcUiOpenOptions = {
+    position?: "active" | "beside" | "new-tab" | (string & {});
+    [key: string]: unknown;
+};
+export type DohcProvenanceRecord = {
+    summary: string;
+    [key: string]: unknown;
+};
 export type CreateDohcClientOptions = {
     transport?: DohcTransport;
     timeoutMs?: number;
@@ -55,30 +161,72 @@ export declare class DohcSdkError extends Error {
 export declare function createPostMessageTransport(options?: Omit<CreateDohcClientOptions, "transport">): DohcTransport;
 export declare function createDohcClient(options?: CreateDohcClientOptions): {
     capabilities: () => Promise<DohcCapabilityMap>;
+    /** Generic escape hatch for host capabilities newer than this SDK. */
+    request: <T = unknown>(method: string, params?: unknown, requestOptions?: DohcRequestOptions) => Promise<T>;
+    /** Alias for request, suited to command-style host capabilities. */
+    invoke: <T = unknown>(method: string, params?: unknown, requestOptions?: DohcRequestOptions) => Promise<T>;
+    /** Generic event subscription escape hatch. */
+    subscribe: <T = unknown>(method: string, params: unknown, listener: (event: DohcSubscriptionEvent<T>) => void, requestOptions?: DohcRequestOptions) => Promise<DohcUnsubscribe>;
     files: {
-        read: (path: string) => Promise<string>;
+        readInfo: (path: string, requestOptions?: DohcRequestOptions) => Promise<DohcFileReadResult>;
+        read: (path: string, requestOptions?: DohcRequestOptions) => Promise<string>;
+        list: (path?: string, options?: DohcFileListOptions, requestOptions?: DohcRequestOptions) => Promise<DohcFileEntry[]>;
+        write: (path: string, text: string, options?: DohcFileWriteOptions, requestOptions?: DohcRequestOptions) => Promise<unknown>;
+        watch: (path: string, listener: (event: DohcSubscriptionEvent<DohcFileWatchEvent>) => void, requestOptions?: DohcRequestOptions) => Promise<DohcUnsubscribe>;
+    };
+    workspace: {
+        search: (query: string, options?: DohcSearchOptions, requestOptions?: DohcRequestOptions) => Promise<DohcSearchResult[]>;
+    };
+    databases: {
+        read: <T = unknown>(input: DohcDatabaseReadRequest, requestOptions?: DohcRequestOptions) => Promise<T>;
+        edit: <T = unknown>(input: DohcDatabaseEditRequest, requestOptions?: DohcRequestOptions) => Promise<T>;
+    };
+    ui: {
+        open: (target: string, options?: DohcUiOpenOptions, requestOptions?: DohcRequestOptions) => Promise<unknown>;
     };
     collections: {
+        list: (name: string, params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
         get: (name: string) => {
-            list: () => Promise<Record<string, unknown>[]>;
+            list: (params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
         };
     };
     provenance: {
-        record: (summary: string) => Promise<void>;
+        record: (value: string | DohcProvenanceRecord, requestOptions?: DohcRequestOptions) => Promise<void>;
     };
 };
 export type DohcClient = ReturnType<typeof createDohcClient>;
 export declare const dohc: {
     capabilities: () => Promise<DohcCapabilityMap>;
+    /** Generic escape hatch for host capabilities newer than this SDK. */
+    request: <T = unknown>(method: string, params?: unknown, requestOptions?: DohcRequestOptions) => Promise<T>;
+    /** Alias for request, suited to command-style host capabilities. */
+    invoke: <T = unknown>(method: string, params?: unknown, requestOptions?: DohcRequestOptions) => Promise<T>;
+    /** Generic event subscription escape hatch. */
+    subscribe: <T = unknown>(method: string, params: unknown, listener: (event: DohcSubscriptionEvent<T>) => void, requestOptions?: DohcRequestOptions) => Promise<DohcUnsubscribe>;
     files: {
-        read: (path: string) => Promise<string>;
+        readInfo: (path: string, requestOptions?: DohcRequestOptions) => Promise<DohcFileReadResult>;
+        read: (path: string, requestOptions?: DohcRequestOptions) => Promise<string>;
+        list: (path?: string, options?: DohcFileListOptions, requestOptions?: DohcRequestOptions) => Promise<DohcFileEntry[]>;
+        write: (path: string, text: string, options?: DohcFileWriteOptions, requestOptions?: DohcRequestOptions) => Promise<unknown>;
+        watch: (path: string, listener: (event: DohcSubscriptionEvent<DohcFileWatchEvent>) => void, requestOptions?: DohcRequestOptions) => Promise<DohcUnsubscribe>;
+    };
+    workspace: {
+        search: (query: string, options?: DohcSearchOptions, requestOptions?: DohcRequestOptions) => Promise<DohcSearchResult[]>;
+    };
+    databases: {
+        read: <T = unknown>(input: DohcDatabaseReadRequest, requestOptions?: DohcRequestOptions) => Promise<T>;
+        edit: <T = unknown>(input: DohcDatabaseEditRequest, requestOptions?: DohcRequestOptions) => Promise<T>;
+    };
+    ui: {
+        open: (target: string, options?: DohcUiOpenOptions, requestOptions?: DohcRequestOptions) => Promise<unknown>;
     };
     collections: {
+        list: (name: string, params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
         get: (name: string) => {
-            list: () => Promise<Record<string, unknown>[]>;
+            list: (params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
         };
     };
     provenance: {
-        record: (summary: string) => Promise<void>;
+        record: (value: string | DohcProvenanceRecord, requestOptions?: DohcRequestOptions) => Promise<void>;
     };
 };
