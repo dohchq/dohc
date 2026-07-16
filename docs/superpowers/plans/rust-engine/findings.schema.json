@@ -4,7 +4,7 @@
   "type": "object",
   "required": ["shardId", "reviewerRole", "findings", "surfacesInspected"],
   "properties": {
-    "shardId": { "type": "string" },
+    "shardId": { "type": "string", "minLength": 1 },
     "reviewerRole": {
       "type": "string",
       "enum": ["behavior-equivalence", "robustness-security", "platform-failure"]
@@ -25,19 +25,23 @@
         ],
         "properties": {
           "severity": { "type": "string", "enum": ["P0", "P1", "P2"] },
-          "behaviorId": { "type": "string" },
-          "location": { "type": "string", "description": "file:line" },
-          "violatedContract": { "type": "string" },
-          "failureSequence": { "type": "string" },
-          "expectedVsActual": { "type": "string" },
-          "regressionTest": { "type": "string" },
+          "behaviorId": { "type": "string", "minLength": 1 },
+          "location": {
+            "type": "string",
+            "pattern": "^.+:[0-9]+(-[0-9]+)?$",
+            "description": "file:line or file:start-end"
+          },
+          "violatedContract": { "type": "string", "minLength": 1 },
+          "failureSequence": { "type": "string", "minLength": 1 },
+          "expectedVsActual": { "type": "string", "minLength": 1 },
+          "regressionTest": { "type": "string", "minLength": 1 },
           "blocksIntegration": { "type": "boolean" }
         }
       }
     },
     "surfacesInspected": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": { "type": "string", "minLength": 1 },
       "minItems": 1,
       "description": "Required even when findings is empty — 'looks good' without inspected surfaces is not a review"
     }

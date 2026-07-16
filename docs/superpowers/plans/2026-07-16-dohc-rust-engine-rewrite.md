@@ -1,15 +1,17 @@
 # dohc Rust Workspace Engine Rewrite Plan — Rev 2
 
-> Status: revised and audit-verified; awaiting Ice's go signal (Gate 0)
+> Status: audit-verified; program authorized by Ice's go signal 2026-07-16
+> (opens Wave 0 preparation only — capability implementation waits on Gate 0,
+> defined below)
 >
 > Date: 2026-07-16 (Rev 2, same day)
 >
 > Decision owner: Ice
 >
-> Execution rule: no production Rust implementation until Ice gives the go
-> signal on this revision. After the go signal, this document is the program's
-> instruction set: any future decision change requires a same-day edit here
-> before any agent consumes the stale text.
+> Execution rule: the go signal authorized Wave 0 (artifacts, spikes, dormant
+> scaffolding). No capability shard (Wave 1+) starts before Gate 0 passes.
+> This document is the program's instruction set: any future decision change
+> requires a same-day edit here before any agent consumes the stale text.
 
 ## Rev 2 changelog
 
@@ -614,7 +616,12 @@ Concretely, not just protocol-level:
    directions. (~hundreds of lines; becomes the permanent R11 regression
    harness.)
 3. Harvest real durable-update fixtures from Ice's own dogfood `engine.db`
-   now (clean reset happens at cutover, not today).
+   now (clean reset happens at cutover, not today). Fixture handling rules:
+   copy-only extraction (never open the live file); harvested fixtures are
+   personal content — they live locally outside the repo, scoped to the
+   spike/R11 harnesses; raw fixtures are never committed or shared; anything
+   committed must be synthetic, or deterministically redacted and
+   secret-scanned with the scan result recorded.
 4. Verify state vectors across alternating JS/Rust edits, compaction without
    convergence change, base-once durable lineage, and remote-apply
    origin/echo-suppression at the adapter layer.
@@ -718,7 +725,9 @@ All live in the program directory chosen at R00
   clean.
 - A reviewer-packet builder script assembling, by shard ID: behavior rows, TS
   source, diff, ported tests, and the specific contract docs — so spawned
-  reviewers never improvise what "relevant contracts" means.
+  reviewers never improvise what "relevant contracts" means. Owned by
+  R01-ORACLE (`tools/rust-engine-program/`); no Tier 1/2 review cell runs
+  before it exists.
 - `WINDOWS_DEV.md` — worktree layout under a short root path, per-worktree
   `CARGO_TARGET_DIR`, sccache shared across worktrees, Defender exclusions
   for all target dirs, the local concurrency budget (max 3–4 lanes running
@@ -960,7 +969,13 @@ high-risk review result.
   review batched at the capability-boundary integration PR.
 - **Tier 3 (test-port and fixture-only PRs)**: one adversarial reviewer +
   CodeRabbit; the anti-weakening CI checks are the real gate.
-- **Docs/artifact PRs**: Codex review only.
+- **Program-control docs** (this plan, `TEST_ORACLE.md`,
+  `CUTOVER_AND_ROLLBACK.md`, the schemas, `WINDOWS_DEV.md`, `DECISIONS.md`):
+  Codex + local Claude review, and plan-content changes additionally need
+  Ice's sign-off — these documents define reset, authority, and privacy
+  behavior, so they review like code. Routine status appends
+  (`EXECUTION_LOG.md`, SHARDS.tsv status column) are Codex-only. This
+  implements the repo's standing PR review loop; it does not replace it.
 
 Per-PR bot loops (push → `@codex review` → local Claude → comment scope →
 repeat) run as self-pacing background loops per open PR, not orchestrator
@@ -1044,12 +1059,14 @@ materialization recovery; R07 watcher/reconcile/path floor/policy; R10
 replication/cursors/share apply (+ shared security-vocabulary contract
 package with parity fixtures).
 
-**Wave 4:** R13 daemon composition + shadow replay; **R13b dormant desktop
-adapter** — the generated client plus feature-flagged parallel wiring of
-`main.ts`/capture/activity/sync call sites and sidecar supervision, landed
-unreachable in normal-sized PRs during Waves 2–4 so the ~8.5k lines of
-desktop rewiring never debut in the cutover PR; shadow replay exercises this
-adapter, not a throwaway harness.
+**Wave 3 (continued):** **R13b dormant desktop adapter** — the generated
+client plus feature-flagged parallel wiring of `main.ts`/capture/activity/
+sync call sites and sidecar supervision, started as soon as R03's protocol
+freezes and landed unreachable in normal-sized PRs across Waves 3–4, so the
+~8.5k lines of desktop rewiring never debut in the cutover PR.
+
+**Wave 4:** R13 daemon composition + shadow replay (depends on R13b —
+shadow replay exercises the real adapter, not a throwaway harness).
 
 **Wave 5:** R14 robustness closure (fuzz targets stand up as each parser
 surface lands, from Wave 1 onward; nightly soaks accumulate from Wave 4 so
@@ -1088,10 +1105,15 @@ failures pinned as approved deltas); protocol/toolchain decisions; CI matrix
 approval; baseline test/memory/perf/handle/WAL/shutdown evidence; the yrs
 spike verdict.
 
-**Gate 0 (the go signal):** Ice approves this revision, the remaining open
-decisions, and the CI/resource budget. Two independent reviewers approve
-`PORTING.md`, `STATE_OWNERSHIP.tsv`, and the semantics matrix together. yrs
-spike passed.
+**Program authorization (given 2026-07-16):** Ice's go signal on this
+revision. It authorized Wave 0 — preparation artifacts, spikes, and dormant
+scaffolding — and nothing further.
+
+**Gate 0 (closes Phase 0, opens Wave 1 capability work):** yrs spike passed;
+remaining open decisions resolved by Ice, including the CI/resource budget;
+two independent reviewers approve `PORTING.md`, `STATE_OWNERSHIP.tsv`, and
+the semantics matrix together; the reviewer-packet builder exists. No
+capability shard starts before this gate.
 
 ### Phase 1 (Wave 1) — calibration slices
 
@@ -1154,7 +1176,11 @@ Freeze schema/protocol for the window. All of Ice's devices cut over in one
 operation (enumerated in the checklist); relay streams for reset workspaces
 are wiped or re-keyed to a **new replication epoch/stream identity** — a
 fresh Rust engine must never attach to a pre-reset stream (resurrected
-pre-reset operations are silent corruption via the sync path).
+pre-reset operations are silent corruption via the sync path). Devices that
+miss the window: the relay permanently rejects pre-reset epoch/stream
+credentials; a stale device never pushes — it rejoins the new epoch fresh,
+and any unpushed local edits on it are exported and manually
+rebased/imported, never automatically replayed into the reset workspace.
 
 Per-workspace reset state machine (durable on-disk marker; every state
 idempotently resumable; crash injection at every transition rehearsed in
@@ -1170,23 +1196,30 @@ not-started → settled → backed-up → moved-aside → initialized → captur
    reset if any document cannot settle** — `atoms.body` is a derived cache,
    and skipping this step silently loses any Y.Doc content newer than its
    materialized markdown.
-2. **Loss ledger + export**: present the per-data-class ledger
+2. **Loss ledger + export + inventory**: present the per-data-class ledger
    (survives-on-disk / exported / destroyed — chats, decisions, reactions,
    mentions, read state, agent runs, version history, moments, conflicts,
    Y.Doc lineage, cursors are engine.db-only); export chats/decisions/history
-   to inspectable text files; Ice acknowledges per workspace.
+   to inspectable text files **written outside the workspace root in the
+   recovery/export directory** (never into the workspace tree, so exports
+   cannot perturb the capture comparison); Ice acknowledges per workspace.
+   Then record the pre-reset disk inventory — file identity, size, mode,
+   content hash, generation, and the exclusion list — durably in the reset
+   marker/backup manifest.
 3. **Backup**: checkpoint WAL, integrity-check, restore-tested backup of the
    whole `.dohc/engine` dir + registry/DM/agent-runs snapshot, manifest
    recorded.
-4. **Move aside**: prove-zero-handles first (attempt exclusive open of the
-   old DB with bounded retries — the TS engine's process-global stores leak
-   WAL handles; on timeout, fail closed read-only with diagnostics). Prefer
+4. **Move aside**: prove-zero-handles first — attempt exclusive open of
+   **every file in the old DB triplet (`engine.db`, `-wal`, `-shm`)** with
+   bounded retries; the TS engine's process-global stores leak WAL handles;
+   on timeout, fail closed read-only with diagnostics. Prefer
    copy+verify+swap over bare rename so a failure can't strand a half-moved
    WAL triplet. Old DB is retained, never auto-deleted pre-launch.
 5. **Initialize**: Rust fresh-init at schema v2; record ownership and a
    first-durable-write flag.
 6. **Capture**: initial capture from disk; verify capture inventory (file
-   count + hashes) against the disk inventory taken at step 1.
+   count + hashes) against the persisted post-settle inventory recorded at
+   step 2.
 7. **Complete**: marker written; packaging now hard-fails without the engine
    binary; protocol/storage incompatibility fails visibly; startup may offer
    read-only recovery but never a TypeScript authority.

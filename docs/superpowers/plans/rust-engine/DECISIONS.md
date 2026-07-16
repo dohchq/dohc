@@ -5,12 +5,23 @@ Append-only. Every entry: date, decision, decider, rationale pointer.
 ## 2026-07-16 — Program authorized (go signal)
 
 - **Decider:** Ice, in-session, after Rev 2 plan review.
-- **Scope:** full rewrite per Rev 2 plan
-  (`docs/superpowers/plans/2026-07-16-dohc-rust-engine-rewrite.md`). No
-  go/no-go trial; Phase 1 slices are calibration only.
+- **Scope:** the go signal authorizes **Wave 0 preparation** (artifacts,
+  spikes, dormant scaffolding) of the full rewrite per the Rev 2 plan
+  (`docs/superpowers/plans/2026-07-16-dohc-rust-engine-rewrite.md`).
+  Capability implementation (Wave 1+) additionally requires Gate 0 as
+  defined in the plan. No go/no-go trial; Phase 1 slices are calibration
+  only.
 - **Sole abort criterion:** the week-one yrs interoperability spike.
+- **Rationale pointer:** plan sections "Rev 2 changelog" and "Decisions
+  locked"; audit workflow `wf_34a62e66-de2` (9 agents: 16 claims verified,
+  37 adversarial findings).
 
-## 2026-07-16 — Locked at planning (see plan "Decisions locked")
+## 2026-07-16 — Locked at planning
+
+- **Decider:** Ice, in-session (conversation preceding the go signal).
+- **Rationale pointer per item:** the correspondingly numbered entry in the
+  plan's "Decisions locked" section, which carries the reasoning inline;
+  language choice additionally per the in-session Rust-vs-Go analysis.
 
 1. Full commitment, no trial.
 2. Clean reset of pre-launch data; two retained safety mechanisms (Rust

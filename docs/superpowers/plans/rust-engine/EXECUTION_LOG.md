@@ -10,8 +10,11 @@ source of truth every orchestrator session loads first).
   confirmed, 2 corrected, 0 wrong; 3 adversarial reviewers: 37 findings,
   8 P0 — all incorporated). Audit transcript:
   session workflow `wf_34a62e66-de2`.
-- Environment verified: cargo/rustc 1.96.1, codex-cli 0.142.5, gh
-  authenticated (icedevera), clean tree.
+- Environment verified on host `x86_64-pc-windows-msvc` (Windows 11 Pro
+  10.0.22631), repo at `main` = `5b6d2009`, working tree clean. Commands:
+  `cargo --version` → 1.96.1; `rustc --version` → 1.96.1;
+  `codex --version` → 0.142.5 (later updated, below); `gh auth status` →
+  authenticated with repo scope; `git status --short` → clean.
 - Wave 0 opened: R00 scaffolding (this commit), YRS-SPIKE and
   R01-INVENTORY launched as background workstreams.
 - R00 PR: dohc-ai/dohc#137.
@@ -22,3 +25,11 @@ source of truth every orchestrator session loads first).
 - Portability guardrails added to the plan (library-first core, trait
   seams in core crates, in-process protocol transport) + open decision 9
   (mobile/web hosts deferred). Requested and approved by Ice.
+- PR #137 review round 1: CodeRabbit (13 actionable) + Codex (8 findings)
+  all triaged valid and fixed in one batch — Gate 0 split from the go
+  signal, fixture sanitization rules, stale-device epoch rejection,
+  persisted post-settle inventory, triplet handle probe, export location
+  outside workspace root, schema validation tightening + approved-unsafe
+  path, SHARDS machine-readability (R00 narrowed, INTEGRATOR row, R13/R13b
+  dependency fix), program-control docs review tier, enforceable build
+  slots/disk hysteresis, Defender exclusions narrowed to build caches.

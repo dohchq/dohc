@@ -14,15 +14,23 @@ running cargo locally follows these rules.
 
 ## Build economics
 
-- **Local concurrency budget: max 3–4 lanes running cargo at once.** Other
-  lanes sit in implement/review states. The orchestrator enforces this.
+- **Local concurrency budget: max 4 lanes running cargo at once**, enforced
+  mechanically, not by convention: a lane acquires a slot by creating one of
+  `C:\w\_locks\build-slot-{1..4}` (directory-create is atomic) before any
+  cargo invocation and removes it after; a slot older than 30 minutes with
+  no live cargo process is stale and may be reclaimed. Denied acquisitions
+  and reclaims are appended to `EXECUTION_LOG.md`.
+- Free-space preflight with hysteresis: before acquiring a slot, check free
+  space on the worktree volume — **pause new builds below 40 GB, resume at
+  60 GB**; while paused, the orchestrator prunes the oldest stale target
+  dirs and logs each deletion. (Bun hit disk exhaustion even with cgroup
+  isolation; target dirs run 5–10 GB each.)
 - sccache is shared across worktrees (`RUSTC_WRAPPER=sccache`).
-- Windows Defender exclusions must cover `C:\w\_targets\` and each worktree
-  (real-time scanning of target dirs multiplies build time and takes
-  transient handles that break renames).
-- Disk watermark: if free space on the worktree volume drops below 40 GB, no
-  new builds start and the orchestrator prunes stale target dirs. (Bun hit
-  disk exhaustion even with cgroup isolation; target dirs run 5–10 GB each.)
+- Windows Defender exclusions cover **build/cache directories only**:
+  `C:\w\_targets\` and the sccache cache dir (real-time scanning there
+  multiplies build time and takes transient handles that break renames).
+  Source worktrees stay scanned; any source-tree exclusion requires explicit
+  Ice approval recorded in `DECISIONS.md`.
 
 ## Windows semantics that will bite
 
