@@ -33,3 +33,9 @@ source of truth every orchestrator session loads first).
   path, SHARDS machine-readability (R00 narrowed, INTEGRATOR row, R13/R13b
   dependency fix), program-control docs review tier, enforceable build
   slots/disk hysteresis, Defender exclusions narrowed to build caches.
+- R01-INVENTORY landed as PR #138 (branch codex/rust-engine-r01-inventory,
+  new files only): 229 behaviors (52 critical/63 high), 218 exports
+  (20 retired-delete, 2 decision-required), 44 test files classified
+  (18 portable / 17 sql-oracle / 5 hook-dependent / 4 impl-specific),
+  114 determinism sites (38 block trace determinism). 11-agent workflow
+  wf_08d4899b-e02, 0 malformed rows on assembly validation.
