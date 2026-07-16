@@ -265,3 +265,8 @@ source of truth every orchestrator session loads first).
   post-Gate-6) resolving the circular Gate 6<->rehearsal dependency I
   introduced last round; R15/R16 placeholder owned_paths made concrete
   globs; R11b start text gated on Gate 0.
+- PR #142 round 3 closed (74ff4856): trailing-slash path matching,
+  directory+stem classification keying, and a real optionalFor redesign
+  (the old design left engines with contradictory expectations on
+  crash/error faults; now uses an engines:["rust"] self-consistency
+  label restricted from expectation-bearing faults). Self-test 38/38.
