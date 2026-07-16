@@ -951,6 +951,7 @@ export function ChatsView(props: {
   const threadRefreshSeq = useRef(0);
   const channelRefreshSeq = useRef(0);
   const feedRefreshSeq = useRef(0);
+  const dmRefreshSeq = useRef(0);
   // Per-(message, emoji) toggle sequence so overlapping reaction toggles resolve
   // in order (see runReactionToggle).
   const reactionSeq = useRef(new Map<string, number>());
@@ -1051,6 +1052,7 @@ export function ChatsView(props: {
   // Workspace switch: drop everything stale and reload from the top.
   useEffect(() => {
     liveToken.current += 1;
+    dmRefreshSeq.current += 1;
     feedRefreshSeq.current += 1;
     bookmarkWorkspaceGeneration.current += 1;
     bookmarkListGeneration.current += 1;
@@ -1300,6 +1302,79 @@ export function ChatsView(props: {
     [workspaceId],
   );
 
+  const loadDmConversation = useCallback(
+    async (dm: DmRecord, token: number, request = ++dmRefreshSeq.current) => {
+      if (!dm.threadId) return;
+      const [result, reactionResult] = await Promise.all([
+        bridge().listChatMessages({ workspaceId, threadId: dm.threadId }),
+        bridge().listChatReactions({ workspaceId, threadId: dm.threadId }),
+      ]);
+      if (token !== liveToken.current || request !== dmRefreshSeq.current) {
+        return;
+      }
+      setMessages(result.messages);
+      setReactions(reactionResult.reactions);
+      setViewerAuthorId(reactionResult.viewerAuthorId);
+      if (!readOnly && dm.connected) {
+        void bridge()
+          .markChatThreadRead({
+            workspaceId,
+            threadId: dm.threadId,
+            upToSequence: result.messages.length,
+          })
+          .catch(() => {
+            // Best-effort, like the thread view.
+          });
+      }
+    },
+    [readOnly, workspaceId],
+  );
+
+  const refreshOpenDm = useCallback(
+    async (dm: DmRecord, token: number) => {
+      const request = ++dmRefreshSeq.current;
+      try {
+        const result = await bridge().syncDms({ workspaceId });
+        if (token !== liveToken.current || request !== dmRefreshSeq.current) {
+          return;
+        }
+        setDmAvailable(result.available);
+        setDms(result.dms);
+        const syncedDm = result.dms.find(
+          (entry) => entry.channelId === dm.channelId,
+        );
+        if (!syncedDm) return;
+        setNav((current) => {
+          if (current.level !== "dm" || current.dm.channelId !== dm.channelId) {
+            return current;
+          }
+          const currentDm = current.dm;
+          if (
+            currentDm.channelWireId === syncedDm.channelWireId &&
+            currentDm.name === syncedDm.name &&
+            currentDm.peerLabel === syncedDm.peerLabel &&
+            currentDm.role === syncedDm.role &&
+            currentDm.shareId === syncedDm.shareId &&
+            currentDm.threadId === syncedDm.threadId &&
+            currentDm.unreadCount === syncedDm.unreadCount &&
+            currentDm.connected === syncedDm.connected
+          ) {
+            return current;
+          }
+          return { ...current, dm: syncedDm };
+        });
+        await loadDmConversation(syncedDm, token, request);
+      } catch {
+        // Offline: keep the conversation as-is; the next tick retries.
+      } finally {
+        if (token === liveToken.current && request === dmRefreshSeq.current) {
+          setMessagesLoading(false);
+        }
+      }
+    },
+    [loadDmConversation, workspaceId],
+  );
+
   const channelIsLocked = useCallback(
     (channel: ChatChannelRecord) => {
       // Share metadata is the authority for whether this local row is owned
@@ -1452,6 +1527,32 @@ export function ChatsView(props: {
         void loadPersonalFeed();
         return;
       }
+      if (nav.level === "dm") {
+        const token = liveToken.current;
+        if (nav.dm.threadId) {
+          const refreshSeq = ++dmRefreshSeq.current;
+          void loadDmConversation(nav.dm, token, refreshSeq)
+            .then(() => {
+              if (
+                token === liveToken.current &&
+                refreshSeq === dmRefreshSeq.current
+              ) {
+                setMessagesLoading(false);
+              }
+            })
+            .catch(() => {
+              if (
+                token === liveToken.current &&
+                refreshSeq === dmRefreshSeq.current
+              ) {
+                setMessagesLoading(false);
+              }
+            });
+        } else {
+          void refreshOpenDm(nav.dm, token);
+        }
+        return;
+      }
       if (nav.level === "thread") {
         const threadId = nav.thread.id;
         const token = liveToken.current;
@@ -1511,9 +1612,11 @@ export function ChatsView(props: {
     applyThreadSnapshot,
     channelIsLocked,
     loadChannelSnapshot,
+    loadDmConversation,
     loadPersonalFeed,
     loadThreadSnapshot,
     nav,
+    refreshOpenDm,
     refreshFollows,
   ]);
 
@@ -1661,11 +1764,17 @@ export function ChatsView(props: {
   const toggleReaction = useCallback(
     (input: { messageId: string; emoji: string; nextState: "added" | "removed" }) => {
       if (readOnly) return;
-      if (nav.level !== "thread") return;
+      const threadId =
+        nav.level === "thread"
+          ? nav.thread.id
+          : nav.level === "dm" && nav.dm.connected
+            ? nav.dm.threadId
+            : null;
+      if (!threadId) return;
       runReactionToggle(
         {
           workspaceId,
-          threadId: nav.thread.id,
+          threadId,
           viewerAuthorId,
           liveToken,
           reactionSeq,
@@ -1727,35 +1836,10 @@ export function ChatsView(props: {
 
   // --- Direct messages (WS-MU-C3) -----------------------------------------
 
-  const loadDmConversation = useCallback(
-    async (dm: DmRecord, token: number) => {
-      if (!dm.threadId) return;
-      const [result, reactionResult] = await Promise.all([
-        bridge().listChatMessages({ workspaceId, threadId: dm.threadId }),
-        bridge().listChatReactions({ workspaceId, threadId: dm.threadId }),
-      ]);
-      if (token !== liveToken.current) return;
-      setMessages(result.messages);
-      setReactions(reactionResult.reactions);
-      setViewerAuthorId(reactionResult.viewerAuthorId);
-      if (!readOnly && dm.connected) {
-        void bridge()
-          .markChatThreadRead({
-            workspaceId,
-            threadId: dm.threadId,
-            upToSequence: result.messages.length,
-          })
-          .catch(() => {
-            // Best-effort, like the thread view.
-          });
-      }
-    },
-    [readOnly, workspaceId],
-  );
-
   const openDm = useCallback(
     async (dm: DmRecord, focusMessageId?: string) => {
       const token = ++liveToken.current;
+      const request = ++dmRefreshSeq.current;
       setNav({
         level: "dm",
         dm,
@@ -1773,8 +1857,10 @@ export function ChatsView(props: {
       messageNodes.current.clear();
       setMessagesLoading(true);
       try {
-        await loadDmConversation(dm, token);
-        if (token !== liveToken.current) return;
+        await loadDmConversation(dm, token, request);
+        if (token !== liveToken.current || request !== dmRefreshSeq.current) {
+          return;
+        }
         if (!readOnly && dm.connected) {
           setDms((current) =>
             current.map((entry) =>
@@ -1788,10 +1874,14 @@ export function ChatsView(props: {
           }
         });
       } catch (error) {
-        if (token !== liveToken.current) return;
+        if (token !== liveToken.current || request !== dmRefreshSeq.current) {
+          return;
+        }
         props.onError(ipcErrorMessage(error, "Could not load this conversation."));
       } finally {
-        if (token === liveToken.current) setMessagesLoading(false);
+        if (token === liveToken.current && request === dmRefreshSeq.current) {
+          setMessagesLoading(false);
+        }
       }
     },
     [loadDmConversation, props, readOnly],
@@ -1980,25 +2070,21 @@ export function ChatsView(props: {
   ]);
 
   // While a DM is open, poll: sync (push the member's ops, pull the peers')
-  // then reload the conversation. Token-guarded so a stale response never
-  // repaints a view the user already left.
+  // then reload the conversation. Pending DMs also sync immediately so they
+  // can acquire their relay-created thread while the outer list poll is
+  // paused. Token and request guards prevent an older pass from repainting a
+  // newer snapshot or a local send.
   useEffect(() => {
-    if (readOnly || nav.level !== "dm" || !nav.dm.threadId) return;
+    if (readOnly || nav.level !== "dm") return;
     const dm = nav.dm;
     const token = liveToken.current;
-    const interval = setInterval(() => {
-      void (async () => {
-        try {
-          await bridge().syncDms({ workspaceId });
-          if (token !== liveToken.current) return;
-          await loadDmConversation(dm, token);
-        } catch {
-          // Offline: keep the conversation as-is; the next tick retries.
-        }
-      })();
-    }, 4_000);
+    if (!dm.threadId) void refreshOpenDm(dm, token);
+    const interval = setInterval(
+      () => void refreshOpenDm(dm, token),
+      4_000,
+    );
     return () => clearInterval(interval);
-  }, [loadDmConversation, nav, readOnly, workspaceId]);
+  }, [nav, readOnly, refreshOpenDm]);
 
   const sendDmMessage = useCallback(async () => {
     if (readOnly) return;
@@ -2019,6 +2105,7 @@ export function ChatsView(props: {
           : {}),
       });
       if (token !== liveToken.current) return;
+      dmRefreshSeq.current += 1;
       setMessages((current) => [...current, result.message]);
       setComposer("");
       messagesEndRef.current?.scrollIntoView({ block: "end" });
@@ -2861,7 +2948,7 @@ export function ChatsView(props: {
                 reactions,
                 viewerAuthorId,
                 onToggle: toggleReaction,
-                readOnly,
+                readOnly: readOnly || !dm.connected,
               }}
             />
           ) : (

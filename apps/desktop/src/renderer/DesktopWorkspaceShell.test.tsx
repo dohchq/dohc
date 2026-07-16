@@ -574,6 +574,34 @@ describe("targeted chat navigation", () => {
     ).toBe(true);
   });
 
+  it("opens an existing local DM when new-DM creation is unavailable", async () => {
+    const dm = {
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      name: "alice@example.com",
+      peerLabel: "Alice",
+      role: "owner" as const,
+      shareId: null,
+      threadId: "dm-thread",
+      unreadCount: 0,
+      connected: false,
+    };
+    const open = vi.fn();
+
+    await runCanonicalDmNavigation({
+      locator: {
+        channelId: dm.channelId,
+        channelWireId: dm.channelWireId,
+        threadId: dm.threadId,
+      },
+      syncDms: async () => ({ available: false, dms: [dm] }),
+      isCurrent: () => true,
+      open,
+    });
+
+    expect(open).toHaveBeenCalledWith({ level: "dm", dm });
+  });
+
   it("does not reopen Chats when destination navigation supersedes a delayed DM lookup", async () => {
     const delayed = deferred<{
       available: boolean;

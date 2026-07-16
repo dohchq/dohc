@@ -308,7 +308,9 @@ export async function runCanonicalDmNavigation(input: {
   try {
     const result = await input.syncDms();
     if (!input.isCurrent()) return;
-    const dm = result.available ? resolveCanonicalDm(input.locator, result.dms) : null;
+    // `available` controls whether a new DM can be created; it does not make
+    // already-local conversations unreadable while signed out or offline.
+    const dm = resolveCanonicalDm(input.locator, result.dms);
     input.open(
       dm
         ? {

@@ -2225,6 +2225,166 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
   });
 
+  it("keeps syncing an open pending DM until its thread arrives", async () => {
+    const user = userEvent.setup();
+    const pendingDm = dm({ threadId: null });
+    const hydratedDm = dm();
+    let resolveOpenSync!: (result: {
+      available: boolean;
+      dms: DmRecord[];
+    }) => void;
+    const openSync = new Promise<{ available: boolean; dms: DmRecord[] }>(
+      (resolve) => {
+        resolveOpenSync = resolve;
+      },
+    );
+    const laterRefresh = new Promise<never>(() => undefined);
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({ available: true, dms: [pendingDm] })
+      .mockImplementationOnce(() => openSync)
+      .mockImplementation(() => laterRefresh);
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message({
+          id: "message-dm-arrived",
+          threadId: "thread-dm-1",
+          body: "The conversation arrived",
+        }),
+      ],
+    });
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-dm-item"));
+    expect(await screen.findByTestId("chats-dm-waiting")).toBeTruthy();
+    await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      resolveOpenSync({ available: true, dms: [hydratedDm] });
+      await openSync;
+    });
+
+    expect(await screen.findByText("The conversation arrived")).toBeTruthy();
+    expect(screen.queryByTestId("chats-dm-waiting")).toBeNull();
+    expect(bridgeMock.syncDms).toHaveBeenCalledTimes(2);
+  });
+
+  it("toggles reactions against the open DM thread", async () => {
+    const user = userEvent.setup();
+    const pendingRefresh = new Promise<never>(() => undefined);
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({ available: true, dms: [dm()] })
+      .mockImplementation(() => pendingRefresh);
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message({
+          id: "message-dm-reaction",
+          threadId: "thread-dm-1",
+          body: "React here",
+        }),
+      ],
+    });
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-dm-item"));
+    expect(await screen.findByText("React here")).toBeTruthy();
+    await user.click(screen.getByTestId("chats-dm-add-reaction"));
+    const thumbsUp = screen
+      .getAllByTestId("chats-dm-reaction-choice")
+      .find((button) => button.getAttribute("data-emoji") === "👍");
+    expect(thumbsUp).toBeTruthy();
+    await user.click(thumbsUp!);
+
+    await waitFor(() =>
+      expect(bridgeMock.setChatReaction).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-dm-1",
+        messageId: "message-dm-reaction",
+        emoji: "👍",
+        state: "added",
+      }),
+    );
+  });
+
+  it("drops older DM refreshes after a newer snapshot and local send", async () => {
+    const user = userEvent.setup();
+    const pendingRefresh = new Promise<never>(() => undefined);
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({ available: true, dms: [dm()] })
+      .mockImplementation(() => pendingRefresh);
+
+    let resolveOlder!: (result: { messages: ChatMessageRecord[] }) => void;
+    let resolveNewer!: (result: { messages: ChatMessageRecord[] }) => void;
+    const older = new Promise<{ messages: ChatMessageRecord[] }>((resolve) => {
+      resolveOlder = resolve;
+    });
+    const newer = new Promise<{ messages: ChatMessageRecord[] }>((resolve) => {
+      resolveNewer = resolve;
+    });
+    bridgeMock.listChatMessages
+      .mockResolvedValueOnce({
+        messages: [
+          message({
+            id: "message-dm-baseline",
+            threadId: "thread-dm-1",
+            body: "Baseline",
+          }),
+        ],
+      })
+      .mockImplementationOnce(() => older)
+      .mockImplementationOnce(() => newer);
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({
+        id: "message-dm-local",
+        threadId: "thread-dm-1",
+        body: "Local send",
+      }),
+    });
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-dm-item"));
+    expect(await screen.findByText("Baseline")).toBeTruthy();
+
+    act(() => emitWorkspaceActivity());
+    act(() => emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(3),
+    );
+    await act(async () => {
+      resolveNewer({
+        messages: [
+          message({
+            id: "message-dm-newer",
+            threadId: "thread-dm-1",
+            body: "Newer snapshot",
+          }),
+        ],
+      });
+      await newer;
+    });
+    expect(await screen.findByText("Newer snapshot")).toBeTruthy();
+
+    await user.type(screen.getByTestId("chats-dm-composer"), "Local send{Enter}");
+    await waitFor(() => expect(screen.getByText("Local send")).toBeTruthy());
+
+    await act(async () => {
+      resolveOlder({
+        messages: [
+          message({
+            id: "message-dm-stale",
+            threadId: "thread-dm-1",
+            body: "Stale snapshot",
+          }),
+        ],
+      });
+      await older;
+    });
+
+    expect(screen.queryByText("Stale snapshot")).toBeNull();
+    expect(
+      screen.getAllByTestId("chats-dm-message-body").map((node) => node.textContent),
+    ).toEqual(["Newer snapshot", "Local send"]);
+  });
+
   it("does not advance a DM read cursor in a read-only workspace", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [message({ id: "m-1", threadId: "thread-dm-1", body: "shared DM" })],

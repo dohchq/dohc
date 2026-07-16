@@ -306,6 +306,11 @@ import { createCloudLogin, type CloudLogin } from "./workspaces/cloudLogin";
 import { createRelaySyncEngine } from "./workspaces/relaySyncEngine";
 import { validateSecretPassphrase } from "./workspaces/secretPassphrase";
 import {
+  createChatChannelIpcHandler,
+  createReadAwareChatIpcHandler,
+  createSetChatReactionIpcHandler,
+} from "./mainChatIpcHandlers";
+import {
   buildShareCode,
   parseShareCode,
   parseSyncCode,
@@ -5506,48 +5511,59 @@ function registerIpcHandlers(): void {
     });
   });
 
-  ipcMain.handle(CHANNELS.markPersonalChatFeedSeen, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = MarkPersonalChatFeedSeenPayload.parse(payload);
-    const { workspace } = await requireEngineCapture(
-      input.workspaceId,
-      "Chats are not enabled for this workspace.",
-    );
-    await markPersonalFeedSeenReadOnlySafe({
-      readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
-      mark: async () => {
-        await warmCredentialCache();
-        const ownerUserId = localUserId();
-        const replicationOwnerUserId = relayAuthorUserId();
-        await linkedChatStoreFor(workspace).markPersonalFeedSeen({
-          workspaceId: workspace.workspaceId,
-          ownerUserId,
-          ...(replicationOwnerUserId ? { replicationOwnerUserId } : {}),
-          headCursor: input.headCursor,
+  ipcMain.handle(
+    CHANNELS.markPersonalChatFeedSeen,
+    createReadAwareChatIpcHandler({
+      assertTrustedSender,
+      parsePayload: (payload) => MarkPersonalChatFeedSeenPayload.parse(payload),
+      requireContext: (workspaceId) =>
+        requireEngineCapture(workspaceId, "Chats are not enabled for this workspace."),
+      isReadOnly: (workspace) => Boolean(sharedViewOf(workspace.workspaceId)),
+      run: async ({ workspace }, input, readOnly) => {
+        await markPersonalFeedSeenReadOnlySafe({
+          readOnly,
+          mark: async () => {
+            await warmCredentialCache();
+            const ownerUserId = localUserId();
+            const replicationOwnerUserId = relayAuthorUserId();
+            await linkedChatStoreFor(workspace).markPersonalFeedSeen({
+              workspaceId: workspace.workspaceId,
+              ownerUserId,
+              ...(replicationOwnerUserId ? { replicationOwnerUserId } : {}),
+              headCursor: input.headCursor,
+            });
+            if (replicationOwnerUserId) activity.queueCloudSync(workspace.workspaceId);
+          },
         });
-        if (replicationOwnerUserId) activity.queueCloudSync(workspace.workspaceId);
       },
-    });
-  });
+    }),
+  );
 
-  ipcMain.handle(CHANNELS.createChatChannel, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = CreateChatChannelPayload.parse(payload);
-    const { workspace } = await requireEngineCapture(
-      input.workspaceId,
-      "Chats are not enabled for this workspace.",
-    );
-    assertWritableWorkspace(workspace);
-    const channel = await linkedChatStoreFor(workspace).createChannel({
-      workspaceId: workspace.workspaceId,
-      name: input.name,
-      kind: "channel",
-    });
-    return CreateChatChannelResult.parse({
-      // A locally created channel's wire identity is its own id.
-      channel: { ...chatChannelForIpc({ ...channel, threadCount: 0, unreadCount: 0 }), wireId: channel.id },
-    });
-  });
+  ipcMain.handle(
+    CHANNELS.createChatChannel,
+    createChatChannelIpcHandler({
+      assertTrustedSender,
+      parsePayload: (payload) => CreateChatChannelPayload.parse(payload),
+      requireContext: (workspaceId) =>
+        requireEngineCapture(workspaceId, "Chats are not enabled for this workspace."),
+      assertWritableWorkspace,
+      run: async ({ workspace }, input) => {
+        const channel = await linkedChatStoreFor(workspace).createChannel({
+          workspaceId: workspace.workspaceId,
+          name: input.name,
+          kind: "channel",
+        });
+        return CreateChatChannelResult.parse({
+          // A locally created channel's wire identity is its own id.
+          channel: {
+            ...chatChannelForIpc({ ...channel, threadCount: 0, unreadCount: 0 }),
+            wireId: channel.id,
+          },
+        });
+      },
+      queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
+    }),
+  );
 
   ipcMain.handle(CHANNELS.listChannelThreads, async (event, payload) => {
     assertTrustedSender(event);
@@ -5676,45 +5692,50 @@ function registerIpcHandlers(): void {
     });
   });
 
-  ipcMain.handle(CHANNELS.setChatReaction, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SetChatReactionPayload.parse(payload);
-    const { workspace } = await requireEngineCapture(
-      input.workspaceId,
-      "Chats are not enabled for this workspace.",
-    );
-    assertWritableWorkspace(workspace);
-    await warmCredentialCache();
-    // MU-C4 (CodeRabbit security): reactions are writes too — a read-only
-    // shared channel rejects them before any durable row.
-    await assertSharedChannelWritable({
-      workspaceId: workspace.workspaceId,
-      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
-      store: linkedChatStoreFor(workspace),
-      target: { threadId: input.threadId },
-    });
-    const reaction = await linkedChatStoreFor(workspace).setReaction({
-      workspaceId: workspace.workspaceId,
-      threadId: input.threadId,
-      messageId: input.messageId,
-      emoji: input.emoji,
-      author: {
-        authorId: localUserId(),
-        kind: "human",
-        displayName: localUserDisplayName(),
+  ipcMain.handle(
+    CHANNELS.setChatReaction,
+    createSetChatReactionIpcHandler({
+      assertTrustedSender,
+      parsePayload: (payload) => SetChatReactionPayload.parse(payload),
+      requireContext: (workspaceId) =>
+        requireEngineCapture(workspaceId, "Chats are not enabled for this workspace."),
+      assertWritableWorkspace,
+      run: async ({ workspace }, input) => {
+        await warmCredentialCache();
+        // MU-C4 (CodeRabbit security): reactions are writes too — a read-only
+        // shared channel rejects them before any durable row.
+        await assertSharedChannelWritable({
+          workspaceId: workspace.workspaceId,
+          sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
+          store: linkedChatStoreFor(workspace),
+          target: { threadId: input.threadId },
+        });
+        const reaction = await linkedChatStoreFor(workspace).setReaction({
+          workspaceId: workspace.workspaceId,
+          threadId: input.threadId,
+          messageId: input.messageId,
+          emoji: input.emoji,
+          author: {
+            authorId: localUserId(),
+            kind: "human",
+            displayName: localUserDisplayName(),
+          },
+          state: input.state,
+        });
+        return SetChatReactionResult.parse({
+          reaction: { ...chatReactionForIpc(reaction), state: reaction.state },
+          viewerAuthorId: localUserId(),
+        });
       },
-      state: input.state,
-    });
-    // MU-C4: reactions in a joined shared channel push out promptly too.
-    void syncWorkspaceSharedChannels(workspace.workspaceId);
-    // Reactions are journaled workspace mutations just like messages and
-    // decision changes, so the owner's cloud workspace must be nudged too.
-    activity.queueCloudSync(workspace.workspaceId);
-    return SetChatReactionResult.parse({
-      reaction: { ...chatReactionForIpc(reaction), state: reaction.state },
-      viewerAuthorId: localUserId(),
-    });
-  });
+      // MU-C4: reactions in a joined shared channel push out promptly too.
+      syncJoinedChannels: (workspaceId) => {
+        void syncWorkspaceSharedChannels(workspaceId);
+      },
+      // Reactions are journaled workspace mutations just like messages and
+      // decision changes, so the owner's cloud workspace is nudged too.
+      queueCloudSync: (workspaceId) => activity.queueCloudSync(workspaceId),
+    }),
+  );
 
   // --- Direct messages (WS-MU-C3) ------------------------------------------
   // A DM is a `kind:"dm"` channel plus one MU-C4 chat-channel grant per
@@ -5873,44 +5894,48 @@ function registerIpcHandlers(): void {
   // Reconcile DM state with the relay and return the workspace's DM list.
   // Called by the renderer on Chats mount + a gentle poll while visible; the
   // network part degrades silently offline (local list still serves).
-  ipcMain.handle(CHANNELS.syncDms, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SyncDmsPayload.parse(payload);
-    const { workspace } = await requireEngineCapture(
-      input.workspaceId,
-      "Chats are not enabled for this workspace.",
-    );
-    await warmCredentialCache();
-    const relay = dmRelayConnection();
-    const store = linkedChatStoreFor(workspace);
-    // The read-shaped DM refresh can auto-join grants and push journal ops.
-    // Shared views may list their existing local rows, but never run those
-    // durable reconciliation steps.
-    if (relay && !sharedViewOf(workspace.workspaceId)) {
-      try {
-        // Born-shared auto-join: discover + join received DM grants.
-        await autoJoinReceivedDms(workspace, relay);
-        // Push the member's local ops, pull everyone else's, for every joined
-        // DM (and any other joined shared channel).
-        await syncWorkspaceSharedChannels(workspace.workspaceId);
-        // Owner-side liveness: members' ops land in THIS workspace's own relay
-        // bucket; nudge the (debounced) sync engine so they arrive without
-        // waiting for an unrelated file edit. No-op when the workspace has no
-        // cloud engine.
-        activity.queueCloudSync(workspace.workspaceId);
-      } catch (error) {
-        // Offline degradation: never a crash, never a blocked Chats view — the
-        // local DM list still serves and the next pass retries.
-        console.error(`[desktop] DM sync failed for ${workspace.rootPath}:`, error);
-      }
-    }
-    const dms = await listDmRecords({
-      workspaceId: workspace.workspaceId,
-      store,
-      sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
-    });
-    return SyncDmsResult.parse({ available: relay !== null, dms: dms.map(dmRecordForIpc) });
-  });
+  ipcMain.handle(
+    CHANNELS.syncDms,
+    createReadAwareChatIpcHandler({
+      assertTrustedSender,
+      parsePayload: (payload) => SyncDmsPayload.parse(payload),
+      requireContext: (workspaceId) =>
+        requireEngineCapture(workspaceId, "Chats are not enabled for this workspace."),
+      isReadOnly: (workspace) => Boolean(sharedViewOf(workspace.workspaceId)),
+      run: async ({ workspace }, _input, readOnly) => {
+        await warmCredentialCache();
+        const relay = dmRelayConnection();
+        const store = linkedChatStoreFor(workspace);
+        // The read-shaped DM refresh can auto-join grants and push journal ops.
+        // Shared views may list their existing local rows, but never run those
+        // durable reconciliation steps.
+        if (relay && !readOnly) {
+          try {
+            // Born-shared auto-join: discover + join received DM grants.
+            await autoJoinReceivedDms(workspace, relay);
+            // Push the member's local ops, pull everyone else's, for every joined
+            // DM (and any other joined shared channel).
+            await syncWorkspaceSharedChannels(workspace.workspaceId);
+            // Owner-side liveness: members' ops land in THIS workspace's own relay
+            // bucket; nudge the (debounced) sync engine so they arrive without
+            // waiting for an unrelated file edit. No-op when the workspace has no
+            // cloud engine.
+            activity.queueCloudSync(workspace.workspaceId);
+          } catch (error) {
+            // Offline degradation: never a crash, never a blocked Chats view — the
+            // local DM list still serves and the next pass retries.
+            console.error(`[desktop] DM sync failed for ${workspace.rootPath}:`, error);
+          }
+        }
+        const dms = await listDmRecords({
+          workspaceId: workspace.workspaceId,
+          store,
+          sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels ?? [],
+        });
+        return SyncDmsResult.parse({ available: relay !== null, dms: dms.map(dmRecordForIpc) });
+      },
+    }),
+  );
 
   // Start (or continue) a DM: dedupe by recipient set, ensure one live grant
   // per recipient, and send the first message into the single running thread.

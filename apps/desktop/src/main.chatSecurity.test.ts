@@ -4,10 +4,11 @@ import { describe, expect, it } from "vitest";
 const mainSource = readFileSync(new URL("./main.ts", import.meta.url), "utf8");
 
 function handlerSource(channel: string): string {
-  const marker = `ipcMain.handle(CHANNELS.${channel}`;
-  const start = mainSource.indexOf(marker);
-  if (start < 0) throw new Error(`Missing IPC handler for ${channel}`);
-  const next = mainSource.indexOf("ipcMain.handle(CHANNELS.", start + marker.length);
+  const marker = `CHANNELS.${channel},`;
+  const markerAt = mainSource.indexOf(marker);
+  const start = mainSource.lastIndexOf("ipcMain.handle(", markerAt);
+  if (markerAt < 0 || start < 0) throw new Error(`Missing IPC handler for ${channel}`);
+  const next = mainSource.indexOf("ipcMain.handle(", markerAt + marker.length);
   return mainSource.slice(start, next < 0 ? undefined : next);
 }
 
@@ -20,10 +21,8 @@ describe("main-process chat authorization", () => {
       "sendChatMessage",
       "resolveChatDecision",
       "setChatFollow",
-      "createChatChannel",
       "startChannelThread",
       "markChatThreadRead",
-      "setChatReaction",
       "shareChatChannel",
       "startDm",
       "resumeThreadDispatch",
@@ -35,25 +34,26 @@ describe("main-process chat authorization", () => {
       );
     }
 
+    expect(handlerSource("createChatChannel")).toContain("createChatChannelIpcHandler({");
+    expect(handlerSource("createChatChannel")).toContain("assertWritableWorkspace,");
+    expect(handlerSource("setChatReaction")).toContain("createSetChatReactionIpcHandler({");
+    expect(handlerSource("setChatReaction")).toContain("assertWritableWorkspace,");
+
     // These read-shaped calls can write viewer/sync state. Their shared-view
     // behavior is deliberately a no-op rather than a rejected background call.
     expect(handlerSource("markPersonalChatFeedSeen")).toContain(
       "markPersonalFeedSeenReadOnlySafe",
     );
-    expect(handlerSource("syncDms")).toContain(
-      "if (relay && !sharedViewOf(workspace.workspaceId))",
-    );
+    expect(handlerSource("syncDms")).toContain("createReadAwareChatIpcHandler({");
+    expect(handlerSource("syncDms")).toContain("if (relay && !readOnly)");
   });
 
-  it("queues both joined-channel and workspace-cloud sync after a reaction write", () => {
+  it("registers the production reaction handler with both sync effects", () => {
     const handler = handlerSource("setChatReaction");
-    const write = handler.indexOf(".setReaction({");
-    const joinedChannelSync = handler.indexOf("syncWorkspaceSharedChannels", write);
-    const workspaceSync = handler.indexOf("activity.queueCloudSync", write);
-
-    expect(write).toBeGreaterThan(-1);
-    expect(joinedChannelSync).toBeGreaterThan(write);
-    expect(workspaceSync).toBeGreaterThan(write);
+    expect(handler).toContain("syncJoinedChannels:");
+    expect(handler).toContain("syncWorkspaceSharedChannels(workspaceId)");
+    expect(handler).toContain("queueCloudSync:");
+    expect(handler).toContain("activity.queueCloudSync(workspaceId)");
   });
 
   it("derives generic channel-share eligibility in the main process", () => {
