@@ -218,3 +218,9 @@ source of truth every orchestrator session loads first).
   at the schemars generator with TS not-subschema support; uint32 maxima
   range-checked. clippy -D warnings clean; 41 Rust + 10 Node tests
   green.
+- PR #143 re-check: 26/26 VERIFIED (junction + 8.3 probes independently
+  re-run; NFC census exact; TSV 52x11 clean; 9 NEEDS-DECISION items all
+  genuine). 2 one-line P2s introduced by the batch (row 4.8 error code
+  invalid-input -> invalid-follow-target + self-reference; row 6.5
+  off-by-one decision pointer) dispatched. Gate 0 contract approval
+  completes on those two lines.
