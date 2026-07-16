@@ -97,7 +97,7 @@ Strategy: **parallel dormant construction with atomic authority cutover.**
    request/idempotency and materialization-job tables **day one**. The
    version-2 stamp doubles as the post-cutover fence: current TS code already
    fails closed on `schema_version != 1`
-   (`engineDbSchema.ts:680` throws `corrupt()`), so every existing TS binary
+   (the `schema_version` check in `initializeOrValidateEngineSchema` (`engineDbSchema.ts:852` as of origin/main 958cdfd3; cite the symbol, not the line — this file moved 188 lines during Wave 0 day one) throws `corrupt()`), so every existing TS binary
    is mechanically locked out with no bridge release.
 4. **Y.Doc**: `yrs` owns durability if and only if the week-one spike passes
    (concrete spec below). If it fails, the program pauses for an Ice decision.
@@ -608,7 +608,7 @@ convention:
   floor, and that confinement is tested.
 - **Post-cutover (TS must not touch Rust workspaces):** Rust initializes at
   `schema_version = 2`; every existing TS binary fails closed via the
-  existing `engineDbSchema.ts:680` corrupt() check. No bridge release
+  existing `schema_version` corrupt() check in `initializeOrValidateEngineSchema`. No bridge release
   needed. Adversarially verified once in Gate 6 by launching the current TS
   desktop against a Rust-owned clone.
 

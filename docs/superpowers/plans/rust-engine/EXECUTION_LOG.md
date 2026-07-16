@@ -90,3 +90,17 @@ source of truth every orchestrator session loads first).
   undeclaredRoot placeholder equality, skip-vs-fault classifier). Codex
   bot added 4 P2s. All 15 findings dispatched to the spike fixer as one
   batch; strict re-certification run required before re-review.
+- R01-ORACLE delivered (PR #142): TEST_ORACLE.md with 35 named fault
+  points (all Tier 1; 3 dual Tier 2; torn-write de-scoped per plan),
+  mapped to 7 live TS hooks / 10 crash-state corpora / 4 structural /
+  14 v2-only gaps shipping with their machinery shards; 6 environmental
+  error kinds + 5-kind relay fault model; EngineTestAdapter sketch;
+  anti-weakening mechanics. Packet builder self-test 25/25, --check green
+  against live tables (30 shards / 229 behaviors). Escalations: legacy
+  stale-lock corpus de-scoped via quarantine (re-opens if decision 4
+  grants headless writes); dead onLockBlocked/lockStaleMs hooks flagged
+  for deletion.
+- CHURN ALERT: engineDbSchema.ts grew 188 lines on origin/main during
+  Wave 0 day one (fence check moved :680 -> :852). Plan citations made
+  symbol-based. The plan's Wave-0 freeze on engineDbSchema.ts + sync wire
+  surfaces needs Ice to enforce starting now.

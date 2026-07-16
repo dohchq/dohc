@@ -29,8 +29,8 @@ Append-only. Every entry: date, decision, decider, rationale pointer.
    write).
 3. Day-one Rust schema: `schema_version = 2`, current v1 logical shapes,
    eager creation, migration/idempotency/job ledgers from day one. The v2
-   stamp is the post-cutover fence (TS fails closed via
-   `engineDbSchema.ts:680`).
+   stamp is the post-cutover fence (TS fails closed via the
+   `schema_version` check in `initializeOrValidateEngineSchema`).
 4. yrs owns Y.Doc durability iff the spike passes; no fallback menu.
 5. Rust over Go; pinned stable toolchain, edition 2024.
 6. Oracle = existing ~22k-line suite ported to implementation-neutral
