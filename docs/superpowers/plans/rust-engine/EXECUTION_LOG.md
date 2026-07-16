@@ -139,3 +139,14 @@ source of truth every orchestrator session loads first).
   aliasing bypass; registryStore/dmHomeStore/cloudCredentialStore
   untracked; smol-toml vs toml crate) + 5 P2. Reviewer 2 (correctness)
   still running; combined fix batch after.
+- PR #143 local review 2/2 (correctness): APPROVE-WITH-FIXES — 2 P1
+  ground-truth errors: matrix 7.6 junction claim EMPIRICALLY INVERTED
+  (rustc 1.96.1 is_symlink()=true for junctions, matching Node — the
+  'load-bearing finding 3' recorded earlier in this log is FALSE and is
+  hereby corrected; naive port is correct there); matrix 4.1 'no
+  normalization anywhere' false for chat surfaces (5 NFC sites incl. the
+  sha256 projection path). 5 P2 (error-code counts 24/19 not 22/20; relay
+  error structured-fields claim; V8 1e999 stated backwards; cross-branch
+  citation provenance; line nits). Combined 17-finding fix batch (12 from
+  completeness incl. 5 P1 census gaps + these 7) dispatched to the
+  contracts shard.
