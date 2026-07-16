@@ -947,13 +947,6 @@ describe("workspace-backed chat bookmarks", () => {
       ownerUserId: "viewer",
       bookmarkId: saved.bookmarkId,
     });
-    await store.markBookmarkReady({
-      workspaceId: "ws",
-      ownerUserId: "viewer",
-      bookmarkId: saved.bookmarkId,
-      generation: archived.generation,
-    });
-
     const restored = await store.saveBookmark({
       workspaceId: "ws",
       ownerUserId: "viewer",
@@ -969,6 +962,24 @@ describe("workspace-backed chat bookmarks", () => {
       projectionState: "pending",
     });
     expect(restored).not.toHaveProperty("projectionObjectId");
+
+    const staleArchiveCompletion = await store.markBookmarkReady({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      bookmarkId: saved.bookmarkId,
+      generation: archived.generation,
+      projectionObjectId: "object-before-archive",
+      projectionPath: destinationPath,
+    });
+    expect(staleArchiveCompletion).toMatchObject({
+      applied: false,
+      bookmark: {
+        state: "active",
+        generation: restored.generation,
+        projectionState: "pending",
+      },
+    });
+    expect(staleArchiveCompletion.bookmark).not.toHaveProperty("projectionObjectId");
 
     const reprojection = await store.markBookmarkReady({
       workspaceId: "ws",

@@ -1,3 +1,4 @@
+import { createLinkedChatStore } from "@dohc/workspace-engine";
 import { closeTrackedEngineDbHandlesForTest } from "@dohc/workspace-engine/testing";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -192,6 +193,115 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     expect(await capture.fileObjectIdForPath(bookmark.destinationPath)).toBe(
       restored.objectId,
     );
+    await capture.stop();
+  });
+
+  it("fences a deferred archive completion from a reactivated live projection", async () => {
+    const rootPath = await root();
+    let now = 10_000;
+    const chats = createLinkedChatStore(rootPath, { nowMs: () => ++now });
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "generated-bookmark-archive-reactivate-race-test",
+      rootPath,
+    });
+    const channel = await chats.ensureGeneralChannel({ workspaceId: "ws" });
+    const started = await chats.startChannelThread({
+      workspaceId: "ws",
+      channelId: channel.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Race archive against restore",
+    });
+    const destinationPath = "Bookmarks/Chats/archive-reactivate-race.md";
+    const saved = await chats.saveBookmark({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      targetKind: "thread",
+      targetId: started.thread.id,
+      mode: "live",
+      destinationPath,
+    });
+    const original = await writeChatBookmarkProjection({
+      bookmark: saved,
+      text: bookmarkProjection(saved.bookmarkId, "Original live projection"),
+      capture,
+    });
+    await chats.markBookmarkReady({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      bookmarkId: saved.bookmarkId,
+      generation: saved.generation,
+      projectionObjectId: original.objectId,
+      projectionPath: destinationPath,
+    });
+
+    const archiveGeneration = await chats.archiveBookmark({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      bookmarkId: saved.bookmarkId,
+    });
+    const archivedPath =
+      `Bookmarks/Chats/Archived/archive-reactivate-race--g${archiveGeneration.generation}.md`;
+    const archivedFile = await archiveChatBookmarkProjection({
+      bookmark: archiveGeneration,
+      archivedPath,
+      capture,
+    });
+    // Defer archiveGeneration's markBookmarkReady until after the user has
+    // reactivated the bookmark and a new live object has been written.
+    const reactivated = await chats.saveBookmark({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      targetKind: "thread",
+      targetId: started.thread.id,
+      mode: "live",
+      destinationPath,
+    });
+    expect(reactivated).not.toHaveProperty("projectionObjectId");
+    const unclaimedLive = await writeChatBookmarkProjection({
+      bookmark: reactivated,
+      text: bookmarkProjection(reactivated.bookmarkId, "Reactivated live projection"),
+      capture,
+    });
+    expect(unclaimedLive.objectId).not.toBe(archivedFile.objectId);
+
+    const staleArchiveCompletion = await chats.markBookmarkReady({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      bookmarkId: saved.bookmarkId,
+      generation: archiveGeneration.generation,
+      projectionObjectId: archivedFile.objectId,
+      projectionPath: destinationPath,
+    });
+    expect(staleArchiveCompletion.applied).toBe(false);
+    expect(staleArchiveCompletion.bookmark).not.toHaveProperty("projectionObjectId");
+
+    // Simulate the active worker retrying after its own write-before-outbox
+    // crash. Marker recovery must select the live object, not the archived ID.
+    const recoveredLive = await writeChatBookmarkProjection({
+      bookmark: staleArchiveCompletion.bookmark,
+      text: bookmarkProjection(reactivated.bookmarkId, "Recovered live projection"),
+      capture,
+    });
+    expect(recoveredLive.objectId).toBe(unclaimedLive.objectId);
+    const ready = await chats.markBookmarkReady({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      bookmarkId: saved.bookmarkId,
+      generation: reactivated.generation,
+      projectionObjectId: recoveredLive.objectId,
+      projectionPath: destinationPath,
+    });
+    expect(ready).toMatchObject({
+      applied: true,
+      bookmark: {
+        state: "active",
+        projectionState: "ready",
+        projectionObjectId: unclaimedLive.objectId,
+      },
+    });
+    expect(await capture.fileObjectIdForPath(archivedPath)).toBe(archivedFile.objectId);
+    expect(await capture.fileObjectIdForPath(destinationPath)).toBe(unclaimedLive.objectId);
+    await chats.close();
     await capture.stop();
   });
 

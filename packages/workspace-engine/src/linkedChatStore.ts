@@ -4034,7 +4034,7 @@ export function createLinkedChatStore(
         const workspaceId = normalizeWorkspaceId(input.workspaceId);
         const ownerUserId = normalizeFeedIdentity(input.ownerUserId, "Bookmark owner");
         const bookmarkId = normalizeFeedIdentity(input.bookmarkId, "Bookmark id");
-        requireBookmark(db, workspaceId, ownerUserId, bookmarkId);
+        const currentBookmark = requireBookmark(db, workspaceId, ownerUserId, bookmarkId);
         if (!Number.isSafeInteger(input.generation) || input.generation < 1) {
           throw new LinkedChatStoreError("invalid-bookmark-target", "Bookmark generation is invalid.");
         }
@@ -4054,16 +4054,22 @@ export function createLinkedChatStore(
             "Projection identity and path must be recorded together.",
           );
         }
-        if (projectionObjectId && projectionPath) {
-          // Claiming the object is separate from the generation-ready CAS: a
-          // worker may finish generation N after N+1 was queued, but the same
-          // bookmark still owns the object it just created when the path did
-          // not change. This lets N+1 update safely instead of adopting by path.
+        if (
+          projectionObjectId &&
+          projectionPath &&
+          currentBookmark.generation === input.generation &&
+          currentBookmark.projectionState === "pending"
+        ) {
+          // Ownership and readiness are fenced by the same generation/state.
+          // A stale archive/write completion must never seed authority into a
+          // newer pending generation; that generation recovers its own live
+          // marker and claims the corresponding object itself.
           const claimed = db
             .prepare(
               `UPDATE chat_bookmark_outbox
                SET projection_object_id = ?
                WHERE workspace_id = ? AND bookmark_id = ?
+                 AND generation = ? AND projection_state = 'pending'
                  AND (projection_object_id IS NULL OR projection_object_id = ?)
                  AND EXISTS (
                    SELECT 1 FROM chat_bookmarks b
@@ -4076,6 +4082,7 @@ export function createLinkedChatStore(
               projectionObjectId,
               workspaceId,
               bookmarkId,
+              input.generation,
               projectionObjectId,
               projectionPath,
             );
