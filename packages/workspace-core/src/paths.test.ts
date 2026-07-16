@@ -164,6 +164,96 @@ describe("path traversal", () => {
   });
 });
 
+describe("Windows path aliases (ADS, device names, 8.3 short names)", () => {
+  it("rejects NTFS Alternate Data Stream and drive-relative colon segments", () => {
+    for (const candidate of [
+      "notes.md:hidden",
+      "notes.md:hidden:$DATA",
+      "C:foo",
+      "docs/report.md:stream",
+      "a/b:stream/c.md",
+    ]) {
+      const write = validateUserWritePath(candidate);
+      expect(write).toEqual({ ok: false, reason: "invalid" });
+      expect(validateUserReadPath(candidate)).toEqual({ ok: false, reason: "invalid" });
+    }
+  });
+
+  it("rejects Windows reserved device names, bare or with extension, any case", () => {
+    for (const candidate of [
+      "NUL",
+      "nul",
+      "nul.md",
+      "CON",
+      "con.md",
+      "CON.md.txt",
+      "PRN",
+      "prn.log",
+      "AUX",
+      "COM1",
+      "com1.tar.gz",
+      "COM9",
+      "LPT1",
+      "lpt9.md",
+      "docs/nul.md",
+      "NUL .txt",
+      "nul.",
+    ]) {
+      const write = validateUserWritePath(candidate);
+      expect(write).toEqual({ ok: false, reason: "invalid" });
+      expect(validateUserReadPath(candidate)).toEqual({ ok: false, reason: "invalid" });
+    }
+  });
+
+  it("still accepts names that merely start with or contain a device name", () => {
+    for (const candidate of [
+      "CONFIG.md",
+      "console.md",
+      "NULL.md",
+      "aux-data.md",
+      "COM10.md",
+      "LPT0.md",
+      "com1ander.md",
+      "nul stuff.md",
+      "notes/prny.md",
+    ]) {
+      expect(validateUserWritePath(candidate).ok).toBe(true);
+    }
+  });
+
+  it("rejects 8.3 short-name-shaped segments (they can alias reserved names)", () => {
+    for (const candidate of [
+      "DOHC~1",
+      "dohc~1",
+      "DOHC~1/engine.db",
+      "notes/DOHC~1/x.md",
+      "SHARED~1/alex/brief.md",
+      "SECRET~1.ENV",
+      "LONGDI~1/notes.md",
+      "DOHC~1./x.md",
+      "DOHC~12345",
+    ]) {
+      const write = validateUserWritePath(candidate);
+      expect(write).toEqual({ ok: false, reason: "invalid" });
+      expect(validateUserReadPath(candidate)).toEqual({ ok: false, reason: "invalid" });
+    }
+  });
+
+  it("still accepts tilde names that cannot be generated short names", () => {
+    for (const candidate of [
+      "notes~backup.md",
+      "verylongname~1.md",
+      "draft~one.md",
+      "~1.md",
+      "my file~1.md",
+      "release.notes~2.md",
+      "tilde~.md",
+    ]) {
+      expect(validateUserWritePath(candidate).ok).toBe(true);
+    }
+  });
+});
+
 describe("workspace root choice", () => {
   it("accepts ordinary folders, including outside the default root", () => {
     expect(

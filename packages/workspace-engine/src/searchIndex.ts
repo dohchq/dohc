@@ -12,6 +12,7 @@ import {
   parseVisibilityPolicy,
   resolveEffectivePolicy,
   type FilesPolicyRule,
+  type PolicyParseResult,
   type VisibilityPolicyRule,
 } from "./effectivePolicy";
 import type { EngineSqliteDb } from "./engineDbSchema";
@@ -21,9 +22,20 @@ const POLICY_FILE_MAX_BYTES = 64 * 1024;
 const THREAD_HEADER_MESSAGE_ID = "__thread__";
 const MIN_TRIGRAM_QUERY_CHARS = 3;
 
+export interface EngineSearchPolicyDiagnostic {
+  file: string;
+  reason: "unreadable" | "invalid";
+  detail: string;
+}
+
 export interface EngineSearchPolicySnapshot {
   filesPolicy: FilesPolicyRule[] | null;
   visibilityPolicy: VisibilityPolicyRule[] | null;
+  // Fail-closed marker. An ABSENT policy file means defaults (null rules, no
+  // diagnostic); a policy file that EXISTS but cannot be read or parsed must
+  // never widen search, so while a diagnostic is present nothing is indexed
+  // or returned (same posture as the desktop's resolveEngineSearchPolicy).
+  diagnostics: EngineSearchPolicyDiagnostic[];
 }
 
 export interface IndexedSearchCandidateFile {
@@ -50,30 +62,51 @@ function tableHasRows(db: EngineSqliteDb, sql: string, ...params: unknown[]): bo
   return Boolean(db.prepare(sql).get(...params));
 }
 
+type PolicyFileRead<T> = {
+  rules: T[] | null;
+  diagnostic: EngineSearchPolicyDiagnostic | null;
+};
+
 function readPolicyFile<T>(
   rootDir: string,
   fileName: string,
-  parse: (text: string) => { ok: true; rules: T[] } | { ok: false },
-): T[] | null {
+  parse: (text: string) => PolicyParseResult<T>,
+): PolicyFileRead<T> {
+  const broken = (
+    reason: EngineSearchPolicyDiagnostic["reason"],
+    detail: string,
+  ): PolicyFileRead<T> => ({ rules: null, diagnostic: { file: fileName, reason, detail } });
   const path = join(rootDir, ".dohc", fileName);
+  let text: string;
   try {
     const info = lstatSync(path);
-    if (info.isSymbolicLink() || !info.isFile() || info.size > POLICY_FILE_MAX_BYTES) {
-      return null;
+    if (info.isSymbolicLink() || !info.isFile()) {
+      return broken("unreadable", "policy file must be a regular file");
     }
-    const parsed = parse(readFileSync(path, "utf8"));
-    return parsed.ok ? parsed.rules : null;
+    if (info.size > POLICY_FILE_MAX_BYTES) {
+      return broken("unreadable", `policy file exceeds ${POLICY_FILE_MAX_BYTES} bytes`);
+    }
+    text = readFileSync(path, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    return null;
+    // ENOENT means the file is absent, which is a valid configuration (the
+    // defaults apply). Anything else means a policy file may exist that we
+    // failed to read (EACCES, EIO, ...), so filtering must fail closed.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { rules: null, diagnostic: null };
+    return broken("unreadable", code ?? String(error));
   }
+  const parsed = parse(text);
+  if (!parsed.ok) return broken("invalid", parsed.errors.join("; "));
+  return { rules: parsed.rules, diagnostic: null };
 }
 
 export function readEngineSearchPolicySync(rootDir: string): EngineSearchPolicySnapshot {
-  return {
-    filesPolicy: readPolicyFile(rootDir, "files.toml", parseFilesPolicy),
-    visibilityPolicy: readPolicyFile(rootDir, "visibility.toml", parseVisibilityPolicy),
-  };
+  const files = readPolicyFile(rootDir, "files.toml", parseFilesPolicy);
+  const visibility = readPolicyFile(rootDir, "visibility.toml", parseVisibilityPolicy);
+  const diagnostics: EngineSearchPolicyDiagnostic[] = [];
+  if (files.diagnostic) diagnostics.push(files.diagnostic);
+  if (visibility.diagnostic) diagnostics.push(visibility.diagnostic);
+  return { filesPolicy: files.rules, visibilityPolicy: visibility.rules, diagnostics };
 }
 
 export function pathIsSearchIndexed(
@@ -81,6 +114,9 @@ export function pathIsSearchIndexed(
   path: string,
   policy = readEngineSearchPolicySync(rootDir),
 ): boolean {
+  // A broken policy file fails CLOSED: policy filtering is never silently
+  // disabled, so nothing is searchable until the file is fixed or removed.
+  if (policy.diagnostics.length > 0) return false;
   const resolved = resolveEffectivePolicy({
     path,
     filesPolicy: policy.filesPolicy,
@@ -250,6 +286,9 @@ export function ensureSearchIndexForVersion(input: {
   input.db
     .prepare("DELETE FROM engine_search_files_fts WHERE workspace_id = ? AND version_id = ?")
     .run(input.workspaceId, input.versionId);
+  // A broken policy fails closed: leave the file index empty and record no
+  // index state, so fixing (or removing) the policy file triggers a rebuild.
+  if (policy.diagnostics.length > 0) return;
   const files = input.db
     .prepare(
       `SELECT candidate.*, b.text

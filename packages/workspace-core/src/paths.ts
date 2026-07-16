@@ -97,6 +97,25 @@ export function isSiteSourcePath(relativePath: string): boolean {
   );
 }
 
+// Win32 resolves these basenames to devices — bare or with any extension
+// ("nul", "NUL.md", "com1.tar.gz") — so such a segment never lands in the
+// workspace tree. The superscript digits alias the ASCII ones (COM¹ = COM1).
+const WINDOWS_DEVICE_NAME_RE = /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])$/i;
+
+// Device matching uses the name before the first dot with trailing spaces
+// stripped: "NUL .txt" opens the NUL device too.
+function isWindowsDeviceSegment(segment: string): boolean {
+  const base = segment.split(".", 1)[0] ?? segment;
+  return WINDOWS_DEVICE_NAME_RE.test(stripWindowsAliasSuffix(base));
+}
+
+// Generated 8.3 short names ("DOHC~1", "SHARED~1", "SECRET~1.ENV") can alias
+// ANY long name on Windows volumes with short-name generation, so a
+// short-name-shaped segment can address .dohc, shared-with-me, or a secret
+// file without ever matching the literal segment guards above. The disk
+// meaning of the shape is ambiguous, so reject it outright.
+const SHORT_NAME_ALIAS_RE = /^[^.\s]{1,8}~\d+(?:\.[^.\s]{1,3})?$/;
+
 export type WritePathValidation =
   | { ok: true; normalized: string }
   | { ok: false; reason: "traversal" | "absolute" | "reserved" | "invalid" };
@@ -162,6 +181,14 @@ function validateWorkspacePath(
       return segment.includes("..")
         ? { ok: false, reason: "traversal" }
         : { ok: false, reason: "invalid" };
+    }
+    // A colon smuggles an NTFS Alternate Data Stream ("notes.md:hidden") or a
+    // drive-relative prefix ("C:foo") into the segment; a colon never names a
+    // workspace file on any platform the workspace syncs to.
+    if (segment.includes(":")) return { ok: false, reason: "invalid" };
+    if (isWindowsDeviceSegment(segment)) return { ok: false, reason: "invalid" };
+    if (SHORT_NAME_ALIAS_RE.test(stripWindowsAliasSuffix(segment))) {
+      return { ok: false, reason: "invalid" };
     }
   }
   const normalized = segments
