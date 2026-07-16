@@ -7,15 +7,20 @@
 // merge_updates of the full update log and a yrs full-state re-encode
 // (compaction/snapshot analogs) must reconstruct the same converged content.
 //
-// Deterministic: every random choice comes from one seeded PRNG, and both
-// peers use fixed client ids derived from the seed — a failing seed replays
-// exactly. This is the permanent R11 regression harness.
+// Deterministic BY CONSTRUCTION: every random choice comes from one seeded
+// PRNG, and every item in the run — including the base lineage — is minted
+// under a fixed, seed-derived client id (the seed content is rebuilt on a
+// fixed-clientID doc rather than imported from the projection helpers, whose
+// docs mint random client ids). A failing seed replays exactly. This is the
+// permanent R11 regression harness.
 //
-// Usage: pnpm --filter @dohc/yrs-spike-scripts fuzz [-- --seeds 200 --start 1]
+// Usage: pnpm --filter @dohc/yrs-spike-scripts fuzz [-- --seeds 200 --start 1 --strict]
+// Certification runs must pass --strict: it promotes fault-injection
+// caveats (e.g. a truncated update being ACCEPTED) to hard failures.
 
 import * as Y from "yjs";
 import { markdownToYDoc, plainTextToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
-import { canonicalContent, contentDiff, contentsEqual } from "./canonical.js";
+import { canonicalContent, contentDiff, contentsEqual, undeclaredRoots } from "./canonical.js";
 import { DOHC_SCHEMA, RustPeer, type RootSchema } from "./rustPeer.js";
 
 const ROUNDS = 10;
@@ -39,6 +44,11 @@ interface FuzzResult {
   deliveries: number;
   duplicates: number;
   truncations: number;
+  // yjs applyUpdate is NOT atomic on malformed input: a rejected truncated
+  // update can leave a partially-integrated prefix (pinned deterministically
+  // by the truncation-atomicity probe in fidelity.ts). The enforced invariant
+  // is that the prefix converges once the genuine update is delivered.
+  partialApplies: number;
   svSyncs: number;
 }
 
@@ -68,6 +78,39 @@ const MARKS: Array<Record<string, unknown> | undefined> = [
   { bold: {}, italic: {} },
 ];
 
+// Build the seed doc so EVERY item — including the base lineage — is minted
+// under the fixed, seed-derived clientID. The projection helpers create docs
+// with random client ids, so their content is cloned onto a fixed-id doc
+// (same clone pattern as ydocEngineDriver.replaceDocContent) instead of
+// setting clientID after the fact, which would leave the base items random.
+function seedJsDoc(mode: "plaintext" | "richdoc", seed: number): Y.Doc {
+  const tmp =
+    mode === "plaintext"
+      ? plainTextToYDoc(`seed ${seed}\nbase line\n`)
+      : markdownToYDoc(`# Seed ${seed}\n\nBase paragraph with **bold**.\n\n- item one\n- item two`);
+  const doc = new Y.Doc();
+  doc.clientID = 1_000_000 + seed;
+  for (const field of ["frontmatter", "meta"] as const) {
+    const target = doc.getMap(field);
+    for (const [k, v] of tmp.getMap(field).entries()) target.set(k, v);
+  }
+  if (mode === "plaintext") {
+    doc.getText("plainText").insert(0, tmp.getText("plainText").toString());
+  } else {
+    const clones = tmp
+      .getXmlFragment("body")
+      .toArray()
+      .filter(
+        (node): node is Y.XmlElement | Y.XmlText =>
+          node instanceof Y.XmlElement || node instanceof Y.XmlText,
+      )
+      .map((node) => node.clone() as Y.XmlElement | Y.XmlText);
+    if (clones.length > 0) doc.getXmlFragment("body").insert(0, clones);
+  }
+  tmp.destroy();
+  return doc;
+}
+
 async function fuzzOne(rust: RustPeer, seed: number, mode: "plaintext" | "richdoc"): Promise<FuzzResult> {
   const rand = mulberry32(seed * 2 + (mode === "richdoc" ? 1 : 0));
   const pick = (n: number) => Math.floor(rand() * n);
@@ -80,6 +123,7 @@ async function fuzzOne(rust: RustPeer, seed: number, mode: "plaintext" | "richdo
     deliveries: 0,
     duplicates: 0,
     truncations: 0,
+    partialApplies: 0,
     svSyncs: 0,
   };
   const fail = (what: string, detail: string) => {
@@ -87,11 +131,7 @@ async function fuzzOne(rust: RustPeer, seed: number, mode: "plaintext" | "richdo
   };
 
   const schema: RootSchema = DOHC_SCHEMA;
-  const jsDoc =
-    mode === "plaintext"
-      ? plainTextToYDoc(`seed ${seed}\nbase line\n`)
-      : markdownToYDoc(`# Seed ${seed}\n\nBase paragraph with **bold**.\n\n- item one\n- item two`);
-  jsDoc.clientID = 1_000_000 + seed;
+  const jsDoc = seedJsDoc(mode, seed);
   const rustId = `fuzz-${seed}-${mode}`;
   await rust.newDoc(rustId, 2_000_000 + seed);
 
@@ -178,11 +218,15 @@ async function fuzzOne(rust: RustPeer, seed: number, mode: "plaintext" | "richdo
           );
         }
       }
-    } catch {
-      // The chosen target was not editable (e.g. the paragraph index landed
-      // on a non-element). Skip: the PRNG stream stays aligned either way.
-      r.rustEdits -= 1;
-      return;
+    } catch (error) {
+      // ONLY the harness's typed "target not editable" rejection is legal
+      // (the random paragraph index landed on a non-editable node). Anything
+      // else is a protocol/build regression and must fail the run, not
+      // silently drop Rust edits. On a legal miss, land a guaranteed
+      // fallback edit instead of skipping — every run must keep genuine
+      // yrs-driven edits or it degrades to a one-driver test.
+      if (!String(error).includes("not-editable:")) throw error;
+      update = await rust.xmlInsertParagraph(rustId, "body", 0, `fallback ${r.rustEdits}`);
     }
     if (update !== null && update.length > 0) toJs.push(update);
   };
@@ -223,14 +267,39 @@ async function fuzzOne(rust: RustPeer, seed: number, mode: "plaintext" | "richdo
     const cut = 1 + pick(u.length - 1);
     const bad = u.slice(0, cut);
     const rustErr = await rust.apply(rustId, bad);
+    // The JS probe carries the REAL doc's current state (not a blank doc), so
+    // a partial mid-decode application against realistic struct-store state
+    // is observable. yjs applyUpdate is NOT atomic on malformed input (pinned
+    // by the truncation-atomicity probe in fidelity.ts): a rejection may
+    // leave a partially-integrated prefix. The enforced invariant is that
+    // the prefix CONVERGES once the genuine update is delivered — anything
+    // else is corruption and fails the run.
+    const probeState = Y.encodeStateAsUpdate(jsDoc);
+    const probe = new Y.Doc();
+    Y.applyUpdate(probe, probeState);
+    const probeBefore = canonicalContent(probe, schema);
     let jsRejected = false;
     try {
-      const probe = new Y.Doc(); // never corrupt the real doc with garbage
       Y.applyUpdate(probe, bad);
     } catch {
       jsRejected = true;
     }
+    if (jsRejected && !contentsEqual(probeBefore, canonicalContent(probe, schema))) {
+      r.partialApplies += 1;
+      Y.applyUpdate(probe, u);
+      const reference = new Y.Doc();
+      Y.applyUpdate(reference, probeState);
+      Y.applyUpdate(reference, u);
+      if (!contentsEqual(canonicalContent(probe, schema), canonicalContent(reference, schema))) {
+        fail(
+          "truncated update corrupted state beyond full-delivery recovery",
+          contentDiff(canonicalContent(probe, schema), canonicalContent(reference, schema)),
+        );
+      }
+    }
     if (rustErr === null || !jsRejected) {
+      // ACCEPTANCE of truncated bytes: caveat in dev runs, promoted to a hard
+      // failure under --strict (certification).
       r.caveats.push(
         `seed ${seed} ${mode}: truncated update (len ${cut}/${u.length}) accepted by ${rustErr === null ? "yrs" : ""}${rustErr === null && !jsRejected ? " and " : ""}${!jsRejected ? "yjs(probe)" : ""}`,
       );
@@ -276,8 +345,18 @@ async function fuzzOne(rust: RustPeer, seed: number, mode: "plaintext" | "richdo
   await flush(1);
 
   // ---- convergence checks ----
+  // The alternating-driver guarantee requires that Rust-side edits actually
+  // landed; a run where every rust edit skipped would silently degrade to a
+  // one-driver test.
+  if (r.rustEdits === 0) {
+    fail("rust edits", "no Rust-side edit landed in this run (all skipped)");
+  }
   const jsContent = canonicalContent(jsDoc, schema);
   const rustContent = await rust.content(rustId, schema);
+  for (const [side, content] of [["js", jsContent], ["rust", rustContent]] as const) {
+    const extra = undeclaredRoots(content);
+    if (extra.length > 0) fail("undeclared roots", `${side}: ${extra.join(", ")}`);
+  }
   if (!contentsEqual(jsContent, rustContent)) {
     fail("converged content", contentDiff(jsContent, rustContent));
   }
@@ -343,9 +422,12 @@ function argNum(name: string, fallback: number): number {
 }
 const seeds = argNum("seeds", 200);
 const start = argNum("start", 1);
+// Certification mode: fault-injection caveats (truncated-update acceptance)
+// are promoted to hard failures instead of warnings.
+const strict = args.includes("--strict");
 
 const rust = new RustPeer();
-const totals = { jsEdits: 0, rustEdits: 0, deliveries: 0, duplicates: 0, truncations: 0, svSyncs: 0 };
+const totals = { jsEdits: 0, rustEdits: 0, deliveries: 0, duplicates: 0, truncations: 0, partialApplies: 0, svSyncs: 0 };
 const allFailures: string[] = [];
 const allCaveats: string[] = [];
 let passedSeeds = 0;
@@ -359,6 +441,7 @@ for (let seed = start; seed < start + seeds; seed += 1) {
     totals.deliveries += r.deliveries;
     totals.duplicates += r.duplicates;
     totals.truncations += r.truncations;
+    totals.partialApplies += r.partialApplies;
     totals.svSyncs += r.svSyncs;
     allFailures.push(...r.failures);
     allCaveats.push(...r.caveats);
@@ -377,11 +460,17 @@ rust.close();
 
 console.log(`\nseeds: ${passedSeeds}/${seeds} passed (each seed = plaintext + richdoc run)`);
 console.log(
-  `totals: jsEdits=${totals.jsEdits} rustEdits=${totals.rustEdits} deliveries=${totals.deliveries} duplicates=${totals.duplicates} truncatedInjections=${totals.truncations} svSyncs=${totals.svSyncs}`,
+  `totals: jsEdits=${totals.jsEdits} rustEdits=${totals.rustEdits} deliveries=${totals.deliveries} duplicates=${totals.duplicates} truncatedInjections=${totals.truncations} yjsPartialApplies=${totals.partialApplies} svSyncs=${totals.svSyncs}`,
 );
 if (allCaveats.length > 0) {
-  console.warn(`caveats (${allCaveats.length}):`);
-  for (const c of allCaveats.slice(0, 20)) console.warn(`  - ${c}`);
+  if (strict) {
+    console.error(`STRICT: ${allCaveats.length} fault-injection caveat(s) promoted to failures:`);
+    for (const c of allCaveats) console.error(`  - ${c}`);
+    allFailures.push(...allCaveats);
+  } else {
+    console.warn(`caveats (${allCaveats.length}) — these are FAILURES under --strict (certification):`);
+    for (const c of allCaveats.slice(0, 20)) console.warn(`  - ${c}`);
+  }
 }
 if (allFailures.length > 0) {
   console.error(`\n${allFailures.length} failure(s) across ${seeds} seeds`);

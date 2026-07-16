@@ -12,8 +12,10 @@
 // Plus: state vectors agree semantically, cross diffs are no-ops, and a yrs
 // merge_updates of the whole log reconstructs the same content (compaction).
 //
-// Usage: pnpm --filter @dohc/yrs-spike-scripts fidelity
-// (harvested fixtures are optional: run scripts/harvest.mjs first)
+// Usage: pnpm --filter @dohc/yrs-spike-scripts fidelity [-- --require-harvested]
+// Harvested fixtures are optional for a dev run (scripts/harvest.mjs
+// produces them); CERTIFICATION runs must pass --require-harvested so the
+// real-lineage half of criterion 1 cannot silently drop out.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -21,7 +23,7 @@ import { fileURLToPath } from "node:url";
 import * as Y from "yjs";
 import { markdownToYDoc, plainTextToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import yaml from "js-yaml";
-import { canonicalContent, contentDiff, contentsEqual } from "./canonical.js";
+import { canonicalContent, contentDiff, contentsEqual, stableStringify, undeclaredRoots } from "./canonical.js";
 import { DOHC_SCHEMA, RustPeer } from "./rustPeer.js";
 import { CORPUS } from "./corpus.js";
 
@@ -33,16 +35,64 @@ interface DocCase {
   updates: Uint8Array[];
 }
 
-function loadCases(): DocCase[] {
+// Synthetic MULTI-update lineages: drive incremental edits and capture every
+// per-transaction update event, so the reverse-order/pending-update-store
+// path runs on every fresh checkout even without harvested fixtures.
+function incrementalCases(): DocCase[] {
+  const capture = (doc: Y.Doc, edits: Array<() => void>): Uint8Array[] => {
+    const updates: Uint8Array[] = [Y.encodeStateAsUpdate(doc)];
+    doc.on("update", (u: Uint8Array) => updates.push(u));
+    for (const edit of edits) doc.transact(edit);
+    return updates;
+  };
+
+  const plain = plainTextToYDoc("base line\n");
+  const t = plain.getText("plainText");
+  const plainUpdates = capture(
+    plain,
+    Array.from({ length: 12 }, (_, i) => () => {
+      if (i % 4 === 3) t.delete(0, 2);
+      else t.insert(t.length, `edit ${i} — 汉字 ${"😀".repeat((i % 3) + 1)}\n`);
+    }),
+  );
+
+  const rich = markdownToYDoc("# Incremental\n\nSeed paragraph.");
+  const frag = rich.getXmlFragment("body");
+  const richUpdates = capture(
+    rich,
+    Array.from({ length: 12 }, (_, i) => () => {
+      if (i % 3 === 0) {
+        const el = new Y.XmlElement("paragraph");
+        el.insert(0, [new Y.XmlText(`para ${i} with émoji 😀`)]);
+        frag.insert(Math.min(i % (frag.length + 1), frag.length), [el]);
+      } else {
+        const first = frag.get(frag.length - 1);
+        const text = first instanceof Y.XmlElement ? first.get(0) : null;
+        if (text instanceof Y.XmlText) {
+          text.insert(text.length, ` +${i}`, i % 2 === 0 ? { bold: {} } : undefined);
+        }
+      }
+    }),
+  );
+
+  return [
+    { name: "corpus: incremental plaintext lineage", source: "synthetic", updates: plainUpdates },
+    { name: "corpus: incremental richdoc lineage", source: "synthetic", updates: richUpdates },
+  ];
+}
+
+function loadCases(requireHarvested: boolean): { cases: DocCase[]; harvestedPresent: boolean } {
   const cases: DocCase[] = CORPUS.map((entry) => {
     const doc = entry.kind === "plaintext" ? plainTextToYDoc(entry.markdown) : markdownToYDoc(entry.markdown);
     return {
       name: `corpus: ${entry.name}`,
-      source: "synthetic",
+      source: "synthetic" as const,
       updates: [Y.encodeStateAsUpdate(doc)],
     };
   });
-  if (existsSync(FIXTURES)) {
+  cases.push(...incrementalCases());
+  const harvestedPresent = existsSync(FIXTURES);
+  if (harvestedPresent) {
     const manifest = JSON.parse(readFileSync(join(FIXTURES, "manifest.json"), "utf8")) as Array<{
       name: string;
       files: string[];
@@ -54,10 +104,13 @@ function loadCases(): DocCase[] {
         updates: doc.files.map((f) => new Uint8Array(readFileSync(join(FIXTURES, doc.name, f)))),
       });
     }
-  } else {
-    console.warn("NOTE: no harvested fixtures found (run harvest.mjs); synthetic corpus only.");
+  } else if (requireHarvested) {
+    console.error(
+      "FATAL: --require-harvested was passed but no harvested fixtures exist (run scripts/harvest.mjs). Certification runs must include the real-lineage corpus.",
+    );
+    process.exit(1);
   }
-  return cases;
+  return { cases, harvestedPresent };
 }
 
 function svMap(sv: Uint8Array): string {
@@ -88,16 +141,26 @@ function projectMarkdown(state: Uint8Array): { markdown: string; afterProjection
 // order of NESTED frontmatter objects (top-level keys are sorted by
 // orderFrontmatter). Markdown mismatches whose sole difference is
 // frontmatter key order are classified as this caveat, not a failure.
+// The caveat is admitted ONLY when: both markdowns carry frontmatter, the
+// bodies are byte-identical, and the two YAML docs parse deep-equal (so the
+// difference is strictly key sequence, nothing else).
+const FM_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?([\s\S]*)$/;
 function frontmatterOrderOnly(a: string, b: string): boolean {
   if (a === b) return false;
-  return normalizeFm(a) === normalizeFm(b);
-}
-const FM_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?([\s\S]*)$/;
-function normalizeFm(markdown: string): string {
-  const match = FM_RE.exec(markdown);
-  if (!match) return markdown;
-  const sorted = yaml.dump(yaml.load(match[1] ?? "") ?? {}, { sortKeys: true, lineWidth: -1 });
-  return `---\n${sorted}---\n${match[2] ?? ""}`;
+  const ma = FM_RE.exec(a);
+  const mb = FM_RE.exec(b);
+  if (!ma || !mb) return false;
+  if ((ma[2] ?? "") !== (mb[2] ?? "")) return false; // bodies must match exactly
+  let pa: unknown;
+  let pb: unknown;
+  try {
+    pa = yaml.load(ma[1] ?? "");
+    pb = yaml.load(mb[1] ?? "");
+  } catch {
+    return false;
+  }
+  type Sortable = Parameters<typeof stableStringify>[0];
+  return stableStringify(pa as Sortable) === stableStringify(pb as Sortable);
 }
 
 let docSeq = 0;
@@ -121,6 +184,16 @@ function checkMarkdown(name: string, expected: string, actual: string, label: st
   check(name, false, () => `expected: ${JSON.stringify(expected.slice(0, 400))}\nactual:   ${JSON.stringify(actual.slice(0, 400))}`);
 }
 
+// undeclaredRoot placeholders compare equal WITHOUT their contents being
+// read — any occurrence means the declared schema no longer covers the doc
+// and the comparison is unsound. Hard failure.
+function checkNoUndeclared(name: string, ...contents: unknown[]): void {
+  for (const content of contents) {
+    const extra = undeclaredRoots(content);
+    check(`${name} / no undeclared roots`, extra.length === 0, () => `undeclared root(s): ${extra.join(", ")}`);
+  }
+}
+
 async function runCase(rust: RustPeer, c: DocCase): Promise<void> {
   // JS reference doc. Markdown is projected on a throwaway clone (see
   // projectMarkdown) so the projection's schema-normalization side effect
@@ -141,6 +214,7 @@ async function runCase(rust: RustPeer, c: DocCase): Promise<void> {
     check(`${c.name} / rust apply`, err === null, () => String(err));
   }
   const rustContent = await rust.content(idFwd);
+  checkNoUndeclared(c.name, jsContent, rustContent);
   check(`${c.name} / content JS->Rust (in order)`, contentsEqual(jsContent, rustContent), () =>
     contentDiff(jsContent, rustContent),
   );
@@ -257,9 +331,140 @@ async function surrogateProbe(rust: RustPeer): Promise<void> {
   );
 }
 
-const cases = loadCases();
+// SPIKE PROBE — OffsetKind::Bytes wire hazard, pinned deterministically.
+// yrs's DEFAULT OffsetKind::Bytes measures text offsets in UTF-8 bytes;
+// Yjs measures in UTF-16 code units. The failure mode is PROBABILISTIC in
+// general fuzzing (ASCII and boundary-aligned offsets behave identically —
+// several pre-fix seeds passed), so this probe pins two deterministic
+// manifestations with emoji content (4 UTF-8 bytes, 2 UTF-16 units):
+//   1. positional divergence from UTF-16 intent: the same insert request
+//      lands at a different position under Bytes than under Utf16;
+//   2. a UTF-16-valid offset that is byte-INVALID (mid-char) panics yrs
+//      outright (block.rs subtract-with-overflow), killing the process.
+// The pre-fix fuzz additionally produced cross-peer content divergence and
+// a downstream Yjs struct-store crash (seed 9) through this mechanism.
+async function bytesModeProbe(rust: RustPeer): Promise<void> {
+  const textOf = async (peer: RustPeer, id: string): Promise<string> => {
+    const content = (await peer.content(id)) as Record<string, { delta?: Array<{ insert: string }> }>;
+    return (content.plainText?.delta ?? []).map((d) => d.insert).join("");
+  };
+
+  // 1. Positional divergence (no crash): same requests, both modes.
+  const run = async (id: string, mode: "utf16" | "bytes"): Promise<string> => {
+    await rust.newDoc(id, 222, mode);
+    await rust.textInsert(id, "plainText", 0, "😀😀😀");
+    await rust.textInsert(id, "plainText", 4, "X"); // utf16 4 = after 2nd emoji; byte 4 = after 1st
+    const text = await textOf(rust, id);
+    await rust.free(id);
+    return text;
+  };
+  const utf16Text = await run("bytes-probe-16", "utf16");
+  const bytesText = await run("bytes-probe-8", "bytes");
+  console.log(`bytes-mode probe: utf16=${JSON.stringify(utf16Text)} bytes=${JSON.stringify(bytesText)}`);
+  check(
+    "bytes probe / utf16 doc lands the edit at the UTF-16 offset",
+    utf16Text === "😀😀X😀",
+    () => JSON.stringify(utf16Text),
+  );
+  check(
+    "bytes probe / bytes doc lands the SAME request at a different position (wire-hazard pinned)",
+    bytesText === "😀X😀😀",
+    () => JSON.stringify(bytesText),
+  );
+
+  // 2. Mid-char byte offset panics yrs — run on a DISPOSABLE peer (the panic
+  // kills the child; the shared peer must survive the probe).
+  const crashPeer = new RustPeer();
+  let crashed = false;
+  try {
+    await crashPeer.newDoc("bytes-probe-crash", 222, "bytes");
+    await crashPeer.textInsert("bytes-probe-crash", "plainText", 0, "😀😀😀");
+    await crashPeer.textInsert("bytes-probe-crash", "plainText", 2, "X"); // byte 2 = mid-emoji
+  } catch (error) {
+    crashed = /exited/.test(String(error));
+  } finally {
+    crashPeer.close();
+  }
+  console.log(`bytes-mode probe: mid-char byte offset ${crashed ? "panicked yrs (pinned)" : "did NOT panic"}`);
+  check(
+    "bytes probe / mid-char byte offset panics yrs (block.rs subtract overflow)",
+    crashed,
+    () => "expected the Bytes-mode harness to die on a byte-invalid offset; it survived — re-characterize the hazard before trusting Bytes mode",
+  );
+}
+
+// SPIKE PROBE — truncation atomicity, pinned over EVERY cut point (fault
+// model: truncation only; arbitrary-byte robustness is future cargo-fuzz
+// work). NEW FINDING from the review batch: yjs 13.6.30 applyUpdate is NOT
+// atomic on malformed input — a rejected truncated update can leave a
+// partially-integrated prefix of the real items. yrs decodes fully before
+// applying, so it IS atomic. The invariants pinned here:
+//   - neither side ever ACCEPTS a truncated update (every cut rejects),
+//   - yrs state is byte-unchanged across every rejected cut (atomic),
+//   - yjs partial prefixes ALWAYS converge once the full update arrives
+//     (0 permanent divergences across every cut).
+async function truncationAtomicityProbe(rust: RustPeer): Promise<void> {
+  const doc = new Y.Doc();
+  doc.clientID = 42;
+  const t = doc.getText("plainText");
+  doc.transact(() => t.insert(0, "hello world "));
+  doc.transact(() => t.insert(t.length, "second edit 汉字 "));
+  doc.transact(() => t.insert(t.length, "third 😀 edit"));
+  const full = Y.encodeStateAsUpdate(doc);
+  const fullContent = canonicalContent(doc, DOHC_SCHEMA);
+
+  const id = "truncation-probe";
+  await rust.newDoc(id);
+  const rustBaseline = await rust.content(id, DOHC_SCHEMA);
+  let jsAccepted = 0;
+  let rustAccepted = 0;
+  let jsPartial = 0;
+  let jsPermanent = 0;
+  for (let cut = 1; cut < full.length; cut += 1) {
+    const bad = full.slice(0, cut);
+    const rustErr = await rust.apply(id, bad);
+    if (rustErr === null) rustAccepted += 1;
+    const probe = new Y.Doc();
+    let threw = false;
+    try {
+      Y.applyUpdate(probe, bad);
+    } catch {
+      threw = true;
+    }
+    if (!threw) jsAccepted += 1;
+    else if (!contentsEqual(canonicalContent(probe, DOHC_SCHEMA), {})) jsPartial += 1;
+    try {
+      Y.applyUpdate(probe, full);
+      if (!contentsEqual(canonicalContent(probe, DOHC_SCHEMA), fullContent)) jsPermanent += 1;
+    } catch {
+      jsPermanent += 1;
+    }
+  }
+  const rustAfter = await rust.content(id, DOHC_SCHEMA);
+  await rust.free(id);
+  console.log(
+    `truncation probe: ${full.length - 1} cuts — yrs accepted=${rustAccepted}, yjs accepted=${jsAccepted}, yjs partial-prefix applies=${jsPartial} (non-atomic reject, pinned), permanent divergences=${jsPermanent}`,
+  );
+  check("truncation probe / yrs never accepts a truncated update", rustAccepted === 0, () => `${rustAccepted} cuts accepted`);
+  check("truncation probe / yjs never accepts a truncated update", jsAccepted === 0, () => `${jsAccepted} cuts accepted`);
+  check(
+    "truncation probe / yrs state unchanged across every rejected cut (atomic)",
+    contentsEqual(rustBaseline, rustAfter),
+    () => contentDiff(rustBaseline, rustAfter),
+  );
+  check(
+    "truncation probe / every yjs partial prefix converges on full delivery",
+    jsPermanent === 0,
+    () => `${jsPermanent} cuts left permanently divergent state`,
+  );
+}
+
+const requireHarvested = process.argv.includes("--require-harvested");
+const { cases, harvestedPresent } = loadCases(requireHarvested);
 const rust = new RustPeer();
 await surrogateProbe(rust);
+await bytesModeProbe(rust);
+await truncationAtomicityProbe(rust);
 let passed = 0;
 for (const c of cases) {
   const beforeFailures = failures.length;
@@ -271,6 +476,12 @@ for (const c of cases) {
 rust.close();
 
 console.log(`\n${passed}/${cases.length} docs passed (${cases.filter((c) => c.source === "harvested").length} harvested, ${cases.filter((c) => c.source === "synthetic").length} synthetic)`);
+if (!harvestedPresent) {
+  console.warn(
+    "\nWARNING: NO HARVESTED FIXTURES — the real-lineage half of criterion 1 was NOT exercised. " +
+      "Run scripts/harvest.mjs against a copied engine.db; certification runs must pass --require-harvested.",
+  );
+}
 if (caveats.length > 0) {
   console.warn(`\n${caveats.length} known-caveat divergence(s) (nested frontmatter Any::Map key order — see SPIKE_REPORT.md):`);
   for (const c of caveats) console.warn(`  - ${c}`);

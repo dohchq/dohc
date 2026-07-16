@@ -37,8 +37,16 @@ use yrs::{
 #[serde(tag = "op", rename_all = "camelCase")]
 enum Request {
     /// Create (or replace) a doc under `id`. Optional fixed clientId keeps
-    /// fuzz runs reproducible under a fixed seed.
-    New { id: String, client_id: Option<u64> },
+    /// fuzz runs reproducible under a fixed seed. `offsetKind` defaults to
+    /// utf16 — the only wire-safe mode against Yjs peers; "bytes" exists
+    /// SOLELY for the pinned Bytes-divergence probe in fidelity.ts.
+    New {
+        id: String,
+        #[serde(rename = "clientId")]
+        client_id: Option<u64>,
+        #[serde(rename = "offsetKind")]
+        offset_kind: Option<WireOffsetKind>,
+    },
     /// Apply a base64 Yjs v1 update. Malformed bytes must error cleanly.
     Apply { id: String, update: String },
     /// Full state re-encode + state vector.
@@ -107,6 +115,13 @@ enum RootKind {
     XmlFragment,
 }
 
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+enum WireOffsetKind {
+    Utf16,
+    Bytes,
+}
+
 fn main() {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
@@ -141,13 +156,22 @@ fn main() {
 
 fn handle(docs: &mut HashMap<String, Doc>, req: Request) -> Result<Value, String> {
     match req {
-        Request::New { id, client_id } => {
+        Request::New {
+            id,
+            client_id,
+            offset_kind,
+        } => {
             // INTEROP-CRITICAL: Yjs measures text in UTF-16 code units; yrs
             // defaults to UTF-8 byte offsets, which desyncs item lengths (and
-            // therefore CRDT clocks) against Yjs peers on any non-ASCII text.
-            // Every doc that will exchange updates with Yjs MUST use Utf16.
+            // therefore CRDT clocks) against Yjs peers whenever an edit's
+            // byte offset differs from its UTF-16 offset. Every doc that
+            // exchanges updates with Yjs MUST use Utf16; Bytes is accepted
+            // here only so the fidelity probe can PIN the divergence.
             let options = Options {
-                offset_kind: OffsetKind::Utf16,
+                offset_kind: match offset_kind {
+                    Some(WireOffsetKind::Bytes) => OffsetKind::Bytes,
+                    _ => OffsetKind::Utf16,
+                },
                 client_id: client_id.map(ClientID::new).unwrap_or_else(ClientID::random),
                 ..Options::default()
             };
@@ -216,7 +240,7 @@ fn handle(docs: &mut HashMap<String, Doc>, req: Request) -> Result<Value, String
             with_delta(doc, |txn| {
                 let s = t.get_string(txn);
                 let index = snap_utf16(&s, index);
-                let len = snap_utf16(&s, index + len) - index;
+                let len = snap_utf16(&s, index.saturating_add(len)) - index;
                 if len > 0 {
                     t.remove_range(txn, index, len);
                 }
@@ -277,7 +301,7 @@ fn handle(docs: &mut HashMap<String, Doc>, req: Request) -> Result<Value, String
                 let t = paragraph_text(&frag, txn, para)?;
                 let s = xml_plain_string(txn, &t);
                 let offset = snap_utf16(&s, offset);
-                let len = snap_utf16(&s, offset + len) - offset;
+                let len = snap_utf16(&s, offset.saturating_add(len)) - offset;
                 if len > 0 {
                     t.remove_range(txn, offset, len);
                 }
@@ -343,6 +367,9 @@ fn xml_plain_string(txn: &yrs::TransactionMut, t: &yrs::XmlTextRef) -> String {
 }
 
 /// Resolve the XmlText child of the `para`-th element of a root fragment.
+/// The `not-editable:` prefix is a typed contract with the fuzz driver: it
+/// marks "the randomly chosen target cannot take this edit" (skip and keep
+/// fuzzing) as opposed to a real harness/protocol failure (fail the run).
 fn paragraph_text(
     frag: &yrs::XmlFragmentRef,
     txn: &mut yrs::TransactionMut,
@@ -350,14 +377,16 @@ fn paragraph_text(
 ) -> Result<yrs::XmlTextRef, String> {
     let node = frag
         .get(txn, para)
-        .ok_or_else(|| format!("no node at index {para}"))?;
+        .ok_or_else(|| format!("not-editable: no node at index {para}"))?;
     let el = match node {
         XmlOut::Element(el) => el,
-        other => return Err(format!("node {para} is not an element: {other:?}")),
+        other => return Err(format!("not-editable: node {para} is not an element: {other:?}")),
     };
     match el.get(txn, 0) {
         Some(XmlOut::Text(t)) => Ok(t),
-        other => Err(format!("paragraph {para} first child is not XmlText: {other:?}")),
+        other => Err(format!(
+            "not-editable: paragraph {para} first child is not XmlText: {other:?}"
+        )),
     }
 }
 

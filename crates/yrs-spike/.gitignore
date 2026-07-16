@@ -1,3 +1,4 @@
 # Harvested fixtures may contain personal dogfood content — LOCAL ONLY.
 fixtures/harvested/
+fixtures/harvest-stage-*/
 target/

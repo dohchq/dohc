@@ -173,6 +173,17 @@ export function contentsEqual(a: unknown, b: unknown): boolean {
   return stableStringify(normalize(a as Json)) === stableStringify(normalize(b as Json));
 }
 
+/** Roots outside the declared schema are emitted as `undeclaredRoot`
+ * placeholders by BOTH sides — two docs carrying the same undeclared root
+ * would compare equal without their contents ever being read. Callers must
+ * treat any occurrence as a failure. Returns the offending root names. */
+export function undeclaredRoots(content: unknown): string[] {
+  if (content === null || typeof content !== "object" || Array.isArray(content)) return [];
+  return Object.entries(content as Record<string, unknown>)
+    .filter(([, v]) => v !== null && typeof v === "object" && (v as { type?: unknown }).type === "undeclaredRoot")
+    .map(([name]) => name);
+}
+
 export function contentDiff(a: unknown, b: unknown): string {
   const sa = stableStringify(normalize(a as Json));
   const sb = stableStringify(normalize(b as Json));

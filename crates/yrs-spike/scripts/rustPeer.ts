@@ -4,11 +4,15 @@
 import { spawn, spawnSync, type ChildProcessByStdio } from "node:child_process";
 import type { Readable, Writable } from "node:stream";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import * as readline from "node:readline";
 
 const CRATE_DIR = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+// A request that takes longer than this has hit a harness bug (a lost
+// response desyncing the queue, a deadlocked child) — fail loudly, never hang.
+const REQUEST_TIMEOUT_MS = 30_000;
 
 export type RootKind = "map" | "text" | "xmlFragment";
 export type RootSchema = Record<string, RootKind>;
@@ -33,36 +37,94 @@ type Response = OkResponse | ErrResponse;
 
 function binaryPath(): string {
   const exe = process.platform === "win32" ? "dohc-yrs-spike.exe" : "dohc-yrs-spike";
-  const targetDir = process.env.CARGO_TARGET_DIR ?? join(CRATE_DIR, "target");
+  // A relative CARGO_TARGET_DIR is interpreted by cargo relative to the
+  // build cwd (the crate dir) — resolve the spawn path the same way, never
+  // against the Node process cwd.
+  const env = process.env.CARGO_TARGET_DIR;
+  const targetDir =
+    env === undefined ? join(CRATE_DIR, "target") : isAbsolute(env) ? env : resolve(CRATE_DIR, env);
   return join(targetDir, "debug", exe);
 }
+
+let builtThisProcess = false;
 
 export function buildRustHarness(): void {
   const result = spawnSync("cargo", ["build"], { cwd: CRATE_DIR, stdio: "inherit", shell: false });
   if (result.status !== 0) throw new Error("cargo build failed");
+  builtThisProcess = true;
 }
 
 export class RustPeer {
   private child: ChildProcessByStdio<Writable, Readable, null>;
-  private queue: Array<(v: Response) => void> = [];
+  private queue: Array<{ resolve: (v: Response) => void; reject: (e: Error) => void }> = [];
+  private dead: Error | null = null;
 
   constructor() {
+    // Always build (a fresh cargo no-op is sub-second): a stale binary must
+    // never certify changed harness sources. Once per driver process is
+    // enough — every RustPeer in one run uses the same sources.
+    if (!builtThisProcess) buildRustHarness();
     const bin = binaryPath();
-    if (!existsSync(bin)) buildRustHarness();
+    if (!existsSync(bin)) throw new Error(`rust harness binary missing after build: ${bin}`);
     this.child = spawn(bin, [], { stdio: ["pipe", "pipe", "inherit"] });
     const rl = readline.createInterface({ input: this.child.stdout });
     rl.on("line", (line) => {
-      const resolve = this.queue.shift();
-      if (resolve) resolve(JSON.parse(line) as Response);
+      const pending = this.queue.shift();
+      if (!pending) return;
+      let parsed: Response;
+      try {
+        parsed = JSON.parse(line) as Response;
+      } catch {
+        // A malformed stdout line means the protocol is desynced — every
+        // subsequent response would answer the wrong request. Kill the run.
+        this.fail(new Error(`rust harness emitted a non-JSON line: ${line.slice(0, 200)}`));
+        return;
+      }
+      pending.resolve(parsed);
     });
+    this.child.on("error", (err) => this.fail(new Error(`rust harness spawn error: ${err.message}`)));
+    this.child.on("exit", (code, signal) => {
+      // An exit while requests are pending (or before close()) is a harness
+      // failure, never a hang: reject everything in flight.
+      if (this.dead === null && (this.queue.length > 0 || !this.closing)) {
+        this.fail(new Error(`rust harness exited (code=${code}, signal=${signal}) with ${this.queue.length} request(s) pending`));
+      }
+    });
+  }
+
+  private closing = false;
+
+  // Rejects every in-flight request; callers turn the rejection into a run
+  // failure (or, for the pinned Bytes crash probe, an expected outcome).
+  private fail(error: Error): void {
+    this.dead = error;
+    for (const pending of this.queue.splice(0)) pending.reject(error);
+    try {
+      this.child.kill();
+    } catch {
+      // already gone
+    }
   }
 
   private request(payload: Record<string, unknown>): Promise<Response> {
     if (process.env.RUST_PEER_TRACE) {
       console.error(`>> ${JSON.stringify(payload).slice(0, 160)}`);
     }
-    return new Promise((resolve) => {
-      this.queue.push(resolve);
+    if (this.dead) return Promise.reject(this.dead);
+    return new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.fail(new Error(`rust harness request timed out after ${REQUEST_TIMEOUT_MS}ms: ${JSON.stringify(payload).slice(0, 160)}`));
+      }, REQUEST_TIMEOUT_MS);
+      this.queue.push({
+        resolve: (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
       this.child.stdin.write(`${JSON.stringify(payload)}\n`);
     });
   }
@@ -74,8 +136,15 @@ export class RustPeer {
     return res;
   }
 
-  async newDoc(id: string, clientId?: number): Promise<void> {
-    await this.ok({ op: "new", id, ...(clientId !== undefined ? { clientId } : {}) });
+  /** offsetKind "bytes" exists solely for the pinned Bytes-divergence probe;
+   * every wire-facing doc must use the default utf16. */
+  async newDoc(id: string, clientId?: number, offsetKind?: "utf16" | "bytes"): Promise<void> {
+    await this.ok({
+      op: "new",
+      id,
+      ...(clientId !== undefined ? { clientId } : {}),
+      ...(offsetKind !== undefined ? { offsetKind } : {}),
+    });
   }
 
   /** Apply update bytes; returns an error string instead of throwing so fuzz
@@ -153,6 +222,7 @@ export class RustPeer {
   }
 
   close(): void {
+    this.closing = true;
     this.child.stdin.end();
     this.child.kill();
   }
