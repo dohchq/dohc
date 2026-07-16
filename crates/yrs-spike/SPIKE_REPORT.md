@@ -268,6 +268,9 @@ A failing fuzz seed replays exactly: `... fuzz -- --seeds 1 --start <seed> --str
   pinned probes (surrogate, bytes-mode, truncation-atomicity).
 - `scripts/fuzz.ts` — criteria 2/4; the permanent R11 regression harness.
 - `scripts/harvest.mjs` — fixture extraction from a copied engine.db.
-  Refuses paths that RESOLVE (realpath: symlinks/junctions/8.3 names) to a
-  live workspace DB; validates the source before touching the existing
-  corpus (stages to a temp dir, swaps in on success); fixtures stay local.
+  Refuses paths that RESOLVE to a live workspace DB via
+  `realpathSync.native` (GetFinalPathNameByHandle: symlinks, junctions, AND
+  Windows 8.3 short-name aliases — JS `realpathSync` resolves links but
+  does NOT expand 8.3 aliases); validates the source before touching the
+  existing corpus (stages to a temp dir, swaps in on success); fixtures
+  stay local.

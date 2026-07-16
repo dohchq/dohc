@@ -160,7 +160,22 @@ function frontmatterOrderOnly(a: string, b: string): boolean {
     return false;
   }
   type Sortable = Parameters<typeof stableStringify>[0];
-  return stableStringify(pa as Sortable) === stableStringify(pb as Sortable);
+  return stableStringify(yamlPlain(pa) as Sortable) === stableStringify(yamlPlain(pb) as Sortable);
+}
+
+// yaml.load can return non-plain values (it parses `due: 2024-01-01` to a
+// Date), and stableStringify renders any non-plain object as "{}" — which
+// would make DIFFERENT dates compare equal and misclassify a real content
+// change as the non-failing key-order caveat. Stringify every non-plain
+// value so distinct values stay distinct.
+function yamlPlain(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(yamlPlain);
+  const proto = Object.getPrototypeOf(value);
+  if (proto !== Object.prototype && proto !== null) return String(value);
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).map(([k, v]) => [k, yamlPlain(v)]),
+  );
 }
 
 let docSeq = 0;
@@ -458,6 +473,21 @@ async function truncationAtomicityProbe(rust: RustPeer): Promise<void> {
     () => `${jsPermanent} cuts left permanently divergent state`,
   );
 }
+
+// Classifier regressions: distinct YAML timestamp VALUES (identical bodies)
+// must NOT be admitted as the key-order caveat (yaml.load parses them to
+// Dates; a naive stringify collapsed all Dates to "{}"), while a pure key
+// reorder still must be.
+check(
+  "frontmatter classifier / distinct Date values are a real difference",
+  !frontmatterOrderOnly("---\ndue: 2024-01-01\n---\n\nbody", "---\ndue: 2025-12-31\n---\n\nbody"),
+  () => "distinct YAML timestamps were misclassified as key-order-only",
+);
+check(
+  "frontmatter classifier / pure nested key reorder is still the caveat",
+  frontmatterOrderOnly("---\nnested:\n  a: 1\n  b: 2\n---\n\nbody", "---\nnested:\n  b: 2\n  a: 1\n---\n\nbody"),
+  () => "a pure key reorder no longer classifies as the caveat",
+);
 
 const requireHarvested = process.argv.includes("--require-harvested");
 const { cases, harvestedPresent } = loadCases(requireHarvested);

@@ -31,11 +31,13 @@ if (!dbPath) {
   console.error("usage: node harvest.mjs <path-to-COPIED-engine.db>  (Node >= 22.13)");
   process.exit(1);
 }
-// realpathSync first: the live-DB refusal must see through symlinks,
-// junctions, and Windows 8.3 aliases, not just the literal argument.
+// realpathSync.NATIVE first: the live-DB refusal must see through symlinks,
+// junctions, AND Windows 8.3 short-name aliases (DOHC~1). The JS
+// implementation (fs.realpathSync) resolves links but does NOT expand 8.3
+// aliases; only the native GetFinalPathNameByHandle path does.
 let realPath;
 try {
-  realPath = realpathSync(resolve(dbPath));
+  realPath = realpathSync.native(resolve(dbPath));
 } catch (error) {
   console.error(`cannot resolve ${dbPath}: ${error.message}`);
   process.exit(1);
