@@ -178,14 +178,19 @@ export function reconcileResolvedChatDecision(
   current: ChatDecisionRecord[],
   resolved: ChatDecisionRecord,
 ): { decisions: ChatDecisionRecord[]; wasOpen: boolean } {
+  const existing = current.find(
+    (decision) => decision.messageId === resolved.messageId,
+  );
   const wasOpen = current.some(
     (decision) =>
       decision.messageId === resolved.messageId && decision.state === "open",
   );
   return {
-    decisions: current.map((decision) =>
-      decision.messageId === resolved.messageId ? resolved : decision,
-    ),
+    decisions: existing
+      ? current.map((decision) =>
+          decision.messageId === resolved.messageId ? resolved : decision,
+        )
+      : [...current, resolved],
     wasOpen,
   };
 }
@@ -1787,13 +1792,15 @@ export function ChatsView(props: {
           : [...current, result.message],
       );
       if (resolvedDecision) {
-        const reconciliation = reconcileResolvedChatDecision(
+        const decisionWasOpen = reconcileResolvedChatDecision(
           latestDecisions.current,
           resolvedDecision,
+        ).wasOpen;
+        setDecisions(
+          (current) =>
+            reconcileResolvedChatDecision(current, resolvedDecision).decisions,
         );
-        latestDecisions.current = reconciliation.decisions;
-        setDecisions(reconciliation.decisions);
-        if (reconciliation.wasOpen) {
+        if (decisionWasOpen) {
           setChannelThreads((current) =>
             current.map((thread) =>
               thread.id === nav.thread.id
@@ -3316,6 +3323,10 @@ export function ChatsView(props: {
       <div
         data-testid="chats-thread-view"
         data-variant={variant}
+        data-open-decision-count={
+          channelThreads.find((thread) => thread.id === nav.thread.id)
+            ?.openDecisionCount ?? 0
+        }
         className="flex min-h-0 flex-1 flex-col"
         onKeyDownCapture={onKeyDownCapture}
       >

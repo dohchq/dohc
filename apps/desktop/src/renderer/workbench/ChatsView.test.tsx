@@ -1461,12 +1461,30 @@ describe("ChatsView decisions", () => {
 
     expect(screen.getAllByTestId("chats-comment-decision-open")).toHaveLength(1);
     expect(screen.getByTestId("chats-message-decision-resolved")).toBeTruthy();
+    expect(screen.getByTestId("chats-thread-view").dataset.openDecisionCount).toBe(
+      "1",
+    );
     expect(
       reconcileResolvedChatDecision(
         [targetResolved, otherOpen],
         targetResolved,
       ).wasOpen,
     ).toBe(false);
+  });
+
+  it("appends a resolved decision that was absent from the current snapshot", () => {
+    const resolved = {
+      threadId: "thread-1",
+      messageId: "message-late-resolution",
+      state: "resolved" as const,
+      resolvedByMessageId: "message-resolution",
+      atMs: NOW,
+    };
+
+    const reconciliation = reconcileResolvedChatDecision([], resolved);
+
+    expect(reconciliation.wasOpen).toBe(false);
+    expect(reconciliation.decisions).toEqual([resolved]);
   });
 });
 
