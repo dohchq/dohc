@@ -76,3 +76,7 @@ source of truth every orchestrator session loads first).
   control (bounded buffer + overflow policy), and per-method param/result
   schemas to close dual-implementation validation drift. Open decision 1
   now has its evidence; Ice ratifies at Gate 0.
+- PR #140 local Claude review 1/2 (robustness/security): verdict UPHELD,
+  5 non-blocking P2 hardening findings (symlink-bypassable harvest guard,
+  hang-on-crash driver, u32 overflow nit, truncation-only fault model to
+  narrow in report, Node>=22 note). Fix batch pending reviewer 2/2.
