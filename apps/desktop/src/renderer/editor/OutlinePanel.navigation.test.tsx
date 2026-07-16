@@ -77,6 +77,20 @@ describe("resolveOutlineHeadingTarget", () => {
       .toEqual(colliding[2]);
     expect(resolveOutlineHeadingTarget(colliding, { anchor: "foo", occurrence: 1 }))
       .toEqual(colliding[2]);
+    expect(resolveOutlineHeadingTarget(colliding, { anchor: "foo-1", occurrence: 1 }))
+      .toEqual(colliding[2]);
+  });
+
+  it("does not reinterpret a genuine literal suffixed-base occurrence", () => {
+    const colliding = [
+      { level: 2, text: "Foo", pos: 2 },
+      { level: 2, text: "Foo-1", pos: 20 },
+      { level: 2, text: "Foo", pos: 40 },
+      { level: 2, text: "Foo-1", pos: 60 },
+    ];
+
+    expect(resolveOutlineHeadingTarget(colliding, { anchor: "foo-1", occurrence: 1 }))
+      .toEqual(colliding[3]);
   });
 });
 

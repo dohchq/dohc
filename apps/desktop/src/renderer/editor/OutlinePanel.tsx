@@ -21,7 +21,10 @@ import {
 } from "./outline";
 import { useDebouncedWordCount } from "./wordCount";
 import { prefersReducedMotion } from "../reducedMotion";
-import { allocateWorkspaceHeadingAnchors } from "../../workspaces/workspaceHeadings";
+import {
+  allocateWorkspaceHeadingAnchors,
+  resolveWorkspaceHeadingAnchorTarget,
+} from "../../workspaces/workspaceHeadings";
 
 // How far below the viewport's top edge a heading must scroll before it's
 // considered "reached" — keeps the very top heading active for a beat
@@ -177,18 +180,11 @@ export type HeadingNavigationTarget = {
 
 type AnchoredOutlineHeading = {
   heading: OutlineHeading;
+  text: string;
   anchor: string;
   anchorBase: string;
   occurrence: number;
 };
-
-function decodeHeadingAnchor(anchor: string): string {
-  try {
-    return decodeURIComponent(anchor);
-  } catch {
-    return anchor;
-  }
-}
 
 /** Resolve editor headings with the same base + numeric-suffix convention as
  * workspaceHeadings. Supporting both the canonical unique anchor (`plan-1`)
@@ -203,25 +199,11 @@ export function resolveOutlineHeadingTarget(
     const identity = anchors[index]!;
     return {
       heading,
+      text: heading.text,
       ...identity,
     };
   });
-  const anchor = decodeHeadingAnchor(target.anchor);
-  const exact = anchored.find(
-    (heading) =>
-      heading.anchor === anchor &&
-      (target.occurrence === undefined || heading.occurrence === target.occurrence),
-  );
-  if (exact) return exact.heading;
-  if (target.occurrence !== undefined) {
-    return (
-      anchored.find(
-        (heading) =>
-          heading.anchorBase === anchor && heading.occurrence === target.occurrence,
-      )?.heading ?? null
-    );
-  }
-  return null;
+  return resolveWorkspaceHeadingAnchorTarget(anchored, target)?.heading ?? null;
 }
 
 export type OutlinePanelProps = {

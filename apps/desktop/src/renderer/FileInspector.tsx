@@ -43,7 +43,7 @@ import { DocumentMenu } from "./DocumentMenu";
 import { EditorErrorBoundary } from "./editor/EditorErrorBoundary";
 import {
   extractWorkspaceHeadings,
-  headingAnchorBase,
+  resolveWorkspaceHeadingAnchorTarget,
 } from "../workspaces/workspaceHeadings";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
@@ -835,26 +835,7 @@ function MarkdownView(props: {
     const source = mode === "source" ? latestDraft.current : savedBody;
     const markdown = markdownEditorBody(source);
     const headings = extractWorkspaceHeadings(markdown);
-    let decodedAnchor = props.headingTarget.anchor;
-    try {
-      decodedAnchor = decodeURIComponent(decodedAnchor);
-    } catch {
-      // Keep malformed percent escapes literal, matching outline navigation.
-    }
-    const occurrence = props.headingTarget.occurrence;
-    const heading =
-      headings.find(
-        (candidate) =>
-          candidate.anchor === decodedAnchor &&
-          (occurrence === undefined || candidate.occurrence === occurrence),
-      ) ??
-      (occurrence === undefined
-        ? undefined
-        : headings.find(
-            (candidate) =>
-              candidate.occurrence === occurrence &&
-              headingAnchorBase(candidate.text) === decodedAnchor,
-          ));
+    const heading = resolveWorkspaceHeadingAnchorTarget(headings, props.headingTarget);
     if (!heading) return;
     if (mode === "source") {
       // Local source is an intentional editing/viewing mode. Keep it visible

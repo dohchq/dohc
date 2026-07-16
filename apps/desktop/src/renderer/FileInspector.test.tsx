@@ -567,6 +567,47 @@ describe("markdown editor unmount flush", () => {
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
+  it("navigates a legacy collided occurrence target to the repeated base heading", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "# Foo\nfirst\n# Foo-1\nliteral\n# Foo\nthird\n",
+      truncated: false,
+    });
+    let toggleSource: (() => void) | null = null;
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={(toggle) => {
+          toggleSource = toggle;
+        }}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    act(() => toggleSource?.());
+    const source = (await screen.findByTestId(
+      "markdown-editor",
+    )) as HTMLTextAreaElement;
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={(toggle) => {
+          toggleSource = toggle;
+        }}
+        headingTarget={{ anchor: "foo-1", occurrence: 1, nonce: 4 }}
+      />,
+    );
+
+    const expected = lineSpanInText(source.value, 5);
+    await waitFor(() => {
+      expect(source.selectionStart).toBe(expected.start);
+      expect(source.selectionEnd).toBe(expected.end);
+    });
+    expect(source.value.slice(source.selectionStart, source.selectionEnd)).toBe("# Foo");
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
   it("routes the document header share action to the active path", async () => {
     const user = userEvent.setup();
     const onSharePath = vi.fn();

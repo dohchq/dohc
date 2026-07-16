@@ -29,6 +29,12 @@ export interface WorkspaceHeadingAnchor {
   occurrence: number;
 }
 
+interface WorkspaceHeadingAnchorCandidate {
+  anchor: string;
+  text: string;
+  occurrence: number;
+}
+
 function visibleHeadingText(value: string): string {
   return value
     .replace(/`([^`]*)`/g, "$1")
@@ -85,6 +91,51 @@ export function allocateWorkspaceHeadingAnchors(
     usedAnchors.add(anchor);
     return { anchor, anchorBase, occurrence };
   });
+}
+
+/** Resolve both current canonical targets and targets stored before anchor
+ * allocation became globally unique. Literal-base occurrences take priority
+ * over interpreting a trailing `-${occurrence}` as the old generated suffix,
+ * so a real repeated `foo-1` heading is never remapped to a repeated `foo`. */
+export function resolveWorkspaceHeadingAnchorTarget<
+  Heading extends WorkspaceHeadingAnchorCandidate,
+>(
+  headings: readonly Heading[],
+  target: { anchor: string; occurrence?: number },
+): Heading | null {
+  let anchor = target.anchor;
+  try {
+    anchor = decodeURIComponent(anchor);
+  } catch {
+    // Keep malformed percent escapes literal.
+  }
+
+  const occurrence = target.occurrence;
+  const canonical = headings.find(
+    (heading) =>
+      heading.anchor === anchor &&
+      (occurrence === undefined || heading.occurrence === occurrence),
+  );
+  if (canonical) return canonical;
+  if (occurrence === undefined) return null;
+
+  const literalBase = headings.find(
+    (heading) =>
+      headingAnchorBase(heading.text) === anchor &&
+      heading.occurrence === occurrence,
+  );
+  if (literalBase) return literalBase;
+
+  if (occurrence <= 0) return null;
+  const legacySuffix = `-${occurrence}`;
+  if (!anchor.endsWith(legacySuffix)) return null;
+  const legacyBase = anchor.slice(0, -legacySuffix.length);
+  if (!legacyBase) return null;
+  return headings.find(
+    (heading) =>
+      headingAnchorBase(heading.text) === legacyBase &&
+      heading.occurrence === occurrence,
+  ) ?? null;
 }
 
 function lineRecords(markdown: string): Array<{ text: string; line: number; offset: number; end: number }> {
@@ -218,35 +269,12 @@ export function findWorkspaceHeading(
   headings: readonly WorkspaceHeading[],
   input: { anchor?: string; text?: string; occurrence?: number },
 ): WorkspaceHeading | null {
-  const decodedAnchor = input.anchor
-    ? (() => {
-        try {
-          return decodeURIComponent(input.anchor);
-        } catch {
-          return input.anchor;
-        }
-      })()
-    : undefined;
-  if (decodedAnchor) {
-    const requestedOccurrence = input.occurrence;
-    const suffixedAnchor =
-      requestedOccurrence !== undefined && requestedOccurrence > 0
-        ? `${decodedAnchor}-${requestedOccurrence}`
-        : decodedAnchor;
-    const exact = headings.find(
-      (heading) =>
-        (heading.anchor === decodedAnchor || heading.anchor === suffixedAnchor) &&
-        (requestedOccurrence === undefined || heading.occurrence === requestedOccurrence),
-    );
-    if (exact) return exact;
-    if (requestedOccurrence !== undefined) {
-      const baseMatch = headings.find(
-        (heading) =>
-          headingAnchorBase(heading.text) === decodedAnchor &&
-          heading.occurrence === requestedOccurrence,
-      );
-      if (baseMatch) return baseMatch;
-    }
+  if (input.anchor) {
+    const anchorMatch = resolveWorkspaceHeadingAnchorTarget(headings, {
+      anchor: input.anchor,
+      occurrence: input.occurrence,
+    });
+    if (anchorMatch) return anchorMatch;
   }
   if (input.text) {
     const normalized = input.text.trim().toLocaleLowerCase();
