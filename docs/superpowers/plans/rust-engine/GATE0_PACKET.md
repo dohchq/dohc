@@ -1,6 +1,10 @@
-# Gate 0 decision packet — RESOLVED 2026-07-16
+# Gate 0 decision packet — DECISIONS RESOLVED 2026-07-16 (gate not yet closed)
 
-> Ice approved all recommendations in-session: yrs PASS ratified
+> Ice resolved all decision items in-session; **Gate 0 itself has not yet
+> passed** — it closes only when its SHARDS deps (REINV done ✓; R02,
+> merges pending) complete and GATE0's status flips from `planned`. Wave 1
+> has NOT opened. Ice approved all recommendations in-session: yrs PASS
+> ratified
 > (converging-prefix accepted), protocol ratified, GitHub CI skipped
 > (local-first evidence; macOS deferred to pre-release), freeze enforced by
 > Ice with in-flight engine changes integrated via delta reconciliation,

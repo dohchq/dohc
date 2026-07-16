@@ -969,10 +969,10 @@ presence/hash/version smoke, sidecar parent-death and restart, workspace
 cleanup/handle release. Full engine-adjacent Electron E2E per platform before
 Gate 6 (smaller native smoke subsets on PRs). Every native run asserts host
 and binary architecture so cross-built artifacts can't masquerade as native
-evidence. Nightly, not per-PR: per-platform E2E and soaks. **Prerequisite
-(week one): the mandatory matrix is open decision 2 and must be approved
-before capability lanes open** — the dev machine is Windows-only, so every
-macOS claim in every lane's evidence requires CI.
+evidence. Nightly, not per-PR: per-platform E2E and soaks. **Prerequisite (resolved at Gate 0, 2026-07-16):** GitHub CI is skipped;
+evidence is R02's local-runner scripts (native Windows + WSL Linux), and
+macOS is a mandatory pre-release obligation (not a Wave-1 blocker). No CI
+approval gates capability lanes.
 
 ## Multi-agent orchestration
 
@@ -1286,9 +1286,12 @@ not-started → settled → backed-up → moved-aside → initialized → captur
    and subject to the same retention window and user-visible cleanup —
    they are durable copies of user content, not scratch. Ice acknowledges
    per workspace.
-   Then record the pre-reset disk inventory — file identity, size, mode,
-   content hash, generation, and the exclusion list — durably in the reset
-   marker/backup manifest.
+   Then record the pre-reset disk inventory of the **normal user file tree
+   only** — file identity, size, mode, content hash, generation, and the
+   exclusion list — durably in the reset marker/backup manifest. This
+   inventory is invariant across the later WAL checkpoint (step 3), which
+   touches only `.dohc/engine/**`; the two file sets never overlap, so the
+   capture comparison at step 6 uses a stable snapshot.
 3. **Backup**: checkpoint WAL, integrity-check, restore-tested backup of the
    whole `.dohc/engine` dir + registry/DM/agent-runs snapshot, manifest
    recorded.

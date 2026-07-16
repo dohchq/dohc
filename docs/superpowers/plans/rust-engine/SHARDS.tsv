@@ -25,9 +25,10 @@ R06	compare-merge-conflicts-materialization	3	R05	crates/dohc-engine-domain/src/
 R07	watcher-reconcile-pathfloor-policy	3	CAL-3;R05	crates/dohc-engine-files/src/{watch,policy}*	ported	critical	1	planned	-	-
 R10	replication-cursors-shares	3	R04;R09	crates/dohc-engine-sync/**;packages/security-contract/**	ported+fault-model	critical	1	planned	-	-
 R10b	relay-epoch-enforcement	3	R10	services/sync-relay/**	relay fault-model suite	critical	1	planned	-	-
-R13b	desktop-adapter-dormant	3	R03;GATE0	apps/desktop/src/workspaces/engineClient*;apps/desktop/src/main.ts;apps/desktop/src/workspaces/workspaceEngineCapture.ts;apps/desktop/src/workspaces/workspaceActivity.ts;apps/desktop/src/workspaces/relaySyncEngine.ts	adapter E2E	critical	1	planned	-	-
+R13b	desktop-adapter-dormant	3	R03;GATE0	apps/desktop/src/workspaces/engineClient*;apps/desktop/src/main.ts;apps/desktop/src/workspaces/workspaceEngineCapture.ts;apps/desktop/src/workspaces/workspaceActivity.ts;apps/desktop/src/workspaces/relaySyncEngine.ts;apps/desktop/src/cli/**;packages/mcp/**	adapter E2E	critical	1	planned	-	-
 R13	daemon-composition-shadow-replay	4	R05;R06;R07;R08;R09;R10;R11a;R11b;R12;R13b	crates/dohc-workspace-engine/**	replay	critical	1	planned	-	-
 R14	robustness-closure	5	R13	fuzz/**;soak configs	fuzz+soak	high	1	planned	-	-
-GATE6	gate-release-candidate	5	R14;R10b	-	-	-	-	planned	-	-
-R15	atomic-cutover-reset	cutover	GATE6	apps/desktop/src/workspaces/cutover*;crates/dohc-workspace-engine/src/cutover*	rehearsal	critical	1	planned	-	-
-R16	legacy-deletion-hardening	post	R15	packages/workspace-engine/src/**;apps/desktop/src/workspaces/**	audit	high	1	planned	-	-
+GATE6	gate-release-candidate	5	R14;R10b;R15-REHEARSE	-	-	-	-	planned	-	-
+R15-REHEARSE	cutover-rehearsal-tier	5	R13;R14	crates/dohc-workspace-engine/src/cutover_rehearse*	rehearsal-on-clones	critical	1	planned	-	-
+R15	atomic-cutover-reset	cutover	GATE6;R15-REHEARSE	apps/desktop/src/workspaces/cutover*;crates/dohc-workspace-engine/src/cutover*	rehearsal	critical	1	planned	-	-
+R16	legacy-deletion-hardening	post	R15	packages/workspace-engine/src/**;apps/desktop/src/workspaces/**;crates/workspace-kernel*/**;packages/workspace-kernel-client/**	audit	high	1	planned	-	-

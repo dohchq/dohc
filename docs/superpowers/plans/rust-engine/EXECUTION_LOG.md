@@ -337,3 +337,13 @@ source of truth every orchestrator session loads first).
   remove-all instruction — correct call. GATE0_PACKET counts superseded:
   261/218/49/123. REINV done; R04/R09 REINV-block cleared (still gated on
   GATE0).
+- PR #137 review round 6 (3 P1 + 3 P2): R15 split into R15-REHEARSE
+  (pre-Gate6, clone rehearsal tier, feeds GATE6) + R15 real cutover
+  (Gate6-gated) — resolves the machine-level Gate6<->rehearsal circularity;
+  R16 gains ownership of crates/workspace-kernel* + workspace-kernel-client
+  deletion; R13b gains cli/** + mcp/** ownership (their raw engine.db
+  consumers need the replacement API for Gate 5/8 audit); stale CI-matrix
+  prerequisite in the cross-platform section replaced with the Gate 0
+  local-runner resolution; disk-inventory scope clarified (normal file tree
+  only, checkpoint-invariant); GATE0_PACKET header corrected to
+  'decisions resolved, gate not yet closed / Wave 1 not opened'.
