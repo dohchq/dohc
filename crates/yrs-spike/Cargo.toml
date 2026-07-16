@@ -1,0 +1,22 @@
+# R11 yrs/Yjs interoperability spike — the rewrite program's sole abort
+# criterion. This crate is a stdio JSON harness the Node driver
+# (scripts/) talks to; it becomes the permanent R11 regression harness.
+#
+# PINNED INTEROP PAIR (audited together; a lone upgrade of either side can
+# silently reopen interop divergence):
+#   yjs 13.6.30  (pnpm-lock.yaml)  <->  yrs 0.27.3 (below)
+[package]
+name = "dohc-yrs-spike"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+publish = false
+
+[dependencies]
+yrs = "=0.27.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+
+[lints.rust]
+unsafe_code = "forbid"
