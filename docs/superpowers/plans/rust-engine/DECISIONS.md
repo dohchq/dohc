@@ -61,6 +61,15 @@ Append-only. Every entry: date, decision, decider, rationale pointer.
      declared dohc root schema; `yDocToMarkdown` is destructive
      (y-prosemirror drops PM-schema-invalid elements, observed in two real
      dogfood docs) — projection provenance must account for this.
+  5. (Added post-review, PR #140 fix batch:) **yjs 13.6.30 `applyUpdate`
+     is not atomic on malformed input** — a rejected truncated update can
+     leave a partially-integrated prefix (67/2,041 injections; yrs is
+     atomic on identical bytes). Pinned invariant: state unchanged OR a
+     prefix that converges on full delivery; zero permanent divergences
+     across an exhaustive per-cut probe. The TS adapter must NEVER assume
+     state-unchanged after a failed apply. If Ice wants the stricter
+     literal invariant, R11b must wrap applies in snapshot/restore
+     (open for Gate 0).
 - **Rationale pointer:** `crates/yrs-spike/SPIKE_REPORT.md` (PR #140).
 
 ## Open — require Ice at Gate 0 (recommendations in plan)

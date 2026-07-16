@@ -122,3 +122,14 @@ source of truth every orchestrator session loads first).
   rewrite.
 - Gate 0 dual adversarial review of the contract set launched (two
   clean-context reviewers, approve-together requirement).
+- PR #140 fix batch complete (94f8083b): all 15 findings fixed, none
+  rejected; strict re-certification green (fidelity 23/23 with
+  --require-harvested; fuzz 500/500 --strict, 2,041 truncated injections
+  zero accepted). Two bonus bugs surfaced by the fixes themselves:
+  serde rename_all silently dropped clientId/offsetKind fields (client
+  ids were random pre-batch), and yjs 13.6.30 applyUpdate is NOT atomic
+  on malformed input (67/2,041 leave a converging partial prefix; yrs is
+  atomic) — pinned as true invariant, recorded as binding R11 constraint
+  5 in DECISIONS.md with a Gate 0 option for the stricter
+  snapshot/restore wrapping. Re-check reviewer launched; @codex re-review
+  triggered by the fixer.
