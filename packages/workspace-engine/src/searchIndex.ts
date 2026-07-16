@@ -480,9 +480,15 @@ export function querySearchIndex(input: {
   query: string;
   limit: number;
 }): IndexedSearchCandidate[] | null {
-  const match = ftsQueryForSubstring(input.query);
-  if (!match) return null;
   const policy = readEngineSearchPolicySync(input.rootDir);
+  const match = ftsQueryForSubstring(input.query);
+  if (!match) {
+    // A query too short for the trigram index normally returns null so the
+    // caller does a linear scan — but under a broken policy that linear scan
+    // fails OPEN (default visibility), so fail CLOSED with an empty result set
+    // (non-null) to suppress the fallback. A healthy policy keeps the null.
+    return policy.diagnostics.length > 0 ? [] : null;
+  }
   const candidates: IndexedSearchCandidate[] = [];
   const seenFiles = new Set<string>();
   for (const row of input.db

@@ -6,6 +6,7 @@ import {
   isReservedPath,
   validateAttachedFolder,
   validateWorkspaceRootChoice,
+  validateUserMaterializePath,
   validateUserReadPath,
   validateUserWritePath,
   hasIgnoredSegment,
@@ -164,11 +165,68 @@ describe("path traversal", () => {
   });
 });
 
-describe("Windows path aliases (ADS, device names, 8.3 short names)", () => {
-  // Host-unsafe names that are legal on macOS/Linux but hazardous to WRITE on
-  // a Windows disk (ADS colon, drive-relative colon, device names, 8.3 alias
-  // shapes). Grouped by the shape the guard recognizes.
-  const winUnsafe = [
+describe("Check A — reserved-path (security core, every surface, every platform)", () => {
+  // 8.3 short-name aliases of `.dohc`: on Windows these resolve to the reserved
+  // dir, so they must be refused on reads AND writes on EVERY platform (the
+  // guard can't depend on running where the alias expands).
+  const dohcAliases = [
+    "DOHC~1",
+    "dohc~1",
+    "DOHC~1/engine.db",
+    "notes/DOHC~1/x.md",
+    "DOHC~1./x.md",
+    "DOHC~100", // 4 + "~" + 3 digits = 8 chars, the longest valid form
+  ];
+
+  it("rejects `.dohc` 8.3 aliases as reserved on write, read, and materialize", () => {
+    for (const candidate of dohcAliases) {
+      expect(validateUserWritePath(candidate)).toEqual({ ok: false, reason: "reserved" });
+      expect(validateUserReadPath(candidate)).toEqual({ ok: false, reason: "reserved" });
+      expect(validateUserMaterializePath(candidate, { platform: "win32" })).toMatchObject({
+        ok: false,
+        reason: "reserved",
+      });
+      expect(validateUserMaterializePath(candidate, { platform: "linux" })).toMatchObject({
+        ok: false,
+        reason: "reserved",
+      });
+      expect(isReservedPath(candidate)).toBe(true);
+    }
+  });
+
+  it("rejects `shared-with-me` 8.3 aliases on WRITE but allows them on READ", () => {
+    for (const candidate of ["SHARED~1/alex/brief.md", "share~10/x.md", "SHARED~2"]) {
+      // Write reservation (like shared-with-me itself).
+      expect(validateUserWritePath(candidate)).toEqual({ ok: false, reason: "reserved" });
+      expect(validateUserMaterializePath(candidate, { platform: "win32" })).toMatchObject({
+        ok: false,
+        reason: "reserved",
+      });
+      // Readable, exactly like the long-form shared-with-me projection.
+      expect(validateUserReadPath(candidate).ok).toBe(true);
+    }
+  });
+
+  it("does NOT treat non-reserved tilde names as reserved (only the alias stems)", () => {
+    for (const candidate of [
+      "report~1.pdf",
+      "draft~2.md",
+      "DOHC~1.md", // has an extension → aliases a long .md name, not `.dohc`
+      "DOHCXY~1", // prefix past the stem → a real user file
+      "shar~1", // too short to be the shared-with-me stem
+      "LONGDI~1/notes.md",
+    ]) {
+      expect(isReservedPath(candidate)).toBe(false);
+      expect(validateUserWritePath(candidate).ok).toBe(true);
+      expect(validateUserReadPath(candidate).ok).toBe(true);
+    }
+  });
+});
+
+describe("Check B — materialize hazard (disk-write only, win32-gated)", () => {
+  // Host-legal off Windows, unsafe to WRITE onto a Windows disk, and NOT
+  // reserved aliases: ADS/drive colons, device names, generic 8.3 shapes.
+  const hazards = [
     "notes.md:hidden",
     "notes.md:hidden:$DATA",
     "C:foo",
@@ -194,70 +252,48 @@ describe("Windows path aliases (ADS, device names, 8.3 short names)", () => {
     "CONIN$",
     "conout$.md",
     "CLOCK$",
-    "DOHC~1",
-    "dohc~1",
-    "DOHC~1/engine.db",
-    "notes/DOHC~1/x.md",
-    "SHARED~1/alex/brief.md",
     "SECRET~1.ENV",
     "LONGDI~1/notes.md",
-    "DOHC~1./x.md",
-    "DOHC~12345",
+    "report~1.pdf",
+    "draft~2.md",
+    "DOHC~12345", // 8.3-SHAPED but too long to be a real `.dohc` alias
   ];
 
-  it("rejects host-unsafe names only when the caller opts in (materialize)", () => {
-    for (const candidate of winUnsafe) {
-      expect(validateUserWritePath(candidate, { rejectHostUnsafeNames: true })).toEqual({
+  it("rejects hazards on a Windows materialize with a typed reason", () => {
+    for (const candidate of hazards) {
+      expect(validateUserMaterializePath(candidate, { platform: "win32" })).toEqual({
         ok: false,
         reason: "unsupported-name",
       });
     }
   });
 
-  it("allows the SAME names by DEFAULT (classification/capture/store write)", () => {
-    // The default write path must NOT reject host-unsafe names — it gates
-    // classification, capture, and persisted-row checks, none of which touch
-    // the local disk, so a synced "report~1.pdf" is never dropped on Windows.
-    for (const candidate of winUnsafe) {
-      expect(validateUserWritePath(candidate).ok).toBe(true);
-      expect(validateUserWritePath(candidate, { rejectHostUnsafeNames: false }).ok).toBe(true);
+  it("allows the SAME names on a non-Windows materialize (host-legal there)", () => {
+    for (const candidate of hazards) {
+      expect(validateUserMaterializePath(candidate, { platform: "linux" }).ok).toBe(true);
+      expect(validateUserMaterializePath(candidate, { platform: "darwin" }).ok).toBe(true);
     }
   });
 
-  it("NEVER rejects host-unsafe names on a READ (capture must see them)", () => {
-    for (const candidate of winUnsafe) {
+  it("allows the SAME names on the default write path AND reads (classify/capture)", () => {
+    for (const candidate of hazards) {
+      expect(validateUserWritePath(candidate).ok).toBe(true);
       expect(validateUserReadPath(candidate).ok).toBe(true);
     }
   });
 
-  it("keeps rejecting genuine traversal/reserved even when opting in", () => {
-    // The universal invariants are independent of the host-unsafe opt-in.
-    expect(validateUserWritePath("../nul.md", { rejectHostUnsafeNames: true }).ok).toBe(false);
-    expect(validateUserReadPath("../nul.md").ok).toBe(false);
-    // Exact `.dohc` stays reserved on every path; only the fuzzy 8.3 ALIAS of
-    // it (DOHC~1) is materialize-only.
-    expect(validateUserWritePath(".dohc/x")).toEqual({ ok: false, reason: "reserved" });
-    expect(validateUserWritePath(".dohc/x", { rejectHostUnsafeNames: true })).toEqual({
+  it("still rejects genuine traversal/reserved before the hazard check", () => {
+    expect(validateUserMaterializePath("../nul.md", { platform: "win32" })).toMatchObject({
+      ok: false,
+      reason: "traversal",
+    });
+    expect(validateUserMaterializePath(".dohc/x", { platform: "win32" })).toMatchObject({
       ok: false,
       reason: "reserved",
     });
   });
 
-  it("host-legal real files read AND write (default) on every host", () => {
-    for (const candidate of [
-      "standup 9:30.md",
-      "con.py",
-      "report~1.pdf",
-      "draft~2.md",
-    ]) {
-      // Default write path (classification/capture) accepts them everywhere.
-      expect(validateUserWritePath(candidate).ok).toBe(true);
-      // Capture is a read: seen on every host regardless of name.
-      expect(validateUserReadPath(candidate).ok).toBe(true);
-    }
-  });
-
-  it("still accepts device/tilde lookalikes even when opting in", () => {
+  it("still accepts device/tilde lookalikes even on a Windows materialize", () => {
     for (const candidate of [
       "CONFIG.md",
       "console.md",
@@ -276,7 +312,7 @@ describe("Windows path aliases (ADS, device names, 8.3 short names)", () => {
       "release.notes~2.md",
       "tilde~.md",
     ]) {
-      expect(validateUserWritePath(candidate, { rejectHostUnsafeNames: true }).ok).toBe(true);
+      expect(validateUserMaterializePath(candidate, { platform: "win32" }).ok).toBe(true);
     }
   });
 });

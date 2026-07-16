@@ -1,5 +1,9 @@
 import type { WatcherEvent } from "@dohc/workspace-core";
-import { validateUserReadPath, validateUserWritePath } from "@dohc/workspace-core";
+import {
+  validateUserMaterializePath,
+  validateUserReadPath,
+  validateUserWritePath,
+} from "@dohc/workspace-core";
 import {
   classifyEngineFilePath,
   compareVersionFiles,
@@ -476,9 +480,7 @@ export function assertGeneratedMarkdownPath(
   path: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
-  const check = validateUserWritePath(path, {
-    rejectHostUnsafeNames: platform === "win32",
-  });
+  const check = validateUserMaterializePath(path, { platform });
   if (!check.ok && check.reason === "unsupported-name") {
     throw new UnsupportedWorkspacePathError(path);
   }
@@ -656,12 +658,10 @@ function assertEngineWritablePath(
   policy: WorkspaceEnginePolicySnapshot,
   options: { protected?: boolean } = {},
 ): void {
-  // The disk-materialize boundary: opt into the host-unsafe-name check, gated
-  // to Windows, so a name that cannot be written on THIS disk is refused here
-  // (and surfaced) while classification/capture/store writes stayed permissive.
-  const check = validateUserWritePath(path, {
-    rejectHostUnsafeNames: process.platform === "win32",
-  });
+  // The disk-materialize boundary runs Check A + Check B (win32): a name that
+  // cannot be written on THIS disk is refused here (and surfaced) while
+  // classification/capture/store writes stayed permissive (Check A only).
+  const check = validateUserMaterializePath(path);
   if (!check.ok && check.reason === "unsupported-name") {
     throw new UnsupportedWorkspacePathError(path);
   }

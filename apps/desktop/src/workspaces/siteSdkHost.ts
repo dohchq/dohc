@@ -1,8 +1,8 @@
 import {
   isDatabaseFile,
   isDatabaseSidecar,
+  validateUserMaterializePath,
   validateUserReadPath,
-  validateUserWritePath,
 } from "@dohc/workspace-core";
 import { rgPath } from "@vscode/ripgrep";
 import { basename, join } from "node:path";
@@ -66,7 +66,7 @@ function normalizeScopeRoot(scopeRoot: string | null): string | null {
 
 function validatedPath(path: unknown, kind: "read" | "write"): string {
   const raw = text(path, "path");
-  const result = kind === "read" ? validateUserReadPath(raw) : validateUserWritePath(raw);
+  const result = kind === "read" ? validateUserReadPath(raw) : validateUserMaterializePath(raw);
   if (!result.ok) throw new Error(`Invalid ${kind} path (${result.reason}): ${raw}`);
   return result.normalized;
 }

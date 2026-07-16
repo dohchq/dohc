@@ -586,6 +586,43 @@ describe("workspace engine search", () => {
     expect(recoveredPaths).toContain("notes/added-while-degraded.md");
   });
 
+  it("fails closed for SHORT queries under a broken policy (no linear fail-open)", async () => {
+    const versions = versionStore();
+    const chats = chatStore();
+    const main = await versions.ensureMainVersion({ workspaceId: "workspace-a" });
+    await versions.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/a.md",
+      text: "shortq needle\n",
+      metadata: { origin: "api" },
+    });
+    // Healthy policy: a 2-char query (below the trigram floor) still works via
+    // the linear scan.
+    await expect(
+      searchWorkspaceEngine({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        query: "sh",
+        versions,
+        chats,
+      }),
+    ).resolves.toMatchObject([{ surface: "file", path: "notes/a.md" }]);
+
+    // Broken policy: the short-query linear fallback must NOT leak files.
+    await mkdir(join(root, ".dohc"), { recursive: true });
+    await writeFile(join(root, ".dohc", "visibility.toml"), "not [ valid toml");
+    await expect(
+      searchWorkspaceEngine({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        query: "sh",
+        versions,
+        chats,
+      }),
+    ).resolves.toEqual([]);
+  });
+
   it("searches a freshly forked version and incrementally reflects a write in the fork", async () => {
     const versions = versionStore();
     const chats = chatStore();
@@ -804,13 +841,22 @@ describe("engine file path classifier (shared by search and capture)", () => {
   });
 
   it("tracks host-legal names that would be Windows-unsafe to WRITE (no capture drop)", () => {
-    // Classification goes through validateUserWritePath but must NOT apply the
-    // host-unsafe-name check — otherwise a synced "report~1.pdf" (or a colon /
-    // device-shaped name) would classify as ignored on Windows and never be
-    // captured. Materialize protects the local disk separately.
+    // Classification runs Check A (reserved) only, NOT the materialize hazard —
+    // otherwise a synced "report~1.pdf" (or a colon / device-shaped name) would
+    // classify as ignored on Windows and never be captured. Materialize protects
+    // the local disk separately.
     for (const path of ["report~1.pdf", "notes/meeting 9:30.md", "con.py", "DOHC~1.md"]) {
       expect(classifyEngineFilePath(path)).toEqual({ kind: "tracked" });
       expect(classifyEngineFilePathForRead(path)).toEqual({ kind: "tracked" });
+    }
+  });
+
+  it("still IGNORES 8.3 short-name aliases of `.dohc` (Check A, reserved bypass)", () => {
+    // DOHC~1 resolves to `.dohc` on Windows, so it must never classify as a
+    // capturable file — the reserved guard catches the alias on every platform.
+    for (const path of ["DOHC~1", "dohc~1", "notes/DOHC~1/x.md", "DOHC~100"]) {
+      expect(classifyEngineFilePath(path)).toEqual({ kind: "ignored" });
+      expect(classifyEngineFilePathForRead(path)).toEqual({ kind: "ignored" });
     }
   });
 
