@@ -1,0 +1,543 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Envelope",
+  "description": "Every message that can cross the transport, tagged by `type`.",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "hello"
+        }
+      },
+      "$ref": "#/$defs/Hello",
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "helloAck"
+        }
+      },
+      "$ref": "#/$defs/HelloAck",
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "request"
+        }
+      },
+      "$ref": "#/$defs/Request",
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "response"
+        }
+      },
+      "$ref": "#/$defs/Response",
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "error"
+        }
+      },
+      "$ref": "#/$defs/ErrorEnvelope",
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "event"
+        }
+      },
+      "$ref": "#/$defs/Event",
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "cancel"
+        }
+      },
+      "$ref": "#/$defs/Cancel",
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "blobStart"
+        }
+      },
+      "$ref": "#/$defs/BlobStart",
+      "required": [
+        "type"
+      ]
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "batch"
+        }
+      },
+      "$ref": "#/$defs/Batch",
+      "required": [
+        "type"
+      ]
+    }
+  ],
+  "$defs": {
+    "Batch": {
+      "description": "A bounded batch of envelopes, applied in order. Batches never nest.",
+      "type": "object",
+      "properties": {
+        "envelopes": {
+          "type": "array",
+          "items": {
+            "$ref": "#"
+          }
+        }
+      },
+      "required": [
+        "envelopes"
+      ]
+    },
+    "BlobStart": {
+      "description": "Announces a binary blob stream whose bytes follow as blob-chunk frames\n(never base64 inside an envelope). Sent by whichever side streams the\nblob; `request_id` ties the stream to its request.",
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sha256": {
+          "description": "Lowercase hex SHA-256 of the full blob, when known, for end-to-end\nintegrity verification.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "streamId": {
+          "description": "Stream id carried by each chunk frame; unique per session generation.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "totalBytes": {
+          "description": "Total size when known up front, letting the receiver preflight bounds.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "requestId",
+        "streamId"
+      ]
+    },
+    "Cancel": {
+      "description": "Cooperative cancellation of an in-flight request. The engine still sends\na terminal response for the id (`CANCELLED` if cancellation won).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "ErrorCode": {
+      "description": "Stable machine error codes. The wire form is the SCREAMING_SNAKE string;\ncodes are append-only once the protocol freezes.",
+      "oneOf": [
+        {
+          "description": "The `hello` auth token did not match the parent-issued token.",
+          "type": "string",
+          "const": "AUTH_FAILED"
+        },
+        {
+          "description": "The peer speaks a protocol version outside our supported range.",
+          "type": "string",
+          "const": "PROTOCOL_VERSION_UNSUPPORTED"
+        },
+        {
+          "description": "A frame violated the framing layer (bad magic, unknown type, bad\nflags, or a size bound).",
+          "type": "string",
+          "const": "MALFORMED_FRAME"
+        },
+        {
+          "description": "A well-framed envelope violated a wire bound (string, collection,\nbatch, depth, or integer range).",
+          "type": "string",
+          "const": "LIMIT_EXCEEDED"
+        },
+        {
+          "description": "A control frame did not decode into a known envelope.",
+          "type": "string",
+          "const": "INVALID_ENVELOPE"
+        },
+        {
+          "description": "The request method is not known to this engine build.",
+          "type": "string",
+          "const": "METHOD_NOT_FOUND"
+        },
+        {
+          "description": "The request params failed method-level validation.",
+          "type": "string",
+          "const": "INVALID_PARAMS"
+        },
+        {
+          "description": "The request deadline elapsed before the engine finished.",
+          "type": "string",
+          "const": "DEADLINE_EXCEEDED"
+        },
+        {
+          "description": "The request was cancelled by the client or by session teardown.",
+          "type": "string",
+          "const": "CANCELLED"
+        },
+        {
+          "description": "Bounded queues are full; explicit backpressure.",
+          "type": "string",
+          "const": "OVERLOADED"
+        },
+        {
+          "description": "The session generation is no longer valid (engine restarted).",
+          "type": "string",
+          "const": "SESSION_EXPIRED"
+        },
+        {
+          "description": "The workspace handle does not refer to an open workspace.",
+          "type": "string",
+          "const": "WORKSPACE_UNAVAILABLE"
+        },
+        {
+          "description": "Internal engine failure; details in redacted diagnostics only.",
+          "type": "string",
+          "const": "INTERNAL"
+        }
+      ]
+    },
+    "ErrorEnvelope": {
+      "description": "A failed response, or a connection-level error when `id` is absent.",
+      "type": "object",
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/WireError"
+        },
+        "id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "error"
+      ]
+    },
+    "Event": {
+      "description": "An engine-initiated event. Events are totally ordered per session by\n`seq`; a client that observes a gap must treat its state as stale and\nresynchronize.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Namespaced event name, e.g. `workspace.filesChanged`.",
+          "type": "string"
+        },
+        "payload": true,
+        "seq": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sessionGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "seq",
+        "sessionGeneration",
+        "name",
+        "payload"
+      ]
+    },
+    "Hello": {
+      "description": "First message on a connection, client → engine. Authenticates the\nparent-child session: the desktop main process spawns the engine with a\nrandom token in its environment and must echo it here. Anything before a\nvalid `hello` is answered with `AUTH_FAILED` and the connection closes.",
+      "type": "object",
+      "properties": {
+        "authToken": {
+          "type": "string"
+        },
+        "capabilities": {
+          "description": "Capabilities the client understands (capability negotiation).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "lastSessionGeneration": {
+          "description": "On reconnect after an engine restart: the generation the client last\nsaw, so the engine can tell resume-after-restart from first contact.\nThe engine always issues a fresh generation in `helloAck`.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "protocolVersion",
+        "authToken",
+        "capabilities"
+      ]
+    },
+    "HelloAck": {
+      "description": "Engine → client handshake acknowledgement.",
+      "type": "object",
+      "properties": {
+        "capabilities": {
+          "description": "Intersection-negotiated capabilities in effect for this session.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "limits": {
+          "description": "Bounds this engine enforces; the client must stay within them.",
+          "$ref": "#/$defs/WireLimits"
+        },
+        "protocolVersion": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "sessionGeneration": {
+          "description": "Fresh per accepted connection. Old workspace handles, request ids and\nevent sequences are invalid under a new generation.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "protocolVersion",
+        "sessionGeneration",
+        "capabilities",
+        "limits"
+      ]
+    },
+    "Request": {
+      "description": "A client request.",
+      "type": "object",
+      "properties": {
+        "deadlineMs": {
+          "description": "Relative deadline. The engine clamps it to its maximum and fails the\nrequest with `DEADLINE_EXCEEDED` when it elapses.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "idempotencyKey": {
+          "description": "Required on retryable mutations: the engine deduplicates replays of\nthe same key after timeouts/reconnects (exactly-once acknowledgement).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "method": {
+          "description": "Namespaced method name, e.g. `workspace.open`. Test-build fault\ninjection uses the reserved `testkit.` namespace.",
+          "type": "string"
+        },
+        "params": {
+          "description": "Method-specific parameters; validated per-method behind the envelope\nlayer, bounded here as a JSON tree."
+        },
+        "workspace": {
+          "description": "Target workspace, when the method is workspace-scoped.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WorkspaceHandle"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ]
+    },
+    "Response": {
+      "description": "A successful response to a request.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "result": true
+      },
+      "required": [
+        "id",
+        "result"
+      ]
+    },
+    "Retryability": {
+      "description": "How a generated client may retry a failed request.",
+      "oneOf": [
+        {
+          "description": "Do not retry.",
+          "type": "string",
+          "const": "no"
+        },
+        {
+          "description": "Retry immediately (same session).",
+          "type": "string",
+          "const": "immediate"
+        },
+        {
+          "description": "Retry with backoff (same session); pair with an idempotency key.",
+          "type": "string",
+          "const": "afterBackoff"
+        },
+        {
+          "description": "Re-handshake (new session generation, re-open handles), then retry.",
+          "type": "string",
+          "const": "afterReconnect"
+        }
+      ]
+    },
+    "WireError": {
+      "description": "The wire error payload carried by an `error` envelope.\n\n`message` must be redaction-safe: no paths, no document content, no\nsecrets, no tokens. Construct via [`WireError::new`] and keep messages to\nstatic, code-like descriptions; anything dynamic belongs in structured\nredacted diagnostics, not here.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/ErrorCode"
+        },
+        "message": {
+          "type": "string"
+        },
+        "retry": {
+          "$ref": "#/$defs/Retryability"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retry"
+      ]
+    },
+    "WireLimits": {
+      "description": "Bounds enforced by both encoder and decoder, and advertised to the client\nin `helloAck` so both sides agree on what a well-formed peer may send.",
+      "type": "object",
+      "properties": {
+        "maxBatchLen": {
+          "description": "Maximum number of envelopes in one `batch` envelope.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "maxBlobChunkBytes": {
+          "description": "Maximum blob-chunk payload size in bytes (raw bytes, excluding the\n8-byte stream-id prefix).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "maxCollectionLen": {
+          "description": "Maximum length of any array or object on the wire.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "maxFrameBytes": {
+          "description": "Maximum control-frame payload size in bytes (the encoded envelope).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "maxJsonDepth": {
+          "description": "Maximum nesting depth of any JSON value on the wire.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "maxStringBytes": {
+          "description": "Maximum size of any single string on the wire, in UTF-8 bytes.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "maxFrameBytes",
+        "maxBlobChunkBytes",
+        "maxStringBytes",
+        "maxCollectionLen",
+        "maxBatchLen",
+        "maxJsonDepth"
+      ]
+    },
+    "WorkspaceHandle": {
+      "description": "Opaque, server-issued workspace handle. Clients never fabricate one and\nnever learn filesystem paths from it; handles die with their session\ngeneration.",
+      "type": "string"
+    }
+  }
+}
