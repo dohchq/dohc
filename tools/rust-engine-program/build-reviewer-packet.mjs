@@ -138,9 +138,15 @@ export function makePathMatcher(pattern) {
       const ch = pat[i];
       if (ch === "*") {
         if (pat[i + 1] === "*") {
-          source += ".*";
           i += 1;
-          if (pat[i + 1] === "/") i += 1;
+          if (pat[i + 1] === "/") {
+            // `**/` = zero or more whole path segments, boundary preserved,
+            // so `docs/**/foo.md` never matches `docs/a/barfoo.md`.
+            source += "(?:[^/]+/)*";
+            i += 1;
+          } else {
+            source += ".*";
+          }
         } else {
           source += "[^/]*";
         }
@@ -327,9 +333,12 @@ export function runCheck({ shards, inventory, classification }, programFiles) {
   return problems;
 }
 
+const TOOLS_DIR_REL = "tools/rust-engine-program";
+
 // Gate-0 program files: everything under the rust-engine program directory,
-// plus rust-engine plan documents at the plans root. Historical (non-program)
-// plans are out of scope for the ownership check.
+// the program tooling directory (this builder + future parity counter — they
+// generate review inputs and must stay owned), plus rust-engine plan documents
+// at the plans root. Historical (non-program) plans are out of scope.
 function listProgramFiles(root) {
   const out = [];
   const walk = (relDir) => {
@@ -342,6 +351,7 @@ function listProgramFiles(root) {
     }
   };
   walk(PROGRAM_DIR_REL);
+  walk(TOOLS_DIR_REL);
   const plansAbs = join(root, PLANS_DIR_REL);
   if (existsSync(plansAbs)) {
     for (const entry of readdirSync(plansAbs, { withFileTypes: true })) {
@@ -673,6 +683,10 @@ function selfTest() {
     "glob: trailing slash rejects sibling dir",
     !m5("docs/superpowers/plans/rust-engine-notes/file.md"),
   );
+  const m6 = makePathMatcher("docs/**/foo.md");
+  check("glob: **/name matches nested", m6("docs/a/b/foo.md"));
+  check("glob: **/name matches direct child", m6("docs/foo.md"));
+  check("glob: **/name respects segment boundary", !m6("docs/a/barfoo.md"));
 
   // behavior resolution
   const inventory = parseTsv(FIXTURE_INVENTORY, "fixture-inventory");

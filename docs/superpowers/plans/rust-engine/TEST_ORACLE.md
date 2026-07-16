@@ -223,13 +223,19 @@ while the workspace actor is quiesced.
   the harness may skip this fault record for an engine only if the engine is
   listed here AND its `listFaultPoints()` (section 6) does not report the
   point. For any engine not listed, a missing point fails the run.
-  **Validation restricts `optionalFor` to expectation-neutral actions**
-  (`observe`, `pause`): skipping those changes no `expect` value, so the
-  trace stays differential. A `crash` or `error` fault at a point one engine
-  lacks changes downstream expectations — such traces MUST instead set the
-  header's `engines: ["rust"]` (Rust-only, self-consistency evidence);
-  a `crash`/`error` fault carrying `optionalFor` fails validation. Omitting
-  `optionalFor` means the point is mandatory on every engine in `engines`.
+  **Validation restricts `optionalFor` to `observe` faults only** — the one
+  action that is purely passive: it neither changes an `expect` value nor
+  alters the execution schedule, so skipping it on one engine keeps both
+  runs identical. Every other action changes behavior when skipped:
+  `crash`/`error` change downstream expectations, and `pause` changes the
+  *schedule* (a `pause`-created interleaving that TS skips while Rust honors
+  means the two engines no longer run the same order — comparisons then pass
+  or fail for reasons unrelated to parity). A trace needing a fault at a
+  point an engine lacks for anything but `observe` MUST instead be header-
+  marked `engines: ["rust"]` (Rust-only, self-consistency evidence) or be
+  rewritten around an equivalent point both engines expose; a non-`observe`
+  fault carrying `optionalFor` fails validation. Omitting `optionalFor`
+  means the point is mandatory on every engine in `engines`.
 - Environmental kinds (`env.*`) and relay fault kinds (`relay.fault.*`) are
   listed in the registry, sections 3.9–3.10.
 
@@ -303,7 +309,13 @@ rule allowed the difference — which is a stop-the-line mismatch).
   `DETERMINISM_AUDIT.tsv`). Ciphertext, IV, tag, and wrapped-key columns of
   the secret tables are excluded from `db` comparison; instead the adapter
   decrypts through the engine's own read path and the harness compares
-  plaintext, key *identity* (fingerprint), and tip/moment structure.
+  plaintext and tip/moment structure. The **data key itself is never compared
+  across engines** — two correct engines encrypt the same fixture under
+  different random workspace keys, so a cross-engine key/fingerprint compare
+  would be a guaranteed false failure. The key is asserted only for
+  *within-engine* consistency (the same key decrypts every moment of a
+  workspace across a close/reopen — a per-engine invariant, checked on each
+  side independently, not diffed between them).
 - **N2 — logical row state, not physical layout.** Comparison reads logical
   rows via the adapter; WAL/page layout, freelist, `sqlite_sequence`,
   rowids, index b-trees, `PRAGMA` state, and file byte size are never
@@ -661,9 +673,17 @@ regresses to `in progress`, finding filed, integrator notified).
   (test builds only; production packaging asserts the variable is rejected);
   Rust: `--features mutation-smoke` + the same env var in the testkit build.
   One mutation armed per run.
-- **Declaration**: every `TEST_PARITY.tsv` row lists ≥1 `mutation_ids` its
-  ported file must be killed by. CI runs each ported suite once per declared
-  mutation and requires a non-zero exit.
+- **Declaration**: every `TEST_PARITY.tsv` row lists ≥1 `mutation_ids` that
+  must kill *that behavior's* ported assertions.
+- **Attribution is per-behavior, not per-suite** — a whole-suite non-zero
+  exit is insufficient, because an unrelated test, a setup failure, or a
+  different behavior's assertion could absorb the kill while the row's own
+  assertions stay weakened. CI runs the mutation against only the tests bound
+  to the row's `behavior_id` (via the §5.1 `// oracle:` / `#[dohc_oracle]`
+  annotation — vitest `-t`/test filter on TS, the testkit's behavior-tagged
+  test selection on Rust) and requires that **those** tests fail. A mutation
+  run where the behavior's own tests pass but the suite exits non-zero for
+  any other reason does not count as a kill and fails the gate.
 - **Seed mutation registry** (extends as capability shards land; IDs stable):
 
 | id | injected bug | must be killed by |
@@ -771,10 +791,10 @@ interface EngineTestAdapter {
 - **`listFaultPoints` is how G-points stay honest**: the harness skips a
   trace's fault record only if the engine reports the point unimplemented
   AND the fault record lists that engine in `optionalFor` (§1.1; only
-  `"ts"` is valid at traceVersion 1, and only for expectation-neutral
-  `observe`/`pause` actions — crash/error traces at G points are
-  header-marked `engines: ["rust"]` instead) — otherwise missing point =
-  failed run. A Rust shard cannot silently ship without its family's points.
+  `"ts"` is valid at traceVersion 1, and only for `observe` faults —
+  crash/error/pause traces at G points are header-marked `engines: ["rust"]`
+  instead) — otherwise missing point = failed run. A Rust shard cannot
+  silently ship without its family's points.
 - **Resource scope**: `snapshotNormalizedState(["resources"])` returns
   thread/handle/queue-depth counts for the plateau checks; on TS it returns
   the tracked-handle registry size (`engineDbSchema.ts:48-82`) — coarse, and
