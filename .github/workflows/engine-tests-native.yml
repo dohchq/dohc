@@ -1,0 +1,71 @@
+name: Engine tests (native matrix)
+
+# Rust rewrite program, shard TS-NATIVE-CI: the TypeScript engine is the
+# behavioral oracle for the Rust rewrite, but its suite has only ever run in
+# CI on ubuntu. This runs it natively on every platform we can get, so
+# differential mismatches on Windows/macOS can be attributed (TS bug vs Rust
+# bug) instead of guessed. Known gap: no native macOS x64 runner is
+# available in this repo's runner set (release cross-builds x64 on arm64);
+# tracked under the program's open decision 2.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/workspace-engine/**"
+      - ".github/workflows/engine-tests-native.yml"
+  pull_request:
+    paths:
+      - "packages/workspace-engine/**"
+      - ".github/workflows/engine-tests-native.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: engine-tests-native-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  engine-tests:
+    name: Engine tests ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Windows x64
+            runner: windows-latest
+          - label: macOS arm64
+            runner: macos-latest
+          - label: Linux x64
+            runner: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.14.0
+
+      - name: Setup pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.24.0 --activate
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Assert native architecture
+        run: node -e "console.log(process.platform, process.arch); if (process.env.EXPECT && process.env.EXPECT !== process.platform + '-' + process.arch) { throw new Error('runner arch mismatch') }"
+
+      - name: Workspace engine typecheck
+        run: pnpm --filter @dohc/workspace-engine typecheck
+
+      - name: Workspace engine tests
+        run: pnpm --filter @dohc/workspace-engine test
