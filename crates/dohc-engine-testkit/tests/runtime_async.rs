@@ -8,7 +8,7 @@ use dohc_engine_runtime::{
     CancellationToken, CompoundWrite, FaultInjector, FaultPoint, NoFaults, WorkspaceSupervisor,
     WriteOutcome,
 };
-use dohc_engine_testkit::{GateFaults, ScratchDir};
+use dohc_engine_testkit::{GateFaults, ScratchDir, ScriptedFaults};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -152,6 +152,32 @@ async fn cancellation_stops_between_units_leaving_consistent_state() {
     // Consistency: unit 0 is durable, unit 1 never ran.
     assert!(handle.read_async("d0").await.expect("read").is_some());
     assert!(handle.read_async("d1").await.expect("read").is_none());
+
+    sup.close(&db).expect("close");
+}
+
+// oracle: run_units counts an after-commit-before-ack crash as committed — the
+// unit is durable, so UnitsOutcome.committed must match what the DB holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_units_counts_after_commit_crash_as_committed() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let sup = WorkspaceSupervisor::new();
+    let handle = sup.open(&db, 1).expect("open");
+
+    // Crash after unit 0 commits durably but before its ack.
+    let faults: Arc<dyn FaultInjector> =
+        ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
+    let units: Vec<CompoundWrite> = (0..3).map(unit).collect();
+    let token = CancellationToken::new();
+
+    let outcome = handle
+        .run_units(units, faults, token)
+        .await
+        .expect("run ok");
+    // Unit 0 committed durably → counted; the run stopped at that boundary.
+    assert_eq!(outcome.committed, 1);
+    assert!(handle.read_async("d0").await.expect("read").is_some());
 
     sup.close(&db).expect("close");
 }

@@ -27,6 +27,15 @@ use std::path::Path;
 /// Table shapes are deliberately minimal for the calibration slice but the
 /// two ledger tables match the day-one design so later shards extend rather
 /// than introduce them.
+///
+/// SCHEMA ASSEMBLY (Wave 1): the day-one v2 schema is being ASSEMBLED across the
+/// calibration slices (CAL-1 ledgers + documents, CAL-2 versioning tables) and
+/// is FROZEN at R04, which owns the finalized shape, fixtures, and the ordered
+/// migration ledger (`plan §Day-one Rust schema`). Adding tables here without a
+/// fingerprint bump is intentional for this window: nothing durable is stamped
+/// v2 yet (every store is dormant/test-created fresh), so a prior CAL-1 v2 file
+/// failing the CAL-2 `validate_v2` is not a data-loss path — there is no such
+/// file in the wild. Post-R04, every schema change goes through the ledger.
 const V2_SCHEMA_DDL: &str = "\
 -- Day-one migration ledger (STATE_OWNERSHIP.tsv row `table-migration-ledger`).
 -- Append-only; one row per applied migration. The eager v2 create records

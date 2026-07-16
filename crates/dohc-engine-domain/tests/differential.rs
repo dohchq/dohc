@@ -105,8 +105,8 @@ fn run_trace(db: &std::path::Path) -> String {
 /// records (N8). Interpolated from the domain's own hashing so the fixture is
 /// self-describing and stays correct if the trace's texts change.
 fn golden() -> String {
-    let hello = &text_blob_sha256("hello")[..12];
-    let world = &text_blob_sha256("world")[..12];
+    let hello = text_blob_sha256("hello");
+    let world = text_blob_sha256("world");
     format!(
         "active=main\n\
          version id=main kind=main name=main created=1 fork_from=- fork_moment=-\n\
@@ -117,8 +117,8 @@ fn golden() -> String {
          snapshot version=main path=a.md object=o1 blob={hello} origin=user\n\
          forkbase version=feat path=a.md object=o1 blob={hello}\n\
          forkbase version=feat2 path=a.md object=o1 blob={hello}\n\
-         moment order=1 version=main path=a.md op=write after={hello} before_present=false sync_only=false\n\
-         moment order=2 version=feat path=a.md op=write after={world} before_present=true sync_only=false\n"
+         moment order=1 id=m1 version=main object=o1 path=a.md recorded=10 op=write after={hello} before_present=false before=- origin=user sync_only=false\n\
+         moment order=2 id=m2 version=feat object=o1 path=a.md recorded=30 op=write after={world} before_present=true before={hello} origin=agent sync_only=false\n"
     )
 }
 

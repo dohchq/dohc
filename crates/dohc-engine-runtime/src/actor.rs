@@ -448,23 +448,33 @@ impl ActorHandle {
         token: CancellationToken,
         deadline: std::time::Duration,
     ) -> Result<UnitsOutcome, RuntimeError> {
+        // The deadline bounds the WHOLE operation, including enqueue: under a
+        // full command queue `send().await` can block past the deadline, so the
+        // wait for queue space is inside the timed select too.
+        let deadline_at = tokio::time::Instant::now() + deadline;
         let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::RunUnits {
+
+        tokio::select! {
+            biased;
+            sent = self.tx.send(Command::RunUnits {
                 units,
                 faults,
                 token: token.clone(),
                 reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
+            }) => sent.map_err(|_| RuntimeError::ActorUnavailable)?,
+            () = tokio::time::sleep_until(deadline_at) => {
+                // Never admitted; nothing was cancelled to observe.
+                token.cancel();
+                return Err(RuntimeError::DeadlineExceeded);
+            }
+        }
 
         tokio::select! {
             biased;
             result = reply_rx => result
                 .map_err(|_| RuntimeError::ActorUnavailable)?
                 .map_err(RuntimeError::Storage),
-            () = tokio::time::sleep(deadline) => {
+            () = tokio::time::sleep_until(deadline_at) => {
                 // Deadline first: ask the run to stop at its next between-unit
                 // boundary. The in-flight unit (if any) still finishes durably.
                 token.cancel();
@@ -586,8 +596,14 @@ fn run_units(
         }
         match store.commit_compound(&unit, faults)? {
             WriteOutcome::Acked { .. } => committed += 1,
-            // A crash fault mid-unit ends the run at a durable boundary.
-            WriteOutcome::Crashed { .. } => {
+            // A crash fault ends the run at a durable boundary. An
+            // after-commit-before-ack crash already durably committed THIS
+            // unit, so count it — otherwise `committed` undercounts what the
+            // database actually holds and breaks retry/progress accounting.
+            WriteOutcome::Crashed { committed: durable } => {
+                if durable {
+                    committed += 1;
+                }
                 return Ok(UnitsOutcome {
                     committed,
                     cancelled: token.is_cancelled(),

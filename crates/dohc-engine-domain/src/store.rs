@@ -108,11 +108,15 @@ impl<'a> VersionedTextStore<'a> {
         validate_path(&input.path)?;
         validate_text(&input.text)?;
 
+        // `object_id` is part of the durable result for a first write, so it is
+        // in the idempotency payload: a retry with a different generated id is a
+        // reuse-mismatch, not a silent replay.
         let payload_hash = hash_fields(&[
             input.version_id.as_bytes(),
             input.path.as_bytes(),
             input.text.as_bytes(),
             input.moment_id.as_bytes(),
+            input.object_id.as_bytes(),
         ]);
 
         // Pre-transaction validation + idempotency (single-writer: authoritative).
@@ -135,7 +139,23 @@ impl<'a> VersionedTextStore<'a> {
             let existing_object = alias_object_id(conn, ws, &input.version_id, &input.path)?;
             let before = match &existing_object {
                 Some(object_id) => get_snapshot(conn, ws, &input.version_id, object_id)?,
-                None => None,
+                None => {
+                    // New path → mint a NEW object. The supplied id must be
+                    // non-empty and not already bound; otherwise the snapshot
+                    // upsert (keyed by object_id) would silently clobber another
+                    // file's state. Fail closed instead.
+                    if input.object_id.is_empty() {
+                        return Err(DomainError::InvalidInput {
+                            reason: "object_id must not be empty for a new path",
+                        });
+                    }
+                    if object_exists(conn, ws, &input.object_id)? {
+                        return Err(DomainError::InvalidInput {
+                            reason: "object_id is already bound to another object",
+                        });
+                    }
+                    None
+                }
             };
             Ok(WritePrep::Apply(Box::new(WriteApply {
                 existing_object,
@@ -148,18 +168,24 @@ impl<'a> VersionedTextStore<'a> {
             WritePrep::Apply(apply) => (apply.existing_object, apply.before),
         };
 
+        let is_new_object = existing_object.is_none();
         let object_id = existing_object.unwrap_or_else(|| input.object_id.clone());
         let blob = text_blob_sha256(&input.text);
         let before_blob = before.as_ref().map(|s| s.blob_sha256.clone());
 
         let outcome = self.store.write_with(faults, |tx| {
             let moment_order = next_moment_order(tx)?;
-            tx.execute(
-                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
-                 VALUES (?1, ?2, ?3)",
-                params![ws, object_id, input.now_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
+            if is_new_object {
+                // Plain INSERT (not OR IGNORE): a collision here — after the
+                // pre-check — must roll the whole write back, never reuse an
+                // existing object.
+                tx.execute(
+                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                     VALUES (?1, ?2, ?3)",
+                    params![ws, object_id, input.now_ms],
+                )
+                .map_err(DomainError::sql_persist)?;
+            }
             tx.execute(
                 "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
                 params![blob, input.text.len() as i64, input.text],
@@ -265,24 +291,32 @@ impl<'a> VersionedTextStore<'a> {
     }
 
     /// Reconstruct the result of a previously-committed write for an
-    /// exactly-once replay (the request ledger already recorded it).
+    /// exactly-once replay. Rebuilds the snapshot from the RECORDED moment's
+    /// after-blob, NOT the live snapshot: if a later write updated the same
+    /// path, its text/latest-moment must never leak into a timed-out client's
+    /// replay (the exactly-once contract).
     fn reconstruct_write(&self, input: &WriteText) -> Result<WriteResult, DomainError> {
         let ws = &input.workspace_id;
         self.store.read_with(|conn| {
-            let object_id = alias_object_id(conn, ws, &input.version_id, &input.path)?.ok_or(
-                DomainError::StateCorrupt {
-                    reason: "deduped write has no path alias",
-                },
-            )?;
-            let snapshot = get_snapshot(conn, ws, &input.version_id, &object_id)?.ok_or(
-                DomainError::StateCorrupt {
-                    reason: "deduped write has no snapshot",
-                },
-            )?;
             let moment =
                 get_moment(conn, ws, &input.moment_id)?.ok_or(DomainError::StateCorrupt {
                     reason: "deduped write has no moment",
                 })?;
+            let text =
+                blob_text(conn, &moment.after_blob_sha256)?.ok_or(DomainError::StateCorrupt {
+                    reason: "deduped write moment blob missing",
+                })?;
+            let snapshot = TextSnapshot {
+                workspace_id: ws.clone(),
+                version_id: moment.version_id.clone(),
+                object_id: moment.object_id.clone(),
+                path: moment.path.clone(),
+                text,
+                blob_sha256: moment.after_blob_sha256.clone(),
+                updated_at_ms: moment.recorded_at_ms,
+                latest_moment_id: moment.moment_id.clone(),
+                metadata_origin: moment.metadata_origin.clone(),
+            };
             Ok(WriteResult {
                 snapshot,
                 moment,
@@ -293,7 +327,9 @@ impl<'a> VersionedTextStore<'a> {
 
     // -------------------------------------------------------------------- reads
 
-    /// Read the current text snapshot for `path` in `version`, or `None`.
+    /// Read the current text snapshot for `path` in `version`, or `None`. Fails
+    /// closed (`VersionNotFound`) on an unknown version so a bad version never
+    /// looks like a missing file (`versions-read-text-file` contract).
     pub fn read_text(
         &self,
         workspace_id: &str,
@@ -301,6 +337,9 @@ impl<'a> VersionedTextStore<'a> {
         path: &str,
     ) -> Result<Option<TextSnapshot>, DomainError> {
         self.store.read_with(|conn| {
+            if !version_exists(conn, workspace_id, version_id)? {
+                return Err(DomainError::VersionNotFound);
+            }
             let Some(object_id) = alias_object_id(conn, workspace_id, version_id, path)? else {
                 return Ok(None);
             };
@@ -759,15 +798,37 @@ fn non_empty(value: &str, field: &'static str) -> Result<(), DomainError> {
     }
 }
 
+/// Minimal path floor for the calibration slice. This is NOT the full
+/// `validateUserWritePath` parity — normalization (NFC, forward-slash),
+/// percent-decoding, and the complete reserved-name set are owned by the
+/// `dohc-engine-files` path-floor shard. It rejects the high-value cases so a
+/// clearly-unsafe path never becomes a durable alias/moment here.
 fn validate_path(path: &str) -> Result<(), DomainError> {
     if path.is_empty() {
         return Err(DomainError::InvalidPath {
             reason: "path must not be empty",
         });
     }
-    if path.starts_with('/') || path.contains("..") {
+    if path.contains('\0') {
         return Err(DomainError::InvalidPath {
-            reason: "path must be workspace-relative without traversal",
+            reason: "path must not contain NUL",
+        });
+    }
+    // POSIX-absolute, Windows backslash / UNC, or drive-letter absolute.
+    if path.starts_with('/') || path.contains('\\') || path.as_bytes().get(1) == Some(&b':') {
+        return Err(DomainError::InvalidPath {
+            reason: "path must be workspace-relative (no absolute or backslash forms)",
+        });
+    }
+    if path.contains("..") {
+        return Err(DomainError::InvalidPath {
+            reason: "path must not contain traversal segments",
+        });
+    }
+    // The engine's own directory is reserved; a file must never alias into it.
+    if path == ".dohc" || path.starts_with(".dohc/") {
+        return Err(DomainError::InvalidPath {
+            reason: "path must not target the reserved .dohc directory",
         });
     }
     Ok(())
@@ -837,6 +898,32 @@ fn moment_exists(
         .optional()
         .map_err(DomainError::sql_corrupt)?;
     Ok(found.is_some())
+}
+
+fn object_exists(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<bool, DomainError> {
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM file_objects WHERE workspace_id = ?1 AND object_id = ?2",
+            params![workspace_id, object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(found.is_some())
+}
+
+fn blob_text(conn: &Connection, sha256: &str) -> Result<Option<String>, DomainError> {
+    conn.query_row(
+        "SELECT text FROM blobs WHERE sha256 = ?1",
+        params![sha256],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)
 }
 
 fn alias_object_id(

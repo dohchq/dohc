@@ -45,15 +45,23 @@ pub struct ForkBaseRow {
     pub blob_sha256: String,
 }
 
-/// One normalized moment row (ascending `moment_order`).
+/// One normalized moment row (ascending `moment_order`). Carries the full
+/// deterministic-history contract — stable id, object identity, before-linking,
+/// timestamp, and origin — so the differential fails when any of them is wrong,
+/// not only when the after-content diverges.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MomentRow {
     pub moment_order: i64,
+    pub moment_id: String,
     pub version_id: String,
+    pub object_id: String,
     pub path: String,
+    pub recorded_at_ms: i64,
     pub operation: String,
     pub after_blob_sha256: String,
     pub before_present: bool,
+    pub before_blob_sha256: Option<String>,
+    pub metadata_origin: String,
     pub sync_record_only: bool,
 }
 
@@ -67,11 +75,10 @@ pub struct NormalizedState {
     pub moments: Vec<MomentRow>,
 }
 
-/// A generous page size to gather all moments in one read for the harness.
-const MOMENT_SWEEP_LIMIT: i64 = 1_000_000;
-/// Blob hashes are truncated to this many hex chars in the canonical string so
-/// golden fixtures stay readable; still deterministic and collision-safe here.
-const HASH_PREFIX: usize = 12;
+/// Per-page size when sweeping the full moment history through the keyset
+/// cursor (bounded — the sweep follows pages until the cursor is exhausted, so
+/// a long-lived workspace is captured completely, not truncated).
+const MOMENT_PAGE: i64 = 512;
 
 pub(crate) fn capture(
     store: &VersionedTextStore<'_>,
@@ -113,26 +120,38 @@ pub(crate) fn capture(
     }
     fork_bases.sort_by(|a, b| (&a.version_id, &a.path).cmp(&(&b.version_id, &b.path)));
 
-    let page = store.list_moments(&ListMomentsQuery {
-        workspace_id: workspace_id.to_owned(),
-        version_id: None,
-        object_id: None,
-        limit: MOMENT_SWEEP_LIMIT,
-        before_moment_order: None,
-    })?;
-    let mut moments: Vec<MomentRow> = page
-        .moments
-        .into_iter()
-        .map(|m| MomentRow {
-            moment_order: m.moment_order,
-            version_id: m.version_id,
-            path: m.path,
-            operation: m.operation.as_str().to_owned(),
-            after_blob_sha256: m.after_blob_sha256,
-            before_present: m.before_present,
-            sync_record_only: m.sync_record_only,
-        })
-        .collect();
+    // Sweep the whole history by following the keyset cursor, never truncating.
+    let mut moments: Vec<MomentRow> = Vec::new();
+    let mut cursor: Option<i64> = None;
+    loop {
+        let page = store.list_moments(&ListMomentsQuery {
+            workspace_id: workspace_id.to_owned(),
+            version_id: None,
+            object_id: None,
+            limit: MOMENT_PAGE,
+            before_moment_order: cursor,
+        })?;
+        for m in page.moments {
+            moments.push(MomentRow {
+                moment_order: m.moment_order,
+                moment_id: m.moment_id,
+                version_id: m.version_id,
+                object_id: m.object_id,
+                path: m.path,
+                recorded_at_ms: m.recorded_at_ms,
+                operation: m.operation.as_str().to_owned(),
+                after_blob_sha256: m.after_blob_sha256,
+                before_present: m.before_present,
+                before_blob_sha256: m.before_blob_sha256,
+                metadata_origin: m.metadata_origin,
+                sync_record_only: m.sync_record_only,
+            });
+        }
+        match page.next_before_moment_order {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
     // list_moments returns newest-first; normalize to ascending order.
     moments.sort_by_key(|m| m.moment_order);
 
@@ -159,51 +178,61 @@ fn to_version_row(v: &VersionRecord) -> VersionRow {
 impl NormalizedState {
     /// A canonical, line-oriented string form — stable across runs for a given
     /// trace, so a golden-fixture comparison is a plain string equality.
+    ///
+    /// FULL sha256 hashes (never truncated) so distinct content can never
+    /// compare equal. Field values are emitted via [`field`] which rejects a
+    /// value containing a delimiter/newline, so user-controlled names/paths/ids
+    /// cannot forge or hide a row.
     pub fn to_canonical_string(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!(
             "active={}\n",
-            self.active_version_id.as_deref().unwrap_or("<none>")
+            field(self.active_version_id.as_deref().unwrap_or("<none>"))
         ));
         for v in &self.versions {
             out.push_str(&format!(
                 "version id={} kind={} name={} created={} fork_from={} fork_moment={}\n",
-                v.version_id,
+                field(&v.version_id),
                 v.kind.as_str(),
-                v.name,
+                field(&v.name),
                 v.created_at_ms,
-                v.fork_version_id.as_deref().unwrap_or("-"),
-                v.fork_moment_id.as_deref().unwrap_or("-"),
+                field(v.fork_version_id.as_deref().unwrap_or("-")),
+                field(v.fork_moment_id.as_deref().unwrap_or("-")),
             ));
         }
         for s in &self.snapshots {
             out.push_str(&format!(
                 "snapshot version={} path={} object={} blob={} origin={}\n",
-                s.version_id,
-                s.path,
-                s.object_id,
-                short(&s.blob_sha256),
-                s.metadata_origin,
+                field(&s.version_id),
+                field(&s.path),
+                field(&s.object_id),
+                s.blob_sha256,
+                field(&s.metadata_origin),
             ));
         }
         for f in &self.fork_bases {
             out.push_str(&format!(
                 "forkbase version={} path={} object={} blob={}\n",
-                f.version_id,
-                f.path,
-                f.object_id,
-                short(&f.blob_sha256),
+                field(&f.version_id),
+                field(&f.path),
+                field(&f.object_id),
+                f.blob_sha256,
             ));
         }
         for m in &self.moments {
             out.push_str(&format!(
-                "moment order={} version={} path={} op={} after={} before_present={} sync_only={}\n",
+                "moment order={} id={} version={} object={} path={} recorded={} op={} after={} before_present={} before={} origin={} sync_only={}\n",
                 m.moment_order,
-                m.version_id,
-                m.path,
+                field(&m.moment_id),
+                field(&m.version_id),
+                field(&m.object_id),
+                field(&m.path),
+                m.recorded_at_ms,
                 m.operation,
-                short(&m.after_blob_sha256),
+                m.after_blob_sha256,
                 m.before_present,
+                m.before_blob_sha256.as_deref().unwrap_or("-"),
+                field(&m.metadata_origin),
                 m.sync_record_only,
             ));
         }
@@ -211,6 +240,13 @@ impl NormalizedState {
     }
 }
 
-fn short(hash: &str) -> &str {
-    hash.get(..HASH_PREFIX).unwrap_or(hash)
+/// Emit a field value for the canonical form, rejecting a delimiter/newline so
+/// a user-controlled value cannot inject or hide a row. Controlled inputs never
+/// hit the fallback; it exists so a malformed value is loud, not silent.
+fn field(value: &str) -> String {
+    if value.contains(' ') || value.contains('\n') || value.contains('=') {
+        format!("<invalid:{}>", value.escape_default())
+    } else {
+        value.to_owned()
+    }
 }

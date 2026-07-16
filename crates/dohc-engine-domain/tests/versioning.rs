@@ -131,6 +131,107 @@ fn duplicate_moment_id_is_rejected() {
     assert_eq!(err.code(), "duplicate-moment-id");
 }
 
+// oracle: writing a NEW path with an object id already bound to another object
+// fails closed (never silently reuses/clobbers the other file's snapshot).
+#[test]
+fn reused_object_id_for_new_path_is_rejected() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+
+    vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("first");
+    let err = vt
+        .write_text(&write("main", "b.md", "two", "m2", "o1", 20), &NO_FAULTS)
+        .expect_err("reused object id");
+    assert_eq!(err.code(), "invalid-input");
+    // a.md's state is untouched.
+    assert_eq!(
+        vt.read_text(WS, "main", "a.md").unwrap().unwrap().text,
+        "one"
+    );
+    assert!(vt.read_text(WS, "main", "b.md").expect("read").is_none());
+}
+
+// oracle: a read against an unknown version fails closed rather than looking
+// like a missing file.
+#[test]
+fn read_text_unknown_version_fails_closed() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let vt = VersionedTextStore::new(&mut store);
+    assert_eq!(
+        vt.read_text(WS, "ghost", "a.md")
+            .expect_err("unknown version")
+            .code(),
+        "version-not-found"
+    );
+}
+
+// oracle (exactly-once): a deduped write replay returns the ORIGINAL recorded
+// result, never a later write's text/moment on the same path.
+#[test]
+fn deduped_write_returns_original_not_later_state() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+
+    let mut first = write("main", "a.md", "first", "m1", "o1", 10);
+    first.request_id = Some("req".to_owned());
+    vt.write_text(&first, &NO_FAULTS).expect("first");
+
+    // A later write updates the same path (live snapshot becomes "second"/m2).
+    vt.write_text(&write("main", "a.md", "second", "m2", "o1", 20), &NO_FAULTS)
+        .expect("second");
+
+    // Replay the original request: must return the ORIGINAL result.
+    let replay = vt.write_text(&first, &NO_FAULTS).expect("replay");
+    assert!(replay.deduped);
+    assert_eq!(replay.snapshot.text, "first");
+    assert_eq!(replay.snapshot.latest_moment_id, "m1");
+    assert_eq!(replay.moment.moment_id, "m1");
+    // The live state is unchanged (still the later write).
+    assert_eq!(
+        vt.read_text(WS, "main", "a.md").unwrap().unwrap().text,
+        "second"
+    );
+}
+
+// oracle: a reserved / absolute / traversal path is rejected.
+#[test]
+fn unsafe_paths_are_rejected() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    for (i, bad) in [
+        "/abs.md",
+        "..\\esc",
+        "a\\b.md",
+        "C:\\x",
+        ".dohc/engine.db",
+        "a/../b",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let err = vt
+            .write_text(
+                &write("main", bad, "x", &format!("m{i}"), &format!("o{i}"), 10),
+                &NO_FAULTS,
+            )
+            .expect_err("unsafe path");
+        assert_eq!(err.code(), "invalid-path", "path {bad:?} must be rejected");
+    }
+}
+
 // oracle: create-named-version forks correctly — copies snapshots/aliases,
 // isolates subsequent writes, and records the fork point.
 #[test]
