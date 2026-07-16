@@ -67,16 +67,29 @@ Every record has `"t"` (type). Types: `header`, `fs`, `state`, `op`, `fault`,
   `createId`/`createRunId`/`createMomentId` options. IDs that remain
   non-injectable after the R01-DETERMINISM retrofit are handled by
   normalizer N5, never by fuzzy matching.
-- `workspaces[].generation` — the session generation the trace starts at;
-  `restart` records increment it. Ops carry the generation they expect so a
-  stale-generation response is a trace failure, not a silent repaint
-  (mirrors the repo's workspace/request-token invariant).
+- `workspaces[].generation` — the session generation the trace starts at
+  (integer ≥ 1); `open()` initializes the workspace actor at exactly this
+  generation (section 6) and `restart` records increment it. Ops carry the
+  generation they expect so a stale-generation response is a trace failure,
+  not a silent repaint (mirrors the repo's workspace/request-token invariant).
 - `actors` — capability fixtures. `kind` ∈
   `user | agent | external-editor | remote-peer | system`. The adapter maps
   actor kind onto the engine's write-metadata origin (the
   `localFileWrite`/`apiWrite`-style metadata the current tests use) and onto
   policy/lock/turn-gate identity. `external-editor` actors may only issue
   `fs` records (they write files, never call the engine API).
+  **Caps are expectations, never grants (normative).** Authorization is
+  derived engine-side from the actor's registered identity, workspace
+  membership, and policy, exactly as in production (repo invariant:
+  authorization is derived server-side; a caller never supplies its own
+  authority) — a trace cannot mint capability. Each behavior's required
+  scope comes from the inventory's `security_class` column. An `op` issued
+  by an actor lacking the required capability MUST carry
+  `expect: {"outcome":"error","code":"forbidden"}` (or the behavior's
+  documented scoping error, e.g. `workspace-mismatch`); a trace expecting
+  success for such an op fails validation before any engine runs, and an
+  engine that accepts the op fails the differential run — authz parity is
+  asserted, not assumed.
 - `normalizers` — pointer to the committed normalization rules in force
   (this document, section 2). A trace is invalid without it.
 - `minimizedFrom` — for minimized replays of a failing fuzz/soak run: the
@@ -100,6 +113,19 @@ uses `contentBase64`. Paths are workspace-root-relative, forward slashes.
 mid-trace model external editors/agents racing the engine (the capture path
 must observe them per its watcher/reconcile contract — but see the trace
 boundary note in 1.3).
+
+`symlink` records (normative): `target` is required and explicit. A target
+that resolves inside the fixture workspace root is created as-is. A target
+that resolves outside it MUST set `"escapesRoot": true` — the harness then
+creates the target only inside a harness-owned scratch sibling directory
+(never a real user path; the shadow-fence denylist applies) and the record
+exists precisely to *prove containment*: the engine contract is that
+capture, scan, and materialization never follow a link out of the workspace
+root (the existing containment-sandwich guards in
+`workspaceEngineCapture.ts`/`shareMounts.ts`), so the trace asserts the
+external content is never read, indexed, or written through. A `symlink`
+record without `escapesRoot` whose target escapes the root fails trace
+validation.
 
 #### `state` — constructed engine-state precondition (logical rows)
 
@@ -175,6 +201,14 @@ while the workspace actor is quiesced.
   reached/not-reached counts).
 - `scope` — restricts the arm to a matching `opId` or `behaviorId`;
   `armAfter` skips N traversals first. An armed `crash` fault consumes itself.
+- `optionalFor` — optional array of engine IDs; the only allowed value at
+  `traceVersion` 1 is `"ts"` (validation rejects anything else). Semantics:
+  the harness may skip this fault record for an engine only if the engine is
+  listed here AND its `listFaultPoints()` (section 6) does not report the
+  point. For any engine not listed, a missing point fails the run. This is
+  the sole mechanism for running a G-point trace differentially before the
+  TS hook exists — omitting `optionalFor` means the point is mandatory on
+  both engines.
 - Environmental kinds (`env.*`) and relay fault kinds (`relay.fault.*`) are
   listed in the registry, sections 3.9–3.10.
 
@@ -302,10 +336,12 @@ rule allowed the difference — which is a stop-the-line mismatch).
   not a diff — it runs identically against both engines.
 - **N11 — error identity**: stable machine code only (`expect.code`);
   message text, stack, and error class hierarchy are never compared.
-- **N12 — replication acks/cursors**: compared as logical positions
-  (origin → seq maps, cursor values); relay-assigned sequence numbers are
-  compared via N5 structural substitution when the relay fixture is not
-  byte-deterministic.
+- **N12 — replication acks/cursors**: compared as logical positions.
+  Origin → seq maps, cursor values, gaps, and monotonicity are compared
+  **numerically** — `[1,3]` and `[1,2]` must never canonicalize equal, or a
+  dropped op / invalid cursor advance would be masked. N5 structural
+  substitution applies only to *opaque* relay identifiers (stream/epoch/
+  origin IDs the relay mints), never to sequence numbers or cursors.
 
 Anything not covered by N1–N12 is compared byte-for-byte after N2's row
 normalization. A needed-but-missing normalizer is a change to this document
@@ -453,10 +489,21 @@ payloads at any registry point, implemented behind the core crates' fs/db
 trait seams (portability guardrail 2 — same seams as the deterministic clock):
 
 `env.disk-full` · `env.permission-denied` ·
-`env.sharing-violation-transient` (Windows AV/indexer handle; must trigger the
-bounded retry/backoff then fail-closed path of the `ReplaceFile` sequence) ·
-`env.locked-file` · `env.sqlite-busy` · `env.truncated-ipc-frame`
-(protocol layer; pairs with the R03 panic-free decoder).
+`env.sharing-violation-transient` · `env.locked-file` · `env.sqlite-busy` ·
+`env.truncated-ipc-frame` (protocol layer; pairs with the R03 panic-free
+decoder).
+
+`env.sharing-violation-transient` (Windows AV/indexer handle) is normative,
+not prose: the fault reports a sharing violation for exactly `n` consecutive
+probes (trace-specified via the fault record's `errorArgs.count`, default 3).
+The engine's `ReplaceFile` sequence retries on a deterministic schedule under
+the test clock with a **normative maximum of 5 attempts** (the single shared
+constant lives in `STORAGE_AND_RECOVERY.md` and both engines read it from the
+generated contract package). Outcome the harness asserts: `n < 5` ⇒ success
+on attempt `n+1` with exactly `n+1` traversals of the fault point; `n ≥ 5` ⇒
+fail closed after exactly 5 attempts with the stable error code
+`file-locked` and the materialization job left pending (replayed at startup).
+Two engines that retry differently cannot both pass.
 
 Relay fault model (Gate 4's named set; seeded schedule from the trace header,
 applied by the harness's relay fixture, N instances):
@@ -469,12 +516,16 @@ between journal-apply and cursor-advance, which is point 24 under tier 2.
 **35 named position points** (6 storage-lane, 5 open/migrate, 5 materialize,
 5 ydoc, 5 sync, 2 secrets, 1 search, 3 runtime/watch, 3 backup/reset — #35
 parameterized over 5 transitions) **+ 6 environmental kinds + 5 relay fault
-kinds**. Mapping census: 7 existing TS hooks (H), 10 constructed-state
-corpora (C), 4 structural (A), 14 gaps (G) that exist only because v2 adds
-the durability machinery v1 lacks (migration ledger, materialization jobs,
-ack boundary, pending index generation, reset machine) — every G point ships
-in the same shard as the machinery it tests, and its shard is not
-parity-verified without it.
+kinds**. Mapping census (each point counted once, under its primary style;
+point 23 is structural with a constructed-state corpus attached and counts
+as A; point 15's hook precedent lives in a quarantined file and counts as C):
+6 existing TS hooks (H: 1, 2, 3, 5, 17, 18), 10 constructed-state corpora
+(C: 7, 8, 9, 12, 13, 15, 16, 25, 26, 31), 4 structural (A: 6, 22, 23, 24),
+and 15 gaps (G: 4, 10, 11, 14, 19, 20, 21, 27, 28, 29, 30, 32, 33, 34, 35)
+that exist only because v2 adds the durability machinery v1 lacks (migration
+ledger, materialization jobs, ack boundary, pending index generation, reset
+machine) — every G point ships in the same shard as the machinery it tests,
+and its shard is not parity-verified without it.
 
 ### 3.12 Crash-shaped TS tests with no fault point — explicit dispositions
 
@@ -538,25 +589,45 @@ attestation. Two mechanisms, both CI-enforced:
   binding — TS: `// oracle: <behavior-id>[, <behavior-id>...]` on the
   `it(...)`; Rust: `#[dohc_oracle("behavior-id", ...)]` attribute macro from
   `dohc-engine-testkit` (doubles as the differential-trace tag).
-- **Counting rule**: static count of assertion call sites inside the test
-  body — TS: `expect(`, `assert.` and `rejects/resolves` matcher chains
-  (each terminal matcher = 1); Rust: `assert!`/`assert_eq!`/`assert_ne!`/
-  `panic-expecting` helpers + testkit assert macros. Loops don't multiply
-  (call sites, not executions — same convention the inventory used for raw-SQL
-  counts). The counter is a small deterministic script in
+- **Counting rule**: static count of **assertion chains**, each chain counted
+  exactly once at its terminal matcher — the rules are mutually exclusive:
+  - a TS `expect(...)` chain = 1, counted at the terminal matcher, sync or
+    async: `expect(x).toBe(y)` = 1; `expect(x).toMatchObject({...})` = 1;
+    `await expect(p).rejects.toThrow(...)` = 1 (the `expect(` call is
+    **not** counted separately from its `rejects`/`resolves` terminal);
+    `await expect(p).resolves.toEqual(...)` = 1.
+  - a bare `assert.*(...)` call = 1 (only when not part of an `expect` chain,
+    which cannot syntactically occur).
+  - Rust: each `assert!`/`assert_eq!`/`assert_ne!` = 1; each
+    `#[should_panic]`/`unwrap_err`-style expectation helper from the testkit
+    = 1.
+  - Loops don't multiply (call sites, not executions — same convention the
+    inventory used for raw-SQL counts).
+  The counter is a small deterministic script in
   `tools/rust-engine-program/` (owned by this shard's follow-up; the packet
-  builder already carries the TSV plumbing it reuses).
+  builder already carries the TSV plumbing it reuses) and ships with fixture
+  cases for each bullet above, including the sync and async forms.
 - **Ledger**: `docs/superpowers/plans/rust-engine/TEST_PARITY.tsv` —
   `original_file · behavior_id · original_assertions · ported_file ·
-  ported_assertions · mutation_ids · delta_justification`. Committed, reviewed
+  ported_assertions · mutation_ids · delta_approval`. Committed, reviewed
   at the porting shard's tier.
+- **Parity exceptions are structured, never free text.** A row with
+  `ported_assertions < original_assertions` passes CI only if
+  `delta_approval` parses as
+  `ref=<PR-or-issue-number>;approver=<reviewer handle or bot>;expires=<gate id>`
+  with all three fields present: `ref` must name the reviewed PR/issue that
+  approved the delta (for behavior-changing deltas this is the PR that added
+  the matching `BEHAVIOR_DELTA.md` entry), `approver` names who approved it,
+  and `expires` names the gate (`GATE2`…`GATE8`) at which the exception is
+  re-audited — an expired exception fails CI again. Malformed, partial, or
+  absent approval ⇒ fail closed. Arbitrary prose cannot bypass the gate.
 - **CI check** (`oracle-parity` job, wired beside the `--check` hook of the
   packet builder): recount both sides, fail if
-  `ported_assertions < original_assertions` with an empty
-  `delta_justification`, if any annotation names an unknown behavior ID, if
+  `ported_assertions < original_assertions` without a valid `delta_approval`
+  per the rule above, if any annotation names an unknown behavior ID, if
   any inventory row whose `current_tests` names a ported file has zero ported
   assertions, or if the skipped-test count (`it.skip`/`#[ignore]`) rose.
-  Justified deltas are the *audited exception path*, reviewed like code.
+  Approved deltas are the *audited exception path*, reviewed like code.
 
 ### 5.2 Mutation-smoke gate
 
@@ -609,7 +680,8 @@ interface EngineTestAdapter {
   // -- lifecycle -----------------------------------------------------------
   open(fixture: WorkspaceFixture, opts: {
     seed: number; clock: ClockSpec; replicated?: boolean;
-  }): Promise<EngineHandle>;                   // workspace actor up, generation 1
+    generation?: number;                       // header workspaces[].generation, default 1
+  }): Promise<EngineHandle>;                   // actor up at opts.generation
   close(h: EngineHandle): Promise<void>;       // orderly drain + release
   restart(h: EngineHandle): Promise<EngineHandle>;  // close+reopen, generation++
   crashRestart(h: EngineHandle): Promise<EngineHandle>; // post-`crash` recovery open
@@ -621,7 +693,11 @@ interface EngineTestAdapter {
     actor: ActorRef; params: Json;
     idempotencyKey: string; retryOf?: string;
     sessionGeneration: number;
-  }): Promise<{ outcome: "ok"; result: Json } | { outcome: "error"; code: string }>;
+  }): Promise<
+    | { outcome: "ok"; result: Json }
+    | { outcome: "error"; code: string }
+    | { outcome: "crashed" }                   // armed crash fault / tier-2 kill fired
+  >;
   drainEvents(h: EngineHandle): Promise<EngineEvent[]>;   // ordered, per-workspace
 
   // -- raw logical state (the sql-state-oracle port) -------------------------
@@ -660,10 +736,19 @@ interface EngineTestAdapter {
   files (12 in `packages/workspace-engine`, 5 desktop — per
   `TEST_CLASSIFICATION.tsv`) therefore port without assertion rewrites, which
   is what keeps the ~148 raw-SQL assertion sites cheap (plan, decision 3).
+- **`crashed` is a first-class outcome**: the adapter resolves `invoke` with
+  `{ outcome: "crashed" }` iff the transport/process was lost while a `crash`
+  fault was armed for that op (or a tier-2 `kill` was scheduled). Transport
+  loss with **no** armed crash is an adapter exception that fails the run —
+  the harness must never confuse an accidental sidecar death or rejected
+  promise with an expected fault. After `crashed`, the only legal next trace
+  records are `restart`/`crashRestart` (or end-of-trace); the harness
+  enforces this ordering.
 - **`listFaultPoints` is how G-points stay honest**: the harness skips a
   trace's fault record only if the engine reports the point unimplemented
-  AND the trace marks it `optional-for:"ts"` — otherwise missing point =
-  failed run. A Rust shard cannot silently ship without its family's points.
+  AND the fault record lists that engine in `optionalFor` (§1.1; only
+  `"ts"` is valid at traceVersion 1) — otherwise missing point = failed run.
+  A Rust shard cannot silently ship without its family's points.
 - **Resource scope**: `snapshotNormalizedState(["resources"])` returns
   thread/handle/queue-depth counts for the plateau checks; on TS it returns
   the tracked-handle registry size (`engineDbSchema.ts:48-82`) — coarse, and
