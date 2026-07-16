@@ -6,7 +6,18 @@ rust-version.workspace = true
 publish.workspace = true
 description = "CAL-3 calibration slice: workspace filesystem scan / streaming content hash / scan-generation diff / reconcile-plan, with cooperative cancellation BETWEEN bounded units and fully bounded resources (max files, max file size, bounded read buffer, bounded hash-worker pool, bounded in-memory diff), the path floor, and the watcher dirty-generation reconcile model — driven actor-native on a dedicated blocking thread under a tokio command loop (the CAL-2 model). Dormant; not wired into the product."
 
+[features]
+# The materialization crash-injection seam. OFF by default so a release build
+# dead-code-eliminates every fault poll on the file-write lane; enabled by
+# `dohc-engine-testkit` (feature unification arms it for `cargo test
+# --workspace`). Delegates to the storage seam so there is one fault registry.
+fault-injection = ["dohc-engine-storage/fault-injection"]
+
 [dependencies]
+# The durable job ledger + blob store the materialization pipeline consumes.
+# `dohc-engine-files` owns the FILESYSTEM side of the crash boundary; the DB
+# side (job rows, blobs) lives in storage, which this depends on.
+dohc-engine-storage = { path = "../dohc-engine-storage" }
 # Streaming content hashing — same crate/version the storage slice content-
 # addresses with, so a scan hash and a stored blob hash are byte-identical.
 sha2 = "0.10"

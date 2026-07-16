@@ -30,17 +30,32 @@
 
 #![forbid(unsafe_code)]
 
+pub mod backup;
+pub mod blob;
+pub mod diagnostics;
 pub mod error;
 pub mod faults;
 pub mod limits;
+pub mod materialize;
 pub mod store;
 
+pub(crate) mod migration;
 pub(crate) mod schema;
 
+pub use backup::{
+    BackupManifest, BackupOutcome, BackupRecord, FreeSpaceProbe, RealFreeSpace,
+    create_verified_backup, load_valid_backup,
+};
+pub use blob::{hex_sha256, put_binary_blob};
+pub use diagnostics::{CorruptionKind, DiagnosticBundle, classify};
 pub use error::StorageError;
 pub use faults::{FaultAction, FaultInjector, FaultPoint, NoFaults};
 pub use limits::{
-    ENGINE_SCHEMA_VERSION, ENGINE_SQLITE_BUSY_TIMEOUT_MS, MAX_DOCUMENT_BODY_BYTES,
-    MAX_IDENTIFIER_BYTES,
+    ENGINE_BUILD, ENGINE_SCHEMA_VERSION, ENGINE_SQLITE_BUSY_TIMEOUT_MS,
+    ENGINE_STORAGE_PROTOCOL_VERSION, MAX_BLOB_BYTES, MAX_DOCUMENT_BODY_BYTES, MAX_IDENTIFIER_BYTES,
+    MAX_MATERIALIZE_BYTES, MAX_REPLACE_ATTEMPTS,
+};
+pub use materialize::{
+    JobStatus, MaterializationJob, MaterializationJobSpec, Preimage, enqueue_job,
 };
 pub use store::{CompoundWrite, Document, EngineStore, TxnOutcome, WriteOutcome};

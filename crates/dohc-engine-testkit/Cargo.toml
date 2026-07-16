@@ -13,6 +13,11 @@ description = "CAL-1 calibration slice: fixtures (scratch workspaces, path alias
 # artifact that does not link the testkit keeps the seam compiled out.
 dohc-engine-storage = { path = "../dohc-engine-storage", features = ["fault-injection"] }
 dohc-engine-runtime = { path = "../dohc-engine-runtime", features = ["fault-injection"] }
+# The materialization pipeline (filesystem half of the crash boundary). Its
+# fault-injection feature (delegating to storage's) is enabled here so
+# `cargo test --workspace` arms the materialize.* fault points for the crash
+# tier. A release artifact that does not link the testkit compiles them out.
+dohc-engine-files = { path = "../dohc-engine-files", features = ["fault-injection"] }
 # Used only to construct adversarial fixtures (v1-fingerprint / foreign
 # databases) that the storage fence must reject. Same bundled build as
 # dohc-engine-storage, so no second SQLite compile.
