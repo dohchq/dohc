@@ -121,13 +121,7 @@ pub fn diff_scans(
     current: &ScanListing,
     bounds: &ScanBounds,
 ) -> Result<ScanDiff, FilesError> {
-    let diff = diff_core(prior, current, is_unchanged);
-    if diff.len() > bounds.max_diff_entries {
-        return Err(FilesError::DiffTooLarge {
-            cap: bounds.max_diff_entries,
-        });
-    }
-    Ok(diff)
+    diff_core(prior, current, is_unchanged, bounds.max_diff_entries)
 }
 
 /// The real change predicate: a file is unchanged iff BOTH its size and its
@@ -139,10 +133,23 @@ fn is_unchanged(prior: &ManifestEntry, current: &FileEntry) -> bool {
 
 /// The diff engine, generic over the "unchanged" predicate so a seeded-bug test
 /// can flip the hash comparison and prove the differential harness catches it.
-fn diff_core<F>(prior: &ScanManifest, current: &ScanListing, is_unchanged: F) -> ScanDiff
+///
+/// The `max_entries` cap bounds the WORKING SET during construction, not after:
+/// `added + changed + removed` is checked as each entry is classified, so a
+/// runaway diff fails closed with [`FilesError::DiffTooLarge`] before it
+/// allocates the whole result (retained-over-cap is a no-op disposition and does
+/// not count against the cap).
+fn diff_core<F>(
+    prior: &ScanManifest,
+    current: &ScanListing,
+    is_unchanged: F,
+    max_entries: usize,
+) -> Result<ScanDiff, FilesError>
 where
     F: Fn(&ManifestEntry, &FileEntry) -> bool,
 {
+    let too_large = || FilesError::DiffTooLarge { cap: max_entries };
+
     let mut added = Vec::new();
     let mut changed = Vec::new();
     for file in &current.files {
@@ -150,6 +157,9 @@ where
             Some(prior_entry) if is_unchanged(prior_entry, file) => {}
             Some(_) => changed.push(file.clone()),
             None => added.push(file.clone()),
+        }
+        if added.len() + changed.len() > max_entries {
+            return Err(too_large());
         }
     }
 
@@ -178,6 +188,9 @@ where
         } else {
             // Absent from disk entirely → removed.
             removed.push(path.clone());
+            if added.len() + changed.len() + removed.len() > max_entries {
+                return Err(too_large());
+            }
         }
     }
 
@@ -185,12 +198,12 @@ where
     changed.sort_by(|a, b| a.path.cmp(&b.path));
     removed.sort();
     retained_over_cap.sort();
-    ScanDiff {
+    Ok(ScanDiff {
         added,
         changed,
         removed,
         retained_over_cap,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -245,7 +258,7 @@ mod tests {
             ],
             skipped: vec![],
         };
-        let diff = diff_core(&prior, &current, is_unchanged);
+        let diff = diff_core(&prior, &current, is_unchanged, usize::MAX).expect("diff");
         assert_eq!(
             diff.added
                 .iter()
@@ -276,7 +289,7 @@ mod tests {
             skipped: vec![],
         };
 
-        let golden = diff_core(&prior, &current, is_unchanged);
+        let golden = diff_core(&prior, &current, is_unchanged, usize::MAX).expect("diff");
         // Real predicate: same.md unchanged, changed.md changed (hash differs).
         assert_eq!(
             golden
@@ -288,7 +301,7 @@ mod tests {
         );
         assert!(golden.added.is_empty() && golden.removed.is_empty());
 
-        let buggy = diff_core(&prior, &current, seeded_bug_unchanged);
+        let buggy = diff_core(&prior, &current, seeded_bug_unchanged, usize::MAX).expect("diff");
         // The size-only bug misses the same-size content edit entirely.
         assert_ne!(
             golden, buggy,

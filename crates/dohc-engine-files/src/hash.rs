@@ -44,6 +44,12 @@ pub enum HashOutcome {
     /// The file vanished between enumeration and open (a benign mid-scan race,
     /// skipped — mirrors the tolerant TS/kernel scan).
     Vanished,
+    /// The streamed byte count exceeded `max_file_bytes` — the file grew or was
+    /// replaced after enumeration measured it under the cap. The stream is
+    /// abandoned at the boundary (never reading unbounded data); the scan moves
+    /// the path into `skipped` (over-cap), the same disposition enumeration
+    /// gives a file it saw over the cap.
+    OverCap,
     /// A non-benign io error; the scan surfaces this as
     /// [`FilesError::ScanIo`].
     Io { kind: std::io::ErrorKind },
@@ -105,6 +111,15 @@ struct Job {
     token: CancellationToken,
 }
 
+/// Immutable per-worker config: the streaming read buffer size and the file-size
+/// cap enforced WHILE streaming (a second defense against a file that grows past
+/// the cap between enumeration and hashing).
+#[derive(Clone, Copy)]
+struct WorkerConfig {
+    read_buffer_bytes: usize,
+    max_file_bytes: u64,
+}
+
 struct Indexed {
     index: usize,
     outcome: HashOutcome,
@@ -123,13 +138,21 @@ pub struct HashPool {
 
 impl HashPool {
     /// Create a pool with `workers` threads, each streaming through a
-    /// `read_buffer_bytes` buffer.
-    pub fn new(workers: usize, read_buffer_bytes: usize) -> Result<Self, FilesError> {
+    /// `read_buffer_bytes` buffer and enforcing `max_file_bytes` mid-stream.
+    pub fn new(
+        workers: usize,
+        read_buffer_bytes: usize,
+        max_file_bytes: u64,
+    ) -> Result<Self, FilesError> {
         if workers == 0 || read_buffer_bytes == 0 {
             return Err(FilesError::PoolUnavailable {
                 reason: "hash pool needs a non-zero worker count and buffer size",
             });
         }
+        let config = WorkerConfig {
+            read_buffer_bytes,
+            max_file_bytes,
+        };
         // Bounded queues: the job channel holds at most `workers` queued jobs,
         // matching the batch size; the result channel likewise. Neither can
         // grow unbounded.
@@ -145,7 +168,7 @@ impl HashPool {
             let gauge = Arc::clone(&gauge);
             let handle = std::thread::Builder::new()
                 .name(format!("dohc-hash-{n}"))
-                .spawn(move || worker_main(&job_rx, &result_tx, &gauge, read_buffer_bytes))
+                .spawn(move || worker_main(&job_rx, &result_tx, &gauge, config))
                 .map_err(|_| FilesError::PoolUnavailable {
                     reason: "could not spawn hash worker thread",
                 })?;
@@ -259,10 +282,10 @@ fn worker_main(
     job_rx: &std::sync::Mutex<Receiver<Job>>,
     result_tx: &SyncSender<Indexed>,
     gauge: &PoolGauge,
-    read_buffer_bytes: usize,
+    config: WorkerConfig,
 ) {
     // One reusable buffer per worker — the bounded read buffer.
-    let mut buffer = vec![0u8; read_buffer_bytes];
+    let mut buffer = vec![0u8; config.read_buffer_bytes];
     loop {
         // Hold the receiver lock only to take one job, never across the hash.
         let job = {
@@ -278,9 +301,10 @@ fn worker_main(
         // result drain (`recv` would otherwise block forever waiting on a
         // result the dead worker can't produce). The worker survives and the
         // batch surfaces a typed, fail-closed outcome.
-        let outcome =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hash_one(&job, &mut buffer)))
-                .unwrap_or(HashOutcome::Panicked);
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            hash_one(&job, &mut buffer, config.max_file_bytes)
+        }))
+        .unwrap_or(HashOutcome::Panicked);
         gauge.leave();
         // If the result channel is gone the pool is being torn down; stop.
         if result_tx
@@ -301,7 +325,7 @@ fn worker_main(
 #[cfg(test)]
 pub(crate) static TEST_PANIC_ON: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-fn hash_one(job: &Job, buffer: &mut [u8]) -> HashOutcome {
+fn hash_one(job: &Job, buffer: &mut [u8], max_file_bytes: u64) -> HashOutcome {
     #[cfg(test)]
     {
         let marker = TEST_PANIC_ON
@@ -334,6 +358,11 @@ fn hash_one(job: &Job, buffer: &mut [u8]) -> HashOutcome {
             Err(err) => return HashOutcome::Io { kind: err.kind() },
         };
         bytes = bytes.saturating_add(read as u64);
+        // Enforce the size cap WHILE streaming: a file that grew past the cap
+        // after enumeration is abandoned at the boundary, never read unbounded.
+        if bytes > max_file_bytes {
+            return HashOutcome::OverCap;
+        }
         if let Some(chunk) = buffer.get(..read) {
             hasher.update(chunk);
         }
@@ -375,7 +404,7 @@ mod tests {
         // The job whose path contains "f3.txt" panics the worker mid-hash.
         *TEST_PANIC_ON.lock().unwrap_or_else(|p| p.into_inner()) = Some("f3.txt".to_owned());
 
-        let pool = HashPool::new(2, 4096).expect("pool");
+        let pool = HashPool::new(2, 4096, u64::MAX).expect("pool");
         let inputs: Vec<HashInput> = (0..6)
             .map(|i| HashInput {
                 index: i,
@@ -399,6 +428,41 @@ mod tests {
             got,
             Ok(true),
             "a panicking hash worker must fail closed (PoolUnavailable) in bounded time, not hang"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn streaming_enforces_the_size_cap() {
+        // A file larger than the pool's cap is abandoned mid-stream and
+        // classified OverCap — the defense against a file that grew past the cap
+        // after enumeration measured it under the cap.
+        let dir = temp_dir("overcap");
+        std::fs::write(dir.join("big.bin"), vec![b'z'; 10_000]).expect("write");
+        std::fs::write(dir.join("small.bin"), b"tiny").expect("write");
+
+        // 64-byte cap, 16-byte buffer → the cap trips after a couple of reads.
+        let pool = HashPool::new(1, 16, 64).expect("pool");
+        let inputs = vec![
+            HashInput {
+                index: 0,
+                abs: dir.join("big.bin"),
+            },
+            HashInput {
+                index: 1,
+                abs: dir.join("small.bin"),
+            },
+        ];
+        let run = pool
+            .hash_batched(&inputs, &CancellationToken::new())
+            .expect("run");
+        let HashRun::Completed { outcomes } = run else {
+            panic!("expected completion");
+        };
+        assert_eq!(outcomes[0], HashOutcome::OverCap, "over-cap file abandoned");
+        assert!(
+            matches!(outcomes[1], HashOutcome::Hashed { bytes: 4, .. }),
+            "under-cap file still hashed"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

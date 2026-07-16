@@ -75,7 +75,11 @@ pub struct Scanner {
 impl Scanner {
     /// Build a scanner with the given bounds, spinning up the fixed hash pool.
     pub fn new(bounds: ScanBounds) -> Result<Self, FilesError> {
-        let pool = HashPool::new(bounds.hash_workers(), bounds.read_buffer_bytes())?;
+        let pool = HashPool::new(
+            bounds.hash_workers(),
+            bounds.read_buffer_bytes(),
+            bounds.max_file_bytes,
+        )?;
         Ok(Scanner { bounds, pool })
     }
 
@@ -119,8 +123,12 @@ impl Scanner {
             HashRun::Completed { outcomes } => outcomes,
         };
 
-        let mut files = Vec::with_capacity(candidates.files.len());
-        for (candidate, outcome) in candidates.files.into_iter().zip(outcomes) {
+        let Enumerated {
+            files: candidate_files,
+            mut skipped,
+        } = candidates;
+        let mut files = Vec::with_capacity(candidate_files.len());
+        for (candidate, outcome) in candidate_files.into_iter().zip(outcomes) {
             match outcome {
                 HashOutcome::Hashed { sha256, bytes } => files.push(FileEntry {
                     media_type: media_type_for_path(&candidate.rel),
@@ -134,6 +142,19 @@ impl Scanner {
                 }),
                 // Vanished between enumeration and hashing: benign race, skip.
                 HashOutcome::Vanished => {}
+                // Grew past the cap after enumeration measured it under: move it
+                // to the skipped set (re-stat for the current size), same
+                // disposition enumeration gives an over-cap file.
+                HashOutcome::OverCap => {
+                    let size = std::fs::metadata(&candidate.abs)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    skipped.push(SkippedPath {
+                        path: candidate.rel,
+                        size,
+                        reason: SkipReason::OverCap,
+                    });
+                }
                 HashOutcome::Cancelled => return Ok(ScanOutcome::Cancelled),
                 HashOutcome::Io { kind } => {
                     return Err(FilesError::ScanIo {
@@ -151,10 +172,10 @@ impl Scanner {
             }
         }
 
-        Ok(ScanOutcome::Completed(ScanListing {
-            files,
-            skipped: candidates.skipped,
-        }))
+        // A stream-detected over-cap may have appended to `skipped` out of
+        // order; restore the by-path sort.
+        skipped.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(ScanOutcome::Completed(ScanListing { files, skipped }))
     }
 
     /// Enumerate every tracked candidate under `root`, bounded and cancellable.
