@@ -4,6 +4,7 @@ import { markPersonalFeedSeenReadOnlySafe } from "./workspaces/chatFollowAccess"
 import {
   createChatChannelIpcHandler,
   createReadAwareChatIpcHandler,
+  createSharedChannelWritableChatIpcHandler,
   createSetChatReactionIpcHandler,
   type MainChatIpcHandler,
 } from "./mainChatIpcHandlers";
@@ -174,5 +175,84 @@ describe("runtime main chat IPC boundaries", () => {
       `joined:${workspaceId}`,
       `cloud:${workspaceId}`,
     ]);
+  });
+
+  it("rejects a read-cursor write before mutation when its joined channel is locked", async () => {
+    interface MarkThreadReadPayload {
+      workspaceId: string;
+      threadId: string;
+      upToSequence: number;
+    }
+    const workspaceId = "joined-workspace";
+    const contexts = new Map<string, TestContext>([
+      [workspaceId, { workspace: { workspaceId, readOnly: false } }],
+    ]);
+    const deps = boundaryDeps(contexts);
+    const ipc = runtimeHarness();
+    const markThreadRead = vi.fn(
+      async (_context: TestContext, _payload: MarkThreadReadPayload) => ({
+        lastReadSequence: 4,
+        revision: 2,
+      }),
+    );
+    const assertJoinedChannelWritable = vi.fn(
+      async (_context: TestContext, payload: MarkThreadReadPayload) => {
+        if (payload.threadId === "thread-locked") {
+          throw new Error("This shared channel is read-only.");
+        }
+      },
+    );
+
+    ipc.handle(
+      CHANNELS.markChatThreadRead,
+      createSharedChannelWritableChatIpcHandler({
+        assertTrustedSender: deps.assertTrustedSender,
+        parsePayload: (payload): MarkThreadReadPayload => {
+          const parsed = payload as {
+            workspaceId?: unknown;
+            threadId?: unknown;
+            upToSequence?: unknown;
+          };
+          if (
+            typeof parsed.workspaceId !== "string" ||
+            typeof parsed.threadId !== "string" ||
+            typeof parsed.upToSequence !== "number"
+          ) {
+            throw new Error("Invalid payload.");
+          }
+          return {
+            workspaceId: parsed.workspaceId,
+            threadId: parsed.threadId,
+            upToSequence: parsed.upToSequence,
+          };
+        },
+        requireContext: deps.requireContext,
+        assertWritableWorkspace: deps.assertWritableWorkspace,
+        assertSharedChannelWritable: assertJoinedChannelWritable,
+        run: markThreadRead,
+      }),
+    );
+
+    await expect(
+      ipc.invoke(CHANNELS.markChatThreadRead, {
+        workspaceId,
+        threadId: "thread-locked",
+        upToSequence: 4,
+      }),
+    ).rejects.toThrow(/read-only/u);
+    expect(markThreadRead).not.toHaveBeenCalled();
+
+    await expect(
+      ipc.invoke(CHANNELS.markChatThreadRead, {
+        workspaceId,
+        threadId: "thread-writable",
+        upToSequence: 4,
+      }),
+    ).resolves.toEqual({ lastReadSequence: 4, revision: 2 });
+    expect(assertJoinedChannelWritable).toHaveBeenLastCalledWith(
+      contexts.get(workspaceId),
+      expect.objectContaining({ threadId: "thread-writable" }),
+    );
+    expect(markThreadRead).toHaveBeenCalledOnce();
   });
 });

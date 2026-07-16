@@ -915,6 +915,79 @@ describe("chat file section mentions", () => {
 });
 
 describe("workspace-backed chat bookmarks", () => {
+  it("claims a fresh projection when an archived bookmark is resaved at the same path", async () => {
+    const store = storeAt();
+    const channel = await store.ensureGeneralChannel({ workspaceId: "ws" });
+    const started = await store.startChannelThread({
+      workspaceId: "ws",
+      channelId: channel.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "Archive and restore this post",
+    });
+    const destinationPath = "Bookmarks/Chats/archive-and-restore.md";
+    const saved = await store.saveBookmark({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      targetKind: "thread",
+      targetId: started.thread.id,
+      mode: "live",
+      destinationPath,
+    });
+    await store.markBookmarkReady({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      bookmarkId: saved.bookmarkId,
+      generation: saved.generation,
+      projectionObjectId: "object-before-archive",
+      projectionPath: destinationPath,
+    });
+
+    const archived = await store.archiveBookmark({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      bookmarkId: saved.bookmarkId,
+    });
+    await store.markBookmarkReady({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      bookmarkId: saved.bookmarkId,
+      generation: archived.generation,
+    });
+
+    const restored = await store.saveBookmark({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      targetKind: "thread",
+      targetId: started.thread.id,
+      mode: "live",
+      destinationPath,
+    });
+    expect(restored).toMatchObject({
+      state: "active",
+      destinationPath,
+      generation: archived.generation + 1,
+      projectionState: "pending",
+    });
+    expect(restored).not.toHaveProperty("projectionObjectId");
+
+    const reprojection = await store.markBookmarkReady({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      bookmarkId: saved.bookmarkId,
+      generation: restored.generation,
+      projectionObjectId: "object-after-restore",
+      projectionPath: destinationPath,
+    });
+    expect(reprojection).toMatchObject({
+      applied: true,
+      bookmark: {
+        state: "active",
+        projectionState: "ready",
+        projectionObjectId: "object-after-restore",
+      },
+    });
+  });
+
   it("persists desired state and enforces generation-checked projection transitions", async () => {
     let store = storeAt();
     const channel = await store.ensureGeneralChannel({ workspaceId: "ws" });
@@ -938,6 +1011,7 @@ describe("workspace-backed chat bookmarks", () => {
       projectionState: "pending",
       state: "active",
     });
+    expect(saved).not.toHaveProperty("projectionObjectId");
     expect(await store.listPendingBookmarks({ workspaceId: "ws", ownerUserId: "viewer" })).toHaveLength(1);
 
     const ready = await store.markBookmarkReady({
@@ -946,10 +1020,17 @@ describe("workspace-backed chat bookmarks", () => {
       bookmarkId: saved.bookmarkId,
       generation: 1,
       projectedAtMs: 2_000,
+      projectionObjectId: "object-bookmark-projection",
+      projectionPath: saved.destinationPath,
     });
     expect(ready).toMatchObject({
       applied: true,
-      bookmark: { projectionState: "ready", projectedGeneration: 1, lastProjectedAtMs: 2_000 },
+      bookmark: {
+        projectionState: "ready",
+        projectedGeneration: 1,
+        projectionObjectId: "object-bookmark-projection",
+        lastProjectedAtMs: 2_000,
+      },
     });
     const lateDuplicateFailure = await store.markBookmarkFailed({
       workspaceId: "ws",
@@ -975,17 +1056,49 @@ describe("workspace-backed chat bookmarks", () => {
       ownerUserId: "viewer",
       bookmarkId: saved.bookmarkId,
     });
-    expect(pending).toMatchObject({ generation: 2, projectionState: "pending" });
+    expect(pending).toMatchObject({
+      generation: 2,
+      projectionState: "pending",
+      projectionObjectId: "object-bookmark-projection",
+    });
 
     const obsolete = await store.markBookmarkReady({
       workspaceId: "ws",
       ownerUserId: "viewer",
       bookmarkId: saved.bookmarkId,
       generation: 1,
+      projectionObjectId: "object-bookmark-projection",
+      projectionPath: saved.destinationPath,
     });
     expect(obsolete).toMatchObject({
       applied: false,
-      bookmark: { generation: 2, projectionState: "pending" },
+      bookmark: {
+        generation: 2,
+        projectionState: "pending",
+        projectionObjectId: "object-bookmark-projection",
+      },
+    });
+
+    await expect(
+      store.markBookmarkReady({
+        workspaceId: "ws",
+        ownerUserId: "viewer",
+        bookmarkId: saved.bookmarkId,
+        generation: 2,
+        projectionObjectId: "object-unrelated-replacement",
+        projectionPath: saved.destinationPath,
+      }),
+    ).rejects.toThrow(/ownership no longer matches/u);
+    expect(
+      await store.findBookmark({
+        workspaceId: "ws",
+        ownerUserId: "viewer",
+        bookmarkId: saved.bookmarkId,
+      }),
+    ).toMatchObject({
+      generation: 2,
+      projectionState: "pending",
+      projectionObjectId: "object-bookmark-projection",
     });
 
     expect(
@@ -1033,6 +1146,7 @@ describe("workspace-backed chat bookmarks", () => {
       generation: 4,
       projectionState: "pending",
     });
+    expect(resaved).not.toHaveProperty("projectionObjectId");
     const archived = await store.archiveBookmark({
       workspaceId: "ws",
       ownerUserId: "viewer",

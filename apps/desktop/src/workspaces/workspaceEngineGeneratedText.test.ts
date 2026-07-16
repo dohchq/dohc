@@ -87,6 +87,19 @@ describe("WorkspaceEngineCapture generated Markdown", () => {
     expect(await readFile(join(rootPath, "Bookmarks/Chats/existing.md"), "utf8")).toBe(
       "user content\n",
     );
+
+    const existing = await capture.writeGeneratedTextFile({
+      path: "Bookmarks/Chats/existing-identical.md",
+      text: "generated content\n",
+    });
+    await expect(
+      capture.writeGeneratedTextFile({
+        path: existing.path,
+        text: "generated content\n",
+        createOnly: true,
+      }),
+    ).rejects.toThrow(/destination already exists/u);
+    expect(await capture.fileObjectIdForPath(existing.path)).toBe(existing.objectId);
     await capture.stop();
   });
 

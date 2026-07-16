@@ -1024,6 +1024,23 @@ function normalizeBookmarkReason(value: string, required: boolean): string | und
   return normalized || undefined;
 }
 
+function normalizeBookmarkProjectionObjectId(value: string): string {
+  if (typeof value !== "string") {
+    throw new LinkedChatStoreError(
+      "invalid-bookmark-target",
+      "Bookmark projection object id is invalid.",
+    );
+  }
+  const normalized = value.trim();
+  if (!normalized || normalized.length > 256 || PROJECTION_FIELD_CONTROL_CHAR.test(normalized)) {
+    throw new LinkedChatStoreError(
+      "invalid-bookmark-target",
+      "Bookmark projection object id is invalid.",
+    );
+  }
+  return normalized;
+}
+
 function bookmarkIdFor(ownerUserId: string, targetKind: ChatBookmarkTargetKind, targetId: string) {
   const digest = createHash("sha256")
     .update(`${ownerUserId}\u0000${targetKind}\u0000${targetId}`, "utf8")
@@ -1036,6 +1053,7 @@ const BOOKMARK_SELECT_SQL = `SELECT b.*,
   o.projected_generation AS outbox_projected_generation,
   o.projection_state AS outbox_projection_state,
   o.last_projected_at_ms AS outbox_last_projected_at_ms,
+  o.projection_object_id AS outbox_projection_object_id,
   o.failure_reason AS outbox_failure_reason
   FROM chat_bookmarks b
   JOIN chat_bookmark_outbox o
@@ -1048,6 +1066,7 @@ function bookmarkFromRow(row: Record<string, unknown>): ChatBookmark {
       ? undefined
       : numberValue(row.outbox_last_projected_at_ms);
   const failureReason = optionalString(row.outbox_failure_reason);
+  const projectionObjectId = optionalString(row.outbox_projection_object_id);
   const targetKind = normalizeBookmarkTargetKind(
     stringValue(row.target_kind) as ChatBookmarkTargetKind,
   );
@@ -1078,6 +1097,7 @@ function bookmarkFromRow(row: Record<string, unknown>): ChatBookmark {
     generation,
     projectedGeneration,
     projectionState: normalizeBookmarkProjectionState(row.outbox_projection_state),
+    ...(projectionObjectId ? { projectionObjectId } : {}),
     createdAtMs: numberValue(row.created_at_ms),
     updatedAtMs: numberValue(row.updated_at_ms),
     ...(lastProjectedAtMs !== undefined ? { lastProjectedAtMs } : {}),
@@ -3843,7 +3863,7 @@ export function createLinkedChatStore(
         const atMs = nowMs();
         const existing = db
           .prepare(
-            `SELECT bookmark_id FROM chat_bookmarks
+            `SELECT bookmark_id, destination_path, state FROM chat_bookmarks
              WHERE workspace_id = ? AND owner_user_id = ?
                AND target_kind = ? AND target_id = ?`,
           )
@@ -3851,6 +3871,8 @@ export function createLinkedChatStore(
         let bookmarkId: string;
         if (existing) {
           bookmarkId = stringValue(existing.bookmark_id);
+          const destinationChanged = stringValue(existing.destination_path) !== destinationPath;
+          const wasArchived = stringValue(existing.state) === "archived";
           db.prepare(
             `UPDATE chat_bookmarks
              SET thread_id = ?, message_id = ?, mode = ?, destination_path = ?,
@@ -3866,6 +3888,17 @@ export function createLinkedChatStore(
             bookmarkId,
           );
           queueBookmarkGeneration(db, workspaceId, bookmarkId, atMs);
+          if (destinationChanged || wasArchived) {
+            // Ownership is a (path, object-id) claim. A new destination is a
+            // first projection and must not inherit authority over an object
+            // that merely happens to exist there. Reactivating an archived
+            // bookmark is also a first projection because the owned object was
+            // moved away from destinationPath during archival.
+            db.prepare(
+              `UPDATE chat_bookmark_outbox SET projection_object_id = NULL
+               WHERE workspace_id = ? AND bookmark_id = ?`,
+            ).run(workspaceId, bookmarkId);
+          }
         } else {
           bookmarkId = bookmarkIdFor(ownerUserId, targetKind, targetId);
           db.prepare(
@@ -3890,8 +3923,9 @@ export function createLinkedChatStore(
           db.prepare(
             `INSERT INTO chat_bookmark_outbox (
                workspace_id, bookmark_id, generation, projected_generation,
-               projection_state, last_projected_at_ms, failure_reason, updated_at_ms
-             ) VALUES (?, ?, 1, 0, 'pending', NULL, NULL, ?)`,
+               projection_state, last_projected_at_ms, projection_object_id,
+               failure_reason, updated_at_ms
+             ) VALUES (?, ?, 1, 0, 'pending', NULL, NULL, NULL, ?)`,
           ).run(workspaceId, bookmarkId, atMs);
         }
         return cloneJson(requireBookmark(db, workspaceId, ownerUserId, bookmarkId));
@@ -4007,6 +4041,50 @@ export function createLinkedChatStore(
         const projectedAtMs = input.projectedAtMs ?? nowMs();
         if (!Number.isFinite(projectedAtMs)) {
           throw new LinkedChatStoreError("invalid-bookmark-target", "Projection time is invalid.");
+        }
+        const projectionObjectId = input.projectionObjectId === undefined
+          ? undefined
+          : normalizeBookmarkProjectionObjectId(input.projectionObjectId);
+        const projectionPath = input.projectionPath === undefined
+          ? undefined
+          : normalizePathHint(input.projectionPath);
+        if ((projectionObjectId === undefined) !== (projectionPath === undefined)) {
+          throw new LinkedChatStoreError(
+            "invalid-bookmark-target",
+            "Projection identity and path must be recorded together.",
+          );
+        }
+        if (projectionObjectId && projectionPath) {
+          // Claiming the object is separate from the generation-ready CAS: a
+          // worker may finish generation N after N+1 was queued, but the same
+          // bookmark still owns the object it just created when the path did
+          // not change. This lets N+1 update safely instead of adopting by path.
+          const claimed = db
+            .prepare(
+              `UPDATE chat_bookmark_outbox
+               SET projection_object_id = ?
+               WHERE workspace_id = ? AND bookmark_id = ?
+                 AND (projection_object_id IS NULL OR projection_object_id = ?)
+                 AND EXISTS (
+                   SELECT 1 FROM chat_bookmarks b
+                   WHERE b.workspace_id = chat_bookmark_outbox.workspace_id
+                     AND b.bookmark_id = chat_bookmark_outbox.bookmark_id
+                     AND b.destination_path = ?
+                 )`,
+            )
+            .run(
+              projectionObjectId,
+              workspaceId,
+              bookmarkId,
+              projectionObjectId,
+              projectionPath,
+            );
+          if (claimed.changes !== 1) {
+            throw new LinkedChatStoreError(
+              "invalid-bookmark-target",
+              "Bookmark projection ownership no longer matches.",
+            );
+          }
         }
         const result = db
           .prepare(

@@ -1318,6 +1318,10 @@ export interface ChatBookmark {
   generation: number;
   projectedGeneration: number;
   projectionState: ChatBookmarkProjectionState;
+  // Stable engine identity of the generated artifact this bookmark owns.
+  // Absent until the first projection succeeds; callers must never infer
+  // ownership from whichever object currently occupies destinationPath.
+  projectionObjectId?: WorkspaceObjectId;
   createdAtMs: number;
   updatedAtMs: number;
   lastProjectedAtMs?: number;
@@ -1588,6 +1592,10 @@ export interface LinkedChatStore {
     bookmarkId: string;
     generation: number;
     projectedAtMs?: number;
+    projectionObjectId?: WorkspaceObjectId;
+    // Required with projectionObjectId so an obsolete worker may safely
+    // record ownership only while the bookmark still targets the same path.
+    projectionPath?: string;
   }): Promise<ChatBookmarkTransitionResult>;
   markBookmarkFailed(input: {
     workspaceId: WorkspaceId;

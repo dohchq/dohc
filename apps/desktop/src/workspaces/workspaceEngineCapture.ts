@@ -338,6 +338,9 @@ export interface WorkspaceEngineCapture {
     path: string;
     text: string;
     expectedObjectId?: string;
+    // Strict first-create mode: any existing engine object or disk file is a
+    // collision, even when its bytes happen to equal the generated text.
+    createOnly?: true;
     metadata?: ActorNeutralWriteMetadata;
   }): Promise<WorkspaceGeneratedTextWriteResult>;
   // Moves a generated Markdown artifact to another visible Markdown path,
@@ -2344,6 +2347,12 @@ export function createWorkspaceEngineCapture(
         if (current?.contentKind === "binary") {
           throw new Error(`Generated Markdown cannot replace a binary file: ${path}`);
         }
+        if (input.createOnly && input.expectedObjectId) {
+          throw new Error("Generated Markdown cannot be both create-only and an owned update.");
+        }
+        if (input.createOnly && current) {
+          throw new Error(`Generated Markdown destination already exists: ${path}`);
+        }
         if (input.expectedObjectId) {
           if (!current || current.objectId !== input.expectedObjectId) {
             throw new Error(`Generated Markdown identity no longer matches: ${path}`);
@@ -2356,6 +2365,9 @@ export function createWorkspaceEngineCapture(
         }
 
         const disk = await readDiskTextState(rootPath, path);
+        if (input.createOnly && disk.kind !== "absent") {
+          throw new Error(`Generated Markdown destination already exists on disk: ${path}`);
+        }
         if (
           disk.kind === "binary" ||
           disk.kind === "untracked-content" ||

@@ -79,6 +79,31 @@ export function createChatChannelIpcHandler<
   });
 }
 
+export function createSharedChannelWritableChatIpcHandler<
+  Event,
+  Payload extends WorkspacePayload,
+  Context extends WorkspaceContext,
+  Result,
+>(input: {
+  assertTrustedSender: (event: Event) => void;
+  parsePayload: (payload: unknown) => Payload;
+  requireContext: (workspaceId: string) => Promise<Context>;
+  assertWritableWorkspace: (workspace: Context["workspace"]) => void;
+  assertSharedChannelWritable: (
+    context: Context,
+    payload: Payload,
+  ) => Promise<void>;
+  run: (context: Context, payload: Payload) => Promise<Result>;
+}): MainChatIpcHandler<Event, Result> {
+  return createWritableChatIpcHandler({
+    ...input,
+    run: async (context, payload) => {
+      await input.assertSharedChannelWritable(context, payload);
+      return input.run(context, payload);
+    },
+  });
+}
+
 export function createSetChatReactionIpcHandler<
   Event,
   Payload extends WorkspacePayload,

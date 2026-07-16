@@ -585,6 +585,7 @@ const CHAT_BOOKMARK_DDL = `
     projected_generation INTEGER NOT NULL DEFAULT 0,
     projection_state TEXT NOT NULL CHECK (projection_state IN ('pending', 'ready', 'failed', 'stale')),
     last_projected_at_ms REAL,
+    projection_object_id TEXT,
     failure_reason TEXT,
     updated_at_ms REAL NOT NULL,
     PRIMARY KEY (workspace_id, bookmark_id)
@@ -862,6 +863,7 @@ export function initializeOrValidateEngineSchema(
   db.exec(CHAT_FEED_DDL);
   db.exec(CHAT_BOOKMARK_DDL);
   db.exec(AGENT_DISPATCH_DDL);
+  ensureNullableColumn(db, "chat_bookmark_outbox", "projection_object_id", "TEXT", corrupt);
   ensureNullableColumn(db, "chat_dispatch_ledger", "failure_reason", "TEXT", corrupt);
   ensureNullableColumn(db, "agent_run_records", "failure_reason", "TEXT", corrupt);
   ensureMomentsAuthorColumn(db, corrupt);

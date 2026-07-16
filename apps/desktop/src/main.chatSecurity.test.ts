@@ -22,7 +22,6 @@ describe("main-process chat authorization", () => {
       "resolveChatDecision",
       "setChatFollow",
       "startChannelThread",
-      "markChatThreadRead",
       "shareChatChannel",
       "startDm",
       "resumeThreadDispatch",
@@ -38,6 +37,13 @@ describe("main-process chat authorization", () => {
     expect(handlerSource("createChatChannel")).toContain("assertWritableWorkspace,");
     expect(handlerSource("setChatReaction")).toContain("createSetChatReactionIpcHandler({");
     expect(handlerSource("setChatReaction")).toContain("assertWritableWorkspace,");
+    expect(handlerSource("markChatThreadRead")).toContain(
+      "createSharedChannelWritableChatIpcHandler({",
+    );
+    expect(handlerSource("markChatThreadRead")).toContain("assertWritableWorkspace,");
+    expect(handlerSource("markChatThreadRead")).toContain(
+      "await assertSharedChannelWritable({",
+    );
 
     // These read-shaped calls can write viewer/sync state. Their shared-view
     // behavior is deliberately a no-op rather than a rejected background call.

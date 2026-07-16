@@ -308,6 +308,7 @@ import { validateSecretPassphrase } from "./workspaces/secretPassphrase";
 import {
   createChatChannelIpcHandler,
   createReadAwareChatIpcHandler,
+  createSharedChannelWritableChatIpcHandler,
   createSetChatReactionIpcHandler,
 } from "./mainChatIpcHandlers";
 import {
@@ -433,6 +434,7 @@ import {
 import { addChatMentionsToWorkspaceGraph } from "./workspaces/chatMentionGraphOverlay";
 import { formatChatBookmarkProjection } from "./workspaces/chatBookmarkProjection";
 import { projectChatBookmarksAfterPull } from "./workspaces/chatBookmarkPullProjection";
+import { writeChatBookmarkProjection } from "./workspaces/chatBookmarkProjectionWrite";
 import {
   collectZipEntries,
   copyIntoWorkspace,
@@ -4689,18 +4691,13 @@ function registerIpcHandlers(): void {
       try {
         if (bookmark.state === "archived") {
           const archivedPath = chatBookmarkArchiveDestination(bookmark);
-          const sourceObjectId = await capture.fileObjectIdForPath(
-            bookmark.destinationPath,
-          );
-          const archivedObjectId = await capture.fileObjectIdForPath(archivedPath);
-          const expectedObjectId = sourceObjectId ?? archivedObjectId;
-          if (expectedObjectId) {
+          if (bookmark.projectionObjectId) {
             // archiveGeneratedTextFile is idempotent when the engine rename
             // completed but the process died before this generation became ready.
             await capture.archiveGeneratedTextFile({
               fromPath: bookmark.destinationPath,
               toPath: archivedPath,
-              expectedObjectId,
+              expectedObjectId: bookmark.projectionObjectId,
             });
           }
           const ready = await store.markBookmarkReady({
@@ -4750,19 +4747,18 @@ function registerIpcHandlers(): void {
             ...(message.parentMessageId ? { parentMessageId: message.parentMessageId } : {}),
           })),
         });
-        const expectedObjectId = await capture.fileObjectIdForPath(
-          bookmark.destinationPath,
-        );
-        await capture.writeGeneratedTextFile({
-          path: bookmark.destinationPath,
+        const written = await writeChatBookmarkProjection({
+          bookmark,
           text,
-          ...(expectedObjectId ? { expectedObjectId } : {}),
+          capture,
         });
         const ready = await store.markBookmarkReady({
           workspaceId: workspace.workspaceId,
           ownerUserId: bookmark.ownerUserId,
           bookmarkId: bookmark.bookmarkId,
           generation: bookmark.generation,
+          projectionObjectId: written.objectId,
+          projectionPath: bookmark.destinationPath,
         });
         return ready.bookmark;
       } catch (error) {
@@ -5639,24 +5635,35 @@ function registerIpcHandlers(): void {
     });
   });
 
-  ipcMain.handle(CHANNELS.markChatThreadRead, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = MarkChatThreadReadPayload.parse(payload);
-    const { workspace } = await requireEngineCapture(
-      input.workspaceId,
-      "Chats are not enabled for this workspace.",
-    );
-    assertWritableWorkspace(workspace);
-    const state = await linkedChatStoreFor(workspace).markThreadRead({
-      workspaceId: workspace.workspaceId,
-      threadId: input.threadId,
-      upToSequence: input.upToSequence,
-    });
-    return MarkChatThreadReadResult.parse({
-      lastReadSequence: state.lastReadSequence,
-      revision: state.revision,
-    });
-  });
+  ipcMain.handle(
+    CHANNELS.markChatThreadRead,
+    createSharedChannelWritableChatIpcHandler({
+      assertTrustedSender,
+      parsePayload: (payload) => MarkChatThreadReadPayload.parse(payload),
+      requireContext: (workspaceId) =>
+        requireEngineCapture(workspaceId, "Chats are not enabled for this workspace."),
+      assertWritableWorkspace,
+      assertSharedChannelWritable: async ({ workspace }, input) => {
+        await assertSharedChannelWritable({
+          workspaceId: workspace.workspaceId,
+          sharedChannels: findWorkspace(workspace.workspaceId)?.sharedChannels,
+          store: linkedChatStoreFor(workspace),
+          target: { threadId: input.threadId },
+        });
+      },
+      run: async ({ workspace }, input) => {
+        const state = await linkedChatStoreFor(workspace).markThreadRead({
+          workspaceId: workspace.workspaceId,
+          threadId: input.threadId,
+          upToSequence: input.upToSequence,
+        });
+        return MarkChatThreadReadResult.parse({
+          lastReadSequence: state.lastReadSequence,
+          revision: state.revision,
+        });
+      },
+    }),
+  );
 
   // --- Reactions (WS-MU-C2) ------------------------------------------------
   // Durable, commutative emoji reactions. Identity is main-derived: the viewer
