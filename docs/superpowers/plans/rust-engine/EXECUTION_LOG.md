@@ -320,3 +320,10 @@ source of truth every orchestrator session loads first).
   fail-closed scoped to file-indexing + diagnostics surfaced. Holes stay
   closed without breaking Mac/Linux workspaces. Escape-on-materialize
   filed as rewrite-era roadmap (Rust materialization pipeline).
+- RE-INVENTORY at 958cdfd3 complete (workflow wf_10f603b4-923): 76
+  corrected chats rows, 28 schema rows (incl. the engine_migrations ledger
+  + repairDeferredChatParentsOnce that the stale inventory missed), 8
+  chat-determinism rows — all column-valid. Merge agent dispatched to
+  replace the stale chats+schema clusters on PR #138 and correct the
+  'no migration machinery' claim in INVENTORY_NOTES. Once merged, REINV
+  clears and R04/R09 unblock.
