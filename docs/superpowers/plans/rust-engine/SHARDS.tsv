@@ -6,8 +6,8 @@ R01-INVENTORY	behavior-inventory	0	-	docs/superpowers/plans/rust-engine/BEHAVIOR
 R01-DETERMINISM	determinism-retrofit	0	-	packages/workspace-engine/src/** (injection seams only)	existing suite	medium	2	planned	codex/rust-engine-r01-determinism	-
 R01-ORACLE	trace-format;fault-points;reviewer-packet-builder	0	R01-INVENTORY	docs/superpowers/plans/rust-engine/TEST_ORACLE.md;tools/rust-engine-program/**	-	high	1	planned	-	-
 R02	cargo-ci	0	-	Cargo.toml;rust-toolchain.toml;.github/workflows/rust-*	-	medium	2	planned	codex/rust-engine-r02	-
-R03	protocol	0	-	crates/dohc-engine-protocol/**;packages/workspace-engine-client/**	protocol conformance	high	1	planned	codex/rust-engine-r03	-
-TS-NATIVE-CI	oracle-baseline	0	-	.github/workflows/engine-tests-*	existing suite	medium	2	planned	codex/rust-engine-ts-native-ci	-
+R03	protocol	0	-	crates/dohc-engine-protocol/**;packages/workspace-engine-client/**	protocol conformance	high	1	in progress	codex/rust-engine-r03	-
+TS-NATIVE-CI	oracle-baseline	0	-	.github/workflows/engine-tests-*	existing suite	medium	2	implemented but unverified	codex/rust-engine-ts-native-ci	139
 R04	storage-core	1	R02;R03	crates/dohc-engine-storage/**	ported storage tests	critical	1	planned	-	-
 CAL-1	ws-open-close-txn-restart	1	R04	crates/dohc-engine-runtime/src/session*	calibration	high	1	planned	-	-
 CAL-2	versioned-write-read-history-restore	1	R04	crates/dohc-engine-domain/src/versions*	calibration	high	1	planned	-	-

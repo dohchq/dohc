@@ -39,3 +39,10 @@ source of truth every orchestrator session loads first).
   (18 portable / 17 sql-oracle / 5 hook-dependent / 4 impl-specific),
   114 determinism sites (38 block trace determinism). 11-agent workflow
   wf_08d4899b-e02, 0 malformed rows on assembly validation.
+- TS-NATIVE-CI landed as PR #139: native engine-suite matrix
+  (windows-latest / macos-latest arm64 / ubuntu-latest) with arch
+  assertion; the PR's own CI run is the first native Windows/macOS
+  execution of the oracle suite. Known gap logged: no native macOS x64
+  runner (open decision 2).
+- R03 protocol spike launched (background agent, isolated worktree,
+  branch codex/rust-engine-r03).
