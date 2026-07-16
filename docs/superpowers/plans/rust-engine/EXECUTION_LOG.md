@@ -241,3 +241,12 @@ source of truth every orchestrator session loads first).
   failed branch added to the reset state-machine diagram; R11a/R13b start
   conditions re-anchored to Gate 0; ENGINE_SCOPE.tsv named consistently;
   locked decision 3 qualified with the raw-writer caveat.
+- PR #142 round 2 closed (9082e3f7): 5/5 codex fixed (errorArgs in
+  fault contract with per-kind validation, hyphenated test-stem parsing,
+  restart-after-crashed trace semantics, count + CLI-guard nits);
+  CodeRabbit 11:14Z posts were fix confirmations. Self-test 33/33.
+- GATE0_PACKET.md assembled for Ice: ratifications (yrs PASS + protocol),
+  billing + CI matrix, freeze enforcement, open decisions 3-8,
+  9 NEEDS-DECISION items incl. 2 recommended current-product TS hotfixes.
+  Gate 0 close sequence documented: merges -> R02 -> GATE0 flips ->
+  Wave 1.
