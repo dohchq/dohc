@@ -270,3 +270,18 @@ source of truth every orchestrator session loads first).
   (the old design left engines with contradictory expectations on
   crash/error faults; now uses an engines:["rust"] self-consistency
   label restricted from expectation-bearing faults). Self-test 38/38.
+- BASELINE DISCREPANCY found by DELTA shard (BEHAVIOR_DELTA.md landed):
+  R01-INVENTORY was extracted at 5b6d2009 (session-start HEAD), ONE MERGE
+  behind origin/main=958cdfd3. The gap is PR #136 (native workspace chat,
+  33 commits, +18,235 lines, engine-heavy). Verified: applyReplicationOp
+  cited at :2478 (5b6d2009) vs :4182 (958cdfd3). CORRECTION to the earlier
+  'engineDbSchema grew 188 lines during Wave 0' churn alert: that was NOT
+  active churn — it was PR #136 already on origin/main while local baseline
+  lagged. Freeze IS holding (958cdfd3..origin/main empty). Impact: inventory
+  misses PR #136's engine surface — first migration machinery (engine_migrations
+  ledger, invalidates the no-migration-machinery claim), 7 new tables,
+  15 new chat methods, 2 new sync op kinds (chat.follow.set/chat.feed.read.set),
+  semantic changes to 32 chat rows. R01-CONTRACTS forked correctly at
+  958cdfd3 and is unaffected. Delta register D1-D9 records the reconciliation.
+  New REINV shard blocks R04/R09; GATE0 gains REINV dep. GATE0_PACKET counts
+  232/218/46/117 are pre-merge and will move.
