@@ -347,3 +347,10 @@ source of truth every orchestrator session loads first).
   local-runner resolution; disk-inventory scope clarified (normal file tree
   only, checkpoint-invariant); GATE0_PACKET header corrected to
   'decisions resolved, gate not yet closed / Wave 1 not opened'.
+- PR #142 round 4 closed (054e36b3): 5 P2 fixed (pause-fault schedule
+  desync restricted to observe-only optionalFor; ** glob boundary;
+  within-engine-only secret-key assertion; per-behavior mutation
+  attribution; oracle tools in ownership walk), 1 correctly re-declined
+  (table commit = path ownership). Self-test 41/41. Oracle review fully
+  converged across 4 rounds -> parity verified. (Its --check reads 229
+  behaviors from its pre-REINV branch fork; resolves to 261 at merge.)
