@@ -147,6 +147,14 @@ export function upsertFileSearchIndex(input: {
   workspaceId: WorkspaceId;
   snapshot: TextFileSnapshot;
 }): void {
+  const policy = readEngineSearchPolicySync(input.rootDir);
+  // Broken policy = freeze the file index: do NOT delete-then-skip, which
+  // would silently drop this file from a previously-healthy index and leave
+  // no index_state to trigger a rebuild once the policy is fixed. Leave the
+  // existing rows untouched — query-time pathIsSearchIndexed already fails
+  // file search closed while degraded, and the next write after the fix
+  // reconciles the row.
+  if (policy.diagnostics.length > 0) return;
   deleteFileIndexRow({
     db: input.db,
     workspaceId: input.workspaceId,
@@ -154,7 +162,7 @@ export function upsertFileSearchIndex(input: {
     objectId: input.snapshot.objectId,
   });
   if (input.snapshot.contentKind === "binary") return;
-  if (!pathIsSearchIndexed(input.rootDir, input.snapshot.path)) return;
+  if (!pathIsSearchIndexed(input.rootDir, input.snapshot.path, policy)) return;
   input.db
     .prepare(
       `INSERT INTO engine_search_files_fts (workspace_id, version_id, object_id, path, text)

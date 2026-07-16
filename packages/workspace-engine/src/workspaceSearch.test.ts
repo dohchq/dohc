@@ -518,6 +518,64 @@ describe("workspace engine search", () => {
     ).toBe(true);
   });
 
+  it("freezes the file index on a broken policy instead of dropping an edited file", async () => {
+    const versions = versionStore();
+    const chats = chatStore();
+    const main = await versions.ensureMainVersion({ workspaceId: "workspace-a" });
+    await versions.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/a.md",
+      text: "FREEZE_NEEDLE v1\n",
+      metadata: { origin: "api" },
+    });
+    // A search builds the index AND records index_state for this version.
+    await expect(
+      searchWorkspaceEngine({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        query: "FREEZE_NEEDLE",
+        versions,
+        chats,
+      }),
+    ).resolves.toHaveLength(1);
+
+    // Break the policy, then edit the file: the incremental upsert must NOT
+    // delete-and-skip the row (which would drop the file with index_state still
+    // set, so a fix would never rebuild it).
+    await mkdir(join(root, ".dohc"), { recursive: true });
+    await writeFile(join(root, ".dohc", "files.toml"), "not [ valid toml");
+    await versions.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/a.md",
+      text: "FREEZE_NEEDLE v2\n",
+      metadata: { origin: "api" },
+    });
+    // While degraded, file search fails closed.
+    await expect(
+      searchWorkspaceEngine({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        query: "FREEZE_NEEDLE",
+        versions,
+        chats,
+      }),
+    ).resolves.toEqual([]);
+
+    // Fixing the policy restores the file — it was frozen in the index, not
+    // dropped, so it returns without needing an external reindex.
+    await rm(join(root, ".dohc", "files.toml"));
+    const recovered = await searchWorkspaceEngine({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      query: "FREEZE_NEEDLE",
+      versions,
+      chats,
+    });
+    expect(recovered.some((r) => r.surface === "file" && r.path === "notes/a.md")).toBe(true);
+  });
+
   it("searches a freshly forked version and incrementally reflects a write in the fork", async () => {
     const versions = versionStore();
     const chats = chatStore();
