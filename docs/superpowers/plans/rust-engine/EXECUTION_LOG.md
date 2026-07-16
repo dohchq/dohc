@@ -384,3 +384,18 @@ source of truth every orchestrator session loads first).
   are the starting allocation, integrator refines at shard-open via
   repo-wide import scan, the pre-merge hook is advisory until Wave 1 —
   defusing consumer-enumeration as integrator-upkeep, not a merge blocker.
+- PR #145 round 3 (dc749c69): codex caught a P1 my re-check MISSED —
+  the win32 default over-applied beyond the materialize sink to
+  classifyEngineFilePath + persisted-row checks, so on Windows a synced
+  report~1.pdf classified 'ignored'/state-corrupt (the recurring
+  over-block class, one layer up). RE-CHECK LIMITATION NOTED: verifying
+  'no bypass at write sinks' missed that the win32 default also hit
+  non-sink write-path callers. Fix is architecturally cleaner: host-unsafe
+  check OFF by default, only assertEngineWritablePath/
+  assertGeneratedMarkdownPath opt in with win32; classifyEngineFilePath
+  tracks these names on every platform (regression test added). Also:
+  policy size cap aligned 64->256 KiB; freeze now invalidates index_state
+  for added-during-degraded files. Tests green (core 123, engine 463+19,
+  capture 71). Lesson: did NOT merge on the single CLEAN re-check — the
+  codex confirmation pass caught a real P1; holding for re-confirmation
+  before merge.
