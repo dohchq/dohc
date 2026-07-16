@@ -48,11 +48,19 @@ enum Request {
         offset_kind: Option<WireOffsetKind>,
     },
     /// Apply a base64 Yjs v1 update. Malformed bytes must error cleanly.
-    Apply { id: String, update: String },
+    Apply {
+        id: String,
+        update: String,
+    },
     /// Full state re-encode + state vector.
-    State { id: String },
+    State {
+        id: String,
+    },
     /// Diff against a remote state vector (base64, v1).
-    Diff { id: String, sv: String },
+    Diff {
+        id: String,
+        sv: String,
+    },
     /// Canonical content JSON (see `content_json`). `schema` names the
     /// expected kind of each root type: the Yjs v1 wire format does NOT
     /// carry root-type kinds (a root's kind is defined by typed API access),
@@ -63,7 +71,9 @@ enum Request {
         schema: HashMap<String, RootKind>,
     },
     /// Merge independent updates into one (compaction primitive).
-    Merge { updates: Vec<String> },
+    Merge {
+        updates: Vec<String>,
+    },
     /// Insert into the root Y.Text `field` at `index`.
     TextInsert {
         id: String,
@@ -104,7 +114,9 @@ enum Request {
         offset: u32,
         len: u32,
     },
-    Free { id: String },
+    Free {
+        id: String,
+    },
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -172,7 +184,9 @@ fn handle(docs: &mut HashMap<String, Doc>, req: Request) -> Result<Value, String
                     Some(WireOffsetKind::Bytes) => OffsetKind::Bytes,
                     _ => OffsetKind::Utf16,
                 },
-                client_id: client_id.map(ClientID::new).unwrap_or_else(ClientID::random),
+                client_id: client_id
+                    .map(ClientID::new)
+                    .unwrap_or_else(ClientID::random),
                 ..Options::default()
             };
             docs.insert(id, Doc::with_options(options));
@@ -183,7 +197,8 @@ fn handle(docs: &mut HashMap<String, Doc>, req: Request) -> Result<Value, String
             let bytes = b64(&update)?;
             let update = Update::decode_v1(&bytes).map_err(|e| format!("decode: {e}"))?;
             let mut txn = doc.transact_mut();
-            txn.apply_update(update).map_err(|e| format!("apply: {e}"))?;
+            txn.apply_update(update)
+                .map_err(|e| format!("apply: {e}"))?;
             Ok(json!({}))
         }
         Request::State { id } => {
@@ -384,7 +399,11 @@ fn paragraph_text(
         .ok_or_else(|| format!("not-editable: no node at index {para}"))?;
     let el = match node {
         XmlOut::Element(el) => el,
-        other => return Err(format!("not-editable: node {para} is not an element: {other:?}")),
+        other => {
+            return Err(format!(
+                "not-editable: node {para} is not an element: {other:?}"
+            ))
+        }
     };
     match el.get(txn, 0) {
         Some(XmlOut::Text(t)) => Ok(t),

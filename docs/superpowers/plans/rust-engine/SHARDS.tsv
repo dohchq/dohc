@@ -7,9 +7,9 @@ R01-INVENTORY	behavior-inventory	0	-	docs/superpowers/plans/rust-engine/BEHAVIOR
 R01-DETERMINISM	determinism-retrofit	0	-	packages/workspace-engine/src/**	existing suite	medium	2	planned	codex/rust-engine-r01-determinism	-
 R01-ORACLE	trace-format;fault-points;reviewer-packet-builder	0	R01-INVENTORY	docs/superpowers/plans/rust-engine/TEST_ORACLE.md;tools/rust-engine-program/**	-	high	1	gate passed	codex/rust-engine-r01-oracle	142
 R01-CONTRACTS	porting-guide;state-ownership;semantics-matrix	0	R01-INVENTORY	docs/superpowers/plans/rust-engine/PORTING.md;docs/superpowers/plans/rust-engine/STATE_OWNERSHIP.tsv;docs/superpowers/plans/rust-engine/LANGUAGE_SEMANTICS_MATRIX.md	-	high	1	gate passed	codex/rust-engine-r01-contracts	143
-R02	cargo-ci	0	-	Cargo.toml;rust-toolchain.toml;.github/workflows/rust-*	-	medium	2	in progress	codex/rust-engine-r02	-
+R02	cargo-ci	0	-	Cargo.toml;Cargo.lock;rust-toolchain.toml;deny.toml;tools/rust-engine-program/run-rust-checks.mjs	-	medium	2	implemented but unverified	codex/rust-engine-r02-workspace	-
 R03	protocol	0	-	crates/dohc-engine-protocol/**;packages/workspace-engine-client/**	protocol conformance	high	1	gate passed	codex/rust-engine-r03	141
-TS-NATIVE-CI	oracle-baseline-local	0	-	tools/rust-engine-program/run-native-suite*	existing suite	medium	2	planned	-	-
+TS-NATIVE-CI	oracle-baseline-local	0	-	tools/rust-engine-program/run-native-suite*	existing suite	medium	2	implemented but unverified	codex/rust-engine-r02-workspace	-
 REINV	reinventory-chats-schema-958cdfd3	0	R01-INVENTORY	docs/superpowers/plans/rust-engine/BEHAVIOR_INVENTORY.tsv;docs/superpowers/plans/rust-engine/DETERMINISM_AUDIT.tsv;docs/superpowers/plans/rust-engine/TEST_CLASSIFICATION.tsv	-	high	1	gate passed	-	138
 GATE0	gate-phase0-closure	0	YRS-SPIKE;R01-INVENTORY;REINV;R01-CONTRACTS;R01-ORACLE;R01-DETERMINISM;TS-NATIVE-CI;R02;R03	-	-	-	-	planned	-	-
 R04	storage-core	1	R02;R03;GATE0;REINV	crates/dohc-engine-storage/**	ported storage tests	critical	1	planned	-	-

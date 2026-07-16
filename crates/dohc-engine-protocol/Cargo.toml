@@ -1,9 +1,9 @@
 [package]
 name = "dohc-engine-protocol"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
-rust-version = "1.85"
-publish = false
+rust-version.workspace = true
+publish.workspace = true
 description = "R03 spike: wire types, error taxonomy, bounds, framed codec, and transport seams for the dohc Rust engine protocol. Dormant; not wired into the product."
 
 [features]
@@ -50,3 +50,7 @@ name = "update_fixtures"
 
 [[example]]
 name = "codec_bench"
+
+# Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
+[lints]
+workspace = true
