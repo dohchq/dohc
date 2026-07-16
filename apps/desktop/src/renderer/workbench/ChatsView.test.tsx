@@ -1780,6 +1780,49 @@ describe("ChatsView liveness", () => {
     expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(2);
     expect(screen.getByText("Second send")).toBeTruthy();
   });
+
+  it("keeps a preserved draft locked when returning to its in-flight thread", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+
+    let resolveSend!: (value: { message: ChatMessageRecord }) => void;
+    const pendingSend = new Promise<{ message: ChatMessageRecord }>((resolve) => {
+      resolveSend = resolve;
+    });
+    bridgeMock.sendChatMessage.mockImplementation(() => pendingSend);
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.type(screen.getByTestId("chats-composer"), "Still sending{Enter}");
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    const restoredComposer = await screen.findByTestId("chats-composer");
+    expect((restoredComposer as HTMLTextAreaElement).value).toBe("Still sending");
+    expect((restoredComposer as HTMLTextAreaElement).disabled).toBe(true);
+
+    fireEvent.submit(restoredComposer.closest("form")!);
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveSend({
+        message: message({
+          id: "message-original-send",
+          body: "Still sending",
+        }),
+      });
+      await pendingSend;
+    });
+
+    await waitFor(() =>
+      expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).disabled).toBe(false),
+    );
+    expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).value).toBe("");
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Still sending")).toBeTruthy();
+  });
 });
 
 // --- Shared channels (MU-C4) -----------------------------------------------

@@ -943,11 +943,11 @@ export function ChatsView(props: {
   // flips. These refs flip synchronously BEFORE the first await, so the second
   // call is ignored immediately.
   const sendingRef = useRef(false);
-  // A send belongs to exactly one workspace conversation. Navigation releases
-  // the new conversation's composer immediately, while incrementing this
-  // generation prevents the abandoned promise's `finally` from releasing a
-  // newer send that is already in flight there.
-  const sendGeneration = useRef(0);
+  // Sends are owned per workspace conversation. This lets another conversation
+  // send independently while preserving the lock if the user returns to a
+  // conversation whose original promise is still in flight.
+  const sendRequestGeneration = useRef(0);
+  const inFlightSendByContext = useRef(new Map<string, number>());
   const startingThreadRef = useRef(false);
   const liveToken = useRef(0);
   // A live thread can refresh repeatedly without changing navigation. Keep a
@@ -970,10 +970,22 @@ export function ChatsView(props: {
       : nav.level === "dm"
         ? `${workspaceId}:dm:${nav.dm.threadId ?? nav.dm.channelId}`
         : `${workspaceId}:${nav.level}`;
+  const activeSendContext = useRef(sendContextKey);
+  activeSendContext.current = sendContextKey;
+  const latestComposerState = useRef({
+    composer,
+    replyMessageId: replyTarget?.messageId,
+    resolveTargetMessageId,
+  });
+  latestComposerState.current = {
+    composer,
+    replyMessageId: replyTarget?.messageId,
+    resolveTargetMessageId,
+  };
   useEffect(() => {
-    sendGeneration.current += 1;
-    sendingRef.current = false;
-    setSending(false);
+    const contextIsSending = inFlightSendByContext.current.has(sendContextKey);
+    sendingRef.current = contextIsSending;
+    setSending(contextIsSending);
   }, [sendContextKey]);
 
   const refreshOverview = useCallback(async () => {
@@ -1691,10 +1703,38 @@ export function ChatsView(props: {
         : resolvingMessageId !== null
           ? "Resolved ✓"
           : "";
-    if (body.length === 0 || sending || sendingRef.current) return;
+    if (
+      body.length === 0 ||
+      sending ||
+      sendingRef.current ||
+      inFlightSendByContext.current.has(sendContextKey)
+    ) {
+      return;
+    }
     const parentMessageId = replyTarget?.messageId;
-    const token = liveToken.current;
-    const request = ++sendGeneration.current;
+    const request = ++sendRequestGeneration.current;
+    inFlightSendByContext.current.set(sendContextKey, request);
+    const requestOwnsActiveContext = () =>
+      inFlightSendByContext.current.get(sendContextKey) === request &&
+      activeSendContext.current === sendContextKey;
+    const clearMatchingComposer = () => {
+      const latest = latestComposerState.current;
+      if (
+        latest.composer !== composer ||
+        latest.replyMessageId !== replyTarget?.messageId ||
+        latest.resolveTargetMessageId !== resolvingMessageId
+      ) {
+        return;
+      }
+      latestComposerState.current = {
+        composer: "",
+        replyMessageId: undefined,
+        resolveTargetMessageId: null,
+      };
+      setComposer("");
+      setReplyTarget(null);
+      setResolveTargetMessageId(null);
+    };
     sendingRef.current = true;
     setSending(true);
     let sentMessage: ChatMessageRecord | null = null;
@@ -1708,7 +1748,10 @@ export function ChatsView(props: {
           ? { fileReferences: extractChatFileReferences(body) }
           : {}),
       });
-      if (token !== liveToken.current) return;
+      // A navigation token mismatch normally fences the response. The one safe
+      // exception is returning to the exact workspace conversation while this
+      // request still owns its send slot.
+      if (!requestOwnsActiveContext()) return;
       sentMessage = result.message;
       let resolvedDecision: ChatDecisionRecord | null = null;
       if (resolvingMessageId) {
@@ -1718,10 +1761,14 @@ export function ChatsView(props: {
           messageId: resolvingMessageId,
           resolvedByMessageId: result.message.id,
         });
-        if (token !== liveToken.current) return;
+        if (!requestOwnsActiveContext()) return;
         resolvedDecision = resolution.decision;
       }
-      setMessages((current) => [...current, result.message]);
+      setMessages((current) =>
+        current.some((message) => message.id === result.message.id)
+          ? current
+          : [...current, result.message],
+      );
       if (resolvedDecision) {
         setDecisions((current) =>
           current.map((decision) =>
@@ -1741,12 +1788,10 @@ export function ChatsView(props: {
           ),
         );
       }
-      setComposer("");
-      setReplyTarget(null);
-      setResolveTargetMessageId(null);
+      clearMatchingComposer();
       messagesEndRef.current?.scrollIntoView({ block: "end" });
     } catch (error) {
-      if (token !== liveToken.current) return;
+      if (!requestOwnsActiveContext()) return;
       if (sentMessage && resolvingMessageId) {
         // The two durable writes are intentionally separate. If the reply
         // landed but resolution failed, show the real posted message and exit
@@ -1757,9 +1802,7 @@ export function ChatsView(props: {
             ? current
             : [...current, posted],
         );
-        setComposer("");
-        setReplyTarget(null);
-        setResolveTargetMessageId(null);
+        clearMatchingComposer();
         props.onError(
           ipcErrorMessage(error, "Your reply was sent, but the decision is still open."),
         );
@@ -1767,12 +1810,27 @@ export function ChatsView(props: {
         props.onError(ipcErrorMessage(error, "Could not send that message."));
       }
     } finally {
-      if (request === sendGeneration.current) {
+      const ownsContext =
+        inFlightSendByContext.current.get(sendContextKey) === request;
+      if (ownsContext) {
+        inFlightSendByContext.current.delete(sendContextKey);
+      }
+      if (ownsContext && activeSendContext.current === sendContextKey) {
         sendingRef.current = false;
         setSending(false);
       }
     }
-  }, [composer, nav, props, readOnly, replyTarget, resolveTargetMessageId, sending, workspaceId]);
+  }, [
+    composer,
+    nav,
+    props,
+    readOnly,
+    replyTarget,
+    resolveTargetMessageId,
+    sendContextKey,
+    sending,
+    workspaceId,
+  ]);
 
   // Reactions (WS-MU-C2): optimistic add/remove of the viewer's own reaction,
   // then reconcile to the server's canonical list (which carries the real
@@ -2107,10 +2165,20 @@ export function ChatsView(props: {
     if (readOnly) return;
     if (nav.level !== "dm" || !nav.dm.threadId || !nav.dm.connected) return;
     const body = composer.trim();
-    if (body.length === 0 || sending || sendingRef.current) return;
+    if (
+      body.length === 0 ||
+      sending ||
+      sendingRef.current ||
+      inFlightSendByContext.current.has(sendContextKey)
+    ) {
+      return;
+    }
     const threadId = nav.dm.threadId;
-    const token = liveToken.current;
-    const request = ++sendGeneration.current;
+    const request = ++sendRequestGeneration.current;
+    inFlightSendByContext.current.set(sendContextKey, request);
+    const requestOwnsActiveContext = () =>
+      inFlightSendByContext.current.get(sendContextKey) === request &&
+      activeSendContext.current === sendContextKey;
     sendingRef.current = true;
     setSending(true);
     try {
@@ -2122,21 +2190,36 @@ export function ChatsView(props: {
           ? { fileReferences: extractChatFileReferences(body) }
           : {}),
       });
-      if (token !== liveToken.current) return;
+      if (!requestOwnsActiveContext()) return;
       dmRefreshSeq.current += 1;
-      setMessages((current) => [...current, result.message]);
-      setComposer("");
+      setMessages((current) =>
+        current.some((message) => message.id === result.message.id)
+          ? current
+          : [...current, result.message],
+      );
+      if (latestComposerState.current.composer === composer) {
+        latestComposerState.current = {
+          ...latestComposerState.current,
+          composer: "",
+        };
+        setComposer("");
+      }
       messagesEndRef.current?.scrollIntoView({ block: "end" });
     } catch (error) {
-      if (token !== liveToken.current) return;
+      if (!requestOwnsActiveContext()) return;
       props.onError(ipcErrorMessage(error, "Could not send that message."));
     } finally {
-      if (request === sendGeneration.current) {
+      const ownsContext =
+        inFlightSendByContext.current.get(sendContextKey) === request;
+      if (ownsContext) {
+        inFlightSendByContext.current.delete(sendContextKey);
+      }
+      if (ownsContext && activeSendContext.current === sendContextKey) {
         sendingRef.current = false;
         setSending(false);
       }
     }
-  }, [composer, nav, props, readOnly, sending, workspaceId]);
+  }, [composer, nav, props, readOnly, sendContextKey, sending, workspaceId]);
 
   // Starting a DM = pick who + say something, one step. Starting one with
   // someone you already message opens the existing conversation.

@@ -251,6 +251,58 @@ describe("chat authorship display", () => {
     ]);
   });
 
+  it("does not bind literal mentions to unrelated attachments by heading or order", () => {
+    const onOpenPath = vi.fn();
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={[
+          {
+            id: "message-file",
+            threadId: "thread-1",
+            authorKind: "agent",
+            authorDisplayName: "Ice",
+            body: "Compare @[docs/literal.md#scope] and @[docs/unheaded.md].",
+            createdAtMs: 1_700_000_000_000,
+            attachments: [
+              {
+                attachmentId: "attachment-cli",
+                threadId: "thread-1",
+                messageId: "message-file",
+                targetKind: "file",
+                objectId: "file-cli",
+                pathHint: "docs/independent-cli-input.md",
+                headingAnchor: "scope",
+                createdAtMs: 1_700_000_000_000,
+              },
+              {
+                attachmentId: "attachment-cli-unheaded",
+                threadId: "thread-1",
+                messageId: "message-file",
+                targetKind: "file",
+                objectId: "file-cli-unheaded",
+                pathHint: "docs/another-independent-input.md",
+                createdAtMs: 1_700_000_000_000,
+              },
+            ],
+          },
+        ]}
+        loading={false}
+        emptyLabel="No messages"
+        endRef={createRef<HTMLDivElement>()}
+        onOpenPath={onOpenPath}
+      />,
+    );
+
+    const chips = screen.getAllByTestId("test-chat-message-body-file-mention");
+    fireEvent.click(chips[0] as HTMLElement);
+    fireEvent.click(chips[1] as HTMLElement);
+    expect(onOpenPath.mock.calls).toEqual([
+      ["docs/literal.md", "scope"],
+      ["docs/unheaded.md", undefined],
+    ]);
+  });
+
   it("classifies mention code ranges across the whole message when file chips split rendering", () => {
     render(
       <div data-testid="message">

@@ -180,10 +180,11 @@ function sameHeading(
 // Body text is immutable display copy, while attachment pathHint is the
 // engine's authoritative, permission-checked navigation target. Most tokens
 // match it exactly. Hand-typed compatibility forms can have edge spaces that
-// main intentionally trims only after exact lookup, and a later rename can
-// make the persisted token differ entirely. Reconcile unique references in
-// three passes so exact space-named files always win, then compatibility paths,
-// then stable attachment order for renamed paths with the same heading.
+// main intentionally trims only after exact lookup. Reconcile unique
+// references in two passes so exact space-named files always
+// win, followed only by the explicit edge-space compatibility form. Never
+// bind by heading/order alone: CLI callers can attach an independent file that
+// happens to share a heading with a literal token in the message body.
 export function resolveFileMentionNavigationTargets(
   tokens: readonly ChatFileReferenceToken[],
   attachments: readonly ChatAttachmentRecord[],
@@ -233,7 +234,6 @@ export function resolveFileMentionNavigationTargets(
       attachment.pathHint === token.path.trim() &&
       sameHeading(token, attachment),
   );
-  assign((token, attachment) => sameHeading(token, attachment));
 
   return targets;
 }
