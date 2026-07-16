@@ -574,3 +574,30 @@ source of truth every orchestrator session loads first).
   materialization-job pipeline, blob storage, and harden the versioned-text
   core schema. Domain-specific tables (chats/secrets/sync/ydoc/search) come
   with their capability shards per SHARDS ownership.
+
+## 2026-07-17 — R04 merged (durable storage core) · capability waves open
+
+- R04 #155 MERGED: migration ledger (ordinal-validated, checksum-gated,
+  crash-recoverable), restore-tested backups + load_valid_backup validator,
+  6-kind corruption classification (header-corrupt → Corruption), content-
+  addressed blobs (dedup + integrity-on-read), materialization-job two-phase
+  pipeline (enqueue_job type-enforces atomicity via &Transaction;
+  target_generation gates stale jobs → Superseded; Windows atomic-replace
+  verified replaces-existing; backoff retry; preimage preserve-both;
+  .conflict floor-excluded). 2 adversarial reviews (both no-P1, independent
+  crash probes) + agent's own codex review (5 bugs) + 10 P2 hardening.
+  Documented residuals: read→rename TOCTOU (§8.2), backup republish window
+  (§8.4), Windows dir-fsync no-op, synchronous=NORMAL tier-3.
+- CAPABILITY-SHARD CONTRACT (from R04): later schema changes MUST append an
+  ordinal-increasing, unique-id Migration to BASELINE_MIGRATIONS (no more
+  eager CREATE); the runner handles transactional + non-transactional.
+  Because BASELINE_MIGRATIONS is one integrator-owned list, schema-touching
+  capability shards SERIALIZE through the migration append (run one at a
+  time) to avoid ordinal/textual collisions. Materializing shards drive
+  phase-1 via enqueue_job inside write_with, phase-2 via run_pending_jobs.
+- Wave 2 opens (serialized on schema): R08 secrets first (new
+  dohc-engine-crypto crate, AEAD cross-engine parity, secret-file
+  materialization), then R09 chats, R11a ydoc, R12 search, R05
+  identity/restore completion. R07 (watcher/materialization) inherits the
+  3 deferred items (files-side fault seam, tolerant-vs-fail-closed scan,
+  two-phase apply-ack — now available via R04's job pipeline).

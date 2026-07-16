@@ -12,12 +12,12 @@ R03	protocol	0	-	crates/dohc-engine-protocol/**;packages/workspace-engine-client
 TS-NATIVE-CI	oracle-baseline-local	0	-	tools/rust-engine-program/run-native-suite*	existing suite	medium	2	gate passed	codex/rust-engine-r02-workspace	-
 REINV	reinventory-chats-schema-958cdfd3	0	R01-INVENTORY	docs/superpowers/plans/rust-engine/BEHAVIOR_INVENTORY.tsv;docs/superpowers/plans/rust-engine/DETERMINISM_AUDIT.tsv;docs/superpowers/plans/rust-engine/TEST_CLASSIFICATION.tsv	-	high	1	gate passed	-	138
 GATE0	gate-phase0-closure	0	YRS-SPIKE;R01-INVENTORY;REINV;R01-CONTRACTS;R01-ORACLE;R01-DETERMINISM;TS-NATIVE-CI;R02;R03	-	-	-	-	gate passed	-	-
-R04	storage-core	1	R02;R03;GATE0;REINV	crates/dohc-engine-storage/**	ported storage tests	critical	1	in progress	codex/rust-engine-r04	-
+R04	storage-core	1	R02;R03;GATE0;REINV	crates/dohc-engine-storage/**	ported storage tests	critical	1	gate passed	codex/rust-engine-r04	155
 CAL-1	ws-open-close-txn-restart	1	R04	crates/dohc-engine-runtime/src/session*	calibration	high	1	gate passed	-	149
 CAL-2	versioned-write-read-history-restore	1	R04	crates/dohc-engine-domain/src/versions*	calibration	high	1	gate passed	codex/rust-engine-cal-2	151
 CAL-3	scan-hash-reconcile-cancel	1	R03;GATE0	crates/dohc-engine-files/**	calibration	high	1	gate passed	codex/rust-engine-cal-3	153
 R05	identity-blobs-versions-moments-restore	2	R04	crates/dohc-engine-domain/src/{identity,blobs,moments,versions}*	ported	critical	1	planned	-	-
-R08	secrets	2	R04	crates/dohc-engine-crypto/**	ported	critical	1	planned	-	-
+R08	secrets	2	R04	crates/dohc-engine-crypto/**	ported	critical	1	in progress	codex/rust-engine-r08	-
 R09	chats-readstate-dispatch	2	R04;REINV	crates/dohc-engine-domain/src/chats*;crates/dohc-engine-storage/src/chat_tables*;apps/desktop/src/agents/desktopAgentDispatchStore.ts	ported	high	2	planned	-	-
 R11a	ydoc-durable-cache	2	YRS-SPIKE;R04	crates/dohc-engine-collab/**	ported+spike-fuzz	critical	1	planned	-	-
 R11b	ydoc-live-adapter	2	R03;GATE0	packages/workspace-engine-client/src/ydoc*	adapter suite	critical	1	planned	-	-
