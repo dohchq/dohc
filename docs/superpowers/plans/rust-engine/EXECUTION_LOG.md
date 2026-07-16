@@ -187,3 +187,12 @@ source of truth every orchestrator session loads first).
   decision-number error (account stores are open decision 6, not 3).
   STATE_OWNERSHIP 40->52 rows; matrix 84->91 rows; NEEDS-DECISION 7->9.
   Re-check launched to complete Gate 0's approve-together requirement.
+- PR #140 codex round-2 batch complete (0fca9074): 4/4 fixed — CRDT
+  state-vector + full-state byte comparison after every rejected cut, empty
+  harvested manifest rejected under --require-harvested, landed-vs-attempted
+  Rust edit accounting via a per-op changed flag (byte-length genuinely
+  cannot distinguish no-ops — reviewer concession), malformed-stdout rejects
+  the named in-flight request before killing the child. Stale 10:17Z
+  threads replied with fixing hashes. Full 500-seed strict certification
+  refreshed: 500/500 (7,480 landed yrs edits, 2,169 truncations
+  zero-accepted, 77 recovered yjs partial-applies). PASS unchanged.
