@@ -451,6 +451,49 @@ impl<'a> VersionedTextStore<'a> {
         })
     }
 
+    /// List the durable fork-base snapshots frozen for `version` at fork time,
+    /// ordered by path. The fork base is the three-way-merge anchor a later
+    /// compare/merge shard builds on; exposing it lets the differential harness
+    /// catch a wrong/leaked/missing base.
+    pub fn list_fork_base_snapshots(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+    ) -> Result<Vec<TextSnapshot>, DomainError> {
+        self.store.read_with(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT f.object_id, f.path, b.text, f.blob_sha256, f.updated_at_ms, \
+                     f.latest_moment_id, f.metadata_origin FROM fork_base_snapshots f \
+                     JOIN blobs b ON b.sha256 = f.blob_sha256 \
+                     WHERE f.workspace_id = ?1 AND f.version_id = ?2 ORDER BY f.path",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let ws = workspace_id.to_owned();
+            let ver = version_id.to_owned();
+            let rows = stmt
+                .query_map(params![workspace_id, version_id], move |row| {
+                    Ok(TextSnapshot {
+                        workspace_id: ws.clone(),
+                        version_id: ver.clone(),
+                        object_id: row.get(0)?,
+                        path: row.get(1)?,
+                        text: row.get(2)?,
+                        blob_sha256: row.get(3)?,
+                        updated_at_ms: row.get(4)?,
+                        latest_moment_id: row.get(5)?,
+                        metadata_origin: row.get(6)?,
+                    })
+                })
+                .map_err(DomainError::sql_corrupt)?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row.map_err(DomainError::sql_corrupt)?);
+            }
+            Ok(out)
+        })
+    }
+
     /// Fetch a single moment by id, or `None`.
     pub fn get_moment(
         &self,
@@ -533,7 +576,7 @@ impl<'a> VersionedTextStore<'a> {
                     reason: "new version id already exists",
                 });
             }
-            let fork_moment_id = latest_materialized_moment_id(conn, ws)?;
+            let fork_moment_id = latest_materialized_moment_id(conn, ws, &input.from_version_id)?;
             Ok(ForkPrep::Apply { fork_moment_id })
         })?;
 
@@ -812,8 +855,9 @@ fn alias_object_id(
 }
 
 fn next_moment_order(conn: &Connection) -> Result<i64, DomainError> {
-    // Per-workspace? moment_order is globally monotone in this store (one
-    // workspace per engine.db in this slice); MAX+1 over all rows is the next.
+    // Store-global MAX+1. Correct for one-workspace-per-engine.db (global ==
+    // per-workspace); a future multi-workspace / share-mount shard MUST add a
+    // `WHERE workspace_id = ?` bound here (see the `moments` schema comment).
     let max: Option<i64> = conn
         .query_row("SELECT MAX(moment_order) FROM moments", [], |row| {
             row.get(0)
@@ -843,14 +887,25 @@ fn latest_moment_order(
         .map_err(DomainError::sql_corrupt)
 }
 
+/// The fork point: the latest materialized moment **belonging to the source
+/// version** (`versionedTextStore.ts:4877-4884` — "it never touched THIS
+/// version's snapshots, so it must never become the fork point"). Scoping to
+/// `version_id` is load-bearing: the global-latest moment can belong to a
+/// sibling fork, and using it would record a merge base that never described
+/// this version's state. `sync_record_only` marker rows (a peer-divergence
+/// record) are excluded — a materialized moment is NULL or `0` (PORTING.md §1;
+/// the `= 0` arm is latent until a sync shard writes 0).
 fn latest_materialized_moment_id(
     conn: &Connection,
     workspace_id: &str,
+    version_id: &str,
 ) -> Result<Option<String>, DomainError> {
     conn.query_row(
-        "SELECT moment_id FROM moments WHERE workspace_id = ?1 AND sync_record_only IS NULL \
+        "SELECT moment_id FROM moments \
+         WHERE workspace_id = ?1 AND version_id = ?2 \
+           AND (sync_record_only IS NULL OR sync_record_only = 0) \
          ORDER BY moment_order DESC LIMIT 1",
-        params![workspace_id],
+        params![workspace_id, version_id],
         |row| row.get(0),
     )
     .optional()
@@ -1008,7 +1063,9 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
         before_blob_sha256,
         metadata_origin,
         author_json,
-        sync_record_only: sync_record_only.is_some(),
+        // A record-only marker is a non-NULL, NON-ZERO value; NULL or 0 both
+        // mean 'materialized' (PORTING.md §1, matching the aligned fork SQL).
+        sync_record_only: matches!(sync_record_only, Some(v) if v != 0),
     }))
 }
 

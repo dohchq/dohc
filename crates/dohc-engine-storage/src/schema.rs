@@ -171,10 +171,14 @@ CREATE TABLE fork_base_snapshots (
     FOREIGN KEY (blob_sha256) REFERENCES blobs(sha256)
 ) STRICT;
 
--- Append-only history. `moment_order` is a per-workspace monotone sequence
--- (the keyset-pagination sort key). `sync_record_only` NULL = a materialized
--- moment; a non-NULL marker row is a peer-divergence record excluded from
--- 'latest moment' fork-point selection (PORTING.md §1).
+-- Append-only history. `moment_order` is a monotone sequence and the
+-- keyset-pagination sort key. In this slice it is store-global (one workspace
+-- per engine.db), which equals per-workspace; a future multi-workspace /
+-- share-mount shard MUST scope the next-order computation to workspace_id
+-- (`UNIQUE (workspace_id, moment_order)` already permits that). `sync_record_only`
+-- NULL or 0 = a materialized moment; a non-NULL non-zero marker row is a
+-- peer-divergence record excluded from 'latest moment' fork-point selection
+-- (PORTING.md §1).
 CREATE TABLE moments (
     workspace_id      TEXT    NOT NULL,
     moment_order      INTEGER NOT NULL,

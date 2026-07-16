@@ -73,6 +73,23 @@ fn run_trace(db: &std::path::Path) -> String {
         &NO_FAULTS,
     )
     .expect("write feat");
+    // Cross-version fork: fork feat2 from `main` (a NON-TIP version) while the
+    // global-latest moment (m2) belongs to `feat`. feat2's fork point MUST be
+    // main's latest (m1), never the global-latest m2. This exercises the fork
+    // provenance the P1 bug corrupted; the fork base (frozen below) must be
+    // main's content, not feat's.
+    vt.create_named_version(
+        &CreateNamedVersion {
+            workspace_id: WS.to_owned(),
+            new_version_id: "feat2".to_owned(),
+            name: "feature2".to_owned(),
+            from_version_id: "main".to_owned(),
+            now_ms: 25,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    )
+    .expect("cross-version fork");
     vt.set_active_version(WS, "feat", &NO_FAULTS)
         .expect("activate feat");
     vt.set_active_version(WS, "main", &NO_FAULTS)
@@ -94,8 +111,12 @@ fn golden() -> String {
         "active=main\n\
          version id=main kind=main name=main created=1 fork_from=- fork_moment=-\n\
          version id=feat kind=named name=feature created=20 fork_from=main fork_moment=m1\n\
+         version id=feat2 kind=named name=feature2 created=25 fork_from=main fork_moment=m1\n\
          snapshot version=feat path=a.md object=o1 blob={world} origin=agent\n\
+         snapshot version=feat2 path=a.md object=o1 blob={hello} origin=user\n\
          snapshot version=main path=a.md object=o1 blob={hello} origin=user\n\
+         forkbase version=feat path=a.md object=o1 blob={hello}\n\
+         forkbase version=feat2 path=a.md object=o1 blob={hello}\n\
          moment order=1 version=main path=a.md op=write after={hello} before_present=false sync_only=false\n\
          moment order=2 version=feat path=a.md op=write after={world} before_present=true sync_only=false\n"
     )

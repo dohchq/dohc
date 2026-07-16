@@ -34,6 +34,17 @@ pub struct SnapshotRow {
     pub metadata_origin: String,
 }
 
+/// One normalized fork-base row (the frozen three-way-merge anchor). Included
+/// so a wrong, leaked, or missing fork base is visible in the differential —
+/// the exact provenance the fork-point bug corrupts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForkBaseRow {
+    pub version_id: String,
+    pub path: String,
+    pub object_id: String,
+    pub blob_sha256: String,
+}
+
 /// One normalized moment row (ascending `moment_order`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MomentRow {
@@ -52,6 +63,7 @@ pub struct NormalizedState {
     pub active_version_id: Option<String>,
     pub versions: Vec<VersionRow>,
     pub snapshots: Vec<SnapshotRow>,
+    pub fork_bases: Vec<ForkBaseRow>,
     pub moments: Vec<MomentRow>,
 }
 
@@ -88,6 +100,19 @@ pub(crate) fn capture(
     // (version_id, path) already unique; sort for a stable order.
     snapshots.sort_by(|a, b| (&a.version_id, &a.path).cmp(&(&b.version_id, &b.path)));
 
+    let mut fork_bases = Vec::new();
+    for version in &versions {
+        for base in store.list_fork_base_snapshots(workspace_id, &version.version_id)? {
+            fork_bases.push(ForkBaseRow {
+                version_id: base.version_id,
+                path: base.path,
+                object_id: base.object_id,
+                blob_sha256: base.blob_sha256,
+            });
+        }
+    }
+    fork_bases.sort_by(|a, b| (&a.version_id, &a.path).cmp(&(&b.version_id, &b.path)));
+
     let page = store.list_moments(&ListMomentsQuery {
         workspace_id: workspace_id.to_owned(),
         version_id: None,
@@ -115,6 +140,7 @@ pub(crate) fn capture(
         active_version_id,
         versions: version_rows,
         snapshots,
+        fork_bases,
         moments,
     })
 }
@@ -158,6 +184,15 @@ impl NormalizedState {
                 s.object_id,
                 short(&s.blob_sha256),
                 s.metadata_origin,
+            ));
+        }
+        for f in &self.fork_bases {
+            out.push_str(&format!(
+                "forkbase version={} path={} object={} blob={}\n",
+                f.version_id,
+                f.path,
+                f.object_id,
+                short(&f.blob_sha256),
             ));
         }
         for m in &self.moments {

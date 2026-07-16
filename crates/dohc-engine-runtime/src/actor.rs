@@ -37,12 +37,19 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::sync_channel as std_sync_channel;
 use std::thread::JoinHandle;
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc::{self, OwnedPermit};
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 /// Bound on the actor's command queue. Backpressure blocks the sender rather
 /// than growing an unbounded queue (`plan §Rust policy`: bounded everything).
 const COMMAND_QUEUE_CAPACITY: usize = 64;
+
+/// Physical channel capacity: the data bound plus ONE slot reserved at spawn
+/// for the `Close` command (see [`WorkspaceActor::close`]). Reserving keeps the
+/// usable data capacity at exactly [`COMMAND_QUEUE_CAPACITY`] while guaranteeing
+/// `Close` always has a home, so shutdown never spins or starves.
+const CHANNEL_CAPACITY: usize = COMMAND_QUEUE_CAPACITY + 1;
 
 /// The actor lifecycle, observable via [`ActorHandle::lifecycle`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,6 +142,11 @@ pub struct WorkspaceActor {
     identity: EngineDbIdentity,
     generation: u64,
     tx: mpsc::Sender<Command>,
+    /// A permit for the `Close` command, reserved at spawn from the dedicated
+    /// extra channel slot. `close` consumes it to deliver `Close` in bounded
+    /// time — fairly, behind existing FIFO work, without a `try_send` spin and
+    /// without blocking in `Drop`.
+    close_permit: Option<OwnedPermit<Command>>,
     state: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
 }
@@ -151,7 +163,11 @@ impl WorkspaceActor {
         generation: u64,
         now_ms: i64,
     ) -> Result<Self, RuntimeError> {
-        let (tx, rx) = mpsc::channel::<Command>(COMMAND_QUEUE_CAPACITY);
+        let (tx, rx) = mpsc::channel::<Command>(CHANNEL_CAPACITY);
+        // Reserve the dedicated Close slot up front (the channel is empty, so
+        // this cannot fail); `close` sends through it without contending with
+        // data producers on tokio's fair waiter queue.
+        let close_permit = tx.clone().try_reserve_owned().ok();
         let state = Arc::new(AtomicU8::new(LifecycleState::Opening.as_u8()));
         // Startup handshake uses a std channel: `spawn` runs in a synchronous
         // context, so the open result must not depend on a tokio runtime.
@@ -168,6 +184,7 @@ impl WorkspaceActor {
                 identity,
                 generation,
                 tx,
+                close_permit,
                 state,
                 worker: Some(worker),
             }),
@@ -209,26 +226,32 @@ impl WorkspaceActor {
     /// Orderly close: drain queued work, stop accepting new commands, release
     /// the connection, and join the worker. Idempotent.
     ///
-    /// Delivery of the `Close` command uses `try_send` with cooperative
-    /// yielding rather than `blocking_send`, so `close` is safe from a `Drop`
-    /// that runs inside an async runtime. A worker wedged inside a fault gate
-    /// must be released by the caller before close (same contract as CAL-1).
+    /// `Close` is delivered through the slot reserved at spawn, so it lands in
+    /// bounded time behind existing FIFO work — no `try_send` spin and no
+    /// starvation under sustained concurrent submission (tokio's fair waiter
+    /// queue can never crowd it out). Sending through the reserved permit does
+    /// not block or await, so `close` is safe to call from a `Drop` that runs
+    /// inside an async runtime.
+    ///
+    /// The subsequent `worker.join()` **does block the calling thread** until
+    /// the worker drains and exits. From an async runtime that briefly parks the
+    /// executor thread; a future `close_async` could yield instead (noted for a
+    /// later shard). A worker wedged inside a fault gate must be released by the
+    /// caller before close (same contract as CAL-1).
     pub fn close(&mut self) -> Result<(), RuntimeError> {
         let Some(worker) = self.worker.take() else {
             return Ok(());
         };
-        let mut pending = Command::Close;
-        loop {
-            match self.tx.try_send(pending) {
-                Ok(()) => break,
-                // Queue full: the worker is draining; yield and retry so Close
-                // lands behind the already-queued FIFO work (drain semantics).
-                Err(TrySendError::Full(cmd)) => {
-                    pending = cmd;
-                    std::thread::yield_now();
-                }
-                // Worker already gone (e.g. panicked): nothing to deliver.
-                Err(TrySendError::Closed(_)) => break,
+        match self.close_permit.take() {
+            // Reserved slot: instant, fair, FIFO-respecting delivery.
+            Some(permit) => {
+                permit.send(Command::Close);
+            }
+            // No reserved permit (only if a prior close already consumed it, or
+            // the impossible spawn-time reservation failure): best-effort. A
+            // Closed error means the worker is already gone — nothing to do.
+            None => {
+                let _ = self.tx.try_send(Command::Close);
             }
         }
         match worker.join() {
@@ -276,6 +299,7 @@ impl ActorHandle {
         write: CompoundWrite,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteOutcome, RuntimeError> {
+        debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .blocking_send(Command::Write {
@@ -315,6 +339,7 @@ impl ActorHandle {
 
     /// Read a document by id, blocking the calling thread.
     pub fn read(&self, doc_id: &str) -> Result<Option<Document>, RuntimeError> {
+        debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .blocking_send(Command::Read {
@@ -330,6 +355,7 @@ impl ActorHandle {
 
     /// Snapshot the store's row counts, blocking the calling thread.
     pub fn snapshot(&self) -> Result<StoreSnapshot, RuntimeError> {
+        debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .blocking_send(Command::Snapshot { reply })
@@ -446,6 +472,19 @@ impl ActorHandle {
             }
         }
     }
+}
+
+/// Debug-only guard: the synchronous `write`/`read`/`snapshot` API uses
+/// `blocking_send`/`blocking_recv`, which PANIC inside a tokio runtime (the
+/// product runs on tokio). Catch the misuse cheaply in debug builds with a
+/// clear message instead of an opaque tokio panic in production; use the async
+/// API from within a runtime.
+#[inline]
+fn debug_assert_sync_context() {
+    debug_assert!(
+        tokio::runtime::Handle::try_current().is_err(),
+        "synchronous ActorHandle API called from within a tokio runtime; use the async API (write_async/read_async/run_units)"
+    );
 }
 
 fn worker_main(

@@ -199,6 +199,65 @@ fn create_named_version_forks_and_isolates() {
     assert_eq!(err.code(), "version-name-conflict");
 }
 
+// oracle (P1 regression): a fork records the SOURCE version's latest moment as
+// its fork point, never the workspace-global latest — even when the global
+// latest belongs to a sibling fork.
+#[test]
+fn cross_version_fork_records_source_version_latest_moment() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+
+    // main gets m1; feat forks from main then gets m2 (the GLOBAL latest).
+    vt.write_text(&write("main", "a.md", "v1", "m1", "o1", 10), &NO_FAULTS)
+        .expect("write main");
+    vt.create_named_version(
+        &CreateNamedVersion {
+            workspace_id: WS.to_owned(),
+            new_version_id: "feat".to_owned(),
+            name: "feature".to_owned(),
+            from_version_id: "main".to_owned(),
+            now_ms: 20,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    )
+    .expect("fork feat");
+    vt.write_text(&write("feat", "a.md", "v2", "m2", "o1", 30), &NO_FAULTS)
+        .expect("write feat");
+
+    // Fork feat2 from main. Global latest is m2 (feat); the correct fork point
+    // is main's latest, m1.
+    let feat2 = vt
+        .create_named_version(
+            &CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: "feat2".to_owned(),
+                name: "feature2".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 40,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("fork feat2");
+    assert_eq!(
+        feat2.fork_moment_id.as_deref(),
+        Some("m1"),
+        "fork point must be the SOURCE (main) latest, not the global latest m2"
+    );
+    // The fork base and snapshot describe main's state (v1), never feat's (v2).
+    assert_eq!(
+        vt.read_text(WS, "feat2", "a.md").unwrap().unwrap().text,
+        "v1"
+    );
+    let base = vt.list_fork_base_snapshots(WS, "feat2").expect("fork base");
+    assert_eq!(base.len(), 1);
+    assert_eq!(base[0].text, "v1");
+}
+
 // oracle: list-versions is ordered by (created_at_ms, name, version_id).
 #[test]
 fn list_versions_is_ordered() {
