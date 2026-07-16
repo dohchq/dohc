@@ -477,3 +477,34 @@ source of truth every orchestrator session loads first).
   calibration slices (CAL-1 ws-open/close/txn/restart, CAL-2 versioned
   write/read/history/restore, CAL-3 scan/hash/reconcile/cancel). Engine
   freeze binding from here.
+
+## 2026-07-17 — CAL-1 merged (first Wave 1 slice) · Gate 1 signal forming
+
+- CAL-1 #149 MERGED: 4 engine crates on main (dohc-engine-storage/runtime/
+  testkit + protocol), workspace-kernel excluded. First production Rust of
+  the engine.
+- CALIBRATION LESSON (the value of the slice): two clean-context adversarial
+  reviewers built+probed and REPRODUCED two P1s in v1 — (1) the one-writer-
+  per-file invariant was keyed on path canonicalization, forking a 2nd writer
+  for filename-case aliases / file-symlinks / hardlinks; (2) the v1/v2 fence
+  applied WAL (persistent) BEFORE the fingerprint check, mutating rejected
+  files. Both FIXED: identity now keys on OS FILE-ID (dev+ino / Windows
+  volume+file-index via the safe `file_id` crate — forbid(unsafe) holds);
+  fence reordered to classify read-only before any persistent pragma; open
+  encapsulated pub(crate) + WorkspaceSupervisor::global() singleton. Plus
+  durability pinned (synchronous=NORMAL + WAL-replay test), idempotency
+  payload SHA-256, and actor-edge hardening (panic drop-guard, restart
+  generation continuity, lock-not-held-across-spawn, typed Overloaded,
+  close/open race). 23 tests green; all local gates pass; 0o700 dir perms.
+- CORRECTED CLAIM: "one writer per engine.db is compiler-enforced" is precise
+  only for one-writer-per-CONNECTION (airtight, type-level). Per-FILE
+  uniqueness is a runtime property now enforced via file-id identity +
+  pub(crate) open + process-global supervisor — not the type system.
+- Gate 1 signal: approach SOUND (intra-actor ownership airtight, impl boring,
+  PORTING mapped line-for-line) with the correct identity architecture now in
+  place for R04 to inherit. NEEDS-DECISION logged: SQLITE_BUSY-vs-corruption
+  error mapping (deferred). Deferred to CAL-2: tokio async-runtime actor loop
+  + cfg-gating the fault seam out of release builds.
+- PROCESS NOTE: merged #149 before fully reviewing bot findings; verified
+  post-hoc the one distinct bot P1 (0o700 dir) was addressed. Going forward:
+  review bot findings before merge.
