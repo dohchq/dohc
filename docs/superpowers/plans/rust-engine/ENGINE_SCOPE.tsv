@@ -1,5 +1,5 @@
 export_name	source_file	consumers	classification	rationale
-parseMentionHandles	packages/workspace-engine/src/chatMentions.ts	none in apps/services (internal to linkedChatStore.ts)	remains-ts	pure string/regex parsing helper with no durable state or external consumers
+parseMentionHandles	packages/workspace-engine/src/chatMentions.ts	none in apps/services (internal to linkedChatStore.ts indexMessageMentions, linkedChatStore.ts:761)	rust-authority	pure parsing helper, but it feeds the durable chat_mentions index on every message append/import (indexMessageMentions), which listMentionsForHandle and the CLI inbox read back — it must port with the chat store or the mention index diverges once message writes move to Rust
 AgentDispatchStoreError	packages/workspace-engine/src/agentDispatchStore.ts	desktop:cli/cliServer.ts	rust-authority	error class for the durable dispatch-claim store, ports with the store
 createAgentDispatchStore	packages/workspace-engine/src/agentDispatchStore.ts	desktop:agents/desktopAgentDispatchStore.ts (+chatDispatchService.test.ts, cliServer.test.ts)	rust-authority	factory for the durable agent-run/claim queue, core engine behavior
 AgentDispatchClaim	packages/workspace-engine/src/agentDispatchStore.ts	desktop:agents/chatDispatchService.ts	ts-adapter	claim data-shape, mirrors workspace-contracts style
@@ -16,11 +16,11 @@ GENERAL_CHANNEL_NAME	packages/workspace-engine/src/linkedChatStore.ts	none	rust-
 GENERAL_CHANNEL_WIRE_ID	packages/workspace-engine/src/linkedChatStore.ts	desktop:main.ts	rust-authority	wire-format constant, only desktop-local consumer today (not sync-relay)
 LINKED_CHAT_PROJECTION_KIND	packages/workspace-engine/src/linkedChatStore.ts	none	rust-authority	projection-kind tag for the chat store's file projection
 LINKED_CHAT_STORE_RELATIVE_PATH	packages/workspace-engine/src/linkedChatStore.ts	desktop:agents/desktopAgentDispatchStore.ts, desktop:cli/cliServer.ts	rust-authority	on-disk layout constant for the chat store
-LinkedChatStoreError	packages/workspace-engine/src/linkedChatStore.ts	none	rust-authority	store error class, part of store behavior
+LinkedChatStoreError	packages/workspace-engine/src/linkedChatStore.ts	mcp:tools.ts	rust-authority	store error class, part of store behavior; MCP tools use it to classify chat-store failures
 THREAD_SNIPPET_TITLE_MAX_CHARS	packages/workspace-engine/src/linkedChatStore.ts	none	rust-authority	store-owned formatting limit
 UNTITLED_THREAD_FALLBACK_TITLE	packages/workspace-engine/src/linkedChatStore.ts	none	rust-authority	store-owned fallback string
 channelSlugForName	packages/workspace-engine/src/linkedChatStore.ts	none	rust-authority	channel-name normalization used by store internals
-createLinkedChatStore	packages/workspace-engine/src/linkedChatStore.ts	desktop:main.ts (+e2e specs, multiple test files)	rust-authority	factory for the durable linked-chat store, core engine behavior
+createLinkedChatStore	packages/workspace-engine/src/linkedChatStore.ts	desktop:main.ts, mcp:tools.ts (+e2e specs, multiple test files)	rust-authority	factory for the durable linked-chat store, core engine behavior
 linkedChatProjectionPath	packages/workspace-engine/src/linkedChatStore.ts	none	rust-authority	projection path-builder, store-owned
 threadSnippetTitle	packages/workspace-engine/src/linkedChatStore.ts	none	rust-authority	store-owned title-derivation helper
 ChannelThreadSummary	packages/workspace-engine/src/linkedChatStore.ts	desktop:cli/cliServer.ts, desktop:main.ts	ts-adapter	thread-summary shape
@@ -34,24 +34,24 @@ ChatChannelSummary	packages/workspace-engine/src/linkedChatStore.ts	desktop:cli/
 ChatDecisionRecord	packages/workspace-engine/src/linkedChatStore.ts	none (bridgeContract.ts/ChatsView.tsx define an unrelated same-name local type)	ts-adapter	decision-record shape, no real external consumer
 ChatDecisionState	packages/workspace-engine/src/linkedChatStore.ts	none	ts-adapter	decision-state union, no current external consumer
 ChatMentionRecord	packages/workspace-engine/src/linkedChatStore.ts	none	ts-adapter	mention-record shape, no current external consumer
-ChatMessage	packages/workspace-engine/src/linkedChatStore.ts	desktop:agents/chatDispatchService.ts, desktop:agents/runnerThreadContext.ts, desktop:cli/cliServer.ts, desktop:main.ts	ts-adapter	message shape, widely consumed by desktop
+ChatMessage	packages/workspace-engine/src/linkedChatStore.ts	desktop:agents/chatDispatchService.ts, desktop:agents/runnerThreadContext.ts, desktop:cli/cliServer.ts, desktop:main.ts, mcp:tools.ts	ts-adapter	message shape, widely consumed by desktop
 ChatMessageId	packages/workspace-engine/src/linkedChatStore.ts	none	ts-adapter	branded id type, no current external consumer
 ChatReaction	packages/workspace-engine/src/linkedChatStore.ts	desktop:main.ts	ts-adapter	reaction shape
 ChatReactionAuthor	packages/workspace-engine/src/linkedChatStore.ts	none	ts-adapter	reaction-author shape, no current external consumer
 ChatReactionState	packages/workspace-engine/src/linkedChatStore.ts	none	ts-adapter	reaction-state shape, no current external consumer
-ChatThread	packages/workspace-engine/src/linkedChatStore.ts	desktop:cli/cliServer.ts, desktop:main.ts	ts-adapter	thread shape
+ChatThread	packages/workspace-engine/src/linkedChatStore.ts	desktop:cli/cliServer.ts, desktop:main.ts, mcp:tools.ts	ts-adapter	thread shape
 ChatThreadId	packages/workspace-engine/src/linkedChatStore.ts	desktop:agents/runnerThreadContext.ts	ts-adapter	branded id type
 ChatThreadReadState	packages/workspace-engine/src/linkedChatStore.ts	none	ts-adapter	thread read-state shape, no current external consumer
 LinkedChatFileRef	packages/workspace-engine/src/linkedChatStore.ts	none	ts-adapter	file-ref shape, no current external consumer
 LinkedChatProjection	packages/workspace-engine/src/linkedChatStore.ts	none	ts-adapter	projection shape, no current external consumer
-LinkedChatProjectionFileAccess	packages/workspace-engine/src/linkedChatStore.ts	none	ts-adapter	projection file-access shape, no current external consumer
-LinkedChatStore	packages/workspace-engine/src/linkedChatStore.ts	desktop:agents/chatDispatchService.ts, desktop:agents/runnerThreadContext.ts, desktop:cli/cliServer.ts, desktop:main.ts, desktop:workspaces/dmChats.ts (+tests)	ts-adapter	store interface type, widely consumed by desktop
+LinkedChatProjectionFileAccess	packages/workspace-engine/src/linkedChatStore.ts	mcp:tools.ts	ts-adapter	projection file-access shape
+LinkedChatStore	packages/workspace-engine/src/linkedChatStore.ts	desktop:agents/chatDispatchService.ts, desktop:agents/runnerThreadContext.ts, desktop:cli/cliServer.ts, desktop:main.ts, desktop:workspaces/dmChats.ts, mcp:tools.ts (+tests)	ts-adapter	store interface type, widely consumed by desktop
 LinkedChatStoreErrorCode	packages/workspace-engine/src/linkedChatStore.ts	none	ts-adapter	error-code union, no current external consumer
 LinkedChatStoreOptions	packages/workspace-engine/src/linkedChatStore.ts	none	ts-adapter	constructor-options shape, no current external consumer
 MAX_VERSIONED_BINARY_FILE_BYTES	packages/workspace-engine/src/versionedTextStore.ts	desktop:workspaces/workspaceEngineCapture.ts	rust-authority	store-owned binary size ceiling
 VERSIONED_TEXT_STORE_RELATIVE_PATH	packages/workspace-engine/src/versionedTextStore.ts	test-only: desktop:collab/ydocEngineProviderSession.test.ts, desktop:workspaces/workspaceEngineYDocSession.test.ts, sync-relay:main.integration.test.ts	rust-authority	on-disk layout constant for the versioned-text store
 VersionedTextStoreError	packages/workspace-engine/src/versionedTextStore.ts	none	rust-authority	store error class
-createVersionedTextStore	packages/workspace-engine/src/versionedTextStore.ts	desktop:main.ts, desktop:workspaces/sharedView.ts, desktop:workspaces/workspaceEngineCapture.ts (+e2e specs, multiple tests)	rust-authority	factory for the durable versioned-text/moment store, core engine behavior
+createVersionedTextStore	packages/workspace-engine/src/versionedTextStore.ts	desktop:main.ts, desktop:workspaces/sharedView.ts, desktop:workspaces/workspaceEngineCapture.ts, mcp:tools.ts (+e2e specs, multiple tests)	rust-authority	factory for the durable versioned-text/moment store, core engine behavior
 ActorNeutralWriteMetadata	packages/workspace-engine/src/versionedTextStore.ts	desktop:workspaces/workspaceEngineCapture.ts	ts-adapter	write-metadata shape
 ActorNeutralWriteOrigin	packages/workspace-engine/src/versionedTextStore.ts	none	ts-adapter	write-origin union, no current external consumer
 AgentMomentAuthor	packages/workspace-engine/src/versionedTextStore.ts	none	ts-adapter	author shape, no current external consumer
@@ -72,12 +72,12 @@ VersionedTextConflictStatus	packages/workspace-engine/src/versionedTextStore.ts	
 VersionedTextDeleteResult	packages/workspace-engine/src/versionedTextStore.ts	none	ts-adapter	delete-result shape, no current external consumer
 VersionedTextFileState	packages/workspace-engine/src/versionedTextStore.ts	none	ts-adapter	file-state shape, no current external consumer
 VersionedTextMergeResult	packages/workspace-engine/src/versionedTextStore.ts	none	ts-adapter	merge-result shape, no current external consumer
-VersionedTextMoment	packages/workspace-engine/src/versionedTextStore.ts	desktop:workspaces/workspaceEngineCapture.ts; test-only: desktop:ipc/engineHistoryIpc.test.ts	ts-adapter	moment shape
+VersionedTextMoment	packages/workspace-engine/src/versionedTextStore.ts	desktop:workspaces/workspaceEngineCapture.ts, mcp:tools.ts; test-only: desktop:ipc/engineHistoryIpc.test.ts	ts-adapter	moment shape
 VersionedTextMomentId	packages/workspace-engine/src/versionedTextStore.ts	none	ts-adapter	branded id type, no current external consumer
 VersionedTextMomentPage	packages/workspace-engine/src/versionedTextStore.ts	none	ts-adapter	paginated-moment shape, no current external consumer
-VersionedTextMomentSummary	packages/workspace-engine/src/versionedTextStore.ts	desktop:ipc/engineHistoryIpc.ts, desktop:main.ts, desktop:workspaces/workspaceEngineCapture.ts	ts-adapter	moment-summary shape
+VersionedTextMomentSummary	packages/workspace-engine/src/versionedTextStore.ts	desktop:ipc/engineHistoryIpc.ts, desktop:main.ts, desktop:workspaces/workspaceEngineCapture.ts, mcp:tools.ts	ts-adapter	moment-summary shape
 VersionedTextRenameResult	packages/workspace-engine/src/versionedTextStore.ts	none	ts-adapter	rename-result shape, no current external consumer
-VersionedTextStore	packages/workspace-engine/src/versionedTextStore.ts	desktop:collab/ydocEngineProviderSession.ts, desktop:main.ts, desktop:workspaces/workspaceEngineCapture.ts (+multiple tests)	ts-adapter	store interface type, widely consumed by desktop
+VersionedTextStore	packages/workspace-engine/src/versionedTextStore.ts	desktop:collab/ydocEngineProviderSession.ts, desktop:main.ts, desktop:workspaces/workspaceEngineCapture.ts, mcp:tools.ts (+multiple tests)	ts-adapter	store interface type, widely consumed by desktop
 VersionedTextStoreErrorCode	packages/workspace-engine/src/versionedTextStore.ts	none	ts-adapter	error-code union, no current external consumer
 VersionedTextStoreOptions	packages/workspace-engine/src/versionedTextStore.ts	none	ts-adapter	constructor-options shape, no current external consumer
 VersionedTextWriteResult	packages/workspace-engine/src/versionedTextStore.ts	none	ts-adapter	write-result shape, no current external consumer
@@ -165,8 +165,8 @@ VersionedFileWorkspaceOptions	packages/workspace-engine/src/versionedFileWorkspa
 VersionedFileWriteResult	packages/workspace-engine/src/versionedFileWorkspace.ts	none	retired-delete	legacy type per rule
 FileWorkspaceCapabilityReport	packages/workspace-engine/src/versionedFileWorkspace.ts	none	retired-delete	legacy type per rule
 FileWorkspacePlatformMode	packages/workspace-engine/src/versionedFileWorkspace.ts	none	retired-delete	legacy type per rule
-classifyEngineFilePath	packages/workspace-engine/src/enginePathFloor.ts	desktop:workspaces/shareMounts.ts, desktop:workspaces/workspaceEngineCapture.ts, desktop:workspaces/workspaceGraph.ts, desktop:workspaces/workspaceSearch.ts, sync-relay:shareFilter.ts (via /enginePathFloor subpath)	decision-required	rule: sync-relay's cross-process import moves to a shared generated contract package
-classifyEngineFilePathForRead	packages/workspace-engine/src/enginePathFloor.ts	desktop:workspaces/workspaceFiles.ts, desktop:workspaces/workspaceGraph.ts, desktop:workspaces/workspaceSearch.ts	rust-authority	same shared path-floor logic, but only desktop-local consumers today (sync-relay does not import this one)
+classifyEngineFilePath	packages/workspace-engine/src/enginePathFloor.ts	desktop:workspaces/shareMounts.ts, desktop:workspaces/workspaceEngineCapture.ts, desktop:workspaces/workspaceGraph.ts, desktop:workspaces/workspaceSearch.ts, mcp:tools.ts, sync-relay:shareFilter.ts (via /enginePathFloor subpath)	decision-required	rule: sync-relay's cross-process import moves to a shared generated contract package
+classifyEngineFilePathForRead	packages/workspace-engine/src/enginePathFloor.ts	desktop:workspaces/workspaceFiles.ts, desktop:workspaces/workspaceGraph.ts, desktop:workspaces/workspaceSearch.ts, mcp:tools.ts	rust-authority	same shared path-floor logic, but only desktop-local consumers today (sync-relay does not import this one)
 WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS	packages/workspace-engine/src/workspaceSearch.ts	none	rust-authority	search-preview truncation constant owned by the engine search implementation
 searchWorkspaceEngine	packages/workspace-engine/src/workspaceSearch.ts	desktop:main.ts	rust-authority	engine's cross-store (chat+file) search implementation
 EngineFilePathClassification	packages/workspace-engine/src/workspaceSearch.ts	none	ts-adapter	already sourced from @dohc/workspace-contracts/engine; workspace-engine only re-exports it
