@@ -1,0 +1,59 @@
+# cargo-deny policy for the dohc Rust engine workspace (plan section "Rust
+# policy": rustfmt, strict clippy, cargo audit, cargo deny).
+#
+# Run via `cargo deny check` (the local runner
+# tools/rust-engine-program/run-rust-checks.mjs invokes it and skips-with-
+# warning when cargo-deny is not installed — see the Gate 0 CI-skipped
+# decision, evidence is local-first). Uses the current cargo-deny config
+# schema (version = 2 tables).
+
+[graph]
+# Evidence targets: native Windows x64 + Linux x64 via WSL (macOS deferred to
+# the pre-release obligation, DECISIONS.md Gate 0 item 2).
+targets = [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+]
+all-features = true
+
+[advisories]
+# RustSec advisory database. `unmaintained`/`yanked` warn so a transient
+# upstream flag never hard-blocks a dormant scaffold; real vulnerabilities
+# still fail. cargo-deny fails on any advisory not listed in `ignore`.
+version = 2
+yanked = "warn"
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+# Permissive licenses acceptable for a shipped desktop app. Add licenses here
+# deliberately, with review, as the dependency set grows.
+version = 2
+# Only licenses currently present in the graph. Add new ones deliberately,
+# with review, as dependencies are introduced in later shards.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+# Our own workspace crates are unpublished (publish = false) and carry no
+# `license` field; skip license evaluation for them.
+private = { ignore = true }
+
+[bans]
+# Duplicate versions warn (a dormant scaffold routinely carries a few until
+# the graph settles); flip to "deny" once the crate graph stabilizes.
+multiple-versions = "warn"
+wildcards = "allow"
+# Nothing is hard-banned yet. The plan bans certain PATTERNS in production
+# mutation paths (unbounded channels, mem::forget, etc.); those are enforced
+# by clippy/review, not crate bans.
+deny = []
+
+[sources]
+# Only crates.io during Wave 0. Any git/registry source must be added here
+# deliberately.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -399,3 +399,50 @@ source of truth every orchestrator session loads first).
   capture 71). Lesson: did NOT merge on the single CLEAN re-check — the
   codex confirmation pass caught a real P1; holding for re-confirmation
   before merge.
+
+## 2026-07-17 — Wave 0 merged
+- All 7 Wave 0 PRs merged to main (squash): #137 program/plan, #138
+  inventory (261 behaviors), #140 yrs-spike, #141 protocol crate, #142
+  oracle, #143 contracts, #144 delta. All remote branches deleted (repo
+  rule); 0 rust-engine branches remain except the new integrator branch.
+  CodeRabbit CHANGES_REQUESTED on #137 overridden with documented
+  rationale (7 rounds, all substantive findings fixed, remainder stale
+  re-flags + provisioned ownership-upkeep on a living doc).
+- Gate 0 remaining deps: R01-DETERMINISM (queued behind hotfix #145 to
+  avoid engine-file conflict) + R02 (+ its local-runner native evidence,
+  = TS-NATIVE-CI). R02 launched on codex/rust-engine-r02.
+- Hotfix #145 still iterating on its own track (two-check A/B model
+  dispatched to converge the ADS/device/8.3 boundary).
+
+## 2026-07-17 — R02: Cargo workspace + toolchain + local-runner evidence
+- Repo-level Cargo workspace created (`Cargo.toml`, resolver 3). MEMBERS:
+  `crates/dohc-engine-protocol` (dormant production protocol crate) and
+  `crates/yrs-spike` (permanent R11 interop harness). EXCLUDED (kept
+  standalone): `crates/workspace-kernel` + `crates/workspace-kernel-spike`
+  — making the kernel a member relocates its build output away from the
+  HARD-CODED `crates/workspace-kernel/target/release/<bin>` path that
+  `apps/desktop/scripts/build-workspace-kernel.mjs` copies from, which
+  (given that script degrades silently) would ship the app WITHOUT the
+  kernel binary. Verified the excluded kernel still builds via
+  `cargo build --release --manifest-path crates/workspace-kernel/Cargo.toml`
+  and emits the binary at the expected staging path. Desktop build unchanged.
+- Pinned `rust-toolchain.toml` (channel 1.96.1, components rustfmt+clippy).
+  `[workspace.package]` (version/rust-version/publish) + `[workspace.lints]`
+  with `unsafe_code = "forbid"`; both members inherit via `[lints]
+  workspace = true` (yrs-spike's crate-local forbid superseded). Committed
+  root `Cargo.lock`; removed the two members' now-superseded per-crate locks.
+- `deny.toml` added (cargo-deny licenses/bans/advisories/sources); cargo-deny
+  installed locally and `cargo deny check` passes. cargo-audit absent — the
+  runner skips-with-warning.
+- Applied a mechanical rustfmt normalization to `crates/yrs-spike/src/main.rs`
+  (behavior-preserving) so the workspace has a fmt-clean baseline under the
+  pinned rustfmt.
+- Local runners under `tools/rust-engine-program/`: `run-rust-checks.mjs`
+  (fmt/clippy -D warnings/build/test + optional deny/audit) and
+  `run-native-suite.mjs` (TS-NATIVE-CI equivalent; asserts host arch; WSL =
+  Linux evidence; macOS = pre-release obligation), plus a `README.md`
+  documenting the local-evidence-replaces-CI workflow.
+- EVIDENCE (native Windows x64, dev machine):
+  - 2026-07-17 | run-rust-checks | win32/x64 | PASS | fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS cargo-deny=PASS cargo-audit=SKIP
+  - 2026-07-17 | run-native-suite | win32/x64 | PASS | typecheck=PASS test=PASS  (25+2 vitest files, 470 tests passed, 114 platform-skipped)
+  - Linux x64 (WSL) + macOS evidence still outstanding (macOS = pre-release obligation).

@@ -7,10 +7,12 @@
 #   yjs 13.6.30  (pnpm-lock.yaml)  <->  yrs 0.27.3 (below)
 [package]
 name = "dohc-yrs-spike"
-version = "0.1.0"
+version.workspace = true
+# edition/rust-version stay pinned to this crate's yrs 0.27.3 spike baseline
+# (not inherited from the workspace, which centralizes edition 2024 members).
 edition = "2021"
 rust-version = "1.82"
-publish = false
+publish.workspace = true
 
 [dependencies]
 yrs = "=0.27.3"
@@ -18,5 +20,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 base64 = "0.22"
 
-[lints.rust]
-unsafe_code = "forbid"
+# Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
+# Supersedes this crate's former crate-local `unsafe_code = "forbid"`.
+[lints]
+workspace = true

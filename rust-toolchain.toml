@@ -1,0 +1,11 @@
+# Pinned toolchain for the dohc Rust engine rewrite (plan section "Rust
+# policy": pinned stable toolchain, edition 2024, committed lockfile).
+#
+# Pinned to the exact stable release installed on the dev machine so local
+# evidence (native Windows + WSL Linux, per the Gate 0 CI-skipped decision) is
+# reproducible. Bump this deliberately and re-run the local runner to
+# regenerate evidence.
+[toolchain]
+channel = "1.96.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

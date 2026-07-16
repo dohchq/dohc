@@ -1,0 +1,56 @@
+# dohc Rust engine — repo-level Cargo workspace (shard R02).
+#
+# Dormant infrastructure: nothing here is wired into the shipping product. The
+# desktop app remains the TypeScript workspace engine until the R15 cutover.
+#
+# MEMBERSHIP DECISION (see PR body / tools/rust-engine-program/README.md):
+#   members  — dohc-engine-protocol (dormant production protocol crate, R03)
+#              and yrs-spike (the permanent R11 interop regression harness).
+#   exclude  — workspace-kernel + workspace-kernel-spike stay STANDALONE.
+#              apps/desktop/scripts/build-workspace-kernel.mjs stages the
+#              kernel binary by building `crates/workspace-kernel/Cargo.toml`
+#              and then copying from a HARD-CODED
+#              `crates/workspace-kernel/target/release/<bin>` path. Making the
+#              kernel a workspace member relocates its build output to the
+#              shared workspace `target/` dir, so that hard-coded path would no
+#              longer exist and the build script (which degrades silently,
+#              never fails) would ship the app WITHOUT the kernel binary. Until
+#              the kernel is ported into the new crate graph, excluding it here
+#              preserves its independent `crates/workspace-kernel/target/` and
+#              keeps the desktop build byte-for-byte unchanged. `exclude` (not
+#              merely being absent from `members`) is required so that
+#              `cargo build --manifest-path crates/workspace-kernel/Cargo.toml`
+#              still treats the crate as its own standalone workspace.
+[workspace]
+resolver = "3"
+members = [
+    "crates/dohc-engine-protocol",
+    "crates/yrs-spike",
+]
+exclude = [
+    "crates/workspace-kernel",
+    "crates/workspace-kernel-spike",
+]
+
+# Shared package metadata. Members opt in per field via `field.workspace = true`.
+# `edition` is intentionally NOT centralized here: dohc-engine-protocol is
+# edition 2024 while yrs-spike is pinned to edition 2021 (its yrs 0.27.3
+# baseline), so each crate declares its own edition.
+[workspace.package]
+version = "0.1.0"
+rust-version = "1.85"
+publish = false
+
+# Rust policy lints (plan section "Rust policy"). `unsafe_code = "forbid"` is
+# enforced in Cargo so the compiler rejects any `unsafe` in ordinary crates —
+# the plan's zero-unsafe budget. Warnings-as-errors is intentionally NOT set
+# here: the local runner (tools/rust-engine-program/run-rust-checks.mjs) passes
+# clippy `-D warnings`, keeping day-to-day `cargo build`/`cargo check`
+# ergonomic while the gate stays strict. Members inherit via
+# `[lints] workspace = true`.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# Strict-but-ergonomic clippy posture; the runner escalates these to errors.
+all = { level = "warn", priority = -1 }
