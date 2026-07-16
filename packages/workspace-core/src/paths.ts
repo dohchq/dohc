@@ -100,7 +100,8 @@ export function isSiteSourcePath(relativePath: string): boolean {
 // Win32 resolves these basenames to devices — bare or with any extension
 // ("nul", "NUL.md", "com1.tar.gz") — so such a segment never lands in the
 // workspace tree. The superscript digits alias the ASCII ones (COM¹ = COM1).
-const WINDOWS_DEVICE_NAME_RE = /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])$/i;
+const WINDOWS_DEVICE_NAME_RE =
+  /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³]|conin\$|conout\$|clock\$)$/i;
 
 // Device matching uses the name before the first dot with trailing spaces
 // stripped: "NUL .txt" opens the NUL device too.
@@ -116,17 +117,42 @@ function isWindowsDeviceSegment(segment: string): boolean {
 // meaning of the shape is ambiguous, so reject it outright.
 const SHORT_NAME_ALIAS_RE = /^[^.\s]{1,8}~\d+(?:\.[^.\s]{1,3})?$/;
 
+// NTFS Alternate Data Stream / drive-relative colons, reserved device names,
+// and generated 8.3 short-name aliases are all WINDOWS filesystem behaviors:
+// a colon is a legal filename byte on macOS/Linux, `DOHC~1` does not alias
+// `.dohc` where 8.3 generation does not exist, and `nul.md` is an ordinary
+// file. So this predicate only fires when the CURRENT host is Windows —
+// rejecting these host-legal names elsewhere would refuse real files for a
+// threat that cannot exist on that host. A remote Windows peer self-protects
+// at its OWN materialize boundary.
+function isHostUnsafeSegment(segment: string): boolean {
+  return (
+    segment.includes(":") ||
+    isWindowsDeviceSegment(segment) ||
+    SHORT_NAME_ALIAS_RE.test(stripWindowsAliasSuffix(segment))
+  );
+}
+
 export type WritePathValidation =
   | { ok: true; normalized: string }
-  | { ok: false; reason: "traversal" | "absolute" | "reserved" | "invalid" };
+  | {
+      ok: false;
+      reason: "traversal" | "absolute" | "reserved" | "invalid" | "unsupported-name";
+    };
 
+// Write-side validation. The host-unsafe-name checks (colon/ADS, device
+// names, 8.3 aliases) protect the LOCAL disk we are about to write to, so
+// they run only when the current host is Windows — `platform` is injectable
+// for tests but defaults to the real process platform.
 export function validateUserWritePath(
   relativePath: string,
-  options: { allowIgnoredSegments?: boolean } = {},
+  options: { allowIgnoredSegments?: boolean; platform?: NodeJS.Platform } = {},
 ): WritePathValidation {
+  const platform = options.platform ?? process.platform;
   return validateWorkspacePath(relativePath, {
     ...options,
     reserved: isReservedPath,
+    rejectHostUnsafeNames: platform === "win32",
   });
 }
 
@@ -134,7 +160,9 @@ export function validateUserWritePath(
 // the shared-with-me projection is readable — it is a WRITE reservation, not
 // a secret. `.dohc` metadata stays refused at any depth, and traversal /
 // encoding / ignored-segment rules are byte-identical to the write side so
-// the two validators can never drift on what a path MEANS.
+// the two validators can never drift on what a path MEANS. Host-unsafe-name
+// checks are NEVER applied to reads: a file that already exists on disk must
+// be readable and capturable on every platform, whatever its name.
 export function validateUserReadPath(
   relativePath: string,
   options: { allowIgnoredSegments?: boolean } = {},
@@ -142,6 +170,7 @@ export function validateUserReadPath(
   return validateWorkspacePath(relativePath, {
     ...options,
     reserved: isDohcMetadataPath,
+    rejectHostUnsafeNames: false,
   });
 }
 
@@ -150,6 +179,7 @@ function validateWorkspacePath(
   options: {
     allowIgnoredSegments?: boolean;
     reserved: (normalized: string) => boolean;
+    rejectHostUnsafeNames: boolean;
   },
 ): WritePathValidation {
   if (relativePath.includes("\0")) return { ok: false, reason: "invalid" };
@@ -182,13 +212,11 @@ function validateWorkspacePath(
         ? { ok: false, reason: "traversal" }
         : { ok: false, reason: "invalid" };
     }
-    // A colon smuggles an NTFS Alternate Data Stream ("notes.md:hidden") or a
-    // drive-relative prefix ("C:foo") into the segment; a colon never names a
-    // workspace file on any platform the workspace syncs to.
-    if (segment.includes(":")) return { ok: false, reason: "invalid" };
-    if (isWindowsDeviceSegment(segment)) return { ok: false, reason: "invalid" };
-    if (SHORT_NAME_ALIAS_RE.test(stripWindowsAliasSuffix(segment))) {
-      return { ok: false, reason: "invalid" };
+    // Colon/ADS, device names, and 8.3 aliases are unsafe to WRITE on Windows
+    // (see isHostUnsafeSegment); reject them only when writing to a Windows
+    // host so reads and non-win32 writes keep host-legal names.
+    if (options.rejectHostUnsafeNames && isHostUnsafeSegment(segment)) {
+      return { ok: false, reason: "unsupported-name" };
     }
   }
   const normalized = segments

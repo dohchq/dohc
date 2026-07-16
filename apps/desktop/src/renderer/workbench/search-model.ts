@@ -21,6 +21,10 @@ export interface SearchModel {
   limitHit: boolean;
   groups: SearchGroup[];
   totalMatches: number;
+  // Set when a batch carries a fail-closed/degraded notice (e.g. a broken
+  // workspace policy file paused search): the panel shows it so an empty
+  // result is explained, never silently blank.
+  notice: string | null;
 }
 
 export function idleSearchModel(): SearchModel {
@@ -30,6 +34,7 @@ export function idleSearchModel(): SearchModel {
     limitHit: false,
     groups: [],
     totalMatches: 0,
+    notice: null,
   };
 }
 
@@ -40,6 +45,7 @@ export function beginSearch(searchId: string): SearchModel {
     limitHit: false,
     groups: [],
     totalMatches: 0,
+    notice: null,
   };
 }
 
@@ -78,6 +84,9 @@ export function applyBatch(model: SearchModel, batch: SearchResultsEvent): Searc
     limitHit: model.limitHit || batch.limitHit,
     groups,
     totalMatches: model.totalMatches + batch.entries.length,
+    // A later batch without a notice never clears an earlier one for the same
+    // search (the pause reason persists until the search is re-run).
+    notice: batch.notice ?? model.notice,
   };
 }
 

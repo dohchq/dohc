@@ -231,11 +231,17 @@ export interface SearchResultsEventEntry {
   title?: string;
 }
 
+// A search that is fail-closed by a broken policy file (or otherwise paused)
+// carries a short human-readable notice so the panel can explain the empty
+// result instead of silently showing nothing.
+export const SEARCH_EVENT_MAX_NOTICE_CHARS = 500;
+
 export interface SearchResultsEvent {
   searchId: string;
   entries: SearchResultsEventEntry[];
   done: boolean;
   limitHit: boolean;
+  notice?: string;
 }
 
 function isBoundedString(value: unknown, max: number): value is string {
@@ -289,6 +295,11 @@ export function parseSearchResultsEvent(value: unknown): SearchResultsEvent | nu
   if (!isBoundedString(searchId, SEARCH_EVENT_MAX_ID_CHARS)) return null;
   if (typeof done !== "boolean" || typeof limitHit !== "boolean") return null;
   if (!Array.isArray(entries) || entries.length > SEARCH_EVENT_MAX_ENTRIES) return null;
+  const notice = optionalBoundedString(
+    (value as { notice?: unknown }).notice,
+    SEARCH_EVENT_MAX_NOTICE_CHARS,
+  );
+  if (notice === null) return null;
   const safeEntries: SearchResultsEventEntry[] = [];
   for (const raw of entries) {
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
@@ -332,7 +343,13 @@ export function parseSearchResultsEvent(value: unknown): SearchResultsEvent | nu
       ...(title !== undefined ? { title } : {}),
     });
   }
-  return { searchId, entries: safeEntries, done, limitHit };
+  return {
+    searchId,
+    entries: safeEntries,
+    done,
+    limitHit,
+    ...(notice !== undefined ? { notice } : {}),
+  };
 }
 
 // WS-G2-C-2 engine Y.Doc binding: main owns the node-only live Y.Doc session;

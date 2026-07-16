@@ -263,32 +263,13 @@ export function upsertChatMessageSearchIndex(input: {
     );
 }
 
-export function ensureSearchIndexForVersion(input: {
+function rebuildFileSearchIndexForVersion(input: {
   db: EngineSqliteDb;
   rootDir: string;
   workspaceId: WorkspaceId;
   versionId: VersionId;
-  nowMs: number;
-  corrupt: (cause?: unknown) => Error;
+  policy: EngineSearchPolicySnapshot;
 }): void {
-  if (
-    tableHasRows(
-      input.db,
-      "SELECT 1 FROM engine_search_index_state WHERE workspace_id = ? AND version_id = ?",
-      input.workspaceId,
-      input.versionId,
-    )
-  ) {
-    return;
-  }
-
-  const policy = readEngineSearchPolicySync(input.rootDir);
-  input.db
-    .prepare("DELETE FROM engine_search_files_fts WHERE workspace_id = ? AND version_id = ?")
-    .run(input.workspaceId, input.versionId);
-  // A broken policy fails closed: leave the file index empty and record no
-  // index state, so fixing (or removing) the policy file triggers a rebuild.
-  if (policy.diagnostics.length > 0) return;
   const files = input.db
     .prepare(
       `SELECT candidate.*, b.text
@@ -319,7 +300,7 @@ export function ensureSearchIndexForVersion(input: {
   );
   for (const row of files) {
     const path = String(row.path);
-    if (!pathIsSearchIndexed(input.rootDir, path, policy)) continue;
+    if (!pathIsSearchIndexed(input.rootDir, path, input.policy)) continue;
     insertFile.run(
       input.workspaceId,
       input.versionId,
@@ -327,6 +308,47 @@ export function ensureSearchIndexForVersion(input: {
       path,
       String(row.text),
     );
+  }
+}
+
+export function ensureSearchIndexForVersion(input: {
+  db: EngineSqliteDb;
+  rootDir: string;
+  workspaceId: WorkspaceId;
+  versionId: VersionId;
+  nowMs: number;
+  corrupt: (cause?: unknown) => Error;
+}): void {
+  if (
+    tableHasRows(
+      input.db,
+      "SELECT 1 FROM engine_search_index_state WHERE workspace_id = ? AND version_id = ?",
+      input.workspaceId,
+      input.versionId,
+    )
+  ) {
+    return;
+  }
+
+  const policy = readEngineSearchPolicySync(input.rootDir);
+  input.db
+    .prepare("DELETE FROM engine_search_files_fts WHERE workspace_id = ? AND version_id = ?")
+    .run(input.workspaceId, input.versionId);
+  // A broken policy fails closed for FILE indexing only: file visibility is
+  // exactly what the policy governs, so leave the file index empty. Chat
+  // indexing (which file policy does NOT govern) still runs below, and no
+  // index_state is recorded while degraded so fixing/removing the policy file
+  // triggers a full rebuild. Query-time pathIsSearchIndexed also fails file
+  // search closed regardless of what the index happens to hold.
+  const policyOk = policy.diagnostics.length === 0;
+  if (policyOk) {
+    rebuildFileSearchIndexForVersion({
+      db: input.db,
+      rootDir: input.rootDir,
+      workspaceId: input.workspaceId,
+      versionId: input.versionId,
+      policy,
+    });
   }
 
   input.db
@@ -377,13 +399,18 @@ export function ensureSearchIndexForVersion(input: {
       }),
     );
   }
-  input.db
-    .prepare(
-      `INSERT INTO engine_search_index_state (workspace_id, version_id, indexed_at_ms)
-       VALUES (?, ?, ?)
-       ON CONFLICT(workspace_id, version_id) DO UPDATE SET indexed_at_ms = excluded.indexed_at_ms`,
-    )
-    .run(input.workspaceId, input.versionId, input.nowMs);
+  // Only mark the version indexed when the file index is authoritative. While
+  // the policy is degraded the file index was intentionally skipped, so
+  // leaving index_state unset forces a rebuild once the policy is fixed.
+  if (policyOk) {
+    input.db
+      .prepare(
+        `INSERT INTO engine_search_index_state (workspace_id, version_id, indexed_at_ms)
+         VALUES (?, ?, ?)
+         ON CONFLICT(workspace_id, version_id) DO UPDATE SET indexed_at_ms = excluded.indexed_at_ms`,
+      )
+      .run(input.workspaceId, input.versionId, input.nowMs);
+  }
 }
 
 function ftsQueryForSubstring(query: string): string | null {

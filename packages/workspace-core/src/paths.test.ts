@@ -165,47 +165,99 @@ describe("path traversal", () => {
 });
 
 describe("Windows path aliases (ADS, device names, 8.3 short names)", () => {
-  it("rejects NTFS Alternate Data Stream and drive-relative colon segments", () => {
-    for (const candidate of [
-      "notes.md:hidden",
-      "notes.md:hidden:$DATA",
-      "C:foo",
-      "docs/report.md:stream",
-      "a/b:stream/c.md",
-    ]) {
-      const write = validateUserWritePath(candidate);
-      expect(write).toEqual({ ok: false, reason: "invalid" });
-      expect(validateUserReadPath(candidate)).toEqual({ ok: false, reason: "invalid" });
+  // Host-unsafe names that are legal on macOS/Linux but hazardous to WRITE on
+  // a Windows disk (ADS colon, drive-relative colon, device names, 8.3 alias
+  // shapes). Grouped by the shape the guard recognizes.
+  const winUnsafe = [
+    "notes.md:hidden",
+    "notes.md:hidden:$DATA",
+    "C:foo",
+    "docs/report.md:stream",
+    "a/b:stream/c.md",
+    "NUL",
+    "nul",
+    "nul.md",
+    "CON",
+    "con.md",
+    "CON.md.txt",
+    "PRN",
+    "prn.log",
+    "AUX",
+    "COM1",
+    "com1.tar.gz",
+    "COM9",
+    "LPT1",
+    "lpt9.md",
+    "docs/nul.md",
+    "NUL .txt",
+    "nul.",
+    "CONIN$",
+    "conout$.md",
+    "CLOCK$",
+    "DOHC~1",
+    "dohc~1",
+    "DOHC~1/engine.db",
+    "notes/DOHC~1/x.md",
+    "SHARED~1/alex/brief.md",
+    "SECRET~1.ENV",
+    "LONGDI~1/notes.md",
+    "DOHC~1./x.md",
+    "DOHC~12345",
+  ];
+
+  it("rejects host-unsafe names on a Windows WRITE with a typed reason", () => {
+    for (const candidate of winUnsafe) {
+      expect(validateUserWritePath(candidate, { platform: "win32" })).toEqual({
+        ok: false,
+        reason: "unsupported-name",
+      });
     }
   });
 
-  it("rejects Windows reserved device names, bare or with extension, any case", () => {
-    for (const candidate of [
-      "NUL",
-      "nul",
-      "nul.md",
-      "CON",
-      "con.md",
-      "CON.md.txt",
-      "PRN",
-      "prn.log",
-      "AUX",
-      "COM1",
-      "com1.tar.gz",
-      "COM9",
-      "LPT1",
-      "lpt9.md",
-      "docs/nul.md",
-      "NUL .txt",
-      "nul.",
-    ]) {
-      const write = validateUserWritePath(candidate);
-      expect(write).toEqual({ ok: false, reason: "invalid" });
-      expect(validateUserReadPath(candidate)).toEqual({ ok: false, reason: "invalid" });
+  it("allows the SAME names on a non-Windows WRITE (host-legal there)", () => {
+    for (const candidate of winUnsafe) {
+      // C:foo / colon names are legal relative filenames off Windows; device
+      // names and 8.3 shapes are ordinary files with no aliasing there.
+      expect(validateUserWritePath(candidate, { platform: "linux" }).ok).toBe(true);
+      expect(validateUserWritePath(candidate, { platform: "darwin" }).ok).toBe(true);
     }
   });
 
-  it("still accepts names that merely start with or contain a device name", () => {
+  it("NEVER rejects host-unsafe names on a READ, any platform (capture must see them)", () => {
+    for (const candidate of winUnsafe) {
+      // Reads carry no platform; existing on-disk files must always be
+      // readable/capturable regardless of name.
+      expect(validateUserReadPath(candidate).ok).toBe(true);
+    }
+  });
+
+  it("keeps rejecting genuine traversal/reserved even in host-unsafe shapes", () => {
+    // The universal invariants are independent of the host-unsafe gate.
+    expect(validateUserWritePath("../nul.md", { platform: "win32" }).ok).toBe(false);
+    expect(validateUserReadPath("../nul.md").ok).toBe(false);
+    // Exact `.dohc` stays reserved on every platform; only the fuzzy 8.3 ALIAS
+    // of it (DOHC~1) is Windows-write-only.
+    expect(validateUserWritePath(".dohc/x", { platform: "linux" })).toEqual({
+      ok: false,
+      reason: "reserved",
+    });
+  });
+
+  it("host-legal real files read AND write on non-Windows, and read on Windows", () => {
+    for (const candidate of [
+      "standup 9:30.md",
+      "con.py",
+      "report~1.pdf",
+      "draft~2.md",
+    ]) {
+      expect(validateUserWritePath(candidate, { platform: "linux" }).ok).toBe(true);
+      expect(validateUserWritePath(candidate, { platform: "darwin" }).ok).toBe(true);
+      // Capture is a read: these must be seen on every host, Windows included.
+      expect(validateUserReadPath(candidate).ok).toBe(true);
+    }
+  });
+
+  it("still accepts device/tilde lookalikes on a Windows WRITE", () => {
     for (const candidate of [
       "CONFIG.md",
       "console.md",
@@ -216,31 +268,6 @@ describe("Windows path aliases (ADS, device names, 8.3 short names)", () => {
       "com1ander.md",
       "nul stuff.md",
       "notes/prny.md",
-    ]) {
-      expect(validateUserWritePath(candidate).ok).toBe(true);
-    }
-  });
-
-  it("rejects 8.3 short-name-shaped segments (they can alias reserved names)", () => {
-    for (const candidate of [
-      "DOHC~1",
-      "dohc~1",
-      "DOHC~1/engine.db",
-      "notes/DOHC~1/x.md",
-      "SHARED~1/alex/brief.md",
-      "SECRET~1.ENV",
-      "LONGDI~1/notes.md",
-      "DOHC~1./x.md",
-      "DOHC~12345",
-    ]) {
-      const write = validateUserWritePath(candidate);
-      expect(write).toEqual({ ok: false, reason: "invalid" });
-      expect(validateUserReadPath(candidate)).toEqual({ ok: false, reason: "invalid" });
-    }
-  });
-
-  it("still accepts tilde names that cannot be generated short names", () => {
-    for (const candidate of [
       "notes~backup.md",
       "verylongname~1.md",
       "draft~one.md",
@@ -249,7 +276,7 @@ describe("Windows path aliases (ADS, device names, 8.3 short names)", () => {
       "release.notes~2.md",
       "tilde~.md",
     ]) {
-      expect(validateUserWritePath(candidate).ok).toBe(true);
+      expect(validateUserWritePath(candidate, { platform: "win32" }).ok).toBe(true);
     }
   });
 });

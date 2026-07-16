@@ -2774,6 +2774,10 @@ export const SearchResultsEventSchema = z.object({
   entries: z.array(SearchResultEntrySchema).max(SEARCH_EVENT_MAX_ENTRIES),
   done: z.boolean(),
   limitHit: z.boolean(),
+  // A short, user-facing explanation when search is paused/degraded (e.g. a
+  // policy file failed to parse and file search fails closed). Optional so
+  // ordinary result batches omit it entirely.
+  notice: z.string().min(1).max(500).optional(),
 });
 export type SearchResultsEventSchema = z.infer<typeof SearchResultsEventSchema>;
 

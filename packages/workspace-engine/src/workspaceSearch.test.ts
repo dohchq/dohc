@@ -442,9 +442,9 @@ describe("workspace engine search", () => {
     }
   });
 
-  it("fails closed when a policy file exists but is broken, and recovers once fixed", async () => {
+  it("fails FILE search closed on a broken policy, keeps CHAT search, and recovers once fixed", async () => {
     await mkdir(join(root, ".dohc"), { recursive: true });
-    await writeFile(join(root, ".dohc", "visibility.toml"), "not [ valid toml");
+    await writeFile(join(root, ".dohc", "files.toml"), "not [ valid toml");
     const versions = versionStore();
     const chats = chatStore();
     const main = await versions.ensureMainVersion({ workspaceId: "workspace-a" });
@@ -455,17 +455,41 @@ describe("workspace engine search", () => {
       text: "FAIL_CLOSED_NEEDLE\n",
       metadata: { origin: "api" },
     });
+    // A chat thread whose message carries the SAME needle: file policy does not
+    // govern chat visibility, so a broken files.toml must not hide it. The
+    // thread links an innocuous file so the chat hit comes from the message.
+    const topic = await versions.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/topic.md",
+      text: "unrelated topic\n",
+      metadata: { origin: "api" },
+    });
+    const thread = await chats.createThread({
+      workspaceId: "workspace-a",
+      title: "Planning",
+      linkedFile: { objectId: topic.object.id, pathHint: "notes/topic.md" },
+    });
+    await chats.sendMessage({
+      workspaceId: "workspace-a",
+      threadId: thread.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "FAIL_CLOSED_NEEDLE from a chat message.",
+    });
 
-    // Broken policy = most restrictive posture: no file hits, nothing indexed.
-    await expect(
-      searchWorkspaceEngine({
-        workspaceId: "workspace-a",
-        versionId: main.id,
-        query: "FAIL_CLOSED_NEEDLE",
-        versions,
-        chats,
-      }),
-    ).resolves.toEqual([]);
+    // File hits fail closed and nothing lands in the file index...
+    const broken = await searchWorkspaceEngine({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      query: "FAIL_CLOSED_NEEDLE",
+      versions,
+      chats,
+    });
+    expect(broken.some((result) => result.surface === "file")).toBe(false);
+    // ...but the chat hit still surfaces (file policy does not govern chat).
+    expect(
+      broken.some((result) => result.surface === "chat" && result.threadId === thread.id),
+    ).toBe(true);
     const db = new DatabaseSync(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH));
     try {
       const rows = db.prepare("SELECT text FROM engine_search_files_fts").all();
@@ -474,20 +498,24 @@ describe("workspace engine search", () => {
       db.close();
     }
 
-    // Fixing the policy file recovers search: no stale empty index state.
+    // Fixing the policy file recovers file search: no stale empty index state.
     await writeFile(
-      join(root, ".dohc", "visibility.toml"),
-      '[[rule]]\npath = "private/**"\nvisibility = "hidden"\n',
+      join(root, ".dohc", "files.toml"),
+      '[[rule]]\npath = "docs/**"\nsearchable = false\n',
     );
-    await expect(
-      searchWorkspaceEngine({
-        workspaceId: "workspace-a",
-        versionId: main.id,
-        query: "FAIL_CLOSED_NEEDLE",
-        versions,
-        chats,
-      }),
-    ).resolves.toMatchObject([{ surface: "file", path: "notes/plan.md" }]);
+    const recovered = await searchWorkspaceEngine({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      query: "FAIL_CLOSED_NEEDLE",
+      versions,
+      chats,
+    });
+    expect(
+      recovered.some((result) => result.surface === "file" && result.path === "notes/plan.md"),
+    ).toBe(true);
+    expect(
+      recovered.some((result) => result.surface === "chat" && result.threadId === thread.id),
+    ).toBe(true);
   });
 
   it("searches a freshly forked version and incrementally reflects a write in the fork", async () => {
