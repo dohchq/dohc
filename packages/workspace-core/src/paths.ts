@@ -188,17 +188,23 @@ export function validateUserMaterializePath(
 // Read-side validation — CHECK A only (read variant). The shared-with-me
 // projection is readable (a WRITE reservation, not a secret), so only `.dohc`
 // metadata stays refused at any depth. Traversal / encoding / ignored-segment
-// rules are byte-identical to the write side, and the materialize hazard is
-// NEVER applied to reads — an existing on-disk file must be readable and
-// capturable on every platform, whatever its name.
+// rules are byte-identical to the write side. The materialize hazard is NOT
+// applied to reads (an existing on-disk file must be readable on every
+// platform, whatever its name) with ONE win32-only exception: a colon in a
+// workspace-RELATIVE read path is always an NTFS Alternate Data Stream
+// reference (relative paths carry no drive letters), which dohc never reads —
+// so it is refused on Windows. Off Windows a colon is a legal filename byte and
+// reads accept it. `platform` is injectable for tests.
 export function validateUserReadPath(
   relativePath: string,
-  options: { allowIgnoredSegments?: boolean } = {},
+  options: { allowIgnoredSegments?: boolean; platform?: NodeJS.Platform } = {},
 ): WritePathValidation {
+  const platform = options.platform ?? process.platform;
   return validateWorkspacePath(relativePath, {
-    ...options,
+    allowIgnoredSegments: options.allowIgnoredSegments,
     reserved: isDohcMetadataPath,
     rejectHostUnsafeNames: false,
+    rejectAdsColon: platform === "win32",
   });
 }
 
@@ -208,6 +214,7 @@ function validateWorkspacePath(
     allowIgnoredSegments?: boolean;
     reserved: (normalized: string) => boolean;
     rejectHostUnsafeNames: boolean;
+    rejectAdsColon?: boolean;
   },
 ): WritePathValidation {
   if (relativePath.includes("\0")) return { ok: false, reason: "invalid" };
@@ -252,10 +259,15 @@ function validateWorkspacePath(
     return { ok: false, reason: "reserved" };
   }
   // Check B (materialize hazard) — disk sinks only, gated to win32 by the
-  // caller via rejectHostUnsafeNames.
+  // caller via rejectHostUnsafeNames (which already covers the ADS colon). On
+  // reads only the win32 ADS-colon slice of Check B applies (rejectAdsColon).
   if (options.rejectHostUnsafeNames) {
     for (const segment of normalized.split("/")) {
       if (hasMaterializeHazard(segment)) return { ok: false, reason: "unsupported-name" };
+    }
+  } else if (options.rejectAdsColon) {
+    for (const segment of normalized.split("/")) {
+      if (segment.includes(":")) return { ok: false, reason: "unsupported-name" };
     }
   }
   return { ok: true, normalized };

@@ -841,12 +841,16 @@ describe("engine file path classifier (shared by search and capture)", () => {
   });
 
   it("tracks host-legal names that would be Windows-unsafe to WRITE (no capture drop)", () => {
-    // Classification runs Check A (reserved) only, NOT the materialize hazard —
-    // otherwise a synced "report~1.pdf" (or a colon / device-shaped name) would
-    // classify as ignored on Windows and never be captured. Materialize protects
-    // the local disk separately.
+    // Capture classification (write variant) runs Check A only, NOT the
+    // materialize hazard — so a synced "report~1.pdf" (or a colon / device /
+    // 8.3-shaped name) is tracked and captured on every platform, never
+    // dropped. Materialize protects the local disk separately.
     for (const path of ["report~1.pdf", "notes/meeting 9:30.md", "con.py", "DOHC~1.md"]) {
       expect(classifyEngineFilePath(path)).toEqual({ kind: "tracked" });
+    }
+    // Read classification tracks the colon-free host-legal names too; an
+    // ADS-colon path is blocked on Windows reads (covered in paths.test.ts).
+    for (const path of ["report~1.pdf", "con.py", "DOHC~1.md"]) {
       expect(classifyEngineFilePathForRead(path)).toEqual({ kind: "tracked" });
     }
   });

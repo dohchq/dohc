@@ -275,10 +275,34 @@ describe("Check B — materialize hazard (disk-write only, win32-gated)", () => 
     }
   });
 
-  it("allows the SAME names on the default write path AND reads (classify/capture)", () => {
+  it("allows the SAME names on the default write path (classify/capture) and non-win32 reads", () => {
     for (const candidate of hazards) {
+      // Check A only — never applies the materialize hazard.
       expect(validateUserWritePath(candidate).ok).toBe(true);
-      expect(validateUserReadPath(candidate).ok).toBe(true);
+      // Reads accept them on non-Windows (colon is a legal filename byte there).
+      expect(validateUserReadPath(candidate, { platform: "linux" }).ok).toBe(true);
+      expect(validateUserReadPath(candidate, { platform: "darwin" }).ok).toBe(true);
+    }
+  });
+
+  it("blocks ADS-colon on WINDOWS reads only (not device/8.3 names)", () => {
+    // A colon in a workspace-relative read path is always an ADS reference on
+    // Windows, which dohc never reads.
+    for (const candidate of ["notes.md:hidden", "C:foo", "docs/report.md:stream"]) {
+      expect(validateUserReadPath(candidate, { platform: "win32" })).toEqual({
+        ok: false,
+        reason: "unsupported-name",
+      });
+      expect(validateUserReadPath(candidate, { platform: "linux" }).ok).toBe(true);
+    }
+    // Non-colon hazards (device names, 8.3 shapes) still READ fine on Windows —
+    // an existing file with that name must stay readable/capturable.
+    for (const candidate of ["nul.md", "report~1.pdf", "CONIN$", "LONGDI~1/notes.md"]) {
+      expect(validateUserReadPath(candidate, { platform: "win32" }).ok).toBe(true);
+    }
+    // Ordinary names read fine on Windows.
+    for (const candidate of ["notes/today.md", "finance/q1 report.md", "a/b/c.txt"]) {
+      expect(validateUserReadPath(candidate, { platform: "win32" }).ok).toBe(true);
     }
   });
 
