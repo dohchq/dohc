@@ -1,0 +1,19 @@
+[package]
+name = "dohc-engine-runtime"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+publish.workspace = true
+description = "CAL-1 calibration slice: the workspace actor that owns the storage writer connection, keyed by canonical engine.db file identity, with an explicit open→ready→draining→closed lifecycle and deterministic Drop. Dormant; not wired into the product."
+
+[dependencies]
+dohc-engine-storage = { path = "../dohc-engine-storage" }
+# OS file identity (POSIX dev+ino, Windows volume+file-index) as a hashable
+# value. Encapsulates the platform FFI so the engine crates keep
+# forbid(unsafe_code).
+file-id = "0.2"
+thiserror = "2"
+
+# Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
+[lints]
+workspace = true

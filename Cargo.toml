@@ -25,6 +25,9 @@
 resolver = "3"
 members = [
     "crates/dohc-engine-protocol",
+    "crates/dohc-engine-storage",
+    "crates/dohc-engine-runtime",
+    "crates/dohc-engine-testkit",
     "crates/yrs-spike",
 ]
 exclude = [
