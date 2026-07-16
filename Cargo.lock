@@ -203,6 +203,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dohc-engine-files"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "dohc-engine-protocol"
 version = "0.1.0"
 dependencies = [

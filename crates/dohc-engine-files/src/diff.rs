@@ -1,0 +1,280 @@
+//! Scan-generation diff ("hash-changed"): compare a prior scan generation's
+//! manifest against a fresh listing to classify **added / changed / removed**.
+//!
+//! Change detection is by content hash and size, never mtime — "hashes, not
+//! timestamps, are the source of truth" (the reference accelerator's own
+//! contract, `crates/workspace-kernel/src/main.rs`). The classification
+//! predicate is factored into [`diff_core`] behind a seam so the seeded-bug
+//! proof (a flipped hash comparison) exercises the real machinery with only the
+//! predicate mutated — the differential harness must be able to catch exactly
+//! this class of bug (`EXECUTION_LOG.md` CAL-2 differential-tautology lesson).
+
+use crate::bounds::ScanBounds;
+use crate::error::FilesError;
+use crate::scan::{FileEntry, ScanListing};
+use std::collections::BTreeMap;
+
+/// One entry in a prior scan generation's manifest: what a file's size and hash
+/// were when it was last reconciled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestEntry {
+    pub size: u64,
+    pub sha256: String,
+}
+
+/// A prior scan generation as a path → (size, hash) manifest. `BTreeMap` keeps
+/// iteration deterministic (`PORTING.md` §11: no `HashMap` in ordered output).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScanManifest {
+    entries: BTreeMap<String, ManifestEntry>,
+}
+
+impl ScanManifest {
+    /// An empty manifest (the baseline before the first scan).
+    pub fn empty() -> Self {
+        ScanManifest {
+            entries: BTreeMap::new(),
+        }
+    }
+
+    /// Build a manifest from explicit (path, entry) pairs — used to reconstruct
+    /// a prior scan generation from a persisted/golden manifest (e.g. the
+    /// differential harness's fixture manifests). A later insert for the same
+    /// path wins.
+    pub fn from_entries(entries: impl IntoIterator<Item = (String, ManifestEntry)>) -> Self {
+        ScanManifest {
+            entries: entries.into_iter().collect(),
+        }
+    }
+
+    /// Build a manifest from a completed listing (its tracked files).
+    pub fn from_listing(listing: &ScanListing) -> Self {
+        let entries = listing
+            .files
+            .iter()
+            .map(|f| {
+                (
+                    f.path.clone(),
+                    ManifestEntry {
+                        size: f.size,
+                        sha256: f.sha256.clone(),
+                    },
+                )
+            })
+            .collect();
+        ScanManifest { entries }
+    }
+
+    /// Number of tracked entries.
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether the manifest is empty.
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// The classified difference between a prior manifest and a current listing.
+/// Each vector is sorted by path (deterministic; `LANGUAGE_SEMANTICS_MATRIX.md`
+/// 3.3).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScanDiff {
+    pub added: Vec<FileEntry>,
+    pub changed: Vec<FileEntry>,
+    pub removed: Vec<String>,
+}
+
+impl ScanDiff {
+    /// Total number of diff entries.
+    pub fn len(&self) -> usize {
+        self.added.len() + self.changed.len() + self.removed.len()
+    }
+
+    /// Whether the diff is empty (the scan converged with the prior generation).
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty()
+    }
+}
+
+/// Compare `prior` against `current`, bounded by `bounds.max_diff_entries`.
+pub fn diff_scans(
+    prior: &ScanManifest,
+    current: &ScanListing,
+    bounds: &ScanBounds,
+) -> Result<ScanDiff, FilesError> {
+    let diff = diff_core(prior, current, is_unchanged);
+    if diff.len() > bounds.max_diff_entries {
+        return Err(FilesError::DiffTooLarge {
+            cap: bounds.max_diff_entries,
+        });
+    }
+    Ok(diff)
+}
+
+/// The real change predicate: a file is unchanged iff BOTH its size and its
+/// content hash match the prior manifest. Comparing size too is a cheap guard,
+/// but the hash is the authority.
+fn is_unchanged(prior: &ManifestEntry, current: &FileEntry) -> bool {
+    prior.size == current.size && prior.sha256 == current.sha256
+}
+
+/// The diff engine, generic over the "unchanged" predicate so a seeded-bug test
+/// can flip the hash comparison and prove the differential harness catches it.
+fn diff_core<F>(prior: &ScanManifest, current: &ScanListing, is_unchanged: F) -> ScanDiff
+where
+    F: Fn(&ManifestEntry, &FileEntry) -> bool,
+{
+    let mut added = Vec::new();
+    let mut changed = Vec::new();
+    for file in &current.files {
+        match prior.entries.get(&file.path) {
+            Some(prior_entry) if is_unchanged(prior_entry, file) => {}
+            Some(_) => changed.push(file.clone()),
+            None => added.push(file.clone()),
+        }
+    }
+
+    // A path in the prior manifest but not in the current listing was removed.
+    let present: BTreeMap<&str, ()> = current
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), ()))
+        .collect();
+    let mut removed: Vec<String> = prior
+        .entries
+        .keys()
+        .filter(|path| !present.contains_key(path.as_str()))
+        .cloned()
+        .collect();
+
+    added.sort_by(|a, b| a.path.cmp(&b.path));
+    changed.sort_by(|a, b| a.path.cmp(&b.path));
+    removed.sort();
+    ScanDiff {
+        added,
+        changed,
+        removed,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(path: &str, size: u64, sha: &str) -> FileEntry {
+        FileEntry {
+            path: path.to_owned(),
+            size,
+            mtime_ms: 0,
+            sha256: sha.to_owned(),
+            media_type: "text/markdown",
+        }
+    }
+
+    fn manifest(rows: &[(&str, u64, &str)]) -> ScanManifest {
+        let entries = rows
+            .iter()
+            .map(|(p, s, h)| {
+                (
+                    (*p).to_owned(),
+                    ManifestEntry {
+                        size: *s,
+                        sha256: (*h).to_owned(),
+                    },
+                )
+            })
+            .collect();
+        ScanManifest { entries }
+    }
+
+    // A dropped hash comparison: "unchanged" decided on size alone — the exact
+    // class of bug the CAL-2 lesson warns a tautological harness would miss,
+    // because a same-size content edit slips through as unchanged.
+    fn seeded_bug_unchanged(prior: &ManifestEntry, current: &FileEntry) -> bool {
+        prior.size == current.size
+    }
+
+    #[test]
+    fn diff_classifies_added_changed_removed() {
+        let prior = manifest(&[
+            ("same.md", 5, "hSAME"),
+            ("changed.md", 7, "hOLD"),
+            ("gone.md", 4, "hGONE"),
+        ]);
+        let current = ScanListing {
+            files: vec![
+                entry("same.md", 5, "hSAME"),
+                entry("changed.md", 6, "hNEW"),
+                entry("added.md", 3, "hADD"),
+            ],
+            skipped: vec![],
+        };
+        let diff = diff_core(&prior, &current, is_unchanged);
+        assert_eq!(
+            diff.added
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["added.md"]
+        );
+        assert_eq!(
+            diff.changed
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["changed.md"]
+        );
+        assert_eq!(diff.removed, ["gone.md"]);
+    }
+
+    // SEEDED-BUG PROOF: the golden diff is what the real predicate produces; the
+    // flipped predicate produces a DIFFERENT diff, so an equality assertion
+    // against the golden would FAIL under the bug. This proves the differential
+    // assertion is load-bearing, not tautological.
+    #[test]
+    fn seeded_bug_is_caught_by_the_golden() {
+        // changed.md is edited in place: SAME size (5), different content hash.
+        let prior = manifest(&[("same.md", 5, "hSAME"), ("changed.md", 5, "hOLD")]);
+        let current = ScanListing {
+            files: vec![entry("same.md", 5, "hSAME"), entry("changed.md", 5, "hNEW")],
+            skipped: vec![],
+        };
+
+        let golden = diff_core(&prior, &current, is_unchanged);
+        // Real predicate: same.md unchanged, changed.md changed (hash differs).
+        assert_eq!(
+            golden
+                .changed
+                .iter()
+                .map(|f| f.path.as_str())
+                .collect::<Vec<_>>(),
+            ["changed.md"]
+        );
+        assert!(golden.added.is_empty() && golden.removed.is_empty());
+
+        let buggy = diff_core(&prior, &current, seeded_bug_unchanged);
+        // The size-only bug misses the same-size content edit entirely.
+        assert_ne!(
+            golden, buggy,
+            "the golden assertion must reject the seeded bug"
+        );
+        assert!(
+            buggy.changed.is_empty(),
+            "size-only diff silently drops the content change"
+        );
+    }
+
+    #[test]
+    fn diff_bound_trips_when_exceeded() {
+        let prior = ScanManifest::empty();
+        let current = ScanListing {
+            files: vec![entry("a.md", 1, "h1"), entry("b.md", 1, "h2")],
+            skipped: vec![],
+        };
+        let bounds = ScanBounds::builder().max_diff_entries(1).build();
+        let err = diff_scans(&prior, &current, &bounds).unwrap_err();
+        assert_eq!(err.code(), "diff-too-large");
+    }
+}
