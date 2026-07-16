@@ -162,3 +162,15 @@ source of truth every orchestrator session loads first).
   Local review cycle complete: implementer -> 2 adversarial -> 15-fix
   batch -> re-check -> 2 residuals -> verified. Re-runs green (23/23
   fidelity --require-harvested; 25/25 strict smoke).
+- PR #137 review round 3 fixed (2 P1 + 13 findings): dispatch raw-writer
+  fence caveat made explicit (v2 stamp only locks out writers that check
+  it; Gate 5 deletion + Gate 6 dispatch-path adversarial test now
+  normative); R10b shard added owning sync-relay epoch rejection; GATE0
+  deps extended (R01-DETERMINISM, TS-NATIVE-CI) and CAL-3/R11b/R13b gated
+  transitively; status vocabulary normalized; R03 skeleton scoped to
+  protocol-crate paths; recovery exports get backup posture; zero-handle
+  proof OS-specified and held through swap; capture mismatch = durable
+  failed state; PASS ledger entry marked provisional pending Ice
+  ratification; handoff schema rejects contradictory unsafe approvals;
+  build-slot reclamation owner-safe (heartbeat + pid-tree + tombstone
+  rename).

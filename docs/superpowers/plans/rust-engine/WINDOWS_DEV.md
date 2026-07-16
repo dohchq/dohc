@@ -17,9 +17,15 @@ running cargo locally follows these rules.
 - **Local concurrency budget: max 4 lanes running cargo at once**, enforced
   mechanically, not by convention: a lane acquires a slot by creating one of
   `C:\w\_locks\build-slot-{1..4}` (directory-create is atomic) before any
-  cargo invocation and removes it after; a slot older than 30 minutes with
-  no live cargo process is stale and may be reclaimed. Denied acquisitions
-  and reclaims are appended to `EXECUTION_LOG.md`.
+  cargo invocation and removes it after. Each slot dir contains an
+  `owner.json` (lane/shard id, pid, start time) whose mtime the owner
+  touches as a heartbeat at least every 5 minutes while building.
+  Reclamation is owner-safe, not age-guessed: a slot is reclaimable only
+  when its heartbeat is >30 minutes stale AND the owner pid (and its child
+  process tree — cargo spawns rustc children) is dead; reclamation renames
+  the slot dir to a tombstone (atomic — a racing owner's next heartbeat
+  fails loudly instead of silently sharing a slot) before deleting it.
+  Denied acquisitions and reclaims are appended to `EXECUTION_LOG.md`.
 - Free-space preflight with hysteresis: before acquiring a slot, check free
   space on the worktree volume — **pause new builds below 40 GB, resume at
   60 GB**; while paused, the orchestrator prunes the oldest stale target

@@ -72,6 +72,17 @@ Append-only. Every entry: date, decision, decider, rationale pointer.
      (open for Gate 0).
 - **Rationale pointer:** `crates/yrs-spike/SPIKE_REPORT.md` (PR #140).
 
+## 2026-07-16 — Amendment: PASS entry accountability and certification status
+
+- The PASS verdict above is **provisional pending Ice's ratification at
+  Gate 0** — its decider is a rule plus shard evidence, not a person, and
+  the append-only ledger must not imply human sign-off that has not
+  happened. Status: both clean-context adversarial reviews UPHELD the
+  verdict; the 15-finding fix batch and both re-check residuals are closed
+  (commits `94f8083b`, `22fdf09a`); strict re-certification green
+  (fidelity 23/23 `--require-harvested`, fuzz 500/500 `--strict`). Ice
+  ratifies (or overrides) as part of the Gate 0 decision packet.
+
 ## Open — require Ice at Gate 0 (recommendations in plan)
 
 | # | Decision | Status |

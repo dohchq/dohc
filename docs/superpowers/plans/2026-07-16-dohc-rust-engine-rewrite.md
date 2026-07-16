@@ -607,10 +607,18 @@ convention:
   Materialization in shadow builds is confined to the cloned root by the path
   floor, and that confinement is tested.
 - **Post-cutover (TS must not touch Rust workspaces):** Rust initializes at
-  `schema_version = 2`; every existing TS binary fails closed via the
-  existing `schema_version` corrupt() check in `initializeOrValidateEngineSchema`. No bridge release
-  needed. Adversarially verified once in Gate 6 by launching the current TS
-  desktop against a Rust-owned clone.
+  `schema_version = 2`; every TS writer that validates the schema fails
+  closed via the `schema_version` corrupt() check in
+  `initializeOrValidateEngineSchema`. **Caveat (mechanical, not assumed):
+  the version stamp only locks out writers that check it.**
+  `desktopAgentDispatchStore.ts` opens `engine.db` raw, checks only that
+  dispatch tables exist, and runs ALTER TABLE / BEGIN IMMEDIATE without
+  ever validating `schema_version` — and v2 keeps the table shapes it
+  probes. Therefore: every raw-connection writer (STATE_OWNERSHIP census,
+  disposition DELETED) must be removed by Gate 5, and Gate 6's adversarial
+  TS-launch test must specifically exercise chat-dispatch startup and
+  app-quit recovery against a Rust-owned clone, proving no surviving code
+  path writes. No bridge release needed.
 
 ## Y.Doc: week-one spike and design
 
@@ -640,8 +648,10 @@ Concretely, not just protocol-level:
 5. Pin the exact yjs/yrs version pair as a locked, audited dependency — a
    later yjs upgrade can silently reopen interop divergence.
 
-Pass → R11a starts as soon as R04's storage foundation lands. Fail → the
-program pauses for an Ice decision. There is no fallback menu.
+Pass → R11a starts once Gate 0 has passed and R04's storage foundation
+lands (SHARDS deps govern; the spike passing does not by itself open any
+capability shard). Fail → the program pauses for an Ice decision. There is
+no fallback menu.
 
 > **Verdict 2026-07-16: PASS** (PR #140, yjs 13.6.30 ↔ yrs 0.27.3 pinned).
 > Binding carry-forward constraints recorded in `DECISIONS.md`: every
@@ -731,9 +741,10 @@ All live in the program directory chosen at R00
 - `SHARDS.tsv` — **the machine-readable program state and the first thing
   every orchestrator session loads.** Columns: shard ID, behavior IDs, wave,
   dependency shards, owned `crate::module` paths and file paths, test files
-  to port, risk tier, review tier, status (planned / in progress /
-  implemented-unverified / parity-verified / gate-passed / cut-over /
-  deleted), branch, PR. The orchestrator assigns shards; no self-claiming.
+  to port, risk tier, review tier, status — canonical space-separated vocabulary,
+  identical to Program reporting: planned / in progress / implemented but
+  unverified / parity verified / gate passed / cut over / deleted —
+  branch, PR. The orchestrator assigns shards; no self-claiming.
 - `handoff.schema.json` / `findings.schema.json` — implementer handoffs and
   reviewer findings are structured outputs validated at the workflow layer,
   not prose. Handoff: shard/behavior IDs, files changed, APIs introduced,
@@ -1052,14 +1063,17 @@ recorded per-shard in SHARDS.tsv:
 
 - **yrs interoperability spike** (sole abort criterion; spec above).
 - R00: this plan revision (done), program directory, SHARDS.tsv +
-  schemas + packet builder + WINDOWS_DEV.md, Codex CLI fix, execution log.
+  schemas + WINDOWS_DEV.md, Codex CLI fix, execution log. (Reviewer-packet
+  builder: R01-ORACLE.)
 - R01: behavior inventory; determinism retrofit; trace format + named fault
   points in `TEST_ORACLE.md`; trace recorder in dogfood; secret scanner;
   test-file classification; **TS suite native CI on Windows/macOS**.
 - R02: Cargo workspace, toolchain, policy lints, CI skeleton; resolve open
   decision 2 (matrix policy).
-- R03: protocol spike, generated client, bounded supervisor skeleton
-  (replaces thread-per-request).
+- R03: protocol spike, generated client, and a bounded-dispatch skeleton
+  PROTOTYPE inside the protocol crate's owned paths (examples/tests only —
+  production sidecar supervision is R13/R13b's; R03 must not touch desktop
+  files).
 - Test-port shards begin as classification completes (Tier 3, high
   parallelism, Codex-heavy).
 
@@ -1201,6 +1215,9 @@ miss the window: the relay permanently rejects pre-reset epoch/stream
 credentials; a stale device never pushes — it rejoins the new epoch fresh,
 and any unpushed local edits on it are exported and manually
 rebased/imported, never automatically replayed into the reset workspace.
+The server-side rejection is owned work, not an assumption: shard R10b owns
+the `services/sync-relay` epoch/stream-identity enforcement change and its
+fault-model tests.
 
 Per-workspace reset state machine (durable on-disk marker; every state
 idempotently resumable; crash injection at every transition rehearsed in
@@ -1222,24 +1239,38 @@ not-started → settled → backed-up → moved-aside → initialized → captur
    Y.Doc lineage, cursors are engine.db-only); export chats/decisions/history
    to inspectable text files **written outside the workspace root in the
    recovery/export directory** (never into the workspace tree, so exports
-   cannot perturb the capture comparison); Ice acknowledges per workspace.
+   cannot perturb the capture comparison). Exports carry the same posture
+   as backups: owner-only permissions where supported, excluded from
+   watching/search/sync/export/agent mounts, listed in the backup manifest,
+   and subject to the same retention window and user-visible cleanup —
+   they are durable copies of user content, not scratch. Ice acknowledges
+   per workspace.
    Then record the pre-reset disk inventory — file identity, size, mode,
    content hash, generation, and the exclusion list — durably in the reset
    marker/backup manifest.
 3. **Backup**: checkpoint WAL, integrity-check, restore-tested backup of the
    whole `.dohc/engine` dir + registry/DM/agent-runs snapshot, manifest
    recorded.
-4. **Move aside**: prove-zero-handles first — attempt exclusive open of
-   **every file in the old DB triplet (`engine.db`, `-wal`, `-shm`)** with
-   bounded retries; the TS engine's process-global stores leak WAL handles;
-   on timeout, fail closed read-only with diagnostics. Prefer
-   copy+verify+swap over bare rename so a failure can't strand a half-moved
-   WAL triplet. Old DB is retained, never auto-deleted pre-launch.
+4. **Move aside**: prove-zero-handles first, with OS-specific semantics —
+   Windows: open **every file in the old DB triplet (`engine.db`, `-wal`,
+   `-shm`)** with no FILE_SHARE flags (a true exclusive handle) and HOLD
+   those handles through the copy+verify+swap, so the proof stays valid for
+   the whole operation; POSIX: exclusive `flock`/`F_SETLK` on each file,
+   likewise held through the swap. Bounded retries; the TS engine's
+   process-global stores leak WAL handles; on timeout, fail closed
+   read-only with diagnostics. Per-platform tests include a deliberate
+   concurrent handle holder. Prefer copy+verify+swap over bare rename so a
+   failure can't strand a half-moved WAL triplet. Old DB is retained, never
+   auto-deleted pre-launch.
 5. **Initialize**: Rust fresh-init at schema v2; record ownership and a
    first-durable-write flag.
 6. **Capture**: initial capture from disk; verify capture inventory (file
    count + hashes) against the persisted post-settle inventory recorded at
-   step 2.
+   step 2. **A mismatch is a durable hard stop**: the state machine
+   transitions to a `failed` state recorded in the on-disk marker, the old
+   database, backup, and exports are preserved untouched, `complete` is
+   unreachable, and the workspace opens read-only with diagnostics until an
+   explicit operator decision — never auto-retry past a mismatch.
 7. **Complete**: marker written; packaging now hard-fails without the engine
    binary; protocol/storage incompatibility fails visibly; startup may offer
    read-only recovery but never a TypeScript authority.

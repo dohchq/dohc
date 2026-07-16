@@ -9,21 +9,22 @@ R01-CONTRACTS	porting-guide;state-ownership;semantics-matrix	0	R01-INVENTORY	doc
 R02	cargo-ci	0	-	Cargo.toml;rust-toolchain.toml;.github/workflows/rust-*	-	medium	2	planned	codex/rust-engine-r02	-
 R03	protocol	0	-	crates/dohc-engine-protocol/**;packages/workspace-engine-client/**	protocol conformance	high	1	implemented but unverified	codex/rust-engine-r03	141
 TS-NATIVE-CI	oracle-baseline	0	-	.github/workflows/engine-tests-*	existing suite	medium	2	implemented but unverified	codex/rust-engine-ts-native-ci	139
-GATE0	gate-phase0-closure	0	YRS-SPIKE;R01-INVENTORY;R01-CONTRACTS;R01-ORACLE;R02;R03	-	-	-	-	planned	-	-
+GATE0	gate-phase0-closure	0	YRS-SPIKE;R01-INVENTORY;R01-CONTRACTS;R01-ORACLE;R01-DETERMINISM;TS-NATIVE-CI;R02;R03	-	-	-	-	planned	-	-
 R04	storage-core	1	R02;R03;GATE0	crates/dohc-engine-storage/**	ported storage tests	critical	1	planned	-	-
 CAL-1	ws-open-close-txn-restart	1	R04	crates/dohc-engine-runtime/src/session*	calibration	high	1	planned	-	-
 CAL-2	versioned-write-read-history-restore	1	R04	crates/dohc-engine-domain/src/versions*	calibration	high	1	planned	-	-
-CAL-3	scan-hash-reconcile-cancel	1	R03	crates/dohc-engine-files/**	calibration	high	1	planned	-	-
+CAL-3	scan-hash-reconcile-cancel	1	R03;GATE0	crates/dohc-engine-files/**	calibration	high	1	planned	-	-
 R05	identity-blobs-versions-moments-restore	2	R04	crates/dohc-engine-domain/src/{identity,blobs,moments,versions}*	ported	critical	1	planned	-	-
 R08	secrets	2	R04	crates/dohc-engine-crypto/**	ported	critical	1	planned	-	-
 R09	chats-readstate-dispatch	2	R04	crates/dohc-engine-domain/src/chats*;crates/dohc-engine-storage/src/chat_tables*	ported	high	2	planned	-	-
 R11a	ydoc-durable-cache	2	YRS-SPIKE;R04	crates/dohc-engine-collab/**	ported+spike-fuzz	critical	1	planned	-	-
-R11b	ydoc-live-adapter	2	R03	packages/workspace-engine-client/src/ydoc*	adapter suite	critical	1	planned	-	-
+R11b	ydoc-live-adapter	2	R03;GATE0	packages/workspace-engine-client/src/ydoc*	adapter suite	critical	1	planned	-	-
 R12	search	2	R04	crates/dohc-engine-runtime/src/search*	ported	high	2	planned	-	-
 R06	compare-merge-conflicts-materialization	3	R05	crates/dohc-engine-domain/src/{merge,conflicts}*;crates/dohc-engine-files/src/materialize*	ported	critical	1	planned	-	-
 R07	watcher-reconcile-pathfloor-policy	3	CAL-3;R05	crates/dohc-engine-files/src/{watch,policy}*	ported	critical	1	planned	-	-
 R10	replication-cursors-shares	3	R04;R09	crates/dohc-engine-sync/**;packages/security-contract/**	ported+fault-model	critical	1	planned	-	-
-R13b	desktop-adapter-dormant	3	R03	apps/desktop/src/workspaces/engineClient*;apps/desktop/src/main.ts (flagged wiring);apps/desktop/src/workspaces/workspaceEngineCapture.ts (flagged wiring);apps/desktop/src/workspaces/workspaceActivity.ts (flagged wiring);apps/desktop/src/workspaces/relaySyncEngine.ts (flagged wiring)	adapter E2E	critical	1	planned	-	-
+R10b	relay-epoch-enforcement	3	R10	services/sync-relay/** (epoch/stream rejection only)	relay fault-model suite	critical	1	planned	-	-
+R13b	desktop-adapter-dormant	3	R03;GATE0	apps/desktop/src/workspaces/engineClient*;apps/desktop/src/main.ts (flagged wiring);apps/desktop/src/workspaces/workspaceEngineCapture.ts (flagged wiring);apps/desktop/src/workspaces/workspaceActivity.ts (flagged wiring);apps/desktop/src/workspaces/relaySyncEngine.ts (flagged wiring)	adapter E2E	critical	1	planned	-	-
 R13	daemon-composition-shadow-replay	4	R05;R06;R07;R08;R09;R10;R11a;R11b;R12;R13b	crates/dohc-workspace-engine/**	replay	critical	1	planned	-	-
 R14	robustness-closure	5	R13	fuzz/**;soak configs	fuzz+soak	high	1	planned	-	-
 GATE6	gate-release-candidate	5	R14	-	-	-	-	planned	-	-
