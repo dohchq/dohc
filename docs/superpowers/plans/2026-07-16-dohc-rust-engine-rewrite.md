@@ -596,9 +596,9 @@ fresh restore point.
 "Never dual-write a canonical workspace" is enforced by machinery, not
 convention:
 
-- **Pre-cutover (Rust must not touch live workspaces):** every pre-Gate-7
-  Rust build is compiled **shadow-only**: it refuses to open any workspace
-  root lacking a harness-written clone marker
+- **Pre-cutover (Rust must not touch live workspaces):** every Rust build
+  before the R15 cutover build is compiled **shadow-only**: it refuses to
+  open any workspace root lacking a harness-written clone marker
   (`.dohc/engine/SHADOW_CLONE` with a harness token), and refuses to open any
   `engine.db` bearing the TS v1 fingerprint for writing. Clone tooling
   creates markers; pointing a shadow binary at a real root is a hard startup
@@ -606,6 +606,15 @@ convention:
   workspace roots and asserts every fixture path is outside them.
   Materialization in shadow builds is confined to the cloned root by the path
   floor, and that confinement is tested.
+- **The cutover build is the sole, explicit exception** (otherwise R15's
+  reset could not be rehearsed or executed without bypassing the fence):
+  a distinct build produced only after Gate 6 authorization, which runs
+  exclusively the reset state machine. It requires an explicit
+  `--cutover` invocation plus a signed on-disk authorization marker
+  materialized by Ice's Gate 6 sign-off (rehearsals use a rehearsal-scoped
+  marker valid only against clone-marked roots); without the marker it
+  refuses to start. It never writes INTO a v1 database — it moves the v1
+  store aside per the state machine — and it refuses ordinary shadow work.
 - **Post-cutover (TS must not touch Rust workspaces):** Rust initializes at
   `schema_version = 2`; every TS writer that validates the schema fails
   closed via the `schema_version` corrupt() check in
@@ -681,7 +690,8 @@ twice. Tests kill the daemon after receipt, after commit, and before
 response, then reopen and prove exactly-once durable convergence.
 
 **R11 splits**: R11a (Rust durable cache/snapshots/compaction/leases) starts
-right after the spike passes; R11b (the TS live-adapter protocol and editor
+only after Gate 0 passes and R04 lands (the spike verdict is necessary, not
+sufficient); R11b (the TS live-adapter protocol and editor
 integration) starts as soon as R03's protocol freezes, so the adapter
 accumulates dogfood hours through Phases 4–6 instead of debuting at shadow
 replay.
@@ -706,9 +716,10 @@ move under Rust; the JSON file remains as a derived inspectable projection.
 All live in the program directory chosen at R00
 (`docs/superpowers/plans/rust-engine/`), and all are machine-consumable:
 
-- `ENGINE_SCOPE.md` — every public export and production caller classified:
-  Rust authority / TS adapter / remains TS / retired-delete / decision
-  required.
+- `ENGINE_SCOPE.tsv` — every public export and production caller
+  classified: Rust authority / TS adapter / remains TS / retired-delete /
+  decision required. (TSV, matching SHARDS.tsv's R01-INVENTORY row — the
+  packet builder is file-name driven.)
 - `BEHAVIOR_INVENTORY.tsv` — one row per observable behavior: ID, current
   implementation and callers, inputs/outputs/errors/events, tables/files
   touched, transaction and ack boundary, ordering/idempotency, workspace/
@@ -1095,8 +1106,9 @@ package with parity fixtures).
 
 **Wave 3 (continued):** **R13b dormant desktop adapter** — the generated
 client plus feature-flagged parallel wiring of `main.ts`/capture/activity/
-sync call sites and sidecar supervision, started as soon as R03's protocol
-freezes and landed unreachable in normal-sized PRs across Waves 3–4, so the
+sync call sites and sidecar supervision, started once Gate 0 has passed
+and R03's protocol freezes (SHARDS deps: R03;GATE0), landed unreachable in
+normal-sized PRs across Waves 3–4, so the
 ~8.5k lines of desktop rewiring never debut in the cutover PR.
 
 **Wave 4:** R13 daemon composition + shadow replay (depends on R13b —
@@ -1225,6 +1237,8 @@ Gate 6):
 
 ```text
 not-started → settled → backed-up → moved-aside → initialized → capturing → complete
+                                                            │            │
+                                                            └──────────→ failed  (terminal; durable; complete unreachable)
 ```
 
 1. **Settle (under the last TS build)**: force-settle every live and durable
@@ -1251,17 +1265,24 @@ not-started → settled → backed-up → moved-aside → initialized → captur
 3. **Backup**: checkpoint WAL, integrity-check, restore-tested backup of the
    whole `.dohc/engine` dir + registry/DM/agent-runs snapshot, manifest
    recorded.
-4. **Move aside**: prove-zero-handles first, with OS-specific semantics —
-   Windows: open **every file in the old DB triplet (`engine.db`, `-wal`,
-   `-shm`)** with no FILE_SHARE flags (a true exclusive handle) and HOLD
-   those handles through the copy+verify+swap, so the proof stays valid for
-   the whole operation; POSIX: exclusive `flock`/`F_SETLK` on each file,
-   likewise held through the swap. Bounded retries; the TS engine's
+4. **Move aside**: prove-zero-handles with OS-specific semantics, honest
+   about what each phase can hold. Windows: open **every file in the old DB
+   triplet (`engine.db`, `-wal`, `-shm`)** with no FILE_SHARE flags (a true
+   exclusive handle); READ the copy through those held handles and verify
+   it — the proof covers the entire copy phase. A no-share handle also
+   denies the rename/replace itself, so for the swap: close the handles and
+   immediately perform the move-aside with bounded retry, then re-verify
+   file identity + content hash of the moved files against the
+   just-verified copy. The close→rename window is a documented residual
+   race; a post-swap mismatch transitions to the durable `failed` state
+   (never proceeds), and the per-platform test suite exercises a deliberate
+   interloper that grabs the file inside that window. POSIX: exclusive
+   `flock`/`F_SETLK` held through copy and released at rename with the same
+   post-swap re-verification. Bounded retries; the TS engine's
    process-global stores leak WAL handles; on timeout, fail closed
-   read-only with diagnostics. Per-platform tests include a deliberate
-   concurrent handle holder. Prefer copy+verify+swap over bare rename so a
-   failure can't strand a half-moved WAL triplet. Old DB is retained, never
-   auto-deleted pre-launch.
+   read-only with diagnostics. Prefer copy+verify+swap over bare rename so
+   a failure can't strand a half-moved WAL triplet. Old DB is retained,
+   never auto-deleted pre-launch.
 5. **Initialize**: Rust fresh-init at schema v2; record ownership and a
    first-durable-write flag.
 6. **Capture**: initial capture from disk; verify capture inventory (file

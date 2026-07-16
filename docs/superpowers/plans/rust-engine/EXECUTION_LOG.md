@@ -230,3 +230,14 @@ source of truth every orchestrator session loads first).
   fixes + re-check residuals. Deliverables final: PORTING.md 15 sections,
   STATE_OWNERSHIP.tsv 52 rows, LANGUAGE_SEMANTICS_MATRIX.md 91 rows,
   9 NEEDS-DECISION items for Ice at Gate 0.
+- PR #137 review round 4 fixed (3 P1 + 6 P2): cutover build defined as
+  the sole signed exception to the shadow-only fence (Gate 6-materialized
+  authorization marker; rehearsal-scoped variant for clones); zero-handle
+  proof made Windows-honest (no-share handles cover the copy phase via
+  read-through-held-handles; close->rename window is a documented residual
+  race with post-swap identity re-verification -> failed state on
+  mismatch, interloper test); GATE6 now depends on R10b (relay epoch
+  enforcement on the release path); SHARDS owned_paths made pure globs;
+  failed branch added to the reset state-machine diagram; R11a/R13b start
+  conditions re-anchored to Gate 0; ENGINE_SCOPE.tsv named consistently;
+  locked decision 3 qualified with the raw-writer caveat.
