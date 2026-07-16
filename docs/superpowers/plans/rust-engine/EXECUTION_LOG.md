@@ -368,3 +368,8 @@ source of truth every orchestrator session loads first).
   (report~1.pdf) still rejected (shape-ambiguous with real aliases);
   reads always work, non-win32 writes work; escape-on-materialize is the
   roadmap fix. Security-critical shipping code -> re-check launched.
+- PR #145 re-check: CLEAN — mergeable. All security claims verified via
+  direct node runs of real validators. 2 non-blocking P2 follow-ups filed
+  (desktop search blocks chat too on broken policy — pre-existing, safe;
+  frozen-index staleness window — self-healing). Hotfix ready to merge
+  pending codex bot confirmation; unblocks R01-DETERMINISM.
