@@ -1,4 +1,5 @@
 import type { CliResultByVerb } from "./protocol";
+import { renderAuthorDisplayName } from "./chatIdentity";
 
 export type ThreadMarkdownInput = CliResultByVerb["show"];
 
@@ -38,7 +39,7 @@ export function renderThreadMarkdown(result: ThreadMarkdownInput): string {
   ];
   for (const message of messages) {
     const metadata = [
-      `**${message.author.displayName}**`,
+      `**${renderAuthorDisplayName(message.author)}**`,
       new Date(message.createdAtMs).toISOString(),
       formatMessageHandle(message.id),
     ];

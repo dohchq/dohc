@@ -1,21 +1,27 @@
-import { SmilePlus, Send } from "lucide-react";
+import { FileText, SmilePlus, Send } from "lucide-react";
 import {
-  Fragment,
   useEffect,
   useId,
   useRef,
   useState,
   type Dispatch,
   type MutableRefObject,
+  type ReactNode,
   type RefObject,
   type SetStateAction,
 } from "react";
-import type { ChatMessageRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
+import type {
+  ChatAttachmentRecord,
+  ChatMessageRecord,
+  ChatReactionRecord,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import {
-  toMentionSegments,
+  findMentions,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
+import { extractChatFileReferenceTokens } from "./chatFileMentions";
+import type { ChatFileReferenceToken } from "./chatFileMentions";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
 // the workspace Chats view render messages and composers through these SAME
@@ -152,6 +158,86 @@ export function formatChatTime(createdAtMs: number): { label: string; iso: strin
   };
 }
 
+interface FileMentionNavigationTarget {
+  path: string;
+  headingAnchor?: string;
+}
+
+function fileReferenceKey(reference: {
+  path: string;
+  headingAnchor?: string;
+}): string {
+  return `${reference.path}\u0000${reference.headingAnchor ?? ""}`;
+}
+
+function sameHeading(
+  token: Pick<ChatFileReferenceToken, "headingAnchor">,
+  attachment: Pick<ChatAttachmentRecord, "headingAnchor">,
+): boolean {
+  return (token.headingAnchor ?? "") === (attachment.headingAnchor ?? "");
+}
+
+// Body text is immutable display copy, while attachment pathHint is the
+// engine's authoritative, permission-checked navigation target. Most tokens
+// match it exactly. Hand-typed compatibility forms can have edge spaces that
+// main intentionally trims only after exact lookup. Reconcile unique
+// references in two passes so exact space-named files always
+// win, followed only by the explicit edge-space compatibility form. Never
+// bind by heading/order alone: CLI callers can attach an independent file that
+// happens to share a heading with a literal token in the message body.
+export function resolveFileMentionNavigationTargets(
+  tokens: readonly ChatFileReferenceToken[],
+  attachments: readonly ChatAttachmentRecord[],
+): Map<string, FileMentionNavigationTarget> {
+  const references = Array.from(
+    new Map(tokens.map((token) => [fileReferenceKey(token), token])).values(),
+  );
+  const available = attachments.filter(
+    (attachment): attachment is ChatAttachmentRecord & { pathHint: string } =>
+      typeof attachment.pathHint === "string" && attachment.pathHint.length > 0,
+  );
+  const unused = new Set(available.map((_, index) => index));
+  const targets = new Map<string, FileMentionNavigationTarget>();
+
+  const assign = (
+    predicate: (
+      token: ChatFileReferenceToken,
+      attachment: ChatAttachmentRecord & { pathHint: string },
+    ) => boolean,
+  ) => {
+    for (const token of references) {
+      const key = fileReferenceKey(token);
+      if (targets.has(key)) continue;
+      const index = available.findIndex(
+        (attachment, at) => unused.has(at) && predicate(token, attachment),
+      );
+      if (index < 0) continue;
+      const attachment = available[index];
+      if (!attachment) continue;
+      unused.delete(index);
+      targets.set(key, {
+        path: attachment.pathHint,
+        ...(attachment.headingAnchor
+          ? { headingAnchor: attachment.headingAnchor }
+          : {}),
+      });
+    }
+  };
+
+  assign(
+    (token, attachment) =>
+      attachment.pathHint === token.path && sameHeading(token, attachment),
+  );
+  assign(
+    (token, attachment) =>
+      token.path.trim() !== token.path &&
+      attachment.pathHint === token.path.trim() &&
+      sameHeading(token, attachment),
+  );
+
+  return targets;
+}
+
 // Renders a message body with @-mention chips. A mention that resolves to a
 // known candidate gets a calm inline chip; everything else is plain text, so
 // the message reads exactly as written. Whitespace/newlines are preserved by
@@ -159,30 +245,96 @@ export function formatChatTime(createdAtMs: number): { label: string; iso: strin
 export function MentionText(props: {
   body: string;
   candidates: readonly MentionCandidate[];
+  attachments?: readonly ChatAttachmentRecord[];
   testId?: string;
+  onOpenPath?: (path: string, headingAnchor?: string) => void;
 }) {
-  // Chips are code-aware too: an @handle inside inline code / a fenced block
-  // reads as code text, not a mention chip.
-  const segments = toMentionSegments(props.body, props.candidates, { ignoreCode: true });
-  return (
-    <>
-      {segments.map((segment, index) =>
-        segment.type === "mention" ? (
-          <span
-            // Segments are positional; index is a stable key within one body.
-            key={`m${index}`}
-            data-testid={props.testId ? `${props.testId}-mention` : undefined}
-            data-mention-kind={segment.candidate.kind}
-            className="rounded bg-accent/15 px-1 font-medium text-accent"
-          >
-            {segment.text}
-          </span>
-        ) : (
-          <Fragment key={`t${index}`}>{segment.text}</Fragment>
-        ),
-      )}
-    </>
+  // Classify code ranges once, against the complete message. File chips split
+  // the rendered output into pieces, but must not reset Markdown fence state
+  // and accidentally turn a handle inside an unmatched/multiline fence into a
+  // mention.
+  const fileTokens = extractChatFileReferenceTokens(props.body);
+  const fileTargets = resolveFileMentionNavigationTargets(
+    fileTokens,
+    props.attachments ?? [],
   );
+  // A file token owns its complete source range. A handle-like substring in a
+  // filename is part of the attachment syntax, not a person mention.
+  const mentions = findMentions(props.body, props.candidates, { ignoreCode: true }).filter(
+    (mention) =>
+      !fileTokens.some(
+        (token) => mention.start < token.end && mention.end > token.start,
+      ),
+  );
+  const content: ReactNode[] = [];
+  let cursor = 0;
+  let mentionIndex = 0;
+  let fileIndex = 0;
+  while (mentionIndex < mentions.length || fileIndex < fileTokens.length) {
+    const mention = mentions[mentionIndex];
+    const fileToken = fileTokens[fileIndex];
+    if (fileToken && (!mention || fileToken.start < mention.start)) {
+      if (fileToken.start > cursor) content.push(props.body.slice(cursor, fileToken.start));
+      const testId = props.testId ? `${props.testId}-file-mention` : undefined;
+      const chipContent = (
+        <>
+          <FileText size={11} aria-hidden />
+          {fileToken.path.split("/").at(-1)}
+          {fileToken.headingAnchor ? `#${fileToken.headingAnchor}` : ""}
+        </>
+      );
+      const className = "inline-flex items-center gap-1 rounded bg-line/50 px-1 text-muted";
+      const navigationTarget = fileTargets.get(fileReferenceKey(fileToken)) ?? fileToken;
+      content.push(props.onOpenPath ? (
+        <button
+          type="button"
+          key={`file:${fileToken.start}`}
+          data-testid={testId}
+          aria-label={`Open ${fileToken.path}${
+            fileToken.headingAnchor ? ` at #${fileToken.headingAnchor}` : ""
+          }`}
+          className={`${className} cursor-pointer hover:bg-line hover:text-ink`}
+          title={fileToken.text}
+          onClick={() =>
+            props.onOpenPath?.(
+              navigationTarget.path,
+              navigationTarget.headingAnchor,
+            )
+          }
+        >
+          {chipContent}
+        </button>
+      ) : (
+        <span
+          key={`file:${fileToken.start}`}
+          data-testid={testId}
+          className={className}
+          title={fileToken.text}
+        >
+          {chipContent}
+        </span>
+      ));
+      cursor = fileToken.end;
+      fileIndex += 1;
+      continue;
+    }
+    if (!mention) break;
+    if (mention.start > cursor) content.push(props.body.slice(cursor, mention.start));
+    content.push(
+      <span
+        key={`mention:${mention.start}`}
+        data-testid={props.testId ? `${props.testId}-mention` : undefined}
+        data-mention-kind={mention.candidate.kind}
+        className="rounded bg-accent/15 px-1 font-medium text-accent"
+      >
+        {props.body.slice(mention.start, mention.end)}
+      </span>,
+    );
+    cursor = mention.end;
+    mentionIndex += 1;
+  }
+  if (cursor < props.body.length) content.push(props.body.slice(cursor));
+  return <>{content}</>;
 }
 
 // Reactions (WS-MU-C2). A small, calm quick-pick — obvious, not a full emoji
@@ -201,6 +353,7 @@ export interface ChatReactionControls {
     nextState: "added" | "removed";
   }) => void;
   emojiChoices?: readonly string[];
+  readOnly?: boolean;
 }
 
 // "Alice, Bob's agent reacted" — agent reactors read as "<name>'s agent".
@@ -292,13 +445,14 @@ export function MessageReactions(props: {
           data-emoji={group.emoji}
           data-mine={group.mine ? "true" : "false"}
           aria-pressed={group.mine}
+          disabled={props.controls.readOnly}
           // The emoji glyph is aria-hidden, so without this the button announces
           // as just its count. Expose emoji + count + reactor names, e.g.
           // "👍 3 — Ice, Ice's agent".
           aria-label={`${group.emoji} ${group.records.length} — ${reactionerNames(group.records)}`}
           title={`${reactionerNames(group.records)} reacted with ${group.emoji}`}
           onClick={() => toggle(group.emoji, group.mine)}
-          className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] leading-none transition-colors ${
+          className={`inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[11px] leading-none transition-colors disabled:cursor-default ${
             group.mine
               ? "border-accent bg-accent/15 text-accent"
               : "border-line bg-bg text-muted hover:border-accent/60"
@@ -308,21 +462,23 @@ export function MessageReactions(props: {
           <span className="tabular-nums">{group.records.length}</span>
         </button>
       ))}
-      <button
-        ref={triggerRef}
-        type="button"
-        data-testid={`${props.testIdPrefix}-add-reaction`}
-        aria-label="Add reaction"
-        aria-haspopup="true"
-        aria-expanded={pickerOpen}
-        aria-controls={pickerOpen ? pickerId : undefined}
-        title="Add reaction"
-        onClick={() => setPickerOpen((open) => !open)}
-        className="grid size-5 place-items-center rounded-full border border-transparent text-subtle opacity-0 transition-opacity hover:border-line hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
-      >
-        <SmilePlus size={13} aria-hidden />
-      </button>
-      {pickerOpen ? (
+      {!props.controls.readOnly ? (
+        <button
+          ref={triggerRef}
+          type="button"
+          data-testid={`${props.testIdPrefix}-add-reaction`}
+          aria-label="Add reaction"
+          aria-haspopup="true"
+          aria-expanded={pickerOpen}
+          aria-controls={pickerOpen ? pickerId : undefined}
+          title="Add reaction"
+          onClick={() => setPickerOpen((open) => !open)}
+          className="grid size-5 place-items-center rounded-full border border-transparent text-subtle opacity-0 transition-opacity hover:border-line hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
+        >
+          <SmilePlus size={13} aria-hidden />
+        </button>
+      ) : null}
+      {pickerOpen && !props.controls.readOnly ? (
         // A lightweight quick-pick, NOT an APG menu: role="group" with plain
         // toggle <button>s (each Tab-stoppable, aria-pressed reflecting the
         // viewer's state). We deliberately don't claim role="menu"/menuitem*,
@@ -372,8 +528,13 @@ export function ChatMessageList(props: {
   endRef: RefObject<HTMLDivElement | null>;
   // When provided, message bodies render @-mention chips for these handles.
   mentionCandidates?: readonly MentionCandidate[];
+  // File-reference tokens become navigation buttons when the host can open
+  // workspace paths; embedded/read-only hosts keep the same non-interactive chip.
+  onOpenPath?: (path: string, headingAnchor?: string) => void;
   // When provided, each message gets a reaction row (pills + quick-pick).
   reactionControls?: ChatReactionControls;
+  flashMessageId?: string | null;
+  onMessageElement?: (messageId: string, element: HTMLLIElement | null) => void;
 }) {
   const candidates = props.mentionCandidates ?? [];
   // Group active reactions by message once per render.
@@ -400,8 +561,14 @@ export function ChatMessageList(props: {
             return (
               <li
                 key={message.id}
+                ref={(element) => props.onMessageElement?.(message.id, element)}
                 data-testid={`${props.testIdPrefix}-message`}
-                className="group"
+                data-message-id={message.id}
+                className={`group transition-shadow ${
+                  props.flashMessageId === message.id
+                    ? "rounded-xl ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+                    : ""
+                }`}
               >
                 <span className="flex items-baseline gap-1.5">
                   <span
@@ -423,15 +590,13 @@ export function ChatMessageList(props: {
                   data-testid={`${props.testIdPrefix}-message-body`}
                   className="mb-0 mt-0.5 select-text cursor-text whitespace-pre-wrap break-words text-[12px] leading-5 text-muted"
                 >
-                  {candidates.length > 0 ? (
-                    <MentionText
-                      body={message.body}
-                      candidates={candidates}
-                      testId={`${props.testIdPrefix}-message-body`}
-                    />
-                  ) : (
-                    message.body
-                  )}
+                  <MentionText
+                    body={message.body}
+                    candidates={candidates}
+                    attachments={message.attachments}
+                    testId={`${props.testIdPrefix}-message-body`}
+                    onOpenPath={props.onOpenPath}
+                  />
                 </p>
                 {props.reactionControls ? (
                   <MessageReactions

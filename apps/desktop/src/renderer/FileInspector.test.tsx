@@ -13,6 +13,7 @@ import {
   lineSpanInText,
   markdownEditorBody,
   mergeMarkdownEditorBody,
+  resolveWikilinkNavigation,
 } from "./FileInspector";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 
@@ -37,6 +38,129 @@ describe("lineSpanInText (search scroll-to-line, Phase E5.0)", () => {
   it("clamps a line past the end to the last line", () => {
     expect(lineSpanInText(text, 99)).toEqual({ start: 19, end: 25 });
     expect(lineSpanInText("", 5)).toEqual({ start: 0, end: 0 });
+  });
+});
+
+describe("resolveWikilinkNavigation", () => {
+  const files = [
+    { path: "notes/plan.md", title: "Plan" },
+    { path: "notes/release#1.md", title: "Release 1" },
+    { path: "notes/daily/milestone#2.md", title: "Milestone 2" },
+    { path: "notes/#overview.md", title: "Hash Overview" },
+    { path: "today.md", title: "Today" },
+  ];
+
+  it("opens file fragments as an exact heading target", () => {
+    expect(
+      resolveWikilinkNavigation("notes/plan.md#next-steps", "today.md", files, 7),
+    ).toEqual({
+      path: "notes/plan.md",
+      headingTarget: { anchor: "next-steps", nonce: 7 },
+    });
+  });
+
+  it("keeps fragment-only links in the current file and preserves encoded anchors", () => {
+    expect(
+      resolveWikilinkNavigation("#caf%C3%A9-plan", "today.md", files, 8),
+    ).toEqual({
+      path: "today.md",
+      headingTarget: { anchor: "caf%C3%A9-plan", nonce: 8 },
+    });
+  });
+
+  it("keeps an explicit leading-hash heading local even when a matching file exists", () => {
+    expect(
+      resolveWikilinkNavigation("#overview", "notes/today.md", files, 16),
+    ).toEqual({
+      path: "notes/today.md",
+      headingTarget: { anchor: "overview", nonce: 16 },
+    });
+    expect(
+      resolveWikilinkNavigation("./#overview", "notes/today.md", files, 17),
+    ).toEqual({ path: "notes/#overview.md" });
+  });
+
+  it("preserves whole-file wikilink resolution without manufacturing a target", () => {
+    expect(resolveWikilinkNavigation("notes/plan", "today.md", files, 9)).toEqual({
+      path: "notes/plan.md",
+    });
+  });
+
+  it("treats a full known filename containing # as a file, not a heading", () => {
+    expect(
+      resolveWikilinkNavigation("notes/release#1.md", "today.md", files, 10),
+    ).toEqual({ path: "notes/release#1.md" });
+    expect(
+      resolveWikilinkNavigation("notes/release#1", "today.md", files, 11),
+    ).toEqual({ path: "notes/release#1.md" });
+  });
+
+  it("normalizes relative paths before matching filenames containing #", () => {
+    expect(
+      resolveWikilinkNavigation(
+        "./milestone#2",
+        "notes/daily/today.md",
+        files,
+        12,
+      ),
+    ).toEqual({ path: "notes/daily/milestone#2.md" });
+    expect(
+      resolveWikilinkNavigation(
+        "../release#1.md",
+        "notes/daily/today.md",
+        files,
+        13,
+      ),
+    ).toEqual({ path: "notes/release#1.md" });
+  });
+
+  it("uses the longest known hash filename before an explicit heading", () => {
+    expect(
+      resolveWikilinkNavigation(
+        "notes/release#1.md#decisions",
+        "today.md",
+        files,
+        14,
+      ),
+    ).toEqual({
+      path: "notes/release#1.md",
+      headingTarget: { anchor: "decisions", nonce: 14 },
+    });
+    expect(
+      resolveWikilinkNavigation(
+        "./milestone#2#next-steps",
+        "notes/daily/today.md",
+        files,
+        15,
+      ),
+    ).toEqual({
+      path: "notes/daily/milestone#2.md",
+      headingTarget: { anchor: "next-steps", nonce: 15 },
+    });
+  });
+
+  it("keeps a trailing empty fragment on the longest known hash filename", () => {
+    const competingFiles = [
+      ...files,
+      { path: "notes/release.md", title: "Release" },
+    ];
+    expect(
+      resolveWikilinkNavigation(
+        "notes/release#1.md#",
+        "today.md",
+        competingFiles,
+        18,
+      ),
+    ).toEqual({ path: "notes/release#1.md" });
+
+    expect(
+      resolveWikilinkNavigation(
+        "notes/release#1.md#",
+        "today.md",
+        [{ path: "notes/release#1.md", title: "Release 1" }],
+        19,
+      ),
+    ).toEqual({ path: "notes/release#1.md" });
   });
 });
 
@@ -153,6 +277,10 @@ function stubEditorGlobals() {
     Number(setTimeout(() => callback(performance.now()), 16)),
   );
   vi.stubGlobal("cancelAnimationFrame", (handle: number) => clearTimeout(handle));
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value: vi.fn(),
+  });
 }
 
 // THE P1 trap (codex review): typing arms an 800ms autosave, and unmounting
@@ -362,10 +490,128 @@ describe("markdown editor unmount flush", () => {
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
+  it("navigates the rendered heading in a read-only shared document", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "# Hello\n\n## Exact destination\nBody\n",
+      truncated: false,
+    });
+    const view = render(
+      <FileInspector workspaceId="ws-1" path="a.md" readOnly />,
+    );
+    await screen.findByTestId("view-markdown");
+    await waitFor(() =>
+      expect(screen.getByTestId("markdown-edit-toggle").textContent).toBe("Edit"),
+    );
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        readOnly
+        headingTarget={{ anchor: "exact-destination", nonce: 2 }}
+      />,
+    );
+
+    await waitFor(() => {
+      const destination = screen.getByRole("heading", {
+        name: "Exact destination",
+      });
+      expect(destination.scrollIntoView).toHaveBeenCalledWith({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+    expect(screen.getByTestId("markdown-edit-toggle").textContent).toBe("Edit");
+    expect(screen.queryByTestId("markdown-editor")).toBeNull();
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("keeps local source mode and selects the target heading line", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "---\ntitle: Plan\n---\n\n# Hello\n\nParagraph\n\n## Exact destination\nBody\n",
+      truncated: false,
+    });
+    let toggleSource: (() => void) | null = null;
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={(toggle) => {
+          toggleSource = toggle;
+        }}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    act(() => toggleSource?.());
+    const source = (await screen.findByTestId(
+      "markdown-editor",
+    )) as HTMLTextAreaElement;
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={(toggle) => {
+          toggleSource = toggle;
+        }}
+        headingTarget={{ anchor: "exact-destination", nonce: 3 }}
+      />,
+    );
+
+    const expected = lineSpanInText(source.value, 9);
+    await waitFor(() => {
+      expect(source.selectionStart).toBe(expected.start);
+      expect(source.selectionEnd).toBe(expected.end);
+    });
+    expect(screen.getByTestId("markdown-editor")).toBe(source);
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
+  it("navigates a legacy collided occurrence target to the repeated base heading", async () => {
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: "# Foo\nfirst\n# Foo-1\nliteral\n# Foo\nthird\n",
+      truncated: false,
+    });
+    let toggleSource: (() => void) | null = null;
+    const view = render(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={(toggle) => {
+          toggleSource = toggle;
+        }}
+      />,
+    );
+    await screen.findByTestId("view-markdown");
+    act(() => toggleSource?.());
+    const source = (await screen.findByTestId(
+      "markdown-editor",
+    )) as HTMLTextAreaElement;
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        registerSourceToggle={(toggle) => {
+          toggleSource = toggle;
+        }}
+        headingTarget={{ anchor: "foo-1", occurrence: 1, nonce: 4 }}
+      />,
+    );
+
+    const expected = lineSpanInText(source.value, 5);
+    await waitFor(() => {
+      expect(source.selectionStart).toBe(expected.start);
+      expect(source.selectionEnd).toBe(expected.end);
+    });
+    expect(source.value.slice(source.selectionStart, source.selectionEnd)).toBe("# Foo");
+    expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+  });
+
   it("routes the document header share action to the active path", async () => {
     const user = userEvent.setup();
     const onSharePath = vi.fn();
-    render(
+    const view = render(
       <FileInspector
         workspaceId="ws-1"
         path="a.md"
@@ -481,7 +727,7 @@ describe("markdown editor unmount flush", () => {
   it("routes database share actions to their active file paths", async () => {
     const user = userEvent.setup();
     const onSharePath = vi.fn();
-    render(
+    const view = render(
       <FileInspector
         workspaceId="ws-1"
         path="data.sqlite"
@@ -620,7 +866,7 @@ describe("engine markdown source view", () => {
   }) {
     const { bridgeMock, pushRemoteMarkdown } = makeEngineBridge(DOC_MARKDOWN);
     vi.stubGlobal("dohcDesktop", bridgeMock);
-    render(
+    const view = render(
       <FileInspector
         workspaceId="ws-1"
         path="a.md"
@@ -634,7 +880,7 @@ describe("engine markdown source view", () => {
       {},
       { timeout: 5_000 },
     );
-    return { bridgeMock, pushRemoteMarkdown, toggle };
+    return { bridgeMock, pushRemoteMarkdown, toggle, view };
   }
 
   it("toggles a read-only source projection (frontmatter included) and back", async () => {
@@ -707,5 +953,24 @@ describe("engine markdown source view", () => {
     act(() => registered?.());
     expect(screen.getByTestId("view-markdown").hidden).toBe(false);
     expect(screen.queryByTestId("markdown-source-view")).toBeNull();
+  });
+
+  it("reveals the visible engine editor before applying a heading jump", async () => {
+    const user = userEvent.setup();
+    const { toggle, view } = await renderEngineDoc();
+    await user.click(toggle);
+    await screen.findByTestId("markdown-source-view", {}, { timeout: 5_000 });
+    expect(screen.getByTestId("view-markdown").hidden).toBe(true);
+
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        headingTarget={{ anchor: "plan", nonce: 3 }}
+      />,
+    );
+
+    await waitFor(() => expect(screen.queryByTestId("markdown-source-view")).toBeNull());
+    expect(screen.getByTestId("view-markdown").hidden).toBe(false);
   });
 });

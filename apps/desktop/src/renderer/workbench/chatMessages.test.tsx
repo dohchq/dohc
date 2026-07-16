@@ -6,6 +6,7 @@ import type { ChatMessageRecord, ChatReactionRecord } from "../../ipc/bridgeCont
 import {
   ChatComposer,
   ChatMessageList,
+  MentionText,
   chatAuthorLabel,
   runReactionToggle,
   type ReactionToggleContext,
@@ -99,6 +100,230 @@ describe("chat authorship display", () => {
     );
     expect(screen.getByTestId("test-chat-message-author").textContent).toBe(
       "Ice's agent",
+    );
+  });
+
+  it("renders file chips without requiring a person or agent roster", () => {
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={[
+          {
+            id: "message-file",
+            threadId: "thread-1",
+            authorKind: "human",
+            authorDisplayName: "Ice",
+            body: "Read @[docs/plan.md#scope] and `@[docs/code.md]`.",
+            createdAtMs: 1_700_000_000_000,
+          },
+        ]}
+        loading={false}
+        emptyLabel="No messages"
+        endRef={createRef<HTMLDivElement>()}
+        mentionCandidates={[]}
+      />,
+    );
+
+    expect(screen.getAllByTestId("test-chat-message-body-file-mention")).toHaveLength(1);
+    const fileChip = screen.getByTestId("test-chat-message-body-file-mention");
+    expect(fileChip.textContent).toContain("plan.md#scope");
+    expect(fileChip.tagName).toBe("SPAN");
+    expect(fileChip.getAttribute("role")).toBeNull();
+    expect(screen.getByTestId("test-chat-message-body").textContent)
+      .toContain("@[docs/code.md]");
+  });
+
+  it("opens a file mention at its heading through the shared message list", () => {
+    const onOpenPath = vi.fn();
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={[
+          {
+            id: "message-file",
+            threadId: "thread-1",
+            authorKind: "human",
+            authorDisplayName: "Ice",
+            body: "Read @[docs/plan.md#scope].",
+            createdAtMs: 1_700_000_000_000,
+          },
+        ]}
+        loading={false}
+        emptyLabel="No messages"
+        endRef={createRef<HTMLDivElement>()}
+        onOpenPath={onOpenPath}
+      />,
+    );
+
+    const fileChip = screen.getByRole("button", {
+      name: "Open docs/plan.md at #scope",
+    });
+    expect(fileChip).toBe(screen.getByTestId("test-chat-message-body-file-mention"));
+    fireEvent.click(fileChip);
+    expect(onOpenPath).toHaveBeenCalledOnce();
+    expect(onOpenPath).toHaveBeenCalledWith("docs/plan.md", "scope");
+  });
+
+  it("opens hand-typed edge-space mentions through the authoritative attachment path", () => {
+    const onOpenPath = vi.fn();
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={[
+          {
+            id: "message-file",
+            threadId: "thread-1",
+            authorKind: "human",
+            authorDisplayName: "Ice",
+            body: "Read @[ docs/plan.md #scope].",
+            createdAtMs: 1_700_000_000_000,
+            attachments: [
+              {
+                attachmentId: "attachment-1",
+                threadId: "thread-1",
+                messageId: "message-file",
+                targetKind: "file",
+                objectId: "file-1",
+                pathHint: "docs/plan.md",
+                headingAnchor: "scope",
+                createdAtMs: 1_700_000_000_000,
+              },
+            ],
+          },
+        ]}
+        loading={false}
+        emptyLabel="No messages"
+        endRef={createRef<HTMLDivElement>()}
+        onOpenPath={onOpenPath}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("test-chat-message-body-file-mention"));
+    expect(onOpenPath).toHaveBeenCalledWith("docs/plan.md", "scope");
+  });
+
+  it("keeps an exact edge-space filename when its authoritative attachment wins", () => {
+    const onOpenPath = vi.fn();
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={[
+          {
+            id: "message-file",
+            threadId: "thread-1",
+            authorKind: "human",
+            authorDisplayName: "Ice",
+            body: "Compare @[ docs/plan.md] and @[docs/plan.md].",
+            createdAtMs: 1_700_000_000_000,
+            attachments: [
+              {
+                attachmentId: "attachment-trimmed",
+                threadId: "thread-1",
+                messageId: "message-file",
+                targetKind: "file",
+                pathHint: "docs/plan.md",
+                createdAtMs: 1_700_000_000_000,
+              },
+              {
+                attachmentId: "attachment-exact-space",
+                threadId: "thread-1",
+                messageId: "message-file",
+                targetKind: "file",
+                pathHint: " docs/plan.md",
+                createdAtMs: 1_700_000_000_000,
+              },
+            ],
+          },
+        ]}
+        loading={false}
+        emptyLabel="No messages"
+        endRef={createRef<HTMLDivElement>()}
+        onOpenPath={onOpenPath}
+      />,
+    );
+
+    const chips = screen.getAllByTestId("test-chat-message-body-file-mention");
+    fireEvent.click(chips[0] as HTMLElement);
+    fireEvent.click(chips[1] as HTMLElement);
+    expect(onOpenPath.mock.calls).toEqual([
+      [" docs/plan.md", undefined],
+      ["docs/plan.md", undefined],
+    ]);
+  });
+
+  it("does not bind literal mentions to unrelated attachments by heading or order", () => {
+    const onOpenPath = vi.fn();
+    render(
+      <ChatMessageList
+        testIdPrefix="test-chat"
+        messages={[
+          {
+            id: "message-file",
+            threadId: "thread-1",
+            authorKind: "agent",
+            authorDisplayName: "Ice",
+            body: "Compare @[docs/literal.md#scope] and @[docs/unheaded.md].",
+            createdAtMs: 1_700_000_000_000,
+            attachments: [
+              {
+                attachmentId: "attachment-cli",
+                threadId: "thread-1",
+                messageId: "message-file",
+                targetKind: "file",
+                objectId: "file-cli",
+                pathHint: "docs/independent-cli-input.md",
+                headingAnchor: "scope",
+                createdAtMs: 1_700_000_000_000,
+              },
+              {
+                attachmentId: "attachment-cli-unheaded",
+                threadId: "thread-1",
+                messageId: "message-file",
+                targetKind: "file",
+                objectId: "file-cli-unheaded",
+                pathHint: "docs/another-independent-input.md",
+                createdAtMs: 1_700_000_000_000,
+              },
+            ],
+          },
+        ]}
+        loading={false}
+        emptyLabel="No messages"
+        endRef={createRef<HTMLDivElement>()}
+        onOpenPath={onOpenPath}
+      />,
+    );
+
+    const chips = screen.getAllByTestId("test-chat-message-body-file-mention");
+    fireEvent.click(chips[0] as HTMLElement);
+    fireEvent.click(chips[1] as HTMLElement);
+    expect(onOpenPath.mock.calls).toEqual([
+      ["docs/literal.md", "scope"],
+      ["docs/unheaded.md", undefined],
+    ]);
+  });
+
+  it("classifies mention code ranges across the whole message when file chips split rendering", () => {
+    render(
+      <div data-testid="message">
+        <MentionText
+          body={[
+            "@ice see @[docs/plan.md]",
+            "```text",
+            "@[docs/inert.md]",
+            "@ice remains code in this unclosed fence",
+          ].join("\n")}
+          candidates={[{ id: "ice", kind: "user", handle: "ice", label: "Ice" }]}
+          testId="whole-message"
+        />
+      </div>,
+    );
+
+    expect(screen.getAllByTestId("whole-message-mention")).toHaveLength(1);
+    expect(screen.getByTestId("whole-message-mention").textContent).toBe("@ice");
+    expect(screen.getAllByTestId("whole-message-file-mention")).toHaveLength(1);
+    expect(screen.getByTestId("message").textContent).toContain(
+      "@[docs/inert.md]\n@ice remains code",
     );
   });
 });

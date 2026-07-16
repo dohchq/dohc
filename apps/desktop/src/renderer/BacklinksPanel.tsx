@@ -1,10 +1,19 @@
 import { ChevronRight, Link2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { GetBacklinksResult } from "../ipc/bridgeContract";
+import type {
+  ChatFileMentionRecord,
+  GetBacklinksResult,
+} from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 
 type BacklinkSource = GetBacklinksResult["sources"][number];
 type BacklinkSnippet = BacklinkSource["snippets"][number];
+type LoadedBacklinks = {
+  workspaceId: string;
+  path: string;
+  sources: BacklinkSource[];
+  chatMentions: ChatFileMentionRecord[];
+};
 
 // Splits a snippet line into before / highlighted / after so the linked text
 // reads out of the surrounding line. Ranges come clamped from main, but this
@@ -35,10 +44,15 @@ export function BacklinksPanel(props: {
   // Bumps on workspace activity (saves, agent edits) so mentions recompute.
   refreshKey?: number;
   onOpenPath?: (path: string) => void;
+  onOpenChatMention?: (mention: ChatFileMentionRecord) => void;
 }) {
-  const [sources, setSources] = useState<BacklinkSource[]>([]);
+  const [loaded, setLoaded] = useState<LoadedBacklinks | null>(null);
   const [open, setOpen] = useState(true);
   const { workspaceId, path, refreshKey } = props;
+  const current =
+    loaded?.workspaceId === workspaceId && loaded.path === path ? loaded : null;
+  const sources = current?.sources ?? [];
+  const chatMentions = current?.chatMentions ?? [];
 
   useEffect(() => {
     const getBacklinks = bridge().getBacklinks;
@@ -46,14 +60,24 @@ export function BacklinksPanel(props: {
     if (typeof getBacklinks !== "function") return;
 
     let active = true;
-    void getBacklinks({ workspaceId, path })
-      .then((result) => {
+    const getChatMentions = bridge().listChatFileMentions;
+    void Promise.all([
+      getBacklinks({ workspaceId, path }),
+      typeof getChatMentions === "function"
+        ? getChatMentions({ workspaceId, path }).catch(() => ({ mentions: [] }))
+        : Promise.resolve({ mentions: [] }),
+    ])
+      .then(([result, chats]) => {
         // Guard the async response against a workspace/path switch mid-flight
         // (product invariant: a slow response must never repaint the wrong doc).
-        if (active) setSources(result.sources);
+        if (active) {
+          setLoaded({ workspaceId, path, sources: result.sources, chatMentions: chats.mentions });
+        }
       })
       .catch(() => {
-        if (active) setSources([]);
+        if (active) {
+          setLoaded({ workspaceId, path, sources: [], chatMentions: [] });
+        }
       });
     return () => {
       active = false;
@@ -73,9 +97,17 @@ export function BacklinksPanel(props: {
     const getBacklinks = bridge().getBacklinks;
     if (typeof getBacklinks !== "function") return;
     let active = true;
-    void getBacklinks({ workspaceId, path })
-      .then((result) => {
-        if (active) setSources(result.sources);
+    const getChatMentions = bridge().listChatFileMentions;
+    void Promise.all([
+      getBacklinks({ workspaceId, path }),
+      typeof getChatMentions === "function"
+        ? getChatMentions({ workspaceId, path }).catch(() => ({ mentions: [] }))
+        : Promise.resolve({ mentions: [] }),
+    ])
+      .then(([result, chats]) => {
+        if (active) {
+          setLoaded({ workspaceId, path, sources: result.sources, chatMentions: chats.mentions });
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -83,7 +115,8 @@ export function BacklinksPanel(props: {
     };
   }, [focusNonce, workspaceId, path]);
 
-  const total = sources.reduce((sum, source) => sum + source.snippets.length, 0);
+  const linkedTotal = sources.reduce((sum, source) => sum + source.snippets.length, 0);
+  const total = linkedTotal + chatMentions.length;
   // Hidden entirely when nothing links here.
   if (total === 0) return null;
 
@@ -110,6 +143,35 @@ export function BacklinksPanel(props: {
           </span>
         </button>
         {open ? (
+          <div>
+          {chatMentions.length > 0 ? (
+            <ul className="dohc-backlinks__list" data-testid="chat-file-mentions">
+              {chatMentions.map((mention) => (
+                <li key={mention.attachment.attachmentId} className="dohc-backlinks__source">
+                  <button
+                    type="button"
+                    className="dohc-backlinks__source-link"
+                    data-testid="chat-file-mention"
+                    onClick={() => props.onOpenChatMention?.(mention)}
+                  >
+                    <span className="dohc-backlinks__source-title">
+                      {mention.channelName ? `#${mention.channelName}` : mention.thread.title}
+                      {mention.attachment.headingText
+                        ? ` · #${mention.attachment.headingText}`
+                        : ""}
+                    </span>
+                    <span className="dohc-backlinks__source-path">
+                      {mention.message.authorDisplayName} · {new Date(mention.message.createdAtMs).toLocaleString()}
+                    </span>
+                  </button>
+                  <p className="dohc-backlinks__snippet m-0 line-clamp-2 text-left">
+                    {mention.message.body}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {linkedTotal > 0 ? (
           <ul className="dohc-backlinks__list">
             {sources.map((source) => (
               <li key={source.sourcePath} className="dohc-backlinks__source">
@@ -151,6 +213,8 @@ export function BacklinksPanel(props: {
               </li>
             ))}
           </ul>
+          ) : null}
+          </div>
         ) : null}
       </div>
     </section>

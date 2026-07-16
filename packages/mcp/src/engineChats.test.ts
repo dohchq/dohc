@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createLinkedChatStore, createVersionedTextStore } from "@dohc/workspace-engine";
 import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -20,6 +21,18 @@ import {
   writeWorkspaceFile,
   type ToolContext,
 } from "./tools";
+
+interface RawSqliteDb {
+  prepare(sql: string): {
+    get(...params: unknown[]): Record<string, unknown> | undefined;
+  };
+  close(): void;
+}
+
+const requireFromHere = createRequire(import.meta.url);
+const { DatabaseSync } = requireFromHere("node:sqlite") as {
+  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => RawSqliteDb;
+};
 
 // PR 0N-1 + WS-H1 retirement Phase C MCP posture:
 //  - mutating tools NEVER write legacy .dohc/history change sets (the
@@ -61,6 +74,51 @@ async function seedManifest(ctx: ToolContext, workspaceId: string): Promise<void
   await writeFile(
     join(ctx.root, ".dohc", "manifest.json"),
     `${JSON.stringify({ version: 1, workspaceId, kind: "personal", mode: "local-first" })}\n`,
+  );
+}
+
+async function seedJoinedSharedChannels(
+  ctx: ToolContext,
+  workspaceId: string,
+  channels: Array<{
+    shareId: string;
+    channelWireId: string;
+    access: "read-write" | "read-only";
+    ended?: boolean;
+  }>,
+): Promise<void> {
+  await writeFile(
+    join(ctx.home, "dohc-workspaces.json"),
+    `${JSON.stringify(
+      {
+        version: 1,
+        workspaces: [
+          {
+            workspaceId,
+            rootPath: ctx.root,
+            kind: "personal",
+            mode: "local-first",
+            sharedChannels: channels.map((channel) => ({
+              ...channel,
+              granterEmail: "owner@example.com",
+              relayUrl: "https://relay.example.test",
+            })),
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
+async function seedPreferredName(
+  ctx: ToolContext,
+  preferredName: unknown,
+): Promise<void> {
+  await writeFile(
+    join(ctx.home, "dohc-settings.json"),
+    `${JSON.stringify({ version: 1, profile: { preferredName } }, null, 2)}\n`,
   );
 }
 
@@ -296,6 +354,7 @@ describe("linked chat tools", () => {
     await withWorkspace(async (ctx) => {
       await seedEngineFlag(ctx);
       await seedManifest(ctx, "ws-chats");
+      await seedPreferredName(ctx, "  Ice  ");
       const { thread } = await seedLinkedChat(ctx, "ws-chats");
 
       const listed = await listFileChats(ctx, { path: "notes/agenda.md" });
@@ -330,9 +389,8 @@ describe("linked chat tools", () => {
         },
       });
 
-      // Signed out: the reply's display name is "You" (the SAME rule the
-      // desktop's localUserDisplayName applies) — shared surfaces render it
-      // as "You's agent".
+      // MCP persists the profile-owned raw name. Presentation surfaces add
+      // the possessive agent label without changing durable authorship.
       const reply = await replyToChat(ctx, {
         threadId: thread.id,
         body: "Done — trimmed it to three items.",
@@ -341,7 +399,7 @@ describe("linked chat tools", () => {
         ok: true,
         message: {
           authorKind: "agent",
-          authorDisplayName: "You",
+          authorDisplayName: "Ice",
           body: "Done — trimmed it to three items.",
         },
       });
@@ -355,22 +413,64 @@ describe("linked chat tools", () => {
       });
       expect(messages.map((message) => message.author)).toEqual([
         { kind: "human", displayName: "Ice de Vera" },
-        { kind: "agent", displayName: "You" },
+        { kind: "agent", displayName: "Ice" },
       ]);
       await chats.close();
     });
   });
 
-  it("uses the dohc Cloud email for the agent's on-behalf-of name when present", async () => {
+  it("uses the preferred profile name and never substitutes a cloud email", async () => {
     await withWorkspace(async (ctx) => {
       vi.stubEnv("DOHC_MCP_CLOUD_EMAIL", "ice@example.com");
+      await writeFile(
+        join(ctx.home, "dohc-cloud.json"),
+        `${JSON.stringify({ version: 1, email: "credential@example.com" })}\n`,
+      );
+      await seedPreferredName(ctx, "Ice de Vera");
       await seedEngineFlag(ctx);
       await seedManifest(ctx, "ws-chats");
       const { thread } = await seedLinkedChat(ctx, "ws-chats");
       const reply = await replyToChat(ctx, { threadId: thread.id, body: "On it." });
       expect(reply).toMatchObject({
         ok: true,
-        message: { authorKind: "agent", authorDisplayName: "ice@example.com" },
+        message: { authorKind: "agent", authorDisplayName: "Ice de Vera" },
+      });
+    });
+  });
+
+  it("prefers a validated DOHC_MCP_OWNER_NAME over persisted settings", async () => {
+    await withWorkspace(async (ctx) => {
+      vi.stubEnv("DOHC_MCP_OWNER_NAME", "  Icy  ");
+      await seedPreferredName(ctx, "Ice");
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, "ws-chats");
+      const { thread } = await seedLinkedChat(ctx, "ws-chats");
+      const reply = await replyToChat(ctx, { threadId: thread.id, body: "On it." });
+      expect(reply).toMatchObject({
+        ok: true,
+        message: { authorKind: "agent", authorDisplayName: "Icy" },
+      });
+    });
+  });
+
+  it("ignores cloud email when no valid owner name is configured", async () => {
+    await withWorkspace(async (ctx) => {
+      vi.stubEnv("DOHC_MCP_CLOUD_EMAIL", "ice@example.com");
+      vi.stubEnv("DOHC_MCP_OWNER_NAME", "bad\u0001name");
+      vi.stubEnv("USERNAME", "local-login");
+      vi.stubEnv("USER", "other-local-login");
+      await writeFile(
+        join(ctx.home, "dohc-cloud.json"),
+        `${JSON.stringify({ version: 1, email: "credential@example.com" })}\n`,
+      );
+      await seedPreferredName(ctx, " ");
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, "ws-chats");
+      const { thread } = await seedLinkedChat(ctx, "ws-chats");
+      const reply = await replyToChat(ctx, { threadId: thread.id, body: "On it." });
+      expect(reply).toMatchObject({
+        ok: true,
+        message: { authorKind: "agent", authorDisplayName: "You" },
       });
     });
   });
@@ -405,6 +505,8 @@ describe("channel tools (PR 12/13 slice)", () => {
 
   it("lists channels (auto-creating general) and starts a chat as the agent", async () => {
     await withWorkspace(async (ctx) => {
+      vi.stubEnv("USERNAME", "local-login");
+      vi.stubEnv("USER", "other-local-login");
       await seedEngineFlag(ctx);
       await seedManifest(ctx, "ws-channels");
 
@@ -469,6 +571,247 @@ describe("channel tools (PR 12/13 slice)", () => {
           },
         ],
       });
+    });
+  });
+
+  it("lists only existing channels without durable mutation in the read-only profile", async () => {
+    await withWorkspace(async (ctx) => {
+      const workspaceId = "ws-read-only-channel-list";
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, workspaceId);
+
+      const chats = createLinkedChatStore(ctx.root);
+      await chats.createChannel({ workspaceId, name: "Existing" });
+      await chats.close();
+
+      const durableCounts = () => {
+        const db = new DatabaseSync(join(ctx.root, ".dohc/engine/engine.db"), {
+          readOnly: true,
+        });
+        try {
+          const channelCount = Number(
+            db
+              .prepare("SELECT COUNT(*) AS count FROM chat_channels WHERE workspace_id = ?")
+              .get(workspaceId)?.count,
+          );
+          const journalCount = Number(
+            db
+              .prepare("SELECT COUNT(*) AS count FROM replication_log WHERE workspace_id = ?")
+              .get(workspaceId)?.count,
+          );
+          return { channelCount, journalCount };
+        } finally {
+          db.close();
+        }
+      };
+
+      const before = durableCounts();
+      expect(before).toEqual({ channelCount: 1, journalCount: 1 });
+      await expect(listChannels({ ...ctx, readOnly: true })).resolves.toMatchObject({
+        ok: true,
+        channels: [{ name: "Existing", slug: "existing" }],
+      });
+      expect(durableCounts()).toEqual(before);
+
+      await expect(listChannels(ctx)).resolves.toMatchObject({
+        ok: true,
+        channels: expect.arrayContaining([
+          expect.objectContaining({ slug: "existing" }),
+          expect.objectContaining({ slug: "general" }),
+        ]),
+      });
+      expect(durableCounts()).toEqual({ channelCount: 2, journalCount: 2 });
+    });
+  });
+
+  it("rejects agent starts and replies in read-only or ended joined channels before mutation", async () => {
+    await withWorkspace(async (ctx) => {
+      const workspaceId = "ws-shared-channel-locks";
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, workspaceId);
+
+      const chats = createLinkedChatStore(ctx.root);
+      const readOnlyChannel = await chats.createChannel({
+        workspaceId,
+        name: "Read only",
+      });
+      const readOnlySeed = await chats.startChannelThread({
+        workspaceId,
+        channelId: readOnlyChannel.id,
+        author: { kind: "human", displayName: "Owner" },
+        body: "Existing read-only message",
+      });
+      const endedChannel = await chats.createChannel({
+        workspaceId,
+        name: "Ended",
+      });
+      const endedSeed = await chats.startChannelThread({
+        workspaceId,
+        channelId: endedChannel.id,
+        author: { kind: "human", displayName: "Owner" },
+        body: "Existing ended message",
+      });
+      const writableChannel = await chats.createChannel({
+        workspaceId,
+        name: "Writable",
+      });
+      const writableSeed = await chats.startChannelThread({
+        workspaceId,
+        channelId: writableChannel.id,
+        author: { kind: "human", displayName: "Owner" },
+        body: "Existing writable message",
+      });
+      const readOnlyWireId = await chats.getChannelWireId({
+        workspaceId,
+        channelId: readOnlyChannel.id,
+      });
+      const endedWireId = await chats.getChannelWireId({
+        workspaceId,
+        channelId: endedChannel.id,
+      });
+      const writableWireId = await chats.getChannelWireId({
+        workspaceId,
+        channelId: writableChannel.id,
+      });
+      await chats.close();
+      if (!readOnlyWireId || !endedWireId || !writableWireId) {
+        throw new Error("Expected every channel to have a wire id.");
+      }
+
+      await seedJoinedSharedChannels(ctx, workspaceId, [
+        {
+          shareId: "share-read-only",
+          channelWireId: readOnlyWireId,
+          access: "read-only",
+        },
+        {
+          shareId: "share-ended",
+          channelWireId: endedWireId,
+          access: "read-write",
+          ended: true,
+        },
+        {
+          shareId: "share-writable",
+          channelWireId: writableWireId,
+          access: "read-write",
+        },
+      ]);
+
+      for (const blocked of [
+        { channel: readOnlyChannel, threadId: readOnlySeed.thread.id },
+        { channel: endedChannel, threadId: endedSeed.thread.id },
+      ]) {
+        await expect(
+          startChannelChat(ctx, {
+            channel: blocked.channel.id,
+            body: "This must not be stored",
+          }),
+        ).resolves.toMatchObject({
+          ok: false,
+          reason: expect.stringContaining("read-only"),
+        });
+        await expect(
+          replyToChat(ctx, {
+            threadId: blocked.threadId,
+            body: "This must not be stored either",
+          }),
+        ).resolves.toMatchObject({
+          ok: false,
+          reason: expect.stringContaining("read-only"),
+        });
+      }
+
+      await expect(
+        startChannelChat(ctx, {
+          channel: writableChannel.id,
+          body: "A permitted new thread",
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      await expect(
+        replyToChat(ctx, {
+          threadId: writableSeed.thread.id,
+          body: "A permitted reply",
+        }),
+      ).resolves.toMatchObject({ ok: true });
+
+      const verify = createLinkedChatStore(ctx.root);
+      expect(
+        await verify.listChannelThreads({
+          workspaceId,
+          channelId: readOnlyChannel.id,
+        }),
+      ).toHaveLength(1);
+      expect(
+        await verify.listMessages({
+          workspaceId,
+          threadId: readOnlySeed.thread.id,
+        }),
+      ).toHaveLength(1);
+      expect(
+        await verify.listChannelThreads({
+          workspaceId,
+          channelId: endedChannel.id,
+        }),
+      ).toHaveLength(1);
+      expect(
+        await verify.listMessages({
+          workspaceId,
+          threadId: endedSeed.thread.id,
+        }),
+      ).toHaveLength(1);
+      expect(
+        await verify.listChannelThreads({
+          workspaceId,
+          channelId: writableChannel.id,
+        }),
+      ).toHaveLength(2);
+      expect(
+        await verify.listMessages({
+          workspaceId,
+          threadId: writableSeed.thread.id,
+        }),
+      ).toHaveLength(2);
+      await verify.close();
+    });
+  });
+
+  it("fails chat writes closed when the shared-channel registry authority is malformed", async () => {
+    await withWorkspace(async (ctx) => {
+      const workspaceId = "ws-malformed-shared-channel-registry";
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, workspaceId);
+      const chats = createLinkedChatStore(ctx.root);
+      const channel = await chats.createChannel({ workspaceId, name: "Shared" });
+      const seeded = await chats.startChannelThread({
+        workspaceId,
+        channelId: channel.id,
+        author: { kind: "human", displayName: "Owner" },
+        body: "Existing message",
+      });
+      await chats.close();
+      await writeFile(join(ctx.home, "dohc-workspaces.json"), "{not valid json");
+
+      await expect(
+        startChannelChat(ctx, { channel: channel.id, body: "Must not be stored" }),
+      ).resolves.toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("registry is invalid"),
+      });
+      await expect(
+        replyToChat(ctx, { threadId: seeded.thread.id, body: "Must not be stored" }),
+      ).resolves.toMatchObject({
+        ok: false,
+        reason: expect.stringContaining("registry is invalid"),
+      });
+
+      const verify = createLinkedChatStore(ctx.root);
+      expect(
+        await verify.listChannelThreads({ workspaceId, channelId: channel.id }),
+      ).toHaveLength(1);
+      expect(
+        await verify.listMessages({ workspaceId, threadId: seeded.thread.id }),
+      ).toHaveLength(1);
+      await verify.close();
     });
   });
 

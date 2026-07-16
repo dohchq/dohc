@@ -41,6 +41,30 @@ type DmStore = Pick<
   "listChannels" | "listChannelThreads" | "getChannelWireId"
 >;
 
+// Main-process trust-boundary guard for the generic shared-channel IPC. A
+// renderer can craft bridge payloads, so the handler must derive the channel
+// kind from the engine rather than trusting which UI initiated the request.
+// DM membership is created atomically by startDm; allowing the generic share
+// path would add a participant without updating the DM's recipient identity.
+export async function requireShareableChatChannel(input: {
+  workspaceId: string;
+  channelId: string;
+  store: Pick<LinkedChatStore, "listChannels">;
+}): Promise<void> {
+  const channel = (await input.store.listChannels({ workspaceId: input.workspaceId })).find(
+    (candidate) => candidate.id === input.channelId,
+  );
+  if (!channel) throw new Error("This channel no longer exists.");
+  if (channel.kind === "dm") {
+    throw new Error(
+      "Direct messages can't be shared as channels. Start a direct message to choose its participants.",
+    );
+  }
+  if (channel.kind !== "channel") {
+    throw new Error("Only ordinary channels can be shared.");
+  }
+}
+
 // The single running conversation (the anti-forum rule): the OLDEST thread in
 // the DM channel, deterministically (createdAtMs, then thread id) — every
 // participant picks the same one even if a race ever minted a duplicate.
@@ -127,11 +151,12 @@ export interface ShareLogPage {
 
 // The outcome of peeking a received grant's channel kind:
 //   "dm"      — a DM grant; auto-join it.
-//   "not-dm"  — a DEFINITIVE non-DM answer (regular channel, or an exhausted /
-//               capped log with no served op). Safe to CACHE and never re-probe:
-//               a grant's channel kind is immutable.
-//   "unknown" — could not determine (a page failed to fetch — transient). Do
-//               NOT cache; retry on the next pass.
+//   "not-dm"  — a DEFINITIVE ordinary-channel answer: an authoritative
+//               channel.create was observed with kind "channel". Safe to
+//               CACHE because a grant's channel kind is immutable.
+//   "unknown" — no authoritative create is visible yet, or a page could not
+//               be fetched. Do NOT cache; retry on the next pass. A grant can
+//               become visible before the owner's bootstrap ops reach relay.
 export type DmPeekResult = "dm" | "not-dm" | "unknown";
 
 // Peek a received chat-channel grant's KIND without mutating the local store,
@@ -144,9 +169,9 @@ export type DmPeekResult = "dm" | "not-dm" | "unknown";
 // is a permanent false negative. Page through `nextCursor` until the first
 // served op appears (inspect its kind) or the log is exhausted. Bounded to
 // `maxPages` so a hostile/huge filtered prefix can't loop forever on since=0;
-// hitting the cap (or an exhausted log) with no served op is a DEFINITIVE
-// "not-dm" (deterministic, cacheable). Only a page that can't be fetched is
-// "unknown" — that one is transient and must be retried, never cached.
+// hitting the cap, a stalled cursor, or exhausting a currently empty log does
+// not prove the immutable kind: the grant can race ahead of its owner's
+// channel bootstrap. Those states are "unknown" and retryable.
 export async function peekReceivedGrantKind(input: {
   fetchPage: (since: number) => Promise<ShareLogPage | null>;
   maxPages?: number;
@@ -158,17 +183,18 @@ export async function peekReceivedGrantKind(input: {
     if (!result) return "unknown";
     const first = result.ops?.[0];
     if (first) {
-      if (first.opKind !== "chat.channel.create") return "not-dm";
+      if (first.opKind !== "chat.channel.create") return "unknown";
       const payload = first.payload as { kind?: unknown } | null;
-      return payload?.kind === "dm" ? "dm" : "not-dm";
+      if (payload?.kind === "dm") return "dm";
+      return payload?.kind === "channel" ? "not-dm" : "unknown";
     }
-    if (result.hasMore !== true) return "not-dm";
+    if (result.hasMore !== true) return "unknown";
     const next = typeof result.nextCursor === "number" ? result.nextCursor : null;
     // No forward progress ⇒ stop rather than re-request the same cursor forever.
-    if (next === null || next <= since) return "not-dm";
+    if (next === null || next <= since) return "unknown";
     since = next;
   }
-  return "not-dm";
+  return "unknown";
 }
 
 // Grant every not-yet-covered recipient of a DM ATOMICALLY. Create all missing

@@ -16,6 +16,15 @@ function stubBacklinks(result: GetBacklinksResult) {
   return getBacklinks;
 }
 
+function stubBacklinksWithChatFailure(result: GetBacklinksResult) {
+  const getBacklinks = vi.fn(async () => result);
+  const listChatFileMentions = vi.fn(async () => {
+    throw new Error("Chats are unavailable for this workspace");
+  });
+  vi.stubGlobal("dohcDesktop", { getBacklinks, listChatFileMentions });
+  return { getBacklinks, listChatFileMentions };
+}
+
 const TWO_SOURCES: GetBacklinksResult = {
   sources: [
     {
@@ -48,6 +57,20 @@ describe("BacklinksPanel", () => {
     expect(screen.getAllByTestId("backlink-snippet")).toHaveLength(3);
     // The linked text is marked out of the surrounding snippet.
     expect(screen.getAllByText("[[Target]]").length).toBeGreaterThan(0);
+  });
+
+  it("keeps ordinary backlinks when chat mention lookup fails", async () => {
+    const { listChatFileMentions } = stubBacklinksWithChatFailure(TWO_SOURCES);
+    render(<BacklinksPanel workspaceId="ws-1" path="notes/target.md" />);
+
+    await screen.findByTestId("backlinks");
+    expect(listChatFileMentions).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      path: "notes/target.md",
+    });
+    expect(screen.getByTestId("backlinks-count").textContent).toBe("3");
+    expect(screen.getAllByTestId("backlink-source")).toHaveLength(2);
+    expect(screen.queryByTestId("chat-file-mentions")).toBeNull();
   });
 
   it("opens the source document when a mention is clicked", async () => {
@@ -98,5 +121,30 @@ describe("BacklinksPanel", () => {
       <BacklinksPanel workspaceId="ws-1" path="notes/target.md" />,
     );
     expect(container.querySelector("[data-testid='backlinks']")).toBeNull();
+  });
+
+  it("never renders results loaded for a previous workspace or path", async () => {
+    const never = new Promise<GetBacklinksResult>(() => undefined);
+    const getBacklinks = vi
+      .fn()
+      .mockResolvedValueOnce(TWO_SOURCES)
+      .mockReturnValueOnce(never);
+    vi.stubGlobal("dohcDesktop", { getBacklinks });
+    const view = render(
+      <BacklinksPanel workspaceId="ws-a" path="notes/target.md" />,
+    );
+
+    await screen.findByTestId("backlinks");
+    expect(screen.getByText("Alpha")).toBeTruthy();
+
+    view.rerender(
+      <BacklinksPanel workspaceId="ws-b" path="notes/other.md" />,
+    );
+    expect(screen.queryByTestId("backlinks")).toBeNull();
+    expect(screen.queryByText("Alpha")).toBeNull();
+    expect(getBacklinks).toHaveBeenLastCalledWith({
+      workspaceId: "ws-b",
+      path: "notes/other.md",
+    });
   });
 });

@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./chat-identity": "./src/chatIdentity.ts",
     "./chat-mentions": "./src/chatMentions.ts",
     "./domain": "./src/domain.ts",
     "./engine": "./src/engine.ts",

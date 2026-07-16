@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -137,5 +137,251 @@ describe("LinkedChatsPanel initialThread consumption", () => {
     );
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
     expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a compatibility-form file mention through its resolved attachment path", async () => {
+    const user = userEvent.setup();
+    const onOpenPath = vi.fn();
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        {
+          id: "message-file",
+          threadId: searchThread.id,
+          authorKind: "human",
+          authorDisplayName: "Ice",
+          body: "Read @[ docs/plan.md #scope].",
+          createdAtMs: 1_700_000_000_000,
+          attachments: [
+            {
+              attachmentId: "attachment-file",
+              threadId: searchThread.id,
+              messageId: "message-file",
+              targetKind: "file",
+              objectId: "file-plan",
+              pathHint: "docs/plan.md",
+              headingAnchor: "scope",
+              createdAtMs: 1_700_000_000_000,
+            },
+          ],
+        },
+      ],
+    });
+
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/current.md"
+        initialThread={searchThread}
+        onOpenPath={onOpenPath}
+        onError={() => undefined}
+      />,
+    );
+
+    await user.click(await screen.findByTestId("linked-chat-message-body-file-mention"));
+    expect(onOpenPath).toHaveBeenCalledWith("docs/plan.md", "scope");
+  });
+
+  it("lands on a focused message and honors a repeated open of the same thread", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        {
+          id: "message-1",
+          threadId: searchThread.id,
+          authorKind: "human",
+          authorDisplayName: "Ice",
+          body: "First update",
+          createdAtMs: 1_700_000_000_000,
+        },
+        {
+          id: "message-2",
+          threadId: searchThread.id,
+          authorKind: "human",
+          authorDisplayName: "Ice",
+          body: "Second update",
+          createdAtMs: 1_700_000_001_000,
+        },
+      ],
+    });
+    const scrolledMessageIds: Array<string | null> = [];
+    vi.mocked(Element.prototype.scrollIntoView).mockImplementation(function (
+      this: Element,
+    ) {
+      scrolledMessageIds.push(this.getAttribute("data-message-id"));
+    });
+
+    const { rerender } = render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        initialThread={{ ...searchThread }}
+        initialFocusMessageId="message-1"
+        onError={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText("First update")).toBeTruthy();
+    await waitFor(() => expect(scrolledMessageIds).toContain("message-1"));
+
+    scrolledMessageIds.length = 0;
+    rerender(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        initialThread={{ ...searchThread }}
+        initialFocusMessageId="message-2"
+        onError={() => undefined}
+      />,
+    );
+
+    await waitFor(() => expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(scrolledMessageIds).toContain("message-2"));
+  });
+
+  it("drops a deferred scroll after a newer thread open supersedes its request", async () => {
+    const secondThread = {
+      ...searchThread,
+      id: "thread-2",
+      title: "Second discussion",
+    };
+    bridgeMock.listChatMessages.mockImplementation(
+      async ({ threadId }: { threadId: string }) => ({
+        messages: threadId === searchThread.id
+          ? [{
+              id: "shared-message",
+              threadId,
+              authorKind: "human" as const,
+              authorDisplayName: "Ice",
+              body: "Old thread message",
+              createdAtMs: 1,
+            }]
+          : [
+              {
+                id: "shared-message",
+                threadId,
+                authorKind: "human" as const,
+                authorDisplayName: "Ice",
+                body: "Same id in the new DOM",
+                createdAtMs: 2,
+              },
+              {
+                id: "new-focus",
+                threadId,
+                authorKind: "human" as const,
+                authorDisplayName: "Ice",
+                body: "New focus",
+                createdAtMs: 3,
+              },
+            ],
+      }),
+    );
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    }));
+    const scrolledMessageIds: Array<string | null> = [];
+    vi.mocked(Element.prototype.scrollIntoView).mockImplementation(function (
+      this: Element,
+    ) {
+      scrolledMessageIds.push(this.getAttribute("data-message-id"));
+    });
+
+    const view = render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        initialThread={{ ...searchThread }}
+        initialFocusMessageId="shared-message"
+        onError={() => undefined}
+      />,
+    );
+    await screen.findByText("Old thread message");
+    await waitFor(() => expect(frames).toHaveLength(1));
+
+    view.rerender(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        initialThread={{ ...secondThread }}
+        initialFocusMessageId="new-focus"
+        onError={() => undefined}
+      />,
+    );
+    await screen.findByText("New focus");
+    await waitFor(() => expect(frames).toHaveLength(2));
+
+    act(() => frames[0]?.(0));
+    expect(scrolledMessageIds).toEqual([]);
+    act(() => frames[1]?.(1));
+    expect(scrolledMessageIds).toEqual(["new-focus"]);
+  });
+});
+
+describe("LinkedChatsPanel shared-workspace read-only boundary", () => {
+  it("keeps the thread readable while blocking composer, reactions, and creation", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        {
+          id: "message-1",
+          threadId: searchThread.id,
+          authorKind: "human",
+          authorDisplayName: "Owner",
+          body: "Read-only context",
+          createdAtMs: 1_700_000_000_000,
+        },
+      ],
+    });
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [
+        {
+          reactionId: "reaction-1",
+          messageId: "message-1",
+          threadId: searchThread.id,
+          emoji: "👍",
+          authorId: "owner@example.com",
+          authorKind: "human",
+          authorDisplayName: "Owner",
+          state: "added",
+        },
+      ],
+      viewerAuthorId: "viewer@example.com",
+    });
+
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        initialThread={searchThread}
+        readOnly
+        onError={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText("Read-only context")).toBeTruthy();
+    const reaction = screen.getByTestId("linked-chat-reaction-pill") as HTMLButtonElement;
+    expect(reaction.disabled).toBe(true);
+    expect(screen.queryByTestId("linked-chat-add-reaction")).toBeNull();
+    expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
+    expect(screen.getByTestId("linked-chat-readonly-note")).toBeTruthy();
+
+    expect(bridgeMock.sendChatMessage).not.toHaveBeenCalled();
+    expect(bridgeMock.setChatReaction).not.toHaveBeenCalled();
+    expect(bridgeMock.createFileChat).not.toHaveBeenCalled();
+  });
+
+  it("does not offer file-chat creation from the read-only list", async () => {
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        readOnly
+        onError={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByTestId("linked-chats-panel")).toBeTruthy();
+    expect(screen.queryByTestId("linked-chat-new")).toBeNull();
+    expect(screen.getByTestId("linked-chat-readonly-note")).toBeTruthy();
+    expect(bridgeMock.createFileChat).not.toHaveBeenCalled();
   });
 });

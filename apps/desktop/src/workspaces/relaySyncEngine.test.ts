@@ -80,6 +80,7 @@ function engine(input: {
   capture: WorkspaceEngineCapture;
   onChange?: () => void;
   syncSharedChannels?: () => Promise<void>;
+  afterSuccessfulPull?: () => Promise<void>;
 }) {
   return createRelaySyncEngine({
     rootDir: "/tmp/workspace",
@@ -88,6 +89,9 @@ function engine(input: {
     capture: input.capture,
     onChange: input.onChange ?? vi.fn(),
     ...(input.syncSharedChannels ? { syncSharedChannels: input.syncSharedChannels } : {}),
+    ...(input.afterSuccessfulPull
+      ? { afterSuccessfulPull: input.afterSuccessfulPull }
+      : {}),
     debounceMs: 100,
     initialBackoffMs: 500,
     maxBackoffMs: 2000,
@@ -115,6 +119,48 @@ afterEach(() => {
 });
 
 describe("relaySyncEngine", () => {
+  it("runs post-pull work after cursor commit and contains its failure", async () => {
+    const calls: string[] = [];
+    const cap = capture();
+    pullMock.mockImplementation(async () => pullResult({
+      commitFetchCursor: vi.fn(async () => {
+        calls.push("commit");
+      }),
+    }));
+    const afterSuccessfulPull = vi.fn(async () => {
+      calls.push("after-pull");
+      throw new Error("bookmark projection failed");
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sync = engine({ capture: cap, afterSuccessfulPull });
+
+    await expect(sync.start()).resolves.toBeUndefined();
+    expect(calls).toEqual(["commit", "after-pull"]);
+    expect(afterSuccessfulPull).toHaveBeenCalledOnce();
+    expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
+    expect(sync.snapshot().syncFailing).toBeFalsy();
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("post-pull work failed"),
+      expect.any(Error),
+    );
+
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
+  it("does not run post-pull work when the relay pull fails", async () => {
+    pullMock.mockRejectedValue(new Error("relay unavailable"));
+    const afterSuccessfulPull = vi.fn(async () => undefined);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const sync = engine({ capture: capture(), afterSuccessfulPull });
+
+    await expect(sync.start()).rejects.toThrow("relay unavailable");
+    expect(afterSuccessfulPull).not.toHaveBeenCalled();
+
+    errorSpy.mockRestore();
+    await sync.stop();
+  });
+
   it("refreshes shared channels on every pass and contains their failures (MU-C4)", async () => {
     const cap = capture();
     // The callback REJECTING must not fail the workspace pass: shared-channel

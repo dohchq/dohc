@@ -35,7 +35,7 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
 
     // The Chats view exists on the activity rail; first use auto-creates
     // the default #general channel.
-    await page.getByTestId("activity-chats").click();
+    await page.getByTestId("titlebar-chats-sidebar").click();
     await expect(page.getByTestId("chats-view")).toBeVisible();
     await expect(page.getByTestId("chats-channel-name")).toHaveText("general");
 
@@ -57,7 +57,7 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     await expect(page.getByTestId("chats-message-body")).toContainText(
       "Let's plan the launch this week.",
     );
-    await expect(page.getByTestId("chats-message-author")).toHaveText("You");
+    await expect(page.getByTestId("chats-message-author")).toHaveText("Ice");
 
     // Replies land through the thread composer.
     const composer = page.getByTestId("chats-composer");
@@ -90,7 +90,7 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     // it closed. Reveal it only when it is not already showing — what this
     // test pins is chat-data durability, not panel-visibility persistence.
     if (!(await page.getByTestId("chats-view").isVisible())) {
-      await page.getByTestId("activity-chats").click();
+      await page.getByTestId("titlebar-chats-sidebar").click();
     }
     await expect(page.getByTestId("chats-channel-name")).toHaveText("general");
     await page.getByTestId("chats-channel").click();
@@ -127,7 +127,10 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     await expect(page.getByTestId("chats-channel-unread")).toHaveText("1");
 
     // Opening the thread marks it read; the badges clear at both levels.
-    await page.getByTestId("chats-channel").click();
+    await page
+      .locator('[data-testid="chats-view"][data-variant="page"]')
+      .getByTestId("chats-channel")
+      .click();
     await agentThreadRow.click();
     await expect(page.getByTestId("chats-message-author")).toHaveText("Ice's agent");
     await page.getByTestId("chats-thread-back").click();
@@ -149,10 +152,9 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
   }
 });
 
-// Expand-to-tab (chats/expand-to-tab): the panel's Maximize button opens
-// Chats as a first-class editor tab seeded with the panel's CURRENT
-// conversation; the tab closes/reopens like any other tab.
-test("flagged: expand opens chats as an editor tab on the current conversation", async () => {
+// Slack-style navigation: the panel remains an overview while selections open
+// and switch a first-class Chats editor tab.
+test("flagged: the persistent chats navigator opens conversations in the editor", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
@@ -172,71 +174,57 @@ test("flagged: expand opens chats as an editor tab on the current conversation",
     await explorerRow(page, "notes.md").click();
     await expect(page.getByTestId("tab-notes.md")).toBeVisible();
 
-    // Into a conversation in the PANEL.
-    await page.getByTestId("activity-chats").click();
-    await expect(page.getByTestId("chats-view")).toBeVisible();
-    await page.getByTestId("chats-channel").click();
-    const newThreadComposer = page.getByTestId("chats-new-thread-composer");
-    await newThreadComposer.fill("Expand me into a tab.");
-    await newThreadComposer.press("Enter");
-    await expect(page.getByTestId("chats-thread-view")).toBeVisible();
-
-    // An unsent reply draft rides the expand handoff instead of vanishing
-    // with the unmounted panel instance.
-    await page.getByTestId("chats-composer").fill("draft in flight");
-
-    // Expand: a "Chats" editor tab opens ON the same thread, page variant.
-    await page.getByTestId("chats-open-tab").click();
+    // The panel remains the navigator; selecting a channel opens the editor.
+    await page.getByTestId("titlebar-chats-sidebar").click();
+    const panel = page.getByTestId("chats-panel");
+    await expect(panel).toBeVisible();
+    const channelButton = panel.getByTestId("chats-channel");
+    await channelButton.click();
     const chatsTab = page.getByTestId("tab-dohc://chats");
     await expect(chatsTab).toBeVisible();
     await expect(chatsTab).toHaveAttribute("data-active", "true");
+    await expect(panel).toBeVisible();
+    await expect(channelButton).toHaveAttribute("data-active", "true");
+    await expect(page.getByTestId("chats-panel-deferred")).toHaveCount(0);
+
+    const newThreadComposer = page.getByTestId("chats-new-thread-composer");
+    await newThreadComposer.fill("Expand me into a tab.");
+    await newThreadComposer.press("Enter");
     const pageThreadView = page.locator(
       '[data-testid="chats-thread-view"][data-variant="page"]',
     );
     await expect(pageThreadView).toBeVisible();
+
+    // The editor owns the composer and draft. The navigator has no duplicate
+    // conversation/composer surface.
+    await page.getByTestId("chats-composer").fill("draft in flight");
     await expect(
       pageThreadView.getByTestId("chats-thread-post-title"),
     ).toHaveText("Expand me into a tab.");
-    await expect(page.getByTestId("chats-composer")).toHaveValue(
-      "draft in flight",
-    );
-
-    // Chats is ONE live surface: while the tab is active the panel defers
-    // (no second presence lease or duplicate composer ids) and the expand
-    // button hides. Exactly ONE reply composer exists in the document.
-    await expect(page.getByTestId("chats-panel-deferred")).toBeVisible();
     await expect(page.getByTestId("chats-open-tab")).toHaveCount(0);
     await expect(page.getByTestId("chats-composer")).toHaveCount(1);
 
-    // Switching to a document tab hands the conversation back to the panel
-    // (draft included) and the expand button returns; re-activating the
-    // Chats tab defers the panel again.
+    // Switching editor tabs never changes the panel back into a conversation.
+    // Reopening Chats restores the editor's conversation and draft.
     await page.getByTestId("tab-notes.md").click();
     await expect(
-      page.locator('[data-testid="chats-thread-view"][data-variant="panel"]'),
+      panel.locator('[data-testid="chats-view"][data-variant="panel"]'),
     ).toBeVisible();
     await expect(page.getByTestId("chats-open-tab")).toBeVisible();
-    await expect(page.getByTestId("chats-composer")).toHaveValue(
-      "draft in flight",
-    );
+    await expect(page.getByTestId("chats-composer")).toHaveCount(0);
     await chatsTab.click();
-    await expect(page.getByTestId("chats-panel-deferred")).toBeVisible();
     await expect(pageThreadView).toBeVisible();
+    await expect(page.getByTestId("chats-composer")).toHaveValue("draft in flight");
+    await expect(panel).toBeVisible();
 
-    // The tab is first-class: it closes like any document tab, and the
-    // conversation hands back to the panel — same thread, panel variant.
+    // Closing the editor leaves the persistent navigator intact. Selecting
+    // the channel again recreates the Chats tab at that channel.
     await chatsTab.getByRole("button", { name: "Close Chats" }).click();
     await expect(page.getByTestId("tab-dohc://chats")).toHaveCount(0);
+    await expect(panel).toBeVisible();
+    await channelButton.click();
     await expect(
-      page.locator('[data-testid="chats-thread-view"][data-variant="panel"]'),
-    ).toBeVisible();
-
-    // Re-expanding from the overview seeds the tab at the overview.
-    await page.getByTestId("chats-thread-back").click();
-    await page.getByTestId("chats-channel-back").click();
-    await page.getByTestId("chats-open-tab").click();
-    await expect(
-      page.locator('[data-testid="chats-view"][data-variant="page"]'),
+      page.locator('[data-testid="chats-channel-view"][data-variant="page"]'),
     ).toBeVisible();
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
@@ -257,9 +245,9 @@ test("opted-out workspace: no Chats view, channel handlers reject", async () => 
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
 
-    // No Chats entry on the rail; the other views are untouched.
+    // No Chats layout control; the activity views are untouched.
     await expect(page.getByTestId("activity-explorer")).toBeVisible();
-    await expect(page.getByTestId("activity-chats")).toHaveCount(0);
+    await expect(page.getByTestId("titlebar-chats-sidebar")).toHaveCount(0);
 
     // Every channel handler rejects for unflagged workspaces — the read
     // path, channel creation, thread start, AND read-cursor advancement. A
@@ -357,12 +345,12 @@ test("performance: channel-list first paint and composer send latency", async ()
     // page (rAF-polled), so harness polling/CDP overhead does not count
     // against the budget. Includes the lazy view chunk + the IPC round trip.
     const firstPaintMs = await page.evaluate(async () => {
-      const rail = document.querySelector<HTMLButtonElement>(
-        '[data-testid="activity-chats"]',
+      const layoutToggle = document.querySelector<HTMLButtonElement>(
+        '[data-testid="titlebar-chats-sidebar"]',
       );
-      if (!rail) throw new Error("chats rail button missing");
+      if (!layoutToggle) throw new Error("chats layout toggle missing");
       const start = performance.now();
-      rail.click();
+      layoutToggle.click();
       await new Promise<void>((resolve) => {
         const check = () => {
           const rows = document.querySelectorAll('[data-testid="chats-channel"]');

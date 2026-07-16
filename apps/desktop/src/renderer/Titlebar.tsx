@@ -1,5 +1,5 @@
 import { DohcMark } from "@dohc/brand";
-import { Check, ChevronsUpDown, Search } from "lucide-react";
+import { Check, ChevronsUpDown, PanelLeft, PanelRight, Search } from "lucide-react";
 import { useState } from "react";
 import type { WorkspaceSummary } from "../ipc/bridgeContract";
 import { TITLEBAR_HEIGHT_PX } from "./tokens";
@@ -8,6 +8,37 @@ import { TITLEBAR_HEIGHT_PX } from "./tokens";
 export function workspaceName(workspace: WorkspaceSummary): string {
   // Separator-agnostic: rootPath is backslash-separated on native Windows.
   return workspace.rootPath.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "workspace";
+}
+
+type TitlebarPanelToggle = {
+  visible: boolean;
+  onToggle: () => void;
+};
+
+function LayoutToggle(props: {
+  label: string;
+  testId: string;
+  pressed: boolean;
+  onClick: () => void;
+  Icon: typeof PanelLeft;
+}) {
+  return (
+    <button
+      type="button"
+      data-testid={props.testId}
+      aria-label={props.label}
+      aria-pressed={props.pressed}
+      title={props.label}
+      onClick={props.onClick}
+      className={`titlebar-no-drag grid size-7 place-items-center rounded-md transition-colors active:translate-y-px ${
+        props.pressed
+          ? "bg-line/70 text-ink"
+          : "text-subtle hover:bg-line/50 hover:text-ink"
+      }`}
+    >
+      <props.Icon size={15} strokeWidth={1.8} aria-hidden />
+    </button>
+  );
 }
 
 // Custom titlebar: a drag strip under the hidden OS titlebar, sized by the
@@ -22,6 +53,8 @@ export function Titlebar(props: {
   onOpenShare?: () => void;
   onSwitchWorkspace?: (workspace: WorkspaceSummary) => void;
   onQuickOpen?: () => void;
+  primarySidebar?: TitlebarPanelToggle;
+  chatsSidebar?: TitlebarPanelToggle;
 }) {
   const [switcherOpen, setSwitcherOpen] = useState(false);
   // macOS draws traffic lights on the LEFT and never populates the
@@ -126,7 +159,7 @@ export function Titlebar(props: {
           type="button"
           data-testid="titlebar-quick-open"
           onClick={props.onQuickOpen}
-          className="titlebar-no-drag absolute left-1/2 top-1/2 flex h-7 w-80 max-w-[min(40vw,100vw_-_560px)] -translate-x-1/2 -translate-y-1/2 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] text-subtle hover:text-ink"
+          className="titlebar-no-drag absolute left-1/2 top-1/2 flex h-7 w-80 max-w-[min(40vw,100vw_-_640px)] -translate-x-1/2 -translate-y-1/2 items-center gap-1.5 rounded-md border border-line bg-bg px-2.5 text-[12px] text-subtle hover:text-ink"
         >
           <Search size={12} aria-hidden />
           <span className="truncate">Search files…</span>
@@ -134,11 +167,41 @@ export function Titlebar(props: {
         </button>
       ) : null}
 
+      {props.primarySidebar || props.chatsSidebar ? (
+        <div
+          data-testid="titlebar-layout-controls"
+          role="group"
+          aria-label="Layout controls"
+          className="titlebar-no-drag ml-auto flex shrink-0 items-center gap-0.5"
+        >
+          {props.primarySidebar ? (
+            <LayoutToggle
+              testId="titlebar-primary-sidebar"
+              label="Toggle primary sidebar"
+              pressed={props.primarySidebar.visible}
+              onClick={props.primarySidebar.onToggle}
+              Icon={PanelLeft}
+            />
+          ) : null}
+          {props.chatsSidebar ? (
+            <LayoutToggle
+              testId="titlebar-chats-sidebar"
+              label="Toggle chats sidebar"
+              pressed={props.chatsSidebar.visible}
+              onClick={props.chatsSidebar.onToggle}
+              Icon={PanelRight}
+            />
+          ) : null}
+        </div>
+      ) : null}
+
       {/* Spacer under the OS window controls (minimize/maximize/close);
           macOS has no right-side controls. */}
       <div
         aria-hidden
-        className="ml-auto h-full shrink-0"
+        className={`${
+          props.primarySidebar || props.chatsSidebar ? "ml-2" : "ml-auto"
+        } h-full shrink-0`}
         style={{
           width: isMac
             ? 12

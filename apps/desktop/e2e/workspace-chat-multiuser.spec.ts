@@ -164,7 +164,7 @@ test("owner + participant chat and co-presence converge in the real app", async 
     const baseUrl = relay.baseUrl;
 
     // --- (a) OWNER creates a channel, starts a thread, sends a message ------
-    await page.getByTestId("activity-chats").click();
+    await page.getByTestId("titlebar-chats-sidebar").click();
     await expect(page.getByTestId("chats-view")).toBeVisible();
 
     await page.getByTestId("chats-new-channel").click();

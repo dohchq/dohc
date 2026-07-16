@@ -4,12 +4,13 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ChannelThreadRecord,
+  ChatBookmarkRecord,
   ChatChannelRecord,
   ChatMessageRecord,
   DmRecord,
   FileChatThreadRecord,
 } from "../../ipc/bridgeContract";
-import { ChatsView } from "./ChatsView";
+import { ChatsView, reconcileResolvedChatDecision } from "./ChatsView";
 
 // Chats view (PR 13, WS-E): fast, natural chat — the channel composer sends
 // on Enter with NO title prompt, unread badges derive from the store's read
@@ -71,6 +72,21 @@ function openingPreview(
   };
 }
 
+function personalFeedItem(body: string, id: string) {
+  return {
+    message: message({ id, body }),
+    thread: thread(),
+    channel: {
+      id: "channel-1",
+      name: "general",
+      slug: "general",
+      kind: "channel" as const,
+    },
+    reactions: [],
+    matchedBy: ["channel" as const],
+  };
+}
+
 const fileThread: FileChatThreadRecord = {
   id: "thread-file-1",
   title: "Naming discussion",
@@ -119,21 +135,31 @@ const bridgeMock = {
   stopAgentRun: vi.fn(),
   resumeThreadDispatch: vi.fn(),
   writeClipboardText: vi.fn(),
+  listChatBookmarks: vi.fn(),
+  saveChatBookmark: vi.fn(),
+  archiveChatBookmark: vi.fn(),
+  listChatFollows: vi.fn(),
+  setChatFollow: vi.fn(),
+  listPersonalChatFeed: vi.fn(),
+  markPersonalChatFeedSeen: vi.fn(),
   onWorkspaceActivity: vi.fn(),
 };
 
 Element.prototype.scrollIntoView = vi.fn();
 
-let workspaceActivityCallback: (() => void) | null = null;
+const workspaceActivityCallbacks = new Set<() => void>();
+
+function emitWorkspaceActivity() {
+  for (const callback of [...workspaceActivityCallbacks]) callback();
+}
 
 beforeEach(() => {
-  workspaceActivityCallback = null;
+  workspaceActivityCallbacks.clear();
   for (const mock of Object.values(bridgeMock)) mock.mockReset();
   bridgeMock.onWorkspaceActivity.mockImplementation((callback: () => void) => {
-    workspaceActivityCallback = callback;
+    workspaceActivityCallbacks.add(callback);
     return () => {
-      // A stale cleanup must never detach a newer subscription.
-      if (workspaceActivityCallback === callback) workspaceActivityCallback = null;
+      workspaceActivityCallbacks.delete(callback);
     };
   });
   bridgeMock.listChatChannels.mockResolvedValue({
@@ -151,6 +177,73 @@ beforeEach(() => {
   bridgeMock.listChatThreadAttachments.mockResolvedValue({ attachments: [] });
   bridgeMock.chatRunRecordsForThread.mockResolvedValue({ runs: {} });
   bridgeMock.writeClipboardText.mockResolvedValue(undefined);
+  bridgeMock.listChatBookmarks.mockResolvedValue({ bookmarks: [] });
+  bridgeMock.saveChatBookmark.mockResolvedValue({
+    bookmark: {
+      bookmarkId: "bookmark-1",
+      targetKind: "thread",
+      targetId: "thread-1",
+      threadId: "thread-1",
+      mode: "live",
+      destinationPath: "Bookmarks/Chats/Friday--thread-1.md",
+      state: "active",
+      projectionState: "ready",
+      generation: 1,
+      createdAtMs: NOW,
+      updatedAtMs: NOW,
+    },
+  });
+  bridgeMock.archiveChatBookmark.mockResolvedValue({
+    bookmark: {
+      bookmarkId: "bookmark-1",
+      targetKind: "thread",
+      targetId: "thread-1",
+      threadId: "thread-1",
+      mode: "live",
+      destinationPath: "Bookmarks/Chats/Friday--thread-1.md",
+      state: "archived",
+      projectionState: "ready",
+      generation: 1,
+      createdAtMs: NOW,
+      updatedAtMs: NOW,
+    },
+  });
+  bridgeMock.listChatFollows.mockResolvedValue({ follows: [] });
+  bridgeMock.setChatFollow.mockImplementation(
+    (input: {
+      target:
+        | { kind: "channel"; channelId: string }
+        | { kind: "thread"; threadId: string }
+        | { kind: "author"; threadId: string; messageId: string };
+      state: "following" | "unfollowed";
+    }) =>
+      Promise.resolve({
+        follow: {
+          targetKind:
+            input.target.kind === "channel"
+              ? "channel"
+              : input.target.kind === "thread"
+                ? "thread"
+                : "person",
+          targetId:
+            input.target.kind === "channel"
+              ? "wire-1"
+              : input.target.kind === "thread"
+                ? input.target.threadId
+                : "user-alice",
+          state: input.state,
+          updatedAtMs: NOW,
+        },
+      }),
+  );
+  bridgeMock.listPersonalChatFeed.mockResolvedValue({ items: [] });
+  bridgeMock.markPersonalChatFeedSeen.mockResolvedValue({
+    readState: {
+      lastSeenCreatedAtMs: NOW,
+      lastSeenMessageId: "message-1",
+      updatedAtMs: NOW,
+    },
+  });
   bridgeMock.chatDispatchStateForThread.mockResolvedValue({
     liveRun: false,
     pendingCount: 0,
@@ -186,7 +279,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  workspaceActivityCallback = null;
+  workspaceActivityCallbacks.clear();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -270,7 +363,348 @@ describe("ChatsView channels", () => {
   });
 });
 
+describe("ChatsView shared-workspace read-only boundary", () => {
+  it("keeps the panel navigator readable while removing every overview/channel mutation", async () => {
+    const sharedChannel = channel({ wireId: "wire-1", threadCount: 1 });
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [sharedChannel],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [
+        {
+          shareId: "share-received",
+          channelWireId: "wire-received",
+          granterEmail: "owner@example.com",
+          access: "read-write",
+          ended: false,
+        },
+      ],
+      joined: [],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ openingMessage: openingPreview() })],
+    });
+
+    renderView(vi.fn(), vi.fn(), { readOnly: true });
+
+    expect(await screen.findByTestId("chats-channel")).toBeTruthy();
+    expect(screen.queryByTestId("chats-channel-follow")).toBeNull();
+    expect(screen.queryByTestId("chats-new-channel")).toBeNull();
+    expect(screen.queryByTestId("chats-new-dm")).toBeNull();
+    expect(screen.queryByTestId("chats-join-shared")).toBeNull();
+    expect(screen.getByTestId("chats-workspace-readonly-note")).toBeTruthy();
+    expect(bridgeMock.syncDms).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByTestId("chats-channel"));
+    expect(await screen.findByTestId("chats-post-card")).toBeTruthy();
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    expect(screen.queryByTestId("chats-share-channel")).toBeNull();
+    expect(screen.queryByTestId("chats-post-bookmark")).toBeNull();
+    expect(screen.queryByTestId("chats-post-add-reaction")).toBeNull();
+    expect(screen.getByTestId("chats-readonly-note")).toBeTruthy();
+
+    expect(bridgeMock.setChatFollow).not.toHaveBeenCalled();
+    expect(bridgeMock.saveChatBookmark).not.toHaveBeenCalled();
+    expect(bridgeMock.setChatReaction).not.toHaveBeenCalled();
+    expect(bridgeMock.startChannelThread).not.toHaveBeenCalled();
+    expect(bridgeMock.shareChatChannel).not.toHaveBeenCalled();
+  });
+
+  it("keeps the page thread readable without reply, decision, bookmark, or cursor writes", async () => {
+    const sharedChannel = channel({ wireId: "wire-1" });
+    const sharedThread = thread();
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message(),
+        message({
+          id: "message-2",
+          parentMessageId: "message-1",
+          body: "A decision",
+        }),
+      ],
+    });
+    bridgeMock.listChatThreadDecisions.mockResolvedValue({
+      decisions: [
+        {
+          threadId: "thread-1",
+          messageId: "message-2",
+          state: "open",
+          createdAtMs: NOW,
+          resolvedAtMs: null,
+          resolvedByMessageId: null,
+        },
+      ],
+    });
+    bridgeMock.listChatReactions.mockResolvedValue({
+      reactions: [
+        {
+          reactionId: "reaction-1",
+          messageId: "message-2",
+          threadId: "thread-1",
+          emoji: "👍",
+          authorId: "someone@example.com",
+          authorKind: "human",
+          authorDisplayName: "Someone",
+          state: "added",
+        },
+      ],
+      viewerAuthorId: "you@example.com",
+    });
+
+    renderView(vi.fn(), vi.fn(), {
+      readOnly: true,
+      variant: "page",
+      initialNav: {
+        level: "thread",
+        channel: sharedChannel,
+        thread: sharedThread,
+      },
+    });
+
+    expect(await screen.findByTestId("chats-thread-view")).toBeTruthy();
+    expect(await screen.findByText("A decision")).toBeTruthy();
+    expect(
+      (screen.getByTestId("chats-reaction-pill") as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(screen.queryByTestId("chats-add-reaction")).toBeNull();
+    expect(screen.queryByTestId("chats-comment-reply")).toBeNull();
+    expect(screen.queryByTestId("chats-message-bookmark")).toBeNull();
+    expect(screen.queryByTestId("chats-composer")).toBeNull();
+    expect(screen.queryByRole("button", { name: /resolve/i })).toBeNull();
+    expect(screen.getByTestId("chats-readonly-note")).toBeTruthy();
+
+    expect(bridgeMock.markChatThreadRead).not.toHaveBeenCalled();
+    expect(bridgeMock.sendChatMessage).not.toHaveBeenCalled();
+    expect(bridgeMock.resolveChatDecision).not.toHaveBeenCalled();
+    expect(bridgeMock.archiveChatBookmark).not.toHaveBeenCalled();
+  });
+
+  it("keeps existing opening-message and comment bookmarks openable without mutation", async () => {
+    const onOpenPath = vi.fn();
+    const sharedChannel = channel({ wireId: "wire-1" });
+    bridgeMock.listChatBookmarks.mockResolvedValue({
+      bookmarks: [
+        {
+          bookmarkId: "bookmark-opening",
+          targetKind: "message",
+          targetId: "message-1",
+          threadId: "thread-1",
+          messageId: "message-1",
+          mode: "live",
+          destinationPath: "Bookmarks/Chats/opening.md",
+          state: "active",
+          projectionState: "ready",
+          generation: 1,
+          createdAtMs: NOW,
+          updatedAtMs: NOW,
+        },
+        {
+          bookmarkId: "bookmark-comment",
+          targetKind: "message",
+          targetId: "message-2",
+          threadId: "thread-1",
+          messageId: "message-2",
+          mode: "snapshot",
+          destinationPath: "Bookmarks/Chats/comment.md",
+          state: "active",
+          projectionState: "ready",
+          generation: 1,
+          createdAtMs: NOW,
+          updatedAtMs: NOW,
+        },
+      ],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message(),
+        message({
+          id: "message-2",
+          parentMessageId: "message-1",
+          body: "A bookmarked comment",
+        }),
+      ],
+    });
+
+    renderView(vi.fn(), vi.fn(), {
+      readOnly: true,
+      variant: "page",
+      onOpenPath,
+      initialNav: {
+        level: "thread",
+        channel: sharedChannel,
+        thread: thread(),
+      },
+    });
+
+    const opening = await screen.findByTitle("Bookmarks/Chats/opening.md");
+    const comment = await screen.findByTitle("Bookmarks/Chats/comment.md");
+    await userEvent.click(opening);
+    await userEvent.click(comment);
+
+    expect(onOpenPath).toHaveBeenNthCalledWith(1, "Bookmarks/Chats/opening.md");
+    expect(onOpenPath).toHaveBeenNthCalledWith(2, "Bookmarks/Chats/comment.md");
+    expect(screen.queryByTestId("chats-message-bookmark")).toBeNull();
+    expect(bridgeMock.archiveChatBookmark).not.toHaveBeenCalled();
+    expect(bridgeMock.saveChatBookmark).not.toHaveBeenCalled();
+  });
+});
+
 describe("ChatsView hybrid feed", () => {
+  it("consumes a rejected best-effort Feed seen cursor", async () => {
+    const onError = vi.fn();
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [],
+      headCursor: "1700000000000:message-1",
+    });
+    bridgeMock.markPersonalChatFeedSeen.mockRejectedValue(
+      new Error("cursor storage unavailable"),
+    );
+    renderView(vi.fn(), onError);
+
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByTestId("chats-personal-feed");
+    await waitFor(() =>
+      expect(bridgeMock.markPersonalChatFeedSeen).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        headCursor: "1700000000000:message-1",
+      }),
+    );
+    await act(async () => Promise.resolve());
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("focuses the selected non-opening message when a feed item opens its thread", async () => {
+    const onNavChange = vi.fn();
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          message: message({
+            id: "message-comment",
+            body: "Selected comment",
+          }),
+          thread: thread(),
+          channel: {
+            id: "channel-1",
+            name: "general",
+            slug: "general",
+            kind: "channel",
+          },
+          reactions: [],
+          matchedBy: ["thread"],
+        },
+      ],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message(),
+        message({
+          id: "message-comment",
+          parentMessageId: "message-1",
+          body: "Selected comment",
+        }),
+      ],
+    });
+    renderView(vi.fn(), vi.fn(), { variant: "page", onNavChange });
+
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const selected = await screen.findByText("Selected comment");
+    await userEvent.click(selected.closest("button")!);
+
+    await waitFor(() =>
+      expect(onNavChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          level: "thread",
+          focusMessageId: "message-comment",
+        }),
+      ),
+    );
+  });
+
+  it("opens a channel-less file Chat in its file panel at the feed message", async () => {
+    const onOpenFileChat = vi.fn();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel()],
+      fileThreads: [fileThread],
+    });
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          message: message({
+            id: "message-file-update",
+            threadId: fileThread.id,
+            body: "Updated the linked document",
+          }),
+          thread: {
+            id: fileThread.id,
+            title: fileThread.title,
+            createdAtMs: fileThread.createdAtMs,
+            updatedAtMs: fileThread.updatedAtMs,
+          },
+          reactions: [],
+          matchedBy: ["thread"],
+        },
+      ],
+    });
+    renderView(onOpenFileChat);
+
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const update = await screen.findByText("Updated the linked document");
+    const openButton = update.closest("button") as HTMLButtonElement;
+    expect(openButton.disabled).toBe(false);
+    await userEvent.click(openButton);
+
+    expect(onOpenFileChat).toHaveBeenCalledWith(
+      fileThread,
+      "message-file-update",
+    );
+  });
+
+  it("bookmarks a post into a live workspace Markdown projection", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ openingMessage: openingPreview() })],
+      viewerAuthorId: "you@example.com",
+    });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-post-bookmark"));
+
+    await waitFor(() =>
+      expect(bridgeMock.saveChatBookmark).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        target: { kind: "thread", threadId: "thread-1" },
+        mode: "live",
+      }),
+    );
+    expect(screen.getByTestId("chats-post-bookmark").getAttribute("aria-pressed")).toBe(
+      "true",
+    );
+  });
+
+  it("offers a keyboard and touch accessible snapshot bookmark action", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ openingMessage: openingPreview() })],
+      viewerAuthorId: "you@example.com",
+    });
+    renderView();
+
+    await user.click(await screen.findByTestId("chats-channel"));
+    const snapshot = await screen.findByRole("button", {
+      name: "Bookmark chat as snapshot",
+    });
+    await user.click(snapshot);
+
+    expect(bridgeMock.saveChatBookmark).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      target: { kind: "thread", threadId: "thread-1" },
+      mode: "snapshot",
+    });
+  });
+
   it("renders post cards with excerpts, reactions, decisions, comments, and agent treatment", async () => {
     const user = userEvent.setup();
     const reaction = {
@@ -400,6 +834,71 @@ describe("ChatsView My agent", () => {
     ).toBe("Message your agent…");
     expect(screen.queryByTestId("chats-share-channel")).toBeNull();
   });
+
+  it("shows setup guidance and a configured owner label in My agent", async () => {
+    const user = userEvent.setup();
+    const onSetupAgent = vi.fn();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [
+        channel({
+          id: "channel-agent",
+          name: "agent-internal",
+          slug: "agent",
+          kind: "agent",
+        }),
+      ],
+      fileThreads: [],
+    });
+    renderView(vi.fn(), vi.fn(), {
+      agentSetup: {
+        preferredName: "Ice",
+        runnerConfigured: true,
+        runnerEnabled: true,
+        mcpEnabled: false,
+      },
+      onSetupAgent,
+    });
+
+    await user.click(await screen.findByTestId("chats-my-agent"));
+    expect((await screen.findByTestId("chats-agent-setup-card")).dataset.state).toBe("ready");
+    expect(screen.getByTestId("chats-agent-setup-name").textContent).toBe("Ice's agent");
+    expect(screen.getByTestId("chats-agent-setup-action").textContent).toBe("Manage");
+    await user.click(screen.getByTestId("chats-agent-setup-action"));
+    expect(onSetupAgent).toHaveBeenCalledOnce();
+  });
+
+  it("does not present an enabled MCP server as a connected agent", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [
+        channel({
+          id: "channel-agent",
+          name: "agent-internal",
+          slug: "agent",
+          kind: "agent",
+        }),
+      ],
+      fileThreads: [],
+    });
+    renderView(vi.fn(), vi.fn(), {
+      agentSetup: {
+        preferredName: "Ice",
+        runnerConfigured: false,
+        runnerEnabled: false,
+        mcpEnabled: true,
+      },
+      onSetupAgent: vi.fn(),
+    });
+
+    await user.click(await screen.findByTestId("chats-my-agent"));
+    expect((await screen.findByTestId("chats-agent-setup-card")).dataset.state).toBe(
+      "needs-setup",
+    );
+    expect(screen.getByTestId("chats-agent-setup-card").textContent).toContain(
+      "Workspace MCP enabled · copy its config into your agent.",
+    );
+    expect(screen.getByTestId("chats-agent-setup-action").textContent).toBe("Set up");
+  });
 });
 
 describe("ChatsView composer-first threads (anti-forum)", () => {
@@ -478,7 +977,7 @@ describe("ChatsView composer-first threads (anti-forum)", () => {
 });
 
 describe("ChatsView document thread", () => {
-  it("renders the post header and flat comments, tagging only non-adjacent parents", async () => {
+  it("renders replies beneath their parent comment", async () => {
     const user = userEvent.setup();
     const opening = message({ body: "The full opening post body." });
     const firstComment = message({
@@ -517,9 +1016,20 @@ describe("ChatsView document thread", () => {
       "#general · thread",
     );
     expect(screen.getAllByTestId("chats-comment-bubble")).toHaveLength(3);
+    const commentItems = screen
+      .getAllByTestId("chats-message")
+      .filter((element) => element.tagName === "LI");
+    expect(commentItems.map((element) => element.dataset.threadDepth)).toEqual([
+      "0",
+      "1",
+      "0",
+    ]);
+    expect(screen.getByTestId("chats-comments").children).toHaveLength(2);
+    expect(screen.getByTestId("chats-replies").children).toHaveLength(1);
+    expect(screen.getByTestId("chats-reply-count").textContent).toBe("1 reply");
     const contexts = screen.getAllByTestId("chats-reply-context");
     expect(contexts).toHaveLength(1);
-    expect(contexts[0]?.textContent).toBe("↳ replying to You");
+    expect(contexts[0]?.textContent).toBe("↳ replying to Ana");
     expect(screen.getByTestId("chats-comment-agent-badge").textContent).toBe("agent");
     expect(screen.getAllByTestId("chats-comment-bubble")[2]?.className).toContain(
       "border-l-2",
@@ -566,10 +1076,133 @@ describe("ChatsView document thread", () => {
         body: "Monday works.",
       }),
     );
+    const postedReply = document.querySelector(
+      '[data-testid="chats-message"][data-message-id="comment-reply"]',
+    ) as HTMLElement | null;
+    expect(postedReply?.dataset.threadDepth).toBe("1");
+    expect(postedReply?.closest('[data-testid="chats-replies"]')).toBeTruthy();
   });
 });
 
 describe("ChatsView live activity refresh", () => {
+  it("refreshes the open Feed with fresh workspace activity content", async () => {
+    let refreshed = false;
+    bridgeMock.listPersonalChatFeed.mockImplementation(() =>
+      Promise.resolve({
+        items: [
+          personalFeedItem(
+            refreshed ? "Fresh Feed update" : "Existing Feed update",
+            refreshed ? "message-fresh" : "message-existing",
+          ),
+        ],
+      }),
+    );
+    renderView();
+
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByText("Existing Feed update");
+
+    refreshed = true;
+    act(() => emitWorkspaceActivity());
+
+    expect(await screen.findByText("Fresh Feed update")).toBeTruthy();
+    expect(screen.queryByText("Existing Feed update")).toBeNull();
+    expect(bridgeMock.listPersonalChatFeed).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops an older pagination page when activity starts a fresh Feed refresh", async () => {
+    type FeedPage = {
+      items: ReturnType<typeof personalFeedItem>[];
+      nextCursor?: string;
+    };
+    let resolveOlder!: (value: FeedPage) => void;
+    const olderPage = new Promise<FeedPage>((resolve) => {
+      resolveOlder = resolve;
+    });
+    bridgeMock.listPersonalChatFeed
+      .mockResolvedValueOnce({
+        items: [personalFeedItem("Initial Feed item", "message-initial")],
+        nextCursor: "older-cursor",
+      })
+      .mockImplementationOnce(() => olderPage)
+      .mockResolvedValueOnce({
+        items: [personalFeedItem("Activity refresh item", "message-refresh")],
+      });
+    renderView();
+
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByText("Initial Feed item");
+    await userEvent.click(await screen.findByTestId("chats-feed-more"));
+    act(() => emitWorkspaceActivity());
+    await screen.findByText("Activity refresh item");
+
+    await act(async () => {
+      resolveOlder({
+        items: [personalFeedItem("Stale paginated item", "message-stale-page")],
+      });
+      await olderPage;
+    });
+    expect(screen.queryByText("Stale paginated item")).toBeNull();
+    expect(screen.getByText("Activity refresh item")).toBeTruthy();
+  });
+
+  it("drops a delayed Feed activity response after switching workspaces", async () => {
+    let resolveOldRefresh!: (value: {
+      items: ReturnType<typeof personalFeedItem>[];
+    }) => void;
+    const oldRefresh = new Promise<{
+      items: ReturnType<typeof personalFeedItem>[];
+    }>((resolve) => {
+      resolveOldRefresh = resolve;
+    });
+    let oldWorkspaceReads = 0;
+    bridgeMock.listPersonalChatFeed.mockImplementation(
+      ({ workspaceId }: { workspaceId: string }) => {
+        if (workspaceId === "workspace-new") {
+          return Promise.resolve({
+            items: [personalFeedItem("New workspace Feed", "message-new")],
+          });
+        }
+        oldWorkspaceReads += 1;
+        return oldWorkspaceReads === 1
+          ? Promise.resolve({
+              items: [personalFeedItem("Old workspace Feed", "message-old-initial")],
+            })
+          : oldRefresh;
+      },
+    );
+    const { rerender } = render(
+      <ChatsView
+        workspaceId="workspace-old"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByText("Old workspace Feed");
+    act(() => emitWorkspaceActivity());
+
+    rerender(
+      <ChatsView
+        workspaceId="workspace-new"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(screen.queryByTestId("chats-personal-feed")).toBeNull());
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByText("New workspace Feed");
+
+    await act(async () => {
+      resolveOldRefresh({
+        items: [personalFeedItem("Stale old workspace Feed", "message-old-stale")],
+      });
+      await oldRefresh;
+    });
+    expect(screen.queryByText("Stale old workspace Feed")).toBeNull();
+    expect(screen.getByText("New workspace Feed")).toBeTruthy();
+  });
+
   it("re-lists threads when workspace activity changes the open channel feed", async () => {
     const user = userEvent.setup();
     let refreshed = false;
@@ -597,10 +1230,10 @@ describe("ChatsView live activity refresh", () => {
     await user.click(await screen.findByTestId("chats-channel"));
     await screen.findByText(thread().title);
     expect(screen.queryByText("Posted from the CLI")).toBeNull();
-    expect(workspaceActivityCallback).not.toBeNull();
+    expect(workspaceActivityCallbacks.size).toBeGreaterThan(0);
 
     refreshed = true;
-    act(() => workspaceActivityCallback?.());
+    act(() => emitWorkspaceActivity());
 
     expect(await screen.findByText("Posted from the CLI")).toBeTruthy();
     expect(bridgeMock.listChannelThreads).toHaveBeenCalledTimes(2);
@@ -656,13 +1289,13 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.queryByText(agentReport.body)).toBeNull();
     expect(screen.queryByTestId("chats-comment-decision-open")).toBeNull();
     expect(screen.queryByTestId("chats-run-chip")).toBeNull();
-    expect(workspaceActivityCallback).not.toBeNull();
+    expect(workspaceActivityCallbacks.size).toBeGreaterThan(0);
 
     const messageReadsBefore = bridgeMock.listChatMessages.mock.calls.length;
     const decisionReadsBefore = bridgeMock.listChatThreadDecisions.mock.calls.length;
     refreshed = true;
     act(() => {
-      workspaceActivityCallback?.();
+      emitWorkspaceActivity();
     });
 
     expect(await screen.findByText(agentReport.body)).toBeTruthy();
@@ -746,6 +1379,112 @@ describe("ChatsView decisions", () => {
     );
     expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
     expect(screen.queryByTestId("chats-resolving-mode")).toBeNull();
+  });
+
+  it("does not decrement again when a refreshed decision is already resolved", async () => {
+    const user = userEvent.setup();
+    const opening = message({ body: "Resolve this" });
+    const otherMessage = message({
+      id: "message-other-decision",
+      parentMessageId: opening.id,
+      body: "Keep this decision open",
+    });
+    const targetOpen = {
+      threadId: "thread-1",
+      messageId: opening.id,
+      state: "open" as const,
+      atMs: NOW,
+    };
+    const targetResolved = {
+      ...targetOpen,
+      state: "resolved" as const,
+      resolvedByMessageId: "resolution-message",
+      atMs: NOW + 1,
+    };
+    const otherOpen = {
+      threadId: "thread-1",
+      messageId: otherMessage.id,
+      state: "open" as const,
+      atMs: NOW,
+    };
+    const resolutionMessage = message({
+      id: "resolution-message",
+      parentMessageId: opening.id,
+      body: "Resolved ✓",
+    });
+    let refreshed = false;
+    bridgeMock.listChannelThreads.mockImplementation(() =>
+      Promise.resolve({
+        threads: [thread({ openDecisionCount: refreshed ? 1 : 2 })],
+      }),
+    );
+    bridgeMock.listChatMessages.mockImplementation(() =>
+      Promise.resolve({
+        messages: refreshed
+          ? [opening, otherMessage, resolutionMessage]
+          : [opening, otherMessage],
+      }),
+    );
+    bridgeMock.listChatThreadDecisions.mockImplementation(() =>
+      Promise.resolve({
+        decisions: refreshed
+          ? [targetResolved, otherOpen]
+          : [targetOpen, otherOpen],
+      }),
+    );
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: resolutionMessage });
+    let resolveDecision!: (value: { decision: typeof targetResolved }) => void;
+    const pendingResolution = new Promise<{ decision: typeof targetResolved }>(
+      (resolve) => {
+        resolveDecision = resolve;
+      },
+    );
+    bridgeMock.resolveChatDecision.mockImplementation(() => pendingResolution);
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.click(await screen.findByTestId("chats-message-decision-resolve"));
+    await user.click(screen.getByTestId("chats-send"));
+    await waitFor(() => expect(bridgeMock.resolveChatDecision).toHaveBeenCalledTimes(1));
+
+    refreshed = true;
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
+    expect(await screen.findByTestId("chats-comment-decision-open")).toBeTruthy();
+
+    await act(async () => {
+      resolveDecision({ decision: targetResolved });
+      await pendingResolution;
+    });
+
+    expect(screen.getAllByTestId("chats-comment-decision-open")).toHaveLength(1);
+    expect(screen.getByTestId("chats-message-decision-resolved")).toBeTruthy();
+    expect(screen.getByTestId("chats-thread-view").dataset.openDecisionCount).toBe(
+      "1",
+    );
+    expect(
+      reconcileResolvedChatDecision(
+        [targetResolved, otherOpen],
+        targetResolved,
+      ).wasOpen,
+    ).toBe(false);
+  });
+
+  it("appends a resolved decision that was absent from the current snapshot", () => {
+    const resolved = {
+      threadId: "thread-1",
+      messageId: "message-late-resolution",
+      state: "resolved" as const,
+      resolvedByMessageId: "message-resolution",
+      atMs: NOW,
+    };
+
+    const reconciliation = reconcileResolvedChatDecision([], resolved);
+
+    expect(reconciliation.wasOpen).toBe(false);
+    expect(reconciliation.decisions).toEqual([resolved]);
   });
 });
 
@@ -1040,6 +1779,25 @@ describe("ChatsView read cursors", () => {
       expect(screen.getAllByTestId("chats-thread-unread")).toHaveLength(1),
     );
   });
+
+  it("keeps an unread thread unread when the workspace is read-only", async () => {
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ messageCount: 3, lastReadSequence: 1, unreadCount: 2 })],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [message(), message({ id: "m2" }), message({ id: "m3" })],
+    });
+    renderView(vi.fn(), vi.fn(), { readOnly: true });
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    expect((await screen.findByTestId("chats-thread-unread")).textContent).toBe("2");
+    await userEvent.click(screen.getByTestId("chats-thread"));
+    await screen.findByTestId("chats-thread-view");
+    expect(bridgeMock.markChatThreadRead).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByTestId("chats-thread-back"));
+    expect((await screen.findByTestId("chats-thread-unread")).textContent).toBe("2");
+  });
 });
 
 describe("ChatsView liveness", () => {
@@ -1062,6 +1820,175 @@ describe("ChatsView liveness", () => {
     await screen.findAllByTestId("chats-channel-name");
     expect(screen.queryByText("Stale thread")).toBeNull();
   });
+
+  it("keeps a newer send busy when an abandoned thread send settles", async () => {
+    const user = userEvent.setup();
+    const firstThread = thread({ id: "thread-1", title: "First thread" });
+    const secondThread = thread({ id: "thread-2", title: "Second thread" });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [firstThread, secondThread],
+    });
+
+    let resolveFirstSend!: (value: { message: ChatMessageRecord }) => void;
+    let resolveSecondSend!: (value: { message: ChatMessageRecord }) => void;
+    const firstSend = new Promise<{ message: ChatMessageRecord }>((resolve) => {
+      resolveFirstSend = resolve;
+    });
+    const secondSend = new Promise<{ message: ChatMessageRecord }>((resolve) => {
+      resolveSecondSend = resolve;
+    });
+    bridgeMock.sendChatMessage
+      .mockImplementationOnce(() => firstSend)
+      .mockImplementationOnce(() => secondSend);
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click((await screen.findAllByTestId("chats-thread"))[0]!);
+    await user.type(screen.getByTestId("chats-composer"), "First send{Enter}");
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await user.click((await screen.findAllByTestId("chats-thread"))[1]!);
+    const nextComposer = await screen.findByTestId("chats-composer");
+    await user.clear(nextComposer);
+    await user.type(nextComposer, "Second send{Enter}");
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(2));
+    expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).disabled).toBe(true);
+
+    await act(async () => {
+      resolveFirstSend({
+        message: message({
+          id: "message-from-first-thread",
+          threadId: firstThread.id,
+          body: "First send",
+        }),
+      });
+      await firstSend;
+    });
+
+    expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).disabled).toBe(true);
+    expect(screen.queryByText("First send")).toBeNull();
+
+    await act(async () => {
+      resolveSecondSend({
+        message: message({
+          id: "message-from-second-thread",
+          threadId: secondThread.id,
+          body: "Second send",
+        }),
+      });
+      await secondSend;
+    });
+
+    await waitFor(() =>
+      expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).disabled).toBe(false),
+    );
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("Second send")).toBeTruthy();
+  });
+
+  it("keeps a preserved draft locked when returning to its in-flight thread", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+
+    let resolveSend!: (value: { message: ChatMessageRecord }) => void;
+    const pendingSend = new Promise<{ message: ChatMessageRecord }>((resolve) => {
+      resolveSend = resolve;
+    });
+    bridgeMock.sendChatMessage.mockImplementation(() => pendingSend);
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.type(screen.getByTestId("chats-composer"), "Still sending{Enter}");
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    const restoredComposer = await screen.findByTestId("chats-composer");
+    expect((restoredComposer as HTMLTextAreaElement).value).toBe("Still sending");
+    expect((restoredComposer as HTMLTextAreaElement).disabled).toBe(true);
+
+    fireEvent.submit(restoredComposer.closest("form")!);
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveSend({
+        message: message({
+          id: "message-original-send",
+          body: "Still sending",
+        }),
+      });
+      await pendingSend;
+    });
+
+    await waitFor(() =>
+      expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).disabled).toBe(false),
+    );
+    expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).value).toBe("");
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Still sending")).toBeTruthy();
+  });
+
+  it("clears sent reply text after leave and return resets reply mode", async () => {
+    const user = userEvent.setup();
+    const opening = message();
+    const parentComment = message({
+      id: "comment-reply-parent",
+      parentMessageId: opening.id,
+      authorDisplayName: "Ana",
+      body: "Can you confirm?",
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [opening, parentComment],
+    });
+
+    let resolveSend!: (value: { message: ChatMessageRecord }) => void;
+    const pendingSend = new Promise<{ message: ChatMessageRecord }>((resolve) => {
+      resolveSend = resolve;
+    });
+    bridgeMock.sendChatMessage.mockImplementation(() => pendingSend);
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.click(await screen.findByTestId("chats-comment-reply"));
+    await user.type(screen.getByTestId("chats-composer"), "Confirmed{Enter}");
+    await waitFor(() =>
+      expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-1",
+        parentMessageId: parentComment.id,
+        body: "Confirmed",
+      }),
+    );
+
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    expect(screen.queryByTestId("chats-replying-mode")).toBeNull();
+    expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).value).toBe(
+      "Confirmed",
+    );
+
+    await act(async () => {
+      resolveSend({
+        message: message({
+          id: "comment-sent-reply",
+          parentMessageId: parentComment.id,
+          body: "Confirmed",
+        }),
+      });
+      await pendingSend;
+    });
+
+    await waitFor(() =>
+      expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).value).toBe(""),
+    );
+    expect(screen.getByText("Confirmed")).toBeTruthy();
+    fireEvent.submit(screen.getByTestId("chats-composer").closest("form")!);
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1);
+  });
 });
 
 // --- Shared channels (MU-C4) -----------------------------------------------
@@ -1070,7 +1997,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
   const teamChannel = () =>
     channel({ id: "channel-team", name: "team", slug: "team", wireId: "wire-team" });
 
-  it("hides every sharing affordance when the sharing surface is unavailable (solo unchanged)", async () => {
+  it("fails closed when sharing metadata is unavailable", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [teamChannel()],
       fileThreads: [],
@@ -1084,6 +2011,56 @@ describe("ChatsView shared channels (MU-C4)", () => {
     await userEvent.click(screen.getByTestId("chats-channel"));
     await screen.findByTestId("chats-channel-view");
     expect(screen.queryByTestId("chats-share-channel")).toBeNull();
+    expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
+    expect(screen.getByTestId("chats-readonly-note").textContent).toContain(
+      "read-only for you",
+    );
+  });
+
+  it("keeps an owned local channel writable after authoritative empty share metadata", async () => {
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [],
+      joined: [],
+    });
+    renderView();
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await screen.findByTestId("chats-channel-view");
+    expect(screen.getByTestId("chats-new-thread-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
+  });
+
+  it("uses the last authoritative joined row when duplicate wire rows exist", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [],
+      joined: [
+        {
+          shareId: "share-old",
+          channelWireId: "wire-team",
+          access: "read-only",
+          granterEmail: "owner@example.com",
+          ended: false,
+        },
+        {
+          shareId: "share-current",
+          channelWireId: "wire-team",
+          access: "read-write",
+          granterEmail: "owner@example.com",
+          ended: false,
+        },
+      ],
+    });
+    renderView();
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    expect(await screen.findByTestId("chats-new-thread-composer")).toBeTruthy();
+    expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
   });
 
   it("marks a granted channel as shared and manages members through the share panel", async () => {
@@ -1236,6 +2213,102 @@ describe("ChatsView shared channels (MU-C4)", () => {
     );
   });
 
+  it("keeps a feed deep link into a joined channel read-only", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [],
+      joined: [
+        {
+          shareId: "share-in",
+          channelWireId: "wire-team",
+          access: "read-only",
+          granterEmail: "owner@example.com",
+          ended: false,
+        },
+      ],
+    });
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          message: message({ body: "Shared update", threadId: "thread-1" }),
+          thread: thread({
+            channelId: "channel-team",
+            messageCount: 1,
+            lastReadSequence: 0,
+            unreadCount: 1,
+          }),
+          channel: {
+            id: "channel-team",
+            wireId: "wire-team",
+            name: "team",
+            slug: "team",
+            kind: "channel",
+          },
+          reactions: [],
+          matchedBy: ["channel"],
+        },
+      ],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [message({ body: "Shared update", threadId: "thread-1" })],
+    });
+
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const update = await screen.findByText("Shared update");
+    await userEvent.click(update.closest("button")!);
+
+    await screen.findByTestId("chats-thread-view");
+    expect(screen.getByTestId("chats-readonly-note").textContent).toContain(
+      "read-only for you",
+    );
+    expect(screen.queryByTestId("chats-composer")).toBeNull();
+    expect(bridgeMock.markChatThreadRead).not.toHaveBeenCalled();
+  });
+
+  it("does not mark a thread read after its joined channel has ended", async () => {
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [teamChannel()],
+      fileThreads: [],
+    });
+    bridgeMock.listChatChannelShares.mockResolvedValue({
+      granted: [],
+      received: [],
+      joined: [
+        {
+          shareId: "share-in",
+          channelWireId: "wire-team",
+          access: "read-write",
+          granterEmail: "owner@example.com",
+          ended: true,
+        },
+      ],
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [
+        thread({
+          channelId: "channel-team",
+          messageCount: 1,
+          lastReadSequence: 0,
+          unreadCount: 1,
+        }),
+      ],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [message()] });
+    renderView();
+
+    await userEvent.click(await screen.findByTestId("chats-channel"));
+    await userEvent.click(await screen.findByTestId("chats-thread"));
+    await screen.findByTestId("chats-thread-view");
+
+    expect(screen.queryByTestId("chats-composer")).toBeNull();
+    expect(bridgeMock.markChatThreadRead).not.toHaveBeenCalled();
+  });
+
   it("keeps a read-write joined channel's composer and blocks it once the share ends", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
       channels: [teamChannel()],
@@ -1327,9 +2400,68 @@ describe("ChatsView direct messages", () => {
     expect(screen.getByTestId("chats-new-dm")).toBeTruthy();
   });
 
+  it("scrolls and highlights a canonical DM backlink's focused message", async () => {
+    const focused = message({
+      id: "message-focus",
+      threadId: "thread-dm-1",
+      body: "Focused DM mention",
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [focused] });
+    vi.mocked(Element.prototype.scrollIntoView).mockClear();
+
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: {
+        level: "dm",
+        dm: dm(),
+        focusMessageId: focused.id,
+      },
+    });
+
+    expect(await screen.findByText("Focused DM mention")).toBeTruthy();
+    await waitFor(() => {
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+    });
+    expect(screen.getByTestId("chats-dm-message").className).toContain("ring-2");
+  });
+
+  it("clears focused-message state and refs when a DM is opened normally", async () => {
+    const user = userEvent.setup();
+    const focused = message({
+      id: "message-focus",
+      threadId: "thread-dm-1",
+      body: "Same id, different navigation",
+    });
+    const pendingRefresh = new Promise<never>(() => undefined);
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({ available: true, dms: [dm()] })
+      .mockImplementation(() => pendingRefresh);
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [focused] });
+
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: {
+        level: "dm",
+        dm: dm(),
+        focusMessageId: focused.id,
+      },
+    });
+
+    const initiallyFocused = await screen.findByTestId("chats-dm-message");
+    await waitFor(() => expect(initiallyFocused.className).toContain("ring-2"));
+
+    await user.click(screen.getByTestId("chats-dm-back"));
+    await user.click(await screen.findByTestId("chats-dm-item"));
+    const normallyOpened = await screen.findByTestId("chats-dm-message");
+    expect(normallyOpened.className).not.toContain("ring-2");
+  });
+
   it("opens a DM into its single running conversation and sends on Enter", async () => {
     const user = userEvent.setup();
-    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
+    const pendingRefresh = new Promise<never>(() => undefined);
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({ available: true, dms: [dm({ unreadCount: 2 })] })
+      .mockImplementation(() => pendingRefresh);
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [
         message({ id: "m-1", threadId: "thread-dm-1", authorDisplayName: "bob@example.com", body: "hey" }),
@@ -1362,6 +2494,185 @@ describe("ChatsView direct messages", () => {
     );
     const updated = await screen.findAllByTestId("chats-dm-message-body");
     expect(updated[updated.length - 1].textContent).toBe("hi bob");
+
+    await user.click(screen.getByTestId("chats-dm-back"));
+    await screen.findByTestId("chats-dm-item");
+    expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
+  });
+
+  it("keeps syncing an open pending DM until its thread arrives", async () => {
+    const user = userEvent.setup();
+    const pendingDm = dm({ threadId: null });
+    const hydratedDm = dm();
+    let resolveOpenSync!: (result: {
+      available: boolean;
+      dms: DmRecord[];
+    }) => void;
+    const openSync = new Promise<{ available: boolean; dms: DmRecord[] }>(
+      (resolve) => {
+        resolveOpenSync = resolve;
+      },
+    );
+    const laterRefresh = new Promise<never>(() => undefined);
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({ available: true, dms: [pendingDm] })
+      .mockImplementationOnce(() => openSync)
+      .mockImplementation(() => laterRefresh);
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message({
+          id: "message-dm-arrived",
+          threadId: "thread-dm-1",
+          body: "The conversation arrived",
+        }),
+      ],
+    });
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-dm-item"));
+    expect(await screen.findByTestId("chats-dm-waiting")).toBeTruthy();
+    await waitFor(() => expect(bridgeMock.syncDms).toHaveBeenCalledTimes(2));
+
+    await act(async () => {
+      resolveOpenSync({ available: true, dms: [hydratedDm] });
+      await openSync;
+    });
+
+    expect(await screen.findByText("The conversation arrived")).toBeTruthy();
+    expect(screen.queryByTestId("chats-dm-waiting")).toBeNull();
+    expect(bridgeMock.syncDms).toHaveBeenCalledTimes(2);
+  });
+
+  it("toggles reactions against the open DM thread", async () => {
+    const user = userEvent.setup();
+    const pendingRefresh = new Promise<never>(() => undefined);
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({ available: true, dms: [dm()] })
+      .mockImplementation(() => pendingRefresh);
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        message({
+          id: "message-dm-reaction",
+          threadId: "thread-dm-1",
+          body: "React here",
+        }),
+      ],
+    });
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-dm-item"));
+    expect(await screen.findByText("React here")).toBeTruthy();
+    await user.click(screen.getByTestId("chats-dm-add-reaction"));
+    const thumbsUp = screen
+      .getAllByTestId("chats-dm-reaction-choice")
+      .find((button) => button.getAttribute("data-emoji") === "👍");
+    expect(thumbsUp).toBeTruthy();
+    await user.click(thumbsUp!);
+
+    await waitFor(() =>
+      expect(bridgeMock.setChatReaction).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-dm-1",
+        messageId: "message-dm-reaction",
+        emoji: "👍",
+        state: "added",
+      }),
+    );
+  });
+
+  it("drops older DM refreshes after a newer snapshot and local send", async () => {
+    const user = userEvent.setup();
+    const pendingRefresh = new Promise<never>(() => undefined);
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({ available: true, dms: [dm()] })
+      .mockImplementation(() => pendingRefresh);
+
+    let resolveOlder!: (result: { messages: ChatMessageRecord[] }) => void;
+    let resolveNewer!: (result: { messages: ChatMessageRecord[] }) => void;
+    const older = new Promise<{ messages: ChatMessageRecord[] }>((resolve) => {
+      resolveOlder = resolve;
+    });
+    const newer = new Promise<{ messages: ChatMessageRecord[] }>((resolve) => {
+      resolveNewer = resolve;
+    });
+    bridgeMock.listChatMessages
+      .mockResolvedValueOnce({
+        messages: [
+          message({
+            id: "message-dm-baseline",
+            threadId: "thread-dm-1",
+            body: "Baseline",
+          }),
+        ],
+      })
+      .mockImplementationOnce(() => older)
+      .mockImplementationOnce(() => newer);
+    bridgeMock.sendChatMessage.mockResolvedValue({
+      message: message({
+        id: "message-dm-local",
+        threadId: "thread-dm-1",
+        body: "Local send",
+      }),
+    });
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-dm-item"));
+    expect(await screen.findByText("Baseline")).toBeTruthy();
+
+    act(() => emitWorkspaceActivity());
+    act(() => emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(3),
+    );
+    await act(async () => {
+      resolveNewer({
+        messages: [
+          message({
+            id: "message-dm-newer",
+            threadId: "thread-dm-1",
+            body: "Newer snapshot",
+          }),
+        ],
+      });
+      await newer;
+    });
+    expect(await screen.findByText("Newer snapshot")).toBeTruthy();
+
+    await user.type(screen.getByTestId("chats-dm-composer"), "Local send{Enter}");
+    await waitFor(() => expect(screen.getByText("Local send")).toBeTruthy());
+
+    await act(async () => {
+      resolveOlder({
+        messages: [
+          message({
+            id: "message-dm-stale",
+            threadId: "thread-dm-1",
+            body: "Stale snapshot",
+          }),
+        ],
+      });
+      await older;
+    });
+
+    expect(screen.queryByText("Stale snapshot")).toBeNull();
+    expect(
+      screen.getAllByTestId("chats-dm-message-body").map((node) => node.textContent),
+    ).toEqual(["Newer snapshot", "Local send"]);
+  });
+
+  it("does not advance a DM read cursor in a read-only workspace", async () => {
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [message({ id: "m-1", threadId: "thread-dm-1", body: "shared DM" })],
+    });
+    renderView(vi.fn(), vi.fn(), {
+      readOnly: true,
+      variant: "page",
+      initialNav: { level: "dm", dm: dm({ unreadCount: 2 }) },
+    });
+
+    expect(await screen.findByText("shared DM")).toBeTruthy();
+    expect(screen.getByTestId("chats-workspace-readonly-note")).toBeTruthy();
+    expect(bridgeMock.markChatThreadRead).not.toHaveBeenCalled();
   });
 
   it("starts a new DM from the recipient step and opens the conversation", async () => {
@@ -1377,12 +2688,17 @@ describe("ChatsView direct messages", () => {
     renderView();
     await user.click(await screen.findByTestId("chats-new-dm"));
     await user.type(screen.getByTestId("chats-dm-recipients"), "bob@example.com");
-    await user.type(screen.getByTestId("chats-dm-new-composer"), "hello there{Enter}");
+    const composer = screen.getByTestId("chats-dm-new-composer");
+    fireEvent.change(composer, {
+      target: { value: "hello there @[docs/plan.md#scope]" },
+    });
+    fireEvent.keyDown(composer, { key: "Enter", code: "Enter" });
     await waitFor(() =>
       expect(bridgeMock.startDm).toHaveBeenCalledWith({
         workspaceId: "workspace-a",
         recipients: "bob@example.com",
-        body: "hello there",
+        body: "hello there @[docs/plan.md#scope]",
+        fileReferences: [{ path: "docs/plan.md", headingAnchor: "scope" }],
       }),
     );
     expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
@@ -1410,10 +2726,20 @@ describe("ChatsView direct messages", () => {
 
   it("closes the composer for an ended DM but keeps the conversation readable", async () => {
     const user = userEvent.setup();
-    bridgeMock.syncDms.mockResolvedValue({
-      available: true,
-      dms: [dm({ role: "participant", peerLabel: "alice@example.com", connected: false })],
-    });
+    const pendingRefresh = new Promise<never>(() => undefined);
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({
+        available: true,
+        dms: [
+          dm({
+            role: "participant",
+            peerLabel: "alice@example.com",
+            connected: false,
+            unreadCount: 2,
+          }),
+        ],
+      })
+      .mockImplementation(() => pendingRefresh);
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [message({ id: "m-1", threadId: "thread-dm-1", body: "old message" })],
     });
@@ -1423,6 +2749,10 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryByTestId("chats-dm-composer")).toBeNull();
     const bodies = await screen.findAllByTestId("chats-dm-message-body");
     expect(bodies.map((el) => el.textContent)).toEqual(["old message"]);
+    expect(bridgeMock.markChatThreadRead).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("chats-dm-back"));
+    expect((await screen.findByTestId("chats-dm-unread")).textContent).toBe("2");
   });
 });
 
@@ -1441,6 +2771,74 @@ describe("ChatsView expand-to-tab", () => {
     renderView();
     const view = await screen.findByTestId("chats-view");
     expect(view.dataset.variant).toBe("panel");
+  });
+
+  it("hands a channel selection from the panel to the editor", async () => {
+    const user = userEvent.setup();
+    const onOpenInTab = vi.fn();
+    renderView(vi.fn(), vi.fn(), { onOpenInTab });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+
+    expect(onOpenInTab).toHaveBeenCalledWith({
+      level: "channel",
+      channel: expect.objectContaining({ id: "channel-1" }),
+    });
+    expect(screen.queryByTestId("chats-channel-view")).toBeNull();
+    expect(bridgeMock.listChannelThreads).not.toHaveBeenCalled();
+  });
+
+  it("hands a chat selection from the panel to the editor", async () => {
+    const user = userEvent.setup();
+    const onOpenInTab = vi.fn();
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [thread({ openingMessage: openingPreview() })],
+      viewerAuthorId: "you@example.com",
+    });
+    renderView(vi.fn(), vi.fn(), {
+      initialNav: { level: "channel", channel: channel() },
+      onOpenInTab,
+    });
+
+    await user.click(await screen.findByTestId("chats-post-card"));
+
+    expect(onOpenInTab).toHaveBeenCalledWith({
+      level: "thread",
+      channel: expect.objectContaining({ id: "channel-1" }),
+      thread: expect.objectContaining({ id: "thread-1" }),
+    });
+    expect(screen.queryByTestId("chats-thread-view")).toBeNull();
+  });
+
+  it("hands a DM selection from the panel to the editor", async () => {
+    const user = userEvent.setup();
+    const onOpenInTab = vi.fn();
+    bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
+    renderView(vi.fn(), vi.fn(), { onOpenInTab });
+
+    await user.click(await screen.findByTestId("chats-dm-item"));
+
+    expect(onOpenInTab).toHaveBeenCalledWith({
+      level: "dm",
+      dm: expect.objectContaining({ channelId: "channel-dm-1" }),
+    });
+    expect(screen.queryByTestId("chats-dm-view")).toBeNull();
+    expect(bridgeMock.listChatMessages).not.toHaveBeenCalled();
+  });
+
+  it("keeps page navigation inside the editor", async () => {
+    const user = userEvent.setup();
+    const onOpenInTab = vi.fn();
+    renderView(vi.fn(), vi.fn(), { variant: "page", onOpenInTab });
+
+    await user.click(await screen.findByTestId("chats-channel"));
+
+    expect(await screen.findByTestId("chats-channel-view")).toBeTruthy();
+    expect(onOpenInTab).not.toHaveBeenCalled();
+    expect(bridgeMock.listChannelThreads).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      channelId: "channel-1",
+    });
   });
 
   it("reports every navigation through onNavChange", async () => {
@@ -1534,6 +2932,56 @@ describe("ChatsView expand-to-tab", () => {
     );
   });
 
+  it("opens a Feed DM directly in the page and preserves its focused message", async () => {
+    const user = userEvent.setup();
+    const directDm = dm();
+    const focused = message({
+      id: "message-feed-dm-focus",
+      threadId: directDm.threadId ?? "thread-dm-1",
+      body: "Focused Feed DM",
+    });
+    const pendingSync = new Promise<never>(() => undefined);
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({ available: true, dms: [directDm] })
+      .mockImplementation(() => pendingSync);
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          message: focused,
+          thread: {
+            id: directDm.threadId ?? "thread-dm-1",
+            title: "DM conversation",
+            createdAtMs: NOW,
+            updatedAtMs: NOW,
+          },
+          channel: {
+            id: directDm.channelId,
+            wireId: directDm.channelWireId,
+            name: directDm.name,
+            slug: "bob-example-com",
+            kind: "dm" as const,
+          },
+          reactions: [],
+          matchedBy: ["person" as const],
+        },
+      ],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [focused] });
+    vi.mocked(Element.prototype.scrollIntoView).mockClear();
+
+    renderView(vi.fn(), vi.fn(), { variant: "page" });
+    await screen.findByTestId("chats-dm-item");
+    await user.click(screen.getByTestId("chats-feed-link"));
+    const feedMessage = await screen.findByText("Focused Feed DM");
+    await user.click(feedMessage.closest("button")!);
+
+    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByTestId("chats-dm-message").className).toContain("ring-2");
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+    });
+  });
+
   it("seeds an expanded tab at the new-message compose screen", async () => {
     bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [] });
     renderView(vi.fn(), vi.fn(), {
@@ -1609,5 +3057,536 @@ describe("ChatsView expand-to-tab", () => {
       ),
     );
   });
-});
 
+  it("hydrates durable author and channel follows and can unfollow both", async () => {
+    const user = userEvent.setup();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ wireId: "wire-1" })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatFollows.mockResolvedValue({
+      follows: [
+        {
+          targetKind: "channel",
+          targetId: "wire-1",
+          state: "following",
+          updatedAtMs: NOW,
+        },
+        {
+          targetKind: "person",
+          targetId: "user-alice",
+          state: "following",
+          updatedAtMs: NOW,
+        },
+      ],
+    });
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          message: message({ authorDisplayName: "Alice" }),
+          thread: thread(),
+          channel: { id: "channel-1", name: "general", slug: "general", kind: "channel" },
+          authorFollowTarget: { targetKind: "person", targetId: "user-alice" },
+          reactions: [],
+          matchedBy: ["person", "channel"],
+        },
+      ],
+    });
+
+    renderView();
+
+    const channelFollow = await screen.findByTestId("chats-channel-follow");
+    await waitFor(() => expect(channelFollow.getAttribute("aria-label")).toBe("Unfollow #general"));
+    await user.click(channelFollow);
+    expect(bridgeMock.setChatFollow).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      target: { kind: "channel", channelId: "channel-1" },
+      state: "unfollowed",
+    });
+
+    await user.click(screen.getByTestId("chats-feed-link"));
+    const authorFollow = await screen.findByTestId("chats-feed-follow-author");
+    expect(authorFollow.textContent).toBe("Following author");
+    await user.click(authorFollow);
+    expect(bridgeMock.setChatFollow).toHaveBeenCalledWith({
+      workspaceId: "workspace-a",
+      target: { kind: "author", threadId: "thread-1", messageId: "message-1" },
+      state: "unfollowed",
+    });
+  });
+
+  it("does not let an older channel-follow refresh overwrite a newer mutation", async () => {
+    const user = userEvent.setup();
+    const persistedFollow = {
+      targetKind: "channel" as const,
+      targetId: "wire-1",
+      state: "following" as const,
+      updatedAtMs: NOW,
+    };
+    let resolveStaleRead!: (value: { follows: [typeof persistedFollow] }) => void;
+    const staleRead = new Promise<{ follows: [typeof persistedFollow] }>((resolve) => {
+      resolveStaleRead = resolve;
+    });
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ wireId: "wire-1" })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatFollows
+      .mockResolvedValueOnce({ follows: [persistedFollow] })
+      .mockImplementationOnce(() => staleRead);
+
+    renderView();
+    const follow = await screen.findByTestId("chats-channel-follow");
+    await waitFor(() => expect(follow.getAttribute("aria-label")).toBe("Unfollow #general"));
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(bridgeMock.listChatFollows).toHaveBeenCalledTimes(2));
+
+    await user.click(follow);
+    await waitFor(() => expect(follow.getAttribute("aria-label")).toBe("Follow #general"));
+    await act(async () => {
+      resolveStaleRead({ follows: [persistedFollow] });
+      await staleRead;
+    });
+    expect(follow.getAttribute("aria-label")).toBe("Follow #general");
+  });
+
+  it("drops stale Feed-follow mutation results and errors after a newer refresh", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    const persistedFollow = {
+      targetKind: "person" as const,
+      targetId: "user-alice",
+      state: "following" as const,
+      updatedAtMs: NOW,
+    };
+    type UnfollowResult = {
+      follow: {
+        targetKind: "person";
+        targetId: string;
+        state: "unfollowed";
+        updatedAtMs: number;
+      };
+    };
+    let resolveOldMutation!: (value: UnfollowResult) => void;
+    const oldMutation = new Promise<UnfollowResult>((resolve) => {
+      resolveOldMutation = resolve;
+    });
+    let rejectOldMutation!: (reason: unknown) => void;
+    const oldRejectedMutation = new Promise<never>((_resolve, reject) => {
+      rejectOldMutation = reject;
+    });
+    bridgeMock.listChatFollows.mockResolvedValue({ follows: [persistedFollow] });
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          message: message({ authorDisplayName: "Alice" }),
+          thread: thread(),
+          channel: {
+            id: "channel-1",
+            name: "general",
+            slug: "general",
+            kind: "channel" as const,
+          },
+          authorFollowTarget: { targetKind: "person" as const, targetId: "user-alice" },
+          reactions: [],
+          matchedBy: ["person" as const],
+        },
+      ],
+    });
+    bridgeMock.setChatFollow
+      .mockImplementationOnce(() => oldMutation)
+      .mockImplementationOnce(() => oldRejectedMutation);
+
+    renderView(vi.fn(), onError);
+    await user.click(await screen.findByTestId("chats-feed-link"));
+    const follow = await screen.findByTestId("chats-feed-follow-author");
+    await waitFor(() => expect(follow.textContent).toBe("Following author"));
+
+    await user.click(follow);
+    act(() => emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(bridgeMock.listChatFollows.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
+    await act(async () => {
+      resolveOldMutation({
+        follow: { ...persistedFollow, state: "unfollowed", updatedAtMs: NOW + 1 },
+      });
+      await oldMutation;
+    });
+    expect(follow.textContent).toBe("Following author");
+
+    await user.click(follow);
+    act(() => emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(bridgeMock.listChatFollows.mock.calls.length).toBeGreaterThanOrEqual(3),
+    );
+    await act(async () => {
+      rejectOldMutation(new Error("stale follow failure"));
+      await oldRejectedMutation.catch(() => undefined);
+    });
+    expect(follow.textContent).toBe("Following author");
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("synchronizes follows between simultaneous chat views after workspace activity", async () => {
+    const user = userEvent.setup();
+    let persistedFollows = [
+      {
+        targetKind: "channel" as const,
+        targetId: "wire-1",
+        state: "following" as const,
+        updatedAtMs: NOW,
+      },
+    ];
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ wireId: "wire-1" })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatFollows.mockImplementation(() =>
+      Promise.resolve({ follows: persistedFollows }),
+    );
+    bridgeMock.setChatFollow.mockImplementation(async (input) => {
+      persistedFollows = [];
+      return {
+        follow: {
+          targetKind: "channel" as const,
+          targetId: "wire-1",
+          state: input.state,
+          updatedAtMs: NOW + 1,
+        },
+      };
+    });
+
+    render(
+      <>
+        <ChatsView workspaceId="workspace-a" onOpenFileChat={vi.fn()} onError={vi.fn()} />
+        <ChatsView workspaceId="workspace-a" onOpenFileChat={vi.fn()} onError={vi.fn()} />
+      </>,
+    );
+
+    const followButtons = await screen.findAllByTestId("chats-channel-follow");
+    await waitFor(() => {
+      expect(followButtons).toHaveLength(2);
+      expect(followButtons.every((button) => button.getAttribute("aria-label") === "Unfollow #general")).toBe(true);
+      expect(workspaceActivityCallbacks.size).toBe(2);
+    });
+
+    await user.click(followButtons[0]);
+    act(() => emitWorkspaceActivity());
+
+    await waitFor(() => {
+      expect(
+        screen
+          .getAllByTestId("chats-channel-follow")
+          .every((button) => button.getAttribute("aria-label") === "Follow #general"),
+      ).toBe(true);
+      expect(bridgeMock.listChatFollows.mock.calls.length).toBeGreaterThanOrEqual(4);
+    });
+  });
+
+  it("drops a stale follow response after switching workspaces", async () => {
+    let resolveOld!: (value: { follows: Array<{
+      targetKind: "channel";
+      targetId: string;
+      state: "following";
+      updatedAtMs: number;
+    }> }) => void;
+    const oldFollows = new Promise<{
+      follows: Array<{
+        targetKind: "channel";
+        targetId: string;
+        state: "following";
+        updatedAtMs: number;
+      }>;
+    }>((resolve) => {
+      resolveOld = resolve;
+    });
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ wireId: "wire-1" })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatFollows
+      .mockImplementationOnce(() => oldFollows)
+      .mockResolvedValueOnce({ follows: [] });
+
+    const { rerender } = render(
+      <ChatsView workspaceId="workspace-old" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
+    );
+    rerender(
+      <ChatsView workspaceId="workspace-new" onOpenFileChat={vi.fn()} onError={vi.fn()} />,
+    );
+
+    const follow = await screen.findByTestId("chats-channel-follow");
+    await waitFor(() => expect(follow.getAttribute("aria-label")).toBe("Follow #general"));
+    await act(async () => {
+      resolveOld({
+        follows: [
+          {
+            targetKind: "channel",
+            targetId: "wire-1",
+            state: "following",
+            updatedAtMs: NOW,
+          },
+        ],
+      });
+      await oldFollows;
+    });
+    expect(follow.getAttribute("aria-label")).toBe("Follow #general");
+  });
+
+  it("drops an awaited follow toggle result and error after switching workspaces", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ wireId: "wire-1" })],
+      fileThreads: [],
+    });
+    let resolveToggle!: (value: {
+      follow: {
+        targetKind: "channel";
+        targetId: string;
+        state: "following";
+        updatedAtMs: number;
+      };
+    }) => void;
+    const toggle = new Promise<{
+      follow: {
+        targetKind: "channel";
+        targetId: string;
+        state: "following";
+        updatedAtMs: number;
+      };
+    }>((resolve) => {
+      resolveToggle = resolve;
+    });
+    bridgeMock.setChatFollow.mockImplementationOnce(() => toggle);
+
+    const { rerender } = render(
+      <ChatsView
+        workspaceId="workspace-old"
+        onOpenFileChat={vi.fn()}
+        onError={onError}
+      />,
+    );
+    const oldFollow = await screen.findByTestId("chats-channel-follow");
+    await user.click(oldFollow);
+    rerender(
+      <ChatsView
+        workspaceId="workspace-new"
+        onOpenFileChat={vi.fn()}
+        onError={onError}
+      />,
+    );
+
+    await act(async () => {
+      resolveToggle({
+        follow: {
+          targetKind: "channel",
+          targetId: "wire-1",
+          state: "following",
+          updatedAtMs: NOW,
+        },
+      });
+      await toggle;
+    });
+    expect((await screen.findByTestId("chats-channel-follow")).getAttribute("aria-label"))
+      .toBe("Follow #general");
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("does not surface a rejected follow toggle from the previous workspace", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ wireId: "wire-1" })],
+      fileThreads: [],
+    });
+    let rejectToggle!: (reason: unknown) => void;
+    const toggle = new Promise<never>((_resolve, reject) => {
+      rejectToggle = reject;
+    });
+    bridgeMock.setChatFollow.mockImplementationOnce(() => toggle);
+
+    const { rerender } = render(
+      <ChatsView
+        workspaceId="workspace-old"
+        onOpenFileChat={vi.fn()}
+        onError={onError}
+      />,
+    );
+    await user.click(await screen.findByTestId("chats-channel-follow"));
+    rerender(
+      <ChatsView
+        workspaceId="workspace-new"
+        onOpenFileChat={vi.fn()}
+        onError={onError}
+      />,
+    );
+
+    await act(async () => {
+      rejectToggle(new Error("old workspace is offline"));
+      await toggle.catch(() => undefined);
+    });
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("keeps a delayed bookmark response after immediate navigation", async () => {
+    let resolveBookmarks!: (value: { bookmarks: ChatBookmarkRecord[] }) => void;
+    const delayedBookmarks = new Promise<{ bookmarks: ChatBookmarkRecord[] }>((resolve) => {
+      resolveBookmarks = resolve;
+    });
+    bridgeMock.listChatBookmarks.mockImplementationOnce(() => delayedBookmarks);
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          message: message(),
+          thread: thread(),
+          channel: { id: "channel-1", name: "general", slug: "general", kind: "channel" },
+          reactions: [],
+          matchedBy: ["channel"],
+        },
+      ],
+    });
+
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    await screen.findByTestId("chats-feed-bookmark");
+    await act(async () => {
+      resolveBookmarks({
+        bookmarks: [
+          {
+            bookmarkId: "bookmark-message-1",
+            targetKind: "message",
+            targetId: "message-1",
+            threadId: "thread-1",
+            messageId: "message-1",
+            mode: "live",
+            destinationPath: "Bookmarks/Chats/Friday--message-1.md",
+            state: "active",
+            projectionState: "ready",
+            generation: 1,
+            createdAtMs: NOW,
+            updatedAtMs: NOW,
+          },
+        ],
+      });
+      await delayedBookmarks;
+    });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("chats-feed-bookmark").getAttribute("aria-pressed")).toBe("true"),
+    );
+  });
+
+  it("does not let an older bookmark list erase a completed mutation", async () => {
+    let resolveBookmarks!: (value: { bookmarks: ChatBookmarkRecord[] }) => void;
+    const delayedBookmarks = new Promise<{ bookmarks: ChatBookmarkRecord[] }>((resolve) => {
+      resolveBookmarks = resolve;
+    });
+    bridgeMock.listChatBookmarks.mockImplementationOnce(() => delayedBookmarks);
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          message: message(),
+          thread: thread(),
+          channel: { id: "channel-1", name: "general", slug: "general", kind: "channel" },
+          reactions: [],
+          matchedBy: ["channel"],
+        },
+      ],
+    });
+    bridgeMock.saveChatBookmark.mockResolvedValue({
+      bookmark: {
+        bookmarkId: "bookmark-message-1",
+        targetKind: "message",
+        targetId: "message-1",
+        threadId: "thread-1",
+        messageId: "message-1",
+        mode: "live",
+        destinationPath: "Bookmarks/Chats/Friday--message-1.md",
+        state: "active",
+        projectionState: "ready",
+        generation: 1,
+        createdAtMs: NOW,
+        updatedAtMs: NOW,
+      },
+    });
+
+    renderView();
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const bookmarkButton = await screen.findByTestId("chats-feed-bookmark");
+    await userEvent.click(bookmarkButton);
+    await waitFor(() => expect(bookmarkButton.getAttribute("aria-pressed")).toBe("true"));
+
+    await act(async () => {
+      resolveBookmarks({ bookmarks: [] });
+      await delayedBookmarks;
+    });
+    expect(bookmarkButton.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("drops a bookmark mutation result and busy cleanup from an old workspace", async () => {
+    let resolveSave!: (value: { bookmark: ChatBookmarkRecord }) => void;
+    const delayedSave = new Promise<{ bookmark: ChatBookmarkRecord }>((resolve) => {
+      resolveSave = resolve;
+    });
+    bridgeMock.saveChatBookmark.mockImplementationOnce(() => delayedSave);
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          message: message(),
+          thread: thread(),
+          channel: { id: "channel-1", name: "general", slug: "general", kind: "channel" },
+          reactions: [],
+          matchedBy: ["channel"],
+        },
+      ],
+    });
+
+    const { rerender } = render(
+      <ChatsView
+        workspaceId="workspace-old"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const oldButton = await screen.findByTestId("chats-feed-bookmark");
+    await userEvent.click(oldButton);
+    expect((oldButton as HTMLButtonElement).disabled).toBe(true);
+
+    rerender(
+      <ChatsView
+        workspaceId="workspace-new"
+        onOpenFileChat={vi.fn()}
+        onError={vi.fn()}
+      />,
+    );
+    await userEvent.click(await screen.findByTestId("chats-feed-link"));
+    const newButton = await screen.findByTestId("chats-feed-bookmark");
+    expect((newButton as HTMLButtonElement).disabled).toBe(false);
+    expect(newButton.getAttribute("aria-pressed")).toBe("false");
+
+    await act(async () => {
+      resolveSave({
+        bookmark: {
+          bookmarkId: "bookmark-old-workspace",
+          targetKind: "message",
+          targetId: "message-1",
+          threadId: "thread-1",
+          messageId: "message-1",
+          mode: "live",
+          destinationPath: "Bookmarks/Chats/old.md",
+          state: "active",
+          projectionState: "ready",
+          generation: 1,
+          createdAtMs: NOW,
+          updatedAtMs: NOW,
+        },
+      });
+      await delayedSave;
+    });
+    expect(newButton.getAttribute("aria-pressed")).toBe("false");
+    expect((newButton as HTMLButtonElement).disabled).toBe(false);
+  });
+});

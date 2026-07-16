@@ -26,7 +26,7 @@ export const SETTINGS_SECTIONS = [
     id: "general",
     label: "General",
     scope: "User",
-    keywords: ["workspace", "launch", "path", "version"],
+    keywords: ["workspace", "launch", "path", "version", "name", "identity"],
     Icon: Settings,
   },
   {
@@ -54,7 +54,7 @@ export const SETTINGS_SECTIONS = [
     id: "agents",
     label: "Agents & MCP",
     scope: "Mixed",
-    keywords: ["agent", "mcp", "claude", "codex", "server", "runner", "dispatch", "timeout"],
+    keywords: ["agent", "identity", "name", "mcp", "claude", "codex", "server", "runner", "dispatch", "timeout"],
     Icon: Bot,
   },
   {

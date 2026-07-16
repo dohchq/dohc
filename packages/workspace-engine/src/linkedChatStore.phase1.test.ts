@@ -16,6 +16,7 @@ import { AGENT_CHANNEL_WIRE_ID, LINKED_CHAT_STORE_RELATIVE_PATH, createLinkedCha
 interface RawSqliteStatement {
   all(...params: unknown[]): Array<Record<string, unknown>>;
   get(...params: unknown[]): Record<string, unknown> | undefined;
+  run(...params: unknown[]): unknown;
 }
 
 interface RawSqliteDb {
@@ -275,7 +276,7 @@ describe("phase-one linked chat model", () => {
     });
   });
 
-  it("round-trips parent ids and accepts a replicated child before its parent", async () => {
+  it("defers a replicated child parent until that parent arrives in the same thread", async () => {
     const engine = await makeEngine("parents");
     const channel = await engine.store.ensureGeneralChannel({
       workspaceId: WORKSPACE_ID,
@@ -311,6 +312,23 @@ describe("phase-one linked chat model", () => {
         createdAtMs: 3000,
       }),
     );
+    expect(
+      (await engine.store.listMessages({
+        workspaceId: WORKSPACE_ID,
+        threadId: started.thread.id,
+      })).find((message) => message.id === "remote-child")?.parentMessageId,
+    ).toBeUndefined();
+    expect(
+      rawDbFor(engine, (db) =>
+        Number(
+          db
+            .prepare(
+              "SELECT COUNT(*) AS count FROM chat_pending_message_parents WHERE workspace_id = ?",
+            )
+            .get(WORKSPACE_ID)?.count,
+        ),
+      ),
+    ).toBe(1);
     await engine.store.applyReplicationOp(
       messageEnvelope({
         originId: "origin-parent",
@@ -337,6 +355,217 @@ describe("phase-one linked chat model", () => {
     expect(messages.find((message) => message.id === localChild.id)?.parentMessageId).toBe(localParent.id);
     expect(messages.find((message) => message.id === "remote-child")?.parentMessageId).toBe("remote-parent");
     expect(messages.find((message) => message.id === "legacy-message")?.parentMessageId).toBeUndefined();
+    expect(
+      rawDbFor(engine, (db) =>
+        Number(
+          db
+            .prepare(
+              "SELECT COUNT(*) AS count FROM chat_pending_message_parents WHERE workspace_id = ?",
+            )
+            .get(WORKSPACE_ID)?.count,
+        ),
+      ),
+    ).toBe(0);
+  });
+
+  it("keeps local parents strict and never activates replicated cross-thread parents", async () => {
+    const engine = await makeEngine("parent-integrity");
+    const channel = await engine.store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const first = await engine.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "First opening",
+    });
+    const second = await engine.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Second opening",
+    });
+
+    await expect(
+      engine.store.sendMessage({
+        workspaceId: WORKSPACE_ID,
+        threadId: first.thread.id,
+        parentMessageId: "message-does-not-exist",
+        author: { kind: "human", displayName: "You" },
+        body: "Missing local parent",
+      }),
+    ).rejects.toMatchObject({ code: "message-not-found" });
+    await expect(
+      engine.store.sendMessage({
+        workspaceId: WORKSPACE_ID,
+        threadId: second.thread.id,
+        parentMessageId: first.message.id,
+        author: { kind: "human", displayName: "You" },
+        body: "Cross-thread local parent",
+      }),
+    ).rejects.toMatchObject({ code: "message-not-found" });
+
+    await expect(
+      engine.store.applyReplicationOp(
+        messageEnvelope({
+          originId: "origin-missing-parent",
+          threadId: first.thread.id,
+          messageId: "remote-missing-parent",
+          parentMessageId: "message-does-not-exist",
+          body: "Missing remote parent",
+          createdAtMs: 5000,
+        }),
+      ),
+    ).resolves.toMatchObject({ status: "applied" });
+    expect(
+      (await engine.store.listMessages({
+        workspaceId: WORKSPACE_ID,
+        threadId: first.thread.id,
+      })).find((message) => message.id === "remote-missing-parent")?.parentMessageId,
+    ).toBeUndefined();
+    await expect(
+      engine.store.applyReplicationOp(
+        messageEnvelope({
+          originId: "origin-cross-thread-parent",
+          threadId: second.thread.id,
+          messageId: "remote-cross-thread-parent",
+          parentMessageId: first.message.id,
+          body: "Cross-thread remote parent",
+          createdAtMs: 5001,
+        }),
+      ),
+    ).resolves.toMatchObject({ status: "applied" });
+
+    await expect(
+      engine.store.applyReplicationOp(
+        messageEnvelope({
+          originId: "origin-child-first-cross-thread",
+          threadId: second.thread.id,
+          messageId: "remote-child-first-cross-thread",
+          parentMessageId: "future-parent-in-other-thread",
+          body: "Child before cross-thread parent",
+          createdAtMs: 5002,
+        }),
+      ),
+    ).resolves.toMatchObject({ status: "applied" });
+    await expect(
+      engine.store.applyReplicationOp(
+        messageEnvelope({
+          originId: "origin-future-cross-thread-parent",
+          threadId: first.thread.id,
+          messageId: "future-parent-in-other-thread",
+          body: "Parent materialized elsewhere",
+          createdAtMs: 5003,
+        }),
+      ),
+    ).resolves.toMatchObject({ status: "applied" });
+
+    const secondMessages = await engine.store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: second.thread.id,
+    });
+    expect(
+      secondMessages.find((message) => message.id === "remote-child-first-cross-thread")
+        ?.parentMessageId,
+    ).toBeUndefined();
+    expect(
+      secondMessages.find((message) => message.id === "remote-cross-thread-parent")
+        ?.parentMessageId,
+    ).toBeUndefined();
+    expect(
+      rawDbFor(engine, (db) =>
+        Number(
+          db
+            .prepare(
+              `SELECT COUNT(*) AS count FROM chat_pending_message_parents
+               WHERE workspace_id = ? AND parent_message_id = ?`,
+            )
+            .get(WORKSPACE_ID, "future-parent-in-other-thread")?.count,
+        ),
+      ),
+    ).toBe(0);
+  });
+
+  it("migrates legacy unresolved parents into deferred state and removes cross-thread links", async () => {
+    const engine = await makeEngine("parent-migration");
+    const channel = await engine.store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const first = await engine.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "First opening",
+    });
+    const second = await engine.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Second opening",
+    });
+    const unresolvedChild = await engine.store.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: second.thread.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Legacy unresolved child",
+    });
+    await engine.store.close();
+    rawDbFor(engine, (db) => {
+      // Model a store created before the one-time repair marker existed.
+      db.prepare(
+        "DELETE FROM engine_migrations WHERE migration_id = ?",
+      ).run("deferred-chat-parent-repair-v1");
+      db.prepare(
+        "UPDATE chat_messages SET parent_message_id = ? WHERE workspace_id = ? AND message_id = ?",
+      ).run(first.message.id, WORKSPACE_ID, second.message.id);
+      db.prepare(
+        "UPDATE chat_messages SET parent_message_id = ? WHERE workspace_id = ? AND message_id = ?",
+      ).run("future-same-thread-parent", WORKSPACE_ID, unresolvedChild.id);
+    });
+
+    engine.store = createLinkedChatStore(engine.root);
+    let messages = await engine.store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: second.thread.id,
+    });
+    expect(messages.find((message) => message.id === second.message.id)?.parentMessageId).toBeUndefined();
+    expect(messages.find((message) => message.id === unresolvedChild.id)?.parentMessageId).toBeUndefined();
+    expect(
+      rawDbFor(engine, (db) =>
+        Number(
+          db
+            .prepare(
+              "SELECT COUNT(*) AS count FROM chat_pending_message_parents WHERE workspace_id = ?",
+            )
+            .get(WORKSPACE_ID)?.count,
+        ),
+      ),
+    ).toBe(1);
+    expect(
+      rawDbFor(engine, (db) =>
+        Number(
+          db
+            .prepare(
+              "SELECT COUNT(*) AS count FROM engine_migrations WHERE migration_id = ?",
+            )
+            .get("deferred-chat-parent-repair-v1")?.count,
+        ),
+      ),
+    ).toBe(1);
+
+    await engine.store.applyReplicationOp(
+      messageEnvelope({
+        originId: "origin-migrated-parent",
+        threadId: second.thread.id,
+        messageId: "future-same-thread-parent",
+        body: "Deferred parent arrived",
+        createdAtMs: 6000,
+      }),
+    );
+    messages = await engine.store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: second.thread.id,
+    });
+    expect(messages.find((message) => message.id === unresolvedChild.id)?.parentMessageId).toBe(
+      "future-same-thread-parent",
+    );
+    expect(messages.find((message) => message.id === second.message.id)?.parentMessageId).toBeUndefined();
   });
 
   it("orders messages by created time and message id instead of arrival order", async () => {
@@ -643,6 +872,79 @@ describe("phase-one linked chat model", () => {
     });
   });
 
+  it("never persists heading metadata that the desktop IPC contract cannot read", async () => {
+    const engine = await makeEngine("attachment-heading-bounds");
+    const receiver = await makeEngine("attachment-heading-bounds-receiver");
+    const channel = await engine.store.ensureGeneralChannel({ workspaceId: WORKSPACE_ID });
+    const boundary = await engine.store.startChannelThread({
+      workspaceId: WORKSPACE_ID,
+      channelId: channel.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Boundary heading",
+      attachments: [{
+        objectId: "object-boundary",
+        headingText: "t".repeat(300),
+        headingAnchor: "a".repeat(400),
+        headingOccurrence: 0,
+      }],
+    });
+    expect(boundary.message.attachments[0]).toMatchObject({
+      headingText: "t".repeat(300),
+      headingAnchor: "a".repeat(400),
+    });
+    for (const op of replicationOps(engine)) await receiver.store.applyReplicationOp(op);
+    expect((await receiver.store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: boundary.thread.id,
+    }))[0]?.attachments[0]).toMatchObject({
+      headingText: "t".repeat(300),
+      headingAnchor: "a".repeat(400),
+    });
+
+    const attachmentOp = replicationOps(engine).find(
+      (op) => op.opKind === "chat.attachment.add",
+    );
+    if (!attachmentOp || attachmentOp.opKind !== "chat.attachment.add") {
+      throw new Error("Expected a heading attachment op.");
+    }
+    await expect(receiver.store.applyReplicationOp({
+      ...attachmentOp,
+      originId: "origin-oversized-heading",
+      originSeq: 0,
+      payload: { ...attachmentOp.payload, headingText: "t".repeat(301) },
+    })).rejects.toMatchObject({ code: "state-corrupt" });
+
+    await expect(engine.store.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: boundary.thread.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Too much heading text",
+      attachments: [{
+        objectId: "object-long-text",
+        headingText: "t".repeat(301),
+        headingAnchor: "valid-anchor",
+        headingOccurrence: 0,
+      }],
+    })).rejects.toMatchObject({ code: "invalid-path" });
+    await expect(engine.store.sendMessage({
+      workspaceId: WORKSPACE_ID,
+      threadId: boundary.thread.id,
+      author: { kind: "human", displayName: "You" },
+      body: "Too much heading anchor",
+      attachments: [{
+        objectId: "object-long-anchor",
+        headingText: "Valid heading",
+        headingAnchor: "a".repeat(401),
+        headingOccurrence: 0,
+      }],
+    })).rejects.toMatchObject({ code: "invalid-path" });
+
+    expect(await engine.store.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: boundary.thread.id,
+    })).toHaveLength(1);
+  });
+
   it("applies redacted attachment ops idempotently without file metadata", async () => {
     const source = await makeEngine("redacted-attachment-source");
     const receiver = await makeEngine("redacted-attachment-receiver");
@@ -823,6 +1125,22 @@ describe("phase-one linked chat model", () => {
       },
       recordedAtMs: 2000,
     });
+    expect(await engine.store.listChannels({ workspaceId: WORKSPACE_ID })).toEqual([]);
+    const internalAgentPlaceholder = rawDbFor(engine, (db) =>
+      db
+        .prepare(
+          `SELECT channel_id FROM chat_channel_placeholders
+           WHERE workspace_id = ? AND wire_id = ?`,
+        )
+        .get(WORKSPACE_ID, AGENT_CHANNEL_WIRE_ID),
+    );
+    if (!internalAgentPlaceholder) throw new Error("Expected an internal agent placeholder.");
+    expect(
+      await engine.store.listChannelThreads({
+        workspaceId: WORKSPACE_ID,
+        channelId: String(internalAgentPlaceholder.channel_id),
+      }),
+    ).toEqual([expect.objectContaining({ thread: expect.objectContaining({ id: "thread-agent" }) })]);
     await engine.store.applyReplicationOp({
       workspaceId: WORKSPACE_ID,
       originId: "origin-channel",
@@ -841,6 +1159,307 @@ describe("phase-one linked chat model", () => {
     expect(await engine.store.listChannels({ workspaceId: WORKSPACE_ID })).toEqual([
       expect.objectContaining({ kind: "agent", slug: "my-agent" }),
     ]);
+  });
+
+  it("backfills only an out-of-order thread placeholder from its authoritative channel", async () => {
+    const engine = await makeEngine("channel-placeholder");
+    const localChannel = await engine.store.createChannel({
+      workspaceId: WORKSPACE_ID,
+      name: "Project Updates",
+    });
+    const threadOp: SyncReplicationEnvelope = {
+      workspaceId: WORKSPACE_ID,
+      originId: "origin-placeholder-thread",
+      originSeq: 0,
+      opKind: "chat.thread.create",
+      payload: {
+        threadId: "remote-thread",
+        title: "Remote thread",
+        createdAtMs: 3000,
+        channelSlug: "project-updates",
+        channelWireId: "wire-remote-project-updates",
+      },
+      recordedAtMs: 3000,
+    };
+    await engine.store.applyReplicationOp(threadOp);
+
+    expect(await engine.store.listChannels({ workspaceId: WORKSPACE_ID })).toEqual([
+      expect.objectContaining({ id: localChannel.id }),
+    ]);
+    await expect(
+      engine.store.findChannelBySlug({
+        workspaceId: WORKSPACE_ID,
+        slug: "project-updates-2",
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      engine.store.findChannelBySlug({
+        workspaceId: WORKSPACE_ID,
+        slug: localChannel.slug,
+      }),
+    ).resolves.toMatchObject({ id: localChannel.id });
+    const placeholder = rawDbFor(engine, (db) =>
+      db
+        .prepare(
+          `SELECT c.* FROM chat_channels c
+           JOIN chat_channel_placeholders placeholder
+             ON placeholder.workspace_id = c.workspace_id
+            AND placeholder.channel_id = c.channel_id
+           WHERE c.workspace_id = ? AND placeholder.wire_id = ?`,
+        )
+        .get(WORKSPACE_ID, "wire-remote-project-updates"),
+    );
+    expect(placeholder).toMatchObject({
+      name: "project-updates",
+      slug: "project-updates-2",
+      kind: "channel",
+      created_at_ms: 3000,
+      updated_at_ms: 3000,
+    });
+    if (!placeholder) throw new Error("Expected an out-of-order channel placeholder.");
+    const placeholderId = String(placeholder.channel_id);
+    expect(
+      await engine.store.listChannelThreads({
+        workspaceId: WORKSPACE_ID,
+        channelId: placeholderId,
+      }),
+    ).toEqual([expect.objectContaining({ thread: expect.objectContaining({ id: "remote-thread" }) })]);
+    await engine.store.applyReplicationOp(
+      messageEnvelope({
+        originId: "origin-placeholder-message",
+        threadId: "remote-thread",
+        messageId: "remote-placeholder-message",
+        body: "Internal placeholder message",
+        createdAtMs: 3100,
+      }),
+    );
+    await engine.store.setFollow({
+      workspaceId: WORKSPACE_ID,
+      ownerUserId: "viewer",
+      targetKind: "thread",
+      targetId: "remote-thread",
+      state: "following",
+    });
+    expect(
+      (await engine.store.listPersonalFeed({
+        workspaceId: WORKSPACE_ID,
+        ownerUserId: "viewer",
+      })).items,
+    ).toEqual([]);
+
+    const channelOp: SyncReplicationEnvelope = {
+      workspaceId: WORKSPACE_ID,
+      originId: "origin-authoritative-channel",
+      originSeq: 0,
+      opKind: "chat.channel.create",
+      payload: {
+        channelId: "remote-channel-id",
+        name: "Remote Project Updates",
+        slug: "project-updates",
+        kind: "dm",
+        createdAtMs: 1000,
+        wireId: "wire-remote-project-updates",
+      },
+      recordedAtMs: 1000,
+    };
+    await expect(engine.store.applyReplicationOp(channelOp)).resolves.toMatchObject({
+      status: "applied",
+    });
+
+    const authoritative = (await engine.store.listChannels({ workspaceId: WORKSPACE_ID })).find(
+      (channel) => channel.id === placeholderId,
+    );
+    expect(authoritative).toMatchObject({
+      id: placeholderId,
+      name: "Remote Project Updates",
+      slug: "project-updates-2",
+      kind: "dm",
+      createdAtMs: 1000,
+      updatedAtMs: 1000,
+    });
+    await expect(
+      engine.store.findChannelBySlug({
+        workspaceId: WORKSPACE_ID,
+        slug: "project-updates-2",
+      }),
+    ).resolves.toMatchObject({
+      id: placeholderId,
+      name: "Remote Project Updates",
+      kind: "dm",
+    });
+    expect(
+      await engine.store.listChannelThreads({
+        workspaceId: WORKSPACE_ID,
+        channelId: placeholderId,
+      }),
+    ).toEqual([expect.objectContaining({ thread: expect.objectContaining({ id: "remote-thread" }) })]);
+    expect(
+      rawDbFor(engine, (db) =>
+        db
+          .prepare(
+            "SELECT 1 FROM chat_channel_placeholders WHERE workspace_id = ? AND channel_id = ?",
+          )
+          .get(WORKSPACE_ID, placeholderId),
+      ),
+    ).toBeUndefined();
+
+    await expect(engine.store.applyReplicationOp(channelOp)).resolves.toMatchObject({
+      status: "skipped",
+    });
+    await engine.store.applyReplicationOp({
+      ...channelOp,
+      originId: "origin-conflicting-channel",
+      payload: {
+        ...channelOp.payload,
+        name: "Conflicting Name",
+        kind: "channel",
+        createdAtMs: 500,
+      },
+      recordedAtMs: 500,
+    });
+    expect(
+      (await engine.store.listChannels({ workspaceId: WORKSPACE_ID })).find(
+        (channel) => channel.id === placeholderId,
+      ),
+    ).toEqual(authoritative);
+
+    await engine.store.ensureDefaultChannelFollows({
+      workspaceId: WORKSPACE_ID,
+      ownerUserId: "viewer",
+    });
+    expect(
+      (await engine.store.listFollows({
+        workspaceId: WORKSPACE_ID,
+        ownerUserId: "viewer",
+        state: "following",
+      })).map((follow) => follow.targetId),
+    ).toEqual([localChannel.id, "remote-thread"]);
+    expect(
+      (await engine.store.listPersonalFeed({
+        workspaceId: WORKSPACE_ID,
+        ownerUserId: "viewer",
+      })).items,
+    ).toEqual([]);
+  });
+
+  it("numbers the local slug for direct replicated channels with distinct wire identities", async () => {
+    const engine = await makeEngine("direct-channel-slug-collision");
+    const firstOp: SyncReplicationEnvelope = {
+      workspaceId: WORKSPACE_ID,
+      originId: "origin-direct-channel-a",
+      originSeq: 0,
+      opKind: "chat.channel.create",
+      payload: {
+        channelId: "remote-channel-a",
+        name: "Project Updates",
+        slug: "project-updates",
+        kind: "channel",
+        createdAtMs: 1000,
+        wireId: "wire-project-updates-a",
+      },
+      recordedAtMs: 1000,
+    };
+    const secondOp: SyncReplicationEnvelope = {
+      workspaceId: WORKSPACE_ID,
+      originId: "origin-direct-channel-b",
+      originSeq: 0,
+      opKind: "chat.channel.create",
+      payload: {
+        channelId: "remote-channel-b",
+        name: "Project_Updates",
+        slug: "project-updates",
+        kind: "channel",
+        createdAtMs: 2000,
+        wireId: "wire-project-updates-b",
+      },
+      recordedAtMs: 2000,
+    };
+
+    await expect(engine.store.applyReplicationOp(firstOp)).resolves.toMatchObject({
+      status: "applied",
+    });
+    await expect(engine.store.applyReplicationOp(secondOp)).resolves.toMatchObject({
+      status: "applied",
+    });
+
+    const channels = await engine.store.listChannels({ workspaceId: WORKSPACE_ID });
+    expect(channels.map(({ name, slug }) => ({ name, slug }))).toEqual([
+      { name: "Project Updates", slug: "project-updates" },
+      { name: "Project_Updates", slug: "project-updates-2" },
+    ]);
+    const first = channels.find((channel) => channel.slug === "project-updates");
+    const second = channels.find((channel) => channel.slug === "project-updates-2");
+    if (!first || !second) throw new Error("Expected both colliding replicated channels.");
+    expect(
+      await engine.store.getChannelWireId({
+        workspaceId: WORKSPACE_ID,
+        channelId: first.id,
+      }),
+    ).toBe("wire-project-updates-a");
+    expect(
+      await engine.store.getChannelWireId({
+        workspaceId: WORKSPACE_ID,
+        channelId: second.id,
+      }),
+    ).toBe("wire-project-updates-b");
+  });
+
+  it("treats a repeated pre-wire channel slug as the same idempotent channel", async () => {
+    const engine = await makeEngine("direct-pre-wire-channel");
+    const firstOp: SyncReplicationEnvelope = {
+      workspaceId: WORKSPACE_ID,
+      originId: "origin-pre-wire-a",
+      originSeq: 0,
+      opKind: "chat.channel.create",
+      payload: {
+        channelId: "legacy-channel",
+        name: "Legacy Updates",
+        slug: "legacy-updates",
+        kind: "channel",
+        createdAtMs: 1000,
+      },
+      recordedAtMs: 1000,
+    };
+    const conflictingReplay: SyncReplicationEnvelope = {
+      workspaceId: WORKSPACE_ID,
+      originId: "origin-pre-wire-b",
+      originSeq: 0,
+      opKind: "chat.channel.create",
+      payload: {
+        channelId: "legacy-channel",
+        name: "Conflicting Legacy Name",
+        slug: "legacy-updates",
+        kind: "dm",
+        createdAtMs: 500,
+      },
+      recordedAtMs: 500,
+    };
+
+    await expect(engine.store.applyReplicationOp(firstOp)).resolves.toMatchObject({
+      status: "applied",
+    });
+    await expect(engine.store.applyReplicationOp(conflictingReplay)).resolves.toMatchObject({
+      status: "applied",
+    });
+    await expect(engine.store.applyReplicationOp(firstOp)).resolves.toMatchObject({
+      status: "skipped",
+    });
+
+    const channels = await engine.store.listChannels({ workspaceId: WORKSPACE_ID });
+    expect(channels).toHaveLength(1);
+    expect(channels[0]).toMatchObject({
+      name: "Legacy Updates",
+      slug: "legacy-updates",
+      kind: "channel",
+      createdAtMs: 1000,
+      updatedAtMs: 1000,
+    });
+    expect(
+      await engine.store.getChannelWireId({
+        workspaceId: WORKSPACE_ID,
+        channelId: channels[0]!.id,
+      }),
+    ).toBeNull();
   });
 
   it("maintains an agent-only CAS cursor and human-authored unread threads", async () => {

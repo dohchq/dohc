@@ -88,10 +88,12 @@ function postCard(page: Page, title: string): Locator {
 
 function commentWithBody(page: Page, body: string): Locator {
   return page
-    .locator('li[data-testid="chats-message"]')
-    .filter({
-      has: page.getByTestId("chats-message-body").filter({ hasText: body }),
-    });
+    .locator(
+      'li[data-testid="chats-message"] > [data-testid="chats-comment-bubble"] > [data-testid="chats-message-body"]',
+    )
+    .filter({ hasText: body })
+    .locator("..")
+    .locator("..");
 }
 
 async function addReaction(message: Locator, emoji: string): Promise<void> {
@@ -135,7 +137,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await openWorkspaceFromFirstRun(desktop.page, temp);
     let page = desktop.page;
 
-    await page.getByTestId("activity-chats").click();
+    await page.getByTestId("titlebar-chats-sidebar").click();
     await expect(page.getByTestId("chats-view")).toBeVisible();
 
     // Channels remain a human/UI action. Creating one opens its feed
@@ -174,6 +176,9 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await composer.press("Enter");
     const firstComment = commentWithBody(page, firstCommentBody);
     await expect(firstComment).toBeVisible();
+    const firstCommentId = await firstComment.getAttribute("data-message-id");
+    expect(firstCommentId).toBeTruthy();
+    if (!firstCommentId) throw new Error("first comment did not expose its message id");
 
     await composer.fill(interveningCommentBody);
     await composer.press("Enter");
@@ -187,6 +192,11 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await composer.press("Enter");
     const nestedComment = commentWithBody(page, nestedCommentBody);
     await expect(nestedComment).toBeVisible();
+    await expect(nestedComment).toHaveAttribute("data-thread-depth", "1");
+    await expect(nestedComment).toHaveAttribute(
+      "data-parent-message-id",
+      firstCommentId,
+    );
     await expect(nestedComment.getByTestId("chats-reply-context")).toHaveText(
       "↳ replying to You",
     );
@@ -286,7 +296,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await openWorkspaceFromFirstRun(desktop.page, temp);
     page = desktop.page;
     if (!(await page.getByTestId("chats-view").isVisible())) {
-      await page.getByTestId("activity-chats").click();
+      await page.getByTestId("titlebar-chats-sidebar").click();
     }
 
     const persistedChannel = page

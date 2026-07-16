@@ -1,11 +1,18 @@
 import { Send } from "lucide-react";
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   activeMentionQuery,
   applyMentionCompletion,
   matchMentionCandidates,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
+import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
+import { formatChatFileReferenceToken } from "./chatFileMentions";
+
+export interface FileMentionCandidate {
+  path: string;
+  label: string;
+}
 
 // A chat composer with @-mention autocomplete. Same send affordances as the
 // shared ChatComposer (Enter sends, Shift+Enter newlines, IME-safe), but while
@@ -23,6 +30,8 @@ export function MentionComposer(props: {
   placeholder: string;
   sendLabel: string;
   candidates: readonly MentionCandidate[];
+  fileCandidates?: readonly FileMentionCandidate[];
+  loadFileHeadings?: (path: string) => Promise<readonly WorkspaceHeadingRecord[]>;
   onChange: (value: string) => void;
   onSend: () => void;
   onEscape?: () => void;
@@ -37,6 +46,15 @@ export function MentionComposer(props: {
   const [caret, setCaret] = useState(0);
   const [menuOpen, setMenuOpen] = useState(false);
   const [highlight, setHighlight] = useState(0);
+  const [fileStage, setFileStage] = useState<{
+    path: string;
+    label: string;
+    headings: readonly WorkspaceHeadingRecord[];
+    loading: boolean;
+  } | null>(null);
+  const fileRequest = useRef(0);
+  const currentFileLoader = useRef(props.loadFileHeadings);
+  currentFileLoader.current = props.loadFileHeadings;
   // When we complete a mention we must reposition the caret AFTER React commits
   // the new value; this holds the pending caret target for the layout effect.
   const pendingCaret = useRef<number | null>(null);
@@ -49,7 +67,20 @@ export function MentionComposer(props: {
     () => (active ? matchMentionCandidates(active.query, props.candidates) : []),
     [active, props.candidates],
   );
-  const showMenu = active !== null && matches.length > 0;
+  const fileMatches = useMemo(() => {
+    if (!active) return [];
+    const needle = active.query.trim().toLocaleLowerCase();
+    return (props.fileCandidates ?? [])
+      .filter((candidate) =>
+        needle.length === 0
+          ? true
+          : candidate.label.toLocaleLowerCase().includes(needle) ||
+            candidate.path.toLocaleLowerCase().includes(needle),
+      )
+      .slice(0, 6);
+  }, [active, props.fileCandidates]);
+  const menuLength = fileStage ? fileStage.headings.length + 1 : matches.length + fileMatches.length;
+  const showMenu = fileStage !== null || (active !== null && menuLength > 0);
 
   useLayoutEffect(() => {
     if (pendingCaret.current === null) return;
@@ -62,6 +93,14 @@ export function MentionComposer(props: {
       setCaret(target);
     }
   }, [props.value]);
+
+  useEffect(() => {
+    // The loader is scoped to the active workspace. A response started with
+    // the previous callback must never populate the next workspace's menu.
+    fileRequest.current += 1;
+    setFileStage(null);
+    setHighlight(0);
+  }, [props.loadFileHeadings]);
 
   const syncCaret = useCallback(() => {
     const node = textareaRef.current;
@@ -88,6 +127,49 @@ export function MentionComposer(props: {
     [caret, props],
   );
 
+  const completeFile = useCallback(
+    (reference: { path: string; headingAnchor?: string }) => {
+      const current = activeMentionQuery(props.value, caret);
+      if (!current) return;
+      const token = `${formatChatFileReferenceToken(reference)} `;
+      const end = current.start + 1 + current.query.length;
+      const next = `${props.value.slice(0, current.start)}${token}${props.value.slice(end)}`;
+      pendingCaret.current = current.start + token.length;
+      setFileStage(null);
+      setMenuOpen(false);
+      props.onChange(next);
+    },
+    [caret, props],
+  );
+
+  const chooseFile = useCallback(
+    (candidate: FileMentionCandidate) => {
+      const request = ++fileRequest.current;
+      setHighlight(0);
+      setFileStage({ path: candidate.path, label: candidate.label, headings: [], loading: true });
+      const load = props.loadFileHeadings;
+      if (!load) {
+        setFileStage({ path: candidate.path, label: candidate.label, headings: [], loading: false });
+        return;
+      }
+      void load(candidate.path)
+        .then((headings) => {
+          if (request !== fileRequest.current || load !== currentFileLoader.current) return;
+          setFileStage({
+            path: candidate.path,
+            label: candidate.label,
+            headings,
+            loading: false,
+          });
+        })
+        .catch(() => {
+          if (request !== fileRequest.current || load !== currentFileLoader.current) return;
+          setFileStage({ path: candidate.path, label: candidate.label, headings: [], loading: false });
+        });
+    },
+    [props.loadFileHeadings],
+  );
+
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
       // IME guard FIRST: Enter during composition confirms the composed
@@ -97,25 +179,41 @@ export function MentionComposer(props: {
       if (showMenu) {
         if (event.key === "ArrowDown") {
           event.preventDefault();
-          setHighlight((value) => (value + 1) % matches.length);
+          setHighlight((value) => (value + 1) % menuLength);
           return;
         }
         if (event.key === "ArrowUp") {
           event.preventDefault();
-          setHighlight((value) => (value - 1 + matches.length) % matches.length);
+          setHighlight((value) => (value - 1 + menuLength) % menuLength);
           return;
         }
         if (event.key === "Enter" || event.key === "Tab") {
-          const candidate = matches[Math.min(highlight, matches.length - 1)];
-          if (candidate) {
-            event.preventDefault();
-            complete(candidate);
+          event.preventDefault();
+          const index = Math.min(highlight, menuLength - 1);
+          if (fileStage) {
+            if (index === 0) completeFile({ path: fileStage.path });
+            else {
+              const heading = fileStage.headings[index - 1];
+              if (heading) completeFile({ path: fileStage.path, headingAnchor: heading.anchor });
+            }
+          } else if (index < matches.length) {
+            const candidate = matches[index];
+            if (candidate) complete(candidate);
+          } else {
+            const candidate = fileMatches[index - matches.length];
+            if (candidate) chooseFile(candidate);
           }
           return;
         }
         if (event.key === "Escape") {
           // Close the menu first; a second Escape reaches the parent (back-out).
           event.stopPropagation();
+          fileRequest.current += 1;
+          if (fileStage) {
+            setFileStage(null);
+            setHighlight(0);
+            return;
+          }
           setMenuOpen(false);
           return;
         }
@@ -132,11 +230,18 @@ export function MentionComposer(props: {
         props.onEscape();
       }
     },
-    [complete, highlight, matches, props, showMenu],
+    [chooseFile, complete, completeFile, fileMatches, fileStage, highlight, matches, menuLength, props, showMenu],
   );
 
   const listboxId = `${props.composerId}-mentions`;
-  const boundedHighlight = Math.min(highlight, Math.max(0, matches.length - 1));
+  const boundedHighlight = Math.min(highlight, Math.max(0, menuLength - 1));
+  const activeDescendant = !showMenu
+    ? undefined
+    : fileStage
+      ? `${listboxId}-file-section-${boundedHighlight}`
+      : boundedHighlight < matches.length
+        ? `${listboxId}-${matches[boundedHighlight]?.id}`
+        : `${listboxId}-file-${boundedHighlight - matches.length}`;
 
   return (
     <form
@@ -155,11 +260,65 @@ export function MentionComposer(props: {
           id={listboxId}
           data-testid={`${props.testIdPrefix}-mention-menu`}
           role="listbox"
-          aria-label="Mention a person or agent"
+          aria-label={fileStage ? `Mention ${fileStage.label}` : "Mention a person, agent, or file"}
           className="dohc-popover dohc-pop-in absolute bottom-full left-2 z-20 mb-1 max-h-48 w-64 overflow-y-auto rounded-lg border border-line bg-panel py-1 text-xs"
         >
+          {fileStage ? (
+            <>
+              <li role="presentation">
+                <button
+                  type="button"
+                  role="option"
+                  id={`${listboxId}-file-section-0`}
+                  aria-selected={boundedHighlight === 0}
+                  data-testid={`${props.testIdPrefix}-file-mention-whole`}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    completeFile({ path: fileStage.path });
+                  }}
+                  onMouseEnter={() => setHighlight(0)}
+                  className={`flex w-full flex-col px-2 py-1 text-left ${
+                    boundedHighlight === 0 ? "bg-line/50 text-ink" : "text-muted hover:bg-line/30"
+                  }`}
+                >
+                  <span className="font-medium text-ink">Whole file</span>
+                  <span className="truncate text-[10px] text-subtle">{fileStage.path}</span>
+                </button>
+              </li>
+              {fileStage.loading ? (
+                <li className="px-2 py-1.5 text-[11px] text-subtle">Loading headings…</li>
+              ) : null}
+              {fileStage.headings.map((heading, headingIndex) => {
+                const index = headingIndex + 1;
+                return (
+                  <li key={`${heading.anchor}:${heading.occurrence}`} role="presentation">
+                    <button
+                      type="button"
+                      role="option"
+                      id={`${listboxId}-file-section-${index}`}
+                      aria-selected={boundedHighlight === index}
+                      data-testid={`${props.testIdPrefix}-file-mention-heading`}
+                      onMouseDown={(event) => {
+                        event.preventDefault();
+                        completeFile({ path: fileStage.path, headingAnchor: heading.anchor });
+                      }}
+                      onMouseEnter={() => setHighlight(index)}
+                      className={`flex w-full items-baseline gap-2 px-2 py-1 text-left ${
+                        boundedHighlight === index ? "bg-line/50 text-ink" : "text-muted hover:bg-line/30"
+                      }`}
+                      style={{ paddingLeft: `${8 + (heading.level - 1) * 7}px` }}
+                    >
+                      <span className="text-subtle">#</span>
+                      <span className="min-w-0 flex-1 truncate text-ink">{heading.text}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </>
+          ) : (
+            <>
           {matches.map((candidate, index) => (
-            <li key={candidate.id} role="presentation">
+            <li key={`mention:${candidate.id}`} role="presentation">
               <button
                 type="button"
                 role="option"
@@ -185,6 +344,34 @@ export function MentionComposer(props: {
               </button>
             </li>
           ))}
+          {fileMatches.map((candidate, fileIndex) => {
+            const index = matches.length + fileIndex;
+            return (
+              <li key={`file:${candidate.path}`} role="presentation">
+                <button
+                  type="button"
+                  role="option"
+                  id={`${listboxId}-file-${fileIndex}`}
+                  aria-selected={index === boundedHighlight}
+                  data-testid={`${props.testIdPrefix}-file-mention-option`}
+                  data-path={candidate.path}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    chooseFile(candidate);
+                  }}
+                  onMouseEnter={() => setHighlight(index)}
+                  className={`flex w-full flex-col px-2 py-1 text-left ${
+                    index === boundedHighlight ? "bg-line/50 text-ink" : "text-muted hover:bg-line/30"
+                  }`}
+                >
+                  <span className="font-medium text-ink">{candidate.label}</span>
+                  <span className="truncate text-[10px] text-subtle">{candidate.path}</span>
+                </button>
+              </li>
+            );
+          })}
+            </>
+          )}
         </ul>
       ) : null}
 
@@ -202,10 +389,8 @@ export function MentionComposer(props: {
         role="combobox"
         aria-expanded={showMenu}
         aria-controls={showMenu ? listboxId : undefined}
+        aria-activedescendant={activeDescendant}
         aria-autocomplete="list"
-        aria-activedescendant={
-          showMenu ? `${listboxId}-${matches[boundedHighlight]?.id ?? ""}` : undefined
-        }
         onChange={(event) => {
           const nextValue = event.target.value;
           const nextCaret = event.target.selectionStart ?? nextValue.length;
@@ -224,7 +409,11 @@ export function MentionComposer(props: {
             node ? activeMentionQuery(node.value, node.selectionStart ?? 0) !== null : false,
           );
         }}
-        onBlur={() => setMenuOpen(false)}
+        onBlur={() => {
+          fileRequest.current += 1;
+          setMenuOpen(false);
+          setFileStage(null);
+        }}
         className="min-w-0 flex-1 resize-none rounded-md border border-line bg-bg px-2.5 py-1.5 text-[13px] leading-6 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
       />
       <button

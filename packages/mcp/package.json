@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@dohc/sqlite-worker": "workspace:*",
+    "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "@dohc/workspace-engine": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",

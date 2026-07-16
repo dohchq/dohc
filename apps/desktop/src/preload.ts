@@ -105,6 +105,16 @@ const bridge: DohcDesktopBridge = {
   readWorkspaceGraph: (payload) =>
     ipcRenderer.invoke(CHANNELS.readWorkspaceGraph, payload),
   getBacklinks: (payload) => ipcRenderer.invoke(CHANNELS.getBacklinks, payload),
+  listWorkspaceHeadings: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listWorkspaceHeadings, payload),
+  listChatFileMentions: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listChatFileMentions, payload),
+  listChatBookmarks: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listChatBookmarks, payload),
+  saveChatBookmark: (payload) =>
+    ipcRenderer.invoke(CHANNELS.saveChatBookmark, payload),
+  archiveChatBookmark: (payload) =>
+    ipcRenderer.invoke(CHANNELS.archiveChatBookmark, payload),
   readWorkspaceDatabase: (payload) =>
     ipcRenderer.invoke(CHANNELS.readWorkspaceDatabase, payload),
   applyDatabaseEdit: (payload) =>
@@ -196,6 +206,13 @@ const bridge: DohcDesktopBridge = {
     ipcRenderer.invoke(CHANNELS.chatRunRecordsForThread, payload),
   listChatChannels: (payload) =>
     ipcRenderer.invoke(CHANNELS.listChatChannels, payload),
+  listChatFollows: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listChatFollows, payload),
+  setChatFollow: (payload) => ipcRenderer.invoke(CHANNELS.setChatFollow, payload),
+  listPersonalChatFeed: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listPersonalChatFeed, payload),
+  markPersonalChatFeedSeen: (payload) =>
+    ipcRenderer.invoke(CHANNELS.markPersonalChatFeedSeen, payload),
   createChatChannel: (payload) =>
     ipcRenderer.invoke(CHANNELS.createChatChannel, payload),
   listChannelThreads: (payload) =>

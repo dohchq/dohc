@@ -31,6 +31,7 @@ import {
 } from "@dohc/workspace-core";
 import {
   LinkedChatStoreError,
+  SharedChannelReadOnlyError,
   classifyEngineFilePath,
   classifyEngineFilePathForRead,
   createLinkedChatStore,
@@ -43,6 +44,7 @@ import {
   type VersionedTextMomentSummary,
   type VersionedTextStore,
 } from "@dohc/workspace-engine";
+import { PreferredName } from "@dohc/workspace-contracts/chat-identity";
 import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
 import { createHash, randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
@@ -988,6 +990,19 @@ interface RegistryWorkspace {
   kind: string;
   mode?: string;
   remote?: RemoteIdentity;
+  sharedChannels?: RegistryJoinedSharedChannel[];
+}
+
+interface RegistryJoinedSharedChannel {
+  channelWireId: string;
+  access: "read-write" | "read-only";
+  ended?: boolean;
+}
+
+interface ChatAuthorizationWorkspace {
+  workspaceId: string;
+  rootPath: string;
+  sharedChannels: RegistryJoinedSharedChannel[];
 }
 
 interface RegistryFile {
@@ -1029,6 +1044,78 @@ async function findWorkspaceEntry(ctx: ToolContext): Promise<RegistryWorkspace |
     if (workspace.rootPath === ctx.root) return workspace;
     const realWorkspaceRoot = await realpath(workspace.rootPath).catch(() => workspace.rootPath);
     if (realWorkspaceRoot === realRoot) return workspace;
+  }
+  return null;
+}
+
+// Discovery callers intentionally tolerate an absent/broken desktop registry,
+// but an authorization check cannot translate unreadable authority state into
+// "no grants". A genuinely absent registry remains valid for standalone local
+// MCP clients; once the file exists, malformed state fails chat writes closed.
+async function findWorkspaceEntryForChatAuthorization(
+  ctx: ToolContext,
+): Promise<ChatAuthorizationWorkspace | null> {
+  let text: string;
+  try {
+    text = await readFile(join(ctx.home, "dohc-workspaces.json"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new Error("Cannot read the workspace registry; refusing the chat write.");
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error("The workspace registry is invalid; refusing the chat write.");
+  }
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    !Array.isArray((parsed as { workspaces?: unknown }).workspaces)
+  ) {
+    throw new Error("The workspace registry is invalid; refusing the chat write.");
+  }
+
+  const realRoot = await realpath(ctx.root).catch(() => ctx.root);
+  for (const candidate of (parsed as { workspaces: unknown[] }).workspaces) {
+    if (
+      candidate === null ||
+      typeof candidate !== "object" ||
+      !nonEmptyString((candidate as { workspaceId?: unknown }).workspaceId) ||
+      !nonEmptyString((candidate as { rootPath?: unknown }).rootPath)
+    ) {
+      throw new Error("The workspace registry is invalid; refusing the chat write.");
+    }
+    const raw = candidate as {
+      workspaceId: string;
+      rootPath: string;
+      sharedChannels?: unknown;
+    };
+    const realCandidateRoot = await realpath(raw.rootPath).catch(() => raw.rootPath);
+    if (raw.rootPath !== ctx.root && realCandidateRoot !== realRoot) continue;
+    if (raw.sharedChannels !== undefined && !Array.isArray(raw.sharedChannels)) {
+      throw new Error("The workspace registry is invalid; refusing the chat write.");
+    }
+    const sharedChannels = (raw.sharedChannels ?? []).map((channel) => {
+      if (
+        channel === null ||
+        typeof channel !== "object" ||
+        !nonEmptyString((channel as { channelWireId?: unknown }).channelWireId) ||
+        ((channel as { access?: unknown }).access !== "read-write" &&
+          (channel as { access?: unknown }).access !== "read-only") ||
+        ((channel as { ended?: unknown }).ended !== undefined &&
+          typeof (channel as { ended?: unknown }).ended !== "boolean")
+      ) {
+        throw new Error("The workspace registry is invalid; refusing the chat write.");
+      }
+      return channel as RegistryJoinedSharedChannel;
+    });
+    return {
+      workspaceId: raw.workspaceId,
+      rootPath: raw.rootPath,
+      sharedChannels,
+    };
   }
   return null;
 }
@@ -2408,20 +2495,23 @@ async function requireEngineChats(
   return { ok: true, workspaceId };
 }
 
-// The reply author's display name — the SAME derivation the desktop uses for
-// its local user (main.ts localUserDisplayName): the dohc Cloud email when a
-// session exists, else "You". Rendered by every shared surface as
-// "<User Name>'s agent".
+function ownerNameFromUnknown(value: unknown): string | undefined {
+  const parsed = PreferredName.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
+}
+
+// Display identity is profile-owned, not inferred from an auth email. The
+// opaque cloud user id below remains the authorization/provenance key.
 async function agentReplyDisplayName(ctx: ToolContext): Promise<string> {
-  if (nonEmptyString(process.env.DOHC_MCP_CLOUD_EMAIL)) {
-    return process.env.DOHC_MCP_CLOUD_EMAIL;
-  }
-  const credentials = await readJson<{ version?: unknown; email?: unknown }>(
-    join(ctx.home, "dohc-cloud.json"),
+  const environmentOwner = ownerNameFromUnknown(process.env.DOHC_MCP_OWNER_NAME);
+  if (environmentOwner) return environmentOwner;
+  const settings = await readJson<{
+    profile?: { preferredName?: unknown };
+  }>(
+    join(ctx.home, "dohc-settings.json"),
   );
-  if (credentials?.version === 1 && nonEmptyString(credentials.email)) {
-    return credentials.email;
-  }
+  const settingsOwner = ownerNameFromUnknown(settings?.profile?.preferredName);
+  if (settingsOwner) return settingsOwner;
   return "You";
 }
 
@@ -2458,6 +2548,46 @@ async function withEngineStores<T>(
   } finally {
     await chats.close().catch(() => undefined);
     await texts.close().catch(() => undefined);
+  }
+}
+
+// Agent writes use the same joined-channel boundary as desktop IPC and the
+// local CLI. The engine stores a joined channel in the ordinary chat tables,
+// so the authoritative read-only/ended grant remains in the desktop registry.
+// Resolve the mutation target to the channel's wire identity and refuse before
+// startChannelThread/sendMessage can create any durable local-only rows.
+async function assertMcpSharedChannelWritable(input: {
+  ctx: ToolContext;
+  workspaceId: string;
+  chats: LinkedChatStore;
+  target: { channelId: string } | { threadId: string };
+}): Promise<void> {
+  const workspace = await findWorkspaceEntryForChatAuthorization(input.ctx);
+  if (!workspace) return;
+  if (workspace.workspaceId !== input.workspaceId) {
+    throw new Error("The workspace registry identity does not match; refusing the chat write.");
+  }
+  const blockedWires = new Set(
+    (workspace.sharedChannels ?? [])
+      .filter((channel) => channel.access === "read-only" || channel.ended === true)
+      .map((channel) => channel.channelWireId),
+  );
+  if (blockedWires.size === 0) return;
+
+  const channelId =
+    "channelId" in input.target
+      ? input.target.channelId
+      : await input.chats.findThreadChannelId({
+          workspaceId: input.workspaceId,
+          threadId: input.target.threadId,
+        });
+  if (!channelId) return;
+  const wireId = await input.chats.getChannelWireId({
+    workspaceId: input.workspaceId,
+    channelId,
+  });
+  if (wireId !== null && blockedWires.has(wireId)) {
+    throw new SharedChannelReadOnlyError();
   }
 }
 
@@ -2615,16 +2745,19 @@ export async function readChat(ctx: ToolContext, args: { threadId: string }) {
 
 // Channel discovery for agents: names, slugs, kinds, and each channel's
 // threads (id + display title) so a follow-up reply/read has real ids to
-// target. Ensures the workspace's default "general" channel on first use —
-// the same rule the desktop applies.
+// target. Writable MCP profiles ensure the workspace's default "general"
+// channel on first use — the same rule the desktop applies. Read-only shared
+// views list only existing channels so discovery never creates durable state.
 export async function listChannels(ctx: ToolContext) {
   const gate = await requireEngineChats(ctx);
   if (!gate.ok) return { ok: false as const, reason: gate.reason };
   try {
     return await withEngineStores(ctx, async ({ chats }) => {
-      await withBusyRetry(() =>
-        chats.ensureGeneralChannel({ workspaceId: gate.workspaceId }),
-      );
+      if (!ctx.readOnly) {
+        await withBusyRetry(() =>
+          chats.ensureGeneralChannel({ workspaceId: gate.workspaceId }),
+        );
+      }
       const channels = await chats.listChannels({ workspaceId: gate.workspaceId });
       const withThreads = [];
       for (const channel of channels) {
@@ -2685,6 +2818,12 @@ export async function startChannelChat(
       if (!channel) {
         return { ok: false as const, reason: `channel not found: ${args.channel}` };
       }
+      await assertMcpSharedChannelWritable({
+        ctx,
+        workspaceId: gate.workspaceId,
+        chats,
+        target: { channelId: channel.id },
+      });
       const started = await withBusyRetry(() =>
         chats.startChannelThread({
           workspaceId: gate.workspaceId,
@@ -2723,6 +2862,12 @@ export async function replyToChat(
   const authorUserId = await agentAuthorUserId(ctx);
   try {
     return await withEngineStores(ctx, async ({ chats }) => {
+      await assertMcpSharedChannelWritable({
+        ctx,
+        workspaceId: gate.workspaceId,
+        chats,
+        target: { threadId: args.threadId },
+      });
       const message = await withBusyRetry(() =>
         chats.sendMessage({
           workspaceId: gate.workspaceId,

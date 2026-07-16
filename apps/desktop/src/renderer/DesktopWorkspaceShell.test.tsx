@@ -11,6 +11,8 @@ import {
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
+  ChatChannelRecord,
+  FileChatThreadRecord,
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
   UpdateStateEvent,
@@ -21,7 +23,17 @@ import type { MenuCommandId, SearchResultsEvent } from "../ipc/channels";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { rendererMarks } from "../performance/rendererMarks";
-import { DesktopWorkspaceShell, type Workspace } from "./DesktopWorkspaceShell";
+import {
+  chatMentionOpenTarget,
+  chatsNavigationRequiresRemount,
+  DesktopWorkspaceShell,
+  graphChatOpenTarget,
+  pendingHeadingTargetForOpen,
+  resolveCanonicalDm,
+  runCanonicalDmNavigation,
+  type Workspace,
+} from "./DesktopWorkspaceShell";
+import type { ChatsNav } from "./workbench/ChatsView";
 import {
   OPEN_EDITORS_DEFAULT_HEIGHT,
   OPEN_EDITORS_MIN_HEIGHT,
@@ -275,7 +287,13 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
       ],
       activeVersionId: "main",
     })),
-    listChatChannels: vi.fn(async () => ({ channels: [], fileThreads: [] })),
+    listChatChannels: vi.fn(
+      async (): Promise<{
+        channels: ChatChannelRecord[];
+        fileThreads: FileChatThreadRecord[];
+      }> => ({ channels: [], fileThreads: [] }),
+    ),
+    listChannelThreads: vi.fn(async () => ({ threads: [] })),
     listChatChannelShares: vi.fn(async () => {
       // Sharing is optional; ChatsView downgrades a rejection to "none".
       throw new Error("sharing unavailable in shell tests");
@@ -285,12 +303,15 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
   });
 }
 
-function renderShell(bridge: ReturnType<typeof makeBridge>) {
+function renderShell(
+  bridge: ReturnType<typeof makeBridge>,
+  workspace: Workspace = WORKSPACE,
+) {
   vi.stubGlobal("dohcDesktop", bridge);
   return render(
     <DesktopWorkspaceShell
-      workspace={WORKSPACE}
-      workspaces={[WORKSPACE]}
+      workspace={workspace}
+      workspaces={[workspace]}
       onSwitchWorkspace={() => {}}
     />,
   );
@@ -300,6 +321,370 @@ afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+});
+
+describe("targeted chat navigation", () => {
+  const threadNav = (threadId: string, focusMessageId?: string): ChatsNav => ({
+    level: "thread",
+    channel: {
+      id: "channel-1",
+      name: "general",
+      slug: "general",
+      kind: "channel",
+      createdAtMs: 0,
+      updatedAtMs: 0,
+      threadCount: 1,
+      unreadCount: 0,
+    },
+    thread: {
+      id: threadId,
+      channelId: "channel-1",
+      title: "Discussion",
+      createdAtMs: 0,
+      updatedAtMs: 0,
+      messageCount: 2,
+      lastReadSequence: 0,
+      unreadCount: 0,
+    },
+    ...(focusMessageId ? { focusMessageId } : {}),
+  });
+
+  it("remounts the live chat for a message backlink inside the current thread", () => {
+    expect(
+      chatsNavigationRequiresRemount(
+        threadNav("thread-1", "message-1"),
+        threadNav("thread-1", "message-2"),
+      ),
+    ).toBe(true);
+    expect(
+      chatsNavigationRequiresRemount(
+        threadNav("thread-1", "message-1"),
+        threadNav("thread-1"),
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps metadata-light file mentions and graph chats on their known file thread", () => {
+    const thread = {
+      id: "thread-file",
+      title: "File discussion",
+      createdAtMs: 10,
+      updatedAtMs: 20,
+    };
+    const mentionTarget = chatMentionOpenTarget({
+      attachment: {
+        attachmentId: "attachment-1",
+        messageId: "message-1",
+        threadId: thread.id,
+        targetKind: "file",
+        objectId: "object-1",
+        pathHint: "docs/plan.md",
+        createdAtMs: 10,
+      },
+      message: {
+        id: "message-1",
+        threadId: thread.id,
+        authorKind: "human",
+        authorDisplayName: "Ice",
+        body: "See the plan",
+        createdAtMs: 10,
+      },
+      thread,
+    });
+    expect(mentionTarget).toEqual({
+      surface: "file",
+      thread,
+      focusMessageId: "message-1",
+    });
+
+    expect(graphChatOpenTarget({
+      path: `chat-thread:${thread.id}`,
+      kind: "chat-thread",
+      threadId: thread.id,
+      title: thread.title,
+      incoming: 1,
+      outgoing: 0,
+    })).toEqual({
+      surface: "file",
+      thread: { ...thread, createdAtMs: 0, updatedAtMs: 0 },
+    });
+  });
+
+  it("keeps full channel metadata on targeted tab navigation", () => {
+    const target = graphChatOpenTarget({
+      path: "chat-thread:thread-channel",
+      kind: "chat-thread",
+      threadId: "thread-channel",
+      channelId: "channel-1",
+      channelName: "planning",
+      channelSlug: "planning",
+      channelKind: "channel",
+      title: "Planning discussion",
+      incoming: 1,
+      outgoing: 0,
+    });
+
+    expect(target.surface).toBe("channel");
+    if (target.surface === "channel") {
+      expect(target.nav.level).toBe("thread");
+      expect(target.nav.channel.id).toBe("channel-1");
+      expect(target.nav.thread.id).toBe("thread-channel");
+    }
+
+    const mentionTarget = chatMentionOpenTarget({
+      attachment: {
+        attachmentId: "attachment-channel",
+        messageId: "message-channel",
+        threadId: "thread-channel",
+        targetKind: "file",
+        createdAtMs: 0,
+      },
+      message: {
+        id: "message-channel",
+        threadId: "thread-channel",
+        authorKind: "agent",
+        authorDisplayName: "Ice",
+        body: "Updated the plan",
+        createdAtMs: 0,
+      },
+      thread: {
+        id: "thread-channel",
+        title: "Planning discussion",
+        createdAtMs: 0,
+        updatedAtMs: 0,
+      },
+      channelId: "channel-1",
+      channelName: "planning",
+    });
+    expect(mentionTarget.surface).toBe("channel");
+    if (mentionTarget.surface === "channel") {
+      expect(mentionTarget.nav.thread.id).toBe("thread-channel");
+      expect(mentionTarget.nav.focusMessageId).toBe("message-channel");
+    }
+  });
+
+  it("routes DM mentions and graph nodes only through a matching canonical DM", () => {
+    const dm = {
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      name: "alice@example.com",
+      peerLabel: "Alice",
+      role: "owner" as const,
+      shareId: null,
+      threadId: "dm-thread",
+      unreadCount: 1,
+      connected: true,
+    };
+    const mentionTarget = chatMentionOpenTarget({
+      attachment: {
+        attachmentId: "attachment-dm",
+        messageId: "message-dm",
+        threadId: "dm-thread",
+        targetKind: "file",
+        createdAtMs: 0,
+      },
+      message: {
+        id: "message-dm",
+        threadId: "dm-thread",
+        authorKind: "human",
+        authorDisplayName: "Alice",
+        body: "DM attachment",
+        createdAtMs: 0,
+      },
+      thread: {
+        id: "dm-thread",
+        title: "Direct message",
+        createdAtMs: 0,
+        updatedAtMs: 0,
+      },
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      channelName: "alice@example.com",
+      channelKind: "dm",
+    });
+    expect(mentionTarget).toEqual({
+      surface: "dm",
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      threadId: "dm-thread",
+      focusMessageId: "message-dm",
+    });
+    if (mentionTarget.surface !== "dm") throw new Error("Expected DM target");
+    expect(resolveCanonicalDm(mentionTarget, [dm])).toEqual(dm);
+    expect(resolveCanonicalDm({ ...mentionTarget, threadId: "other-thread" }, [dm]))
+      .toBeNull();
+    expect(resolveCanonicalDm({ ...mentionTarget, channelWireId: "other-wire" }, [dm]))
+      .toBeNull();
+
+    expect(graphChatOpenTarget({
+      path: "chat-thread:dm-thread",
+      kind: "chat-thread",
+      threadId: "dm-thread",
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      channelName: "alice@example.com",
+      channelKind: "dm",
+      title: "Direct message",
+      incoming: 1,
+      outgoing: 0,
+    })).toEqual({
+      surface: "dm",
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      threadId: "dm-thread",
+    });
+  });
+
+  it("preserves a DM mention message target through canonical navigation", async () => {
+    const dm = {
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      name: "alice@example.com",
+      peerLabel: "Alice",
+      role: "owner" as const,
+      shareId: null,
+      threadId: "dm-thread",
+      unreadCount: 0,
+      connected: true,
+    };
+    const open = vi.fn();
+
+    await runCanonicalDmNavigation({
+      locator: {
+        channelId: dm.channelId,
+        channelWireId: dm.channelWireId,
+        threadId: dm.threadId,
+        focusMessageId: "message-dm",
+      },
+      syncDms: async () => ({ available: true, dms: [dm] }),
+      isCurrent: () => true,
+      open,
+    });
+
+    expect(open).toHaveBeenCalledWith({
+      level: "dm",
+      dm,
+      focusMessageId: "message-dm",
+    });
+    expect(
+      chatsNavigationRequiresRemount(
+        { level: "dm", dm, focusMessageId: "message-old" },
+        { level: "dm", dm, focusMessageId: "message-dm" },
+      ),
+    ).toBe(true);
+  });
+
+  it("opens an existing local DM when new-DM creation is unavailable", async () => {
+    const dm = {
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      name: "alice@example.com",
+      peerLabel: "Alice",
+      role: "owner" as const,
+      shareId: null,
+      threadId: "dm-thread",
+      unreadCount: 0,
+      connected: false,
+    };
+    const open = vi.fn();
+
+    await runCanonicalDmNavigation({
+      locator: {
+        channelId: dm.channelId,
+        channelWireId: dm.channelWireId,
+        threadId: dm.threadId,
+      },
+      syncDms: async () => ({ available: false, dms: [dm] }),
+      isCurrent: () => true,
+      open,
+    });
+
+    expect(open).toHaveBeenCalledWith({ level: "dm", dm });
+  });
+
+  it("does not reopen Chats when destination navigation supersedes a delayed DM lookup", async () => {
+    const delayed = deferred<{
+      available: boolean;
+      dms: Array<{
+        channelId: string;
+        channelWireId: string;
+        name: string;
+        peerLabel: string;
+        role: "owner";
+        shareId: null;
+        threadId: string;
+        unreadCount: number;
+        connected: boolean;
+      }>;
+    }>();
+    let current = true;
+    const open = vi.fn();
+    const pending = runCanonicalDmNavigation({
+      locator: {
+        channelId: "dm-local",
+        channelWireId: "dm-wire",
+        threadId: "dm-thread",
+      },
+      syncDms: () => delayed.promise,
+      isCurrent: () => current,
+      open,
+    });
+
+    // Models the centralized workbench mutation invalidation used by file,
+    // graph, history, and arbitrary editor-tab navigation.
+    current = false;
+    delayed.resolve({
+      available: true,
+      dms: [{
+        channelId: "dm-local",
+        channelWireId: "dm-wire",
+        name: "alice@example.com",
+        peerLabel: "Alice",
+        role: "owner",
+        shareId: null,
+        threadId: "dm-thread",
+        unreadCount: 0,
+        connected: true,
+      }],
+    });
+    await pending;
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("clears stale chat navigation to channels when DM canonicalization fails", async () => {
+    const open = vi.fn();
+    const base = {
+      locator: { channelId: "dm-local", threadId: "dm-thread" },
+      isCurrent: () => true,
+      open,
+    };
+    await runCanonicalDmNavigation({
+      ...base,
+      syncDms: async () => ({ available: true, dms: [] }),
+    });
+    expect(open).toHaveBeenLastCalledWith({ level: "channels" });
+
+    open.mockClear();
+    await runCanonicalDmNavigation({
+      ...base,
+      syncDms: async () => {
+        throw new Error("offline");
+      },
+    });
+    expect(open).toHaveBeenLastCalledWith({ level: "channels" });
+  });
+});
+
+describe("heading-target file opens", () => {
+  it("clears a prior section command on an ordinary open", () => {
+    expect(
+      pendingHeadingTargetForOpen("a.md", { anchor: "old-section", nonce: 1 }),
+    ).toEqual({
+      path: "a.md",
+      target: { anchor: "old-section", nonce: 1 },
+    });
+    expect(pendingHeadingTargetForOpen("a.md")).toBeNull();
+  });
 });
 
 // THE merge-on-load race (codex P2): the load gate used to compare COMMITTED
@@ -358,9 +743,9 @@ describe("ui-state merge-on-load", () => {
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
     expect((await screen.findByTestId("side-panel")).style.width).toBe("320px");
     // chatsVisible is stored true, but this workspace is engine-off: the
-    // Chats panel (and its activity-bar toggle) must not exist at all.
+    // Chats panel (and its titlebar toggle) must not exist at all.
     expect(screen.queryByTestId("chats-panel")).toBeNull();
-    expect(screen.queryByTestId("activity-chats")).toBeNull();
+    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
   });
 });
 
@@ -905,13 +1290,13 @@ describe("chats panel (right side)", () => {
 
     await screen.findByText("a.md");
     expect(screen.queryByTestId("chats-panel")).toBeNull();
-    expect(screen.queryByTestId("activity-chats")).toBeNull();
+    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
     // The old history rail is gone for good — no timeline, no restore stub.
     expect(screen.queryByTestId("history-timeline")).toBeNull();
     expect(screen.queryByTestId("history-restore")).toBeNull();
   });
 
-  it("toggles from the activity bar and hides entirely when collapsed", async () => {
+  it("toggles from the titlebar and hides entirely when collapsed", async () => {
     const bridge = makeEngineBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -919,8 +1304,9 @@ describe("chats panel (right side)", () => {
     // Hidden by default (VS Code secondary-sidebar grammar).
     await screen.findByText("a.md");
     expect(screen.queryByTestId("chats-panel")).toBeNull();
+    expect(screen.queryByTestId("activity-chats")).toBeNull();
 
-    await user.click(await screen.findByTestId("activity-chats"));
+    await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
 
     await user.click(screen.getByTestId("chats-panel-collapse"));
@@ -928,8 +1314,122 @@ describe("chats panel (right side)", () => {
     // Collapsed means GONE — no 36px stub squatting on the right edge.
     expect(screen.queryByTestId("history-restore")).toBeNull();
 
-    await user.click(screen.getByTestId("activity-chats"));
+    await user.click(screen.getByTestId("titlebar-chats-sidebar"));
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
+  });
+
+  it("keeps the navigator open and switches the editor between channels", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listChatChannels.mockResolvedValue({
+      channels: [
+        {
+          id: "channel-1",
+          name: "general",
+          slug: "general",
+          kind: "channel" as const,
+          createdAtMs: 1_700_000_000_000,
+          updatedAtMs: 1_700_000_000_000,
+          threadCount: 0,
+          unreadCount: 0,
+        },
+        {
+          id: "channel-2",
+          name: "random",
+          slug: "random",
+          kind: "channel" as const,
+          createdAtMs: 1_700_000_000_001,
+          updatedAtMs: 1_700_000_000_001,
+          threadCount: 0,
+          unreadCount: 0,
+        },
+      ],
+      fileThreads: [],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
+    const panel = await screen.findByTestId("chats-panel");
+    const channelButtons = within(panel).getAllByTestId("chats-channel");
+    await user.click(channelButtons[0]!);
+
+    const channelView = await screen.findByTestId("chats-channel-view");
+    expect(channelView.dataset.variant).toBe("page");
+    expect(channelButtons).toHaveLength(2);
+    await waitFor(() => expect(channelButtons[0]?.dataset.active).toBe("true"));
+    expect(bridge.listChannelThreads).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      channelId: "channel-1",
+    });
+
+    await user.click(channelButtons[1]!);
+    await waitFor(() => {
+      expect(screen.getByTestId("chats-channel-title").textContent).toBe("random");
+    });
+    expect(screen.getByTestId("chats-panel")).toBeTruthy();
+    expect(channelButtons[1]?.dataset.active).toBe("true");
+    expect(bridge.listChannelThreads).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      channelId: "channel-2",
+    });
+  });
+
+  it("keeps both shared-view Chats mounts read-only", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const startChannelThread = vi.fn();
+    Object.assign(bridge, { startChannelThread });
+    const sharedWorkspace: Workspace = {
+      ...WORKSPACE,
+      shareView: {
+        shareId: "share-view-1",
+        granterEmail: "owner@example.com",
+      },
+    };
+    bridge.listChatChannels.mockResolvedValue({
+      channels: [
+        {
+          id: "channel-1",
+          wireId: "wire-1",
+          name: "general",
+          slug: "general",
+          kind: "channel",
+          createdAtMs: 1_700_000_000_000,
+          updatedAtMs: 1_700_000_000_000,
+          threadCount: 0,
+          unreadCount: 0,
+        },
+      ],
+      fileThreads: [],
+    });
+    bridge.listFileChats.mockResolvedValue({
+      fileObjectId: null,
+      threads: [],
+    });
+    const user = userEvent.setup();
+    renderShell(bridge, sharedWorkspace);
+
+    const panel = await screen.findByTestId("chats-panel");
+    expect(
+      await within(panel).findByTestId("chats-workspace-readonly-note"),
+    ).toBeTruthy();
+    expect(within(panel).queryByTestId("chats-new-channel")).toBeNull();
+    expect(within(panel).queryByTestId("chats-channel-follow")).toBeNull();
+    expect(bridge.syncDms).not.toHaveBeenCalled();
+
+    await user.click(within(panel).getByTestId("chats-channel"));
+    const page = await screen.findByTestId("chats-channel-view");
+    expect(page.dataset.variant).toBe("page");
+    expect(within(page).getByTestId("chats-readonly-note")).toBeTruthy();
+    expect(within(page).queryByTestId("chats-new-thread-composer")).toBeNull();
+    expect(within(page).queryByTestId("chats-share-channel")).toBeNull();
+    expect(startChannelThread).not.toHaveBeenCalled();
+
+    await user.click(screen.getByTestId("tab-b.md"));
+    await user.click(within(panel).getByTestId("chats-panel-tab-file"));
+    expect(
+      await within(panel).findByTestId("linked-chat-readonly-note"),
+    ).toBeTruthy();
+    expect(within(panel).queryByTestId("linked-chat-new")).toBeNull();
   });
 
   it("restores the stored width and can be resized from its left edge", async () => {
@@ -971,7 +1471,7 @@ describe("chats panel (right side)", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    await user.click(await screen.findByTestId("activity-chats"));
+    await user.click(await screen.findByTestId("titlebar-chats-sidebar"));
     await screen.findByTestId("chats-panel");
     await user.click(screen.getByTestId("chats-panel-tab-file"));
 

@@ -10,6 +10,7 @@ import {
   matchDmChannelByRecipients,
   parseDmRecipients,
   peekReceivedGrantKind,
+  requireShareableChatChannel,
   type ShareLogPage,
 } from "./dmChats";
 import type { JoinedSharedChannel } from "./registryStore";
@@ -268,7 +269,37 @@ describe("peekReceivedGrantKind", () => {
     expect(kind).toBe("not-dm");
   });
 
-  it("caps pages scanned and returns a definitive not-dm for an all-filtered log (no infinite since=0 loop)", async () => {
+  it("does not cache a malformed bootstrap as a definitive non-DM", async () => {
+    await expect(
+      peekReceivedGrantKind({
+        fetchPage: async () => ({
+          ops: [{ opKind: "chat.message.append", payload: {} }],
+          nextCursor: 1,
+          hasMore: false,
+        }),
+      }),
+    ).resolves.toBe("unknown");
+    await expect(
+      peekReceivedGrantKind({
+        fetchPage: async () => ({
+          ops: [{ opKind: "chat.channel.create", payload: {} }],
+          nextCursor: 1,
+          hasMore: false,
+        }),
+      }),
+    ).resolves.toBe("unknown");
+    await expect(
+      peekReceivedGrantKind({
+        fetchPage: async () => ({
+          ops: [{ opKind: "chat.channel.create", payload: { kind: "agent" } }],
+          nextCursor: 1,
+          hasMore: false,
+        }),
+      }),
+    ).resolves.toBe("unknown");
+  });
+
+  it("caps pages scanned but keeps an all-filtered log retryable", async () => {
     let calls = 0;
     const kind = await peekReceivedGrantKind({
       // Every page is empty but keeps claiming hasMore with an advancing cursor.
@@ -278,22 +309,95 @@ describe("peekReceivedGrantKind", () => {
       },
       maxPages: 5,
     });
-    expect(kind).toBe("not-dm");
+    expect(kind).toBe("unknown");
     expect(calls).toBe(5);
   });
 
-  it("distinguishes an exhausted log (definitive not-dm) from an un-fetchable page (transient unknown, must be retried not cached)", async () => {
+  it("stops after one page when hasMore carries a stalled cursor", async () => {
+    let calls = 0;
+    const kind = await peekReceivedGrantKind({
+      fetchPage: async (since) => {
+        calls++;
+        return { ops: [], nextCursor: since, hasMore: true };
+      },
+    });
+
+    expect(kind).toBe("unknown");
+    expect(calls).toBe(1);
+  });
+
+  it("stops after one page when hasMore carries a non-numeric cursor", async () => {
+    let calls = 0;
+    const kind = await peekReceivedGrantKind({
+      fetchPage: async () => {
+        calls++;
+        return { ops: [], nextCursor: "not-a-cursor", hasMore: true };
+      },
+    });
+
+    expect(kind).toBe("unknown");
+    expect(calls).toBe(1);
+  });
+
+  it("keeps exhausted and un-fetchable logs transient until a create is visible", async () => {
     await expect(
       peekReceivedGrantKind({
         fetchPage: async () => ({ ops: [], nextCursor: 1, hasMore: false }),
       }),
-    ).resolves.toBe("not-dm");
+    ).resolves.toBe("unknown");
     // A page that can't be fetched (network/relay hiccup) is UNKNOWN, never
     // cached as not-dm — otherwise a transient failure would permanently block
     // a real DM from ever auto-joining.
     await expect(
       peekReceivedGrantKind({ fetchPage: async () => null }),
     ).resolves.toBe("unknown");
+  });
+
+  it("retries when a grant races ahead of owner ops and detects the DM on the next poll", async () => {
+    let ownerBootstrapVisible = false;
+    const fetchPage = async (): Promise<ShareLogPage> =>
+      ownerBootstrapVisible
+        ? {
+            ops: [
+              { opKind: "chat.channel.create", payload: { kind: "dm" } },
+              { opKind: "chat.thread.create", payload: { threadId: "thread-1" } },
+              { opKind: "chat.message.append", payload: { messageId: "message-1" } },
+            ],
+            nextCursor: 3,
+            hasMore: false,
+          }
+        : { ops: [], nextCursor: 0, hasMore: false };
+
+    // First syncDms poll: grant exists, but the owner has not pushed its
+    // channel/thread/message bootstrap. UNKNOWN must not enter the non-DM cache.
+    await expect(peekReceivedGrantKind({ fetchPage })).resolves.toBe("unknown");
+    ownerBootstrapVisible = true;
+    // Later poll sees the immutable create and proceeds to auto-join.
+    await expect(peekReceivedGrantKind({ fetchPage })).resolves.toBe("dm");
+  });
+});
+
+describe("requireShareableChatChannel", () => {
+  it("rejects a crafted generic-share request for a DM at runtime", async () => {
+    const { store } = await makeStore();
+    const dm = await store.createChannel({ workspaceId: WS, name: "bob@x.com", kind: "dm" });
+
+    await expect(
+      requireShareableChatChannel({ workspaceId: WS, channelId: dm.id, store }),
+    ).rejects.toThrow(/Direct messages can't be shared as channels/u);
+
+    const ordinary = await store.createChannel({ workspaceId: WS, name: "Project room" });
+    await expect(
+      requireShareableChatChannel({ workspaceId: WS, channelId: ordinary.id, store }),
+    ).resolves.toBeUndefined();
+
+    const agent = await store.ensureAgentChannel({ workspaceId: WS });
+    await expect(
+      requireShareableChatChannel({ workspaceId: WS, channelId: agent.id, store }),
+    ).rejects.toThrow(/Only ordinary channels can be shared/u);
+    await expect(
+      requireShareableChatChannel({ workspaceId: WS, channelId: "missing-channel", store }),
+    ).rejects.toThrow(/no longer exists/u);
   });
 });
 

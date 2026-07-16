@@ -224,6 +224,21 @@ export interface WorkspaceEngineRestoreResult {
   path: string;
 }
 
+export interface WorkspaceGeneratedTextWriteResult {
+  path: string;
+  objectId: string;
+  changed: boolean;
+}
+
+export interface WorkspaceGeneratedTextArchiveResult {
+  fromPath: string;
+  path: string;
+  objectId: string;
+  changed: boolean;
+}
+
+export type WorkspaceGeneratedTextIdentityValidator = (text: string) => boolean;
+
 // Finishes an engine-coordinated single-file rename: call with ok=true after
 // the disk move succeeded, ok=false to roll the engine rename back.
 export type WorkspaceEngineRenameFinisher = (ok: boolean) => Promise<void>;
@@ -317,6 +332,35 @@ export interface WorkspaceEngineCapture {
   // Stable-identity seam for the linked-chat rail: the active version's
   // engine object id for a path, or null when the engine does not own it.
   fileObjectIdForPath(path: string): Promise<string | null>;
+  // Writes a generated Markdown artifact through this capture's canonical
+  // VersionedTextStore and then materializes it to disk on the SAME serialized
+  // chain as capture/version work. `expectedObjectId` is the update authority:
+  // callers omit it only on first creation or an identical crash-retry.
+  writeGeneratedTextFile(input: {
+    path: string;
+    text: string;
+    expectedObjectId?: string;
+    // Strict first-create mode: any existing engine object or disk file is a
+    // collision, even when its bytes happen to equal the generated text.
+    createOnly?: true;
+    // Marker-validated recovery for legacy or crash-interrupted generated
+    // files whose stable object id was not persisted by the caller. Existing
+    // engine and disk text must both pass inside the serialized write.
+    recoverExistingText?: WorkspaceGeneratedTextIdentityValidator;
+    metadata?: ActorNeutralWriteMetadata;
+  }): Promise<WorkspaceGeneratedTextWriteResult>;
+  // Moves a generated Markdown artifact to another visible Markdown path,
+  // preserving its stable engine object id. Repeating a completed archive is
+  // a no-op that also repairs any unfinished disk materialization.
+  archiveGeneratedTextFile(input: {
+    fromPath: string;
+    toPath: string;
+    expectedObjectId?: string;
+    // When expectedObjectId was not durably recorded, recover it atomically
+    // from either the live source or an already-renamed archive destination.
+    recoverExistingText?: WorkspaceGeneratedTextIdentityValidator;
+    metadata?: ActorNeutralWriteMetadata;
+  }): Promise<WorkspaceGeneratedTextArchiveResult>;
   // Engine-coordinated single-file rename (product rename flows call this
   // BEFORE moving the file on disk). When both sides are engine-owned text,
   // the engine records a rename moment — preserving the stable object id the
@@ -405,6 +449,35 @@ function sha256Bytes(bytes: Uint8Array): string {
 function pathBasename(path: string): string {
   const index = path.lastIndexOf("/");
   return index >= 0 ? path.slice(index + 1) : path;
+}
+
+function assertGeneratedMarkdownPath(path: string): string {
+  const check = validateUserWritePath(path);
+  if (
+    !check.ok ||
+    check.normalized !== path ||
+    !check.normalized.toLocaleLowerCase("en-US").endsWith(".md")
+  ) {
+    throw new Error(`Generated text must use a safe visible Markdown path: ${path}`);
+  }
+  return check.normalized;
+}
+
+function assertGeneratedTextRecoveryIdentity(
+  path: string,
+  text: string,
+  validate: WorkspaceGeneratedTextIdentityValidator,
+): void {
+  let matches = false;
+  try {
+    matches = validate(text);
+  } catch {
+    // A recovery validator is evidence, not an execution surface: any parser
+    // failure is simply a non-match and must fail closed.
+  }
+  if (!matches) {
+    throw new Error(`Generated Markdown ownership marker does not match: ${path}`);
+  }
 }
 
 type DiskTextState =
@@ -2280,6 +2353,345 @@ export function createWorkspaceEngineCapture(
         path,
       });
       return snapshot?.objectId ?? null;
+    },
+
+    writeGeneratedTextFile(input) {
+      return enqueueResult("write generated text", async () => {
+        const path = assertGeneratedMarkdownPath(input.path);
+        if (Buffer.byteLength(input.text, "utf8") > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
+          throw new Error(`Generated Markdown is too large to track: ${path}`);
+        }
+        if (input.recoverExistingText) {
+          // Recovery may only replace an owned projection with another text
+          // carrying the same durable identity; otherwise the next crash
+          // retry would lose its proof of ownership.
+          assertGeneratedTextRecoveryIdentity(path, input.text, input.recoverExistingText);
+        }
+        await settleAndCloseLiveYDocSessions(
+          (candidate) => candidate === path,
+          "Saved latest edits before refreshing generated content",
+        );
+        const policy = await readPolicyForTask();
+        assertEngineWritablePath(path, policy);
+        const engine = await engineStore();
+        const versionId = await activeVersionIdOf(engine);
+        let current = await engine.readTextFile({ workspaceId, versionId, path });
+        if (current?.contentKind === "binary") {
+          throw new Error(`Generated Markdown cannot replace a binary file: ${path}`);
+        }
+        if (
+          (input.createOnly && (input.expectedObjectId || input.recoverExistingText)) ||
+          (input.expectedObjectId && input.recoverExistingText)
+        ) {
+          throw new Error("Generated Markdown write authority is ambiguous.");
+        }
+        if (input.createOnly && current) {
+          throw new Error(`Generated Markdown destination already exists: ${path}`);
+        }
+        if (input.expectedObjectId) {
+          if (!current || current.objectId !== input.expectedObjectId) {
+            throw new Error(`Generated Markdown identity no longer matches: ${path}`);
+          }
+        } else if (input.recoverExistingText && current) {
+          assertGeneratedTextRecoveryIdentity(path, current.text, input.recoverExistingText);
+        } else if (current && current.text !== input.text) {
+          // First creation may be retried after a crash, but it may not adopt
+          // and overwrite an unrelated tracked file merely because the path
+          // happens to collide.
+          throw new Error(`Generated Markdown destination already exists: ${path}`);
+        }
+
+        const disk = await readDiskTextState(rootPath, path);
+        if (input.createOnly && disk.kind !== "absent") {
+          throw new Error(`Generated Markdown destination already exists on disk: ${path}`);
+        }
+        if (
+          disk.kind === "binary" ||
+          disk.kind === "untracked-content" ||
+          disk.kind === "unreadable"
+        ) {
+          throw new Error(`Generated Markdown cannot safely replace the file on disk: ${path}`);
+        }
+        if (input.recoverExistingText && disk.kind === "text") {
+          assertGeneratedTextRecoveryIdentity(path, disk.text, input.recoverExistingText);
+        }
+        if (
+          !current &&
+          !input.recoverExistingText &&
+          disk.kind === "text" &&
+          disk.text !== input.text
+        ) {
+          throw new Error(`Generated Markdown destination already exists on disk: ${path}`);
+        }
+
+        const metadata: ActorNeutralWriteMetadata = input.metadata ?? {
+          origin: "api",
+          summary: `Updated generated ${pathBasename(path)}`,
+          correlationId: `generated-write-${randomUUID()}`,
+        };
+        // Preserve a manually edited disk preimage in history before the
+        // canonical generated copy replaces it. This never grants that edit
+        // authority over the chat source; it only keeps recovery honest.
+        if (
+          disk.kind === "text" &&
+          disk.text !== current?.text &&
+          (Boolean(current) || Boolean(input.recoverExistingText))
+        ) {
+          await writeIfChanged(engine, versionId, path, disk, {
+            origin: "local-file",
+            summary: `Saved edits before refreshing ${pathBasename(path)}`,
+            correlationId: metadata.correlationId,
+          });
+          current = await engine.readTextFile({ workspaceId, versionId, path });
+        }
+
+        let changed = false;
+        if (!current || current.text !== input.text) {
+          const written = await engine.writeTextFile({
+            workspaceId,
+            versionId,
+            path,
+            text: input.text,
+            metadata,
+          });
+          current = written.snapshot;
+          changed = true;
+        }
+        if (disk.kind !== "text" || disk.text !== input.text) {
+          await materialize([{ kind: "write", path, text: input.text }], policy);
+          changed = true;
+        }
+        if (!current) throw new Error(`Generated Markdown did not materialize: ${path}`);
+        return { path, objectId: current.objectId, changed };
+      });
+    },
+
+    archiveGeneratedTextFile(input) {
+      return enqueueResult("archive generated text", async () => {
+        const fromPath = assertGeneratedMarkdownPath(input.fromPath);
+        const toPath = assertGeneratedMarkdownPath(input.toPath);
+        if (fromPath === toPath) {
+          throw new Error("Generated Markdown archive destination must be different.");
+        }
+        if (Boolean(input.expectedObjectId) === Boolean(input.recoverExistingText)) {
+          throw new Error(
+            "Generated Markdown archive requires exactly one ownership authority.",
+          );
+        }
+        await settleAndCloseLiveYDocSessions(
+          (candidate) => candidate === fromPath || candidate === toPath,
+          "Saved latest edits before archiving generated content",
+        );
+        const policy = await readPolicyForTask();
+        assertEngineWritablePath(fromPath, policy);
+        assertEngineWritablePath(toPath, policy);
+        const engine = await engineStore();
+        const versionId = await activeVersionIdOf(engine);
+        let source = await engine.readTextFile({ workspaceId, versionId, path: fromPath });
+        let destination = await engine.readTextFile({ workspaceId, versionId, path: toPath });
+
+        if (!source && !destination && input.recoverExistingText) {
+          // A pre-delta projection may exist only on disk because no engine
+          // object had been created yet. Capture exactly one marker-validated
+          // side before continuing through the normal identity-preserving
+          // archive path. Two present paths are ambiguous and fail below.
+          const sourceDisk = await readDiskTextState(rootPath, fromPath);
+          const destinationDisk = await readDiskTextState(rootPath, toPath);
+          const recoverPath =
+            sourceDisk.kind === "text" && destinationDisk.kind === "absent"
+              ? fromPath
+              : sourceDisk.kind === "absent" && destinationDisk.kind === "text"
+                ? toPath
+                : undefined;
+          const recoverDisk = recoverPath === fromPath ? sourceDisk : destinationDisk;
+          if (recoverPath && recoverDisk.kind === "text") {
+            assertGeneratedTextRecoveryIdentity(
+              recoverPath,
+              recoverDisk.text,
+              input.recoverExistingText,
+            );
+            await writeIfChanged(engine, versionId, recoverPath, recoverDisk, {
+              origin: "local-file",
+              summary: `Recovered generated ${pathBasename(recoverPath)}`,
+              correlationId: `generated-recovery-${randomUUID()}`,
+            });
+            source = await engine.readTextFile({ workspaceId, versionId, path: fromPath });
+            destination = await engine.readTextFile({ workspaceId, versionId, path: toPath });
+          }
+        }
+
+        if (!source) {
+          // Crash-retry/idempotency: the engine rename already completed.
+          if (!destination) {
+            throw new Error(`Generated Markdown archive source is unavailable: ${fromPath}`);
+          }
+          if (destination.contentKind === "binary") {
+            throw new Error(`Generated Markdown archive is unexpectedly binary: ${toPath}`);
+          }
+          if (
+            input.expectedObjectId &&
+            destination.objectId !== input.expectedObjectId
+          ) {
+            throw new Error(`Generated Markdown archive source is unavailable: ${fromPath}`);
+          }
+          if (input.recoverExistingText) {
+            assertGeneratedTextRecoveryIdentity(
+              toPath,
+              destination.text,
+              input.recoverExistingText,
+            );
+          }
+          const sourceDisk = await readDiskTextState(rootPath, fromPath);
+          const destinationDisk = await readDiskTextState(rootPath, toPath);
+          if (input.recoverExistingText && sourceDisk.kind === "text") {
+            assertGeneratedTextRecoveryIdentity(
+              fromPath,
+              sourceDisk.text,
+              input.recoverExistingText,
+            );
+          }
+          if (input.recoverExistingText && destinationDisk.kind === "text") {
+            assertGeneratedTextRecoveryIdentity(
+              toPath,
+              destinationDisk.text,
+              input.recoverExistingText,
+            );
+          }
+          if (
+            sourceDisk.kind === "binary" ||
+            sourceDisk.kind === "untracked-content" ||
+            sourceDisk.kind === "unreadable" ||
+            (!input.recoverExistingText &&
+              sourceDisk.kind === "text" &&
+              sourceDisk.text !== destination.text)
+          ) {
+            throw new Error(
+              `Generated Markdown archive source changed before recovery: ${fromPath}`,
+            );
+          }
+          if (
+            destinationDisk.kind === "binary" ||
+            destinationDisk.kind === "untracked-content" ||
+            destinationDisk.kind === "unreadable"
+          ) {
+            throw new Error(`Generated Markdown archive cannot repair its disk copy: ${toPath}`);
+          }
+          if (destinationDisk.kind === "text" && destinationDisk.text !== destination.text) {
+            const canonical = destination.text;
+            await writeIfChanged(engine, versionId, toPath, destinationDisk, {
+              origin: "local-file",
+              summary: `Saved edits before repairing ${pathBasename(toPath)}`,
+            });
+            const repaired = await engine.writeTextFile({
+              workspaceId,
+              versionId,
+              path: toPath,
+              text: canonical,
+              metadata: input.metadata ?? {
+                origin: "api",
+                summary: `Repaired archived ${pathBasename(toPath)}`,
+              },
+            });
+            destination = repaired.snapshot;
+          }
+          await materialize(
+            [
+              { kind: "write", path: toPath, text: destination.text },
+              { kind: "delete", path: fromPath },
+            ],
+            policy,
+          );
+          return {
+            fromPath,
+            path: toPath,
+            objectId: destination.objectId,
+            changed: false,
+          };
+        }
+
+        if (
+          source.contentKind === "binary" ||
+          (input.expectedObjectId && source.objectId !== input.expectedObjectId)
+        ) {
+          throw new Error(`Generated Markdown identity no longer matches: ${fromPath}`);
+        }
+        if (input.recoverExistingText) {
+          assertGeneratedTextRecoveryIdentity(
+            fromPath,
+            source.text,
+            input.recoverExistingText,
+          );
+        }
+        if (destination) {
+          throw new Error(`Generated Markdown archive destination already exists: ${toPath}`);
+        }
+        const sourceDisk = await readDiskTextState(rootPath, fromPath);
+        const destinationDisk = await readDiskTextState(rootPath, toPath);
+        if (input.recoverExistingText && sourceDisk.kind === "text") {
+          assertGeneratedTextRecoveryIdentity(
+            fromPath,
+            sourceDisk.text,
+            input.recoverExistingText,
+          );
+        }
+        if (
+          sourceDisk.kind === "binary" ||
+          sourceDisk.kind === "untracked-content" ||
+          sourceDisk.kind === "unreadable" ||
+          destinationDisk.kind !== "absent"
+        ) {
+          throw new Error("Generated Markdown archive paths are not safe to replace.");
+        }
+
+        const metadata: ActorNeutralWriteMetadata = input.metadata ?? {
+          origin: "api",
+          summary: `Archived ${pathBasename(fromPath)}`,
+          correlationId: `generated-archive-${randomUUID()}`,
+        };
+        const canonical = source.text;
+        if (sourceDisk.kind === "text" && sourceDisk.text !== canonical) {
+          await writeIfChanged(engine, versionId, fromPath, sourceDisk, {
+            origin: "local-file",
+            summary: `Saved edits before archiving ${pathBasename(fromPath)}`,
+            correlationId: metadata.correlationId,
+          });
+          await engine.writeTextFile({
+            workspaceId,
+            versionId,
+            path: fromPath,
+            text: canonical,
+            metadata: {
+              ...metadata,
+              summary: `Restored generated ${pathBasename(fromPath)} before archive`,
+            },
+          });
+          source = await engine.readTextFile({ workspaceId, versionId, path: fromPath });
+          if (!source) throw new Error(`Generated Markdown disappeared: ${fromPath}`);
+        }
+        const renamed = await engine.renameTextFile({
+          workspaceId,
+          versionId,
+          fromPath,
+          toPath,
+          metadata,
+        });
+        // Destination-first ensures a partial failure never leaves the user
+        // with no readable copy. A retry recognizes the completed engine
+        // rename above and repairs/removes the remaining disk path.
+        await materialize(
+          [
+            { kind: "write", path: toPath, text: renamed.after.text },
+            { kind: "delete", path: fromPath },
+          ],
+          policy,
+        );
+        return {
+          fromPath,
+          path: toPath,
+          objectId: renamed.object.id,
+          changed: true,
+        };
+      });
     },
 
     beginFileRename(fromPath, toPath) {

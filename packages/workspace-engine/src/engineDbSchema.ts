@@ -13,6 +13,15 @@
 
 export const ENGINE_SCHEMA_VERSION = 1;
 export const ENGINE_SQLITE_BUSY_TIMEOUT_MS = 5_000;
+export const CHAT_MESSAGES_CANONICAL_ORDER_INDEX =
+  "idx_chat_messages_thread_created";
+const DEFERRED_CHAT_PARENT_REPAIR_MIGRATION = "deferred-chat-parent-repair-v1";
+
+const ENGINE_MIGRATIONS_DDL = `
+  CREATE TABLE IF NOT EXISTS engine_migrations (
+    migration_id TEXT PRIMARY KEY
+  )
+`;
 
 export interface EngineSqliteStatement {
   all(...params: unknown[]): Array<Record<string, unknown>>;
@@ -396,6 +405,17 @@ const CHAT_CHANNEL_TABLES_DDL = `
     channel_id TEXT NOT NULL,
     PRIMARY KEY (workspace_id, wire_id)
   );
+  -- A replicated thread may arrive before the channel-create op from another
+  -- origin. Keep provenance for only those synthetic rows so the later
+  -- authoritative create can replace their guessed metadata without making
+  -- ordinary, already-mapped channels mutable under conflicting create ops.
+  CREATE TABLE IF NOT EXISTS chat_channel_placeholders (
+    workspace_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    wire_id TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, channel_id),
+    UNIQUE (workspace_id, wire_id)
+  );
   -- Reactions (WS-MU-C2): a set-membership CRDT of emoji reactions. ONE row per
   -- (message, emoji, author) CELL — the row is an LWW register holding the
   -- winning state ('added'|'removed') and its at_ms clock. Tombstones ('removed'
@@ -430,8 +450,12 @@ const CHAT_CHANNEL_TABLES_DDL = `
 `;
 
 /**
- * Decisions, attachments, and mentions deliberately omit FKs because replicated rows can
- * arrive before parents. No deletion path exists yet; cleanup will ship with deletion.
+ * Phase-one chat projections deliberately omit FKs. Attachments/decisions may
+ * arrive before their messages and their readers visibility-gate them through
+ * exact workspace+thread+message joins. Replicated replies instead hold an
+ * absent parent claim in a durable pending table and activate it only after the
+ * parent exists in the same workspace/thread. No deletion path exists yet;
+ * cleanup ships with deletion.
  */
 const CHAT_PHASE_ONE_DDL = `
   CREATE TABLE IF NOT EXISTS chat_decisions (
@@ -460,6 +484,15 @@ const CHAT_PHASE_ONE_DDL = `
   );
   CREATE INDEX IF NOT EXISTS idx_chat_attachments_thread_message
     ON chat_attachments(workspace_id, thread_id, message_id, created_at_ms, attachment_id);
+  CREATE TABLE IF NOT EXISTS chat_pending_message_parents (
+    workspace_id TEXT NOT NULL,
+    child_message_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    parent_message_id TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, child_message_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_chat_pending_message_parents_parent
+    ON chat_pending_message_parents(workspace_id, thread_id, parent_message_id);
   CREATE TABLE IF NOT EXISTS chat_agent_read_state (
     workspace_id TEXT NOT NULL,
     thread_id TEXT NOT NULL,
@@ -480,6 +513,85 @@ const CHAT_PHASE_ONE_DDL = `
   );
   CREATE INDEX IF NOT EXISTS idx_chat_mentions_handle
     ON chat_mentions(workspace_id, handle, created_at_ms, message_id);
+`;
+
+// Receiver-owned personal Feed state. Follows are LWW registers whose
+// `unfollowed` rows are retained as tombstones. Feed read state is another LWW
+// register. Both live in the owner's ordinary workspace-sync lane; the
+// shared-channel replication allowlist intentionally excludes their op kinds.
+const CHAT_FEED_DDL = `
+  CREATE INDEX IF NOT EXISTS ${CHAT_MESSAGES_CANONICAL_ORDER_INDEX}
+    ON chat_messages(workspace_id, thread_id, created_at_ms, message_id);
+  CREATE TABLE IF NOT EXISTS chat_follows (
+    workspace_id TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('person', 'agent', 'channel', 'thread')),
+    target_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('following', 'unfollowed')),
+    updated_at_ms REAL NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, owner_user_id, target_kind, target_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_chat_follows_active
+    ON chat_follows(workspace_id, owner_user_id, state, target_kind, target_id);
+  CREATE TABLE IF NOT EXISTS chat_feed_read_state (
+    workspace_id TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    last_seen_created_at_ms REAL NOT NULL,
+    last_seen_message_id TEXT NOT NULL,
+    updated_at_ms REAL NOT NULL,
+    origin_id TEXT NOT NULL,
+    origin_seq INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, owner_user_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_chat_channel_wire_ids_channel
+    ON chat_channel_wire_ids(workspace_id, channel_id);
+  CREATE INDEX IF NOT EXISTS idx_chat_attachments_file_object
+    ON chat_attachments(workspace_id, object_id, created_at_ms DESC, attachment_id DESC);
+  CREATE INDEX IF NOT EXISTS idx_chat_attachments_file_path
+    ON chat_attachments(workspace_id, path_hint, created_at_ms DESC, attachment_id DESC);
+`;
+
+// Workspace-backed bookmarks split desired state from projection delivery.
+// The outbox's generation is a CAS token: a worker finishing generation N
+// cannot mark N ready after a newer chat message queued N+1. No filesystem IO
+// occurs in the engine; desktop materialization consumes pending rows.
+const CHAT_BOOKMARK_DDL = `
+  CREATE TABLE IF NOT EXISTS chat_bookmarks (
+    workspace_id TEXT NOT NULL,
+    bookmark_id TEXT NOT NULL,
+    owner_user_id TEXT NOT NULL,
+    target_kind TEXT NOT NULL CHECK (target_kind IN ('message', 'thread')),
+    target_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    message_id TEXT,
+    mode TEXT NOT NULL CHECK (mode IN ('live', 'snapshot')),
+    destination_path TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('active', 'archived')),
+    created_at_ms REAL NOT NULL,
+    updated_at_ms REAL NOT NULL,
+    PRIMARY KEY (workspace_id, bookmark_id),
+    UNIQUE (workspace_id, owner_user_id, target_kind, target_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_chat_bookmarks_owner_state
+    ON chat_bookmarks(workspace_id, owner_user_id, state, updated_at_ms DESC, bookmark_id);
+  CREATE INDEX IF NOT EXISTS idx_chat_bookmarks_live_thread
+    ON chat_bookmarks(workspace_id, thread_id, mode, state);
+  CREATE TABLE IF NOT EXISTS chat_bookmark_outbox (
+    workspace_id TEXT NOT NULL,
+    bookmark_id TEXT NOT NULL,
+    generation INTEGER NOT NULL,
+    projected_generation INTEGER NOT NULL DEFAULT 0,
+    projection_state TEXT NOT NULL CHECK (projection_state IN ('pending', 'ready', 'failed', 'stale')),
+    last_projected_at_ms REAL,
+    projection_object_id TEXT,
+    failure_reason TEXT,
+    updated_at_ms REAL NOT NULL,
+    PRIMARY KEY (workspace_id, bookmark_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_chat_bookmark_outbox_pending
+    ON chat_bookmark_outbox(workspace_id, projection_state, updated_at_ms, bookmark_id);
 `;
 
 const AGENT_DISPATCH_DDL = `
@@ -664,6 +776,66 @@ function listUserTables(db: EngineSqliteDb): string[] {
     .map((row) => String(row.name));
 }
 
+function repairDeferredChatParentsOnce(
+  db: EngineSqliteDb,
+  corrupt: (cause?: unknown) => Error,
+): void {
+  db.exec(ENGINE_MIGRATIONS_DDL);
+  const migrationCompleted = () =>
+    db
+      .prepare("SELECT 1 FROM engine_migrations WHERE migration_id = ?")
+      .get(DEFERRED_CHAT_PARENT_REPAIR_MIGRATION);
+  // The common path stays read-only and never takes SQLite's writer lock.
+  if (migrationCompleted()) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    // Re-check after acquiring the writer lock: another process may have
+    // completed the repair between the fast-path read and this transaction.
+    if (!migrationCompleted()) {
+      // Older builds surfaced a replicated parent id immediately, even when
+      // its message had not arrived yet. Move genuinely absent parents into
+      // deferred state and discard cross-thread/self links. The marker is
+      // committed atomically with the repair, so a crash retries the entire
+      // migration while every later startup performs only the keyed lookup.
+      db.exec(`
+        INSERT OR IGNORE INTO chat_pending_message_parents (
+          workspace_id, child_message_id, thread_id, parent_message_id
+        )
+        SELECT child.workspace_id, child.message_id, child.thread_id, child.parent_message_id
+        FROM chat_messages child
+        WHERE child.parent_message_id IS NOT NULL
+          AND child.parent_message_id <> child.message_id
+          AND NOT EXISTS (
+            SELECT 1 FROM chat_messages parent
+            WHERE parent.workspace_id = child.workspace_id
+              AND parent.message_id = child.parent_message_id
+          );
+        UPDATE chat_messages AS child
+        SET parent_message_id = NULL
+        WHERE child.parent_message_id IS NOT NULL
+          AND (
+            child.parent_message_id = child.message_id
+            OR NOT EXISTS (
+              SELECT 1 FROM chat_messages parent
+              WHERE parent.workspace_id = child.workspace_id
+                AND parent.thread_id = child.thread_id
+                AND parent.message_id = child.parent_message_id
+            )
+          );
+      `);
+      db.prepare("INSERT INTO engine_migrations (migration_id) VALUES (?)").run(
+        DEFERRED_CHAT_PARENT_REPAIR_MIGRATION,
+      );
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {}
+    throw corrupt(error);
+  }
+}
+
 export function initializeOrValidateEngineSchema(
   db: EngineSqliteDb,
   corrupt: (cause?: unknown) => Error,
@@ -688,7 +860,10 @@ export function initializeOrValidateEngineSchema(
   db.exec(ENGINE_SEARCH_INDEX_DDL);
   db.exec(CHAT_CHANNEL_TABLES_DDL);
   db.exec(CHAT_PHASE_ONE_DDL);
+  db.exec(CHAT_FEED_DDL);
+  db.exec(CHAT_BOOKMARK_DDL);
   db.exec(AGENT_DISPATCH_DDL);
+  ensureNullableColumn(db, "chat_bookmark_outbox", "projection_object_id", "TEXT", corrupt);
   ensureNullableColumn(db, "chat_dispatch_ledger", "failure_reason", "TEXT", corrupt);
   ensureNullableColumn(db, "agent_run_records", "failure_reason", "TEXT", corrupt);
   ensureMomentsAuthorColumn(db, corrupt);
@@ -710,6 +885,14 @@ export function initializeOrValidateEngineSchema(
   ensureNullableColumn(db, "chat_messages", "author_user_id", "TEXT", corrupt);
   ensureNullableColumn(db, "chat_messages", "parent_message_id", "TEXT", corrupt);
   ensureNullableColumn(db, "chat_messages", "origin", "TEXT", corrupt);
+  repairDeferredChatParentsOnce(db, corrupt);
+  ensureNullableColumn(db, "chat_attachments", "heading_text", "TEXT", corrupt);
+  ensureNullableColumn(db, "chat_attachments", "heading_anchor", "TEXT", corrupt);
+  ensureNullableColumn(db, "chat_attachments", "heading_occurrence", "INTEGER", corrupt);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_chat_messages_author_feed
+    ON chat_messages(
+      workspace_id, author_user_id, author_kind, created_at_ms DESC, message_id DESC
+    )`);
 }
 
 export function assertRequiredEngineTables(
@@ -751,6 +934,7 @@ export function createEngineSchema(db: EngineSqliteDb): void {
         id INTEGER PRIMARY KEY CHECK (id = 1),
         version INTEGER NOT NULL
       );
+      ${ENGINE_MIGRATIONS_DDL};
       CREATE TABLE IF NOT EXISTS blobs (
         sha256 TEXT PRIMARY KEY,
         byte_length INTEGER NOT NULL,
@@ -940,6 +1124,8 @@ export function createEngineSchema(db: EngineSqliteDb): void {
       ${SECRET_TABLES_DDL};
       ${CHAT_CHANNEL_TABLES_DDL};
       ${CHAT_PHASE_ONE_DDL};
+      ${CHAT_FEED_DDL};
+      ${CHAT_BOOKMARK_DDL};
       ${AGENT_DISPATCH_DDL};
       ${SYNC_REPLICATION_DDL};
       ${SHARED_CHANNEL_SYNC_DDL};

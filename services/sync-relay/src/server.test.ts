@@ -907,6 +907,28 @@ describe("MU-C0 verified chat authorship", () => {
     return { originSeq, opKind: "chat.reaction.set", payload, recordedAtMs: 1000 + originSeq };
   }
 
+  function receiverStateOp(
+    originSeq: number,
+    opKind: "chat.follow.set" | "chat.feed.read.set",
+    ownerUserId: string | undefined,
+  ) {
+    const payload: Record<string, unknown> =
+      opKind === "chat.follow.set"
+        ? {
+            targetKind: "thread",
+            targetId: "t-1",
+            state: "following",
+            atMs: 1000 + originSeq,
+          }
+        : {
+            lastSeenCreatedAtMs: 1000 + originSeq,
+            lastSeenMessageId: "m-1",
+            atMs: 1000 + originSeq,
+          };
+    if (ownerUserId !== undefined) payload.ownerUserId = ownerUserId;
+    return { originSeq, opKind, payload, recordedAtMs: 1000 + originSeq };
+  }
+
   async function logOps(h: SyncRelayHandler): Promise<unknown[]> {
     const fetched = await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })));
     return fetched.ops as unknown[];
@@ -984,6 +1006,83 @@ describe("MU-C0 verified chat authorship", () => {
     expect(await json(missing)).toMatchObject({ ok: false, code: "authorship_mismatch" });
     expect(await logOps(h)).toEqual([]);
   });
+
+  it("admits follow and feed-read state owned by the authenticated pusher", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const admitted = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody({
+          originId: "origin-a",
+          ops: [
+            receiverStateOp(0, "chat.follow.set", "a"),
+            receiverStateOp(1, "chat.feed.read.set", "a"),
+          ],
+        }),
+      ),
+    );
+    expect(admitted.status).toBe(200);
+    expect(await logOps(h)).toHaveLength(2);
+  });
+
+  for (const opKind of ["chat.follow.set", "chat.feed.read.set"] as const) {
+    it(`rejects ${opKind} forging another user's ownerUserId`, async () => {
+      const storage = await testStorage();
+      const h = handler(storage);
+      await createWorkspace(h);
+      const forged = await h(
+        request(
+          "a",
+          "/sync/workspace-a/log",
+          jsonBody({ originId: "origin-a", ops: [receiverStateOp(0, opKind, "victim")] }),
+        ),
+      );
+      expect(forged.status).toBe(403);
+      expect(await json(forged)).toMatchObject({ ok: false, code: "authorship_mismatch" });
+      expect(await logOps(h)).toEqual([]);
+    });
+
+    it(`rejects ${opKind} with no ownerUserId (required owner, fail-closed)`, async () => {
+      const storage = await testStorage();
+      const h = handler(storage);
+      await createWorkspace(h);
+      const missing = await h(
+        request(
+          "a",
+          "/sync/workspace-a/log",
+          jsonBody({ originId: "origin-a", ops: [receiverStateOp(0, opKind, undefined)] }),
+        ),
+      );
+      expect(missing.status).toBe(403);
+      expect(await json(missing)).toMatchObject({ ok: false, code: "authorship_mismatch" });
+      expect(await logOps(h)).toEqual([]);
+    });
+
+    it(`rejects an entire ${opKind} batch when a later op forges its owner`, async () => {
+      const storage = await testStorage();
+      const h = handler(storage);
+      await createWorkspace(h);
+      const mixed = await h(
+        request(
+          "a",
+          "/sync/workspace-a/log",
+          jsonBody({
+            originId: "origin-a",
+            ops: [
+              receiverStateOp(0, opKind, "a"),
+              receiverStateOp(1, opKind, "victim"),
+            ],
+          }),
+        ),
+      );
+      expect(mixed.status).toBe(403);
+      expect(await json(mixed)).toMatchObject({ ok: false, code: "authorship_mismatch" });
+      expect(await logOps(h)).toEqual([]);
+    });
+  }
 
   it("rejects a batch mixing one valid and one forged op ATOMICALLY (nothing admitted)", async () => {
     const storage = await testStorage();

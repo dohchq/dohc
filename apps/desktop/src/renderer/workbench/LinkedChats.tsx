@@ -43,15 +43,19 @@ type ThreadsState =
 export function LinkedChatsPanel(props: {
   workspaceId: string;
   filePath: string | null;
+  readOnly?: boolean;
   initialThread?: ChatThreadRecord | null;
+  initialFocusMessageId?: string;
   // Fired once when initialThread is consumed so the parent can clear the
   // state it minted for this open. Without that clear, every remount of this
   // panel (History <-> Chats toggle) resets consumedInitialThread and
   // re-opens the stale thread.
   onInitialThreadConsumed?: () => void;
+  onOpenPath?: (path: string, headingAnchor?: string) => void;
   onError: (message: string) => void;
 }) {
   const { workspaceId, filePath } = props;
+  const readOnly = props.readOnly === true;
   const [threadsState, setThreadsState] = useState<ThreadsState>({ status: "loading" });
   const [activeThread, setActiveThread] = useState<ChatThreadRecord | null>(null);
   const [messages, setMessages] = useState<ChatMessageRecord[]>([]);
@@ -66,6 +70,7 @@ export function LinkedChatsPanel(props: {
   // in order (see runReactionToggle).
   const reactionSeq = useRef(new Map<string, number>());
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const threadViewRef = useRef<HTMLDivElement | null>(null);
 
   const refreshThreads = useCallback(async () => {
     if (!filePath) return;
@@ -106,7 +111,7 @@ export function LinkedChatsPanel(props: {
   }, [filePath, refreshThreads]);
 
   const openThread = useCallback(
-    async (thread: ChatThreadRecord) => {
+    async (thread: ChatThreadRecord, focusMessageId?: string) => {
       const token = ++liveToken.current;
       setActiveThread(thread);
       setMessages([]);
@@ -121,10 +126,24 @@ export function LinkedChatsPanel(props: {
         setMessages(result.messages);
         setReactions(reactionResult.reactions);
         setViewerAuthorId(reactionResult.viewerAuthorId);
-        // Land on the most recent message, matching the post-send scroll.
-        requestAnimationFrame(() =>
-          messagesEndRef.current?.scrollIntoView({ block: "end" }),
-        );
+        requestAnimationFrame(() => {
+          // Rendering is deferred one frame so the freshly loaded messages
+          // exist in the DOM. Re-check the same request token inside that
+          // deferred callback: another thread/file/workspace may have opened
+          // after the response committed but before this frame ran.
+          if (token !== liveToken.current) return;
+          const focusedMessage = focusMessageId
+            ? Array.from(
+                threadViewRef.current?.querySelectorAll<HTMLElement>("[data-message-id]") ??
+                  [],
+              ).find((element) => element.dataset.messageId === focusMessageId)
+            : undefined;
+          // A file mention lands on the exact referenced message. Ordinary
+          // thread opens retain the established latest-message landing.
+          (focusedMessage ?? messagesEndRef.current)?.scrollIntoView({
+            block: focusedMessage ? "center" : "end",
+          });
+        });
       } catch (error) {
         if (token !== liveToken.current) return;
         props.onError(ipcErrorMessage(error, "Could not load this chat."));
@@ -146,12 +165,18 @@ export function LinkedChatsPanel(props: {
     if (!props.initialThread) return;
     if (consumedInitialThread.current === props.initialThread) return;
     consumedInitialThread.current = props.initialThread;
-    void openThread(props.initialThread);
+    void openThread(props.initialThread, props.initialFocusMessageId);
     props.onInitialThreadConsumed?.();
-  }, [openThread, props.initialThread, props.onInitialThreadConsumed]);
+  }, [
+    openThread,
+    props.initialFocusMessageId,
+    props.initialThread,
+    props.onInitialThreadConsumed,
+  ]);
 
   const createChat = useCallback(
     async (title: string) => {
+      if (readOnly) return;
       if (!filePath) return;
       const trimmed = title.trim();
       if (trimmed.length === 0) return;
@@ -175,10 +200,11 @@ export function LinkedChatsPanel(props: {
         props.onError(ipcErrorMessage(error, "Could not start a chat for this file."));
       }
     },
-    [filePath, openThread, props, workspaceId],
+    [filePath, openThread, props, readOnly, workspaceId],
   );
 
   const sendMessage = useCallback(async () => {
+    if (readOnly) return;
     const thread = activeThread;
     const body = composer.trim();
     if (!thread || body.length === 0 || sending) return;
@@ -205,13 +231,14 @@ export function LinkedChatsPanel(props: {
       // sends, so an unconditional reset is race-free.
       setSending(false);
     }
-  }, [activeThread, composer, props, sending, workspaceId]);
+  }, [activeThread, composer, props, readOnly, sending, workspaceId]);
 
   // Reactions (WS-MU-C2): optimistic toggle of the viewer's own reaction with
   // rollback-on-failure and per-cell ordering, then reconcile to the canonical
   // server list. Shared with the Chats view so behavior can never drift.
   const toggleReaction = useCallback(
     (input: { messageId: string; emoji: string; nextState: "added" | "removed" }) => {
+      if (readOnly) return;
       const thread = activeThread;
       if (!thread) return;
       runReactionToggle(
@@ -228,12 +255,16 @@ export function LinkedChatsPanel(props: {
         input,
       );
     },
-    [activeThread, props, viewerAuthorId, workspaceId],
+    [activeThread, props, readOnly, viewerAuthorId, workspaceId],
   );
 
   if (activeThread) {
     return (
-      <div data-testid="linked-chat-thread" className="flex min-h-0 flex-1 flex-col">
+      <div
+        ref={threadViewRef}
+        data-testid="linked-chat-thread"
+        className="flex min-h-0 flex-1 flex-col"
+      >
         <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-line px-2">
           <button
             type="button"
@@ -262,22 +293,33 @@ export function LinkedChatsPanel(props: {
           loading={messagesLoading}
           emptyLabel={`No messages yet${filePath ? ` about ${basename(filePath)}` : ""}.`}
           endRef={messagesEndRef}
+          onOpenPath={props.onOpenPath}
           reactionControls={{
             reactions,
             viewerAuthorId,
             onToggle: toggleReaction,
+            readOnly,
           }}
         />
-        <ChatComposer
-          testIdPrefix="linked-chat"
-          composerId="linked-chat-composer"
-          value={composer}
-          sending={sending}
-          placeholder="Write a message…"
-          sendLabel="Send message"
-          onChange={setComposer}
-          onSend={() => void sendMessage()}
-        />
+        {readOnly ? (
+          <p
+            data-testid="linked-chat-readonly-note"
+            className="m-0 shrink-0 border-t border-line px-3 py-2 text-[11px] text-subtle"
+          >
+            This shared workspace is read-only. You can still read this chat.
+          </p>
+        ) : (
+          <ChatComposer
+            testIdPrefix="linked-chat"
+            composerId="linked-chat-composer"
+            value={composer}
+            sending={sending}
+            placeholder="Write a message…"
+            sendLabel="Send message"
+            onChange={setComposer}
+            onSend={() => void sendMessage()}
+          />
+        )}
       </div>
     );
   }
@@ -331,7 +373,9 @@ export function LinkedChatsPanel(props: {
             <span className="text-xs text-muted">
               No chats about this file yet.
             </span>
-            <span className="text-[11px] text-subtle">Start one.</span>
+            <span className="text-[11px] text-subtle">
+              {readOnly ? "This shared workspace is read-only." : "Start one."}
+            </span>
           </div>
         ) : (
           <ul className="m-0 list-none p-0">
@@ -357,7 +401,14 @@ export function LinkedChatsPanel(props: {
         )}
       </div>
       <div className="shrink-0 border-t border-line p-2">
-        {threadsState.fileObjectId === null ? (
+        {readOnly ? (
+          <p
+            data-testid="linked-chat-readonly-note"
+            className="m-0 px-1 text-[11px] leading-4 text-subtle"
+          >
+            This shared workspace is read-only. You can still read its chats.
+          </p>
+        ) : threadsState.fileObjectId === null ? (
           <p className="m-0 px-1 text-[11px] leading-4 text-subtle">
             Chats aren't available for this file yet — only text files dohc
             tracks can have Chats.

@@ -140,7 +140,7 @@ test("explicit opt-out: app works, nothing records anywhere, and the app says hi
     await page.getByTestId("activity-history").click();
     await expect(page.getByTestId("history-off-placeholder")).toBeVisible();
     await expect(page.getByTestId("engine-history-list")).toHaveCount(0);
-    await expect(page.getByTestId("activity-chats")).toHaveCount(0);
+    await expect(page.getByTestId("titlebar-chats-sidebar")).toHaveCount(0);
     await expect(page.getByTestId("chats-panel")).toHaveCount(0);
 
     // The persistent notice is present (reuses the capture-failure pattern).

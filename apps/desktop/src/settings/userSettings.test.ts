@@ -76,8 +76,32 @@ describe("desktop user settings model", () => {
 
     expect(parseDesktopUserSettings(legacySettings)).toEqual({
       ...legacySettings,
+      profile: {},
       runner: DEFAULT_RUNNER_SETTINGS,
     });
+  });
+
+  it("migrates preferred-name support into old v1 settings and validates names", () => {
+    const legacy = {
+      version: 1 as const,
+      appearance: DEFAULT_USER_SETTINGS.appearance,
+      general: DEFAULT_USER_SETTINGS.general,
+      editor: DEFAULT_USER_SETTINGS.editor,
+      notifications: DEFAULT_USER_SETTINGS.notifications,
+      runner: DEFAULT_RUNNER_SETTINGS,
+    };
+    expect(parseDesktopUserSettings(legacy).profile).toEqual({});
+
+    const named = mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
+      profile: { preferredName: "  Ice de Vera  " },
+    });
+    expect(named.profile.preferredName).toBe("Ice de Vera");
+    expect(
+      DesktopUserSettings.safeParse({
+        ...DEFAULT_USER_SETTINGS,
+        profile: { preferredName: "Ice\u0000Admin" },
+      }).success,
+    ).toBe(false);
   });
 
   it("merges runner fields independently and validates timeout bounds", () => {

@@ -232,6 +232,11 @@ export type SyncReplicationOpKind =
   // no-op. It rides the SAME 0P chat replication transport as the other chat
   // kinds (blob-free). See ChatReactionSetPayload.
   | "chat.reaction.set"
+  // Receiver-owned personal Feed state. These ops ride the owner's ordinary
+  // workspace-sync lane and are deliberately excluded from chat-channel
+  // shares; the shared-channel allowlist must never serve them.
+  | "chat.follow.set"
+  | "chat.feed.read.set"
   // WS-G2-C1: a Yjs CRDT update for a rich-doc object. UNLIKE moment.append it
   // is a COMMUTATIVE delta — apply carries NO head-check and opens NO P0D
   // conflict (Yjs guarantees convergence). See YDocUpdatePayload.
@@ -425,6 +430,9 @@ export interface ChatAttachmentAddPayload {
   // still require objectId through sendMessage/startChannelThread inputs.
   objectId?: WorkspaceObjectId;
   pathHint?: string;
+  headingText?: string;
+  headingAnchor?: string;
+  headingOccurrence?: number;
   createdAtMs: number;
 }
 
@@ -470,6 +478,26 @@ export interface ChatReactionSetPayload {
   // The cell's observed membership after this op.
   state: ChatReactionState;
   // LWW clock for this cell (the op's wall time). Ties break remove-wins.
+  atMs: number;
+}
+
+export type ChatFollowTargetKind = "person" | "agent" | "channel" | "thread";
+export type ChatFollowState = "following" | "unfollowed";
+
+/** Receiver-owned LWW register for one Feed subscription. */
+export interface ChatFollowSetPayload {
+  ownerUserId: string;
+  targetKind: ChatFollowTargetKind;
+  targetId: string;
+  state: ChatFollowState;
+  atMs: number;
+}
+
+/** Receiver-owned LWW register for the Feed's caught-up boundary. */
+export interface ChatFeedReadSetPayload {
+  ownerUserId: string;
+  lastSeenCreatedAtMs: number;
+  lastSeenMessageId: ChatMessageId;
   atMs: number;
 }
 
@@ -544,6 +572,8 @@ export type SyncReplicationEnvelope =
   | SyncReplicationEnvelopeOf<"chat.decision.set", ChatDecisionSetPayload>
   | SyncReplicationEnvelopeOf<"chat.attachment.add", ChatAttachmentAddPayload>
   | SyncReplicationEnvelopeOf<"chat.reaction.set", ChatReactionSetPayload>
+  | SyncReplicationEnvelopeOf<"chat.follow.set", ChatFollowSetPayload>
+  | SyncReplicationEnvelopeOf<"chat.feed.read.set", ChatFeedReadSetPayload>
   | SyncReplicationEnvelopeOf<"ydoc.update", YDocUpdatePayload>;
 
 /**
@@ -1039,6 +1069,8 @@ export type LinkedChatStoreErrorCode =
   | "decision-not-found"
   | "invalid-channel-kind"
   | "invalid-channel-name"
+  | "invalid-bookmark-target"
+  | "invalid-follow-target"
   | "invalid-message-body"
   | "message-not-found"
   | "invalid-path"
@@ -1151,7 +1183,17 @@ export interface ChatAttachment {
   // Absent for an opaque attachment received through a shared channel.
   objectId?: WorkspaceObjectId;
   pathHint?: string;
+  headingText?: string;
+  headingAnchor?: string;
+  headingOccurrence?: number;
   createdAtMs: number;
+}
+
+export interface ChatFileMention {
+  attachment: ChatAttachment;
+  message: ChatMessage;
+  thread: ChatThread;
+  channel?: ChatChannel;
 }
 
 export interface ChatMessage {
@@ -1216,6 +1258,81 @@ export interface ChatReaction {
   author: ChatReactionAuthor;
   state: ChatReactionState;
   atMs: number;
+}
+
+export interface ChatFollow {
+  workspaceId: WorkspaceId;
+  ownerUserId: string;
+  targetKind: ChatFollowTargetKind;
+  targetId: string;
+  state: ChatFollowState;
+  updatedAtMs: number;
+}
+
+export interface ChatFeedReadState {
+  workspaceId: WorkspaceId;
+  ownerUserId: string;
+  lastSeenCreatedAtMs: number;
+  lastSeenMessageId: ChatMessageId;
+  updatedAtMs: number;
+}
+
+export interface ChatFeedItem {
+  message: ChatMessage;
+  thread: ChatThread;
+  channel?: ChatChannel;
+  parentMessage?: ChatMessage;
+  openingMessage?: ChatMessage;
+  reactions: ChatReaction[];
+  matchedBy: ChatFollowTargetKind[];
+}
+
+export interface ChatFeedPage {
+  items: ChatFeedItem[];
+  nextCursor?: string;
+  headCursor?: string;
+  readState?: ChatFeedReadState;
+}
+
+export type ChatBookmarkTargetKind = "message" | "thread";
+export type ChatBookmarkMode = "live" | "snapshot";
+export type ChatBookmarkState = "active" | "archived";
+export type ChatBookmarkProjectionState = "pending" | "ready" | "failed" | "stale";
+
+/**
+ * A receiver-owned request to materialize chat context as a workspace file.
+ * The engine owns desired state + a generation-checked outbox only; filesystem
+ * materialization belongs to the desktop workspace layer.
+ */
+export interface ChatBookmark {
+  bookmarkId: string;
+  workspaceId: WorkspaceId;
+  ownerUserId: string;
+  targetKind: ChatBookmarkTargetKind;
+  targetId: string;
+  threadId: ChatThreadId;
+  messageId?: ChatMessageId;
+  mode: ChatBookmarkMode;
+  destinationPath: string;
+  state: ChatBookmarkState;
+  generation: number;
+  projectedGeneration: number;
+  projectionState: ChatBookmarkProjectionState;
+  // Stable engine identity of the generated artifact this bookmark owns.
+  // Absent until the first projection succeeds; callers must never infer
+  // ownership from whichever object currently occupies destinationPath.
+  projectionObjectId?: WorkspaceObjectId;
+  createdAtMs: number;
+  updatedAtMs: number;
+  lastProjectedAtMs?: number;
+  failureReason?: string;
+}
+
+export interface ChatBookmarkTransitionResult {
+  bookmark: ChatBookmark;
+  // False when a materializer reports an obsolete generation. The current
+  // bookmark is returned so the worker can immediately observe newer work.
+  applied: boolean;
 }
 
 export type LinkedChatProjectionFileAccess =
@@ -1286,7 +1403,13 @@ export interface LinkedChatStore {
     origin?: "cli";
     body: string;
     needsDecision?: boolean;
-    attachments?: Array<{ objectId: WorkspaceObjectId; pathHint?: string }>;
+    attachments?: Array<{
+      objectId: WorkspaceObjectId;
+      pathHint?: string;
+      headingText?: string;
+      headingAnchor?: string;
+      headingOccurrence?: number;
+    }>;
   }): Promise<{ thread: ChatThread; message: ChatMessage }>;
   // Most-recent-activity first, with derived unread counts.
   listChannelThreads(input: {
@@ -1324,7 +1447,13 @@ export interface LinkedChatStore {
     origin?: "cli";
     body: string;
     needsDecision?: boolean;
-    attachments?: Array<{ objectId: WorkspaceObjectId; pathHint?: string }>;
+    attachments?: Array<{
+      objectId: WorkspaceObjectId;
+      pathHint?: string;
+      headingText?: string;
+      headingAnchor?: string;
+      headingOccurrence?: number;
+    }>;
   }): Promise<ChatMessage>;
   listMessages(input: {
     workspaceId: WorkspaceId;
@@ -1344,6 +1473,11 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId,
     threadId: ChatThreadId,
   ): Promise<ChatAttachment[]>;
+  listFileMentions(input: {
+    workspaceId: WorkspaceId;
+    objectId?: WorkspaceObjectId;
+    pathHint?: string;
+  }): Promise<ChatFileMention[]>;
   markThreadReadByAgent(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
@@ -1378,6 +1512,105 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
   }): Promise<ChatReaction[]>;
+  // --- Personal Feed -------------------------------------------------------
+  // Receiver-owned state: ownerUserId is derived by the trusted caller (main
+  // process / local CLI), never by a browser renderer. Channel targets use the
+  // cross-machine wire id; person/agent targets use verified opaque user ids.
+  setFollow(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    // Supplied only when the trusted caller has a verified relay identity.
+    // Omit for signed-out/local-only state. When present it must equal
+    // ownerUserId before this mutation is admitted to the replication log.
+    replicationOwnerUserId?: string;
+    targetKind: ChatFollowTargetKind;
+    targetId: string;
+    state: ChatFollowState;
+  }): Promise<ChatFollow>;
+  listFollows(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    state?: ChatFollowState;
+  }): Promise<ChatFollow[]>;
+  // Seeds missing non-DM channel follows at clock zero. It never journals and
+  // INSERT OR IGNORE means a real unfollow tombstone cannot be resurrected.
+  ensureDefaultChannelFollows(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+  }): Promise<void>;
+  listPersonalFeed(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    cursor?: string;
+    limit?: number;
+  }): Promise<ChatFeedPage>;
+  markPersonalFeedSeen(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    // Same verified-identity gate as setFollow. Signed-out read position is
+    // durable locally but intentionally absent from sync exports.
+    replicationOwnerUserId?: string;
+    headCursor: string;
+  }): Promise<ChatFeedReadState>;
+  // --- Workspace-backed chat bookmarks -----------------------------------
+  saveBookmark(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    targetKind: ChatBookmarkTargetKind;
+    targetId: string;
+    mode: ChatBookmarkMode;
+    destinationPath: string;
+  }): Promise<ChatBookmark>;
+  listBookmarks(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    state?: ChatBookmarkState;
+  }): Promise<ChatBookmark[]>;
+  findBookmark(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    bookmarkId: string;
+  }): Promise<ChatBookmark | null>;
+  archiveBookmark(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    bookmarkId: string;
+  }): Promise<ChatBookmark>;
+  listPendingBookmarks(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    limit?: number;
+  }): Promise<ChatBookmark[]>;
+  markBookmarkPending(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    bookmarkId: string;
+  }): Promise<ChatBookmark>;
+  markBookmarkReady(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    bookmarkId: string;
+    generation: number;
+    projectedAtMs?: number;
+    projectionObjectId?: WorkspaceObjectId;
+    // Required with projectionObjectId so an obsolete worker may safely
+    // record ownership only while the bookmark still targets the same path.
+    projectionPath?: string;
+  }): Promise<ChatBookmarkTransitionResult>;
+  markBookmarkFailed(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    bookmarkId: string;
+    generation: number;
+    failureReason: string;
+  }): Promise<ChatBookmarkTransitionResult>;
+  markBookmarkStale(input: {
+    workspaceId: WorkspaceId;
+    ownerUserId: string;
+    bookmarkId: string;
+    generation: number;
+    failureReason?: string;
+  }): Promise<ChatBookmarkTransitionResult>;
   // Same replication contract as VersionedTextStore.applyReplicationOp:
   // idempotent skip on duplicate originSeq, fail-closed on per-origin gaps,
   // journal + ack in the same transaction as the mutation. Chat ops never

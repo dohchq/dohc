@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { Bot, Check, Copy, RefreshCw } from "lucide-react";
 import type {
+  AgentPanelSnapshotResult,
   AgentRunStatusResult,
   McpConfigResult,
 } from "../../ipc/bridgeContract";
 import type { RunnerSettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
+import { PreferredNameControl } from "./PreferredNameControl";
 import { RunnerSettingsCard } from "./RunnerSettingsCard";
 import { SettingRow } from "./SettingRow";
 
@@ -30,6 +32,8 @@ const USAGE_EXAMPLES = [
 export function AgentsMcpSettings(props: {
   workspaceId: string;
   workspacePath: string;
+  preferredName?: string;
+  onPreferredNameChange: (preferredName: string | undefined) => Promise<void>;
   runner: RunnerSettings;
   onRunnerChange: (runner: RunnerSettings) => Promise<void>;
   onAgentActiveChange?: (active: boolean) => void;
@@ -37,6 +41,8 @@ export function AgentsMcpSettings(props: {
   const {
     workspaceId,
     workspacePath,
+    preferredName,
+    onPreferredNameChange,
     runner,
     onRunnerChange,
     onAgentActiveChange,
@@ -47,6 +53,9 @@ export function AgentsMcpSettings(props: {
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [drivers, setDrivers] = useState<AgentPanelSnapshotResult["drivers"] | null>(null);
+  const [probeError, setProbeError] = useState(false);
+  const [probing, setProbing] = useState(false);
   const mountedRef = useRef(false);
   // Workspace async safety invariant: IPC responses are allowed to update this
   // panel only if they belong to the latest workspace/request version.
@@ -88,6 +97,19 @@ export function AgentsMcpSettings(props: {
     });
   }, [isCurrentRequest, refresh]);
 
+  const probeDrivers = useCallback(async (version: number) => {
+    setProbing(true);
+    setProbeError(false);
+    try {
+      const panel = await bridge().probeAgentDrivers({ workspaceId });
+      if (isCurrentRequest(version)) setDrivers(panel.drivers);
+    } catch {
+      if (isCurrentRequest(version)) setProbeError(true);
+    } finally {
+      if (isCurrentRequest(version)) setProbing(false);
+    }
+  }, [isCurrentRequest, workspaceId]);
+
   useEffect(() => {
     mountedRef.current = true;
     const version = requestVersionRef.current + 1;
@@ -97,20 +119,30 @@ export function AgentsMcpSettings(props: {
     setCopied(false);
     setCopyError(null);
     setLoadError(null);
+    setDrivers(null);
+    setProbeError(false);
+    setProbing(false);
     setBusy(false);
     void refresh(version).catch(() => {
       if (isCurrentRequest(version)) {
         setLoadError("Could not load MCP settings.");
       }
     });
+    void probeDrivers(version);
     return () => {
       requestVersionRef.current += 1;
       mountedRef.current = false;
       clearCopyResetTimer();
     };
-  }, [clearCopyResetTimer, isCurrentRequest, refresh, workspaceId]);
+  }, [clearCopyResetTimer, isCurrentRequest, probeDrivers, refresh, workspaceId]);
 
   const enabled = status?.mcpEnabled ?? false;
+  const runnerConfigured = runner.command.trim().length > 0;
+  // An enabled MCP server only means it is available to connect to. We do not
+  // have a trusted session signal proving that an external client copied the
+  // configuration and connected, so only the in-app runner can make this
+  // guide ready.
+  const setupReady = Boolean(preferredName) && runner.enabled;
 
   const toggle = useCallback(async () => {
     const version = requestVersionRef.current;
@@ -172,6 +204,129 @@ export function AgentsMcpSettings(props: {
 
   return (
     <div className="flex flex-col">
+      <section
+        data-testid="agent-setup-guide"
+        data-state={setupReady ? "ready" : "needs-setup"}
+        className="my-4 overflow-hidden rounded-lg border border-line bg-panel-2"
+        aria-labelledby="agent-setup-title"
+      >
+        <div className="flex items-start gap-3 border-b border-line px-4 py-3">
+          <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md border border-line bg-bg text-agent">
+            <Bot size={14} aria-hidden />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 id="agent-setup-title" className="m-0 text-[13px] font-medium text-ink">
+                Set up your agent
+              </h3>
+              <span
+                data-testid="agent-setup-status"
+                data-state={setupReady ? "ready" : "needs-setup"}
+                className="rounded-full border border-line bg-bg px-2 py-0.5 text-[10px] uppercase tracking-wide text-subtle"
+              >
+                {setupReady ? "Ready" : "Needs setup"}
+              </span>
+            </div>
+            <p className="m-0 mt-1 text-[11px] leading-relaxed text-muted">
+              Choose how a local agent connects to this workspace. Provider names describe
+              the connection; messages are always attributed to you.
+            </p>
+          </div>
+        </div>
+
+        <div className="grid gap-4 px-4 py-3 md:grid-cols-2">
+          <div>
+            <p className="m-0 mb-1.5 text-[11px] font-medium text-ink">1. Your name</p>
+            <PreferredNameControl
+              value={preferredName}
+              onChange={onPreferredNameChange}
+              testIdPrefix="agent-preferred-name"
+            />
+          </div>
+          <div>
+            <div className="mb-1.5 flex items-center gap-2">
+              <p className="m-0 text-[11px] font-medium text-ink">2. Local tools</p>
+              <button
+                type="button"
+                data-testid="agent-probe-refresh"
+                aria-label="Check local agents again"
+                title="Check again"
+                disabled={probing}
+                onClick={() => void probeDrivers(requestVersionRef.current)}
+                className="ml-auto grid size-6 place-items-center rounded text-subtle hover:bg-bg hover:text-ink disabled:opacity-50"
+              >
+                <RefreshCw size={12} aria-hidden className={probing ? "animate-spin" : undefined} />
+              </button>
+            </div>
+            {drivers === null && !probeError ? (
+              <p data-testid="agent-probes-loading" className="m-0 text-[11px] text-subtle">
+                Checking Codex, Claude, and ACP…
+              </p>
+            ) : probeError ? (
+              <p data-testid="agent-probes-error" className="m-0 text-[11px] text-danger">
+                Could not check local agents. You can still configure either connection below.
+              </p>
+            ) : (
+              <ul data-testid="agent-probe-list" className="m-0 grid list-none gap-1 p-0">
+                {drivers?.map((driver) => (
+                  <li
+                    key={driver.id}
+                    data-testid="agent-probe-row"
+                    data-installed={driver.installed ? "true" : "false"}
+                    className="flex items-center gap-2 rounded-md border border-line bg-bg px-2.5 py-1.5"
+                  >
+                    <span className={`size-1.5 rounded-full ${driver.installed ? "bg-success" : "bg-line"}`} />
+                    <span className="min-w-0 flex-1 truncate text-[11px] text-ink">
+                      {driver.displayName}
+                    </span>
+                    <span className="text-[10px] text-subtle">
+                      {driver.installed
+                        ? driver.auth.status === "authenticated"
+                          ? "Installed · signed in"
+                          : "Installed · sign-in not verified"
+                        : "Not found"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+
+        <div className="grid border-t border-line md:grid-cols-2">
+          <div className="border-b border-line px-4 py-3 md:border-b-0 md:border-r">
+            <p className="m-0 text-[11px] font-medium text-ink">Run from dohc</p>
+            <p className="m-0 mt-1 text-[10px] leading-relaxed text-subtle">
+              Configure the chat runner below. dohc starts it when My agent receives work and
+              keeps permission requests visible.
+            </p>
+            <span
+              data-testid="agent-setup-runner-state"
+              data-state={runner.enabled ? "ready" : runnerConfigured ? "configured" : "missing"}
+              className="mt-2 inline-block text-[10px] font-medium text-muted"
+            >
+              {runner.enabled ? "Dispatch ready" : runnerConfigured ? "Configured · dispatch off" : "Runner command needed"}
+            </span>
+          </div>
+          <div className="px-4 py-3">
+            <p className="m-0 text-[11px] font-medium text-ink">Connect an existing agent</p>
+            <p className="m-0 mt-1 text-[10px] leading-relaxed text-subtle">
+              Enable the workspace-scoped MCP server, then copy its configuration into your
+              existing agent. Sign-in status stays with that provider.
+            </p>
+            <button
+              type="button"
+              data-testid="agent-setup-mcp-action"
+              disabled={busy}
+              onClick={() => void toggle()}
+              className="mt-2 rounded-md border border-line bg-bg px-2.5 py-1 text-[10px] font-medium text-muted hover:text-ink disabled:opacity-50"
+            >
+              {enabled ? "MCP enabled · copy config below" : "Enable MCP"}
+            </button>
+          </div>
+        </div>
+      </section>
+
       <RunnerSettingsCard
         workspaceId={workspaceId}
         runner={runner}

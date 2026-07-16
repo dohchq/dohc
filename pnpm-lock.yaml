@@ -274,6 +274,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@dohc/workspace-contracts':
+        specifier: workspace:*
+        version: link:../workspace-contracts
       zod:
         specifier: ^3.25.76
         version: 3.25.76
@@ -296,6 +299,9 @@ importers:
       '@dohc/sqlite-worker':
         specifier: workspace:*
         version: link:../../services/sqlite-worker
+      '@dohc/workspace-contracts':
+        specifier: workspace:*
+        version: link:../workspace-contracts
       '@dohc/workspace-core':
         specifier: workspace:*
         version: link:../workspace-core

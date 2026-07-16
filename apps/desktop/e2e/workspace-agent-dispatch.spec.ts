@@ -66,7 +66,7 @@ async function openMyAgent(page: Page): Promise<void> {
     )
     .toBe(true);
 
-  await page.getByTestId("activity-chats").click();
+  await page.getByTestId("titlebar-chats-sidebar").click();
   await expect(page.getByTestId("chats-view")).toBeVisible();
   await page.getByTestId("chats-my-agent").click();
   await expect(page.getByTestId("chats-channel-title")).toHaveText("My agent");
