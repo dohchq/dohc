@@ -255,8 +255,10 @@ pub fn materialize_one(
         return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterTempWrite));
     }
 
-    // Step 3: flush per the per-OS durability policy.
-    flush_temp(&tmp, target.parent(), policy)?;
+    // Step 3: flush the temp FILE per the per-OS durability policy. The parent
+    // directory is synced AFTER the rename (below), which is where the rename's
+    // durability actually lives on POSIX.
+    flush_temp_file(&tmp, policy)?;
     if should_crash(faults, FaultPoint::MaterializeAfterFlushBeforeRename) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterFlushBeforeRename,
@@ -282,8 +284,11 @@ pub fn materialize_one(
         return Ok(JobOutcome::Conflict);
     }
 
-    // Step 5: atomic replace with bounded retry, then mark complete.
+    // Step 5: atomic replace with bounded retry, then make the rename itself
+    // durable by syncing the parent directory (POSIX), THEN mark complete — so a
+    // crash can never leave the job marked complete over a non-durable rename.
     replace_with_bounded_retry(&tmp, &target, replacer)?;
+    sync_parent_dir(target.parent(), policy)?;
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
         // Renamed but not marked complete. Startup replay: the target now equals
         // the desired content, so step 1 short-circuits and marks complete —
@@ -410,11 +415,7 @@ fn write_temp(tmp: &Path, content: &[u8]) -> Result<(), MaterializeError> {
     Ok(())
 }
 
-fn flush_temp(
-    tmp: &Path,
-    parent: Option<&Path>,
-    policy: DurabilityPolicy,
-) -> Result<(), MaterializeError> {
+fn flush_temp_file(tmp: &Path, policy: DurabilityPolicy) -> Result<(), MaterializeError> {
     if policy.fsync_file {
         // Open with WRITE access: on Windows `sync_all` maps to
         // `FlushFileBuffers`, which requires a writable handle (a read-only
@@ -425,11 +426,20 @@ fn flush_temp(
             .map_err(|e| MaterializeError::io(tmp, &e))?;
         file.sync_all().map_err(|e| MaterializeError::io(tmp, &e))?;
     }
+    Ok(())
+}
+
+/// Sync the parent directory AFTER the rename so the directory entry change (the
+/// replace) is durable. POSIX only; on Windows `std` exposes no portable
+/// directory sync, so this is a documented no-op there (an honestly-scoped
+/// durability limit — `per_os()` sets `fsync_parent_dir = false` off POSIX).
+fn sync_parent_dir(
+    parent: Option<&Path>,
+    policy: DurabilityPolicy,
+) -> Result<(), MaterializeError> {
     if policy.fsync_parent_dir
         && let Some(dir) = parent
     {
-        // POSIX: fsync the directory so the rename is durable. On Windows this
-        // path is disabled by `per_os()` (std cannot open a dir for sync).
         #[cfg(unix)]
         {
             let dirf = std::fs::File::open(dir).map_err(|e| MaterializeError::io(dir, &e))?;

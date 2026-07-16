@@ -32,10 +32,19 @@ use std::path::{Path, PathBuf};
 /// A mismatch means the copy is not a faithful snapshot — the backup fails.
 const COMPARED_TABLES: &[&str] = &[
     "engine_migrations",
+    "engine_ownership",
+    "engine_requests",
     "documents",
     "replication_journal",
+    "versioned_workspaces",
+    "versions",
+    "active_versions",
+    "file_objects",
     "blobs",
     "binary_blobs",
+    "path_aliases",
+    "snapshots",
+    "fork_base_snapshots",
     "moments",
     "materialization_jobs",
 ];
@@ -196,33 +205,33 @@ pub fn create_verified_backup(
 
     let backup_path = recovery_dir.join(format!("{backup_stem}.db"));
     let manifest_path = recovery_dir.join(format!("{backup_stem}.manifest.json"));
+    // Copy into a disposable STAGING path first, so any existing verified backup
+    // with this stem is only replaced AFTER the new copy is restore-tested — a
+    // crash never destroys the last valid restore point to make room for an
+    // unverified one. VACUUM INTO also refuses a pre-existing target, so a stale
+    // staging file is cleared (staging is scratch, safe to delete).
+    let staging_path = recovery_dir.join(format!("{backup_stem}.db.staging"));
+    remove_if_exists(&staging_path)?;
 
-    // A stale/partial prior backup with this stem must not be trusted. Remove a
-    // leftover backup file (VACUUM INTO refuses an existing target) and any
-    // orphan manifest, so this run produces a clean verified pair.
-    remove_if_exists(&backup_path)?;
-    remove_if_exists(&manifest_path)?;
+    // Copy the live DB as a clean single-file snapshot into staging.
+    store.vacuum_into(&staging_path)?;
 
-    // Copy the live DB as a clean single-file snapshot.
-    store.vacuum_into(&backup_path)?;
-
-    // Fault: bytes copied, manifest not yet written.
+    // Fault: bytes copied to staging, nothing published or manifested.
     if should_crash(faults, FaultPoint::BackupAfterCopyBeforeManifest) {
         return Ok(BackupOutcome::Crashed { after_copy: true });
     }
 
-    // 3. Restore test: open the copy read-only, integrity + row-count compare.
-    //    A crash mid-verify leaves the manifest unwritten (unverified) and the
-    //    source untouched.
-    if !restore_test(store, &backup_path, faults)? {
-        return Ok(BackupOutcome::Crashed { after_copy: true });
+    // 3. Restore test the STAGING copy: integrity + row-count compare. A crash
+    //    mid-verify publishes nothing (source and any prior backup untouched).
+    if !restore_test(store, &staging_path, faults)? {
+        return Ok(BackupOutcome::Crashed { after_copy: false });
     }
 
-    // 4. Compute checksum + size, write the manifest atomically.
-    let size_bytes = std::fs::metadata(&backup_path)
+    // 4. Compute checksum + size on the verified staging copy.
+    let size_bytes = std::fs::metadata(&staging_path)
         .map_err(StorageError::classify_io)?
         .len();
-    let checksum = hash_file(&backup_path)?;
+    let checksum = hash_file(&staging_path)?;
     let (engine_uuid, engine_build) = store.ownership()?;
     let manifest = BackupManifest {
         engine_uuid,
@@ -234,6 +243,16 @@ pub fn create_verified_backup(
         retention: retention.to_owned(),
         verified: true,
     };
+
+    // 5. Publish: the verified staging copy is atomically renamed into place
+    //    FIRST (a prior backup's bytes are replaced only by verified bytes),
+    //    then the manifest is written LAST. The manifest is the validity marker,
+    //    so a crash after the db-rename but before the manifest leaves the new
+    //    verified db invalid-by-absence-of-manifest; a retry re-manifests and no
+    //    verified data is lost. A stale prior manifest is cleared before the
+    //    db-rename so it can never describe the newly published (unmanifested) db.
+    remove_if_exists(&manifest_path)?;
+    std::fs::rename(&staging_path, &backup_path).map_err(StorageError::classify_io)?;
     write_manifest_atomic(&manifest_path, &manifest)?;
 
     Ok(BackupOutcome::Verified(BackupRecord {

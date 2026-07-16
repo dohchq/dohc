@@ -340,8 +340,9 @@ fn should_crash(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 enum LedgerStatus {
     /// No row (or the ledger table does not exist yet — a fresh store).
     Missing,
-    /// A started-but-incomplete non-transactional migration: re-run idempotently.
-    Incomplete,
+    /// A started-but-incomplete non-transactional migration: re-run idempotently
+    /// — but only if its recorded checksum still matches this build's definition.
+    Incomplete { checksum: String },
     /// Completed; carries the recorded checksum for the compatibility check.
     Complete { checksum: String },
 }
@@ -356,7 +357,7 @@ fn ledger_status(conn: &Connection, id: &str) -> Result<LedgerStatus, StorageErr
         .optional();
     match row {
         Ok(Some((checksum, Some(_completed)))) => Ok(LedgerStatus::Complete { checksum }),
-        Ok(Some((_checksum, None))) => Ok(LedgerStatus::Incomplete),
+        Ok(Some((checksum, None))) => Ok(LedgerStatus::Incomplete { checksum }),
         Ok(None) => Ok(LedgerStatus::Missing),
         // A fresh store has no `engine_migrations` table until the baseline
         // creates it; that is 'missing', not an error.
@@ -402,7 +403,16 @@ pub(crate) fn run_migrations(
                 }
                 continue;
             }
-            LedgerStatus::Missing | LedgerStatus::Incomplete => {}
+            LedgerStatus::Incomplete { checksum } => {
+                // A started-but-unfinished migration whose DDL changed between
+                // builds must NOT be re-run: the new body would apply over the
+                // partial effects of the old one. Fail closed; only a
+                // checksum-matching incomplete row is resumed.
+                if checksum != migration_checksum(migration.sql) {
+                    return Err(StorageError::MigrationFailed { source: None });
+                }
+            }
+            LedgerStatus::Missing => {}
         }
 
         let outcome = match migration.kind {
@@ -711,6 +721,49 @@ mod tests {
             ..BASELINE_MIGRATIONS[0]
         }];
         let err = run_migrations(&mut conn, tampered, &ctx, &NoFaults).unwrap_err();
+        assert_eq!(err.code(), "migration-failed");
+    }
+
+    #[test]
+    fn incomplete_migration_with_changed_checksum_fails_closed() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(4_500);
+
+        // Establish the baseline, then leave a non-transactional migration in a
+        // started-but-incomplete state via a crash before completion.
+        {
+            let mut conn = open_bare(&path);
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("baseline");
+        }
+        let mut migrations = BASELINE_MIGRATIONS.to_vec();
+        migrations.push(Migration {
+            ordinal: 1,
+            id: "r04-nontx",
+            kind: MigrationKind::NonTransactional,
+            sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
+            sets_user_version: None,
+        });
+        let faults = OneShotCrash::at(FaultPoint::MigrateBeforeLedgerCommit);
+        {
+            let mut conn = open_bare(&path);
+            let out = run_migrations(&mut conn, &migrations, &ctx, &faults).expect("run");
+            assert_eq!(out, MigrationOutcome::Crashed);
+        }
+
+        // A later build DEFINES the same migration id with different DDL. The
+        // incomplete row's checksum no longer matches: re-running would apply
+        // the new body over the old body's partial effects, so fail closed.
+        let mut changed = BASELINE_MIGRATIONS.to_vec();
+        changed.push(Migration {
+            ordinal: 1,
+            id: "r04-nontx",
+            kind: MigrationKind::NonTransactional,
+            sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
+            sets_user_version: None,
+        });
+        let mut conn = open_bare(&path);
+        let err = run_migrations(&mut conn, &changed, &ctx, &NoFaults).unwrap_err();
         assert_eq!(err.code(), "migration-failed");
     }
 
