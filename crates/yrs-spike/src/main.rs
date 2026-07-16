@@ -226,7 +226,7 @@ fn handle(docs: &mut HashMap<String, Doc>, req: Request) -> Result<Value, String
             with_delta(doc, |txn| {
                 let index = snap_utf16(&t.get_string(txn), index);
                 t.insert(txn, index, &text);
-                Ok(())
+                Ok(!text.is_empty())
             })
         }
         Request::TextDelete {
@@ -244,7 +244,7 @@ fn handle(docs: &mut HashMap<String, Doc>, req: Request) -> Result<Value, String
                 if len > 0 {
                     t.remove_range(txn, index, len);
                 }
-                Ok(())
+                Ok(len > 0)
             })
         }
         Request::XmlInsertParagraph {
@@ -259,7 +259,7 @@ fn handle(docs: &mut HashMap<String, Doc>, req: Request) -> Result<Value, String
                 let index = index.min(frag.len(txn));
                 let el = frag.insert(txn, index, XmlElementPrelim::empty("paragraph"));
                 el.insert(txn, 0, XmlTextPrelim::new(text.as_str()));
-                Ok(())
+                Ok(true)
             })
         }
         Request::XmlTextInsert {
@@ -285,7 +285,7 @@ fn handle(docs: &mut HashMap<String, Doc>, req: Request) -> Result<Value, String
                     }
                     _ => t.insert(txn, offset, &text),
                 }
-                Ok(())
+                Ok(!text.is_empty())
             })
         }
         Request::XmlTextDelete {
@@ -305,7 +305,7 @@ fn handle(docs: &mut HashMap<String, Doc>, req: Request) -> Result<Value, String
                 if len > 0 {
                     t.remove_range(txn, offset, len);
                 }
-                Ok(())
+                Ok(len > 0)
             })
         }
         Request::Free { id } => {
@@ -325,17 +325,21 @@ fn b64(s: &str) -> Result<Vec<u8>, String> {
 
 /// Run a yrs-side edit and return the exact v1 delta it produced (state
 /// before the edit -> state after), which the JS driver delivers to Yjs.
+/// The closure reports whether it actually CHANGED the doc — a clamped
+/// out-of-range delete is a legal no-op, and the encoded "delta" of a no-op
+/// is never empty (it carries the doc's full delete set), so byte length
+/// cannot distinguish one. `changed` lets the fuzz count LANDED edits.
 fn with_delta(
     doc: &Doc,
-    edit: impl FnOnce(&mut yrs::TransactionMut) -> Result<(), String>,
+    edit: impl FnOnce(&mut yrs::TransactionMut) -> Result<bool, String>,
 ) -> Result<Value, String> {
     let before = doc.transact().state_vector().clone();
-    {
+    let changed = {
         let mut txn = doc.transact_mut();
-        edit(&mut txn)?;
-    }
+        edit(&mut txn)?
+    };
     let delta = doc.transact().encode_state_as_update_v1(&before);
-    Ok(json!({ "update": B64.encode(delta) }))
+    Ok(json!({ "update": B64.encode(delta), "changed": changed }))
 }
 
 /// Snap a UTF-16 offset to the nearest code-point boundary at or below it

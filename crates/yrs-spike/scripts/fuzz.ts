@@ -21,7 +21,7 @@
 import * as Y from "yjs";
 import { markdownToYDoc, plainTextToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import { canonicalContent, contentDiff, contentsEqual, undeclaredRoots } from "./canonical.js";
-import { DOHC_SCHEMA, RustPeer, type RootSchema } from "./rustPeer.js";
+import { DOHC_SCHEMA, RustPeer, type EditResult, type RootSchema } from "./rustPeer.js";
 
 const ROUNDS = 10;
 
@@ -192,23 +192,29 @@ async function fuzzOne(rust: RustPeer, seed: number, mode: "plaintext" | "richdo
     });
   };
 
+  // r.rustEdits counts LANDED edits: the harness reports per-op whether the
+  // doc actually changed (a clamped out-of-range delete is a legal no-op,
+  // and a no-op's encoded "delta" is still non-empty — it carries the full
+  // delete set — so byte length cannot tell). An attempt that misses (typed
+  // not-editable target) or no-ops is replaced by a guaranteed fallback
+  // edit, so every attempt changes the yrs doc and the alternating-driver
+  // guarantee cannot silently degrade to one driver.
   const rustEdit = async () => {
-    r.rustEdits += 1;
-    let update: Uint8Array | null = null;
+    let result: EditResult | null = null;
     try {
       if (mode === "plaintext") {
-        update =
+        result =
           rand() < 0.3
             ? await rust.textDelete(rustId, "plainText", pick(400), 1 + pick(4))
             : await rust.textInsert(rustId, "plainText", pick(400), `${word()} `);
       } else {
         const roll = rand();
         if (roll < 0.35) {
-          update = await rust.xmlInsertParagraph(rustId, "body", pick(12), `${word()} ${word()}`);
+          result = await rust.xmlInsertParagraph(rustId, "body", pick(12), `${word()} ${word()}`);
         } else if (roll < 0.55) {
-          update = await rust.xmlTextDelete(rustId, "body", pick(12), pick(30), 1 + pick(3));
+          result = await rust.xmlTextDelete(rustId, "body", pick(12), pick(30), 1 + pick(3));
         } else {
-          update = await rust.xmlTextInsert(
+          result = await rust.xmlTextInsert(
             rustId,
             "body",
             pick(12),
@@ -222,13 +228,17 @@ async function fuzzOne(rust: RustPeer, seed: number, mode: "plaintext" | "richdo
       // ONLY the harness's typed "target not editable" rejection is legal
       // (the random paragraph index landed on a non-editable node). Anything
       // else is a protocol/build regression and must fail the run, not
-      // silently drop Rust edits. On a legal miss, land a guaranteed
-      // fallback edit instead of skipping — every run must keep genuine
-      // yrs-driven edits or it degrades to a one-driver test.
+      // silently drop Rust edits.
       if (!String(error).includes("not-editable:")) throw error;
-      update = await rust.xmlInsertParagraph(rustId, "body", 0, `fallback ${r.rustEdits}`);
     }
-    if (update !== null && update.length > 0) toJs.push(update);
+    if (result === null || !result.changed) {
+      result =
+        mode === "plaintext"
+          ? await rust.textInsert(rustId, "plainText", 0, `fb${r.rustEdits} `)
+          : await rust.xmlInsertParagraph(rustId, "body", 0, `fallback ${r.rustEdits}`);
+    }
+    r.rustEdits += 1; // landed: the op above verifiably changed the yrs doc
+    toJs.push(result.update);
   };
 
   const shuffle = <T>(items: T[]): T[] => {

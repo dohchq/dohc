@@ -44,8 +44,10 @@ lineages** — 13 captured update blobs each — so the reverse-order/pending-
 update path runs on every fresh checkout without harvested fixtures) and
 **9 harvested real dogfood docs (163 durable updates + 9 snapshots)**.
 Certification runs pass `--require-harvested`, which exits nonzero when the
-real-lineage corpus is absent; without the flag a missing corpus prints a
-loud NOT-EXERCISED warning. Any `undeclaredRoot` (a root outside the shared
+real-lineage corpus is absent OR degenerate (an empty manifest, or a
+harvested doc with zero blob files — e.g. after harvesting a DB with no
+`ydoc_docs`); without the flag a missing/degenerate corpus prints a loud
+NOT-EXERCISED warning. Any `undeclaredRoot` (a root outside the shared
 dohc schema, whose contents the comparison would never read) is a hard
 failure on either side. Per doc, all of the following hold:
 
@@ -99,18 +101,21 @@ by construction. Each seed runs a **plaintext** doc (root Y.Text) and a
 XmlText inserts with bold/italic marks) with edits alternating between the
 Yjs driver and the yrs driver; delivery is randomly ordered, duplicated, and
 fault-injected with truncated updates; some rounds sync via state-vector
-diffs instead of raw update delivery. Every run must land Rust-side edits
-(a run where all yrs edits skipped fails; non-editable random targets fall
-back to a guaranteed yrs paragraph insert), and only the harness's typed
-`not-editable:` rejection may skip an edit — any other Rust error fails the
-run.
+diffs instead of raw update delivery. Rust-edit counts are LANDED edits,
+not attempts: the harness reports per-op whether the doc actually changed
+(a clamped out-of-range delete is a legal no-op whose encoded "delta" still
+carries the full delete set, so byte length cannot tell), and any attempt
+that misses (typed `not-editable:` target) or no-ops is replaced by a
+guaranteed fallback edit — every run keeps genuine yrs-driven changes or
+fails. Any Rust error other than the typed `not-editable:` rejection fails
+the run.
 
 **Result: 500/500 seeds passed under `--strict` (= 1,000 doc runs).**
-Totals: 7,507 JS edits, 7,519 Rust edits, 28,200 deliveries, 5,665
-duplicate deliveries, 2,041 truncated-update injections (zero accepted by
-either side; fault model is truncation-only — see above), 67 yjs
+Totals: 7,511 JS edits, 7,480 LANDED Rust edits, 28,814 deliveries, 5,770
+duplicate deliveries, 2,169 truncated-update injections (zero accepted by
+either side; fault model is truncation-only — see above), 77 yjs
 partial-prefix applications on rejected truncations (all recovered — see
-caveat 4; zero corruption), 3,511 state-vector sync exchanges. End-state
+caveat 4; zero corruption), 3,473 state-vector sync exchanges. End-state
 checks per run: canonical content equality, no undeclared roots, semantic
 state-vector equality, identical markdown projection, `merge_updates`
 reconstruction, full-state re-encode reconstruction, and idempotent
@@ -206,12 +211,14 @@ they are absent and prints a note. Re-harvest anytime with
    **partially-integrated prefix** of the real items in the doc (readUpdate
    integrates structs while decoding). yrs decodes the full update before
    applying, so a yrs rejection is state-unchanged — pinned mechanically by
-   the truncation-atomicity probe (every prefix cut of a multi-transaction
-   update: 0 cuts accepted by either side, yrs content byte-unchanged across
-   all rejected cuts, yjs left a partial prefix on some cuts). The pinned
-   recovery invariant: the partial prefix **always converges once the
-   genuine update is delivered** (0 permanent divergences across every probe
-   cut and all 67 fuzz occurrences). R11 consequence: the TS adapter must
+   the truncation-atomicity probe at CRDT-STATE level, not just visible
+   content (every prefix cut of a multi-transaction update: 0 cuts accepted
+   by either side; yrs state vector AND full state re-encode byte-unchanged
+   after EVERY rejected cut; yjs left a partial prefix on some cuts — both
+   visible-content and sv-only-advance cases are counted). The pinned
+   recovery invariant: the partial prefix **always converges — content and
+   state vector — once the genuine update is delivered** (0 permanent
+   divergences across every probe cut and all fuzz occurrences). R11 consequence: the TS adapter must
    treat an `applyUpdate` exception as "doc may hold a partial prefix" — 
    safe under dohc's durable update log (the full update is re-delivered),
    but never assume state-unchanged after a failed apply, and never journal

@@ -91,22 +91,38 @@ function loadCases(requireHarvested: boolean): { cases: DocCase[]; harvestedPres
     };
   });
   cases.push(...incrementalCases());
-  const harvestedPresent = existsSync(FIXTURES);
-  if (harvestedPresent) {
+  // "Present" means present AND non-degenerate: an empty manifest (e.g. the
+  // wrong copied DB with no ydoc_docs) or a doc with zero blob files would
+  // let certification report a pass with zero real durable lineages.
+  let harvestedPresent = false;
+  let emptyReason: string | null = "no harvested fixtures exist (run scripts/harvest.mjs)";
+  if (existsSync(FIXTURES)) {
     const manifest = JSON.parse(readFileSync(join(FIXTURES, "manifest.json"), "utf8")) as Array<{
       name: string;
       files: string[];
     }>;
-    for (const doc of manifest) {
-      cases.push({
-        name: `harvested: ${doc.name}`,
-        source: "harvested",
-        updates: doc.files.map((f) => new Uint8Array(readFileSync(join(FIXTURES, doc.name, f)))),
-      });
+    if (manifest.length === 0) {
+      emptyReason = "the harvested manifest is EMPTY (harvested a DB with no ydoc_docs?)";
+    } else if (manifest.some((doc) => doc.files.length === 0)) {
+      emptyReason = `harvested doc(s) with zero blob files: ${manifest
+        .filter((doc) => doc.files.length === 0)
+        .map((doc) => doc.name)
+        .join(", ")}`;
+    } else {
+      harvestedPresent = true;
+      emptyReason = null;
+      for (const doc of manifest) {
+        cases.push({
+          name: `harvested: ${doc.name}`,
+          source: "harvested",
+          updates: doc.files.map((f) => new Uint8Array(readFileSync(join(FIXTURES, doc.name, f)))),
+        });
+      }
     }
-  } else if (requireHarvested) {
+  }
+  if (!harvestedPresent && requireHarvested) {
     console.error(
-      "FATAL: --require-harvested was passed but no harvested fixtures exist (run scripts/harvest.mjs). Certification runs must include the real-lineage corpus.",
+      `FATAL: --require-harvested was passed but ${emptyReason}. Certification runs must exercise the real-lineage corpus.`,
     );
     process.exit(1);
   }
@@ -430,15 +446,30 @@ async function truncationAtomicityProbe(rust: RustPeer): Promise<void> {
 
   const id = "truncation-probe";
   await rust.newDoc(id);
-  const rustBaseline = await rust.content(id, DOHC_SCHEMA);
+  // Atomicity is certified at CRDT-STATE level, not just visible content: a
+  // rejected cut that advanced the state vector, pending store, or
+  // tombstones without changing visible text would silently break later
+  // diffs/compaction. Compare the encoded state vector AND full state
+  // re-encode byte-for-byte, after EVERY rejected cut.
+  const bytesEqual = (a: Uint8Array, b: Uint8Array) => Buffer.compare(Buffer.from(a), Buffer.from(b)) === 0;
+  const rustBaselineContent = await rust.content(id, DOHC_SCHEMA);
+  const rustBaselineState = await rust.state(id);
   let jsAccepted = 0;
   let rustAccepted = 0;
+  let rustStateMutations = 0;
   let jsPartial = 0;
+  let jsSvOnlyAdvances = 0;
   let jsPermanent = 0;
   for (let cut = 1; cut < full.length; cut += 1) {
     const bad = full.slice(0, cut);
     const rustErr = await rust.apply(id, bad);
     if (rustErr === null) rustAccepted += 1;
+    else {
+      const st = await rust.state(id);
+      if (!bytesEqual(st.sv, rustBaselineState.sv) || !bytesEqual(st.update, rustBaselineState.update)) {
+        rustStateMutations += 1;
+      }
+    }
     const probe = new Y.Doc();
     let threw = false;
     try {
@@ -447,28 +478,41 @@ async function truncationAtomicityProbe(rust: RustPeer): Promise<void> {
       threw = true;
     }
     if (!threw) jsAccepted += 1;
-    else if (!contentsEqual(canonicalContent(probe, DOHC_SCHEMA), {})) jsPartial += 1;
+    else {
+      // CRDT-state view of the partial application: any integrated item
+      // advances the state vector even when no text is visible yet.
+      const svAdvanced = Y.decodeStateVector(Y.encodeStateVector(probe)).size > 0;
+      const contentVisible = !contentsEqual(canonicalContent(probe, DOHC_SCHEMA), {});
+      if (contentVisible) jsPartial += 1;
+      else if (svAdvanced) jsSvOnlyAdvances += 1;
+    }
     try {
       Y.applyUpdate(probe, full);
       if (!contentsEqual(canonicalContent(probe, DOHC_SCHEMA), fullContent)) jsPermanent += 1;
+      else if (!bytesEqual(Y.encodeStateVector(probe), Y.encodeStateVector(doc))) jsPermanent += 1;
     } catch {
       jsPermanent += 1;
     }
   }
-  const rustAfter = await rust.content(id, DOHC_SCHEMA);
+  const rustAfterContent = await rust.content(id, DOHC_SCHEMA);
   await rust.free(id);
   console.log(
-    `truncation probe: ${full.length - 1} cuts — yrs accepted=${rustAccepted}, yjs accepted=${jsAccepted}, yjs partial-prefix applies=${jsPartial} (non-atomic reject, pinned), permanent divergences=${jsPermanent}`,
+    `truncation probe: ${full.length - 1} cuts — yrs accepted=${rustAccepted} stateMutations=${rustStateMutations}; yjs accepted=${jsAccepted}, partial-prefix applies=${jsPartial} + sv-only advances=${jsSvOnlyAdvances} (non-atomic reject, pinned), permanent divergences=${jsPermanent}`,
   );
   check("truncation probe / yrs never accepts a truncated update", rustAccepted === 0, () => `${rustAccepted} cuts accepted`);
   check("truncation probe / yjs never accepts a truncated update", jsAccepted === 0, () => `${jsAccepted} cuts accepted`);
   check(
-    "truncation probe / yrs state unchanged across every rejected cut (atomic)",
-    contentsEqual(rustBaseline, rustAfter),
-    () => contentDiff(rustBaseline, rustAfter),
+    "truncation probe / yrs CRDT state (sv + full re-encode) byte-unchanged after every rejected cut",
+    rustStateMutations === 0,
+    () => `${rustStateMutations} rejected cut(s) mutated yrs state`,
   );
   check(
-    "truncation probe / every yjs partial prefix converges on full delivery",
+    "truncation probe / yrs content unchanged across the sweep",
+    contentsEqual(rustBaselineContent, rustAfterContent),
+    () => contentDiff(rustBaselineContent, rustAfterContent),
+  );
+  check(
+    "truncation probe / every yjs partial prefix converges (content + sv) on full delivery",
     jsPermanent === 0,
     () => `${jsPermanent} cuts left permanently divergent state`,
   );

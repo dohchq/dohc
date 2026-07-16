@@ -56,7 +56,7 @@ export function buildRustHarness(): void {
 
 export class RustPeer {
   private child: ChildProcessByStdio<Writable, Readable, null>;
-  private queue: Array<{ resolve: (v: Response) => void; reject: (e: Error) => void }> = [];
+  private queue: Array<{ op: string; resolve: (v: Response) => void; reject: (e: Error) => void }> = [];
   private dead: Error | null = null;
 
   constructor() {
@@ -76,8 +76,14 @@ export class RustPeer {
         parsed = JSON.parse(line) as Response;
       } catch {
         // A malformed stdout line means the protocol is desynced — every
-        // subsequent response would answer the wrong request. Kill the run.
-        this.fail(new Error(`rust harness emitted a non-JSON line: ${line.slice(0, 200)}`));
+        // subsequent response would answer the wrong request. Reject the
+        // request that RECEIVED the bad line first (it is already off the
+        // queue, and diagnostics must name its op), then kill the rest.
+        const error = new Error(
+          `rust harness emitted a non-JSON line answering op "${pending.op}": ${line.slice(0, 200)}`,
+        );
+        pending.reject(error);
+        this.fail(error);
         return;
       }
       pending.resolve(parsed);
@@ -116,6 +122,7 @@ export class RustPeer {
         this.fail(new Error(`rust harness request timed out after ${REQUEST_TIMEOUT_MS}ms: ${JSON.stringify(payload).slice(0, 160)}`));
       }, REQUEST_TIMEOUT_MS);
       this.queue.push({
+        op: String(payload.op),
         resolve: (v) => {
           clearTimeout(timer);
           resolve(v);
@@ -174,14 +181,14 @@ export class RustPeer {
     return fromB64(res.update as string);
   }
 
-  async textInsert(id: string, field: string, index: number, text: string): Promise<Uint8Array> {
+  async textInsert(id: string, field: string, index: number, text: string): Promise<EditResult> {
     const res = await this.ok({ op: "textInsert", id, field, index, text });
-    return fromB64(res.update as string);
+    return editResult(res);
   }
 
-  async textDelete(id: string, field: string, index: number, len: number): Promise<Uint8Array> {
+  async textDelete(id: string, field: string, index: number, len: number): Promise<EditResult> {
     const res = await this.ok({ op: "textDelete", id, field, index, len });
-    return fromB64(res.update as string);
+    return editResult(res);
   }
 
   async xmlInsertParagraph(
@@ -189,9 +196,9 @@ export class RustPeer {
     field: string,
     index: number,
     text: string,
-  ): Promise<Uint8Array> {
+  ): Promise<EditResult> {
     const res = await this.ok({ op: "xmlInsertParagraph", id, field, index, text });
-    return fromB64(res.update as string);
+    return editResult(res);
   }
 
   async xmlTextInsert(
@@ -201,9 +208,9 @@ export class RustPeer {
     offset: number,
     text: string,
     attrs?: Record<string, unknown>,
-  ): Promise<Uint8Array> {
+  ): Promise<EditResult> {
     const res = await this.ok({ op: "xmlTextInsert", id, field, para, offset, text, attrs });
-    return fromB64(res.update as string);
+    return editResult(res);
   }
 
   async xmlTextDelete(
@@ -212,9 +219,9 @@ export class RustPeer {
     para: number,
     offset: number,
     len: number,
-  ): Promise<Uint8Array> {
+  ): Promise<EditResult> {
     const res = await this.ok({ op: "xmlTextDelete", id, field, para, offset, len });
-    return fromB64(res.update as string);
+    return editResult(res);
   }
 
   async free(id: string): Promise<void> {
@@ -226,6 +233,18 @@ export class RustPeer {
     this.child.stdin.end();
     this.child.kill();
   }
+}
+
+/** A yrs-driven edit: the encoded delta plus whether the edit actually
+ * CHANGED the doc (a clamped out-of-range delete is a legal no-op; its
+ * "delta" still carries the full delete set, so bytes can't tell). */
+export interface EditResult {
+  update: Uint8Array;
+  changed: boolean;
+}
+
+function editResult(res: Record<string, unknown>): EditResult {
+  return { update: fromB64(res.update as string), changed: res.changed === true };
 }
 
 function b64(bytes: Uint8Array): string {
