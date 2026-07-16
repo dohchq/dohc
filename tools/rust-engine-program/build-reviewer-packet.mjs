@@ -128,7 +128,9 @@ export function expandBraces(pattern) {
 // (within a segment), and plain prefixes (a bare file or directory path
 // matches itself and everything under it).
 export function makePathMatcher(pattern) {
-  const posix = toPosix(pattern);
+  // "docs/x/" and "docs/x" are the same directory spelling; a trailing slash
+  // must not turn the prefix matcher into a double-slash-only match.
+  const posix = toPosix(pattern).replace(/\/+$/, "");
   const expanded = expandBraces(posix);
   const regexes = expanded.map((pat) => {
     let source = "";
@@ -389,13 +391,23 @@ function portedTestsForShard(shard, behaviorRows, classificationRows, sourceFile
     if (isPathLike(token)) tests.set(toPosix(token), "named in SHARDS.tsv");
     else tests.set(token, "SHARDS.tsv test-suite label (not a file path)");
   }
-  const sourceStems = new Set(
-    sourceFiles.map((f) => toPosix(f).split("/").pop().replace(/\.tsx?$/, "")),
+  // Key by directory + stem, not basename alone: tests in this repo sit
+  // beside their sources, and a bare-stem match would pull a same-named
+  // test (e.g. index.test.ts) from an unrelated package into the packet.
+  const dirAndStem = (path) => {
+    const posix = toPosix(path);
+    const cut = posix.lastIndexOf("/");
+    return cut === -1 ? `./${posix}` : posix.slice(0, cut + 1);
+  };
+  const sourceKeys = new Set(
+    sourceFiles.map(
+      (f) => dirAndStem(f) + toPosix(f).split("/").pop().replace(/\.tsx?$/, ""),
+    ),
   );
   for (const row of classificationRows) {
     const file = toPosix(row.test_file ?? "");
     const stem = testFileStem(file);
-    if (stem && sourceStems.has(stem)) {
+    if (stem && sourceKeys.has(dirAndStem(file) + stem)) {
       tests.set(
         file,
         `TEST_CLASSIFICATION: ${row.classification}, priority ${row.port_priority}`,
@@ -648,6 +660,19 @@ function selfTest() {
   );
   const m4 = makePathMatcher("apps/desktop/src/main.ts (flagged wiring)".replace(/\s*\([^)]*\)$/, ""));
   check("glob: annotation stripped upstream", m4("apps/desktop/src/main.ts"));
+  const m5 = makePathMatcher("docs/superpowers/plans/rust-engine/");
+  check(
+    "glob: trailing slash matches children",
+    m5("docs/superpowers/plans/rust-engine/SHARDS.tsv"),
+  );
+  check(
+    "glob: trailing slash matches the directory itself",
+    m5("docs/superpowers/plans/rust-engine"),
+  );
+  check(
+    "glob: trailing slash rejects sibling dir",
+    !m5("docs/superpowers/plans/rust-engine-notes/file.md"),
+  );
 
   // behavior resolution
   const inventory = parseTsv(FIXTURE_INVENTORY, "fixture-inventory");
@@ -735,6 +760,19 @@ function selfTest() {
   // packet assembly (no git diff), against a throwaway dir
   const tmp = mkdtempSync(join(tmpdir(), "packet-selftest-"));
   try {
+    const classificationRows = [
+      {
+        test_file: "packages/workspace-engine/src/engineDbSchema.test.ts",
+        classification: "sql-state-oracle",
+        port_priority: "1",
+      },
+      {
+        // same basename, foreign package — must NOT leak into the packet
+        test_file: "apps/other/src/engineDbSchema.test.ts",
+        classification: "portable-behavioral",
+        port_priority: "1",
+      },
+    ];
     const packet = buildPacket({
       shard: storeShard,
       shardsHeader: shards.header,
@@ -743,7 +781,7 @@ function selfTest() {
       root: tmp,
       diffRef: null,
       diffBase: "main",
-      classificationRows: [],
+      classificationRows,
     });
     check("packet: names the shard", packet.includes("# Reviewer packet — shard F-STORE"));
     check(
@@ -758,6 +796,14 @@ function selfTest() {
     check(
       "packet: storage crate pulls STORAGE_AND_RECOVERY.md",
       packet.includes("STORAGE_AND_RECOVERY.md"),
+    );
+    check(
+      "packet: sibling test matched by dir+stem",
+      packet.includes("packages/workspace-engine/src/engineDbSchema.test.ts"),
+    );
+    check(
+      "packet: same-stem foreign-package test excluded",
+      !packet.includes("apps/other/src/engineDbSchema.test.ts"),
     );
     check("packet: no-diff note", packet.includes("No --diff ref supplied"));
   } finally {

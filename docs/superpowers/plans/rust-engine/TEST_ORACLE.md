@@ -51,6 +51,7 @@ Every record has `"t"` (type). Types: `header`, `fs`, `state`, `op`, `fault`,
            {"actorId":"peer-b","kind":"remote-peer","caps":["replicate"]}],
  "normalizers":"docs/superpowers/plans/rust-engine/TEST_ORACLE.md#2-normalizers",
  "minimizedFrom":null,
+ "engines":["ts","rust"],
  "tier2":false}
 ```
 
@@ -97,8 +98,16 @@ Every record has `"t"` (type). Types: `header`, `fs`, `state`, `op`, `fault`,
   `traces/failed/<traceId>.jsonl`). `null` for hand-written traces. Every
   nondeterministic failure MUST persist seed + minimized trace (stop-the-line
   rule "Nondeterministic failure without saved seed/trace").
+- `engines` — which engines the trace runs on (default `["ts","rust"]`).
+  `["rust"]` marks a Rust-only trace, **required** whenever any expectation
+  in the trace depends on a fault the TS engine cannot express (`crash` or
+  `error` action at a G point): skipping just the fault record would leave
+  the two engines with contradictory `expect` values, so such traces must
+  not claim to be differential. Rust-only traces are self-consistency
+  evidence, same honesty rule as tier 2.
 - `tier2` — `true` marks a trace containing `kill` records; the TS adapter
-  refuses tier-2 traces honestly (section 4).
+  refuses tier-2 traces honestly (section 4). `tier2: true` implies
+  `engines: ["rust"]`.
 
 #### `fs` — filesystem precondition / external edit
 
@@ -213,10 +222,14 @@ while the workspace actor is quiesced.
   `traceVersion` 1 is `"ts"` (validation rejects anything else). Semantics:
   the harness may skip this fault record for an engine only if the engine is
   listed here AND its `listFaultPoints()` (section 6) does not report the
-  point. For any engine not listed, a missing point fails the run. This is
-  the sole mechanism for running a G-point trace differentially before the
-  TS hook exists — omitting `optionalFor` means the point is mandatory on
-  both engines.
+  point. For any engine not listed, a missing point fails the run.
+  **Validation restricts `optionalFor` to expectation-neutral actions**
+  (`observe`, `pause`): skipping those changes no `expect` value, so the
+  trace stays differential. A `crash` or `error` fault at a point one engine
+  lacks changes downstream expectations — such traces MUST instead set the
+  header's `engines: ["rust"]` (Rust-only, self-consistency evidence);
+  a `crash`/`error` fault carrying `optionalFor` fails validation. Omitting
+  `optionalFor` means the point is mandatory on every engine in `engines`.
 - Environmental kinds (`env.*`) and relay fault kinds (`relay.fault.*`) are
   listed in the registry, sections 3.9–3.10.
 
@@ -758,8 +771,10 @@ interface EngineTestAdapter {
 - **`listFaultPoints` is how G-points stay honest**: the harness skips a
   trace's fault record only if the engine reports the point unimplemented
   AND the fault record lists that engine in `optionalFor` (§1.1; only
-  `"ts"` is valid at traceVersion 1) — otherwise missing point = failed run.
-  A Rust shard cannot silently ship without its family's points.
+  `"ts"` is valid at traceVersion 1, and only for expectation-neutral
+  `observe`/`pause` actions — crash/error traces at G points are
+  header-marked `engines: ["rust"]` instead) — otherwise missing point =
+  failed run. A Rust shard cannot silently ship without its family's points.
 - **Resource scope**: `snapshotNormalizedState(["resources"])` returns
   thread/handle/queue-depth counts for the plateau checks; on TS it returns
   the tracked-handle registry size (`engineDbSchema.ts:48-82`) — coarse, and
