@@ -943,6 +943,11 @@ export function ChatsView(props: {
   // flips. These refs flip synchronously BEFORE the first await, so the second
   // call is ignored immediately.
   const sendingRef = useRef(false);
+  // A send belongs to exactly one workspace conversation. Navigation releases
+  // the new conversation's composer immediately, while incrementing this
+  // generation prevents the abandoned promise's `finally` from releasing a
+  // newer send that is already in flight there.
+  const sendGeneration = useRef(0);
   const startingThreadRef = useRef(false);
   const liveToken = useRef(0);
   // A live thread can refresh repeatedly without changing navigation. Keep a
@@ -958,6 +963,18 @@ export function ChatsView(props: {
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const messageNodes = useRef(new Map<string, HTMLElement>());
   const focusedMessageJump = useRef<string | null>(null);
+
+  const sendContextKey =
+    nav.level === "thread"
+      ? `${workspaceId}:thread:${nav.thread.id}`
+      : nav.level === "dm"
+        ? `${workspaceId}:dm:${nav.dm.threadId ?? nav.dm.channelId}`
+        : `${workspaceId}:${nav.level}`;
+  useEffect(() => {
+    sendGeneration.current += 1;
+    sendingRef.current = false;
+    setSending(false);
+  }, [sendContextKey]);
 
   const refreshOverview = useCallback(async () => {
     const token = ++liveToken.current;
@@ -1677,6 +1694,7 @@ export function ChatsView(props: {
     if (body.length === 0 || sending || sendingRef.current) return;
     const parentMessageId = replyTarget?.messageId;
     const token = liveToken.current;
+    const request = ++sendGeneration.current;
     sendingRef.current = true;
     setSending(true);
     let sentMessage: ChatMessageRecord | null = null;
@@ -1749,11 +1767,10 @@ export function ChatsView(props: {
         props.onError(ipcErrorMessage(error, "Could not send that message."));
       }
     } finally {
-      // Unconditional reset (LinkedChats precedent): navigation bumps the
-      // token without resetting `sending`, and the token guard on the READ
-      // above already prevents concurrent sends.
-      sendingRef.current = false;
-      setSending(false);
+      if (request === sendGeneration.current) {
+        sendingRef.current = false;
+        setSending(false);
+      }
     }
   }, [composer, nav, props, readOnly, replyTarget, resolveTargetMessageId, sending, workspaceId]);
 
@@ -2093,6 +2110,7 @@ export function ChatsView(props: {
     if (body.length === 0 || sending || sendingRef.current) return;
     const threadId = nav.dm.threadId;
     const token = liveToken.current;
+    const request = ++sendGeneration.current;
     sendingRef.current = true;
     setSending(true);
     try {
@@ -2113,8 +2131,10 @@ export function ChatsView(props: {
       if (token !== liveToken.current) return;
       props.onError(ipcErrorMessage(error, "Could not send that message."));
     } finally {
-      sendingRef.current = false;
-      setSending(false);
+      if (request === sendGeneration.current) {
+        sendingRef.current = false;
+        setSending(false);
+      }
     }
   }, [composer, nav, props, readOnly, sending, workspaceId]);
 
@@ -2743,6 +2763,7 @@ export function ChatsView(props: {
                               <MentionText
                                 body={item.message.body}
                                 candidates={mentionCandidates}
+                                attachments={item.message.attachments}
                               />
                             </span>
                           ) : null}
@@ -2752,6 +2773,7 @@ export function ChatsView(props: {
                             <MentionText
                               body={item.message.body}
                               candidates={mentionCandidates}
+                              attachments={item.message.attachments}
                               onOpenPath={props.onOpenPath}
                             />
                           </span>
@@ -3084,6 +3106,7 @@ export function ChatsView(props: {
               <MentionText
                 body={comment.body}
                 candidates={mentionCandidates}
+                attachments={commentAttachments}
                 testId="chats-message-body"
                 onOpenPath={props.onOpenPath}
               />
@@ -3353,6 +3376,7 @@ export function ChatsView(props: {
                     <MentionText
                       body={openingMessage.body}
                       candidates={mentionCandidates}
+                      attachments={attachmentsByMessage.get(openingMessage.id) ?? []}
                       testId="chats-message-body"
                       onOpenPath={props.onOpenPath}
                     />

@@ -10,13 +10,18 @@ import {
   type RefObject,
   type SetStateAction,
 } from "react";
-import type { ChatMessageRecord, ChatReactionRecord } from "../../ipc/bridgeContract";
+import type {
+  ChatAttachmentRecord,
+  ChatMessageRecord,
+  ChatReactionRecord,
+} from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import {
   findMentions,
   type MentionCandidate,
 } from "@dohc/workspace-contracts/chat-mentions";
 import { extractChatFileReferenceTokens } from "./chatFileMentions";
+import type { ChatFileReferenceToken } from "./chatFileMentions";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
 // the workspace Chats view render messages and composers through these SAME
@@ -153,6 +158,86 @@ export function formatChatTime(createdAtMs: number): { label: string; iso: strin
   };
 }
 
+interface FileMentionNavigationTarget {
+  path: string;
+  headingAnchor?: string;
+}
+
+function fileReferenceKey(reference: {
+  path: string;
+  headingAnchor?: string;
+}): string {
+  return `${reference.path}\u0000${reference.headingAnchor ?? ""}`;
+}
+
+function sameHeading(
+  token: Pick<ChatFileReferenceToken, "headingAnchor">,
+  attachment: Pick<ChatAttachmentRecord, "headingAnchor">,
+): boolean {
+  return (token.headingAnchor ?? "") === (attachment.headingAnchor ?? "");
+}
+
+// Body text is immutable display copy, while attachment pathHint is the
+// engine's authoritative, permission-checked navigation target. Most tokens
+// match it exactly. Hand-typed compatibility forms can have edge spaces that
+// main intentionally trims only after exact lookup, and a later rename can
+// make the persisted token differ entirely. Reconcile unique references in
+// three passes so exact space-named files always win, then compatibility paths,
+// then stable attachment order for renamed paths with the same heading.
+export function resolveFileMentionNavigationTargets(
+  tokens: readonly ChatFileReferenceToken[],
+  attachments: readonly ChatAttachmentRecord[],
+): Map<string, FileMentionNavigationTarget> {
+  const references = Array.from(
+    new Map(tokens.map((token) => [fileReferenceKey(token), token])).values(),
+  );
+  const available = attachments.filter(
+    (attachment): attachment is ChatAttachmentRecord & { pathHint: string } =>
+      typeof attachment.pathHint === "string" && attachment.pathHint.length > 0,
+  );
+  const unused = new Set(available.map((_, index) => index));
+  const targets = new Map<string, FileMentionNavigationTarget>();
+
+  const assign = (
+    predicate: (
+      token: ChatFileReferenceToken,
+      attachment: ChatAttachmentRecord & { pathHint: string },
+    ) => boolean,
+  ) => {
+    for (const token of references) {
+      const key = fileReferenceKey(token);
+      if (targets.has(key)) continue;
+      const index = available.findIndex(
+        (attachment, at) => unused.has(at) && predicate(token, attachment),
+      );
+      if (index < 0) continue;
+      const attachment = available[index];
+      if (!attachment) continue;
+      unused.delete(index);
+      targets.set(key, {
+        path: attachment.pathHint,
+        ...(attachment.headingAnchor
+          ? { headingAnchor: attachment.headingAnchor }
+          : {}),
+      });
+    }
+  };
+
+  assign(
+    (token, attachment) =>
+      attachment.pathHint === token.path && sameHeading(token, attachment),
+  );
+  assign(
+    (token, attachment) =>
+      token.path.trim() !== token.path &&
+      attachment.pathHint === token.path.trim() &&
+      sameHeading(token, attachment),
+  );
+  assign((token, attachment) => sameHeading(token, attachment));
+
+  return targets;
+}
+
 // Renders a message body with @-mention chips. A mention that resolves to a
 // known candidate gets a calm inline chip; everything else is plain text, so
 // the message reads exactly as written. Whitespace/newlines are preserved by
@@ -160,6 +245,7 @@ export function formatChatTime(createdAtMs: number): { label: string; iso: strin
 export function MentionText(props: {
   body: string;
   candidates: readonly MentionCandidate[];
+  attachments?: readonly ChatAttachmentRecord[];
   testId?: string;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
 }) {
@@ -168,6 +254,10 @@ export function MentionText(props: {
   // and accidentally turn a handle inside an unmatched/multiline fence into a
   // mention.
   const fileTokens = extractChatFileReferenceTokens(props.body);
+  const fileTargets = resolveFileMentionNavigationTargets(
+    fileTokens,
+    props.attachments ?? [],
+  );
   // A file token owns its complete source range. A handle-like substring in a
   // filename is part of the attachment syntax, not a person mention.
   const mentions = findMentions(props.body, props.candidates, { ignoreCode: true }).filter(
@@ -194,6 +284,7 @@ export function MentionText(props: {
         </>
       );
       const className = "inline-flex items-center gap-1 rounded bg-line/50 px-1 text-muted";
+      const navigationTarget = fileTargets.get(fileReferenceKey(fileToken)) ?? fileToken;
       content.push(props.onOpenPath ? (
         <button
           type="button"
@@ -204,7 +295,12 @@ export function MentionText(props: {
           }`}
           className={`${className} cursor-pointer hover:bg-line hover:text-ink`}
           title={fileToken.text}
-          onClick={() => props.onOpenPath?.(fileToken.path, fileToken.headingAnchor)}
+          onClick={() =>
+            props.onOpenPath?.(
+              navigationTarget.path,
+              navigationTarget.headingAnchor,
+            )
+          }
         >
           {chipContent}
         </button>
@@ -497,6 +593,7 @@ export function ChatMessageList(props: {
                   <MentionText
                     body={message.body}
                     candidates={candidates}
+                    attachments={message.attachments}
                     testId={`${props.testIdPrefix}-message-body`}
                     onOpenPath={props.onOpenPath}
                   />

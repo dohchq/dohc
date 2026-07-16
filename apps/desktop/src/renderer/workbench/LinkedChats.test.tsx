@@ -139,6 +139,48 @@ describe("LinkedChatsPanel initialThread consumption", () => {
     expect(bridgeMock.listChatMessages).toHaveBeenCalledTimes(1);
   });
 
+  it("opens a compatibility-form file mention through its resolved attachment path", async () => {
+    const user = userEvent.setup();
+    const onOpenPath = vi.fn();
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [
+        {
+          id: "message-file",
+          threadId: searchThread.id,
+          authorKind: "human",
+          authorDisplayName: "Ice",
+          body: "Read @[ docs/plan.md #scope].",
+          createdAtMs: 1_700_000_000_000,
+          attachments: [
+            {
+              attachmentId: "attachment-file",
+              threadId: searchThread.id,
+              messageId: "message-file",
+              targetKind: "file",
+              objectId: "file-plan",
+              pathHint: "docs/plan.md",
+              headingAnchor: "scope",
+              createdAtMs: 1_700_000_000_000,
+            },
+          ],
+        },
+      ],
+    });
+
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/current.md"
+        initialThread={searchThread}
+        onOpenPath={onOpenPath}
+        onError={() => undefined}
+      />,
+    );
+
+    await user.click(await screen.findByTestId("linked-chat-message-body-file-mention"));
+    expect(onOpenPath).toHaveBeenCalledWith("docs/plan.md", "scope");
+  });
+
   it("lands on a focused message and honors a repeated open of the same thread", async () => {
     bridgeMock.listChatMessages.mockResolvedValue({
       messages: [

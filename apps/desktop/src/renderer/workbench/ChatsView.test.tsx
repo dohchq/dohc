@@ -1714,6 +1714,72 @@ describe("ChatsView liveness", () => {
     await screen.findAllByTestId("chats-channel-name");
     expect(screen.queryByText("Stale thread")).toBeNull();
   });
+
+  it("keeps a newer send busy when an abandoned thread send settles", async () => {
+    const user = userEvent.setup();
+    const firstThread = thread({ id: "thread-1", title: "First thread" });
+    const secondThread = thread({ id: "thread-2", title: "Second thread" });
+    bridgeMock.listChannelThreads.mockResolvedValue({
+      threads: [firstThread, secondThread],
+    });
+
+    let resolveFirstSend!: (value: { message: ChatMessageRecord }) => void;
+    let resolveSecondSend!: (value: { message: ChatMessageRecord }) => void;
+    const firstSend = new Promise<{ message: ChatMessageRecord }>((resolve) => {
+      resolveFirstSend = resolve;
+    });
+    const secondSend = new Promise<{ message: ChatMessageRecord }>((resolve) => {
+      resolveSecondSend = resolve;
+    });
+    bridgeMock.sendChatMessage
+      .mockImplementationOnce(() => firstSend)
+      .mockImplementationOnce(() => secondSend);
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click((await screen.findAllByTestId("chats-thread"))[0]!);
+    await user.type(screen.getByTestId("chats-composer"), "First send{Enter}");
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await user.click((await screen.findAllByTestId("chats-thread"))[1]!);
+    const nextComposer = await screen.findByTestId("chats-composer");
+    await user.clear(nextComposer);
+    await user.type(nextComposer, "Second send{Enter}");
+    await waitFor(() => expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(2));
+    expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).disabled).toBe(true);
+
+    await act(async () => {
+      resolveFirstSend({
+        message: message({
+          id: "message-from-first-thread",
+          threadId: firstThread.id,
+          body: "First send",
+        }),
+      });
+      await firstSend;
+    });
+
+    expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).disabled).toBe(true);
+    expect(screen.queryByText("First send")).toBeNull();
+
+    await act(async () => {
+      resolveSecondSend({
+        message: message({
+          id: "message-from-second-thread",
+          threadId: secondThread.id,
+          body: "Second send",
+        }),
+      });
+      await secondSend;
+    });
+
+    await waitFor(() =>
+      expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).disabled).toBe(false),
+    );
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(2);
+    expect(screen.getByText("Second send")).toBeTruthy();
+  });
 });
 
 // --- Shared channels (MU-C4) -----------------------------------------------
