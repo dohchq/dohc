@@ -92,25 +92,99 @@ export type WikilinkNavigation = {
   headingTarget?: HeadingTarget;
 };
 
-/** Resolve a rich-editor wikilink without treating its `#fragment` as part of
- * the filename. Fragment-only links stay in the current file; file fragments
- * retain the existing known-file/fallback path resolution. */
+function normalizeWikilinkPath(path: string): string {
+  const parts: string[] = [];
+  for (const part of path.replace(/\\/gu, "/").split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  return parts.join("/");
+}
+
+function wikilinkPathCandidates(target: string, currentPath: string): string[] {
+  const slashed = target.replace(/\\/gu, "/");
+  const currentDirectory = currentPath.includes("/")
+    ? currentPath.slice(0, currentPath.lastIndexOf("/"))
+    : "";
+  const direct = normalizeWikilinkPath(slashed);
+  const relative = normalizeWikilinkPath(
+    currentDirectory ? `${currentDirectory}/${slashed}` : slashed,
+  );
+  const explicitlyRelative = slashed.startsWith("./") || slashed.startsWith("../");
+  return [...new Set(explicitlyRelative ? [relative, direct] : [direct, relative])];
+}
+
+function findKnownWikilinkFile(
+  target: string,
+  currentPath: string,
+  knownFiles: ReadonlyArray<WikilinkFile>,
+): WikilinkFile | undefined {
+  const candidates = wikilinkPathCandidates(target, currentPath);
+  for (const candidate of candidates) {
+    const match = knownFiles.find((file) => {
+      const knownPath = normalizeWikilinkPath(file.path);
+      const knownWithoutExtension = knownPath.replace(/\.md$/iu, "");
+      const withoutExtension = candidate.replace(/\.md$/iu, "");
+      return candidate === knownPath || withoutExtension === knownWithoutExtension;
+    });
+    if (match) return match;
+  }
+  return undefined;
+}
+
+/** Resolve a rich-editor wikilink. A complete known-file path is authoritative
+ * even when it contains `#`; only unmatched suffixes become heading fragments.
+ * Fragment-only links stay in the current file, and unknown links retain the
+ * existing `.md` fallback after path normalization. */
 export function resolveWikilinkNavigation(
   target: string,
   currentPath: string,
   knownFiles: ReadonlyArray<WikilinkFile>,
   nonce: number,
 ): WikilinkNavigation {
+  // A leading hash is the explicit same-file heading form. A file whose name
+  // begins with `#` remains addressable through a path such as `./#notes`.
+  if (target.startsWith("#")) {
+    const fragment = target.slice(1);
+    return {
+      path: currentPath,
+      ...(fragment
+        ? { headingTarget: { anchor: fragment, nonce } }
+        : {}),
+    };
+  }
+
+  const fullTargetMatch = findKnownWikilinkFile(target, currentPath, knownFiles);
+  if (fullTargetMatch) return { path: fullTargetMatch.path };
+
+  // Prefer the longest known filename before a `#`. This keeps an explicit
+  // heading navigable for files that themselves contain one or more hashes,
+  // e.g. `notes/release#1.md#decisions`.
+  for (let hashIndex = target.lastIndexOf("#"); hashIndex > 0;) {
+    const fileTarget = target.slice(0, hashIndex);
+    const fragment = target.slice(hashIndex + 1);
+    const match = findKnownWikilinkFile(fileTarget, currentPath, knownFiles);
+    if (match && fragment) {
+      return {
+        path: match.path,
+        headingTarget: { anchor: fragment, nonce },
+      };
+    }
+    hashIndex = target.lastIndexOf("#", hashIndex - 1);
+  }
+
   const hashIndex = target.indexOf("#");
   const fileTarget = hashIndex === -1 ? target : target.slice(0, hashIndex);
   const fragment = hashIndex === -1 ? "" : target.slice(hashIndex + 1);
   let path = currentPath;
   if (fileTarget) {
-    const normalized = fileTarget.replace(/\.md$/i, "");
-    const match =
-      knownFiles.find((file) => file.path.replace(/\.md$/i, "") === normalized) ??
-      knownFiles.find((file) => file.path === fileTarget);
-    path = match?.path ?? `${normalized}.md`;
+    const match = findKnownWikilinkFile(fileTarget, currentPath, knownFiles);
+    const fallback = wikilinkPathCandidates(fileTarget, currentPath)[0] ?? fileTarget;
+    path = match?.path ?? `${fallback.replace(/\.md$/iu, "")}.md`;
   }
   return {
     path,

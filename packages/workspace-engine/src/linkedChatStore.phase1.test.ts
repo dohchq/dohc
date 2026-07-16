@@ -1186,6 +1186,18 @@ describe("phase-one linked chat model", () => {
     expect(await engine.store.listChannels({ workspaceId: WORKSPACE_ID })).toEqual([
       expect.objectContaining({ id: localChannel.id }),
     ]);
+    await expect(
+      engine.store.findChannelBySlug({
+        workspaceId: WORKSPACE_ID,
+        slug: "project-updates-2",
+      }),
+    ).resolves.toBeNull();
+    await expect(
+      engine.store.findChannelBySlug({
+        workspaceId: WORKSPACE_ID,
+        slug: localChannel.slug,
+      }),
+    ).resolves.toMatchObject({ id: localChannel.id });
     const placeholder = rawDbFor(engine, (db) =>
       db
         .prepare(
@@ -1264,6 +1276,16 @@ describe("phase-one linked chat model", () => {
       kind: "dm",
       createdAtMs: 1000,
       updatedAtMs: 1000,
+    });
+    await expect(
+      engine.store.findChannelBySlug({
+        workspaceId: WORKSPACE_ID,
+        slug: "project-updates-2",
+      }),
+    ).resolves.toMatchObject({
+      id: placeholderId,
+      name: "Remote Project Updates",
+      kind: "dm",
     });
     expect(
       await engine.store.listChannelThreads({

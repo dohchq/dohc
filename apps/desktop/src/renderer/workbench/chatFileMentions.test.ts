@@ -47,6 +47,45 @@ describe("chat file reference tokens", () => {
     ).toEqual([{ path: "notes/literal%23.md" }]);
   });
 
+  it("preserves leading and trailing spaces in paths byte-for-byte", () => {
+    const references = [
+      { path: " notes/leading.md" },
+      { path: "notes/trailing.md " },
+      { path: " notes/both.md ", headingAnchor: "scope" },
+    ];
+
+    expect(references.map(formatChatFileReferenceToken)).toEqual([
+      "@[ notes/leading.md]",
+      "@[notes/trailing.md ]",
+      "@[ notes/both.md #scope]",
+    ]);
+    for (const reference of references) {
+      expect(extractChatFileReferences(formatChatFileReferenceToken(reference))).toEqual([
+        reference,
+      ]);
+    }
+  });
+
+  it("keeps edge-space paths distinct from their trimmed path", () => {
+    const body = [
+      "@[ notes/collision.md ]",
+      "@[notes/collision.md]",
+      "@[ notes/collision.md ]",
+    ].join(" ");
+
+    expect(extractChatFileReferences(body)).toEqual([
+      { path: " notes/collision.md " },
+      { path: "notes/collision.md" },
+    ]);
+  });
+
+  it("rejects whitespace-only path and heading values", () => {
+    expect(extractChatFileReferences("@[   ] @[docs/plan.md#   ]")).toEqual([]);
+    expect(extractChatFileReferences("@[docs/plan.md# scope ]")).toEqual([
+      { path: "docs/plan.md", headingAnchor: "scope" },
+    ]);
+  });
+
   it("does not span malformed or multiline tokens", () => {
     expect(extractChatFileReferences("@[missing @[docs/a.md\n#bad]")).toEqual([]);
     expect(extractChatFileReferences("@[missing @[docs/a.md]]")).toEqual([]);

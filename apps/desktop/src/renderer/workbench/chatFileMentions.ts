@@ -40,11 +40,18 @@ export function extractChatFileReferenceTokens(body: string): ChatFileReferenceT
     // not reinterpret the inner-looking text as a second attachment token.
     if (match[0].slice(2).includes("@[")) continue;
     if (inCode(match.index)) continue;
-    const path = match[1] ? decodeReferenceComponent(match[1].trim()) : undefined;
-    if (!path) continue;
-    const headingAnchor = match[2]
-      ? decodeReferenceComponent(match[2].trim())
+    const path = match[1] ? decodeReferenceComponent(match[1]) : undefined;
+    // Edge spaces are legal filename bytes and the insertion formatter emits
+    // them literally, so trim only to reject an empty/whitespace-only value.
+    if (!path || !path.trim()) continue;
+    const rawHeading = match[2];
+    const hasHeading = rawHeading !== undefined;
+    const headingAnchor = rawHeading !== undefined
+      ? decodeReferenceComponent(rawHeading.trim())
       : undefined;
+    // Keep heading normalization unchanged, but reject an explicitly present
+    // heading delimiter whose value is empty after normalization.
+    if (hasHeading && !headingAnchor) continue;
     tokens.push({
       path,
       ...(headingAnchor ? { headingAnchor } : {}),

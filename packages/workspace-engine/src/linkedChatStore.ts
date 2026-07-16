@@ -2402,7 +2402,15 @@ export function createLinkedChatStore(
         if (!slug) return null;
         return withDb((db) => {
           const row = db
-            .prepare("SELECT * FROM chat_channels WHERE workspace_id = ? AND slug = ?")
+            .prepare(
+              `SELECT c.* FROM chat_channels c
+               WHERE c.workspace_id = ? AND c.slug = ?
+                 AND NOT EXISTS (
+                   SELECT 1 FROM chat_channel_placeholders placeholder
+                   WHERE placeholder.workspace_id = c.workspace_id
+                     AND placeholder.channel_id = c.channel_id
+                 )`,
+            )
             .get(workspaceId, slug);
           return row ? cloneJson(channelFromRow(row)) : null;
         });

@@ -44,6 +44,9 @@ describe("lineSpanInText (search scroll-to-line, Phase E5.0)", () => {
 describe("resolveWikilinkNavigation", () => {
   const files = [
     { path: "notes/plan.md", title: "Plan" },
+    { path: "notes/release#1.md", title: "Release 1" },
+    { path: "notes/daily/milestone#2.md", title: "Milestone 2" },
+    { path: "notes/#overview.md", title: "Hash Overview" },
     { path: "today.md", title: "Today" },
   ];
 
@@ -65,9 +68,74 @@ describe("resolveWikilinkNavigation", () => {
     });
   });
 
+  it("keeps an explicit leading-hash heading local even when a matching file exists", () => {
+    expect(
+      resolveWikilinkNavigation("#overview", "notes/today.md", files, 16),
+    ).toEqual({
+      path: "notes/today.md",
+      headingTarget: { anchor: "overview", nonce: 16 },
+    });
+    expect(
+      resolveWikilinkNavigation("./#overview", "notes/today.md", files, 17),
+    ).toEqual({ path: "notes/#overview.md" });
+  });
+
   it("preserves whole-file wikilink resolution without manufacturing a target", () => {
     expect(resolveWikilinkNavigation("notes/plan", "today.md", files, 9)).toEqual({
       path: "notes/plan.md",
+    });
+  });
+
+  it("treats a full known filename containing # as a file, not a heading", () => {
+    expect(
+      resolveWikilinkNavigation("notes/release#1.md", "today.md", files, 10),
+    ).toEqual({ path: "notes/release#1.md" });
+    expect(
+      resolveWikilinkNavigation("notes/release#1", "today.md", files, 11),
+    ).toEqual({ path: "notes/release#1.md" });
+  });
+
+  it("normalizes relative paths before matching filenames containing #", () => {
+    expect(
+      resolveWikilinkNavigation(
+        "./milestone#2",
+        "notes/daily/today.md",
+        files,
+        12,
+      ),
+    ).toEqual({ path: "notes/daily/milestone#2.md" });
+    expect(
+      resolveWikilinkNavigation(
+        "../release#1.md",
+        "notes/daily/today.md",
+        files,
+        13,
+      ),
+    ).toEqual({ path: "notes/release#1.md" });
+  });
+
+  it("uses the longest known hash filename before an explicit heading", () => {
+    expect(
+      resolveWikilinkNavigation(
+        "notes/release#1.md#decisions",
+        "today.md",
+        files,
+        14,
+      ),
+    ).toEqual({
+      path: "notes/release#1.md",
+      headingTarget: { anchor: "decisions", nonce: 14 },
+    });
+    expect(
+      resolveWikilinkNavigation(
+        "./milestone#2#next-steps",
+        "notes/daily/today.md",
+        files,
+        15,
+      ),
+    ).toEqual({
+      path: "notes/daily/milestone#2.md",
+      headingTarget: { anchor: "next-steps", nonce: 15 },
     });
   });
 });
