@@ -1,0 +1,45 @@
+test_file	line_count	classification	hooks_or_sql_used	port_priority	notes_inline
+packages/workspace-engine/src/activeVersion.test.ts	127	sql-state-oracle	1 raw DatabaseSync site (DROP TABLE active_versions to simulate a missing table on reopen)	1	small, clean oracle: proves recovery when active_versions table is absent
+packages/workspace-engine/src/agentDispatchStore.test.ts	596	sql-state-oracle	7 raw db.prepare sites against agent_run_records via EngineSqliteDb	2	agent-dispatch capability shard, no hooks
+packages/workspace-engine/src/changeSetStore.test.ts	1332	hook-dependent	hand-built corrupt index/record JSON files written directly to .dohc/history (10+ sites) + currentProcessIdentityForTest (/proc/pid/stat) for stale-lock heartbeat simulation	3	majority of file is portable-behavioral (public API); only the corrupt-on-disk-JSON and stale-lock/heartbeat tests need the named-fault-point protocol — good split candidate
+packages/workspace-engine/src/effectivePolicy.test.ts	295	portable-behavioral	none	1	pure classifyEngineFilePath/policy logic, public API only
+packages/workspace-engine/src/linkedChatStore.phase1.test.ts	1018	sql-state-oracle	8 raw db.prepare sites	1	core linked-chat store contract (phase1 slice), foundational oracle candidate
+packages/workspace-engine/src/linkedChatStore.test.ts	2030	sql-state-oracle	20 rawRows()/rawExec() call sites	1	core linked-chat store, largest chat suite, foundational oracle
+packages/workspace-engine/src/momentAuthor.test.ts	225	sql-state-oracle	3 rawEngineDb().exec sites	1	authorship state-corrupt contract, small and foundational
+packages/workspace-engine/src/momentTimeline.test.ts	215	portable-behavioral	none	1	public API only
+packages/workspace-engine/src/phase0Proof.test.ts	211	portable-behavioral	none	1	literal phase-0 smoke/proof suite, should land first
+packages/workspace-engine/src/searchIndex.test.ts	111	sql-state-oracle	in-memory db built straight from ENGINE_SEARCH_INDEX_DDL; tests queryChatMessagesGranular directly against inserted rows (2 raw sites)	2	search capability, exercises SQL query function directly against portable DDL rather than the store layer
+packages/workspace-engine/src/secretFileStore.test.ts	1207	sql-state-oracle	5 rawDb() call sites	2	secret-file capability shard
+packages/workspace-engine/src/secretKeyEnvelope.test.ts	267	portable-behavioral	none	1	pure envelope/key-install logic via public API plus junk-input assertions
+packages/workspace-engine/src/syncFolder.test.ts	3531	sql-state-oracle	8 rawDb() call sites	2	largest file in the package; folder export/import bundle capability
+packages/workspace-engine/src/syncRelay.test.ts	1254	sql-state-oracle	17 raw db.prepare sites	2	relay capability shard
+packages/workspace-engine/src/syncShareView.test.ts	405	portable-behavioral	none	2	share-view capability, public API only
+packages/workspace-engine/src/syncSharedChannel.test.ts	827	sql-state-oracle	4 raw db.prepare sites	2	shared-channel capability shard
+packages/workspace-engine/src/versionCompare.test.ts	127	portable-behavioral	none	1	pure compareVersionFiles logic
+packages/workspace-engine/src/versionedFileWorkspace.test.ts	2813	hook-dependent	VersionedFileWorkspaceTestHooks (afterFileMutationLockAcquired, afterFileWriteBeforeHistory, forcePlatformMode, onFileMutationLockWait, onWorkspaceMutationQueued) plus createExternalMutationLockForTest/isPidAliveForTest/unusedPidForTest/readPendingMutationJournalsForTest/writePendingMutationJournalForTest	3	crash + stale-lock recovery suite; needs the named-fault-point protocol; very large file, strong candidate to split so non-hook tests ship earlier
+packages/workspace-engine/src/versionedTextMerge.test.ts	439	sql-state-oracle	2 withRawDb() call sites	1	mostly portable merge logic with 2 raw-row assertions; foundational
+packages/workspace-engine/src/versionedTextStore.test.ts	2458	hook-dependent	testHooks: beforePersist / afterLoadWritableState / onWriteQueued (concurrency race + failure injection) plus 45 rawRows()/rawExec()/rawCorrupt() call sites	3	the core store test; bulk of file (45 sites) is sql-state-oracle and could ship wave-1, but the concurrency-hook tests pin the whole file to priority 3 until fault-injection infra exists — strongest split candidate in the package
+packages/workspace-engine/src/workspaceSearch.test.ts	769	sql-state-oracle	6 raw db.prepare/exec sites (one is an FTS5 capability probe against a scratch table, not an engine-table assertion)	2	search capability shard
+packages/workspace-engine/src/ydocEngineDriver.test.ts	789	hook-dependent	onAfterReserveForTest (mid-open failure injection) plus 27 rawRows()/rawExec()/rawExecWithForeignKeys() call sites	3	central to the yrs interop spike; needs fault-injection protocol before it can fully port
+packages/workspace-engine/src/ydocFidelity.test.ts	219	portable-behavioral	none	1	markdown<->Y.Doc round-trip fidelity harness (WS-G2-B); critical evidence for the yrs interop spike, no db/hooks involved
+packages/workspace-engine/src/ydocReplication.test.ts	1015	hook-dependent	onBeforeBaseClaimForTest (concurrent-claim race injection) plus 16 rawDb() call sites	3	multi-node replication race suite; needs fault-injection protocol; directly relevant to the yrs interop spike
+apps/desktop/src/workspaces/syncCode.test.ts	108	portable-behavioral	none	1	pure buildSyncCode/parseSyncCode/relayUrlsMatch string logic, trivial early port
+apps/desktop/src/workspaces/workspaceEnginePolicyFile.test.ts	131	portable-behavioral	none	2	policy-file fs conventions via public API, no db/hooks
+apps/desktop/src/renderer/collab/ipcPresenceTransport.test.ts	138	implementation-specific	none (wraps Electron ipcRenderer channel)	3	Electron ipcRenderer-backed PresenceTransport has no Rust-engine equivalent; desktop transport glue only, justifying implementation-specific
+apps/desktop/src/renderer/collab/engineYDocProvider.test.ts	145	portable-behavioral	none	1	Y.Doc provider handshake/update logic; foundational to the yrs interop spike
+apps/desktop/src/ipc/engineHistoryIpc.test.ts	166	implementation-specific	none	3	maps EngineMomentRecord to the Electron IPC bridge-contract shape; UI-glue, not engine behavior, justifying implementation-specific
+apps/desktop/src/renderer/workbench/EngineHistory.test.ts	181	implementation-specific	none	3	pure UI label/formatting logic (chatAuthorLabel etc.) over engine moment records; presentation, not engine behavior
+apps/desktop/src/workspaces/sharedView.test.ts	188	portable-behavioral	none	2	shared-view fs + public-API logic
+apps/desktop/src/renderer/collab/usePresence.test.tsx	205	implementation-specific	none	3	React hook/component render via @testing-library/react; UI-framework glue, justifying implementation-specific
+apps/desktop/src/collab/ydocEngineProviderSession.test.ts	273	sql-state-oracle	1 raw db.prepare site (SELECT COUNT(*) FROM ydoc_updates)	2	ydoc provider session persistence, yrs-spike relevant
+apps/desktop/src/workspaces/workspaceEngineRestore.test.ts	300	portable-behavioral	none	2	backup/restore directory-layout logic via fs + public API
+apps/desktop/src/renderer/collab/presenceChannel.test.ts	301	portable-behavioral	none	2	presence dedup/broadcast logic, public API only
+apps/desktop/src/workspaces/workspaceEngineYDocSession.test.ts	313	sql-state-oracle	7 raw db.prepare sites	2	ydoc session capability shard, yrs-spike relevant
+apps/desktop/src/renderer/collab/docPresence.test.ts	319	portable-behavioral	none	2	y-protocols/awareness diffing logic; Yjs awareness protocol, conceptually portable to a yrs/y-sync awareness equivalent
+apps/desktop/src/workspaces/sharedChannels.test.ts	347	portable-behavioral	none	2	shared-channel fs + public-API logic
+apps/desktop/src/workspaces/workspaceEngineSecretCapture.test.ts	366	sql-state-oracle	4 raw db.prepare sites	2	secret-capture capability shard
+apps/desktop/src/workspaces/relaySyncEngine.test.ts	492	portable-behavioral	none	2	relay sync engine over mocked network, public API only
+apps/desktop/src/workspaces/shareMounts.test.ts	505	portable-behavioral	none	2	uses real symlink() for share mounts; confirm Windows symlink support before relying on this suite in Windows CI
+apps/desktop/src/workspaces/workspaceVersionOperations.test.ts	681	sql-state-oracle	4 raw db.prepare sites	2	version-ops capability shard
+apps/desktop/src/workspaces/workspaceFiles.test.ts	774	portable-behavioral	none	2	file watcher/listing conventions via fs + public API
+apps/desktop/src/workspaces/workspaceEngineCapture.test.ts	1871	sql-state-oracle	10 raw db.prepare sites	2	largest desktop shard; mirrors workspace-engine oracle patterns for capture
