@@ -48,8 +48,8 @@ pub use diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
 pub use error::FilesError;
 pub use hash::{HashOutcome, HashPool, PoolGauge};
 pub use materialize::{
-    AtomicReplacer, DurabilityPolicy, JobOutcome, JobResult, MaterializeError, StdReplacer,
-    materialize_one, run_pending_jobs,
+    AtomicReplacer, DurabilityPolicy, JobOutcome, JobResult, MaterializeError, NoBackoff,
+    ReplaceBackoff, StdBackoff, StdReplacer, backoff_delay, materialize_one, run_pending_jobs,
 };
 pub use reconcile::{
     CaptureOp, IngestReason, ReconcileController, ReconcilePlan, ReconcileRun, ScanGeneration,

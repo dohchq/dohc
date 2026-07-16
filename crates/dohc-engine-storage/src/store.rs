@@ -456,6 +456,15 @@ impl EngineStore {
         materialize::pending_job_count(&self.conn)
     }
 
+    /// The highest COMPLETE `target_generation` for `path` (staleness gate for
+    /// the materialization pipeline), or `None` if nothing is materialized there.
+    pub fn max_completed_generation_for_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<i64>, StorageError> {
+        materialize::max_completed_generation_for_path(&self.conn, path)
+    }
+
     // ---- R04: backup support --------------------------------------------
 
     /// The on-disk size of the main database file, from `page_count * page_size`

@@ -8,9 +8,10 @@
 use dohc_engine_storage::{
     BackupOutcome, CorruptionKind, DiagnosticBundle, EngineStore, FreeSpaceProbe,
     MaterializationJobSpec, NoFaults, Preimage, StorageError, classify, create_verified_backup,
-    enqueue_job, hex_sha256,
+    enqueue_job, hex_sha256, load_valid_backup,
 };
 use rusqlite::Connection;
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
@@ -388,6 +389,123 @@ fn unsupported_fingerprint_open_is_refused_and_preserves_evidence() {
     assert!(bundle.evidence.iter().any(|e| e == "engine.db"));
 }
 
+#[test]
+fn corrupt_page1_header_classifies_as_corruption_not_unsupported() {
+    let scratch = Scratch::new("corrupt-header");
+    let db = scratch.db_path();
+    // A real store with data, then a garbage user_version stamped on top.
+    {
+        let mut store = EngineStore::open(&db, 1).expect("open");
+        write_doc(&mut store, "r1", "doc-a", "payload-for-pages", 10);
+        drop(store);
+    }
+    {
+        let conn = Connection::open(&db).expect("raw");
+        conn.pragma_update(None, "user_version", 99).expect("uv");
+        conn.close().expect("close");
+    }
+    // Corrupt page-2 bytes so integrity is genuinely broken (a garbled header
+    // that merely changed user_version would otherwise read as a foreign
+    // fingerprint). Wipe the WAL/SHM first so the main file is authoritative.
+    let _ = std::fs::remove_file(scratch.root.join("engine.db-wal"));
+    let _ = std::fs::remove_file(scratch.root.join("engine.db-shm"));
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&db)
+            .expect("open db");
+        f.seek(SeekFrom::Start(4096)).expect("seek");
+        f.write_all(&[0xFFu8; 1024]).expect("corrupt");
+        f.sync_all().expect("sync");
+    }
+
+    let err = EngineStore::open(&db, 2).unwrap_err();
+    // A corrupt store must be classified corruption ("restore from backup"),
+    // never unsupported-fingerprint ("export/reset").
+    assert_eq!(
+        classify(&err),
+        CorruptionKind::Corruption,
+        "err was {}",
+        err.code()
+    );
+    assert_ne!(err.code(), "unsupported-fingerprint");
+}
+
+// ---------------------------------------------------------------------------
+// backup validator
+// ---------------------------------------------------------------------------
+
+#[test]
+fn load_valid_backup_enforces_manifest_presence_and_checksum() {
+    let scratch = Scratch::new("backup-validate");
+    let recovery = scratch.sub("recovery");
+    {
+        let mut store = EngineStore::open(&scratch.db_path(), 1).expect("open");
+        write_doc(&mut store, "r1", "doc-a", "payload", 10);
+        let outcome = create_verified_backup(
+            &store,
+            &recovery,
+            "snap",
+            "periodic",
+            99,
+            &FakeSpace(1 << 30),
+            &NoFaults,
+        )
+        .expect("backup");
+        assert!(matches!(outcome, BackupOutcome::Verified(_)));
+    }
+    // Valid pair loads.
+    assert!(
+        load_valid_backup(&recovery, "snap")
+            .expect("load")
+            .is_some()
+    );
+
+    // (a) Missing manifest ⇒ invalid-by-absence ⇒ None.
+    std::fs::remove_file(recovery.join("snap.manifest.json")).expect("rm manifest");
+    assert!(
+        load_valid_backup(&recovery, "snap")
+            .expect("load")
+            .is_none()
+    );
+
+    // Recreate a fresh valid backup, then (b) tamper the db bytes ⇒ checksum
+    // mismatch ⇒ None.
+    {
+        let store = EngineStore::open(&scratch.db_path(), 2).expect("reopen");
+        create_verified_backup(
+            &store,
+            &recovery,
+            "snap",
+            "periodic",
+            100,
+            &FakeSpace(1 << 30),
+            &NoFaults,
+        )
+        .expect("backup2");
+    }
+    assert!(
+        load_valid_backup(&recovery, "snap")
+            .expect("load")
+            .is_some()
+    );
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(recovery.join("snap.db"))
+            .expect("open backup");
+        f.seek(SeekFrom::Start(4096)).expect("seek");
+        f.write_all(&[0x00u8; 64]).expect("tamper");
+        f.sync_all().expect("sync");
+    }
+    assert!(
+        load_valid_backup(&recovery, "snap")
+            .expect("load")
+            .is_none(),
+        "tampered bytes must fail the checksum check"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // materialization job ledger
 // ---------------------------------------------------------------------------
@@ -406,14 +524,16 @@ fn job_spec(id: &str, path: &str, content_sha: &str, now: i64) -> Materializatio
 #[test]
 fn materialization_job_lifecycle_transitions() {
     let scratch = Scratch::new("job-life");
-    let store = EngineStore::open(&scratch.db_path(), 1).expect("open");
+    let mut store = EngineStore::open(&scratch.db_path(), 1).expect("open");
     let sha = store.put_binary_blob(b"content").expect("blob");
 
-    // Enqueue two jobs directly on the connection via a read/write closure.
+    // Enqueue two jobs in one transaction (phase-1 atomicity is type-enforced:
+    // `enqueue_job` demands a `&Transaction`, so this cannot compile on an
+    // autocommit connection).
     store
-        .read_with(|conn| {
-            enqueue_job(conn, &job_spec("j1", "notes/a.md", &sha, 10))?;
-            enqueue_job(conn, &job_spec("j2", "notes/b.md", &sha, 11))?;
+        .write_with(&NoFaults, |tx| {
+            enqueue_job(tx, &job_spec("j1", "notes/a.md", &sha, 10))?;
+            enqueue_job(tx, &job_spec("j2", "notes/b.md", &sha, 11))?;
             Ok::<_, StorageError>(())
         })
         .expect("enqueue");

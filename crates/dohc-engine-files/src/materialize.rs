@@ -20,6 +20,15 @@
 //!
 //! Each boundary has a named fault point so a crash-injection test can prove the
 //! recovery contract by reopening and replaying.
+//!
+//! **Residual TOCTOU (documented, not closed).** The preimage revalidation
+//! (step 4) reads the current target and the atomic replace (step 5) renames
+//! over it; no filesystem offers a content-compare-and-swap, so these two steps
+//! are NOT atomic. An external write landing in the microsecond between the
+//! revalidation read and the rename is clobbered. This is an inherent, narrow
+//! residual window — the pipeline closes the common case (an editor that wrote
+//! before the pipeline started is detected and preserved), not the sub-op race.
+//! Recorded in `BEHAVIOR_DELTA.md` (R04) so it is not mistaken for closed.
 
 use crate::floor::is_excluded_file;
 use dohc_engine_storage::{
@@ -27,6 +36,7 @@ use dohc_engine_storage::{
 };
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Maximum bytes the pipeline will materialize or read back for comparison. A
 /// job's content came from a bounded blob; the on-disk comparison read is
@@ -91,6 +101,45 @@ impl AtomicReplacer for StdReplacer {
     }
 }
 
+/// The delay schedule between bounded atomic-replace retries. Injectable so
+/// tests stay fast (no real sleep) while production absorbs the tens-of-ms
+/// window a real Windows AV/indexer sharing violation holds a handle.
+pub trait ReplaceBackoff: Send + Sync {
+    /// Wait before retrying after `failed_attempt` (1-indexed) failed with a
+    /// transient sharing violation.
+    fn wait_before_retry(&self, failed_attempt: u32);
+}
+
+/// Exponential backoff delay: base 10 ms doubled per failed attempt, capped at
+/// 200 ms. Pure so the schedule is unit-testable without sleeping.
+pub fn backoff_delay(failed_attempt: u32) -> Duration {
+    const BASE_MS: u64 = 10;
+    const CAP_MS: u64 = 200;
+    let shift = failed_attempt.saturating_sub(1).min(20);
+    let ms = BASE_MS.saturating_mul(1u64 << shift).min(CAP_MS);
+    Duration::from_millis(ms)
+}
+
+/// Production backoff: really sleeps [`backoff_delay`] so a transient sharing
+/// violation (tens of ms) is actually absorbed rather than burned through in
+/// microseconds.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StdBackoff;
+
+impl ReplaceBackoff for StdBackoff {
+    fn wait_before_retry(&self, failed_attempt: u32) {
+        std::thread::sleep(backoff_delay(failed_attempt));
+    }
+}
+
+/// No-wait backoff for tests that assert logical retry behavior, not timing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoBackoff;
+
+impl ReplaceBackoff for NoBackoff {
+    fn wait_before_retry(&self, _failed_attempt: u32) {}
+}
+
 /// The terminal outcome of one job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobOutcome {
@@ -99,6 +148,10 @@ pub enum JobOutcome {
     /// The target already equalled the desired content (idempotent replay); no
     /// write performed, marked complete.
     AlreadyMaterialized,
+    /// A newer generation was already materialized at this path; this job is
+    /// superseded and marked complete without regressing the path to older
+    /// content.
+    Superseded,
     /// Newer external content was found at revalidation; preserved-both, marked
     /// conflict, target NOT overwritten.
     Conflict,
@@ -187,13 +240,15 @@ pub fn run_pending_jobs(
     root: &Path,
     policy: DurabilityPolicy,
     replacer: &dyn AtomicReplacer,
+    backoff: &dyn ReplaceBackoff,
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<Vec<JobResult>, MaterializeError> {
     let jobs = store.list_pending_materialization_jobs()?;
     let mut results = Vec::with_capacity(jobs.len());
     for job in jobs {
-        let outcome = materialize_one(store, root, &job, policy, replacer, now_ms, faults)?;
+        let outcome =
+            materialize_one(store, root, &job, policy, replacer, backoff, now_ms, faults)?;
         let crashed = matches!(outcome, JobOutcome::Crashed(_));
         results.push(JobResult {
             job_id: job.job_id,
@@ -207,16 +262,37 @@ pub fn run_pending_jobs(
 }
 
 /// Execute a single job through the five durable steps.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each seam is injected for testability"
+)]
 pub fn materialize_one(
     store: &EngineStore,
     root: &Path,
     job: &MaterializationJob,
     policy: DurabilityPolicy,
     replacer: &dyn AtomicReplacer,
+    backoff: &dyn ReplaceBackoff,
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<JobOutcome, MaterializeError> {
     let target = resolve_target(root, &job.target_path)?;
+
+    // `materialize.after-job-commit`: the job row is durable but nothing is on
+    // disk yet. A crash here leaves the job pending for startup replay.
+    if should_crash(faults, FaultPoint::MaterializeAfterJobCommit) {
+        return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit));
+    }
+
+    // Generation staleness gate: if a NEWER generation has already been
+    // materialized at this path, this job is superseded — never regress the path
+    // to older content (concurrent / out-of-order jobs). No-op; mark complete.
+    if let Some(done_gen) = store.max_completed_generation_for_path(&job.target_path)?
+        && done_gen > job.target_generation
+    {
+        store.mark_materialization_complete(&job.job_id, now_ms)?;
+        return Ok(JobOutcome::Superseded);
+    }
 
     // Load the content blob (integrity-verified on read).
     let content = store.get_binary_blob(&job.content_sha256)?.ok_or_else(|| {
@@ -273,11 +349,18 @@ pub fn materialize_one(
             FaultPoint::MaterializeBeforePreimageRevalidate,
         ));
     }
+    // NOTE: this read and the rename below are not atomic (no fs content-CAS);
+    // an external write in the gap is clobbered — the documented residual TOCTOU
+    // (module docs + BEHAVIOR_DELTA). The common case (an editor that wrote
+    // before the pipeline ran) IS caught here.
     let current_now = read_current_no_follow(&target)?;
     if !preimage_matches(&job.preimage, &current_now) {
         // External newer content: preserve BOTH. Keep the on-disk target
         // untouched; persist our intended content to a `.conflict` sibling so it
-        // is not lost; mark the job conflict (never silently replayed).
+        // is not lost; mark the job conflict (never silently replayed). The
+        // `.conflict` artifact is on the path floor, so the scanner does NOT
+        // auto-capture it as a new tracked document — the user/agent inspects
+        // and resolves it manually.
         let conflict_path = conflict_sibling(&target, &job.job_id);
         rename_no_follow(&tmp, &conflict_path, replacer)?;
         store.mark_materialization_conflict(&job.job_id, now_ms)?;
@@ -287,7 +370,7 @@ pub fn materialize_one(
     // Step 5: atomic replace with bounded retry, then make the rename itself
     // durable by syncing the parent directory (POSIX), THEN mark complete — so a
     // crash can never leave the job marked complete over a non-durable rename.
-    replace_with_bounded_retry(&tmp, &target, replacer)?;
+    replace_with_bounded_retry(&tmp, &target, replacer, backoff)?;
     sync_parent_dir(target.parent(), policy)?;
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
         // Renamed but not marked complete. Startup replay: the target now equals
@@ -480,6 +563,7 @@ fn replace_with_bounded_retry(
     tmp: &Path,
     target: &Path,
     replacer: &dyn AtomicReplacer,
+    backoff: &dyn ReplaceBackoff,
 ) -> Result<(), MaterializeError> {
     let mut attempt = 0u32;
     loop {
@@ -491,8 +575,10 @@ fn replace_with_bounded_retry(
                     let _ = std::fs::remove_file(tmp); // best-effort cleanup
                     return Err(MaterializeError::FileLocked);
                 }
-                // Retry: a real pipeline would back off on the test clock; the
-                // seam makes the schedule deterministic in tests.
+                // Back off before the next attempt so a real (tens-of-ms)
+                // AV/indexer sharing violation is actually absorbed. Injectable,
+                // so tests stay fast.
+                backoff.wait_before_retry(attempt);
             }
             Err(err) => {
                 let _ = std::fs::remove_file(tmp);

@@ -156,11 +156,33 @@ fn classify_fingerprint(conn: &Connection) -> Result<Disposition, StorageError> 
                 Ok(Disposition::Fresh)
             }
         }
-        other => Err(StorageError::UnsupportedFingerprint {
-            found: other,
-            expected: ENGINE_SCHEMA_VERSION,
-        }),
+        other => {
+            // A non-recognized `user_version` is normally a real foreign
+            // fingerprint (e.g. a valid v1 TS database) → export/reset. But a
+            // corrupt page-1 header can read `user_version` as garbage; that is
+            // CORRUPTION (restore from backup), not an unsupported version.
+            // Distinguish by a read-only integrity probe: a store that fails
+            // `quick_check` is classified corrupt regardless of the version it
+            // claims. (A genuine foreign db passes the probe.)
+            if probe_integrity_ok(conn) {
+                Err(StorageError::UnsupportedFingerprint {
+                    found: other,
+                    expected: ENGINE_SCHEMA_VERSION,
+                })
+            } else {
+                Err(StorageError::StateCorrupt { source: None })
+            }
+        }
     }
+}
+
+/// A read-only `quick_check` probe used during classification. Returns `false`
+/// on any failure (a corrupt store that cannot even be checked is not "ok"). No
+/// file mutation — safe to run before the persistent pragmas.
+fn probe_integrity_ok(conn: &Connection) -> bool {
+    conn.pragma_query_value(None, "quick_check", |row| row.get::<_, String>(0))
+        .map(|result| result.eq_ignore_ascii_case("ok"))
+        .unwrap_or(false)
 }
 
 fn has_any_user_object(conn: &Connection) -> Result<bool, StorageError> {

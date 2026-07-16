@@ -44,7 +44,7 @@ pub(crate) mod schema;
 
 pub use backup::{
     BackupManifest, BackupOutcome, BackupRecord, FreeSpaceProbe, RealFreeSpace,
-    create_verified_backup,
+    create_verified_backup, load_valid_backup,
 };
 pub use blob::{hex_sha256, put_binary_blob};
 pub use diagnostics::{CorruptionKind, DiagnosticBundle, classify};

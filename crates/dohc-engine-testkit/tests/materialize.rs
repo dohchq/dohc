@@ -1,31 +1,31 @@
 //! Crash-injection matrix for the durable materialization pipeline
 //! (`dohc-engine-files::materialize`, `TEST_ORACLE.md` §3.3 points 12-16 and
 //! §3.10 the bounded-retry contract). Each test drives the five-step pipeline,
-//! injects a crash (or an external write / transient lock), then proves the
-//! recovery contract by REOPENING the store and replaying — durability is never
-//! trusted from the in-process outcome flag.
+//! injects a crash (or an external write / transient lock / superseding
+//! generation), then proves the recovery contract by REOPENING the store and
+//! replaying — durability is never trusted from the in-process outcome flag.
 
 use dohc_engine_files::{
-    AtomicReplacer, DurabilityPolicy, JobOutcome, StdReplacer, run_pending_jobs,
+    AtomicReplacer, DurabilityPolicy, JobOutcome, NoBackoff, ReplaceBackoff, StdReplacer,
+    backoff_delay, run_pending_jobs,
 };
 use dohc_engine_storage::{
-    EngineStore, JobStatus, MaterializationJobSpec, NoFaults, Preimage, StorageError, enqueue_job,
-    hex_sha256,
+    EngineStore, FaultPoint, JobStatus, MaterializationJobSpec, NoFaults, Preimage, StorageError,
+    enqueue_job, hex_sha256,
 };
 use dohc_engine_testkit::ScriptedFaults;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
+
+static SCRATCH_SEQ: AtomicU32 = AtomicU32::new(0);
 
 struct Scratch {
     root: PathBuf,
 }
-static SCRATCH_SEQ: AtomicU32 = AtomicU32::new(0);
-
 impl Scratch {
     fn new(tag: &str) -> Self {
         let mut root = std::env::temp_dir();
-        // pid + monotonic sequence: unique even across parallel test threads
-        // that start in the same nanosecond.
         root.push(format!(
             "dohc-r04-mat-{tag}-{}-{}",
             std::process::id(),
@@ -34,11 +34,9 @@ impl Scratch {
         std::fs::create_dir_all(root.join(".dohc").join("engine")).expect("mkdir engine dir");
         Scratch { root }
     }
-    /// The workspace root the pipeline materializes into.
     fn workspace(&self) -> &Path {
         &self.root
     }
-    /// The engine.db path (under the excluded `.dohc/engine` floor).
     fn db(&self) -> PathBuf {
         self.root.join(".dohc").join("engine").join("engine.db")
     }
@@ -56,19 +54,26 @@ impl Drop for Scratch {
     }
 }
 
-fn spec(id: &str, path: &str, sha: &str, preimage: Preimage, now: i64) -> MaterializationJobSpec {
+fn spec(
+    id: &str,
+    path: &str,
+    sha: &str,
+    preimage: Preimage,
+    generation: i64,
+    now: i64,
+) -> MaterializationJobSpec {
     MaterializationJobSpec {
         job_id: id.to_owned(),
         target_path: path.to_owned(),
         content_sha256: sha.to_owned(),
         preimage,
-        target_generation: 1,
+        target_generation: generation,
         now_ms: now,
     }
 }
 
 /// Put a content blob and enqueue a job for it in one transaction (phase 1).
-fn stage_job(store: &mut EngineStore, content: &[u8], job: &MaterializationJobSpec) -> String {
+fn stage_job(store: &mut EngineStore, content: &[u8], job: &MaterializationJobSpec) {
     let sha = store.put_binary_blob(content).expect("blob");
     assert_eq!(sha, job.content_sha256, "spec content sha must match blob");
     store
@@ -77,7 +82,6 @@ fn stage_job(store: &mut EngineStore, content: &[u8], job: &MaterializationJobSp
             Ok::<_, StorageError>(())
         })
         .expect("enqueue");
-    sha
 }
 
 #[test]
@@ -90,6 +94,7 @@ fn materializes_a_new_file_and_marks_complete() {
         "notes/a.md",
         &hex_sha256(content),
         Preimage::Absent,
+        1,
         10,
     );
     stage_job(&mut store, content, &job);
@@ -99,6 +104,7 @@ fn materializes_a_new_file_and_marks_complete() {
         sc.workspace(),
         DurabilityPolicy::per_os(),
         &StdReplacer,
+        &NoBackoff,
         20,
         &NoFaults,
     )
@@ -124,39 +130,55 @@ fn materializes_a_new_file_and_marks_complete() {
 #[test]
 fn job_committed_but_pipeline_unrun_replays_after_restart() {
     // `materialize.after-job-commit` (point 12): the job row is durable but the
-    // pipeline never ran (crash right after the phase-1 commit). A fresh restart
-    // must replay it to completion.
+    // pipeline never ran. Driven as a real crash at the wired fault point, then
+    // proven to replay on restart.
     let sc = Scratch::new("after-job-commit");
+    let content = b"deferred";
     {
         let mut store = EngineStore::open(&sc.db(), 1).expect("open");
-        let content = b"deferred";
         let job = spec(
             "j1",
             "notes/a.md",
             &hex_sha256(content),
             Preimage::Absent,
+            1,
             10,
         );
         stage_job(&mut store, content, &job);
-        // Simulate death immediately after the job commit: drop without running
-        // the pipeline.
+        let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit);
+        let results = run_pending_jobs(
+            &store,
+            sc.workspace(),
+            DurabilityPolicy::none(),
+            &StdReplacer,
+            &NoBackoff,
+            20,
+            faults.as_ref(),
+        )
+        .expect("run");
+        assert!(matches!(results[0].outcome, JobOutcome::Crashed(_)));
+        assert!(
+            !sc.target("notes/a.md").exists(),
+            "nothing on disk after job-commit crash"
+        );
         assert_eq!(store.pending_materialization_count().expect("pending"), 1);
         drop(store);
     }
-    let store = EngineStore::open(&sc.db(), 20).expect("reopen");
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
         DurabilityPolicy::none(),
         &StdReplacer,
-        30,
+        &NoBackoff,
+        40,
         &NoFaults,
     )
     .expect("replay");
     assert_eq!(results[0].outcome, JobOutcome::Completed);
     assert_eq!(
         std::fs::read(sc.target("notes/a.md")).expect("read"),
-        b"deferred"
+        content
     );
     assert_eq!(store.pending_materialization_count().expect("pending"), 0);
 }
@@ -166,29 +188,27 @@ fn crash_after_temp_write_leaves_no_torn_target_and_replay_completes() {
     let sc = Scratch::new("after-temp");
     let mut store = EngineStore::open(&sc.db(), 1).expect("open");
     let content = b"content-x";
-    let job = spec("j1", "a.md", &hex_sha256(content), Preimage::Absent, 10);
+    let job = spec("j1", "a.md", &hex_sha256(content), Preimage::Absent, 1, 10);
     stage_job(&mut store, content, &job);
 
-    let faults =
-        ScriptedFaults::crash_at(dohc_engine_storage::FaultPoint::MaterializeAfterTempWrite);
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterTempWrite);
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
         DurabilityPolicy::none(),
         &StdReplacer,
+        &NoBackoff,
         20,
         faults.as_ref(),
     )
     .expect("run");
     assert!(matches!(results[0].outcome, JobOutcome::Crashed(_)));
-    // No torn target: the temp is NEVER the user file.
     assert!(
         !sc.target("a.md").exists(),
         "target must not exist after temp-only crash"
     );
     assert_eq!(store.pending_materialization_count().expect("pending"), 1);
 
-    // Restart: reopen and replay with no fault → completes exactly once.
     drop(store);
     let store = EngineStore::open(&sc.db(), 30).expect("reopen");
     let results = run_pending_jobs(
@@ -196,6 +216,7 @@ fn crash_after_temp_write_leaves_no_torn_target_and_replay_completes() {
         sc.workspace(),
         DurabilityPolicy::none(),
         &StdReplacer,
+        &NoBackoff,
         40,
         &NoFaults,
     )
@@ -210,17 +231,16 @@ fn crash_after_flush_before_rename_replays_to_completion() {
     let sc = Scratch::new("after-flush");
     let mut store = EngineStore::open(&sc.db(), 1).expect("open");
     let content = b"flushed";
-    let job = spec("j1", "a.md", &hex_sha256(content), Preimage::Absent, 10);
+    let job = spec("j1", "a.md", &hex_sha256(content), Preimage::Absent, 1, 10);
     stage_job(&mut store, content, &job);
 
-    let faults = ScriptedFaults::crash_at(
-        dohc_engine_storage::FaultPoint::MaterializeAfterFlushBeforeRename,
-    );
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterFlushBeforeRename);
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
         DurabilityPolicy::per_os(),
         &StdReplacer,
+        &NoBackoff,
         20,
         faults.as_ref(),
     )
@@ -236,6 +256,7 @@ fn crash_after_flush_before_rename_replays_to_completion() {
         sc.workspace(),
         DurabilityPolicy::none(),
         &StdReplacer,
+        &NoBackoff,
         40,
         &NoFaults,
     )
@@ -249,29 +270,24 @@ fn crash_after_rename_before_complete_replays_exactly_once() {
     let sc = Scratch::new("after-rename");
     let mut store = EngineStore::open(&sc.db(), 1).expect("open");
     let content = b"renamed-content";
-    let job = spec("j1", "a.md", &hex_sha256(content), Preimage::Absent, 10);
+    let job = spec("j1", "a.md", &hex_sha256(content), Preimage::Absent, 1, 10);
     stage_job(&mut store, content, &job);
 
-    let faults = ScriptedFaults::crash_at(
-        dohc_engine_storage::FaultPoint::MaterializeAfterRenameBeforeComplete,
-    );
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterRenameBeforeComplete);
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
         DurabilityPolicy::none(),
         &StdReplacer,
+        &NoBackoff,
         20,
         faults.as_ref(),
     )
     .expect("run");
     assert!(matches!(results[0].outcome, JobOutcome::Crashed(_)));
-    // The file IS renamed (present with the content), but the job is not yet
-    // marked complete.
     assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), content);
     assert_eq!(store.pending_materialization_count().expect("pending"), 1);
 
-    // Restart replay: idempotent — the target already equals the desired
-    // content, so no second write, marked complete (exactly-once).
     drop(store);
     let store = EngineStore::open(&sc.db(), 30).expect("reopen");
     let results = run_pending_jobs(
@@ -279,6 +295,7 @@ fn crash_after_rename_before_complete_replays_exactly_once() {
         sc.workspace(),
         DurabilityPolicy::none(),
         &StdReplacer,
+        &NoBackoff,
         40,
         &NoFaults,
     )
@@ -293,14 +310,9 @@ fn external_newer_content_is_preserved_not_clobbered() {
     let sc = Scratch::new("preserve-both");
     let mut store = EngineStore::open(&sc.db(), 1).expect("open");
 
-    // The job intends to write "new-intended" over content whose known preimage
-    // hash is that of "old-known". But an external editor wrote "external-newer"
-    // to the target after the DB commit.
     let intended = b"new-intended-content";
     let old_known = b"old-known-content";
     let external = b"external-newer-content";
-
-    // Pre-create the target with the external content.
     std::fs::write(sc.target("a.md"), external).expect("pre-write external");
 
     let job = spec(
@@ -308,6 +320,7 @@ fn external_newer_content_is_preserved_not_clobbered() {
         "a.md",
         &hex_sha256(intended),
         Preimage::Present(hex_sha256(old_known)),
+        1,
         10,
     );
     stage_job(&mut store, intended, &job);
@@ -317,18 +330,16 @@ fn external_newer_content_is_preserved_not_clobbered() {
         sc.workspace(),
         DurabilityPolicy::none(),
         &StdReplacer,
+        &NoBackoff,
         20,
         &NoFaults,
     )
     .expect("run");
     assert_eq!(results[0].outcome, JobOutcome::Conflict);
 
-    // The external content is preserved untouched (NOT overwritten).
     assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), external);
-    // Our intended content is preserved beside it (preserve-both), not lost.
     let conflict = sc.target("a.md.j1.conflict");
     assert_eq!(std::fs::read(&conflict).expect("read conflict"), intended);
-    // The job is terminal-conflict, never silently replayed.
     assert_eq!(store.pending_materialization_count().expect("pending"), 0);
     assert_eq!(
         store
@@ -338,6 +349,51 @@ fn external_newer_content_is_preserved_not_clobbered() {
             .status,
         JobStatus::Conflict
     );
+}
+
+#[test]
+fn superseded_lower_generation_job_is_skipped() {
+    // A newer generation is materialized at the path first; a later-arriving job
+    // carrying an OLDER generation must not regress the path to older content.
+    let sc = Scratch::new("superseded");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    let newer = b"generation-2-content";
+    let older = b"generation-1-content";
+
+    let g2 = spec("j-g2", "a.md", &hex_sha256(newer), Preimage::Absent, 2, 10);
+    stage_job(&mut store, newer, &g2);
+    let r = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        20,
+        &NoFaults,
+    )
+    .expect("run g2");
+    assert_eq!(r[0].outcome, JobOutcome::Completed);
+    assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), newer);
+
+    let g1 = spec("j-g1", "a.md", &hex_sha256(older), Preimage::Absent, 1, 30);
+    stage_job(&mut store, older, &g1);
+    let r = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        40,
+        &NoFaults,
+    )
+    .expect("run g1");
+    assert_eq!(r[0].outcome, JobOutcome::Superseded);
+    assert_eq!(
+        std::fs::read(sc.target("a.md")).expect("read"),
+        newer,
+        "path not regressed"
+    );
+    assert_eq!(store.pending_materialization_count().expect("pending"), 0);
 }
 
 // --- bounded atomic-replace retry (env.sharing-violation-transient) ---------
@@ -366,8 +422,6 @@ impl AtomicReplacer for FlakyReplacer {
             })
             .is_ok_and(|prev| prev > 0)
         {
-            // A transient sharing violation (PermissionDenied is treated as
-            // transient on every platform by the pipeline).
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "injected sharing violation",
@@ -377,21 +431,36 @@ impl AtomicReplacer for FlakyReplacer {
     }
 }
 
+/// Records which failed-attempt numbers the pipeline asked us to back off on, so
+/// a test can assert the retry schedule is actually wired (no real sleep).
+#[derive(Default)]
+struct RecordingBackoff {
+    calls: Mutex<Vec<u32>>,
+}
+impl ReplaceBackoff for RecordingBackoff {
+    fn wait_before_retry(&self, failed_attempt: u32) {
+        self.calls.lock().unwrap().push(failed_attempt);
+    }
+}
+
 #[test]
-fn bounded_retry_succeeds_below_the_cap_with_exact_attempt_count() {
+fn bounded_retry_succeeds_below_the_cap_with_exact_attempt_count_and_backoff() {
     let sc = Scratch::new("retry-ok");
     let mut store = EngineStore::open(&sc.db(), 1).expect("open");
     let content = b"retryable";
-    let job = spec("j1", "a.md", &hex_sha256(content), Preimage::Absent, 10);
+    let job = spec("j1", "a.md", &hex_sha256(content), Preimage::Absent, 1, 10);
     stage_job(&mut store, content, &job);
 
-    // 2 transient failures (< 5) ⇒ success on attempt 3, exactly 3 traversals.
+    // 2 transient failures (< 5) ⇒ success on attempt 3, exactly 3 traversals,
+    // backoff invoked after failed attempts 1 and 2.
     let replacer = FlakyReplacer::new(2);
+    let backoff = RecordingBackoff::default();
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
         DurabilityPolicy::none(),
         &replacer,
+        &backoff,
         20,
         &NoFaults,
     )
@@ -402,6 +471,11 @@ fn bounded_retry_succeeds_below_the_cap_with_exact_attempt_count() {
         3,
         "n+1 = 3 attempts"
     );
+    assert_eq!(
+        *backoff.calls.lock().unwrap(),
+        vec![1, 2],
+        "backoff between retries"
+    );
     assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), content);
     assert_eq!(store.pending_materialization_count().expect("pending"), 0);
 }
@@ -411,16 +485,19 @@ fn bounded_retry_fails_closed_at_the_cap_and_leaves_job_pending() {
     let sc = Scratch::new("retry-exhaust");
     let mut store = EngineStore::open(&sc.db(), 1).expect("open");
     let content = b"stuck";
-    let job = spec("j1", "a.md", &hex_sha256(content), Preimage::Absent, 10);
+    let job = spec("j1", "a.md", &hex_sha256(content), Preimage::Absent, 1, 10);
     stage_job(&mut store, content, &job);
 
-    // 5 (>= cap) transient failures ⇒ fail closed after exactly 5 attempts.
+    // 5 (>= cap) transient failures ⇒ fail closed after exactly 5 attempts; the
+    // final (5th) failure returns immediately without backing off.
     let replacer = FlakyReplacer::new(5);
+    let backoff = RecordingBackoff::default();
     let err = run_pending_jobs(
         &store,
         sc.workspace(),
         DurabilityPolicy::none(),
         &replacer,
+        &backoff,
         20,
         &NoFaults,
     )
@@ -431,7 +508,73 @@ fn bounded_retry_fails_closed_at_the_cap_and_leaves_job_pending() {
         5,
         "exactly 5 attempts"
     );
-    // Fail-closed: nothing on disk, job left pending for startup replay.
+    assert_eq!(
+        *backoff.calls.lock().unwrap(),
+        vec![1, 2, 3, 4],
+        "backoff on attempts 1-4 only"
+    );
     assert!(!sc.target("a.md").exists());
     assert_eq!(store.pending_materialization_count().expect("pending"), 1);
+}
+
+#[test]
+fn backoff_schedule_is_increasing_and_capped() {
+    assert_eq!(backoff_delay(1).as_millis(), 10);
+    assert_eq!(backoff_delay(2).as_millis(), 20);
+    assert_eq!(backoff_delay(3).as_millis(), 40);
+    assert_eq!(backoff_delay(5).as_millis(), 160);
+    assert_eq!(backoff_delay(6).as_millis(), 200); // capped
+    assert_eq!(backoff_delay(100).as_millis(), 200);
+    let mut prev = 0u128;
+    for n in 1..=10 {
+        let ms = backoff_delay(n).as_millis();
+        assert!(ms >= prev, "monotonic");
+        prev = ms;
+    }
+}
+
+#[test]
+fn every_materialize_fault_point_has_a_live_call_site() {
+    // Registry consistency: arming each materialize.* point crashes the pipeline
+    // at that point — no dead/inert fault points. A new materialize FaultPoint
+    // that is not wired would fail here.
+    let points = [
+        FaultPoint::MaterializeAfterJobCommit,
+        FaultPoint::MaterializeAfterTempWrite,
+        FaultPoint::MaterializeAfterFlushBeforeRename,
+        FaultPoint::MaterializeBeforePreimageRevalidate,
+        FaultPoint::MaterializeAfterRenameBeforeComplete,
+    ];
+    for (i, point) in points.into_iter().enumerate() {
+        let sc = Scratch::new(&format!("live-{i}"));
+        let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+        let content = format!("content-{i}");
+        let job = spec(
+            "j1",
+            "a.md",
+            &hex_sha256(content.as_bytes()),
+            Preimage::Absent,
+            1,
+            10,
+        );
+        stage_job(&mut store, content.as_bytes(), &job);
+
+        let faults = ScriptedFaults::crash_at(point);
+        let results = run_pending_jobs(
+            &store,
+            sc.workspace(),
+            DurabilityPolicy::none(),
+            &StdReplacer,
+            &NoBackoff,
+            20,
+            faults.as_ref(),
+        )
+        .expect("run");
+        assert_eq!(
+            results[0].outcome,
+            JobOutcome::Crashed(point),
+            "fault point {} must fire",
+            point.as_str()
+        );
+    }
 }

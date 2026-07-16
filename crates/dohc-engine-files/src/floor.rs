@@ -41,6 +41,14 @@ const IGNORED_FILE_PREFIXES: &[&str] = &[".dohc-write-"];
 const SIDECAR_SUFFIXES: &[&str] = &["-wal", "-shm", "-journal"];
 const DB_BASE_EXTENSIONS: &[&str] = &[".db", ".sqlite", ".sqlite3"];
 
+/// Preserve-both recovery artifacts written by the materialization pipeline
+/// (`<base>.<job-id>.conflict`) are excluded from auto-capture: they stay
+/// VISIBLE on disk for a human/agent to inspect and resolve, but the scanner
+/// must NOT churn a recovery artifact into a new tracked document (that would
+/// fork provenance on a conflict). `dohc-engine-files::materialize` writes them;
+/// the floor keeps them out of the workspace's tracked set.
+const CONFLICT_ARTIFACT_SUFFIX: &str = ".conflict";
+
 /// Normalize a single path segment for reserved/ignored comparison.
 ///
 /// On Windows: strip trailing `.`/` ` (Win32 open-time aliasing), then
@@ -90,15 +98,22 @@ pub fn is_database_sidecar(file_name: &str) -> bool {
     })
 }
 
+/// Whether a file name is a preserve-both conflict artifact
+/// (`<base>.<job-id>.conflict`). Compared on the normalized name so the Win32
+/// trailing-alias/case rules apply consistently with the rest of the floor.
+pub fn is_conflict_artifact(file_name: &str) -> bool {
+    normalize_segment(file_name).ends_with(CONFLICT_ARTIFACT_SUFFIX)
+}
+
 /// Whether a whole file, addressed by its workspace-relative forward-slash
 /// path, is excluded by the floor. Combines the ignored-segment check with the
-/// sidecar check on the final segment.
+/// sidecar and conflict-artifact checks on the final segment.
 pub fn is_excluded_file(rel_path: &str) -> bool {
     if has_ignored_segment(rel_path) {
         return true;
     }
     match rel_path.rsplit('/').next() {
-        Some(name) => is_database_sidecar(name),
+        Some(name) => is_database_sidecar(name) || is_conflict_artifact(name),
         None => false,
     }
 }
@@ -139,6 +154,17 @@ mod tests {
     fn write_temp_prefix_excluded() {
         assert!(is_excluded_file(".dohc-write-123.tmp"));
         assert!(is_excluded_file("sub/.dohc-write-abc"));
+    }
+
+    #[test]
+    fn conflict_artifacts_excluded_from_capture() {
+        // The materialization preserve-both artifact `<base>.<job>.conflict` is
+        // a recovery artifact: visible on disk, but NOT auto-captured.
+        assert!(is_conflict_artifact("notes.md.j1.conflict"));
+        assert!(is_excluded_file("notes/x.md.abc123.conflict"));
+        assert!(is_excluded_file("x.md.job-9.conflict"));
+        // A normal document is still captured.
+        assert!(!is_excluded_file("notes/x.md"));
     }
 
     #[test]

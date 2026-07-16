@@ -16,9 +16,24 @@
 //! 4. **Writes a redaction-safe manifest** (opaque engine id, build, schema
 //!    fingerprint, checksum, size, retention) — never document content. A
 //!    backup with no manifest is invalid-by-absence and never counted.
+//! 5. **Reads back through [`load_valid_backup`]**, which ENFORCES those
+//!    invariants: it returns `None` for a missing manifest (invalid-by-absence)
+//!    or a checksum that no longer matches the db bytes (tamper / partial
+//!    write). A backup is only trusted through this validated read path.
 //!
 //! Two named fault points make the crash boundary testable:
 //! `backup.after-copy-before-manifest` and `backup.during-restore-verify`.
+//!
+//! **Same-stem republish window (documented, safe).** When a backup reuses an
+//! existing stem, the copy is staged and verified first, then published by
+//! atomic rename, and the prior manifest is cleared just before the rename so it
+//! can never describe the newly published (still-unmanifested) db. This leaves a
+//! narrow window in which *that stem* has a db but no manifest —
+//! [`load_valid_backup`] correctly reports it invalid-by-absence, and a retry
+//! self-heals by rewriting the manifest. The live source database is never
+//! touched, and any OTHER-stem backup is untouched; the guarantee is precisely
+//! "never destroy a valid restore point to make room for an unverified one",
+//! not "the target stem is atomically valid at every instant".
 
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, FaultPoint};
@@ -124,6 +139,68 @@ impl BackupManifest {
             self.verified,
         )
     }
+}
+
+impl BackupManifest {
+    /// Parse a manifest from its JSON text. Returns `None` if the JSON is
+    /// malformed or a required field is missing/mistyped (a malformed manifest
+    /// is treated as no manifest — invalid-by-absence).
+    fn from_json(text: &str) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_str(text).ok()?;
+        let obj = value.as_object()?;
+        Some(BackupManifest {
+            engine_uuid: obj.get("engine_uuid")?.as_str()?.to_owned(),
+            engine_build: obj.get("engine_build")?.as_str()?.to_owned(),
+            schema_fingerprint: obj.get("schema_fingerprint")?.as_i64()?,
+            checksum: obj.get("checksum")?.as_str()?.to_owned(),
+            size_bytes: obj.get("size_bytes")?.as_u64()?,
+            created_at_ms: obj.get("created_at_ms")?.as_i64()?,
+            retention: obj.get("retention")?.as_str()?.to_owned(),
+            verified: obj.get("verified")?.as_bool()?,
+        })
+    }
+}
+
+/// Load and VALIDATE a backup pair `(<stem>.db, <stem>.manifest.json)` from
+/// `recovery_dir`. Returns `Some(record)` only when the manifest is present,
+/// well-formed, marked `verified`, and its recorded checksum matches the current
+/// db bytes. Returns `None` for:
+/// - a missing manifest (invalid-by-absence — including the same-stem republish
+///   crash window),
+/// - a missing db,
+/// - an unverified manifest,
+/// - a checksum mismatch (tampered or partially-written bytes).
+///
+/// This is the ONLY sanctioned way to trust a backup; the documented invariants
+/// are enforced here rather than assumed by a reader.
+pub fn load_valid_backup(
+    recovery_dir: &Path,
+    backup_stem: &str,
+) -> Result<Option<BackupRecord>, StorageError> {
+    let backup_path = recovery_dir.join(format!("{backup_stem}.db"));
+    let manifest_path = recovery_dir.join(format!("{backup_stem}.manifest.json"));
+
+    let manifest_text = match std::fs::read_to_string(&manifest_path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(StorageError::classify_io(err)),
+    };
+    let Some(manifest) = BackupManifest::from_json(&manifest_text) else {
+        return Ok(None);
+    };
+    if !manifest.verified || !backup_path.exists() {
+        return Ok(None);
+    }
+    // Integrity: the db bytes must still hash to the recorded checksum.
+    let actual = hash_file(&backup_path)?;
+    if actual != manifest.checksum {
+        return Ok(None);
+    }
+    Ok(Some(BackupRecord {
+        backup_path,
+        manifest_path,
+        manifest,
+    }))
 }
 
 /// Minimal JSON string escaper (control chars, quote, backslash). The manifest

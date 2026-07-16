@@ -13,7 +13,7 @@
 //! user-tree filesystem writes out of `dohc-engine-storage`).
 
 use crate::error::StorageError;
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 
 /// The expected on-disk state of the target immediately before the replace.
 /// Revalidated by the filesystem pipeline: a mismatch means an external editor
@@ -83,15 +83,21 @@ pub struct MaterializationJob {
     pub created_at_ms: i64,
 }
 
-/// Enqueue a materialization job. Call this on a `&Transaction` (which derefs to
-/// `&Connection`) that also commits the canonical state, so the durable intent
-/// and the state are one atomic unit (`plan` step 1).
-pub fn enqueue_job(conn: &Connection, spec: &MaterializationJobSpec) -> Result<(), StorageError> {
+/// Enqueue a materialization job. The signature demands a `&Transaction`, not a
+/// bare `&Connection`, so phase-1 atomicity (the job row + the canonical state
+/// it reflects commit together, or neither) is **type-enforced**: enqueuing on
+/// an autocommit connection — where each statement would commit independently —
+/// is a compile error. Compose this into the same `write_with` transaction that
+/// mutates the canonical state (`plan` step 1).
+pub fn enqueue_job(
+    tx: &Transaction<'_>,
+    spec: &MaterializationJobSpec,
+) -> Result<(), StorageError> {
     let (present, preimage_sha): (i64, Option<&str>) = match &spec.preimage {
         Preimage::Absent => (0, None),
         Preimage::Present(sha) => (1, Some(sha.as_str())),
     };
-    conn.execute(
+    tx.execute(
         "INSERT INTO materialization_jobs \
          (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
           target_generation, status, created_at_ms, completed_at_ms) \
@@ -196,6 +202,25 @@ pub fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> {
         "SELECT COUNT(*) FROM materialization_jobs WHERE status = 'pending'",
         [],
         |r| r.get(0),
+    )
+    .map_err(StorageError::corrupt)
+}
+
+/// The highest `target_generation` among COMPLETE jobs for `path`, or `None` if
+/// nothing has been materialized there yet. The materialization pipeline uses
+/// this to skip a pending job whose generation is superseded by an already-
+/// materialized newer generation for the same path (concurrent/out-of-order
+/// jobs must never regress a path to older content).
+pub fn max_completed_generation_for_path(
+    conn: &Connection,
+    path: &str,
+) -> Result<Option<i64>, StorageError> {
+    // MAX over an empty set yields a single NULL row → `None`.
+    conn.query_row(
+        "SELECT MAX(target_generation) FROM materialization_jobs \
+         WHERE target_path = ?1 AND status = 'complete'",
+        [path],
+        |r| r.get::<_, Option<i64>>(0),
     )
     .map_err(StorageError::corrupt)
 }

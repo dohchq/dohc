@@ -403,3 +403,58 @@ the contract). macOS case-insensitivity (row 7.5) remains a separate
 NEEDS-DECISION and is intentionally NOT special-cased here. Tests:
 `src/floor.rs::posix_case_and_trailing_variants_are_distinct_content` (POSIX),
 `::win32_trailing_alias_still_excluded` (Windows).
+
+## 8. R04 (durable storage core) — approved deltas & documented residuals
+
+The R04 shard adds durability machinery the TS engine never had (migration
+ledger, verified backups, materialization-job pipeline). Four items are recorded
+here so downstream shards do not mistake a scoped limit for a closed guarantee.
+
+### 8.1 NEW-BEHAVIOR: durable materialization pipeline replaces plain `writeFile`
+
+**TS behavior.** `createDefaultDiskWriter` materializes with a plain buffered
+`writeFile` — no temp file, no atomic replace, no fsync
+(`STATE_OWNERSHIP.tsv` `job-materialization`); a crash mid-write can leave a
+TORN file with no job record.
+
+**Rust behavior (R04).** Canonical state + a durable materialization job commit
+in one txn; a sibling temp is written (restrictive mode), flushed per the per-OS
+policy, atomically replaced without following links (bounded retry for transient
+sharing violations), then marked complete. Startup replays pending jobs
+idempotently. Approved delta per `plan §Filesystem/database crash boundary`.
+
+### 8.2 RESIDUAL (documented, NOT closed): preimage-revalidate → replace TOCTOU
+
+The pipeline revalidates the target's preimage immediately before the atomic
+replace, but the read and the rename are not one operation (no filesystem offers
+content-compare-and-swap). An external write landing in the microsecond between
+the revalidation read and the rename is clobbered. The common case — an editor
+that wrote *before* the pipeline ran — IS detected and preserved-both. The
+sub-op race is an inherent, narrow residual; it is documented in
+`dohc-engine-files::materialize` module docs and is NOT claimed closed.
+
+### 8.3 DECISION: preserve-both `.conflict` artifacts are floor-excluded
+
+When materialization finds newer external content, it preserves both: the
+external file is left untouched and the intended content is written to a visible
+`<base>.<job-id>.conflict` sibling for the user/agent to resolve. That artifact
+is added to the path floor (`is_conflict_artifact`), so the scanner does NOT
+auto-capture it as a new tracked document (which would fork provenance on every
+conflict). It stays VISIBLE on disk; it is simply not auto-tracked. Test:
+`src/floor.rs::conflict_artifacts_excluded_from_capture`.
+
+### 8.4 SCOPED LIMIT: Windows directory fsync is a no-op; same-stem backup window
+
+- **Directory fsync.** `std` exposes no portable directory sync, so the
+  post-rename parent-directory fsync (which makes a rename durable on POSIX) is a
+  documented no-op on Windows. `DurabilityPolicy::per_os()` sets
+  `fsync_parent_dir = false` off POSIX. Honestly-scoped per `plan §Crash tiers`
+  (the last rename may be lost only on OS crash / power loss on Windows).
+- **Same-stem backup republish.** Reusing a backup stem stages + verifies the
+  new copy, then publishes by atomic rename and writes the manifest last; the
+  prior manifest is cleared just before the rename. This leaves a narrow window
+  where *that stem* has a db but no manifest — `load_valid_backup` correctly
+  reports it invalid-by-absence and a retry self-heals. The guarantee is
+  precisely "never destroy a valid restore point to make room for an unverified
+  one" (the live source and any other-stem backup are never touched), not "the
+  target stem is atomically valid at every instant."

@@ -379,12 +379,37 @@ fn quick_check_ok(conn: &Connection) -> Result<bool, StorageError> {
 /// Run every pending migration in `migrations` (ordered) against `conn`,
 /// idempotently and crash-recoverably. Safe to call on every open: already-
 /// applied migrations are skipped after a checksum check.
+/// Assert the migration list is well-formed: strictly increasing ordinals and
+/// unique ids. The runner trusts *slice order* to be *ordinal order*, so a dev
+/// appending out of order (`[0, 2, 1]`) would otherwise apply DDL out of order
+/// with no other trip (distinct ids/ordinals pass the checksum gate). Fail
+/// closed instead.
+fn validate_migration_order(migrations: &[Migration]) -> Result<(), StorageError> {
+    let mut seen_ids = std::collections::HashSet::new();
+    let mut prev_ordinal: Option<u32> = None;
+    for migration in migrations {
+        if let Some(prev) = prev_ordinal
+            && migration.ordinal <= prev
+        {
+            return Err(StorageError::MigrationFailed { source: None });
+        }
+        prev_ordinal = Some(migration.ordinal);
+        if !seen_ids.insert(migration.id) {
+            return Err(StorageError::MigrationFailed { source: None });
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn run_migrations(
     conn: &mut Connection,
     migrations: &[Migration],
     ctx: &MigrationContext,
     faults: &dyn FaultInjector,
 ) -> Result<MigrationOutcome, StorageError> {
+    // Fail closed on a malformed migration list BEFORE touching the store.
+    validate_migration_order(migrations)?;
+
     let mut newly_applied = 0u32;
     for (index, migration) in migrations.iter().enumerate() {
         // `migrate.between-steps`: a crash after a prior migration committed but
@@ -704,6 +729,60 @@ mod tests {
             )
             .expect("probe");
         assert_eq!(probe, 1);
+    }
+
+    #[test]
+    fn out_of_order_or_duplicate_migration_list_fails_closed() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(3_000);
+
+        // Ordinals [0, 2, 1]: a dev appended out of order. Must fail closed
+        // BEFORE applying anything (no partial out-of-order DDL).
+        let a = Migration {
+            ordinal: 1,
+            id: "a",
+            kind: MigrationKind::Transactional,
+            sql: "CREATE TABLE a (x INTEGER);",
+            sets_user_version: None,
+        };
+        let b = Migration {
+            ordinal: 2,
+            id: "b",
+            kind: MigrationKind::Transactional,
+            sql: "CREATE TABLE b (x INTEGER);",
+            sets_user_version: None,
+        };
+        let out_of_order = &[BASELINE_MIGRATIONS[0], b, a];
+        let mut conn = open_bare(&path);
+        let err = run_migrations(&mut conn, out_of_order, &ctx, &NoFaults).unwrap_err();
+        assert_eq!(err.code(), "migration-failed");
+        // Nothing was applied.
+        let applied: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='engine_migrations'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("q");
+        assert!(applied.is_none(), "out-of-order list must apply nothing");
+
+        // Duplicate id also fails closed.
+        let dup = &[
+            BASELINE_MIGRATIONS[0],
+            Migration {
+                ordinal: 1,
+                ..BASELINE_MIGRATIONS[0]
+            },
+        ];
+        let mut conn2 = open_bare(&dir.join("dup.db"));
+        assert_eq!(
+            run_migrations(&mut conn2, dup, &ctx, &NoFaults)
+                .unwrap_err()
+                .code(),
+            "migration-failed"
+        );
     }
 
     #[test]
