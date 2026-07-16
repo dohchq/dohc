@@ -1,0 +1,125 @@
+# Rust engine rewrite — decision ledger
+
+Append-only. Every entry: date, decision, decider, rationale pointer.
+
+## 2026-07-16 — Program authorized (go signal)
+
+- **Decider:** Ice, in-session, after Rev 2 plan review.
+- **Scope:** the go signal authorizes **Wave 0 preparation** (artifacts,
+  spikes, dormant scaffolding) of the full rewrite per the Rev 2 plan
+  (`docs/superpowers/plans/2026-07-16-dohc-rust-engine-rewrite.md`).
+  Capability implementation (Wave 1+) additionally requires Gate 0 as
+  defined in the plan. No go/no-go trial; Phase 1 slices are calibration
+  only.
+- **Sole abort criterion:** the week-one yrs interoperability spike.
+- **Rationale pointer:** plan sections "Rev 2 changelog" and "Decisions
+  locked"; audit workflow `wf_34a62e66-de2` (9 agents: 16 claims verified,
+  37 adversarial findings).
+
+## 2026-07-16 — Locked at planning
+
+- **Decider:** Ice, in-session (conversation preceding the go signal).
+- **Rationale pointer per item:** the correspondingly numbered entry in the
+  plan's "Decisions locked" section, which carries the reasoning inline;
+  language choice additionally per the in-session Rust-vs-Go analysis.
+
+1. Full commitment, no trial.
+2. Clean reset of pre-launch data; two retained safety mechanisms (Rust
+   refuses unrecognized DBs; verified restore-tested backup before first
+   write).
+3. Day-one Rust schema: `schema_version = 2`, current v1 logical shapes,
+   eager creation, migration/idempotency/job ledgers from day one. The v2
+   stamp is the post-cutover fence for writers that validate the schema
+   (TS fails closed via the `schema_version` check in
+   `initializeOrValidateEngineSchema`) — **it does NOT lock out raw
+   connections that never check it** (e.g. `desktopAgentDispatchStore`);
+   those are deleted by Gate 5 and adversarially tested at Gate 6, per the
+   plan's Mechanical fences caveat.
+4. yrs owns Y.Doc durability iff the spike passes; no fallback menu.
+5. Rust over Go; pinned stable toolchain, edition 2024.
+6. Oracle = existing ~22k-line suite ported to implementation-neutral
+   adapter + differential traces + named-fault-point crash injection.
+
+## 2026-07-16 — yrs interoperability spike: PASS (sole abort criterion cleared)
+
+- **Decider:** evidence-based per locked decision 4 ("yrs owns Y.Doc
+  durability iff the spike passes"); verdict delivered by the YRS-SPIKE
+  shard, subject to PR #140 review verification.
+- **Evidence:** 21/21 fidelity corpus docs (12 synthetic + 9 harvested real
+  dogfood lineages: 9 snapshots + 163 durable updates from an
+  integrity-checked copy); 500 seeds × 2 modes = 1,000 fuzz runs
+  (7,519 JS edits / 5,906 yrs edits / 25,532 shuffled deliveries /
+  5,131 duplicates / 1,742 truncated updates all rejected cleanly);
+  semantic state-vector equality and compaction convergence-neutrality.
+  Pinned pair: **yjs 13.6.30 ↔ yrs 0.27.3** (audited as one unit).
+- **Binding carry-forward constraints for R11 (spike findings):**
+  1. Every wire-facing yrs `Doc` MUST be constructed with
+     `OffsetKind::Utf16` — the default `OffsetKind::Bytes` is wire-unsafe
+     against Yjs (real divergence + a Yjs struct-store crash on non-ASCII
+     text).
+  2. Nested `Any::Map` key order is nondeterministic through yrs
+     re-encode: sort nested frontmatter keys in `yDocToMarkdown` before
+     cutover; do not content-address unsorted snapshot blobs.
+  3. The TS adapter validates `isWellFormed()` UTF-16 at the boundary.
+  4. Yjs wire format carries no root-type kinds — both engines share the
+     declared dohc root schema; `yDocToMarkdown` is destructive
+     (y-prosemirror drops PM-schema-invalid elements, observed in two real
+     dogfood docs) — projection provenance must account for this.
+  5. (Added post-review, PR #140 fix batch:) **yjs 13.6.30 `applyUpdate`
+     is not atomic on malformed input** — a rejected truncated update can
+     leave a partially-integrated prefix (67/2,041 injections; yrs is
+     atomic on identical bytes). Pinned invariant: state unchanged OR a
+     prefix that converges on full delivery; zero permanent divergences
+     across an exhaustive per-cut probe. The TS adapter must NEVER assume
+     state-unchanged after a failed apply. If Ice wants the stricter
+     literal invariant, R11b must wrap applies in snapshot/restore
+     (open for Gate 0).
+- **Rationale pointer:** `crates/yrs-spike/SPIKE_REPORT.md` (PR #140).
+
+## 2026-07-16 — Amendment: PASS entry accountability and certification status
+
+- The PASS verdict above is **provisional pending Ice's ratification at
+  Gate 0** — its decider is a rule plus shard evidence, not a person, and
+  the append-only ledger must not imply human sign-off that has not
+  happened. Status: both clean-context adversarial reviews UPHELD the
+  verdict; the 15-finding fix batch and both re-check residuals are closed
+  (commits `94f8083b`, `22fdf09a`); strict re-certification green
+  (fidelity 23/23 `--require-harvested`, fuzz 500/500 `--strict`). Ice
+  ratifies (or overrides) as part of the Gate 0 decision packet.
+
+## 2026-07-16 — Gate 0 decisions (Ice, in-session, via GATE0_PACKET.md)
+
+- **yrs PASS ratified** (provisional flag lifted). Sub-choice: the pinned
+  converging-prefix invariant for yjs non-atomic applies is ACCEPTED — no
+  snapshot/restore wrap in R11b.
+- **Protocol ratified**: length-framed JSON control frames + raw binary
+  blob-chunk frames, serde-struct single schema source (per PR #141).
+- **GitHub CI SKIPPED** (supersedes the billing blocker): evidence is
+  local-first — native Windows runs on the dev machine + Linux via WSL;
+  macOS untested during construction and MUST be revisited before any Mac
+  release (recorded as pre-release obligation, replaces old open
+  decision 2). PR #139's workflow is retired; native-suite evidence moves
+  to R02's local runner scripts.
+- **Freeze**: Ice enforces no further TS-engine changes on main. In-flight
+  engine changes already on main are IMPORTANT FEATURES and are
+  **integrated, not discarded**: every engine commit since the inventory
+  baseline (958cdfd3) is reconciled into BEHAVIOR_DELTA.md and the
+  inventory/contract artifacts before the affected shards port.
+- **Security hotfixes approved**: TS fixes this week for (a)
+  validateWorkspacePath ADS/device-name/8.3 bypasses, (b) search policy
+  fail-open → fail-closed. Both land with BEHAVIOR_DELTA entries and
+  become approved deltas the Rust port inherits.
+- **Remaining NEEDS-DECISION items**: defaults approved — stricter
+  behavior with every difference recorded as a documented delta/fixture.
+
+| # | Decision | Resolution (Ice, 2026-07-16) |
+| --- | --- | --- |
+| 1 | Protocol | framed JSON + binary chunks (ratified) |
+| 2 | CI matrix | GitHub CI skipped; local-first (Windows native + WSL Linux); macOS deferred to pre-release revisit |
+| 3 | Relay HTTP client | Rust-owned at cutover |
+| 4 | Standalone CLI/MCP | remain external filesystem writers |
+| 5 | Share mounts | cut over in the same atomic release |
+| 6 | Account/DM/registry | TS-owned + crash-recoverable Rust sagas |
+| 7 | Agent-run attribution | Rust authority; agent-runs.json becomes derived projection |
+| 8 | Dogfood duration | minimum 2 weeks before stable |
+| 9 | Mobile/web hosts | deferred; portability guardrails stand |

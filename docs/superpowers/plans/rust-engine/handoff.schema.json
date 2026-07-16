@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Implementer handoff",
+  "type": "object",
+  "required": [
+    "shardId",
+    "behaviorIds",
+    "filesChanged",
+    "apisIntroduced",
+    "invariantsReliedOn",
+    "commandsRun",
+    "knownSemanticDifferences",
+    "resourceBoundsIntroduced",
+    "unsafeUsed",
+    "warningsRemaining",
+    "reviewerFocus"
+  ],
+  "properties": {
+    "shardId": { "type": "string", "minLength": 1 },
+    "behaviorIds": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "filesChanged": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "apisIntroduced": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "invariantsReliedOn": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "commandsRun": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["command", "result"],
+        "properties": {
+          "command": { "type": "string", "minLength": 1 },
+          "result": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "knownSemanticDifferences": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "resourceBoundsIntroduced": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "unsafeUsed": {
+      "type": "boolean",
+      "description": "true only for an approved platform/FFI unsafe crate per the plan's Rust policy"
+    },
+    "unsafeApproval": {
+      "type": "object",
+      "required": ["unsafeLedgerEntry", "approver"],
+      "properties": {
+        "unsafeLedgerEntry": { "type": "string", "minLength": 1, "description": "UNSAFE.md entry ID" },
+        "approver": { "type": "string", "minLength": 1 }
+      }
+    },
+    "warningsRemaining": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "reviewerFocus": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  },
+  "if": { "properties": { "unsafeUsed": { "const": true } } },
+  "then": { "required": ["unsafeApproval"] },
+  "else": { "not": { "required": ["unsafeApproval"] } }
+}
