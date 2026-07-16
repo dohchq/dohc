@@ -133,3 +133,9 @@ source of truth every orchestrator session loads first).
   5 in DECISIONS.md with a Gate 0 option for the stricter
   snapshot/restore wrapping. Re-check reviewer launched; @codex re-review
   triggered by the fixer.
+- PR #143 local review 1/2 (completeness): APPROVE-WITH-FIXES — 5 P1
+  census gaps (cliServer's 2 untracked raw engine.db connections — census
+  is six, not four; base64 strictness semantics; Windows 8.3 short-name
+  aliasing bypass; registryStore/dmHomeStore/cloudCredentialStore
+  untracked; smol-toml vs toml crate) + 5 P2. Reviewer 2 (correctness)
+  still running; combined fix batch after.
