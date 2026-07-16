@@ -446,3 +446,34 @@ source of truth every orchestrator session loads first).
   - 2026-07-17 | run-rust-checks | win32/x64 | PASS | fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS cargo-deny=PASS cargo-audit=SKIP
   - 2026-07-17 | run-native-suite | win32/x64 | PASS | typecheck=PASS test=PASS  (25+2 vitest files, 470 tests passed, 114 platform-skipped)
   - Linux x64 (WSL) + macOS evidence still outstanding (macOS = pre-release obligation).
+
+## 2026-07-17 — GATE 0 PASSED · Wave 1 open
+
+- Security hotfix #145 MERGED to main: converged two-check model (Check A
+  reserved-path always all-platforms incl. win32 8.3 alias resolution;
+  Check B materialize-hazard win32-write-only via validateUserMaterializePath;
+  ADS-colon blocked win32 read+write). Fixed two real current-product
+  security holes. Branch deleted. (Notable: a local re-check called it
+  CLEAN but codex caught a P1 — held merge for confirmation; validated the
+  multi-layer discipline. Final validator personally read before merge.)
+- R02 #146 MERGED: Cargo workspace (members: dohc-engine-protocol,
+  yrs-spike; workspace-kernel EXCLUDED to preserve desktop staging path),
+  rust-toolchain 1.96.1, deny.toml, local-runner scripts
+  (run-rust-checks + run-native-suite) replacing skipped GitHub CI. Native
+  Windows evidence: workspace build/clippy/deny green + 470 engine tests.
+  Branch deleted.
+- R01-DETERMINISM #147 MERGED: 12 injection seams (createId/nowMs options
+  defaulting to Date.now/randomUUID — zero production behavior change,
+  spot-verified + 488 tests green + per-site injection tests). One site
+  escalated (versionedFileWorkspace pending-id) and correctly left
+  un-seamed: it's quarantined legacy (R16 deletion), oracle excludes it.
+  Branch deleted.
+- **GATE 0 PASSED**: all deps merged (YRS-SPIKE, R01-INVENTORY, REINV,
+  R01-CONTRACTS, R01-ORACLE, R01-DETERMINISM, TS-NATIVE-CI [=R02 native
+  run], R02, R03). Phase 0 closed. Ice's Gate-0 decisions all recorded in
+  DECISIONS.md; yrs PASS ratified.
+- **Wave 1 OPENS**: R04 storage core (day-one v2 schema + migration/
+  idempotency/materialization-job ledgers + backup/integrity) and the 3
+  calibration slices (CAL-1 ws-open/close/txn/restart, CAL-2 versioned
+  write/read/history/restore, CAL-3 scan/hash/reconcile/cancel). Engine
+  freeze binding from here.
