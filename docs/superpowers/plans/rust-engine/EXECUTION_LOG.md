@@ -282,6 +282,6 @@ source of truth every orchestrator session loads first).
   ledger, invalidates the no-migration-machinery claim), 7 new tables,
   15 new chat methods, 2 new sync op kinds (chat.follow.set/chat.feed.read.set),
   semantic changes to 32 chat rows. R01-CONTRACTS forked correctly at
-  958cdfd3 and is unaffected. Delta register D1-D9 records the reconciliation.
+  958cdfd3 and is unaffected. Delta register records the reconciliation; canonical BEHAVIOR_DELTA.md is PR #144 (26 new / 16 changed behaviors, +7,760/-50 across 36 engine files; 0 drift on secrets/Y.Doc/shared-channels/watcher/policy/search). NOTE: R01-ORACLE also forked at 958cdfd3 and is current — no oracle update owed.
   New REINV shard blocks R04/R09; GATE0 gains REINV dep. GATE0_PACKET counts
   232/218/46/117 are pre-merge and will move.
