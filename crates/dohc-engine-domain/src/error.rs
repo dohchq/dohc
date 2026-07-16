@@ -3,6 +3,7 @@
 //! (`PORTING.md` §4). Storage failures are wrapped so the underlying
 //! `state-corrupt`/fingerprint code stays reachable.
 
+use dohc_engine_crypto::CryptoError;
 use dohc_engine_storage::StorageError;
 
 /// A typed versioning-domain failure. `#[non_exhaustive]`: later shards add
@@ -61,6 +62,16 @@ pub enum DomainError {
     /// a missing blob). Fails closed; never auto-repairs.
     #[error("engine store is corrupt: {reason}")]
     StateCorrupt { reason: &'static str },
+
+    /// A secret-file crypto failure (AEAD open failed — wrong key, tampered
+    /// ciphertext/tag, or AAD mismatch; a malformed key; or an invalid base64
+    /// field on the replication path). Fails closed; the message is content-free.
+    #[error("secret crypto error: {0}")]
+    Crypto(#[from] CryptoError),
+
+    /// A secret moment id was not found (restore/get on an unknown moment).
+    #[error("protected history moment not found")]
+    SecretMomentNotFound,
 }
 
 impl DomainError {
@@ -78,6 +89,10 @@ impl DomainError {
             DomainError::InvalidInput { .. } => "invalid-input",
             DomainError::IdempotencyKeyReuseMismatch => "idempotency-key-reuse-mismatch",
             DomainError::StateCorrupt { .. } => "state-corrupt",
+            // Delegates to the crypto taxonomy: `decrypt-failed`, `key-corrupt`,
+            // `invalid-text`, `invalid-input`, `unwrap-failed`.
+            DomainError::Crypto(err) => err.code(),
+            DomainError::SecretMomentNotFound => "moment-not-found",
         }
     }
 

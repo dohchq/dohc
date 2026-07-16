@@ -29,6 +29,7 @@
 pub mod error;
 pub mod normalize;
 pub mod records;
+pub mod secrets;
 pub mod store;
 
 pub use error::DomainError;
@@ -36,6 +37,10 @@ pub use normalize::NormalizedState;
 pub use records::{
     CreateNamedVersion, ListMomentsQuery, MomentOp, MomentPage, MomentRecord, TextSnapshot,
     VersionKind, VersionRecord, WriteResult, WriteText,
+};
+pub use secrets::{
+    SecretDelete, SecretFileStat, SecretFileStore, SecretMomentRecord, SecretOp, SecretWrite,
+    SecretWriteResult,
 };
 pub use store::{MAX_TEXT_BYTES, VersionedTextStore};
 

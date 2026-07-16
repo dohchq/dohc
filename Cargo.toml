@@ -30,6 +30,7 @@ members = [
     "crates/dohc-engine-files",
     "crates/dohc-engine-runtime",
     "crates/dohc-engine-testkit",
+    "crates/dohc-engine-crypto",
     "crates/yrs-spike",
 ]
 exclude = [

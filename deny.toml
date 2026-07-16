@@ -39,6 +39,10 @@ allow = [
     # foldhash (rusqlite → hashlink → hashbrown → foldhash) with the
     # CAL-1 storage slice.
     "Zlib",
+    # BSD-3-Clause: permissive, OSI-approved, FSF-libre. Enters via
+    # `subtle` (aes-gcm → constant-time tag comparison) with the R08
+    # secrets crypto crate (dohc-engine-crypto).
+    "BSD-3-Clause",
 ]
 confidence-threshold = 0.9
 # Our own workspace crates are unpublished (publish = false) and carry no

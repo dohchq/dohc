@@ -57,6 +57,10 @@ const REQUIRED_TABLES: &[&str] = &[
     // R04 durability tables.
     "binary_blobs",
     "materialization_jobs",
+    // R08 secret-backed-file tables (migration ordinal 1).
+    "secret_files",
+    "secret_fork_bases",
+    "secret_moments",
 ];
 
 /// How an existing file was classified by the fingerprint fence.

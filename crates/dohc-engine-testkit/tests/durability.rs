@@ -339,6 +339,7 @@ fn close_reopen_mutate_cycle_stays_writable() {
 
     let store = EngineStore::open(&db, 99).expect("final reopen");
     assert_eq!(store.document_count().expect("docs"), 3);
-    // The eager migration ledger recorded exactly the v2 baseline row.
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 1);
+    // The migration ledger recorded the frozen list: the v2 baseline row plus
+    // the R08 secrets migration (ordinal 1).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 2);
 }

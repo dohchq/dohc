@@ -1,0 +1,9 @@
+{
+  "passphrase": "correct horse battery staple",
+  "workspaceId": "ws_envelope_01",
+  "dataKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "scryptN": 131072,
+  "scryptR": 8,
+  "scryptP": 1,
+  "envelopeJson": "{\"format\":\"dohc-key-envelope-v1\",\"saltBase64\":\"Dw4NDAsKCQgHBgUEAwIBAA==\",\"scryptN\":131072,\"scryptR\":8,\"scryptP\":1,\"ivBase64\":\"/ty6mHZUMhD+3LqY\",\"authTagBase64\":\"0BQxMMom+36nK7lMvy+beQ==\",\"ciphertextBase64\":\"NSXQZ8mboaCoMhOEs+P9zm4bV9FXnyMLV88RqyMX5bE=\"}"
+}
