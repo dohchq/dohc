@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Implementer handoff",
+  "type": "object",
+  "required": [
+    "shardId",
+    "behaviorIds",
+    "filesChanged",
+    "apisIntroduced",
+    "invariantsReliedOn",
+    "commandsRun",
+    "knownSemanticDifferences",
+    "resourceBoundsIntroduced",
+    "unsafeUsed",
+    "warningsRemaining",
+    "reviewerFocus"
+  ],
+  "properties": {
+    "shardId": { "type": "string" },
+    "behaviorIds": { "type": "array", "items": { "type": "string" } },
+    "filesChanged": { "type": "array", "items": { "type": "string" } },
+    "apisIntroduced": { "type": "array", "items": { "type": "string" } },
+    "invariantsReliedOn": { "type": "array", "items": { "type": "string" } },
+    "commandsRun": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["command", "result"],
+        "properties": {
+          "command": { "type": "string" },
+          "result": { "type": "string" }
+        }
+      }
+    },
+    "knownSemanticDifferences": { "type": "array", "items": { "type": "string" } },
+    "resourceBoundsIntroduced": { "type": "array", "items": { "type": "string" } },
+    "unsafeUsed": { "type": "boolean", "const": false },
+    "warningsRemaining": { "type": "array", "items": { "type": "string" } },
+    "reviewerFocus": { "type": "array", "items": { "type": "string" } }
+  }
+}

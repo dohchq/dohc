@@ -1,0 +1,27 @@
+shard_id	behavior_ids	wave	deps	owned_paths	test_files	risk_tier	review_tier	status	branch	pr
+R00	program-artifacts	0	-	docs/superpowers/plans/rust-engine/**	-	low	docs	in progress	codex/rust-engine-r00	-
+YRS-SPIKE	ydoc-interop	0	-	crates/yrs-spike/**	crates/yrs-spike/tests/**	critical	1	in progress	codex/rust-engine-yrs-spike	-
+R01-INVENTORY	behavior-inventory	0	-	docs/superpowers/plans/rust-engine/BEHAVIOR_INVENTORY.tsv;docs/superpowers/plans/rust-engine/ENGINE_SCOPE.md;docs/superpowers/plans/rust-engine/TEST_CLASSIFICATION.tsv	-	low	docs	in progress	codex/rust-engine-r01-inventory	-
+R01-DETERMINISM	determinism-retrofit	0	-	packages/workspace-engine/src/** (injection seams only)	existing suite	medium	2	planned	codex/rust-engine-r01-determinism	-
+R01-ORACLE	trace-format;fault-points	0	R01-INVENTORY	docs/superpowers/plans/rust-engine/TEST_ORACLE.md	-	high	1	planned	-	-
+R02	cargo-ci	0	-	Cargo.toml;rust-toolchain.toml;.github/workflows/rust-*	-	medium	2	planned	codex/rust-engine-r02	-
+R03	protocol	0	-	crates/dohc-engine-protocol/**;packages/workspace-engine-client/**	protocol conformance	high	1	planned	codex/rust-engine-r03	-
+TS-NATIVE-CI	oracle-baseline	0	-	.github/workflows/engine-tests-*	existing suite	medium	2	planned	codex/rust-engine-ts-native-ci	-
+R04	storage-core	1	R02;R03	crates/dohc-engine-storage/**	ported storage tests	critical	1	planned	-	-
+CAL-1	ws-open-close-txn-restart	1	R04	crates/dohc-engine-runtime/src/session*	calibration	high	1	planned	-	-
+CAL-2	versioned-write-read-history-restore	1	R04	crates/dohc-engine-domain/src/versions*	calibration	high	1	planned	-	-
+CAL-3	scan-hash-reconcile-cancel	1	R03	crates/dohc-engine-files/**	calibration	high	1	planned	-	-
+R05	identity-blobs-versions-moments-restore	2	R04	crates/dohc-engine-domain/src/{identity,blobs,moments}*	ported	critical	1	planned	-	-
+R08	secrets	2	R04	crates/dohc-engine-crypto/**	ported	critical	1	planned	-	-
+R09	chats-readstate-dispatch	2	R04	crates/dohc-engine-domain/src/chats*;crates/dohc-engine-storage/src/chat_tables*	ported	high	2	planned	-	-
+R11a	ydoc-durable-cache	2	YRS-SPIKE;R04	crates/dohc-engine-collab/**	ported+spike-fuzz	critical	1	planned	-	-
+R11b	ydoc-live-adapter	2	R03	packages/workspace-engine-client/src/ydoc*	adapter suite	critical	1	planned	-	-
+R12	search	2	R04	crates/dohc-engine-runtime/src/search*	ported	high	2	planned	-	-
+R06	compare-merge-conflicts-materialization	3	R05	crates/dohc-engine-domain/src/{merge,conflicts}*;crates/dohc-engine-files/src/materialize*	ported	critical	1	planned	-	-
+R07	watcher-reconcile-pathfloor-policy	3	CAL-3;R05	crates/dohc-engine-files/src/{watch,policy}*	ported	critical	1	planned	-	-
+R10	replication-cursors-shares	3	R04;R09	crates/dohc-engine-sync/**;packages/security-contract/**	ported+fault-model	critical	1	planned	-	-
+R13	daemon-composition-shadow-replay	4	R05..R12	crates/dohc-workspace-engine/**	replay	critical	1	planned	-	-
+R13b	desktop-adapter-dormant	4	R03;R13	apps/desktop/src/workspaces/engineClient*	adapter E2E	critical	1	planned	-	-
+R14	robustness-closure	5	R13	fuzz/**;soak configs	fuzz+soak	high	1	planned	-	-
+R15	atomic-cutover-reset	cutover	Gate6	cutover wiring	rehearsal	critical	1	planned	-	-
+R16	legacy-deletion-hardening	post	R15	deletions	audit	high	1	planned	-	-

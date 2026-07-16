@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Reviewer findings",
+  "type": "object",
+  "required": ["shardId", "reviewerRole", "findings", "surfacesInspected"],
+  "properties": {
+    "shardId": { "type": "string" },
+    "reviewerRole": {
+      "type": "string",
+      "enum": ["behavior-equivalence", "robustness-security", "platform-failure"]
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "severity",
+          "behaviorId",
+          "location",
+          "violatedContract",
+          "failureSequence",
+          "expectedVsActual",
+          "regressionTest",
+          "blocksIntegration"
+        ],
+        "properties": {
+          "severity": { "type": "string", "enum": ["P0", "P1", "P2"] },
+          "behaviorId": { "type": "string" },
+          "location": { "type": "string", "description": "file:line" },
+          "violatedContract": { "type": "string" },
+          "failureSequence": { "type": "string" },
+          "expectedVsActual": { "type": "string" },
+          "regressionTest": { "type": "string" },
+          "blocksIntegration": { "type": "boolean" }
+        }
+      }
+    },
+    "surfacesInspected": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "description": "Required even when findings is empty — 'looks good' without inspected surfaces is not a review"
+    }
+  }
+}
