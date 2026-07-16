@@ -24,6 +24,7 @@ describe("main-process chat authorization", () => {
       "startChannelThread",
       "markChatThreadRead",
       "setChatReaction",
+      "shareChatChannel",
       "startDm",
       "resumeThreadDispatch",
     ];
@@ -53,6 +54,14 @@ describe("main-process chat authorization", () => {
     expect(write).toBeGreaterThan(-1);
     expect(joinedChannelSync).toBeGreaterThan(write);
     expect(workspaceSync).toBeGreaterThan(write);
+  });
+
+  it("derives generic channel-share eligibility in the main process", () => {
+    const handler = handlerSource("shareChatChannel");
+    expect(handler).toContain("requireShareableChatChannel({");
+    expect(handler.indexOf("requireShareableChatChannel({")).toBeLessThan(
+      handler.indexOf("relayShareJson<{ shareId: string }>("),
+    );
   });
 
   it("projects pending chat bookmarks immediately after workspace and shared-channel pulls", () => {

@@ -293,6 +293,7 @@ import {
   matchDmChannelByRecipients,
   parseDmRecipients,
   peekReceivedGrantKind,
+  requireShareableChatChannel,
   runningThread,
   type DmPeekResult,
   type DmRecordInfo,
@@ -3636,7 +3637,14 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
-    const wireId = await linkedChatStoreFor(workspace).getChannelWireId({
+    assertWritableWorkspace(workspace);
+    const store = linkedChatStoreFor(workspace);
+    await requireShareableChatChannel({
+      workspaceId: workspace.workspaceId,
+      channelId: input.channelId,
+      store,
+    });
+    const wireId = await store.getChannelWireId({
       workspaceId: workspace.workspaceId,
       channelId: input.channelId,
     });
@@ -5745,11 +5753,10 @@ function registerIpcHandlers(): void {
     return join(stateDir(), "dohc-dm-homes.json");
   }
 
-  // Received chat-channel shares definitively confirmed NOT to be DMs (a
-  // grant's channel kind is immutable). Cached so a regular manual-join channel
-  // invite the user never accepts is probed ONCE, not re-fetched on every 5s
-  // syncDms poll (CodeRabbit: unbounded relay round-trips). Account-wide, so a
-  // share rejected while syncing one workspace stays rejected for all.
+  // Received chat-channel shares whose authoritative channel.create was
+  // observed with the ordinary "channel" kind. Cached so a manual-join invite
+  // is probed once, while an empty/unbootstrapped log remains retryable: the relay
+  // can expose the grant before the owner's channel bootstrap ops arrive.
   const peekedNonDmShareIds = new Set<string>();
 
   // Peek a received chat-channel grant's kind WITHOUT mutating the local store:
