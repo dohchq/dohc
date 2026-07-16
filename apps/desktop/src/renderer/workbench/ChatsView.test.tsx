@@ -10,7 +10,7 @@ import type {
   DmRecord,
   FileChatThreadRecord,
 } from "../../ipc/bridgeContract";
-import { ChatsView } from "./ChatsView";
+import { ChatsView, reconcileResolvedChatDecision } from "./ChatsView";
 
 // Chats view (PR 13, WS-E): fast, natural chat — the channel composer sends
 // on Enter with NO title prompt, unread badges derive from the store's read
@@ -1380,6 +1380,94 @@ describe("ChatsView decisions", () => {
     expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
     expect(screen.queryByTestId("chats-resolving-mode")).toBeNull();
   });
+
+  it("does not decrement again when a refreshed decision is already resolved", async () => {
+    const user = userEvent.setup();
+    const opening = message({ body: "Resolve this" });
+    const otherMessage = message({
+      id: "message-other-decision",
+      parentMessageId: opening.id,
+      body: "Keep this decision open",
+    });
+    const targetOpen = {
+      threadId: "thread-1",
+      messageId: opening.id,
+      state: "open" as const,
+      atMs: NOW,
+    };
+    const targetResolved = {
+      ...targetOpen,
+      state: "resolved" as const,
+      resolvedByMessageId: "resolution-message",
+      atMs: NOW + 1,
+    };
+    const otherOpen = {
+      threadId: "thread-1",
+      messageId: otherMessage.id,
+      state: "open" as const,
+      atMs: NOW,
+    };
+    const resolutionMessage = message({
+      id: "resolution-message",
+      parentMessageId: opening.id,
+      body: "Resolved ✓",
+    });
+    let refreshed = false;
+    bridgeMock.listChannelThreads.mockImplementation(() =>
+      Promise.resolve({
+        threads: [thread({ openDecisionCount: refreshed ? 1 : 2 })],
+      }),
+    );
+    bridgeMock.listChatMessages.mockImplementation(() =>
+      Promise.resolve({
+        messages: refreshed
+          ? [opening, otherMessage, resolutionMessage]
+          : [opening, otherMessage],
+      }),
+    );
+    bridgeMock.listChatThreadDecisions.mockImplementation(() =>
+      Promise.resolve({
+        decisions: refreshed
+          ? [targetResolved, otherOpen]
+          : [targetOpen, otherOpen],
+      }),
+    );
+    bridgeMock.sendChatMessage.mockResolvedValue({ message: resolutionMessage });
+    let resolveDecision!: (value: { decision: typeof targetResolved }) => void;
+    const pendingResolution = new Promise<{ decision: typeof targetResolved }>(
+      (resolve) => {
+        resolveDecision = resolve;
+      },
+    );
+    bridgeMock.resolveChatDecision.mockImplementation(() => pendingResolution);
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.click(await screen.findByTestId("chats-message-decision-resolve"));
+    await user.click(screen.getByTestId("chats-send"));
+    await waitFor(() => expect(bridgeMock.resolveChatDecision).toHaveBeenCalledTimes(1));
+
+    refreshed = true;
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    expect(await screen.findByTestId("chats-message-decision-resolved")).toBeTruthy();
+    expect(await screen.findByTestId("chats-comment-decision-open")).toBeTruthy();
+
+    await act(async () => {
+      resolveDecision({ decision: targetResolved });
+      await pendingResolution;
+    });
+
+    expect(screen.getAllByTestId("chats-comment-decision-open")).toHaveLength(1);
+    expect(screen.getByTestId("chats-message-decision-resolved")).toBeTruthy();
+    expect(
+      reconcileResolvedChatDecision(
+        [targetResolved, otherOpen],
+        targetResolved,
+      ).wasOpen,
+    ).toBe(false);
+  });
 });
 
 describe("ChatsView work and run links", () => {
@@ -1822,6 +1910,66 @@ describe("ChatsView liveness", () => {
     expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).value).toBe("");
     expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1);
     expect(screen.getByText("Still sending")).toBeTruthy();
+  });
+
+  it("clears sent reply text after leave and return resets reply mode", async () => {
+    const user = userEvent.setup();
+    const opening = message();
+    const parentComment = message({
+      id: "comment-reply-parent",
+      parentMessageId: opening.id,
+      authorDisplayName: "Ana",
+      body: "Can you confirm?",
+    });
+    bridgeMock.listChannelThreads.mockResolvedValue({ threads: [thread()] });
+    bridgeMock.listChatMessages.mockResolvedValue({
+      messages: [opening, parentComment],
+    });
+
+    let resolveSend!: (value: { message: ChatMessageRecord }) => void;
+    const pendingSend = new Promise<{ message: ChatMessageRecord }>((resolve) => {
+      resolveSend = resolve;
+    });
+    bridgeMock.sendChatMessage.mockImplementation(() => pendingSend);
+
+    renderView();
+    await user.click(await screen.findByTestId("chats-channel"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    await user.click(await screen.findByTestId("chats-comment-reply"));
+    await user.type(screen.getByTestId("chats-composer"), "Confirmed{Enter}");
+    await waitFor(() =>
+      expect(bridgeMock.sendChatMessage).toHaveBeenCalledWith({
+        workspaceId: "workspace-a",
+        threadId: "thread-1",
+        parentMessageId: parentComment.id,
+        body: "Confirmed",
+      }),
+    );
+
+    await user.click(screen.getByTestId("chats-thread-back"));
+    await user.click(await screen.findByTestId("chats-thread"));
+    expect(screen.queryByTestId("chats-replying-mode")).toBeNull();
+    expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).value).toBe(
+      "Confirmed",
+    );
+
+    await act(async () => {
+      resolveSend({
+        message: message({
+          id: "comment-sent-reply",
+          parentMessageId: parentComment.id,
+          body: "Confirmed",
+        }),
+      });
+      await pendingSend;
+    });
+
+    await waitFor(() =>
+      expect((screen.getByTestId("chats-composer") as HTMLTextAreaElement).value).toBe(""),
+    );
+    expect(screen.getByText("Confirmed")).toBeTruthy();
+    fireEvent.submit(screen.getByTestId("chats-composer").closest("form")!);
+    expect(bridgeMock.sendChatMessage).toHaveBeenCalledTimes(1);
   });
 });
 

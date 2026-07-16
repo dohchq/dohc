@@ -174,6 +174,22 @@ interface ThreadSnapshot {
   viewerAuthorId: string;
 }
 
+export function reconcileResolvedChatDecision(
+  current: ChatDecisionRecord[],
+  resolved: ChatDecisionRecord,
+): { decisions: ChatDecisionRecord[]; wasOpen: boolean } {
+  const wasOpen = current.some(
+    (decision) =>
+      decision.messageId === resolved.messageId && decision.state === "open",
+  );
+  return {
+    decisions: current.map((decision) =>
+      decision.messageId === resolved.messageId ? resolved : decision,
+    ),
+    wasOpen,
+  };
+}
+
 interface ChannelSnapshot {
   threads: ChannelThreadRecord[];
   feedPosts: Record<string, FeedPostData>;
@@ -982,6 +998,8 @@ export function ChatsView(props: {
     replyMessageId: replyTarget?.messageId,
     resolveTargetMessageId,
   };
+  const latestDecisions = useRef(decisions);
+  latestDecisions.current = decisions;
   useEffect(() => {
     const contextIsSending = inFlightSendByContext.current.has(sendContextKey);
     sendingRef.current = contextIsSending;
@@ -1719,21 +1737,20 @@ export function ChatsView(props: {
       activeSendContext.current === sendContextKey;
     const clearMatchingComposer = () => {
       const latest = latestComposerState.current;
-      if (
-        latest.composer !== composer ||
-        latest.replyMessageId !== replyTarget?.messageId ||
-        latest.resolveTargetMessageId !== resolvingMessageId
-      ) {
-        return;
+      const next = { ...latest };
+      if (latest.composer === composer) {
+        next.composer = "";
+        setComposer("");
       }
-      latestComposerState.current = {
-        composer: "",
-        replyMessageId: undefined,
-        resolveTargetMessageId: null,
-      };
-      setComposer("");
-      setReplyTarget(null);
-      setResolveTargetMessageId(null);
+      if (latest.replyMessageId === replyTarget?.messageId) {
+        next.replyMessageId = undefined;
+        setReplyTarget(null);
+      }
+      if (latest.resolveTargetMessageId === resolvingMessageId) {
+        next.resolveTargetMessageId = null;
+        setResolveTargetMessageId(null);
+      }
+      latestComposerState.current = next;
     };
     sendingRef.current = true;
     setSending(true);
@@ -1770,23 +1787,27 @@ export function ChatsView(props: {
           : [...current, result.message],
       );
       if (resolvedDecision) {
-        setDecisions((current) =>
-          current.map((decision) =>
-            decision.messageId === resolvedDecision.messageId
-              ? resolvedDecision
-              : decision,
-          ),
+        const reconciliation = reconcileResolvedChatDecision(
+          latestDecisions.current,
+          resolvedDecision,
         );
-        setChannelThreads((current) =>
-          current.map((thread) =>
-            thread.id === nav.thread.id
-              ? {
-                  ...thread,
-                  openDecisionCount: Math.max(0, (thread.openDecisionCount ?? 0) - 1),
-                }
-              : thread,
-          ),
-        );
+        latestDecisions.current = reconciliation.decisions;
+        setDecisions(reconciliation.decisions);
+        if (reconciliation.wasOpen) {
+          setChannelThreads((current) =>
+            current.map((thread) =>
+              thread.id === nav.thread.id
+                ? {
+                    ...thread,
+                    openDecisionCount: Math.max(
+                      0,
+                      (thread.openDecisionCount ?? 0) - 1,
+                    ),
+                  }
+                : thread,
+            ),
+          );
+        }
       }
       clearMatchingComposer();
       messagesEndRef.current?.scrollIntoView({ block: "end" });
