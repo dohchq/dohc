@@ -540,9 +540,10 @@ describe("workspace engine search", () => {
       }),
     ).resolves.toHaveLength(1);
 
-    // Break the policy, then edit the file: the incremental upsert must NOT
-    // delete-and-skip the row (which would drop the file with index_state still
-    // set, so a fix would never rebuild it).
+    // Break the policy, then edit the existing file AND create a NEW one. The
+    // incremental upsert must not drop the edited file, and must invalidate
+    // index_state so the new file (written during the degraded window) is not
+    // lost after the fix.
     await mkdir(join(root, ".dohc"), { recursive: true });
     await writeFile(join(root, ".dohc", "files.toml"), "not [ valid toml");
     await versions.writeTextFile({
@@ -550,6 +551,13 @@ describe("workspace engine search", () => {
       versionId: main.id,
       path: "notes/a.md",
       text: "FREEZE_NEEDLE v2\n",
+      metadata: { origin: "api" },
+    });
+    await versions.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/added-while-degraded.md",
+      text: "FREEZE_NEEDLE new file\n",
       metadata: { origin: "api" },
     });
     // While degraded, file search fails closed.
@@ -563,8 +571,8 @@ describe("workspace engine search", () => {
       }),
     ).resolves.toEqual([]);
 
-    // Fixing the policy restores the file — it was frozen in the index, not
-    // dropped, so it returns without needing an external reindex.
+    // Fixing the policy rebuilds: BOTH the edited file and the file added
+    // during the degraded window are searchable — no external reindex needed.
     await rm(join(root, ".dohc", "files.toml"));
     const recovered = await searchWorkspaceEngine({
       workspaceId: "workspace-a",
@@ -573,7 +581,9 @@ describe("workspace engine search", () => {
       versions,
       chats,
     });
-    expect(recovered.some((r) => r.surface === "file" && r.path === "notes/a.md")).toBe(true);
+    const recoveredPaths = recovered.filter((r) => r.surface === "file").map((r) => r.path);
+    expect(recoveredPaths).toContain("notes/a.md");
+    expect(recoveredPaths).toContain("notes/added-while-degraded.md");
   });
 
   it("searches a freshly forked version and incrementally reflects a write in the fork", async () => {
@@ -791,6 +801,17 @@ describe("engine file path classifier (shared by search and capture)", () => {
   it("tracks ordinary workspace text paths", () => {
     expect(classifyEngineFilePath("notes/today.md")).toEqual({ kind: "tracked" });
     expect(classifyEngineFilePath("environment.md")).toEqual({ kind: "tracked" });
+  });
+
+  it("tracks host-legal names that would be Windows-unsafe to WRITE (no capture drop)", () => {
+    // Classification goes through validateUserWritePath but must NOT apply the
+    // host-unsafe-name check — otherwise a synced "report~1.pdf" (or a colon /
+    // device-shaped name) would classify as ignored on Windows and never be
+    // captured. Materialize protects the local disk separately.
+    for (const path of ["report~1.pdf", "notes/meeting 9:30.md", "con.py", "DOHC~1.md"]) {
+      expect(classifyEngineFilePath(path)).toEqual({ kind: "tracked" });
+      expect(classifyEngineFilePathForRead(path)).toEqual({ kind: "tracked" });
+    }
   });
 
   it("read classification sees mounted shares as the mount does", () => {

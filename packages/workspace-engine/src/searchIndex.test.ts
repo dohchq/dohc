@@ -123,12 +123,30 @@ describe("search policy fail-closed", () => {
     expect(pathIsSearchIndexed(root, "notes/a.md", policy)).toBe(false);
   });
 
-  it("fails closed when a policy file exceeds the size limit", () => {
+  it("fails closed when a policy file exceeds the size limit (matches desktop's 256 KiB cap)", () => {
     mkdirSync(join(root, ".dohc"), { recursive: true });
-    writeFileSync(join(root, ".dohc", "files.toml"), "#".repeat(64 * 1024 + 1));
+    // Just over the shared 256 KiB cap; a file the desktop reader also rejects.
+    writeFileSync(join(root, ".dohc", "files.toml"), "#".repeat(256 * 1024 + 1));
     const policy = readEngineSearchPolicySync(root);
     expect(policy.diagnostics).toMatchObject([{ file: "files.toml", reason: "unreadable" }]);
     expect(pathIsSearchIndexed(root, "notes/a.md", policy)).toBe(false);
+  });
+
+  it("accepts a valid policy between the old 64 KiB and the 256 KiB cap", () => {
+    mkdirSync(join(root, ".dohc"), { recursive: true });
+    // ~100 KiB of valid rules: over the previous 64 KiB engine cap, under the
+    // desktop's 256 KiB — must parse and apply, not fail closed.
+    const rules = Array.from(
+      { length: 1200 },
+      (_, index) => `[[rule]]\npath = "private-${index}/**"\nvisibility = "hidden"\n`,
+    ).join("");
+    expect(rules.length).toBeGreaterThan(64 * 1024);
+    expect(rules.length).toBeLessThan(256 * 1024);
+    writeFileSync(join(root, ".dohc", "visibility.toml"), rules);
+    const policy = readEngineSearchPolicySync(root);
+    expect(policy.diagnostics).toEqual([]);
+    expect(pathIsSearchIndexed(root, "private-5/x.md", policy)).toBe(false);
+    expect(pathIsSearchIndexed(root, "notes/x.md", policy)).toBe(true);
   });
 
   it("reports only the broken file; the absent one still means defaults", () => {

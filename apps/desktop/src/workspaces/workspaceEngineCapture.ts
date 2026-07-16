@@ -469,12 +469,16 @@ export class UnsupportedWorkspacePathError extends Error {
 }
 
 // Exported for direct tests of the typed host-unsafe rejection; production
-// callers omit `platform` so it defaults to the real host.
+// callers omit `platform` so it defaults to the real host. This is a
+// materialize boundary (generated Markdown is written to the local disk), so
+// it opts into the host-unsafe-name check, gated to Windows.
 export function assertGeneratedMarkdownPath(
   path: string,
   platform: NodeJS.Platform = process.platform,
 ): string {
-  const check = validateUserWritePath(path, { platform });
+  const check = validateUserWritePath(path, {
+    rejectHostUnsafeNames: platform === "win32",
+  });
   if (!check.ok && check.reason === "unsupported-name") {
     throw new UnsupportedWorkspacePathError(path);
   }
@@ -652,7 +656,12 @@ function assertEngineWritablePath(
   policy: WorkspaceEnginePolicySnapshot,
   options: { protected?: boolean } = {},
 ): void {
-  const check = validateUserWritePath(path);
+  // The disk-materialize boundary: opt into the host-unsafe-name check, gated
+  // to Windows, so a name that cannot be written on THIS disk is refused here
+  // (and surfaced) while classification/capture/store writes stayed permissive.
+  const check = validateUserWritePath(path, {
+    rejectHostUnsafeNames: process.platform === "win32",
+  });
   if (!check.ok && check.reason === "unsupported-name") {
     throw new UnsupportedWorkspacePathError(path);
   }

@@ -18,7 +18,11 @@ import {
 import type { EngineSqliteDb } from "./engineDbSchema";
 import { threadDisplayTitle } from "./chatThreadTitle";
 
-const POLICY_FILE_MAX_BYTES = 64 * 1024;
+// Must match the desktop policy reader's cap (MAX_WORKSPACE_SETTINGS_FILE_BYTES,
+// 256 KiB): now that oversize fails CLOSED, a file the desktop accepts and
+// applies must not be treated as broken here, or search would silently pause
+// on a policy both layers consider valid.
+const POLICY_FILE_MAX_BYTES = 256 * 1024;
 const THREAD_HEADER_MESSAGE_ID = "__thread__";
 const MIN_TRIGRAM_QUERY_CHARS = 3;
 
@@ -148,13 +152,20 @@ export function upsertFileSearchIndex(input: {
   snapshot: TextFileSnapshot;
 }): void {
   const policy = readEngineSearchPolicySync(input.rootDir);
-  // Broken policy = freeze the file index: do NOT delete-then-skip, which
-  // would silently drop this file from a previously-healthy index and leave
-  // no index_state to trigger a rebuild once the policy is fixed. Leave the
-  // existing rows untouched — query-time pathIsSearchIndexed already fails
-  // file search closed while degraded, and the next write after the fix
-  // reconciles the row.
-  if (policy.diagnostics.length > 0) return;
+  // Broken policy = freeze the file index: don't delete-then-skip (which would
+  // drop this file from a healthy index). Leave FTS rows untouched — query-time
+  // pathIsSearchIndexed fails file search closed while degraded — but INVALIDATE
+  // index_state so a fix triggers a full rebuild that picks up everything
+  // written during the degraded window (a new file would otherwise stay missing
+  // because ensureSearchIndexForVersion skips already-stated versions).
+  if (policy.diagnostics.length > 0) {
+    input.db
+      .prepare(
+        "DELETE FROM engine_search_index_state WHERE workspace_id = ? AND version_id = ?",
+      )
+      .run(input.workspaceId, input.snapshot.versionId);
+    return;
+  }
   deleteFileIndexRow({
     db: input.db,
     workspaceId: input.workspaceId,

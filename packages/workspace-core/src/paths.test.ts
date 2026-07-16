@@ -205,59 +205,59 @@ describe("Windows path aliases (ADS, device names, 8.3 short names)", () => {
     "DOHC~12345",
   ];
 
-  it("rejects host-unsafe names on a Windows WRITE with a typed reason", () => {
+  it("rejects host-unsafe names only when the caller opts in (materialize)", () => {
     for (const candidate of winUnsafe) {
-      expect(validateUserWritePath(candidate, { platform: "win32" })).toEqual({
+      expect(validateUserWritePath(candidate, { rejectHostUnsafeNames: true })).toEqual({
         ok: false,
         reason: "unsupported-name",
       });
     }
   });
 
-  it("allows the SAME names on a non-Windows WRITE (host-legal there)", () => {
+  it("allows the SAME names by DEFAULT (classification/capture/store write)", () => {
+    // The default write path must NOT reject host-unsafe names — it gates
+    // classification, capture, and persisted-row checks, none of which touch
+    // the local disk, so a synced "report~1.pdf" is never dropped on Windows.
     for (const candidate of winUnsafe) {
-      // C:foo / colon names are legal relative filenames off Windows; device
-      // names and 8.3 shapes are ordinary files with no aliasing there.
-      expect(validateUserWritePath(candidate, { platform: "linux" }).ok).toBe(true);
-      expect(validateUserWritePath(candidate, { platform: "darwin" }).ok).toBe(true);
+      expect(validateUserWritePath(candidate).ok).toBe(true);
+      expect(validateUserWritePath(candidate, { rejectHostUnsafeNames: false }).ok).toBe(true);
     }
   });
 
-  it("NEVER rejects host-unsafe names on a READ, any platform (capture must see them)", () => {
+  it("NEVER rejects host-unsafe names on a READ (capture must see them)", () => {
     for (const candidate of winUnsafe) {
-      // Reads carry no platform; existing on-disk files must always be
-      // readable/capturable regardless of name.
       expect(validateUserReadPath(candidate).ok).toBe(true);
     }
   });
 
-  it("keeps rejecting genuine traversal/reserved even in host-unsafe shapes", () => {
-    // The universal invariants are independent of the host-unsafe gate.
-    expect(validateUserWritePath("../nul.md", { platform: "win32" }).ok).toBe(false);
+  it("keeps rejecting genuine traversal/reserved even when opting in", () => {
+    // The universal invariants are independent of the host-unsafe opt-in.
+    expect(validateUserWritePath("../nul.md", { rejectHostUnsafeNames: true }).ok).toBe(false);
     expect(validateUserReadPath("../nul.md").ok).toBe(false);
-    // Exact `.dohc` stays reserved on every platform; only the fuzzy 8.3 ALIAS
-    // of it (DOHC~1) is Windows-write-only.
-    expect(validateUserWritePath(".dohc/x", { platform: "linux" })).toEqual({
+    // Exact `.dohc` stays reserved on every path; only the fuzzy 8.3 ALIAS of
+    // it (DOHC~1) is materialize-only.
+    expect(validateUserWritePath(".dohc/x")).toEqual({ ok: false, reason: "reserved" });
+    expect(validateUserWritePath(".dohc/x", { rejectHostUnsafeNames: true })).toEqual({
       ok: false,
       reason: "reserved",
     });
   });
 
-  it("host-legal real files read AND write on non-Windows, and read on Windows", () => {
+  it("host-legal real files read AND write (default) on every host", () => {
     for (const candidate of [
       "standup 9:30.md",
       "con.py",
       "report~1.pdf",
       "draft~2.md",
     ]) {
-      expect(validateUserWritePath(candidate, { platform: "linux" }).ok).toBe(true);
-      expect(validateUserWritePath(candidate, { platform: "darwin" }).ok).toBe(true);
-      // Capture is a read: these must be seen on every host, Windows included.
+      // Default write path (classification/capture) accepts them everywhere.
+      expect(validateUserWritePath(candidate).ok).toBe(true);
+      // Capture is a read: seen on every host regardless of name.
       expect(validateUserReadPath(candidate).ok).toBe(true);
     }
   });
 
-  it("still accepts device/tilde lookalikes on a Windows WRITE", () => {
+  it("still accepts device/tilde lookalikes even when opting in", () => {
     for (const candidate of [
       "CONFIG.md",
       "console.md",
@@ -276,7 +276,7 @@ describe("Windows path aliases (ADS, device names, 8.3 short names)", () => {
       "release.notes~2.md",
       "tilde~.md",
     ]) {
-      expect(validateUserWritePath(candidate, { platform: "win32" }).ok).toBe(true);
+      expect(validateUserWritePath(candidate, { rejectHostUnsafeNames: true }).ok).toBe(true);
     }
   });
 });

@@ -121,10 +121,9 @@ const SHORT_NAME_ALIAS_RE = /^[^.\s]{1,8}~\d+(?:\.[^.\s]{1,3})?$/;
 // and generated 8.3 short-name aliases are all WINDOWS filesystem behaviors:
 // a colon is a legal filename byte on macOS/Linux, `DOHC~1` does not alias
 // `.dohc` where 8.3 generation does not exist, and `nul.md` is an ordinary
-// file. So this predicate only fires when the CURRENT host is Windows —
-// rejecting these host-legal names elsewhere would refuse real files for a
-// threat that cannot exist on that host. A remote Windows peer self-protects
-// at its OWN materialize boundary.
+// file. Rejecting these host-legal names would refuse real files for a threat
+// that cannot exist off Windows, so the check is OFF by default and only the
+// local-disk materialize boundary opts in (gated to win32 there).
 function isHostUnsafeSegment(segment: string): boolean {
   return (
     segment.includes(":") ||
@@ -140,19 +139,21 @@ export type WritePathValidation =
       reason: "traversal" | "absolute" | "reserved" | "invalid" | "unsupported-name";
     };
 
-// Write-side validation. The host-unsafe-name checks (colon/ADS, device
-// names, 8.3 aliases) protect the LOCAL disk we are about to write to, so
-// they run only when the current host is Windows — `platform` is injectable
-// for tests but defaults to the real process platform.
+// Write-side validation. `rejectHostUnsafeNames` is OFF by default: this
+// validator gates classification, capture, persisted-row checks, and the
+// engine store write — none of which touch the local disk — so it must never
+// refuse a host-legal name (e.g. a synced "report~1.pdf" on Windows), or that
+// file would be misclassified/dropped. ONLY the disk-materialize boundary
+// opts in, passing `rejectHostUnsafeNames: process.platform === "win32"` to
+// protect the local Windows disk.
 export function validateUserWritePath(
   relativePath: string,
-  options: { allowIgnoredSegments?: boolean; platform?: NodeJS.Platform } = {},
+  options: { allowIgnoredSegments?: boolean; rejectHostUnsafeNames?: boolean } = {},
 ): WritePathValidation {
-  const platform = options.platform ?? process.platform;
   return validateWorkspacePath(relativePath, {
-    ...options,
+    allowIgnoredSegments: options.allowIgnoredSegments,
     reserved: isReservedPath,
-    rejectHostUnsafeNames: platform === "win32",
+    rejectHostUnsafeNames: options.rejectHostUnsafeNames ?? false,
   });
 }
 
