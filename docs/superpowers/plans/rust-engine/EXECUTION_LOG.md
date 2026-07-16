@@ -354,3 +354,17 @@ source of truth every orchestrator session loads first).
   (table commit = path ownership). Self-test 41/41. Oracle review fully
   converged across 4 rounds -> parity verified. (Its --check reads 229
   behaviors from its pre-REINV branch fork; resolves to 261 at merge.)
+- PR #145 hotfix rescope DONE (8dafa7cb + 04761e82): all 6 fixes
+  applied. win32-write-only gating for colon/device/8.3; read+capture
+  never blocked (silent-data-loss root cause eliminated — host-legal
+  files seed on every host incl. Windows); .dohc/shared-with-me exact
+  reservation stays universal; materialize throws typed
+  UnsupportedWorkspacePathError surfaced via history-capture-failed
+  notice; kernel scan collect-not-throw; search fail-closed scoped to
+  file indexing (chat preserved, no index_state while degraded, freeze-
+  not-drop); search diagnostics surfaced; CONIN$/CONOUT$/CLOCK$ added.
+  Tests: workspace-core 123, workspace-engine 460+19, desktop suites all
+  green. RESIDUAL for Ice: on Windows WRITE, 8.3-shaped names
+  (report~1.pdf) still rejected (shape-ambiguous with real aliases);
+  reads always work, non-win32 writes work; escape-on-materialize is the
+  roadmap fix. Security-critical shipping code -> re-check launched.
