@@ -7,10 +7,19 @@
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, FaultPoint};
 use crate::limits::{MAX_DOCUMENT_BODY_BYTES, MAX_IDENTIFIER_BYTES};
+use crate::materialize::MaterializationJob;
 use crate::schema::open_engine_db;
+use crate::{blob, materialize};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use std::path::Path;
+
+/// Whether a string is a safe bare SQL identifier (ASCII alnum + underscore,
+/// non-empty). Used to guard the one place a table name is interpolated rather
+/// than bound (`table_row_count`), so a caller cannot inject SQL through it.
+fn is_safe_identifier(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
 
 /// A single owned writable connection. Not `Sync`, not cloneable: the workspace
 /// actor owns exactly one and never lets it cross threads
@@ -380,6 +389,136 @@ impl EngineStore {
     fn scalar_count(&self, sql: &str) -> Result<i64, StorageError> {
         self.conn
             .query_row(sql, [], |row| row.get(0))
+            .map_err(StorageError::corrupt)
+    }
+
+    // ---- R04: blob store -------------------------------------------------
+
+    /// Store `bytes` as a content-addressed binary blob (dedup by hash),
+    /// returning its sha-256 key.
+    pub fn put_binary_blob(&self, bytes: &[u8]) -> Result<String, StorageError> {
+        blob::put_binary_blob(&self.conn, bytes)
+    }
+
+    /// Fetch a binary blob by key, verifying integrity on read.
+    pub fn get_binary_blob(&self, sha256: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        blob::get_binary_blob(&self.conn, sha256)
+    }
+
+    /// Whether a binary blob with this key exists.
+    pub fn has_binary_blob(&self, sha256: &str) -> Result<bool, StorageError> {
+        blob::has_binary_blob(&self.conn, sha256)
+    }
+
+    /// The number of distinct binary blobs.
+    pub fn binary_blob_count(&self) -> Result<i64, StorageError> {
+        blob::binary_blob_count(&self.conn)
+    }
+
+    // ---- R04: materialization jobs --------------------------------------
+
+    /// Every pending materialization job, oldest first — the set the filesystem
+    /// pipeline replays at startup and executes on enqueue.
+    pub fn list_pending_materialization_jobs(
+        &self,
+    ) -> Result<Vec<MaterializationJob>, StorageError> {
+        materialize::list_pending_jobs(&self.conn)
+    }
+
+    /// Load a single materialization job by id.
+    pub fn load_materialization_job(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<MaterializationJob>, StorageError> {
+        materialize::load_job(&self.conn, job_id)
+    }
+
+    /// Mark a job complete (content durably on disk).
+    pub fn mark_materialization_complete(
+        &self,
+        job_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StorageError> {
+        materialize::mark_complete(&self.conn, job_id, now_ms)
+    }
+
+    /// Mark a job in conflict (newer external content was preserved).
+    pub fn mark_materialization_conflict(
+        &self,
+        job_id: &str,
+        now_ms: i64,
+    ) -> Result<(), StorageError> {
+        materialize::mark_conflict(&self.conn, job_id, now_ms)
+    }
+
+    /// The number of pending materialization jobs.
+    pub fn pending_materialization_count(&self) -> Result<i64, StorageError> {
+        materialize::pending_job_count(&self.conn)
+    }
+
+    // ---- R04: backup support --------------------------------------------
+
+    /// The on-disk size of the main database file, from `page_count * page_size`
+    /// (the free-space preflight budget). Does not require the file path.
+    pub fn database_size_bytes(&self) -> Result<u64, StorageError> {
+        let page_count: i64 = self
+            .conn
+            .pragma_query_value(None, "page_count", |r| r.get(0))
+            .map_err(StorageError::corrupt)?;
+        let page_size: i64 = self
+            .conn
+            .pragma_query_value(None, "page_size", |r| r.get(0))
+            .map_err(StorageError::corrupt)?;
+        let bytes = page_count.max(0) as u64 * page_size.max(0) as u64;
+        Ok(bytes)
+    }
+
+    /// Copy the live database into `dest` as a clean single-file snapshot
+    /// (`VACUUM INTO`). `dest` must not already exist. Used by the backup
+    /// pipeline; not a general-purpose export.
+    pub fn vacuum_into(&self, dest: &Path) -> Result<(), StorageError> {
+        let dest_str = dest.to_str().ok_or(StorageError::InvalidInput {
+            reason: "backup destination path is not valid UTF-8",
+        })?;
+        self.conn
+            .execute("VACUUM INTO ?1", [dest_str])
+            .map_err(StorageError::backup)?;
+        Ok(())
+    }
+
+    /// The engine ownership record `(engine_uuid, engine_build)`.
+    pub fn ownership(&self) -> Result<(String, String), StorageError> {
+        self.conn
+            .query_row(
+                "SELECT engine_uuid, engine_build FROM engine_ownership WHERE rowid_guard = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(StorageError::corrupt)
+    }
+
+    /// The engine ownership UUID, if the store is readable (best-effort; used by
+    /// diagnostics on a failed open).
+    pub fn engine_uuid(&self) -> Result<String, StorageError> {
+        self.conn
+            .query_row(
+                "SELECT engine_uuid FROM engine_ownership WHERE rowid_guard = 1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(StorageError::corrupt)
+    }
+
+    /// Row count of a single table (backup restore-test compare). The table name
+    /// is interpolated (not bindable), so it is guarded to a safe identifier.
+    pub fn table_row_count(&self, table: &str) -> Result<i64, StorageError> {
+        if !is_safe_identifier(table) {
+            return Err(StorageError::InvalidInput {
+                reason: "table name is not a safe identifier",
+            });
+        }
+        self.conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
             .map_err(StorageError::corrupt)
     }
 }

@@ -17,6 +17,11 @@ fault-injection = []
 rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
 thiserror = "2"
+# Safe wrapper over the platform free-space call (statvfs / GetDiskFreeSpaceEx)
+# so the backup preflight keeps forbid(unsafe_code). Only the real
+# `FreeSpaceProbe` uses it; the disk-full behavior is tested through an injected
+# probe, not by filling a disk.
+fs4 = "0.13"
 
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]

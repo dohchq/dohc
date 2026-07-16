@@ -36,6 +36,7 @@ pub mod diff;
 pub mod error;
 pub mod floor;
 pub mod hash;
+pub mod materialize;
 pub mod media;
 pub mod reconcile;
 pub mod scan;
@@ -46,6 +47,10 @@ pub use bounds::{OverCapPolicy, ScanBounds, ScanBoundsBuilder};
 pub use diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
 pub use error::FilesError;
 pub use hash::{HashOutcome, HashPool, PoolGauge};
+pub use materialize::{
+    AtomicReplacer, DurabilityPolicy, JobOutcome, JobResult, MaterializeError, StdReplacer,
+    materialize_one, run_pending_jobs,
+};
 pub use reconcile::{
     CaptureOp, IngestReason, ReconcileController, ReconcilePlan, ReconcileRun, ScanGeneration,
 };

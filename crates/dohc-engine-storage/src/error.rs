@@ -58,6 +58,60 @@ pub enum StorageError {
     /// (a same-payload retry stays exactly-once).
     #[error("idempotency key was reused with a different payload")]
     IdempotencyKeyReuseMismatch,
+
+    /// An ordered migration failed to apply, or a previously-applied migration's
+    /// recorded checksum does not match this build's definition (a tampered or
+    /// incompatible ledger). The migration transaction rolled back; the store is
+    /// left at its prior consistent state and never half-migrated.
+    #[error("engine migration failed to apply")]
+    MigrationFailed {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+
+    /// A backup operation failed (copy, manifest write, or restore-test). The
+    /// only valid source database is never deleted on failure; a partial backup
+    /// is left un-manifested and is therefore invalid-by-absence (never counted
+    /// as a valid restore point).
+    #[error("engine backup failed")]
+    BackupFailed {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+
+    /// A destructive/space-consuming operation was refused because the target
+    /// volume lacks the preflighted free space. Fails closed BEFORE touching the
+    /// only valid source (`plan §Backups`: never delete the only valid source on
+    /// disk-full).
+    #[error("insufficient free space: need {needed} bytes, {available} available")]
+    DiskFull { needed: u64, available: u64 },
+
+    /// A filesystem operation was denied by permissions. Distinguished from
+    /// corruption and transient locks so recovery does not misclassify an ACL
+    /// problem as a corrupt store (`plan §Corruption behavior`).
+    #[error("permission denied")]
+    PermissionDenied {
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    },
+
+    /// A file was transiently locked (Windows AV/indexer sharing violation, or a
+    /// busy SQLite handle) and the bounded retry budget was exhausted. Distinct
+    /// from corruption: the store is intact; the operation is retryable and any
+    /// pending job is left for startup replay (`LANGUAGE_SEMANTICS_MATRIX` 7.7,
+    /// `TEST_ORACLE` `env.sharing-violation-transient`).
+    #[error("file is locked (retry budget exhausted)")]
+    FileLocked,
+
+    /// A content-addressed blob failed its integrity check on read: the stored
+    /// bytes do not hash to the key they were filed under. Fails closed; never
+    /// returns corrupt bytes as if valid (`plan §blobs`, integrity on read).
+    #[error("blob integrity check failed for {sha256}")]
+    BlobIntegrity { sha256: String },
+
+    /// A blob exceeded [`crate::limits::MAX_BLOB_BYTES`].
+    #[error("blob {actual} bytes exceeds the blob size limit")]
+    BlobTooLarge { actual: usize },
 }
 
 impl StorageError {
@@ -72,6 +126,44 @@ impl StorageError {
             StorageError::DocumentTooLarge { .. } => "document-too-large",
             StorageError::PersistFailed { .. } => "persist-failed",
             StorageError::IdempotencyKeyReuseMismatch => "idempotency-key-reuse-mismatch",
+            StorageError::MigrationFailed { .. } => "migration-failed",
+            StorageError::BackupFailed { .. } => "backup-failed",
+            StorageError::DiskFull { .. } => "disk-full",
+            StorageError::PermissionDenied { .. } => "permission-denied",
+            StorageError::FileLocked => "file-locked",
+            StorageError::BlobIntegrity { .. } => "blob-integrity",
+            StorageError::BlobTooLarge { .. } => "blob-too-large",
+        }
+    }
+
+    /// Wrap an unexpected error as `migration-failed` with the source attached.
+    pub(crate) fn migration(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        StorageError::MigrationFailed {
+            source: Some(Box::new(source)),
+        }
+    }
+
+    /// Wrap an unexpected error as `backup-failed` with the source attached.
+    pub(crate) fn backup(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        StorageError::BackupFailed {
+            source: Some(Box::new(source)),
+        }
+    }
+
+    /// Classify a raw [`std::io::Error`] from a filesystem step into the
+    /// recovery taxonomy (`plan §Corruption behavior`: distinguish permission,
+    /// disk-full, transient lock from corruption). Anything unrecognized becomes
+    /// `backup-failed`/caller-mapped rather than silently swallowed.
+    pub(crate) fn classify_io(err: std::io::Error) -> Self {
+        use std::io::ErrorKind;
+        match err.kind() {
+            ErrorKind::PermissionDenied => StorageError::PermissionDenied {
+                source: Some(Box::new(err)),
+            },
+            // `StorageFull` is nightly-only as a variant; disk-full also arrives
+            // as raw OS errors, so callers preflight explicitly. Treat an
+            // out-of-space raw error conservatively as backup-failed here.
+            _ => StorageError::backup(err),
         }
     }
 
