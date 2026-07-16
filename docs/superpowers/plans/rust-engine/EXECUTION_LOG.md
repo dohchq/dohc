@@ -63,3 +63,16 @@ source of truth every orchestrator session loads first).
 - PR #139 CI BLOCKED: GitHub Actions billing failure at the org — no job
   starts on any runner. Escalated to Ice (open decision 2 now includes
   restoring Actions billing).
+- R03 protocol spike delivered (PR #141, dormant crate
+  dohc-engine-protocol): recommendation = length-framed JSON control
+  frames + raw binary blob-chunk frames; serde structs as single schema
+  source (ts-rs -> TS types, schemars -> JSON Schema); CBOR held as
+  negotiated upgrade. Measurements: worst-case metadata JSON penalty
+  ~1.5ms vs 1,500ms budget; raw chunk frames 4.7-6.6 GB/s vs 0.4-0.5 for
+  base64-JSON; V8 JSON.parse decodes fastest on the JS peer. 35 Rust +
+  7 Node tests over byte-identical shared fixtures; panic-free decoder;
+  in-process transport with zero serde in path (portability guardrail 3).
+  Two protocol-freeze escalations recorded: engine->client event flow
+  control (bounded buffer + overflow policy), and per-method param/result
+  schemas to close dual-implementation validation drift. Open decision 1
+  now has its evidence; Ice ratifies at Gate 0.
