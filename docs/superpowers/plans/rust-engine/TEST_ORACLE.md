@@ -186,6 +186,8 @@ while the workspace actor is quiesced.
 ```json
 {"t":"fault","point":"storage.before-persist","action":"error",
  "errorKind":"env.disk-full","scope":{"opId":"op-000008"},"armAfter":0}
+{"t":"fault","point":"materialize.before-preimage-revalidate","action":"error",
+ "errorKind":"env.sharing-violation-transient","errorArgs":{"count":5}}
 {"t":"fault","point":"sync.between-apply-and-cursor-commit","action":"crash",
  "scope":{"behaviorId":"relay-pull-workspace"}}
 {"t":"clear-faults"}
@@ -201,6 +203,12 @@ while the workspace actor is quiesced.
   reached/not-reached counts).
 - `scope` — restricts the arm to a matching `opId` or `behaviorId`;
   `armAfter` skips N traversals first. An armed `crash` fault consumes itself.
+- `errorArgs` — optional parameters for the injected `errorKind`, validated
+  per kind against the registry (section 3.10): `env.sharing-violation-transient`
+  takes `{"count": n}` (consecutive failing probes, default 3; `n ≥ 5`
+  exercises the fail-closed terminal). Kinds with no declared parameters
+  reject a non-empty `errorArgs`. The adapter's `FaultSpec` (section 6)
+  carries the same field.
 - `optionalFor` — optional array of engine IDs; the only allowed value at
   `traceVersion` 1 is `"ts"` (validation rejects anything else). Semantics:
   the harness may skip this fault record for an engine only if the engine is
@@ -706,7 +714,7 @@ interface EngineTestAdapter {
 
   // -- fault control (§3 registry) -------------------------------------------
   listFaultPoints(): Promise<string[]>;        // registry names this engine implements
-  installFault(f: FaultSpec): Promise<void>;   // {point, action, scope?, armAfter?, errorKind?}
+  installFault(f: FaultSpec): Promise<void>;   // {point, action, scope?, armAfter?, errorKind?, errorArgs?}
   releasePause(point: string): Promise<void>;
   clearFaults(): Promise<void>;
 
@@ -718,7 +726,7 @@ interface EngineTestAdapter {
 }
 ```
 
-16 methods. Design notes:
+15 methods. Design notes:
 
 - **`invoke` is behavior-ID-keyed, not method-per-operation.** 229 typed
   methods would freeze the inventory into an interface; instead the adapter
@@ -742,7 +750,10 @@ interface EngineTestAdapter {
   loss with **no** armed crash is an adapter exception that fails the run —
   the harness must never confuse an accidental sidecar death or rejected
   promise with an expected fault. After `crashed`, the only legal next trace
-  records are `restart`/`crashRestart` (or end-of-trace); the harness
+  record is `restart` (or end-of-trace) — `crashRestart` is an **adapter
+  method, not a trace record**: the harness executes a `restart` record via
+  `crashRestart()` when the engine is in a crashed state and via
+  `restart()` otherwise, so traces stay engine-state-agnostic. The harness
   enforces this ordering.
 - **`listFaultPoints` is how G-points stay honest**: the harness skips a
   trace's fault record only if the engine reports the point unimplemented

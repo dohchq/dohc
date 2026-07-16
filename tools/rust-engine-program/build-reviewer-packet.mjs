@@ -371,6 +371,14 @@ function sourceFilesForBehaviors(rows) {
   return [...files].sort();
 }
 
+// "linkedChatStore.replication-validation.test.ts" -> "linkedChatStore":
+// strip every dotted qualifier (hyphens included) before the .test suffix.
+export function testFileStem(testFilePath) {
+  const base = toPosix(testFilePath).split("/").pop() ?? "";
+  if (!/\.test\.tsx?$/.test(base)) return null;
+  return base.replace(/(\.[\w-]+)*\.test\.tsx?$/, "");
+}
+
 function portedTestsForShard(shard, behaviorRows, classificationRows, sourceFiles) {
   const tests = new Map(); // path -> annotation
   const shardTestTokens = (shard.test_files ?? "")
@@ -386,7 +394,7 @@ function portedTestsForShard(shard, behaviorRows, classificationRows, sourceFile
   );
   for (const row of classificationRows) {
     const file = toPosix(row.test_file ?? "");
-    const stem = file.split("/").pop()?.replace(/(\.\w+)?\.test\.tsx?$/, "");
+    const stem = testFileStem(file);
     if (stem && sourceStems.has(stem)) {
       tests.set(
         file,
@@ -483,12 +491,39 @@ export function buildPacket({ shard, shardsHeader, behaviors, inventoryHeader, r
   // program dir differs from HEAD (modified or untracked files), say so —
   // never label working-tree data as committed HEAD state.
   let provenance = "git provenance unavailable (not a repository)";
+  let tableDivergence = null;
   try {
     const head = git(root, ["rev-parse", "--short", "HEAD"]).trim();
     const dirty = git(root, ["status", "--porcelain", "--", PLANS_DIR_REL]).trim();
     provenance = dirty
       ? `WORKING TREE with uncommitted program-table changes (HEAD ${head}; ${dirty.split("\n").length} dirty/untracked path(s) under ${PLANS_DIR_REL})`
       : `committed HEAD ${head} (program tables clean)`;
+    if (dirty) {
+      // The main --diff range (base...ref) cannot show these, so include the
+      // divergence explicitly: tracked staged+unstaged changes as a patch,
+      // untracked files by name (their working-tree content is what the
+      // packet's table sections render).
+      const divergence = git(root, ["diff", "HEAD", "--", PLANS_DIR_REL]);
+      const untracked = git(root, [
+        "ls-files", "--others", "--exclude-standard", "--", PLANS_DIR_REL,
+      ]).trim();
+      const fence = makeFence([divergence]);
+      tableDivergence = [
+        "The program tables differ from committed HEAD. Uncommitted tracked",
+        "changes (`git diff HEAD`, staged + unstaged):",
+        "",
+        divergence.trim()
+          ? [`${fence}diff`, divergence.trimEnd(), fence].join("\n")
+          : "_(none)_",
+        "",
+        "Untracked program files read from the working tree (rendered in full",
+        "by the packet sections above):",
+        "",
+        untracked
+          ? untracked.split("\n").map((f) => `- ${f}`).join("\n")
+          : "_(none)_",
+      ].join("\n");
+    }
   } catch {}
 
   const parts = [];
@@ -531,6 +566,12 @@ export function buildPacket({ shard, shardsHeader, behaviors, inventoryHeader, r
     parts.push(`- ${doc}${exists ? "" : " _(not yet written — flag if this shard needs it)_"}`);
   }
   parts.push("");
+  if (tableDivergence) {
+    parts.push("## Program-table divergence from HEAD");
+    parts.push("");
+    parts.push(tableDivergence);
+    parts.push("");
+  }
   parts.push("## Diff");
   parts.push("");
   parts.push(
@@ -675,6 +716,22 @@ function selfTest() {
   check("fence: longer than longest backtick run", fence.length === 6);
   check("fence: minimum three backticks", makeFence(["no ticks"]) === "```");
 
+  // test-file stem extraction, including hyphenated/dotted qualifiers
+  check(
+    "stem: plain test file",
+    testFileStem("packages/x/src/linkedChatStore.test.ts") === "linkedChatStore",
+  );
+  check(
+    "stem: hyphenated qualifier stripped",
+    testFileStem("packages/x/src/linkedChatStore.replication-validation.test.ts") ===
+      "linkedChatStore",
+  );
+  check(
+    "stem: multiple qualifiers stripped",
+    testFileStem("apps/y/usePresence.a.b-c.test.tsx") === "usePresence",
+  );
+  check("stem: non-test file rejected", testFileStem("packages/x/src/store.ts") === null);
+
   // packet assembly (no git diff), against a throwaway dir
   const tmp = mkdtempSync(join(tmpdir(), "packet-selftest-"));
   try {
@@ -803,4 +860,15 @@ function main() {
   );
 }
 
-main();
+// Run only as a CLI entry point — the exported helpers (parseTsv, runCheck,
+// makePathMatcher, ...) are reused by sibling tools (e.g. the parity counter)
+// which must be able to import this module without executing main().
+const isEntryPoint = (() => {
+  if (!process.argv[1]) return false;
+  const self = fileURLToPath(import.meta.url);
+  const invoked = resolve(process.argv[1]);
+  return process.platform === "win32"
+    ? invoked.toLowerCase() === self.toLowerCase()
+    : invoked === self;
+})();
+if (isEntryPoint) main();
