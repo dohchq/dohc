@@ -2497,6 +2497,56 @@ describe("ChatsView expand-to-tab", () => {
     );
   });
 
+  it("opens a Feed DM directly in the page and preserves its focused message", async () => {
+    const user = userEvent.setup();
+    const directDm = dm();
+    const focused = message({
+      id: "message-feed-dm-focus",
+      threadId: directDm.threadId ?? "thread-dm-1",
+      body: "Focused Feed DM",
+    });
+    const pendingSync = new Promise<never>(() => undefined);
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({ available: true, dms: [directDm] })
+      .mockImplementation(() => pendingSync);
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          message: focused,
+          thread: {
+            id: directDm.threadId ?? "thread-dm-1",
+            title: "DM conversation",
+            createdAtMs: NOW,
+            updatedAtMs: NOW,
+          },
+          channel: {
+            id: directDm.channelId,
+            wireId: directDm.channelWireId,
+            name: directDm.name,
+            slug: "bob-example-com",
+            kind: "dm" as const,
+          },
+          reactions: [],
+          matchedBy: ["person" as const],
+        },
+      ],
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [focused] });
+    vi.mocked(Element.prototype.scrollIntoView).mockClear();
+
+    renderView(vi.fn(), vi.fn(), { variant: "page" });
+    await screen.findByTestId("chats-dm-item");
+    await user.click(screen.getByTestId("chats-feed-link"));
+    const feedMessage = await screen.findByText("Focused Feed DM");
+    await user.click(feedMessage.closest("button")!);
+
+    expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByTestId("chats-dm-message").className).toContain("ring-2");
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+    });
+  });
+
   it("seeds an expanded tab at the new-message compose screen", async () => {
     bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [] });
     renderView(vi.fn(), vi.fn(), {
@@ -2628,6 +2678,119 @@ describe("ChatsView expand-to-tab", () => {
       target: { kind: "author", threadId: "thread-1", messageId: "message-1" },
       state: "unfollowed",
     });
+  });
+
+  it("does not let an older channel-follow refresh overwrite a newer mutation", async () => {
+    const user = userEvent.setup();
+    const persistedFollow = {
+      targetKind: "channel" as const,
+      targetId: "wire-1",
+      state: "following" as const,
+      updatedAtMs: NOW,
+    };
+    let resolveStaleRead!: (value: { follows: [typeof persistedFollow] }) => void;
+    const staleRead = new Promise<{ follows: [typeof persistedFollow] }>((resolve) => {
+      resolveStaleRead = resolve;
+    });
+    bridgeMock.listChatChannels.mockResolvedValue({
+      channels: [channel({ wireId: "wire-1" })],
+      fileThreads: [],
+    });
+    bridgeMock.listChatFollows
+      .mockResolvedValueOnce({ follows: [persistedFollow] })
+      .mockImplementationOnce(() => staleRead);
+
+    renderView();
+    const follow = await screen.findByTestId("chats-channel-follow");
+    await waitFor(() => expect(follow.getAttribute("aria-label")).toBe("Unfollow #general"));
+    act(() => emitWorkspaceActivity());
+    await waitFor(() => expect(bridgeMock.listChatFollows).toHaveBeenCalledTimes(2));
+
+    await user.click(follow);
+    await waitFor(() => expect(follow.getAttribute("aria-label")).toBe("Follow #general"));
+    await act(async () => {
+      resolveStaleRead({ follows: [persistedFollow] });
+      await staleRead;
+    });
+    expect(follow.getAttribute("aria-label")).toBe("Follow #general");
+  });
+
+  it("drops stale Feed-follow mutation results and errors after a newer refresh", async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    const persistedFollow = {
+      targetKind: "person" as const,
+      targetId: "user-alice",
+      state: "following" as const,
+      updatedAtMs: NOW,
+    };
+    type UnfollowResult = {
+      follow: {
+        targetKind: "person";
+        targetId: string;
+        state: "unfollowed";
+        updatedAtMs: number;
+      };
+    };
+    let resolveOldMutation!: (value: UnfollowResult) => void;
+    const oldMutation = new Promise<UnfollowResult>((resolve) => {
+      resolveOldMutation = resolve;
+    });
+    let rejectOldMutation!: (reason: unknown) => void;
+    const oldRejectedMutation = new Promise<never>((_resolve, reject) => {
+      rejectOldMutation = reject;
+    });
+    bridgeMock.listChatFollows.mockResolvedValue({ follows: [persistedFollow] });
+    bridgeMock.listPersonalChatFeed.mockResolvedValue({
+      items: [
+        {
+          message: message({ authorDisplayName: "Alice" }),
+          thread: thread(),
+          channel: {
+            id: "channel-1",
+            name: "general",
+            slug: "general",
+            kind: "channel" as const,
+          },
+          authorFollowTarget: { targetKind: "person" as const, targetId: "user-alice" },
+          reactions: [],
+          matchedBy: ["person" as const],
+        },
+      ],
+    });
+    bridgeMock.setChatFollow
+      .mockImplementationOnce(() => oldMutation)
+      .mockImplementationOnce(() => oldRejectedMutation);
+
+    renderView(vi.fn(), onError);
+    await user.click(await screen.findByTestId("chats-feed-link"));
+    const follow = await screen.findByTestId("chats-feed-follow-author");
+    await waitFor(() => expect(follow.textContent).toBe("Following author"));
+
+    await user.click(follow);
+    act(() => emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(bridgeMock.listChatFollows.mock.calls.length).toBeGreaterThanOrEqual(2),
+    );
+    await act(async () => {
+      resolveOldMutation({
+        follow: { ...persistedFollow, state: "unfollowed", updatedAtMs: NOW + 1 },
+      });
+      await oldMutation;
+    });
+    expect(follow.textContent).toBe("Following author");
+
+    await user.click(follow);
+    act(() => emitWorkspaceActivity());
+    await waitFor(() =>
+      expect(bridgeMock.listChatFollows.mock.calls.length).toBeGreaterThanOrEqual(3),
+    );
+    await act(async () => {
+      rejectOldMutation(new Error("stale follow failure"));
+      await oldRejectedMutation.catch(() => undefined);
+    });
+    expect(follow.textContent).toBe("Following author");
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it("synchronizes follows between simultaneous chat views after workspace activity", async () => {

@@ -1824,13 +1824,17 @@ export function ChatsView(props: {
       if (readOnly) return;
       const following = followedUi.has(key);
       const token = liveToken.current;
+      // A follow write supersedes every older list read or write in this
+      // workspace. The same generation guards both success and failure so a
+      // stale completion cannot repaint state or surface an obsolete error.
+      const request = ++followRequest.current;
       try {
         const result = await bridge().setChatFollow({
           workspaceId,
           target,
           state: following ? "unfollowed" : "following",
         });
-        if (token !== liveToken.current) return;
+        if (token !== liveToken.current || request !== followRequest.current) return;
         setFollowedUi((current) => {
           const next = new Set(current);
           const durableKey = `${result.follow.targetKind}:${result.follow.targetId}`;
@@ -1842,7 +1846,7 @@ export function ChatsView(props: {
           return next;
         });
       } catch (error) {
-        if (token !== liveToken.current) return;
+        if (token !== liveToken.current || request !== followRequest.current) return;
         props.onError(ipcErrorMessage(error, "Could not update that follow."));
       }
     },
@@ -1856,13 +1860,14 @@ export function ChatsView(props: {
       const key = `channel:${channel.wireId}`;
       const following = followedUi.has(key);
       const token = liveToken.current;
+      const request = ++followRequest.current;
       try {
         const result = await bridge().setChatFollow({
           workspaceId,
           target: { kind: "channel", channelId: channel.id },
           state: following ? "unfollowed" : "following",
         });
-        if (token !== liveToken.current) return;
+        if (token !== liveToken.current || request !== followRequest.current) return;
         setFollowedUi((current) => {
           const next = new Set(current);
           const durableKey = `${result.follow.targetKind}:${result.follow.targetId}`;
@@ -1871,7 +1876,7 @@ export function ChatsView(props: {
           return next;
         });
       } catch (error) {
-        if (token !== liveToken.current) return;
+        if (token !== liveToken.current || request !== followRequest.current) return;
         props.onError(ipcErrorMessage(error, "Could not update that channel follow."));
       }
     },
@@ -1893,7 +1898,7 @@ export function ChatsView(props: {
       else if (target.level === "channel") void openChannel(target.channel);
       else if (target.level === "thread") {
         void openThread(target.channel, target.thread, target.focusMessageId);
-      } else void openDm(target.dm);
+      } else void openDm(target.dm, target.focusMessageId);
     },
     [openChannel, openDm, openFeed, openThread, props.onOpenInTab, variant],
   );
@@ -2587,6 +2592,10 @@ export function ChatsView(props: {
                       ...item.thread,
                       path: null,
                     };
+                const feedDm =
+                  item.channel?.kind === "dm"
+                    ? dms.find((dm) => dm.channelId === item.channel?.id)
+                    : undefined;
                 const bookmark = bookmarkFor("message", item.message.id);
                 const bookmarkKey = `message:${item.message.id}`;
                 const hasFileMentions = extractChatFileReferences(item.message.body).length > 0;
@@ -2603,6 +2612,14 @@ export function ChatsView(props: {
                           onClick={() => {
                             if (!item.channel) {
                               props.onOpenFileChat(fileThread!, item.message.id);
+                              return;
+                            }
+                            if (feedDm) {
+                              openConversation({
+                                level: "dm",
+                                dm: feedDm,
+                                focusMessageId: item.message.id,
+                              });
                               return;
                             }
                             openConversation({
