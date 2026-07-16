@@ -14,3 +14,7 @@ target/
 
 # Playwright output
 test-results/
+
+# In-worktree cargo target dirs (WINDOWS_DEV prefers out-of-repo CARGO_TARGET_DIR)
+target-*/
+**/target-*/
