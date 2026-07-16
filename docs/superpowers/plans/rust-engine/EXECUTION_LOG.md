@@ -174,3 +174,10 @@ source of truth every orchestrator session loads first).
   ratification; handoff schema rejects contradictory unsafe approvals;
   build-slot reclamation owner-safe (heartbeat + pid-tree + tombstone
   rename).
+- PR #142 review round addressed (40d3c675): 14 fixed (capability
+  enforcement normative, structured delta_approval replaces free-text
+  parity bypass, crashed as first-class trace outcome, one-per-chain
+  assertion counting, fence-injection + diff-failure + provenance fixes
+  in the packet builder), 1 partially declined on correct path-ownership
+  grounds (program tables belong to INTEGRATOR/#138). Self-test 29/29,
+  --check green. @codex re-review triggered.
