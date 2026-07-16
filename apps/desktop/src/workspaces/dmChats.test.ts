@@ -313,6 +313,32 @@ describe("peekReceivedGrantKind", () => {
     expect(calls).toBe(5);
   });
 
+  it("stops after one page when hasMore carries a stalled cursor", async () => {
+    let calls = 0;
+    const kind = await peekReceivedGrantKind({
+      fetchPage: async (since) => {
+        calls++;
+        return { ops: [], nextCursor: since, hasMore: true };
+      },
+    });
+
+    expect(kind).toBe("unknown");
+    expect(calls).toBe(1);
+  });
+
+  it("stops after one page when hasMore carries a non-numeric cursor", async () => {
+    let calls = 0;
+    const kind = await peekReceivedGrantKind({
+      fetchPage: async () => {
+        calls++;
+        return { ops: [], nextCursor: "not-a-cursor", hasMore: true };
+      },
+    });
+
+    expect(kind).toBe("unknown");
+    expect(calls).toBe(1);
+  });
+
   it("keeps exhausted and un-fetchable logs transient until a create is visible", async () => {
     await expect(
       peekReceivedGrantKind({
