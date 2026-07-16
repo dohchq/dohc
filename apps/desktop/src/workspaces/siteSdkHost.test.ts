@@ -1,3 +1,4 @@
+import { databaseOpLogPath } from "@dohc/workspace-core";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -147,6 +148,26 @@ describe("site SDK host authority", () => {
       ).rejects.toThrow(/cannot overwrite database files.*databases\.edit/i);
       await expect(readFile(join(root, path))).rejects.toMatchObject({ code: "ENOENT" });
     }
+  });
+
+  it("threads the injected clock/id seams into a database edit's op log", async () => {
+    const root = await workspace();
+    await mkdir(join(root, "data"), { recursive: true });
+    seedDatabase(join(root, "data", "app.sqlite"), "start");
+    const context = {
+      workspaceRoot: root,
+      scopeRoot: null,
+      writable: true,
+      now: () => 1_700_000_000_000,
+      createId: () => "op_site_0001",
+    };
+    await invokeSiteSdkHost(context, "databases.edit", {
+      path: "data/app.sqlite",
+      edit: { table: "sentinel", op: "update", pkColumn: "id", rowId: "1", payload: { marker: "edited" } },
+    });
+    const log = await readFile(join(root, databaseOpLogPath("data/app.sqlite")), "utf8");
+    const ops = log.trim().split("\n").map((l) => JSON.parse(l));
+    expect(ops[0]).toMatchObject({ operationId: "op_site_0001", appliedAt: 1_700_000_000_000 });
   });
 
   it("keeps a mounted shared site read-only and hides paths outside its mount", async () => {

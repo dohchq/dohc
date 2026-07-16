@@ -44,6 +44,21 @@ describe("AgentIntegration", () => {
     });
   });
 
+  it("stamps the run record id and startedAt from injected createId/now seams", async () => {
+    await withWorkspace(async ({ root, setSlot }) => {
+      const integration = createAgentIntegration({
+        rootFor: () => root,
+        setAgentRun: (_id, run) => setSlot(run),
+        now: () => 1_700_000_000_000,
+        createId: () => "run_fixed_0001",
+      });
+      const run = await integration.startAgentRun("ws");
+      expect(run).toMatchObject({ id: "run_fixed_0001", startedAt: 1_700_000_000_000 });
+      const persisted = JSON.parse(await readFile(join(root, ".dohc/agent-runs.json"), "utf8"));
+      expect(persisted[0]).toMatchObject({ id: "run_fixed_0001", startedAt: 1_700_000_000_000 });
+    });
+  });
+
   it("spawns and stops the managed MCP child across a run, reflected in status", async () => {
     await withWorkspace(async ({ root, setSlot }) => {
       const stop = vi.fn();

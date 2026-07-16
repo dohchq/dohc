@@ -51,12 +51,18 @@ export interface JournalReplicationOpInput {
   recordedAtMs: number;
 }
 
-export function ensureOriginId(db: JournalConnection, workspaceId: WorkspaceId): string {
+export function ensureOriginId(
+  db: JournalConnection,
+  workspaceId: WorkspaceId,
+  // Injectable id seam (oracle/tests): omitted ⇒ a real random origin id,
+  // identical to today's behavior.
+  createId: () => string = () => `origin_${randomUUID()}`,
+): string {
   const existing = db
     .prepare("SELECT origin_id FROM sync_identity WHERE workspace_id = ?")
     .get(workspaceId);
   if (typeof existing?.origin_id === "string") return existing.origin_id;
-  const originId = `origin_${randomUUID()}`;
+  const originId = createId();
   db.prepare("INSERT OR IGNORE INTO sync_identity (workspace_id, origin_id) VALUES (?, ?)").run(
     workspaceId,
     originId,

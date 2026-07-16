@@ -53,6 +53,9 @@ export interface AgentIntegrationOptions {
   agentId?: string;
   onBehalfOf?: string;
   now?: () => number;
+  // Injectable id seam (oracle/tests) for the AgentRunRecord id. Omitted ⇒ a
+  // real randomUUID, identical to today's behavior.
+  createId?: () => string;
   // PR 0N-2: fired after a KNOWN run's terminal status is durably recorded.
   // endAgentRun is the single funnel every terminal path goes through
   // (AgentSessionManager finalizeRun, the panel's Stop, the endAgentRun IPC),
@@ -109,6 +112,7 @@ async function writeRuns(rootPath: string, runs: AgentRunRecord[]): Promise<void
 
 export function createAgentIntegration(options: AgentIntegrationOptions) {
   const now = options.now ?? (() => Date.now());
+  const createId = options.createId ?? (() => randomUUID());
   const agentId = options.agentId ?? DEFAULT_AGENT_ID;
   const onBehalfOf = options.onBehalfOf ?? "local";
 
@@ -154,7 +158,7 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
       s.mcp = options.spawnMcpServer({ root, home: options.home ?? root });
     }
     const record: AgentRunRecord = {
-      id: randomUUID(),
+      id: createId(),
       startedAt: now(),
       agentId,
       onBehalfOf,

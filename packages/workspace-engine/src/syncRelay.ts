@@ -26,6 +26,10 @@ export interface SyncRelayInput {
   rootDir: string;
   workspaceId: WorkspaceId;
   relay: SyncRelayConnection;
+  // Injectable id seam (oracle/tests) used by recoverRelayOrigin when minting a
+  // fresh origin id on orphan-op reconciliation. Omitted ⇒ a real random origin
+  // id, identical to today's behavior.
+  createId?: () => string;
 }
 
 export interface RelayMaterializedPath {
@@ -595,7 +599,7 @@ export async function recoverRelayOrigin(
   try {
     writeDb.exec("BEGIN IMMEDIATE");
     try {
-      const newOriginId = `origin_${randomUUID()}`;
+      const newOriginId = input.createId?.() ?? `origin_${randomUUID()}`;
       // Re-journal orphan ops under the fresh origin with contiguous seqs.
       orphanOps.forEach((op, index) => {
         journalReplicationOp(writeDb, {

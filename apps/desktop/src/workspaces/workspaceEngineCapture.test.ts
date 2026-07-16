@@ -134,6 +134,7 @@ function sha256Utf8(text: string): string {
 function capture(root: string, options: {
   store?: VersionedTextStore;
   now?: () => number;
+  createId?: () => string;
   onError?: (context: string, error: unknown) => void;
   onCaptureOutcome?: (outcome: { ok: boolean }) => void;
   activeAgentRun?: () => { agentId: string; onBehalfOf: string; agentRunId: string } | null;
@@ -834,6 +835,26 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     third.start();
     await third.stop();
     expect(readEngineMoments(root)).toHaveLength(afterSecond.length);
+  });
+
+  it("stamps reconcile correlation ids from an injected createId seam", async () => {
+    const root = await tempRoot();
+    await write(root, "kept.md", "before\n");
+    const first = capture(root, { createId: () => "corr-fixed-0001" });
+    first.start();
+    await first.stop();
+
+    // Closed-period edit so the next session reconciles a change.
+    await write(root, "kept.md", "after\n");
+    const second = capture(root, { createId: () => "corr-fixed-0001" });
+    second.start();
+    await second.stop();
+
+    const stamped = readEngineMoments(root).filter((m) => m.correlationId !== null);
+    expect(stamped.length).toBeGreaterThan(0);
+    for (const moment of stamped) {
+      expect(moment.correlationId).toBe("reconcile-corr-fixed-0001");
+    }
   });
 
   it("serializes reconciliation before a live watcher batch on one chain", async () => {

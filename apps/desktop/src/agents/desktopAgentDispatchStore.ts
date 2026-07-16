@@ -95,7 +95,12 @@ function nonNegativeInteger(value: unknown, label: string): number {
 
 export function createDesktopAgentDispatchStore(
   rootDir: string,
+  // Injectable clock/id seams (oracle/tests). Omitted ⇒ real randomUUID run
+  // ids and the real wall clock, identical to today's behavior.
+  options: { createRunId?: () => string; nowMs?: () => number } = {},
 ): DesktopAgentDispatchStoreHandle {
+  const createRunId = options.createRunId ?? (() => `run_${randomUUID()}`);
+  const nowMs = options.nowMs ?? (() => Date.now());
   const path = join(resolve(rootDir), LINKED_CHAT_STORE_RELATIVE_PATH);
   const { DatabaseSync } = nodeSqlite();
   const db = new DatabaseSync(path);
@@ -109,7 +114,7 @@ export function createDesktopAgentDispatchStore(
   let preparedRunId: string | null = null;
   const base = createAgentDispatchStore(db, {
     createRunId: () => {
-      const runId = preparedRunId ?? `run_${randomUUID()}`;
+      const runId = preparedRunId ?? createRunId();
       preparedRunId = null;
       return runId;
     },
@@ -117,7 +122,7 @@ export function createDesktopAgentDispatchStore(
   const store: AgentDispatchStore = {
     ...base,
     claimNextPending(workspaceId, claimOptions = {}) {
-      const runId = `run_${randomUUID()}`;
+      const runId = createRunId();
       preparedRunId = runId;
       try {
         return base.claimNextPending(workspaceId, {
@@ -162,7 +167,7 @@ export function createDesktopAgentDispatchStore(
                AND state = 'failed' AND run_id = ? AND attempt_count < 2`,
           )
           .run(
-            Date.now(),
+            nowMs(),
             input.workspaceId,
             input.triggerMessageId,
             input.runId,

@@ -1156,6 +1156,34 @@ describe("sync relay client", () => {
     }
   });
 
+  it("mints the fresh recovery origin from an injected createId seam", async () => {
+    const relay = new FakeRelay();
+    const a = await tempRoot("recover-createid");
+    await claimRelayWorkspace({ workspaceId: WORKSPACE_ID, relay: relay.connection() });
+    await seedText(a);
+    await pushWorkspaceToRelay({ rootDir: a, workspaceId: WORKSPACE_ID, relay: relay.connection() });
+
+    const recovery = await recoverRelayOrigin({
+      rootDir: a,
+      workspaceId: WORKSPACE_ID,
+      relay: relay.connection(),
+      createId: () => "origin_injected",
+    });
+    expect(recovery.newOriginId).toBe("origin_injected");
+
+    // The adopted local origin is the injected id — future writes are
+    // deterministic under the seam.
+    const db = openEngineDb(a);
+    try {
+      const row = db
+        .prepare("SELECT origin_id FROM sync_identity WHERE workspace_id = ?")
+        .get(WORKSPACE_ID);
+      expect(row?.origin_id).toBe("origin_injected");
+    } finally {
+      db.close();
+    }
+  });
+
   it("aborts a pull when relay pagination stops advancing", async () => {
     const relay = new FakeRelay();
     const b = await tempRoot("stuck-page");
