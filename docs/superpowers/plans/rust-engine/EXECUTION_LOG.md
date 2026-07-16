@@ -196,3 +196,12 @@ source of truth every orchestrator session loads first).
   threads replied with fixing hashes. Full 500-seed strict certification
   refreshed: 500/500 (7,480 landed yrs edits, 2,169 truncations
   zero-accepted, 77 recovered yjs partial-applies). PASS unchanged.
+- PR #138 codex round complete (3a9de602): 9/9 verified-then-fixed (incl.
+  a 9th inline beyond the 8 headlines): key-envelope randomness rows,
+  desktop database-edit Date.now clock seam, 3 missing rust-authority
+  behavior rows (versionCompare + key wrap/unwrap, critical), mention
+  parsing reclassified rust-authority, MCP consumers added to 12 rows,
+  dispatch-adapter + workspaceActivity tests queued, retired suites
+  demoted to port_priority none, CLI granular-search caller corrected.
+  Counts: 232 behaviors / 46 test files / 117 determinism sites; column
+  validation clean.
