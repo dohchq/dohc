@@ -1,0 +1,32 @@
+[package]
+name = "dohc-engine-domain"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+publish.workspace = true
+description = "CAL-2 calibration slice: the versioning domain — stable object identity, versioned text write/read, moment history with keyset pagination, named-version fork, and restore (set-active-version) — over the CAL-1 storage core's single-transaction seam. Dormant; not wired into the product."
+
+[features]
+# Forwards the storage crash-injection seam so the version-create / restore
+# crash tests can arm the named fault points.
+fault-injection = ["dohc-engine-storage/fault-injection"]
+
+[dependencies]
+dohc-engine-storage = { path = "../dohc-engine-storage" }
+# The domain composes its versioning SQL against the transaction/connection the
+# storage core hands it; it owns the version/moment semantics, storage owns the
+# connection, open ritual, txn boundary, and fault seam.
+rusqlite = { version = "0.37", features = ["bundled"] }
+# Content-addressed text blobs (sha256), matching the storage core's discipline.
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+# Scratch workspaces + the crash harness for the domain's durability traces.
+# Depending on the testkit here also unifies the storage `fault-injection`
+# feature ON for `cargo test`, arming the version-create / restore fault points.
+dohc-engine-testkit = { path = "../dohc-engine-testkit" }
+
+# Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
+[lints]
+workspace = true

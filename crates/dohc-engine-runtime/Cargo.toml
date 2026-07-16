@@ -4,7 +4,12 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 publish.workspace = true
-description = "CAL-1 calibration slice: the workspace actor that owns the storage writer connection, keyed by canonical engine.db file identity, with an explicit open→ready→draining→closed lifecycle and deterministic Drop. Dormant; not wired into the product."
+description = "CAL-1/CAL-2 calibration slice: the workspace actor that owns the storage writer connection on ONE dedicated blocking thread, driven by a tokio command loop with cancellation tokens and deadlines, keyed by canonical engine.db file identity, with an explicit open→ready→draining→closed lifecycle and deterministic Drop. Dormant; not wired into the product."
+
+[features]
+# Forwards the storage crash-injection seam so a build that arms faults (the
+# testkit / `cargo test --workspace`) also arms them under the actor loop.
+fault-injection = ["dohc-engine-storage/fault-injection"]
 
 [dependencies]
 dohc-engine-storage = { path = "../dohc-engine-storage" }
@@ -13,6 +18,22 @@ dohc-engine-storage = { path = "../dohc-engine-storage" }
 # forbid(unsafe_code).
 file-id = "0.2"
 thiserror = "2"
+# The async command loop. The writer connection still lives on ONE dedicated
+# blocking OS thread (never on the runtime); commands flow over tokio::sync
+# channels and the worker receives them via `blocking_recv`.
+tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
+# Cooperative cancellation tree (PORTING.md §12): session/deadline cancellation
+# is checked BETWEEN bounded units, never inside a transaction.
+tokio-util = "0.7"
+
+[dev-dependencies]
+tokio = { version = "1", features = [
+  "sync",
+  "rt",
+  "rt-multi-thread",
+  "time",
+  "macros",
+] }
 
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]

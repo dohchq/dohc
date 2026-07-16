@@ -39,6 +39,12 @@ pub enum RuntimeError {
     /// unwinding but the session is dead.
     #[error("workspace actor worker thread panicked")]
     WorkerPanicked,
+
+    /// A request's deadline elapsed before the operation completed. The
+    /// operation's cancellation token was tripped; work already committed
+    /// stays durable (exactly-once ack — `PORTING.md` §12).
+    #[error("request deadline elapsed")]
+    DeadlineExceeded,
 }
 
 impl RuntimeError {
@@ -51,6 +57,7 @@ impl RuntimeError {
             RuntimeError::ActorUnavailable => "actor-unavailable",
             RuntimeError::Overloaded => "overloaded",
             RuntimeError::WorkerPanicked => "worker-panicked",
+            RuntimeError::DeadlineExceeded => "deadline-exceeded",
         }
     }
 }

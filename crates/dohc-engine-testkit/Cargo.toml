@@ -7,12 +7,21 @@ publish.workspace = true
 description = "CAL-1 calibration slice: fixtures (scratch workspaces, path aliases, adversarial v1/foreign databases) and the in-process crash/restart harness with named fault points. Dormant test infrastructure; not wired into the product."
 
 [dependencies]
-dohc-engine-storage = { path = "../dohc-engine-storage" }
-dohc-engine-runtime = { path = "../dohc-engine-runtime" }
+# The testkit is the crash tier: it turns ON the storage fault-injection seam.
+# Feature unification then arms the seam for the whole `cargo test --workspace`
+# build (storage, runtime, and these integration traces), while a release
+# artifact that does not link the testkit keeps the seam compiled out.
+dohc-engine-storage = { path = "../dohc-engine-storage", features = ["fault-injection"] }
+dohc-engine-runtime = { path = "../dohc-engine-runtime", features = ["fault-injection"] }
 # Used only to construct adversarial fixtures (v1-fingerprint / foreign
 # databases) that the storage fence must reject. Same bundled build as
 # dohc-engine-storage, so no second SQLite compile.
 rusqlite = { version = "0.37", features = ["bundled"] }
+
+[dev-dependencies]
+# Drives the async actor-loop traces (cancellation + deadline). The synchronous
+# CAL-1 traces need no runtime; these exercise the tokio command path.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"] }
 
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]

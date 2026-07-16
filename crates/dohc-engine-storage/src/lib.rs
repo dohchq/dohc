@@ -43,4 +43,4 @@ pub use limits::{
     ENGINE_SCHEMA_VERSION, ENGINE_SQLITE_BUSY_TIMEOUT_MS, MAX_DOCUMENT_BODY_BYTES,
     MAX_IDENTIFIER_BYTES,
 };
-pub use store::{CompoundWrite, Document, EngineStore, WriteOutcome};
+pub use store::{CompoundWrite, Document, EngineStore, TxnOutcome, WriteOutcome};

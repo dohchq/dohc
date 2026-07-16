@@ -29,7 +29,7 @@ pub mod error;
 pub mod identity;
 pub mod supervisor;
 
-pub use actor::{ActorHandle, LifecycleState, StoreSnapshot, WorkspaceActor};
+pub use actor::{ActorHandle, LifecycleState, StoreSnapshot, UnitsOutcome, WorkspaceActor};
 pub use error::RuntimeError;
 pub use identity::EngineDbIdentity;
 pub use supervisor::WorkspaceSupervisor;
@@ -37,6 +37,11 @@ pub use supervisor::WorkspaceSupervisor;
 // Re-export the storage surface callers need so a downstream host depends on
 // one crate for the common path.
 pub use dohc_engine_storage::{
-    CompoundWrite, Document, EngineStore, FaultInjector, NoFaults, StorageError, WriteOutcome,
+    CompoundWrite, Document, EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome,
+    WriteOutcome,
     faults::{FaultAction, FaultPoint},
 };
+
+// The cancellation primitive the async actor loop consumes. Re-exported so a
+// caller drives cancellation through one crate.
+pub use tokio_util::sync::CancellationToken;
