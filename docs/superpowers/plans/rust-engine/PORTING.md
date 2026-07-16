@@ -5,9 +5,14 @@
 > porting shard. A Rust diff that contradicts an approved mapping here is a
 > review rejection unless it carries an approved `BEHAVIOR_DELTA.md` entry.
 >
-> Line numbers cite the repo as of 2026-07-16 (branch point `origin/main`,
-> post-PR-135). The engine freeze makes these stable; if a frozen file moves,
-> update the citation in the same PR that consumed it.
+> Line numbers cite the repo as of 2026-07-16 (branch point `origin/main`
+> @ `958cdfd3`, post-PR-136). The engine freeze makes these stable; if a
+> frozen file moves, update the citation in the same PR that consumed it.
+> Cross-shard citations reference unmerged Wave-0 branches until they land:
+> the R03 protocol crate → `codex/rust-engine-r03` (PR #141); the plan /
+> `WINDOWS_DEV.md` → `codex/rust-engine-r00` (PR #137); inventory TSVs →
+> `codex/rust-engine-r01-inventory` (PR #138); yrs-spike constraints in
+> `DECISIONS.md` → PR #140.
 
 How to read each section: **TS pattern** (with a real engine example),
 **approved Rust pattern**, **reviewers reject**. `NEEDS-DECISION` marks places
@@ -82,9 +87,12 @@ bound so TS clients read plain `number`s losslessly.
   in domain newtypes where they carry identity or ordering:
   `MomentOrder(i64)`, `OriginSeq(i64)`, `UpdateSeq(i64)`, `ByteLength(u64)`.
 - Every value that crosses the protocol is range-checked against
-  `MAX_WIRE_INTEGER` at the protocol boundary (the R03 codec already does
-  this — do not duplicate ad-hoc checks in domain code, but do rely on the
-  fact that no engine counter can realistically exceed 2^53).
+  `MAX_WIRE_INTEGER` at the protocol boundary. The R03 codec (PR #141,
+  unmerged at this writing) implements the check; until it lands in `main`,
+  the bound is normative FROM THIS DOCUMENT — a shard introducing a wire
+  type before the codec exists adds the check itself and marks it for
+  consolidation, never assumes an absent codec enforced it. Once the codec
+  is in the tree, do not duplicate ad-hoc checks in domain code.
 - Timestamps and byte counts read from SQLite REAL columns are `f64` at the
   storage layer and converted with explicit, checked conversion where an
   integer is required (see §3 and `LANGUAGE_SEMANTICS_MATRIX.md` §2).
@@ -127,12 +135,16 @@ registers, which order by `(at_ms, state, origin_id, origin_seq)`
   test-injected clocks), validated finite at construction, compared only for
   LWW where the TS engine does.
 - Columns keep their current SQLite types (schema-shape stability, locked
-  decision 3): REAL stays REAL, INTEGER stays INTEGER. The storage layer owns
-  the per-table conversion; `TimestampMs` → INTEGER column goes through a
-  checked "is integral" conversion. NEEDS-DECISION only if a differential
-  trace surfaces a fractional timestamp written into an INTEGER column today
-  (SQLite would store the REAL; TS reads it back as-is — see
-  `LANGUAGE_SEMANTICS_MATRIX.md` §2 fixture `semantics/int-column-real-bind`).
+  decision 3): REAL stays REAL, INTEGER stays INTEGER. Timestamps bind as
+  f64 EVERYWHERE — including into the INTEGER-affinity chat/dispatch
+  columns — exactly as node:sqlite does: SQLite's affinity converts a
+  lossless value to INTEGER and stores a fractional value as REAL. The TS
+  engine accepts fractional `nowMs` into those tables today
+  (`createLinkedChatStore` has no integer guard), so a checked
+  "must-be-integral" conversion would REJECT behavior TS allows — do not
+  add one. Reads come back as f64 and convert checked only where an i64 is
+  genuinely required (see `LANGUAGE_SEMANTICS_MATRIX.md` §2 rows 2.3/2.4,
+  fixture `semantics/int-column-real-bind`).
 - Monotonic time (`std::time::Instant`) is allowed ONLY for
   intervals/timeouts/backoff inside `dohc-engine-runtime` (never persisted,
   never compared to wall time). Deadlines arriving over the protocol are
@@ -151,7 +163,7 @@ inside a port shard (that is a schema change; integrator + delta only).
 **TS pattern.** Every store defines an `Error` subclass with a closed union
 of machine codes, and tests assert the codes:
 
-- `VersionedTextStoreError` + `VersionedTextStoreErrorCode` — 22 codes:
+- `VersionedTextStoreError` + `VersionedTextStoreErrorCode` — 24 codes:
   `conflict-not-found | conflict-stale-target | duplicate-id |
   file-too-large | file-not-found | fork-base-not-found |
   invalid-generated-id | invalid-input | invalid-metadata | invalid-object |
@@ -161,7 +173,7 @@ of machine codes, and tests assert the codes:
   version-name-conflict | version-not-found | workspace-mismatch |
   write-lane-reentry` (`packages/workspace-contracts/src/engine.ts:38-62`,
   class at `versionedTextStore.ts:121-129`).
-- `LinkedChatStoreError` — 20 codes incl. `channel-exists`,
+- `LinkedChatStoreError` — 19 codes incl. `channel-exists`,
   `read-state-revision-mismatch`, `state-corrupt`, `workspace-mismatch`
   (`engine.ts:1066-1085`).
 - `SecretFileStoreError` — 11 codes incl. `decrypt-failed`, `key-corrupt`,
@@ -485,11 +497,34 @@ Full behavioral table in `LANGUAGE_SEMANTICS_MATRIX.md` §8. The approved
   (fixture-pinned).
 - `INSERT OR IGNORE` / `ON CONFLICT` SQL text is ported verbatim; do not
   re-express as read-then-write (loses the atomicity the SQL had).
+- **Lazy-DDL families → ledgered migrations.** The v1 engine installs ~10
+  lazy DDL families plus PRAGMA-gated column adds on every open as a fixed
+  sequence of individually auto-committed statements with no enclosing
+  transaction (`initializeOrValidateEngineSchema`,
+  `engineDbSchema.ts:839-896`) — safe only because every step is
+  independently idempotent and consumers treat missing tables as
+  "feature unused". NONE of that machinery is ported. The day-one Rust
+  schema creates everything eagerly at `schema_version = 2` inside one
+  transaction, and ALL subsequent schema change goes through the ordered
+  migration ledger (migration id, checksum, engine build, transactional
+  classification, integrity result — plan §Day-one Rust schema; rows
+  `table-migration-ledger` / `table-idempotency-ledger` in
+  `STATE_OWNERSHIP.tsv`). The one existing data-repair migration
+  (`repairDeferredChatParentsOnce`, `engineDbSchema.ts:779-837`, marker in
+  `engine_migrations`) becomes irrelevant under clean reset: fresh v2
+  databases can never contain the pre-repair shape, so it is NOT ported —
+  its lock-recheck-commit pattern IS the template for future ledgered
+  migrations.
 
 **Reviewers reject:** any connection opened outside `open_engine_db()`;
-pragma drift between open sites (the desktopAgentDispatchStore's separately
-hardcoded `busy_timeout` — `apps/desktop/src/agents/desktopAgentDispatchStore.ts`
-— is a bug class to eliminate, not port); `execute_batch` for anything with
+pragma drift between open sites — TWO shipped instances of this bug class to
+eliminate, not port: the desktopAgentDispatchStore's separately hardcoded
+`busy_timeout` (`apps/desktop/src/agents/desktopAgentDispatchStore.ts:99-104`)
+and the CLI server's two open-per-query read-only connections that set NO
+busy_timeout at all (`apps/desktop/src/cli/cliServer.ts:666,:696` — a busy
+writer makes them fail instantly instead of waiting; post-cutover, CLI reads
+become engine-client calls, see `STATE_OWNERSHIP.tsv`
+`sqlite-conn-cli-readonly`); `execute_batch` for anything with
 user data (no binds); string-interpolated SQL (SQL injection + no plan
 cache; the TS engine has one interpolation — `PRAGMA table_info(${table})`,
 `engineDbSchema.ts:723` — which dies with the lazy-upgrade machinery);
@@ -583,21 +618,28 @@ guards).
 
 **Approved Rust pattern.**
 
-- `serde_json` with `preserve_order` feature (struct-field-declaration order
-  standing in for TS insertion order) for `payload_json` compatibility, and
-  the struct field order for each op payload declared to match the TS
-  emitter — pinned by differential fixtures comparing journal bytes, since
-  peers' dedup keys on `(origin_id, origin_seq)`, not payload bytes.
-  NEEDS-DECISION at R10 if any consumer is found comparing payload_json
-  bytes across engines; if none, byte-equality is relaxed to
+- Serialization order for `payload_json`: derived-`Serialize` structs emit
+  fields in DECLARATION order regardless of features — declare each op
+  payload's fields to match the TS emitter's insertion order. The
+  `preserve_order` serde_json feature matters only where a payload passes
+  through `serde_json::Value` maps (re-serialization paths like the relay's
+  canonical-form comparison) — enable it so `Value` round-trips do not
+  alphabetize keys. Pinned by differential fixtures comparing journal
+  bytes, since peers' dedup keys on `(origin_id, origin_seq)`, not payload
+  bytes. NEEDS-DECISION at R10 if any consumer is found comparing
+  payload_json bytes across engines; if none, byte-equality is relaxed to
   JSON-value-equality in the oracle normalizer (record in `TEST_ORACLE.md`).
 - Everything NEW that is hashed, signed, or content-addressed uses a real
   canonical form (sorted keys, no insignificant whitespace, forbidden
   non-finite floats) in `dohc-engine-protocol::canonical` — one
   implementation, parity-tested against the TS `stableStringify` fixtures.
-- f64 formatting: JSON numbers must round-trip; use serde_json's default
-  (shortest round-trip, same algorithm family as V8's) and pin with fixture
-  `semantics/json-float-format` (matrix §5).
+- f64 formatting: serde_json's default is NOT JS-compatible for integral
+  values (`5.0` vs JS `5`) or exponent form (`1e21` vs JS `1e+21`) — see
+  matrix rows 5.1/5.2. Approved pattern: serialize integral numeric fields
+  as i64 (or through a custom JS-compatible f64 formatter that emits the
+  integer form when `fract() == 0`) on every wire/journal/canonical
+  surface; pinned by fixtures `semantics/json-integral-float` and
+  `semantics/json-float-format`.
 
 **Reviewers reject:** `HashMap` anywhere in a serialized type (iteration
 order nondeterminism — use `BTreeMap` or ordered structs); hashing a
@@ -679,8 +721,11 @@ token on "quick" operations (queue delay makes everything slow under load).
   state drops the connection **after** WAL checkpoint
   (`PRAGMA wal_checkpoint(TRUNCATE)` on clean close is an approved
   improvement — record in `BEHAVIOR_DELTA.md`; TS never checkpoints
-  explicitly). Drop order within the actor: sessions → jobs →
-  read pool → write connection → watcher (see `STATE_OWNERSHIP.tsv`
+  explicitly). Drop order within the actor: watcher FIRST (no new events
+  can arrive once the event source is stopped — matching
+  `workspaceActivity.stopAll`, which stops the watcher handle before
+  `capture.stop`, `workspaceActivity.ts:363-375`), then sessions → jobs →
+  read pool → write connection last (see `STATE_OWNERSHIP.tsv`
   `shutdown_drop_order` column; the table is authoritative).
 - The process exits with zero unowned handles — the soak gate asserts
   threads/handles return exactly to baseline (plan §Resource and soak
