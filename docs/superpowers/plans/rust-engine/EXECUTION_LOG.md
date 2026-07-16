@@ -224,3 +224,9 @@ source of truth every orchestrator session loads first).
   invalid-input -> invalid-follow-target + self-reference; row 6.5
   off-by-one decision pointer) dispatched. Gate 0 contract approval
   completes on those two lines.
+- PR #143 two-line residuals closed (399645d5) with independent
+  verification of the error-code claim at linkedChatStore.ts:908-910.
+  R01-CONTRACTS complete: both Gate 0 adversarial approvals + 26 verified
+  fixes + re-check residuals. Deliverables final: PORTING.md 15 sections,
+  STATE_OWNERSHIP.tsv 52 rows, LANGUAGE_SEMANTICS_MATRIX.md 91 rows,
+  9 NEEDS-DECISION items for Ice at Gate 0.
