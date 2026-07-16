@@ -845,6 +845,11 @@ interface FeedCursorValue {
 // into a broader authorization surface than the read path.
 const PERSONAL_FEED_VISIBILITY_PREDICATE = `
   AND (t.channel_id IS NULL OR c.kind <> 'dm')
+  AND (t.channel_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM chat_channel_placeholders placeholder
+    WHERE placeholder.workspace_id = t.workspace_id
+      AND placeholder.channel_id = t.channel_id
+  ))
   AND (
     EXISTS (
       SELECT 1 FROM chat_follows f
@@ -2352,6 +2357,11 @@ export function createLinkedChatStore(
                  GROUP BY t.workspace_id, t.channel_id
                ) agg ON agg.workspace_id = c.workspace_id AND agg.channel_id = c.channel_id
                WHERE c.workspace_id = ?
+                 AND NOT EXISTS (
+                   SELECT 1 FROM chat_channel_placeholders placeholder
+                   WHERE placeholder.workspace_id = c.workspace_id
+                     AND placeholder.channel_id = c.channel_id
+                 )
                ORDER BY c.created_at_ms, c.channel_id`,
             )
             .all(workspaceId)
@@ -3421,7 +3431,12 @@ export function createLinkedChatStore(
             `SELECT DISTINCT w.wire_id FROM chat_channels c
              JOIN chat_channel_wire_ids w
                ON w.workspace_id = c.workspace_id AND w.channel_id = c.channel_id
-             WHERE c.workspace_id = ? AND c.kind <> 'dm'`,
+             WHERE c.workspace_id = ? AND c.kind <> 'dm'
+               AND NOT EXISTS (
+                 SELECT 1 FROM chat_channel_placeholders placeholder
+                 WHERE placeholder.workspace_id = c.workspace_id
+                   AND placeholder.channel_id = c.channel_id
+               )`,
           )
           .all(workspaceId);
         const insert = db.prepare(

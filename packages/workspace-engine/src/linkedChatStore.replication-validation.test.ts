@@ -195,8 +195,50 @@ describe("replicated chat.thread.create payload validation", () => {
       { id: "thread-valid", title: "New chat" },
       { id: "thread-file", title: "File discussion" },
     ]);
+    expect(await store.listChannels({ workspaceId: WORKSPACE_ID })).toEqual([]);
+    const internalChannelId = await store.findThreadChannelId({
+      workspaceId: WORKSPACE_ID,
+      threadId: "thread-valid",
+    });
+    expect(internalChannelId).not.toBeNull();
+    expect(
+      await store.listChannelThreads({
+        workspaceId: WORKSPACE_ID,
+        channelId: internalChannelId!,
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        thread: expect.objectContaining({
+          id: "thread-valid",
+          channelId: internalChannelId,
+        }),
+      }),
+    ]);
+
+    await expect(
+      store.applyReplicationOp({
+        workspaceId: WORKSPACE_ID,
+        originId: "valid-channel-create",
+        originSeq: 0,
+        opKind: "chat.channel.create",
+        payload: {
+          channelId: "remote-team-updates",
+          name: "Team Updates",
+          slug: "team-updates",
+          kind: "channel",
+          createdAtMs: 500,
+          wireId: "wire-team-updates",
+        },
+        recordedAtMs: 500,
+      }),
+    ).resolves.toMatchObject({ status: "applied" });
     expect(await store.listChannels({ workspaceId: WORKSPACE_ID })).toEqual([
-      expect.objectContaining({ slug: "team-updates" }),
+      expect.objectContaining({
+        id: internalChannelId,
+        name: "Team Updates",
+        slug: "team-updates",
+        kind: "channel",
+      }),
     ]);
     await store.close();
   });

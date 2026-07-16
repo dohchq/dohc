@@ -1125,6 +1125,22 @@ describe("phase-one linked chat model", () => {
       },
       recordedAtMs: 2000,
     });
+    expect(await engine.store.listChannels({ workspaceId: WORKSPACE_ID })).toEqual([]);
+    const internalAgentPlaceholder = rawDbFor(engine, (db) =>
+      db
+        .prepare(
+          `SELECT channel_id FROM chat_channel_placeholders
+           WHERE workspace_id = ? AND wire_id = ?`,
+        )
+        .get(WORKSPACE_ID, AGENT_CHANNEL_WIRE_ID),
+    );
+    if (!internalAgentPlaceholder) throw new Error("Expected an internal agent placeholder.");
+    expect(
+      await engine.store.listChannelThreads({
+        workspaceId: WORKSPACE_ID,
+        channelId: String(internalAgentPlaceholder.channel_id),
+      }),
+    ).toEqual([expect.objectContaining({ thread: expect.objectContaining({ id: "thread-agent" }) })]);
     await engine.store.applyReplicationOp({
       workspaceId: WORKSPACE_ID,
       originId: "origin-channel",
@@ -1167,17 +1183,57 @@ describe("phase-one linked chat model", () => {
     };
     await engine.store.applyReplicationOp(threadOp);
 
-    const placeholder = (await engine.store.listChannels({ workspaceId: WORKSPACE_ID })).find(
-      (channel) => channel.id !== localChannel.id,
+    expect(await engine.store.listChannels({ workspaceId: WORKSPACE_ID })).toEqual([
+      expect.objectContaining({ id: localChannel.id }),
+    ]);
+    const placeholder = rawDbFor(engine, (db) =>
+      db
+        .prepare(
+          `SELECT c.* FROM chat_channels c
+           JOIN chat_channel_placeholders placeholder
+             ON placeholder.workspace_id = c.workspace_id
+            AND placeholder.channel_id = c.channel_id
+           WHERE c.workspace_id = ? AND placeholder.wire_id = ?`,
+        )
+        .get(WORKSPACE_ID, "wire-remote-project-updates"),
     );
     expect(placeholder).toMatchObject({
       name: "project-updates",
       slug: "project-updates-2",
       kind: "channel",
-      createdAtMs: 3000,
-      updatedAtMs: 3000,
+      created_at_ms: 3000,
+      updated_at_ms: 3000,
     });
     if (!placeholder) throw new Error("Expected an out-of-order channel placeholder.");
+    const placeholderId = String(placeholder.channel_id);
+    expect(
+      await engine.store.listChannelThreads({
+        workspaceId: WORKSPACE_ID,
+        channelId: placeholderId,
+      }),
+    ).toEqual([expect.objectContaining({ thread: expect.objectContaining({ id: "remote-thread" }) })]);
+    await engine.store.applyReplicationOp(
+      messageEnvelope({
+        originId: "origin-placeholder-message",
+        threadId: "remote-thread",
+        messageId: "remote-placeholder-message",
+        body: "Internal placeholder message",
+        createdAtMs: 3100,
+      }),
+    );
+    await engine.store.setFollow({
+      workspaceId: WORKSPACE_ID,
+      ownerUserId: "viewer",
+      targetKind: "thread",
+      targetId: "remote-thread",
+      state: "following",
+    });
+    expect(
+      (await engine.store.listPersonalFeed({
+        workspaceId: WORKSPACE_ID,
+        ownerUserId: "viewer",
+      })).items,
+    ).toEqual([]);
 
     const channelOp: SyncReplicationEnvelope = {
       workspaceId: WORKSPACE_ID,
@@ -1199,10 +1255,10 @@ describe("phase-one linked chat model", () => {
     });
 
     const authoritative = (await engine.store.listChannels({ workspaceId: WORKSPACE_ID })).find(
-      (channel) => channel.id === placeholder.id,
+      (channel) => channel.id === placeholderId,
     );
     expect(authoritative).toMatchObject({
-      id: placeholder.id,
+      id: placeholderId,
       name: "Remote Project Updates",
       slug: "project-updates-2",
       kind: "dm",
@@ -1212,7 +1268,7 @@ describe("phase-one linked chat model", () => {
     expect(
       await engine.store.listChannelThreads({
         workspaceId: WORKSPACE_ID,
-        channelId: placeholder.id,
+        channelId: placeholderId,
       }),
     ).toEqual([expect.objectContaining({ thread: expect.objectContaining({ id: "remote-thread" }) })]);
     expect(
@@ -1221,7 +1277,7 @@ describe("phase-one linked chat model", () => {
           .prepare(
             "SELECT 1 FROM chat_channel_placeholders WHERE workspace_id = ? AND channel_id = ?",
           )
-          .get(WORKSPACE_ID, placeholder.id),
+          .get(WORKSPACE_ID, placeholderId),
       ),
     ).toBeUndefined();
 
@@ -1241,9 +1297,27 @@ describe("phase-one linked chat model", () => {
     });
     expect(
       (await engine.store.listChannels({ workspaceId: WORKSPACE_ID })).find(
-        (channel) => channel.id === placeholder.id,
+        (channel) => channel.id === placeholderId,
       ),
     ).toEqual(authoritative);
+
+    await engine.store.ensureDefaultChannelFollows({
+      workspaceId: WORKSPACE_ID,
+      ownerUserId: "viewer",
+    });
+    expect(
+      (await engine.store.listFollows({
+        workspaceId: WORKSPACE_ID,
+        ownerUserId: "viewer",
+        state: "following",
+      })).map((follow) => follow.targetId),
+    ).toEqual([localChannel.id, "remote-thread"]);
+    expect(
+      (await engine.store.listPersonalFeed({
+        workspaceId: WORKSPACE_ID,
+        ownerUserId: "viewer",
+      })).items,
+    ).toEqual([]);
   });
 
   it("numbers the local slug for direct replicated channels with distinct wire identities", async () => {

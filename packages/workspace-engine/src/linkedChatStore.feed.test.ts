@@ -88,6 +88,100 @@ function receiverStateReplicationOps(): SyncReplicationEnvelope[] {
 }
 
 describe("personal chat Feed", () => {
+  it("keeps unresolved channel placeholders out of defaults and Feed until authoritative create", async () => {
+    const store = storeAt();
+    const wireId = "wire-delayed-channel";
+    const threadId = "thread-delayed-channel";
+    await store.applyReplicationOp({
+      workspaceId: "ws",
+      originId: "delayed-thread-origin",
+      originSeq: 0,
+      opKind: "chat.thread.create",
+      payload: {
+        threadId,
+        title: "Delayed channel thread",
+        createdAtMs: 100,
+        channelSlug: "delayed-channel",
+        channelWireId: wireId,
+      },
+      recordedAtMs: 100,
+    });
+    await store.applyReplicationOp({
+      workspaceId: "ws",
+      originId: "delayed-message-origin",
+      originSeq: 0,
+      opKind: "chat.message.append",
+      payload: {
+        messageId: "message-delayed-channel",
+        threadId,
+        authorKind: "human",
+        authorDisplayName: "Alice",
+        authorUserId: "alice",
+        body: "Must stay internal until the channel create arrives",
+        createdAtMs: 200,
+      },
+      recordedAtMs: 200,
+    });
+    await store.ensureDefaultChannelFollows({ workspaceId: "ws", ownerUserId: "viewer" });
+    await store.setFollow({
+      workspaceId: "ws",
+      ownerUserId: "viewer",
+      targetKind: "thread",
+      targetId: threadId,
+      state: "following",
+    });
+
+    expect(await store.listChannels({ workspaceId: "ws" })).toEqual([]);
+    expect(
+      (await store.listFollows({
+        workspaceId: "ws",
+        ownerUserId: "viewer",
+        state: "following",
+      })).filter((follow) => follow.targetKind === "channel"),
+    ).toEqual([]);
+    expect(
+      (await store.listPersonalFeed({ workspaceId: "ws", ownerUserId: "viewer" })).items,
+    ).toEqual([]);
+
+    await store.applyReplicationOp({
+      workspaceId: "ws",
+      originId: "delayed-channel-origin",
+      originSeq: 0,
+      opKind: "chat.channel.create",
+      payload: {
+        channelId: "remote-delayed-channel",
+        name: "Delayed Channel",
+        slug: "delayed-channel",
+        kind: "channel",
+        createdAtMs: 50,
+        wireId,
+      },
+      recordedAtMs: 50,
+    });
+    await store.ensureDefaultChannelFollows({ workspaceId: "ws", ownerUserId: "viewer" });
+
+    expect(await store.listChannels({ workspaceId: "ws" })).toEqual([
+      expect.objectContaining({ name: "Delayed Channel", kind: "channel" }),
+    ]);
+    expect(
+      await store.listFollows({
+        workspaceId: "ws",
+        ownerUserId: "viewer",
+        state: "following",
+      }),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ targetKind: "channel", targetId: wireId }),
+      ]),
+    );
+    const feed = await store.listPersonalFeed({ workspaceId: "ws", ownerUserId: "viewer" });
+    expect(feed.items).toHaveLength(1);
+    expect(feed.items[0]).toMatchObject({
+      message: { id: "message-delayed-channel" },
+      matchedBy: ["thread", "channel"],
+    });
+  });
+
   it("keeps signed-out receiver state local and journals only a verified matching owner", async () => {
     const store = storeAt();
     const general = await store.ensureGeneralChannel({ workspaceId: "ws" });
