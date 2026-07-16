@@ -213,7 +213,7 @@ source of truth every orchestrator session loads first).
   CANCELLED/DEADLINE_EXCEEDED behind a hung handler (2 new paused-time
   regressions). Float-form integers >2^53 rejected matching TS
   Number.isInteger semantics; BoundedWriter fails oversized encodes
-  mid-write; nullable fields契 aligned with TS optional|null contract;
+  mid-write; nullable fields aligned with TS optional|null contract;
   blob stream ids typed-rejected both directions; no-nested-batch encoded
   at the schemars generator with TS not-subschema support; uint32 maxima
   range-checked. clippy -D warnings clean; 41 Rust + 10 Node tests
