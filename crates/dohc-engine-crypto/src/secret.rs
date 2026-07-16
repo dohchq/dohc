@@ -54,8 +54,13 @@ impl SecretPlaintext {
     /// returned `String` is NOT zeroizing — a caller that needs the text as a
     /// string owns that exposure deliberately.
     pub fn into_utf8(self) -> Result<String, CryptoError> {
-        // Copy out of the zeroizing buffer, validate, and let `self` drop-scrub.
-        String::from_utf8(self.0.to_vec()).map_err(|_| CryptoError::PlaintextNotUtf8)
+        // Validate IN PLACE (no copy): only the Ok path allocates the
+        // deliberately caller-owned `String`. A non-UTF-8 payload never leaves a
+        // second un-zeroized copy behind (the failing `FromUtf8Error` would),
+        // and `self`'s zeroizing buffer scrubs on drop.
+        std::str::from_utf8(self.as_bytes())
+            .map(str::to_owned)
+            .map_err(|_| CryptoError::PlaintextNotUtf8)
     }
 }
 

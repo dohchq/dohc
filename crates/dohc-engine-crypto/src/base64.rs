@@ -5,12 +5,14 @@
 //!
 //! - [`encode_standard`] / [`forgiving_decode`] reproduce
 //!   `Buffer.from(bytes).toString("base64")` and `Buffer.from(str, "base64")`.
-//!   Node's decoder is FORGIVING: it skips any byte outside the standard
-//!   alphabet (whitespace, `=`, stray punctuation) and, on a trailing group of
-//!   one leftover character, drops it. The TS key-file parser relies on exactly
-//!   this leniency (its `try/catch` is unreachable; the 32-byte length check is
-//!   the real guard). We port the leniency rather than tighten it, so a v1-era
-//!   hand-edited key file that survived under Node survives here too.
+//!   Node's decoder is FORGIVING: `=` is a hard TERMINATOR (decoding stops at
+//!   the first one, even mid-string); before it, bytes outside the standard
+//!   alphabet (whitespace, stray punctuation) are skipped; a trailing lone
+//!   leftover symbol is dropped. The TS key-file parser relies on exactly this
+//!   leniency (its `try/catch` is unreachable; the 32-byte length check is the
+//!   real guard). We port the leniency rather than tighten it — including the
+//!   `=`-terminator rule, so we neither accept a malformed key file Node would
+//!   reject nor reject one it would accept.
 //! - [`strict_decode_exact`] reproduces the TS replication-ingest guard
 //!   (`normalizeBase64Field`, `secretFileStore.ts:500-509`): the string must
 //!   match `^[A-Za-z0-9+/]*={0,2}$`, decode to `expected_len` bytes, AND
@@ -66,13 +68,22 @@ fn decode_symbol(b: u8) -> Option<u8> {
     }
 }
 
-/// Forgiving decode matching `Buffer.from(str, "base64")`: every non-alphabet
-/// byte (including `=` and whitespace) is ignored, then the collected symbols
-/// are decoded. A trailing lone symbol (1 leftover) yields no byte — Node drops
-/// it rather than erroring. Never fails.
+/// Forgiving decode matching `Buffer.from(str, "base64")`. Node treats `=` as a
+/// hard TERMINATOR: decoding STOPS at the first `=` (even mid-string). Before
+/// that terminator, any non-alphabet byte (whitespace, stray punctuation) is
+/// skipped. A trailing lone symbol (1 leftover) yields no byte — Node drops it
+/// rather than erroring. Never fails.
+///
+/// The `=`-terminator behavior is load-bearing for parity: `"AB==CD"` decodes to
+/// `[0]` (Node stops at the first `=`), not `[0, 16, 131]` (which a
+/// filter-everything decoder would produce).
 #[must_use]
 pub fn forgiving_decode(input: &str) -> Vec<u8> {
-    let symbols: Vec<u8> = input.bytes().filter_map(decode_symbol).collect();
+    let symbols: Vec<u8> = input
+        .bytes()
+        .take_while(|b| *b != b'=')
+        .filter_map(decode_symbol)
+        .collect();
     let mut out = Vec::with_capacity(symbols.len() / 4 * 3 + 2);
     let mut chunks = symbols.chunks_exact(4);
     for chunk in &mut chunks {
@@ -187,6 +198,17 @@ mod tests {
     fn forgiving_drops_lone_trailing_symbol() {
         // "AAAAA" = 5 symbols → one full group (3 bytes) + a lone symbol dropped.
         assert_eq!(forgiving_decode("AAAAA"), vec![0u8, 0, 0]);
+    }
+
+    #[test]
+    fn forgiving_treats_equals_as_terminator_like_node() {
+        // Node's Buffer.from(str, "base64") stops at the first '=' (verified
+        // against Node v24). A filter-everything decoder would diverge here.
+        assert_eq!(forgiving_decode("AB==CD"), vec![0u8]);
+        assert_eq!(forgiving_decode("AA=A"), vec![0u8]);
+        assert_eq!(forgiving_decode("A=A=A"), Vec::<u8>::new());
+        // A normal trailing pad still decodes the leading group.
+        assert_eq!(forgiving_decode("AA=="), vec![0u8]);
     }
 
     #[test]

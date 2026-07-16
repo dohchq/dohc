@@ -53,6 +53,31 @@ fn write(
 }
 
 #[test]
+fn secret_write_debug_redacts_cleartext() {
+    // The one secret-bearing input type must never spill plaintext through
+    // Debug (tracing, format!, panic messages, error context).
+    let w = SecretWrite {
+        workspace_id: WS.to_owned(),
+        version_id: "main".to_owned(),
+        path: ".env".to_owned(),
+        text: "PASSWORD=hunter2".to_owned(),
+        moment_id: "sm1".to_owned(),
+        metadata_origin: "api".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        now_ms: 1,
+    };
+    let rendered = format!("{w:?}");
+    assert!(
+        !rendered.contains("hunter2"),
+        "Debug must not leak cleartext"
+    );
+    assert!(rendered.contains("<redacted, 16 bytes>"));
+    // Non-secret fields remain visible for diagnosability.
+    assert!(rendered.contains(".env"));
+}
+
+#[test]
 fn round_trips_through_the_single_materialization_accessor() {
     let scratch = ScratchDir::new().unwrap();
     let db = scratch.engine_db_path().unwrap();

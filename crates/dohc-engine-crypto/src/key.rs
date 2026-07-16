@@ -10,7 +10,7 @@
 
 use crate::base64;
 use crate::error::CryptoError;
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 /// The versioned prefix of the on-disk key file. The format is versioned so an
 /// OS-keychain wrap can be layered on later without a migration.
@@ -57,7 +57,10 @@ impl SecretDataKey {
         let encoded = trimmed
             .strip_prefix(SECRET_KEY_FILE_PREFIX)
             .ok_or(CryptoError::KeyFileMalformed)?;
-        let bytes = base64::forgiving_decode(encoded);
+        // Raw key material must only ever live in a zeroizing buffer — the
+        // decoded bytes are scrubbed on drop whether or not the length check
+        // passes.
+        let bytes = Zeroizing::new(base64::forgiving_decode(encoded));
         if bytes.len() != SECRET_KEY_BYTES {
             return Err(CryptoError::KeyFileMalformed);
         }

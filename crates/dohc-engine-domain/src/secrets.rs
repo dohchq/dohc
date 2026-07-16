@@ -24,6 +24,18 @@
 //! Path CLASSIFICATION (deciding which paths are secret) is the R07 path floor's
 //! job; this store validates a path is safe + workspace-relative and treats
 //! routed paths as secret. The `not-secret-path` floor gate lands with R07.
+//!
+//! **Delete is a tombstone, not a crypto-shred (documented decision).** Deleting
+//! a secret removes the `secret_files` tip, but the prior WRITE moment in
+//! `secret_moments` RETAINS its `after_ciphertext_base64` + `after_byte_length`.
+//! So a deleted secret's ciphertext — and its exact plaintext SIZE — persist in
+//! history (never plaintext: ciphertext-only-at-rest still holds). This is the
+//! deliberate, TS-matching behavior: the versioned model preserves history, and
+//! restore-to-before-a-moment depends on the retained sealed after-state. The
+//! residual is that existence + size of a deleted secret remain visible to
+//! anyone with DB access — acceptable because they already hold the ciphertext.
+//! A future crypto-shred-on-delete (purge the retained after-state) is a
+//! possible enhancement for the sync/retention shard; see BEHAVIOR_DELTA.md.
 
 use crate::error::DomainError;
 use crate::store::validate_path;
@@ -66,7 +78,14 @@ impl SecretOp {
 
 /// Inputs to a secret write. `text` is the cleartext (bounded to 1 MiB UTF-8);
 /// it is encrypted before any of it touches storage.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is HAND-WRITTEN to redact `text` — this is the one secret-bearing
+/// input type, so a stray `tracing::debug!(?input)`, `format!("{write:?}")`,
+/// panic message, or error context must never spill the cleartext (the
+/// plaintext-never-leaks-into-logs invariant). `Clone` is derived deliberately:
+/// callers may need to retain the request, and the copy stays inside this typed
+/// carrier, never a formatter.
+#[derive(Clone)]
 pub struct SecretWrite {
     pub workspace_id: String,
     pub version_id: String,
@@ -77,6 +96,25 @@ pub struct SecretWrite {
     pub metadata_summary: Option<String>,
     pub metadata_correlation_id: Option<String>,
     pub now_ms: i64,
+}
+
+impl core::fmt::Debug for SecretWrite {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SecretWrite")
+            .field("workspace_id", &self.workspace_id)
+            .field("version_id", &self.version_id)
+            .field("path", &self.path)
+            .field(
+                "text",
+                &format_args!("<redacted, {} bytes>", self.text.len()),
+            )
+            .field("moment_id", &self.moment_id)
+            .field("metadata_origin", &self.metadata_origin)
+            .field("metadata_summary", &self.metadata_summary)
+            .field("metadata_correlation_id", &self.metadata_correlation_id)
+            .field("now_ms", &self.now_ms)
+            .finish()
+    }
 }
 
 /// A secret history moment — METADATA ONLY, by construction. There is no content

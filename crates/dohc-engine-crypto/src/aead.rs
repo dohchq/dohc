@@ -132,10 +132,9 @@ fn cipher_for(key: &SecretDataKey) -> Result<Aes256Gcm, CryptoError> {
     Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|_| CryptoError::InvalidKeyLength)
 }
 
-/// Encrypt `plaintext` under `key`, bound to `workspace_id`+`path`, using the
-/// caller-supplied `iv`. Exposed for deterministic tests and cross-engine parity
-/// (production uses [`seal`], which draws a random IV).
-pub fn seal_with_iv(
+/// The always-compiled sealing core. Private: the ONLY public entry is [`seal`]
+/// (fresh CSPRNG IV). `seal_with_iv` (gated) also routes here for parity tests.
+fn seal_core(
     key: &SecretDataKey,
     workspace_id: &str,
     path: &str,
@@ -163,8 +162,27 @@ pub fn seal_with_iv(
     })
 }
 
-/// Encrypt `plaintext` under `key` with a fresh random 96-bit IV. The
-/// production path (`encryptSecretText`).
+/// Encrypt `plaintext` under `key`, bound to `workspace_id`+`path`, using the
+/// caller-supplied `iv`. **Only for deterministic tests / cross-engine parity
+/// fixtures** — gated behind the `test-util` feature and hidden from docs.
+///
+/// A fixed IV reused under one key is catastrophic for AES-GCM, so production
+/// code must never reach this: use [`seal`], which draws a fresh CSPRNG nonce.
+#[cfg(any(test, feature = "test-util"))]
+#[doc(hidden)]
+pub fn seal_with_iv(
+    key: &SecretDataKey,
+    workspace_id: &str,
+    path: &str,
+    plaintext: &[u8],
+    iv: [u8; SECRET_IV_BYTES],
+) -> Result<SealedSecret, CryptoError> {
+    seal_core(key, workspace_id, path, plaintext, iv)
+}
+
+/// Encrypt `plaintext` under `key` with a fresh random 96-bit IV. The sole
+/// production sealing entry point (`encryptSecretText`). Each call draws a new
+/// nonce from the OS CSPRNG — never a caller-controlled IV.
 pub fn seal(
     key: &SecretDataKey,
     workspace_id: &str,
@@ -173,7 +191,7 @@ pub fn seal(
 ) -> Result<SealedSecret, CryptoError> {
     let mut iv = [0u8; SECRET_IV_BYTES];
     getrandom::getrandom(&mut iv).map_err(|_| CryptoError::InvalidIvLength)?;
-    seal_with_iv(key, workspace_id, path, plaintext, iv)
+    seal_core(key, workspace_id, path, plaintext, iv)
 }
 
 /// Decrypt `sealed` under `key`, bound to `workspace_id`+`path`. Any failure —
@@ -304,5 +322,53 @@ mod tests {
         let dbg = format!("{sealed:?}");
         assert!(!dbg.contains("topsecret"));
         assert!(dbg.contains("SealedSecret"));
+    }
+
+    // Byte-exact re-encryption parity vs the REAL Node fixture. Lives inline (not
+    // in tests/) because it needs `seal_with_iv`, which is gated behind
+    // `test-util`/`cfg(test)` so production consumers cannot reuse a nonce. The
+    // integration test (`tests/cross_engine_parity.rs`) covers the public-API
+    // decrypt/AAD/envelope parity.
+    #[test]
+    fn reencrypt_matches_ts_fixture_byte_exact() {
+        let raw = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/ts_secret_ciphertext.json"
+        ))
+        .expect("read fixture");
+        let fixture: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        for entry in fixture["entries"].as_array().unwrap() {
+            let label = entry["label"].as_str().unwrap();
+            let key =
+                SecretDataKey::from_bytes(&hex(entry["dataKeyHex"].as_str().unwrap())).unwrap();
+            let ws = entry["workspaceId"].as_str().unwrap();
+            let path = entry["path"].as_str().unwrap();
+            let plaintext = entry["plaintext"].as_str().unwrap();
+            let mut iv = [0u8; SECRET_IV_BYTES];
+            iv.copy_from_slice(&hex(entry["ivHex"].as_str().unwrap()));
+            let resealed = seal_with_iv(&key, ws, path, plaintext.as_bytes(), iv).unwrap();
+            assert_eq!(
+                resealed.iv_base64(),
+                entry["ivBase64"].as_str().unwrap(),
+                "[{label}] IV base64 parity"
+            );
+            assert_eq!(
+                resealed.auth_tag_base64(),
+                entry["authTagBase64"].as_str().unwrap(),
+                "[{label}] auth tag base64 parity (proves AAD + GHASH match)"
+            );
+            assert_eq!(
+                resealed.ciphertext_base64(),
+                entry["ciphertextBase64"].as_str().unwrap(),
+                "[{label}] ciphertext base64 parity (byte-exact vs TS)"
+            );
+        }
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
 }

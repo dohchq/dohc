@@ -458,3 +458,57 @@ conflict). It stays VISIBLE on disk; it is simply not auto-tracked. Test:
   precisely "never destroy a valid restore point to make room for an unverified
   one" (the live source and any other-stem backup are never touched), not "the
   target stem is atomically valid at every instant."
+
+## 9. R08 (secrets — dohc-engine-crypto) — approved deltas & documented residuals
+
+### 9.1 DECISION: secret delete is a tombstone, not a crypto-shred
+
+Deleting a secret file (`SecretFileStore::delete_secret_file`) removes the
+`secret_files` tip but the prior WRITE moment in `secret_moments` RETAINS its
+`after_ciphertext_base64` + `after_byte_length`. So a deleted secret's
+ciphertext — and its exact plaintext SIZE — persist in history. This is the
+deliberate, TS-matching behavior (`secretFileStore.ts`): the versioned model
+preserves history, and restore-to-before-a-moment depends on the retained sealed
+after-state. Ciphertext-only-at-rest still holds (plaintext is never persisted).
+Residual: existence + size of a deleted secret remain visible to anyone with DB
+access — acceptable because they already hold the ciphertext. A future
+crypto-shred-on-delete (purge the retained after-state, or re-seal history under
+a rotated key) is a possible enhancement for the sync/retention shard. Documented
+in `crates/dohc-engine-domain/src/secrets.rs` module doc.
+
+### 9.2 NEW-BEHAVIOR: secret materialization rides the R04 job pipeline
+
+A secret write enqueues an R04 `materialization_jobs` row in the SAME
+transaction as the secret state (`enqueue_job` in `write_with`), so the intent
+to write the plaintext file is crash-safe. The job's `content_sha256` references
+the CIPHERTEXT blob (the only leak-free content the FK can point at) as an
+integrity anchor; the plaintext is produced only at execution time by the
+secret-aware materializer (`materialize_secret_file`, the single authorized
+plaintext accessor) and lives only on disk. The generic file-executor's
+decrypt-before-write wiring for secret paths is a later capture/desktop
+integration point; this shard owns the crypto + domain durable-intent path.
+
+### 9.3 SCOPED: replication-op apply and the secret path floor are later shards
+
+R08 ships the local write / read / fork / materialize / delete path plus the
+compound-commit journal entries. The replication-op apply for
+`secret.file.put` / `secret.file.delete` / `secret.version.fork` (with the
+tip-rank comparator and fork-poison verification) is scoped to the sync shard
+atop these crypto/blob/tip primitives. Path CLASSIFICATION (the `not-secret-path`
+fail-closed gate) is the R07 path floor's job; the store validates
+safe/workspace-relative paths and treats routed paths as secret.
+
+### 9.4 SECURITY POSTURE: nonce discipline, zeroization, log-safety
+
+- The public sealing entry is `aead::seal` ONLY — it draws a fresh CSPRNG nonce
+  every call. The deterministic caller-supplied-IV `seal_with_iv` is gated behind
+  the `test-util` feature (and `cfg(test)`) and is NOT re-exported at the crate
+  root: reusing a 96-bit nonce under one key is catastrophic for AES-GCM.
+- All raw key material lives only in zeroizing buffers (`SecretDataKey`,
+  key-file decode, envelope KEK/data-key), and the sole plaintext carrier
+  (`SecretPlaintext`) zeroizes on drop with no `Display`/`Serialize` and a
+  redacted `Debug`. `SecretWrite` (the one secret-bearing input) hand-writes a
+  redacted `Debug` so cleartext cannot spill through logs/panics.
+- `base64::forgiving_decode` reproduces Node `Buffer`'s `=`-terminator semantics
+  exactly (stops at the first `=`), so the key-file parser neither accepts a
+  malformed file Node rejects nor rejects one it accepts.
