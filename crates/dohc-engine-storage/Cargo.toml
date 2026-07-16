@@ -1,0 +1,15 @@
+[package]
+name = "dohc-engine-storage"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+publish.workspace = true
+description = "CAL-1 calibration slice: one writable rusqlite connection per workspace, the day-one v2 engine schema (migration + request/idempotency ledgers), the compound transactional write API, and the v1-vs-v2 fingerprint fence. Dormant; not wired into the product."
+
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled"] }
+thiserror = "2"
+
+# Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
+[lints]
+workspace = true
