@@ -312,3 +312,11 @@ source of truth every orchestrator session loads first).
   escape-on-materialize (logical path primitive, Windows disk name a
   reversible mirage). P1 + kernel-disable P2 are release blockers. Holding
   fix batch for reviewer 1/2 (bypass/regression).
+- PR #145 both reviews APPROVE-WITH-FIXES; fix batch dispatched. Both
+  found the over-block hits READ+CAPTURE (silent data-loss, scanner
+  self-disable) and that every hazard is Windows-only. Resolution:
+  win32-gate write/materialize rejection, never block read/capture,
+  surface rejections not silent-drop, kernel collect-not-throw, search
+  fail-closed scoped to file-indexing + diagnostics surfaced. Holes stay
+  closed without breaking Mac/Linux workspaces. Escape-on-materialize
+  filed as rewrite-era roadmap (Rust materialization pipeline).
