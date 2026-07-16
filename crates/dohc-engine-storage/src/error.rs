@@ -89,4 +89,18 @@ impl StorageError {
             source: Some(Box::new(source)),
         }
     }
+
+    /// Public `state-corrupt` constructor for downstream crates that compose
+    /// SQL against the [`crate::EngineStore::read_with`] seam and must map their
+    /// own low-level failures into this taxonomy (the enum is
+    /// `#[non_exhaustive]`, so a variant cannot be built directly off-crate).
+    pub fn corrupt_public(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        StorageError::corrupt(source)
+    }
+
+    /// Public `persist-failed` constructor for downstream crates writing SQL
+    /// through the [`crate::EngineStore::write_with`] seam.
+    pub fn persist_public(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        StorageError::persist(source)
+    }
 }

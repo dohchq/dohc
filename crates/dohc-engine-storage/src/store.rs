@@ -5,10 +5,10 @@
 //! commit together, or none do).
 
 use crate::error::StorageError;
-use crate::faults::{FaultAction, FaultInjector, FaultPoint};
+use crate::faults::{FaultInjector, FaultPoint};
 use crate::limits::{MAX_DOCUMENT_BODY_BYTES, MAX_IDENTIFIER_BYTES};
 use crate::schema::open_engine_db;
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -76,6 +76,20 @@ fn check_identifier(value: &str, field: &'static str) -> Result<(), StorageError
     Ok(())
 }
 
+/// The outcome of a generic transactional unit run through
+/// [`EngineStore::write_with`]. Mirrors [`WriteOutcome`] but carries the
+/// closure's value on success, so the versioning domain
+/// (`dohc-engine-domain`) can commit a compound mutation + its journal entry
+/// in ONE transaction and still learn what it produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TxnOutcome<T> {
+    /// The transaction committed durably and the ack was delivered.
+    Committed(T),
+    /// A crash fault fired at a named point. `committed` reports the durable
+    /// truth for test assertions only — durability is proven by reopening.
+    Crashed { committed: bool },
+}
+
 /// The outcome of a compound write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteOutcome {
@@ -122,6 +136,26 @@ fn payload_fingerprint(write: &CompoundWrite) -> String {
         let _ = write!(hex, "{byte:02x}");
     }
     hex
+}
+
+/// Consult a named fault point. **cfg-gated**: only the `fault-injection`
+/// feature compiles the actual `poll` call. In a release build without the
+/// feature this is a `const false`, so the crash branch it guards is dead code
+/// the optimizer removes — provably zero release overhead on the write lane
+/// (`plan §Rust policy`; the injection seam is dev/test-only). The
+/// [`FaultInjector`] trait and [`crate::NoFaults`] stay in the public API for
+/// callers (`dohc-engine-runtime` threads an `Arc<dyn FaultInjector>`), but
+/// their `poll` is never invoked in production.
+#[cfg(feature = "fault-injection")]
+#[inline]
+fn should_crash(faults: &dyn FaultInjector, point: FaultPoint) -> bool {
+    faults.poll(point) == crate::faults::FaultAction::Crash
+}
+
+#[cfg(not(feature = "fault-injection"))]
+#[inline(always)]
+fn should_crash(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
+    false
 }
 
 impl EngineStore {
@@ -191,7 +225,7 @@ impl EngineStore {
         // Fault point: inside the open transaction, before commit. A crash
         // here rolls back (dropping the transaction) — restart shows no
         // partial state.
-        if faults.poll(FaultPoint::StorageBeforePersist) == FaultAction::Crash {
+        if should_crash(faults, FaultPoint::StorageBeforePersist) {
             drop(tx); // explicit rollback
             return Ok(WriteOutcome::Crashed { committed: false });
         }
@@ -200,7 +234,7 @@ impl EngineStore {
 
         // Fault point: durably committed, ack not yet delivered. A crash here
         // leaves the committed state; a retry is exactly-once via the ledger.
-        if faults.poll(FaultPoint::StorageAfterCommitBeforeAck) == FaultAction::Crash {
+        if should_crash(faults, FaultPoint::StorageAfterCommitBeforeAck) {
             return Ok(WriteOutcome::Crashed { committed: true });
         }
 
@@ -208,6 +242,71 @@ impl EngineStore {
             seq,
             deduped: false,
         })
+    }
+
+    /// Borrow the owned connection for a read-only closure (read-your-writes on
+    /// the single writer). The versioning domain composes its history/read SQL
+    /// through this seam so the connection never leaves the actor thread.
+    ///
+    /// Generic over the closure's error so a caller (e.g. `dohc-engine-domain`)
+    /// maps `rusqlite` errors into its own taxonomy. By contract the closure
+    /// only reads; writes go through [`Self::write_with`] so the fault seam and
+    /// single-transaction discipline always apply.
+    pub fn read_with<T, E>(&self, f: impl FnOnce(&Connection) -> Result<T, E>) -> Result<T, E> {
+        f(&self.conn)
+    }
+
+    /// Run a compound domain mutation inside exactly ONE `BEGIN IMMEDIATE`
+    /// transaction, consulting the two named storage fault points around the
+    /// commit boundary. The closure issues every mutation — the domain write,
+    /// its replication-journal entry, and any idempotency-ledger row — against
+    /// the same `&Transaction`, so they commit together or not at all (plan
+    /// §Storage and recovery model; PORTING.md §9).
+    ///
+    /// A `StorageBeforePersist` fault rolls back (drop-is-rollback) and reports
+    /// `Crashed { committed: false }`; a `StorageAfterCommitBeforeAck` fault
+    /// reports `Crashed { committed: true }` after a durable commit. An `Err`
+    /// from the closure rolls the transaction back and propagates. Generic over
+    /// the closure's error `E` (which must absorb the transaction's own
+    /// begin/commit [`StorageError`]s) so the caller keeps its taxonomy.
+    pub fn write_with<T, E>(
+        &mut self,
+        faults: &dyn FaultInjector,
+        f: impl FnOnce(&Transaction<'_>) -> Result<T, E>,
+    ) -> Result<TxnOutcome<T>, E>
+    where
+        E: From<StorageError>,
+    {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StorageError::persist)?;
+
+        let value = match f(&tx) {
+            Ok(value) => value,
+            Err(err) => {
+                // Explicit rollback of the domain mutation before surfacing the
+                // error; the typed `Transaction` would roll back on drop too.
+                drop(tx);
+                return Err(err);
+            }
+        };
+
+        // Cancel/crash point is BETWEEN durable steps, never mid-commit
+        // (PORTING.md §12): the closure has issued all SQL but nothing is
+        // durable yet.
+        if should_crash(faults, FaultPoint::StorageBeforePersist) {
+            drop(tx); // explicit rollback
+            return Ok(TxnOutcome::Crashed { committed: false });
+        }
+
+        tx.commit().map_err(StorageError::persist)?;
+
+        if should_crash(faults, FaultPoint::StorageAfterCommitBeforeAck) {
+            return Ok(TxnOutcome::Crashed { committed: true });
+        }
+
+        Ok(TxnOutcome::Committed(value))
     }
 
     fn lookup_request(&self, request_id: &str) -> Result<Option<RecordedRequest>, StorageError> {

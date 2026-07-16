@@ -27,6 +27,15 @@ use std::path::Path;
 /// Table shapes are deliberately minimal for the calibration slice but the
 /// two ledger tables match the day-one design so later shards extend rather
 /// than introduce them.
+///
+/// SCHEMA ASSEMBLY (Wave 1): the day-one v2 schema is being ASSEMBLED across the
+/// calibration slices (CAL-1 ledgers + documents, CAL-2 versioning tables) and
+/// is FROZEN at R04, which owns the finalized shape, fixtures, and the ordered
+/// migration ledger (`plan §Day-one Rust schema`). Adding tables here without a
+/// fingerprint bump is intentional for this window: nothing durable is stamped
+/// v2 yet (every store is dormant/test-created fresh), so a prior CAL-1 v2 file
+/// failing the CAL-2 `validate_v2` is not a data-loss path — there is no such
+/// file in the wild. Post-R04, every schema change goes through the ledger.
 const V2_SCHEMA_DDL: &str = "\
 -- Day-one migration ledger (STATE_OWNERSHIP.tsv row `table-migration-ledger`).
 -- Append-only; one row per applied migration. The eager v2 create records
@@ -60,12 +69,150 @@ CREATE TABLE documents (
 -- Replication journal. The compound write appends here in the SAME
 -- transaction as the domain mutation, exercising the plan's compound-commit
 -- invariant (domain mutation + journal entry commit together, or neither).
+-- CAL-2's versioning domain journals its `version.create` op here too.
 CREATE TABLE replication_journal (
     seq           INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     doc_id        TEXT    NOT NULL,
     op_kind       TEXT    NOT NULL,
     created_at_ms INTEGER NOT NULL
 ) STRICT;
+
+-- ===========================================================================
+-- CAL-2 versioning tables. The v1 logical shapes (versioned_workspaces,
+-- versions, active_versions, file_objects, path_aliases, blobs, snapshots,
+-- fork_base_snapshots, moments — engineDbSchema.ts:944-1048) mapped into the
+-- day-one eager v2 schema. Reduced to the text slice: binary_blobs, conflicts,
+-- secret_* and the chat/sync/ydoc families are out of scope for this slice and
+-- land in later shards. Identity is carried by STABLE object ids (file_objects
+-- / path_aliases); a path is an alias, never identity (plan §Target
+-- architecture, STATE_OWNERSHIP `cache-engine-state`).
+-- ===========================================================================
+
+-- One row per versioned workspace; names its main (bootstrap) version.
+CREATE TABLE versioned_workspaces (
+    workspace_id    TEXT NOT NULL PRIMARY KEY,
+    main_version_id TEXT NOT NULL
+) STRICT;
+
+-- A version is a named line of history. `main` is the bootstrap version; named
+-- versions fork from a (fork_version_id, fork_moment_id) point. Ordered for
+-- list-versions by (created_at_ms, name, version_id).
+CREATE TABLE versions (
+    workspace_id    TEXT    NOT NULL,
+    version_id      TEXT    NOT NULL,
+    kind            TEXT    NOT NULL,
+    name            TEXT    NOT NULL,
+    created_at_ms   INTEGER NOT NULL,
+    fork_version_id TEXT,
+    fork_moment_id  TEXT,
+    PRIMARY KEY (workspace_id, version_id),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+
+-- The active version pointer per workspace (restore = set-active-version). A
+-- missing row reads as 'main is active' (matches active_versions lazy row).
+CREATE TABLE active_versions (
+    workspace_id TEXT NOT NULL PRIMARY KEY,
+    version_id   TEXT NOT NULL,
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+
+-- Stable object identity. A path is an alias onto an object; the object id is
+-- the durable identity that survives renames and forks.
+CREATE TABLE file_objects (
+    workspace_id  TEXT    NOT NULL,
+    object_id     TEXT    NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, object_id),
+    UNIQUE (object_id),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+
+-- Content-addressed text blobs (sha256 → bytes). Dedup by hash.
+CREATE TABLE blobs (
+    sha256      TEXT    NOT NULL PRIMARY KEY,
+    byte_length INTEGER NOT NULL,
+    text        TEXT    NOT NULL
+) STRICT;
+
+-- Path→object binding within a version. (version, path) is unique; the same
+-- object can be aliased at different paths across versions.
+CREATE TABLE path_aliases (
+    workspace_id TEXT NOT NULL,
+    version_id   TEXT NOT NULL,
+    path         TEXT NOT NULL,
+    object_id    TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, path),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE
+) STRICT;
+
+-- The materialized current state of an object within a version.
+CREATE TABLE snapshots (
+    workspace_id     TEXT    NOT NULL,
+    version_id       TEXT    NOT NULL,
+    object_id        TEXT    NOT NULL,
+    path             TEXT    NOT NULL,
+    blob_sha256      TEXT    NOT NULL,
+    updated_at_ms    INTEGER NOT NULL,
+    latest_moment_id TEXT    NOT NULL,
+    metadata_origin  TEXT    NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
+    FOREIGN KEY (blob_sha256) REFERENCES blobs(sha256)
+) STRICT;
+
+-- The durable fork-point snapshot copied at create-named-version time, so a
+-- three-way compare/merge has a stable base even as both sides evolve.
+CREATE TABLE fork_base_snapshots (
+    workspace_id     TEXT    NOT NULL,
+    version_id       TEXT    NOT NULL,
+    object_id        TEXT    NOT NULL,
+    path             TEXT    NOT NULL,
+    blob_sha256      TEXT    NOT NULL,
+    updated_at_ms    INTEGER NOT NULL,
+    latest_moment_id TEXT    NOT NULL,
+    metadata_origin  TEXT    NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
+    FOREIGN KEY (blob_sha256) REFERENCES blobs(sha256)
+) STRICT;
+
+-- Append-only history. `moment_order` is a monotone sequence and the
+-- keyset-pagination sort key. In this slice it is store-global (one workspace
+-- per engine.db), which equals per-workspace; a future multi-workspace /
+-- share-mount shard MUST scope the next-order computation to workspace_id
+-- (`UNIQUE (workspace_id, moment_order)` already permits that). `sync_record_only`
+-- NULL or 0 = a materialized moment; a non-NULL non-zero marker row is a
+-- peer-divergence record excluded from 'latest moment' fork-point selection
+-- (PORTING.md §1).
+CREATE TABLE moments (
+    workspace_id      TEXT    NOT NULL,
+    moment_order      INTEGER NOT NULL,
+    moment_id         TEXT    NOT NULL,
+    version_id        TEXT    NOT NULL,
+    object_id         TEXT    NOT NULL,
+    path              TEXT    NOT NULL,
+    recorded_at_ms    INTEGER NOT NULL,
+    operation         TEXT    NOT NULL,
+    after_blob_sha256 TEXT    NOT NULL,
+    before_present    INTEGER NOT NULL,
+    before_blob_sha256 TEXT,
+    metadata_origin   TEXT    NOT NULL,
+    author_json       TEXT,
+    sync_record_only  INTEGER,
+    PRIMARY KEY (workspace_id, moment_id),
+    UNIQUE (workspace_id, moment_order),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
+    FOREIGN KEY (after_blob_sha256) REFERENCES blobs(sha256)
+) STRICT;
+
+CREATE INDEX idx_moments_workspace_order ON moments(workspace_id, moment_order DESC);
+CREATE INDEX idx_moments_version_order ON moments(workspace_id, version_id, moment_order DESC);
+CREATE INDEX idx_moments_object_order ON moments(workspace_id, object_id, moment_order DESC);
 ";
 
 /// The `id` recorded for the eager baseline-create in the migration ledger.
@@ -90,6 +237,16 @@ const REQUIRED_TABLES: &[&str] = &[
     "engine_requests",
     "documents",
     "replication_journal",
+    // CAL-2 versioning tables (eager v2).
+    "versioned_workspaces",
+    "versions",
+    "active_versions",
+    "file_objects",
+    "blobs",
+    "path_aliases",
+    "snapshots",
+    "fork_base_snapshots",
+    "moments",
 ];
 
 /// How an existing file was classified by the fingerprint fence.
