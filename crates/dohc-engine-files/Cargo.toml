@@ -1,0 +1,34 @@
+[package]
+name = "dohc-engine-files"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+publish.workspace = true
+description = "CAL-3 calibration slice: workspace filesystem scan / streaming content hash / scan-generation diff / reconcile-plan, with cooperative cancellation BETWEEN bounded units and fully bounded resources (max files, max file size, bounded read buffer, bounded hash-worker pool, bounded in-memory diff), the path floor, and the watcher dirty-generation reconcile model — driven actor-native on a dedicated blocking thread under a tokio command loop (the CAL-2 model). Dormant; not wired into the product."
+
+[dependencies]
+# Streaming content hashing — same crate/version the storage slice content-
+# addresses with, so a scan hash and a stored blob hash are byte-identical.
+sha2 = "0.10"
+thiserror = "2"
+# The actor command loop. The blocking scan/hash work stays on ONE dedicated
+# OS thread (never the async runtime); commands flow over tokio::sync channels
+# and the worker receives them via `blocking_recv` — the CAL-2 actor model.
+tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
+# Cooperative cancellation tree (PORTING.md §12): checked BETWEEN bounded
+# units (per-file / per-batch), never inside a hash of a single file's stream.
+tokio-util = "0.7"
+
+[dev-dependencies]
+# The differential harness parses the shared workspace-kernel golden fixtures
+# (independently-computed hashes) and the crate's extended goldens.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Drives the async FilesActor traces (cancellation + deadline through the tokio
+# loop). Also recomputes expected hashes via a second code path (non-tautology).
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"] }
+
+# Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
+[lints]
+workspace = true

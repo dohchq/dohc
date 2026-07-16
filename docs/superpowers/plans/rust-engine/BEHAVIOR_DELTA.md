@@ -355,3 +355,51 @@ needed (R01-ORACLE forked post-drift).
 
 R01-CONTRACTS artifacts (PORTING / STATE_OWNERSHIP / SEMANTICS_MATRIX) and
 R01-ORACLE need **no** delta updates — they were authored against `958cdfd3`.
+
+---
+
+## 7. CAL-3 (dohc-engine-files) — approved deltas
+
+Two deliberate divergences introduced by the CAL-3 scan/hash/reconcile slice
+(`crates/dohc-engine-files`, PR #153). Both are corrections/hardenings, not
+faithful ports; recorded here as binding contracts for R07 (watcher/reconcile/
+path-floor/materialization) to inherit.
+
+### 7.1 Over-cap-but-present files are RETAINED, never retired
+
+**TS/kernel behavior.** The reference accelerator scan simply omits over-cap
+handling (the kernel does not cap file size); the TS capture path's
+reconcile-into-version retires any engine-tracked path not seen in the scan
+after a confirmed-absence `lstat`
+(`workspaceEngineCapture.ts` reconcile, false-delete defense).
+
+**Rust behavior (CAL-3).** With a finite `max_file_bytes` and the default
+`OverCapPolicy::Skip`, a file that GROWS past the cap drops out of the tracked
+listing into the `skipped` set. The diff consults BOTH `files` and `skipped`:
+a previously-tracked path still present in `skipped` is classified
+`retained_over_cap` (a distinct, no-op capture disposition), the reconcile
+carries its **last-known-good** manifest entry forward, and it is **never**
+`Retire`d. Only a path absent from BOTH files and skipped (truly gone from disk)
+is `removed`. This closes a size-cap-grow false-delete (forgetting live user
+data). R07 materialization must leave `retained_over_cap` paths untouched on
+disk. Regression:
+`tests/reconcile.rs::size_cap_grow_retains_never_retires_the_false_delete_regression`.
+
+### 7.2 Path-floor segment normalization is platform-gated (POSIX correctness)
+
+**TS/kernel behavior.** `workspace-kernel/src/main.rs:683-684`
+(`normalize_ignored_segment`) strips trailing dots/spaces and lowercases every
+segment on ALL platforms. On case-sensitive POSIX hosts this silently aliases a
+real user directory `.DOHC` / `.Dohc` / `.dohc.` (distinct inodes) onto the
+reserved `.dohc`, omitting that subtree from the scan — a data-omission bug.
+
+**Rust behavior (CAL-3).** The trailing-dot/space strip AND the case-fold are
+gated behind `cfg(windows)` (where Win32 open-time aliasing and NTFS
+case-insensitivity make them correct). On POSIX, only the EXACT reserved name is
+the floor. Per the plan's "Rust is right, TS is platform-buggy → approved delta,
+don't reproduce the bug" rule. **The TS kernel is flagged for a matching fix**
+(gate its `normalize_ignored_segment` to Windows, or accept the Rust behavior as
+the contract). macOS case-insensitivity (row 7.5) remains a separate
+NEEDS-DECISION and is intentionally NOT special-cased here. Tests:
+`src/floor.rs::posix_case_and_trailing_variants_are_distinct_content` (POSIX),
+`::win32_trailing_alias_still_excluded` (Windows).

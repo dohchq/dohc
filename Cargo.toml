@@ -27,6 +27,7 @@ members = [
     "crates/dohc-engine-protocol",
     "crates/dohc-engine-storage",
     "crates/dohc-engine-domain",
+    "crates/dohc-engine-files",
     "crates/dohc-engine-runtime",
     "crates/dohc-engine-testkit",
     "crates/yrs-spike",
