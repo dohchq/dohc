@@ -205,3 +205,16 @@ source of truth every orchestrator session loads first).
   demoted to port_priority none, CLI granular-search caller corrected.
   Counts: 232 behaviors / 46 test files / 117 determinism sites; column
   validation clean.
+- PR #141 codex round complete (f4a61885): 7/7 fixed. The starvation
+  finding was confirmed worse than stated (mpsc-buried jobs equally
+  unobservable) and fixed by redesign: counter-bounded admission with
+  exact OVERLOADED + per-request biased select over
+  {cancel, deadline, slot permit} — queued requests now resolve
+  CANCELLED/DEADLINE_EXCEEDED behind a hung handler (2 new paused-time
+  regressions). Float-form integers >2^53 rejected matching TS
+  Number.isInteger semantics; BoundedWriter fails oversized encodes
+  mid-write; nullable fields契 aligned with TS optional|null contract;
+  blob stream ids typed-rejected both directions; no-nested-batch encoded
+  at the schemars generator with TS not-subschema support; uint32 maxima
+  range-checked. clippy -D warnings clean; 41 Rust + 10 Node tests
+  green.
