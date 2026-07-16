@@ -23,6 +23,12 @@ const MAX_HEADING_ANCHOR_LENGTH = 400;
 
 interface PendingHeading extends Omit<WorkspaceHeading, "anchor" | "occurrence" | "endOffset"> {}
 
+export interface WorkspaceHeadingAnchor {
+  anchor: string;
+  anchorBase: string;
+  occurrence: number;
+}
+
 function visibleHeadingText(value: string): string {
   return value
     .replace(/`([^`]*)`/g, "$1")
@@ -53,6 +59,32 @@ export function headingAnchorBase(text: string): string {
     hash = Math.imul(hash, 0x01000193);
   }
   return visible ? `section-${(hash >>> 0).toString(36)}` : "section";
+}
+
+/** Allocate document-wide unique anchors while preserving each heading's
+ * duplicate ordinal within its own base. A literal `foo-1` heading may occupy
+ * the suffix that the second `foo` would normally use, so suffix candidates
+ * must also be checked against every anchor already allocated. */
+export function allocateWorkspaceHeadingAnchors(
+  headings: readonly { text: string }[],
+): WorkspaceHeadingAnchor[] {
+  const baseOccurrences = new Map<string, number>();
+  const usedAnchors = new Set<string>();
+
+  return headings.map((heading) => {
+    const anchorBase = headingAnchorBase(heading.text);
+    const occurrence = baseOccurrences.get(anchorBase) ?? 0;
+    baseOccurrences.set(anchorBase, occurrence + 1);
+
+    let suffix = occurrence;
+    let anchor = suffix === 0 ? anchorBase : `${anchorBase}-${suffix}`;
+    while (usedAnchors.has(anchor)) {
+      suffix += 1;
+      anchor = `${anchorBase}-${suffix}`;
+    }
+    usedAnchors.add(anchor);
+    return { anchor, anchorBase, occurrence };
+  });
 }
 
 function lineRecords(markdown: string): Array<{ text: string; line: number; offset: number; end: number }> {
@@ -144,18 +176,16 @@ export function extractWorkspaceHeadings(markdown: string): WorkspaceHeading[] {
     index += 1;
   }
 
-  const counts = new Map<string, number>();
+  const anchors = allocateWorkspaceHeadingAnchors(pending);
   return pending.map((heading, index) => {
-    const base = headingAnchorBase(heading.text);
-    const occurrence = counts.get(base) ?? 0;
-    counts.set(base, occurrence + 1);
+    const identity = anchors[index]!;
     const nextBoundary = pending
       .slice(index + 1)
       .find((candidate) => candidate.level <= heading.level)?.startOffset;
     return {
       ...heading,
-      anchor: occurrence === 0 ? base : `${base}-${occurrence}`,
-      occurrence,
+      anchor: identity.anchor,
+      occurrence: identity.occurrence,
       endOffset: nextBoundary ?? markdown.length,
     };
   });
@@ -209,6 +239,14 @@ export function findWorkspaceHeading(
         (requestedOccurrence === undefined || heading.occurrence === requestedOccurrence),
     );
     if (exact) return exact;
+    if (requestedOccurrence !== undefined) {
+      const baseMatch = headings.find(
+        (heading) =>
+          headingAnchorBase(heading.text) === decodedAnchor &&
+          heading.occurrence === requestedOccurrence,
+      );
+      if (baseMatch) return baseMatch;
+    }
   }
   if (input.text) {
     const normalized = input.text.trim().toLocaleLowerCase();

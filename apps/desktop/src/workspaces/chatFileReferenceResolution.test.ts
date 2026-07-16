@@ -1,6 +1,37 @@
 import { describe, expect, it, vi } from "vitest";
 import { extractChatFileReferences } from "../renderer/workbench/chatFileMentions";
-import { resolveTrackedChatFilePath } from "./chatFileReferenceResolution";
+import {
+  resolveChatFileMentionPath,
+  resolveTrackedChatFilePath,
+} from "./chatFileReferenceResolution";
+
+describe("resolveChatFileMentionPath", () => {
+  it("rejects an object-owned row returned by an untracked path-hint fallback", () => {
+    expect(resolveChatFileMentionPath({
+      requestedObjectId: null,
+      attachmentObjectId: "object_moved",
+      attachmentPathHint: "docs/old-name.md",
+      pathByObjectId: new Map([["object_moved", "docs/new-name.md"]]),
+    })).toBeNull();
+  });
+
+  it("retains legacy path-only rows for an untracked path-hint fallback", () => {
+    expect(resolveChatFileMentionPath({
+      requestedObjectId: null,
+      attachmentPathHint: "docs/legacy.md",
+      pathByObjectId: new Map(),
+    })).toBe("docs/legacy.md");
+  });
+
+  it("resolves an object-owned mention through its authoritative current path", () => {
+    expect(resolveChatFileMentionPath({
+      requestedObjectId: "object_plan",
+      attachmentObjectId: "object_plan",
+      attachmentPathHint: "docs/old-plan.md",
+      pathByObjectId: new Map([["object_plan", "docs/plan.md"]]),
+    })).toBe("docs/plan.md");
+  });
+});
 
 describe("resolveTrackedChatFilePath", () => {
   it("supports a hand-typed leading space when only the trimmed file exists", async () => {

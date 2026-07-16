@@ -3,6 +3,35 @@ export interface ResolvedTrackedChatFilePath {
   path: string;
 }
 
+interface ChatFileMentionPathInput {
+  /** Object identity currently assigned to the requested path, when tracked. */
+  requestedObjectId: string | null;
+  attachmentObjectId?: string;
+  attachmentPathHint?: string;
+  pathByObjectId: ReadonlyMap<string, string>;
+}
+
+/**
+ * Resolves a stored mention only through the identity used for its lookup.
+ *
+ * A path-hint fallback is used only when the requested path is not currently
+ * tracked. Object-owned rows with that old hint may have moved elsewhere, so
+ * exposing their current path here would attach the old conversation to a new
+ * or untracked file that reused the hint.
+ */
+export function resolveChatFileMentionPath({
+  requestedObjectId,
+  attachmentObjectId,
+  attachmentPathHint,
+  pathByObjectId,
+}: ChatFileMentionPathInput): string | null {
+  if (!requestedObjectId) {
+    return attachmentObjectId ? null : attachmentPathHint ?? null;
+  }
+  if (attachmentObjectId !== requestedObjectId) return null;
+  return pathByObjectId.get(attachmentObjectId) ?? null;
+}
+
 /**
  * Resolves a chat mention path without making edge spaces ambiguous.
  *

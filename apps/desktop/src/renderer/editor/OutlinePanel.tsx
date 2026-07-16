@@ -21,7 +21,7 @@ import {
 } from "./outline";
 import { useDebouncedWordCount } from "./wordCount";
 import { prefersReducedMotion } from "../reducedMotion";
-import { headingAnchorBase } from "../../workspaces/workspaceHeadings";
+import { allocateWorkspaceHeadingAnchors } from "../../workspaces/workspaceHeadings";
 
 // How far below the viewport's top edge a heading must scroll before it's
 // considered "reached" — keeps the very top heading active for a beat
@@ -198,16 +198,12 @@ export function resolveOutlineHeadingTarget(
   headings: readonly OutlineHeading[],
   target: Pick<HeadingNavigationTarget, "anchor" | "occurrence">,
 ): OutlineHeading | null {
-  const counts = new Map<string, number>();
-  const anchored: AnchoredOutlineHeading[] = headings.map((heading) => {
-    const anchorBase = headingAnchorBase(heading.text);
-    const occurrence = counts.get(anchorBase) ?? 0;
-    counts.set(anchorBase, occurrence + 1);
+  const anchors = allocateWorkspaceHeadingAnchors(headings);
+  const anchored: AnchoredOutlineHeading[] = headings.map((heading, index) => {
+    const identity = anchors[index]!;
     return {
       heading,
-      anchorBase,
-      occurrence,
-      anchor: occurrence === 0 ? anchorBase : `${anchorBase}-${occurrence}`,
+      ...identity,
     };
   });
   const anchor = decodeHeadingAnchor(target.anchor);

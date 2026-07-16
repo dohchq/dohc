@@ -2657,16 +2657,19 @@ export async function readChat(ctx: ToolContext, args: { threadId: string }) {
 
 // Channel discovery for agents: names, slugs, kinds, and each channel's
 // threads (id + display title) so a follow-up reply/read has real ids to
-// target. Ensures the workspace's default "general" channel on first use —
-// the same rule the desktop applies.
+// target. Writable MCP profiles ensure the workspace's default "general"
+// channel on first use — the same rule the desktop applies. Read-only shared
+// views list only existing channels so discovery never creates durable state.
 export async function listChannels(ctx: ToolContext) {
   const gate = await requireEngineChats(ctx);
   if (!gate.ok) return { ok: false as const, reason: gate.reason };
   try {
     return await withEngineStores(ctx, async ({ chats }) => {
-      await withBusyRetry(() =>
-        chats.ensureGeneralChannel({ workspaceId: gate.workspaceId }),
-      );
+      if (!ctx.readOnly) {
+        await withBusyRetry(() =>
+          chats.ensureGeneralChannel({ workspaceId: gate.workspaceId }),
+        );
+      }
       const channels = await chats.listChannels({ workspaceId: gate.workspaceId });
       const withThreads = [];
       for (const channel of channels) {

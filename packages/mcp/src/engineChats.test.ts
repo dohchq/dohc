@@ -2,6 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createLinkedChatStore, createVersionedTextStore } from "@dohc/workspace-engine";
 import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -20,6 +21,18 @@ import {
   writeWorkspaceFile,
   type ToolContext,
 } from "./tools";
+
+interface RawSqliteDb {
+  prepare(sql: string): {
+    get(...params: unknown[]): Record<string, unknown> | undefined;
+  };
+  close(): void;
+}
+
+const requireFromHere = createRequire(import.meta.url);
+const { DatabaseSync } = requireFromHere("node:sqlite") as {
+  DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => RawSqliteDb;
+};
 
 // PR 0N-1 + WS-H1 retirement Phase C MCP posture:
 //  - mutating tools NEVER write legacy .dohc/history change sets (the
@@ -558,6 +571,56 @@ describe("channel tools (PR 12/13 slice)", () => {
           },
         ],
       });
+    });
+  });
+
+  it("lists only existing channels without durable mutation in the read-only profile", async () => {
+    await withWorkspace(async (ctx) => {
+      const workspaceId = "ws-read-only-channel-list";
+      await seedEngineFlag(ctx);
+      await seedManifest(ctx, workspaceId);
+
+      const chats = createLinkedChatStore(ctx.root);
+      await chats.createChannel({ workspaceId, name: "Existing" });
+      await chats.close();
+
+      const durableCounts = () => {
+        const db = new DatabaseSync(join(ctx.root, ".dohc/engine/engine.db"), {
+          readOnly: true,
+        });
+        try {
+          const channelCount = Number(
+            db
+              .prepare("SELECT COUNT(*) AS count FROM chat_channels WHERE workspace_id = ?")
+              .get(workspaceId)?.count,
+          );
+          const journalCount = Number(
+            db
+              .prepare("SELECT COUNT(*) AS count FROM replication_log WHERE workspace_id = ?")
+              .get(workspaceId)?.count,
+          );
+          return { channelCount, journalCount };
+        } finally {
+          db.close();
+        }
+      };
+
+      const before = durableCounts();
+      expect(before).toEqual({ channelCount: 1, journalCount: 1 });
+      await expect(listChannels({ ...ctx, readOnly: true })).resolves.toMatchObject({
+        ok: true,
+        channels: [{ name: "Existing", slug: "existing" }],
+      });
+      expect(durableCounts()).toEqual(before);
+
+      await expect(listChannels(ctx)).resolves.toMatchObject({
+        ok: true,
+        channels: expect.arrayContaining([
+          expect.objectContaining({ slug: "existing" }),
+          expect.objectContaining({ slug: "general" }),
+        ]),
+      });
+      expect(durableCounts()).toEqual({ channelCount: 2, journalCount: 2 });
     });
   });
 

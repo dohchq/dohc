@@ -65,6 +65,19 @@ describe("resolveOutlineHeadingTarget", () => {
     expect(resolveOutlineHeadingTarget(headings, { anchor: "caf%C3%A9-plan" }))
       .toEqual(headings[2]);
   });
+
+  it("uses the same globally unique allocation for literal suffix collisions", () => {
+    const colliding = [
+      { level: 2, text: "Foo", pos: 2 },
+      { level: 2, text: "Foo-1", pos: 20 },
+      { level: 2, text: "Foo", pos: 40 },
+    ];
+
+    expect(resolveOutlineHeadingTarget(colliding, { anchor: "foo-2", occurrence: 1 }))
+      .toEqual(colliding[2]);
+    expect(resolveOutlineHeadingTarget(colliding, { anchor: "foo", occurrence: 1 }))
+      .toEqual(colliding[2]);
+  });
 });
 
 describe("MarkdownEditor heading navigation", () => {

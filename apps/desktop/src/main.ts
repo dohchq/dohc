@@ -432,7 +432,10 @@ import {
   markPersonalFeedSeenReadOnlySafe,
 } from "./workspaces/chatFollowAccess";
 import { addChatMentionsToWorkspaceGraph } from "./workspaces/chatMentionGraphOverlay";
-import { resolveTrackedChatFilePath } from "./workspaces/chatFileReferenceResolution";
+import {
+  resolveChatFileMentionPath,
+  resolveTrackedChatFilePath,
+} from "./workspaces/chatFileReferenceResolution";
 import { formatChatBookmarkProjection } from "./workspaces/chatBookmarkProjection";
 import { projectChatBookmarksAfterPull } from "./workspaces/chatBookmarkPullProjection";
 import {
@@ -4915,9 +4918,16 @@ function registerIpcHandlers(): void {
     );
     return ListChatFileMentionsResult.parse({
       mentions: mentions.flatMap((mention) => {
-        const currentPath = mention.attachment.objectId
-          ? activeFiles.pathByObjectId.get(mention.attachment.objectId)
-          : mention.attachment.pathHint;
+        const currentPath = resolveChatFileMentionPath({
+          requestedObjectId: objectId,
+          ...(mention.attachment.objectId
+            ? { attachmentObjectId: mention.attachment.objectId }
+            : {}),
+          ...(mention.attachment.pathHint
+            ? { attachmentPathHint: mention.attachment.pathHint }
+            : {}),
+          pathByObjectId: activeFiles.pathByObjectId,
+        });
         if (!currentPath) return [];
         return [{
           attachment: chatAttachmentForIpc({

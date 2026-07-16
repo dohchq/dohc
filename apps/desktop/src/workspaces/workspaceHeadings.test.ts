@@ -32,6 +32,37 @@ describe("workspace headings", () => {
     );
   });
 
+  it("keeps anchors unique when a literal heading occupies a duplicate suffix", () => {
+    const headings = extractWorkspaceHeadings([
+      "# Foo",
+      "# Foo-1",
+      "# Foo",
+      "# Foo",
+    ].join("\n"));
+
+    expect(headings.map(({ anchor, occurrence }) => ({ anchor, occurrence }))).toEqual([
+      { anchor: "foo", occurrence: 0 },
+      { anchor: "foo-1", occurrence: 0 },
+      { anchor: "foo-2", occurrence: 1 },
+      { anchor: "foo-3", occurrence: 2 },
+    ]);
+    expect(new Set(headings.map((heading) => heading.anchor)).size).toBe(headings.length);
+    expect(findWorkspaceHeading(headings, { anchor: "foo-2", occurrence: 1 }))
+      .toBe(headings[2]);
+    expect(findWorkspaceHeading(headings, { anchor: "foo", occurrence: 1 }))
+      .toBe(headings[2]);
+  });
+
+  it("uniquifies a literal suffixed base that follows an existing duplicate", () => {
+    const headings = extractWorkspaceHeadings("# Foo\n# Foo\n# Foo-1");
+
+    expect(headings.map(({ anchor, occurrence }) => ({ anchor, occurrence }))).toEqual([
+      { anchor: "foo", occurrence: 0 },
+      { anchor: "foo-1", occurrence: 1 },
+      { anchor: "foo-1-1", occurrence: 0 },
+    ]);
+  });
+
   it("ignores headings in fenced and indented code", () => {
     const headings = extractWorkspaceHeadings([
       "```md",

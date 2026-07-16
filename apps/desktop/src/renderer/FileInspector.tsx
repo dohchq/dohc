@@ -41,7 +41,10 @@ import type { WikilinkFile } from "./editor/wikilinkPlugin";
 import { IconButton, SectionLabel } from "./ui/controls";
 import { DocumentMenu } from "./DocumentMenu";
 import { EditorErrorBoundary } from "./editor/EditorErrorBoundary";
-import { extractWorkspaceHeadings } from "../workspaces/workspaceHeadings";
+import {
+  extractWorkspaceHeadings,
+  headingAnchorBase,
+} from "../workspaces/workspaceHeadings";
 
 const EMPTY_WIKILINK_FILES: ReadonlyArray<WikilinkFile> = [];
 
@@ -850,7 +853,7 @@ function MarkdownView(props: {
         : headings.find(
             (candidate) =>
               candidate.occurrence === occurrence &&
-              candidate.anchor === `${decodedAnchor}-${occurrence}`,
+              headingAnchorBase(candidate.text) === decodedAnchor,
           ));
     if (!heading) return;
     if (mode === "source") {
