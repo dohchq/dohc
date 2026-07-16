@@ -1,0 +1,12 @@
+{
+  "limits": {
+    "maxBatchLen": 64,
+    "maxBlobChunkBytes": 262144,
+    "maxCollectionLen": 16384,
+    "maxFrameBytes": 1048576,
+    "maxJsonDepth": 32,
+    "maxStringBytes": 65536
+  },
+  "maxWireInteger": 9007199254740991,
+  "protocolVersion": 1
+}

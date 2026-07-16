@@ -1,0 +1,52 @@
+[package]
+name = "dohc-engine-protocol"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+description = "R03 spike: wire types, error taxonomy, bounds, framed codec, and transport seams for the dohc Rust engine protocol. Dormant; not wired into the product."
+
+[features]
+default = ["supervisor"]
+# Tokio-based bounded request dispatch skeleton (replaces thread-per-request).
+supervisor = ["dep:tokio"]
+# TypeScript/JSON Schema binding generation (build tooling, not production).
+bindings = ["dep:schemars", "dep:ts-rs"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = { version = "1", optional = true }
+ts-rs = { version = "11", features = ["serde-json-impl"], optional = true }
+tokio = { version = "1", features = [
+  "rt",
+  "rt-multi-thread",
+  "sync",
+  "time",
+  "macros",
+], optional = true }
+
+[dev-dependencies]
+# Codec candidates measured by examples/codec_bench.rs (spike-only).
+ciborium = "0.2"
+rmp-serde = "1"
+prost = "0.13"
+# test-util enables start_paused deterministic-time supervisor tests.
+tokio = { version = "1", features = [
+  "rt",
+  "rt-multi-thread",
+  "sync",
+  "time",
+  "macros",
+  "test-util",
+] }
+
+[[example]]
+name = "generate_bindings"
+required-features = ["bindings"]
+
+[[example]]
+name = "update_fixtures"
+
+[[example]]
+name = "codec_bench"

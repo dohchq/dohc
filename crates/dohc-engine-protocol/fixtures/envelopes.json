@@ -1,0 +1,164 @@
+{
+  "description": "Deterministic wire fixtures for the dohc engine protocol, readable by both the Rust and TypeScript test suites. canonicalJson is the sorted-key, no-whitespace JSON encoding produced by examples/update_fixtures.rs; regenerate with: cargo run --example update_fixtures",
+  "entries": [
+    {
+      "canonicalJson": "{\"authToken\":\"fixture-parent-token\",\"capabilities\":[\"core\",\"blobs\",\"testkit\"],\"lastSessionGeneration\":null,\"protocolVersion\":1,\"type\":\"hello\"}",
+      "envelope": {
+        "authToken": "fixture-parent-token",
+        "capabilities": [
+          "core",
+          "blobs",
+          "testkit"
+        ],
+        "lastSessionGeneration": null,
+        "protocolVersion": 1,
+        "type": "hello"
+      },
+      "name": "hello"
+    },
+    {
+      "canonicalJson": "{\"capabilities\":[\"core\",\"blobs\"],\"limits\":{\"maxBatchLen\":64,\"maxBlobChunkBytes\":262144,\"maxCollectionLen\":16384,\"maxFrameBytes\":1048576,\"maxJsonDepth\":32,\"maxStringBytes\":65536},\"protocolVersion\":1,\"sessionGeneration\":7,\"type\":\"helloAck\"}",
+      "envelope": {
+        "capabilities": [
+          "core",
+          "blobs"
+        ],
+        "limits": {
+          "maxBatchLen": 64,
+          "maxBlobChunkBytes": 262144,
+          "maxCollectionLen": 16384,
+          "maxFrameBytes": 1048576,
+          "maxJsonDepth": 32,
+          "maxStringBytes": 65536
+        },
+        "protocolVersion": 1,
+        "sessionGeneration": 7,
+        "type": "helloAck"
+      },
+      "name": "helloAck"
+    },
+    {
+      "canonicalJson": "{\"deadlineMs\":5000,\"id\":42,\"idempotencyKey\":\"open-42-6d1f\",\"method\":\"workspace.open\",\"params\":{\"nested\":{\"a\":[1,2,3]},\"profile\":\"default\",\"unicode\":\"héllo — ñ 郵便\",\"warm\":true},\"type\":\"request\",\"workspace\":null}",
+      "envelope": {
+        "deadlineMs": 5000,
+        "id": 42,
+        "idempotencyKey": "open-42-6d1f",
+        "method": "workspace.open",
+        "params": {
+          "nested": {
+            "a": [
+              1,
+              2,
+              3
+            ]
+          },
+          "profile": "default",
+          "unicode": "héllo — ñ 郵便",
+          "warm": true
+        },
+        "type": "request",
+        "workspace": null
+      },
+      "name": "request"
+    },
+    {
+      "canonicalJson": "{\"id\":42,\"result\":{\"fileCount\":128,\"workspace\":\"ws_01HZX3\"},\"type\":\"response\"}",
+      "envelope": {
+        "id": 42,
+        "result": {
+          "fileCount": 128,
+          "workspace": "ws_01HZX3"
+        },
+        "type": "response"
+      },
+      "name": "response"
+    },
+    {
+      "canonicalJson": "{\"deadlineMs\":null,\"id\":43,\"idempotencyKey\":null,\"method\":\"files.reconcile\",\"params\":{\"generation\":12},\"type\":\"request\",\"workspace\":\"ws_01HZX3\"}",
+      "envelope": {
+        "deadlineMs": null,
+        "id": 43,
+        "idempotencyKey": null,
+        "method": "files.reconcile",
+        "params": {
+          "generation": 12
+        },
+        "type": "request",
+        "workspace": "ws_01HZX3"
+      },
+      "name": "workspaceScopedRequest"
+    },
+    {
+      "canonicalJson": "{\"error\":{\"code\":\"OVERLOADED\",\"message\":\"request queue is full\",\"retry\":\"afterBackoff\"},\"id\":43,\"type\":\"error\"}",
+      "envelope": {
+        "error": {
+          "code": "OVERLOADED",
+          "message": "request queue is full",
+          "retry": "afterBackoff"
+        },
+        "id": 43,
+        "type": "error"
+      },
+      "name": "overloadedError"
+    },
+    {
+      "canonicalJson": "{\"name\":\"workspace.filesChanged\",\"payload\":{\"paths\":[\"notes/a.md\",\"notes/b.md\"],\"workspace\":\"ws_01HZX3\"},\"seq\":9001,\"sessionGeneration\":7,\"type\":\"event\"}",
+      "envelope": {
+        "name": "workspace.filesChanged",
+        "payload": {
+          "paths": [
+            "notes/a.md",
+            "notes/b.md"
+          ],
+          "workspace": "ws_01HZX3"
+        },
+        "seq": 9001,
+        "sessionGeneration": 7,
+        "type": "event"
+      },
+      "name": "event"
+    },
+    {
+      "canonicalJson": "{\"id\":42,\"type\":\"cancel\"}",
+      "envelope": {
+        "id": 42,
+        "type": "cancel"
+      },
+      "name": "cancel"
+    },
+    {
+      "canonicalJson": "{\"requestId\":44,\"sha256\":\"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\",\"streamId\":3,\"totalBytes\":4194304,\"type\":\"blobStart\"}",
+      "envelope": {
+        "requestId": 44,
+        "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+        "streamId": 3,
+        "totalBytes": 4194304,
+        "type": "blobStart"
+      },
+      "name": "blobStart"
+    },
+    {
+      "canonicalJson": "{\"envelopes\":[{\"id\":45,\"type\":\"cancel\"},{\"name\":\"workspace.watcherOverflow\",\"payload\":{\"workspace\":\"ws_01HZX3\"},\"seq\":9002,\"sessionGeneration\":7,\"type\":\"event\"}],\"type\":\"batch\"}",
+      "envelope": {
+        "envelopes": [
+          {
+            "id": 45,
+            "type": "cancel"
+          },
+          {
+            "name": "workspace.watcherOverflow",
+            "payload": {
+              "workspace": "ws_01HZX3"
+            },
+            "seq": 9002,
+            "sessionGeneration": 7,
+            "type": "event"
+          }
+        ],
+        "type": "batch"
+      },
+      "name": "batch"
+    }
+  ],
+  "protocolVersion": 1
+}
