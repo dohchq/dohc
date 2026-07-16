@@ -181,3 +181,9 @@ source of truth every orchestrator session loads first).
   in the packet builder), 1 partially declined on correct path-ownership
   grounds (program tables belong to INTEGRATOR/#138). Self-test 29/29,
   --check green. @codex re-review triggered.
+- PR #143 fix batch complete (96629473): 19/19 local findings + 7 Codex
+  inline fixed, 0 rejected; fixer independently re-verified the junction
+  probe and 8.3 three-way split, and corrected the integrator's own
+  decision-number error (account stores are open decision 6, not 3).
+  STATE_OWNERSHIP 40->52 rows; matrix 84->91 rows; NEEDS-DECISION 7->9.
+  Re-check launched to complete Gate 0's approve-together requirement.
