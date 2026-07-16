@@ -508,3 +508,34 @@ source of truth every orchestrator session loads first).
 - PROCESS NOTE: merged #149 before fully reviewing bot findings; verified
   post-hoc the one distinct bot P1 (0o700 dir) was addressed. Going forward:
   review bot findings before merge.
+
+## 2026-07-17 — CAL-2 merged (versioning slice)
+
+- CAL-2 #151 MERGED: dohc-engine-domain crate (versioned write/read,
+  history/keyset-pagination, create_named_version fork, set_active_version
+  restore, NormalizedState differential); 9 versioning tables in v2 schema;
+  runtime migrated to tokio actor loop (writer on dedicated blocking thread,
+  cancellation between-units, DCE-proven fault seam); fault seam cfg-gated.
+  46 tests green.
+- CALIBRATION LESSONS (2 reviewers, both reproduced bugs):
+  1. P1 fork provenance: fork_moment_id was workspace-GLOBAL latest, not
+     source-version latest (dropped `version_id` filter vs TS oracle) —
+     corrupts the merge base. Fixed + sync clause aligned to
+     `(IS NULL OR = 0)`.
+  2. DIFFERENTIAL TAUTOLOGY: the golden harness pinned Rust's own output,
+     only forked from tip, and omitted fork_base_snapshots — so it couldn't
+     catch the P1. Hardened (capture fork_base, cross-version fork trace,
+     value-based sync classification) and PROVEN to now fail on the pre-fix
+     bug (fork_moment m2 vs m1). Standing rule for future differentials:
+     the trace must exercise divergence-prone paths and NormalizedState must
+     capture every table where a divergence can hide, or the oracle is
+     tautological.
+  3. Codex P1: deduped write read the live snapshot, not the recorded
+     moment — fixed (reconstruct from moment). Plus fail-closed hardenings.
+  4. Tokio migration verified solid down to release asm (fault seam DCE'd,
+     seam armed under test); nits fixed (OwnedPermit fair close,
+     sync-in-runtime debug_assert).
+- Tokio actor loop is now the runtime model going into CAL-3/R04.
+- Housekeeping: .gitignore now ignores in-worktree target-*/ dirs (agents
+  keep using in-worktree CARGO_TARGET_DIR despite WINDOWS_DEV out-of-repo
+  convention).
