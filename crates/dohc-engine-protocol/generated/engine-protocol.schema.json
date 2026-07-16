@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Envelope",
-  "description": "Every message that can cross the transport, tagged by `type`.",
+  "description": "Every message that can cross the transport, tagged by `type`.\n\nNullable-field contract: encoders emit every nullable field explicitly\n(`null` when absent - the canonical form); decoders on both sides also\naccept the field being omitted. The generated TS types are therefore\n`field?: T | null`.",
   "oneOf": [
     {
       "type": "object",
@@ -129,7 +129,18 @@
         "envelopes": {
           "type": "array",
           "items": {
-            "$ref": "#"
+            "$ref": "#",
+            "not": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "const": "batch"
+                }
+              },
+              "required": [
+                "type"
+              ]
+            }
           }
         }
       },

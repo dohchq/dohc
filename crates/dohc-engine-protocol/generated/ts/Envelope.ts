@@ -11,5 +11,10 @@ import type { Response } from "./Response";
 
 /**
  * Every message that can cross the transport, tagged by `type`.
+ *
+ * Nullable-field contract: encoders emit every nullable field explicitly
+ * (`null` when absent - the canonical form); decoders on both sides also
+ * accept the field being omitted. The generated TS types are therefore
+ * `field?: T | null`.
  */
 export type Envelope = { "type": "hello" } & Hello | { "type": "helloAck" } & HelloAck | { "type": "request" } & Request | { "type": "response" } & Response | { "type": "error" } & ErrorEnvelope | { "type": "event" } & Event | { "type": "cancel" } & Cancel | { "type": "blobStart" } & BlobStart | { "type": "batch" } & Batch;

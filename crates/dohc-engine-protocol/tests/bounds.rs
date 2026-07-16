@@ -173,3 +173,107 @@ fn wire_integer_boundary() {
     let over = request_with(json!({ "n": MAX_WIRE_INTEGER + 1 }));
     assert!(over.validate(&limits).is_err());
 }
+
+#[test]
+fn blob_stream_id_boundary_on_encode_and_decode() {
+    let limits = WireLimits::SPIKE_DEFAULTS;
+    for (stream_id, ok) in [
+        (MAX_WIRE_INTEGER - 1, true),
+        (MAX_WIRE_INTEGER, true),
+        (MAX_WIRE_INTEGER + 1, false),
+    ] {
+        let encoded = encode_blob_chunk_frame(stream_id, true, b"x", &limits);
+        assert_eq!(encoded.is_ok(), ok, "encode stream id {stream_id}");
+        if let Err(violation) = encoded {
+            assert_eq!(violation.limit, LimitKind::IntegerRange);
+        }
+
+        // Decoder side: craft the frame bytes directly so out-of-range ids
+        // (which the encoder now refuses) are still exercised.
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&FRAME_MAGIC);
+        frame.extend_from_slice(&[2, 1, 0, 0]);
+        frame.extend_from_slice(&9u32.to_le_bytes()); // stream id + 1 byte
+        frame.extend_from_slice(&stream_id.to_le_bytes());
+        frame.push(b'x');
+        let mut decoder = FrameDecoder::new(limits.clone());
+        decoder.push(&frame);
+        let result = decoder.next_frame();
+        if ok {
+            assert!(
+                matches!(
+                    result,
+                    Ok(Some(dohc_engine_protocol::Frame::BlobChunk { .. }))
+                ),
+                "decode stream id {stream_id}: {result:?}"
+            );
+        } else {
+            assert_eq!(
+                result,
+                Err(FrameDecodeError::BlobStreamIdTooLarge { stream_id }),
+                "decode stream id {stream_id}"
+            );
+        }
+    }
+}
+
+#[test]
+fn float_form_integers_respect_wire_integer_bound() {
+    let limits = WireLimits::SPIKE_DEFAULTS;
+    // Integer-valued floats beyond 2^53-1 are rejected, matching the TS
+    // walker's Number.isInteger check.
+    for params in [json!({ "n": 1e20 }), json!({ "n": -1e20 }), json!(1e100)] {
+        let violation = request_with(params)
+            .validate(&limits)
+            .expect_err("oversized float-form integer must be rejected");
+        assert_eq!(violation.limit, LimitKind::IntegerRange);
+    }
+    // Non-integer floats and in-range integer-valued floats pass.
+    for params in [json!(0.5), json!(-2.25), json!(9007199254740991.0_f64)] {
+        assert!(request_with(params).validate(&limits).is_ok());
+    }
+}
+
+#[test]
+fn encode_control_refuses_aggregate_payload_beyond_frame_bound() {
+    // Each string is within max_string_bytes and the array is within
+    // max_collection_len, but the serialized payload exceeds
+    // max_frame_bytes: the bounded writer must refuse mid-serialization.
+    let limits = WireLimits {
+        max_frame_bytes: 128,
+        max_blob_chunk_bytes: 16,
+        max_string_bytes: 100,
+        max_collection_len: 4,
+        max_batch_len: 2,
+        max_json_depth: 8,
+    };
+    let envelope = request_with(json!(["y".repeat(100), "y".repeat(100)]));
+    let error = dohc_engine_protocol::wire::encode_control(&envelope, &limits)
+        .expect_err("aggregate oversize must be refused");
+    match error {
+        dohc_engine_protocol::error::EnvelopeDecodeError::Limit(violation) => {
+            assert_eq!(violation.limit, LimitKind::FrameBytes);
+            assert!(violation.actual > violation.max);
+        }
+        other => panic!("expected frame-bytes violation, got {other:?}"),
+    }
+    // A small envelope under the same limits still encodes.
+    let small = request_with(json!("ok"));
+    assert!(dohc_engine_protocol::wire::encode_control(&small, &limits).is_ok());
+}
+
+#[test]
+fn omitted_nullable_fields_decode_as_none() {
+    let limits = WireLimits::SPIKE_DEFAULTS;
+    let decoded = dohc_engine_protocol::wire::decode_control(
+        br#"{"type":"request","id":1,"method":"m","params":null}"#,
+        &limits,
+    )
+    .expect("omitted nullable fields are accepted");
+    let Envelope::Request(request) = decoded else {
+        panic!("expected request envelope");
+    };
+    assert_eq!(request.workspace, None);
+    assert_eq!(request.deadline_ms, None);
+    assert_eq!(request.idempotency_key, None);
+}

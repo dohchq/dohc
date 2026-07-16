@@ -14,17 +14,17 @@ method: string,
 /**
  * Target workspace, when the method is workspace-scoped.
  */
-workspace: WorkspaceHandle | null, 
+workspace?: WorkspaceHandle | null, 
 /**
  * Relative deadline. The engine clamps it to its maximum and fails the
  * request with `DEADLINE_EXCEEDED` when it elapses.
  */
-deadlineMs: number | null, 
+deadlineMs?: number | null, 
 /**
  * Required on retryable mutations: the engine deduplicates replays of
  * the same key after timeouts/reconnects (exactly-once acknowledgement).
  */
-idempotencyKey: string | null, 
+idempotencyKey?: string | null, 
 /**
  * Method-specific parameters; validated per-method behind the envelope
  * layer, bounded here as a JSON tree.

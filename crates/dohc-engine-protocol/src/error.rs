@@ -192,6 +192,9 @@ pub enum FrameDecodeError {
     BlobChunkMissingStreamId { len: u32 },
     /// Blob chunk bytes exceed `max_blob_chunk_bytes`.
     BlobChunkTooLarge { len: u32, max: u32 },
+    /// Blob chunk stream id exceeds the JS-safe wire-integer bound
+    /// (`MAX_WIRE_INTEGER`), so it could never match a `blobStart.streamId`.
+    BlobStreamIdTooLarge { stream_id: u64 },
 }
 
 impl fmt::Display for FrameDecodeError {
@@ -215,6 +218,12 @@ impl fmt::Display for FrameDecodeError {
             }
             FrameDecodeError::BlobChunkTooLarge { len, max } => {
                 write!(f, "blob chunk payload {len} exceeds max {max}")
+            }
+            FrameDecodeError::BlobStreamIdTooLarge { stream_id } => {
+                write!(
+                    f,
+                    "blob chunk stream id {stream_id} exceeds the wire-integer bound"
+                )
             }
         }
     }

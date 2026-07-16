@@ -103,6 +103,40 @@ test("every fixture is within the generated wire bounds", () => {
   }
 });
 
+test("nullable fields may be omitted and still validate", () => {
+  const omitted = { type: "request", id: 9, method: "workspace.status", params: {} };
+  assert.deepEqual(validator.validate(omitted), []);
+  // Generated types agree: nullable fields are optional.
+  const typed = omitted as Envelope & { type: "request" };
+  assert.equal(typed.workspace ?? null, null);
+  assert.equal(typed.deadlineMs ?? null, null);
+});
+
+test("nested batches are rejected by the generated schema", () => {
+  const flat = {
+    type: "batch",
+    envelopes: [{ type: "cancel", id: 1 }],
+  };
+  assert.deepEqual(validator.validate(flat), []);
+  const nested = {
+    type: "batch",
+    envelopes: [{ type: "batch", envelopes: [{ type: "cancel", id: 1 }] }],
+  };
+  assert.notDeepEqual(validator.validate(nested), [], "nested batch must fail");
+});
+
+test("fixed-width integer formats are range-checked", () => {
+  const base = { type: "request", id: 1, method: "m", params: null };
+  assert.deepEqual(validator.validate({ ...base, deadlineMs: 4294967295 }), []);
+  assert.notDeepEqual(
+    validator.validate({ ...base, deadlineMs: 4294967296 }),
+    [],
+    "u32 overflow must fail TS validation like Rust deserialization",
+  );
+  assert.notDeepEqual(validator.validate({ ...base, deadlineMs: 12.5 }), []);
+  assert.notDeepEqual(validator.validate({ ...base, deadlineMs: -1 }), []);
+});
+
 test("the validator is not vacuous: corrupted envelopes fail", () => {
   const corrupted: unknown[] = [
     { type: "nope" },

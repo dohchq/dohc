@@ -16,4 +16,4 @@ capabilities: Array<string>,
  * saw, so the engine can tell resume-after-restart from first contact.
  * The engine always issues a fresh generation in `helloAck`.
  */
-lastSessionGeneration: number | null, };
+lastSessionGeneration?: number | null, };

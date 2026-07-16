@@ -1,8 +1,11 @@
 // Minimal JSON Schema (draft 2020-12 subset) validator covering exactly the
 // keywords schemars emits for the dohc engine protocol schema: $ref into
-// $defs, oneOf, anyOf, type (string | string[]), const, enum, properties,
-// required, items, minimum, maximum. Handwritten support code for the spike;
-// a production client would use ajv against the same generated schema.
+// $defs (and "#" root self-reference), oneOf, anyOf, not, type
+// (string | string[]), const, enum, properties, required, items, minimum,
+// maximum, plus fixed-width integer `format` ranges (uint32 etc., which
+// schemars emits without an explicit maximum). Handwritten support code for
+// the spike; a production client would use ajv (with equivalent format
+// range checks) against the same generated schema.
 
 export type Schema = boolean | SchemaObject;
 
@@ -11,6 +14,7 @@ export interface SchemaObject {
   $ref?: string;
   oneOf?: Schema[];
   anyOf?: Schema[];
+  not?: Schema;
   type?: string | string[];
   const?: unknown;
   enum?: unknown[];
@@ -19,8 +23,25 @@ export interface SchemaObject {
   items?: Schema;
   minimum?: number;
   maximum?: number;
+  format?: string;
   [other: string]: unknown;
 }
+
+// Value ranges implied by schemars' fixed-width integer formats. The wire
+// contract additionally caps 64-bit values at Number.MAX_SAFE_INTEGER
+// (2^53-1), so a JS peer never loses precision.
+const INTEGER_FORMAT_RANGES: Record<string, [number, number]> = {
+  uint8: [0, 255],
+  uint16: [0, 65535],
+  uint32: [0, 4294967295],
+  uint64: [0, Number.MAX_SAFE_INTEGER],
+  uint: [0, Number.MAX_SAFE_INTEGER],
+  int8: [-128, 127],
+  int16: [-32768, 32767],
+  int32: [-2147483648, 2147483647],
+  int64: [-Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+  int: [-Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER],
+};
 
 function typeOf(value: unknown): string {
   if (value === null) return "null";
@@ -89,6 +110,19 @@ export class Validator {
     }
     if (schema.maximum !== undefined && typeof value === "number" && value > schema.maximum) {
       errors.push(`${path}: ${value} > maximum ${schema.maximum}`);
+    }
+    if (schema.format !== undefined && typeof value === "number") {
+      const range = INTEGER_FORMAT_RANGES[schema.format];
+      if (range !== undefined) {
+        if (!Number.isInteger(value)) {
+          errors.push(`${path}: ${value} is not an integer (${schema.format})`);
+        } else if (value < range[0] || value > range[1]) {
+          errors.push(`${path}: ${value} outside ${schema.format} range`);
+        }
+      }
+    }
+    if (schema.not !== undefined && this.validate(value, schema.not, path).length === 0) {
+      errors.push(`${path}: matches forbidden (not) schema`);
     }
     if (schema.properties !== undefined || schema.required !== undefined) {
       if (typeOf(value) === "object") {

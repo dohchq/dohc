@@ -13,9 +13,9 @@ streamId: number,
 /**
  * Total size when known up front, letting the receiver preflight bounds.
  */
-totalBytes: number | null, 
+totalBytes?: number | null, 
 /**
  * Lowercase hex SHA-256 of the full blob, when known, for end-to-end
  * integrity verification.
  */
-sha256: string | null, };
+sha256?: string | null, };

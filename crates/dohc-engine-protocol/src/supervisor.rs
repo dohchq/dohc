@@ -5,15 +5,22 @@
 //!
 //! - **Bounded concurrency**: at most `max_in_flight` requests execute
 //!   concurrently (semaphore).
-//! - **Bounded queue / backpressure**: at most `queue_capacity` requests
-//!   wait; beyond that, submission fails immediately with a typed
-//!   `OVERLOADED` error (`afterBackoff`) instead of buffering unboundedly.
+//! - **Bounded admission / backpressure**: at most
+//!   `max_in_flight + queue_capacity` requests are admitted at once; beyond
+//!   that, submission fails immediately with a typed `OVERLOADED` error
+//!   (`afterBackoff`) instead of buffering unboundedly.
 //! - **Deadlines**: every request gets `default_deadline` unless it asks for
 //!   less; requests never exceed `max_deadline`. Expiry produces
-//!   `DEADLINE_EXCEEDED`.
+//!   `DEADLINE_EXCEEDED` — including while still queued for an execution
+//!   slot: a hung in-flight handler never pins an expired or cancelled
+//!   queued request.
 //! - **Cooperative cancellation**: `cancel(id)` resolves queued or in-flight
 //!   requests to `CANCELLED`; handlers observe `ctx.cancel` at their own
 //!   pace, and the supervisor stops awaiting them once cancellation wins.
+//!
+//! Execution slots are granted in approximate submission order (tokio's
+//! semaphore queues waiters fairly); strict FIFO is not a protocol
+//! guarantee — concurrent requests are unordered, only events are ordered.
 //!
 //! Skeleton scope: single session, no event stream, no blob scheduling, no
 //! per-workspace actors — those live in `dohc-engine-runtime` later. This
@@ -24,9 +31,10 @@ use crate::error::{ErrorCode, WireError};
 use crate::transport::{EngineService, RequestContext};
 use crate::wire::{Request, RequestId, Response};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::sync::{Semaphore, oneshot};
 use tokio::time::Instant;
 
 /// Tuning knobs for a supervisor instance.
@@ -52,59 +60,43 @@ impl Default for SupervisorConfig {
 /// Terminal outcome of a submitted request.
 pub type RequestOutcome = Result<Response, WireError>;
 
-struct Job {
-    request: Request,
-    respond: oneshot::Sender<RequestOutcome>,
-    cancel: CancelSignal,
-    deadline: Instant,
-}
-
 type CancelRegistry = Arc<Mutex<HashMap<RequestId, CancelSignal>>>;
 
 /// Bounded request dispatcher over an [`EngineService`].
-pub struct Supervisor {
-    queue: mpsc::Sender<Job>,
+pub struct Supervisor<S: EngineService + 'static> {
+    service: Arc<S>,
+    semaphore: Arc<Semaphore>,
     cancels: CancelRegistry,
+    /// Admitted (queued + in-flight) request count; the admission bound.
+    admitted: Arc<AtomicUsize>,
+    capacity: usize,
     config: SupervisorConfig,
+    runtime: tokio::runtime::Handle,
 }
 
-impl Supervisor {
-    /// Spawn the dispatch loop onto the current tokio runtime.
-    pub fn new<S: EngineService + 'static>(config: SupervisorConfig, service: Arc<S>) -> Self {
-        let (queue, mut rx) = mpsc::channel::<Job>(config.queue_capacity);
-        let cancels: CancelRegistry = Arc::new(Mutex::new(HashMap::new()));
-        let semaphore = Arc::new(Semaphore::new(config.max_in_flight));
-        let worker_cancels = cancels.clone();
-
-        tokio::spawn(async move {
-            while let Some(job) = rx.recv().await {
-                // The semaphore is never closed, so acquisition only fails if
-                // it were; treat that as loop shutdown rather than panicking.
-                let Ok(permit) = semaphore.clone().acquire_owned().await else {
-                    break;
-                };
-                let service = service.clone();
-                let cancels = worker_cancels.clone();
-                tokio::spawn(async move {
-                    let outcome =
-                        run_job(service.as_ref(), &job.request, &job.cancel, job.deadline).await;
-                    lock(&cancels).remove(&job.request.id);
-                    let _ = job.respond.send(outcome);
-                    drop(permit);
-                });
-            }
-        });
-
+impl<S: EngineService + 'static> Supervisor<S> {
+    /// Build a supervisor bound to the current tokio runtime.
+    ///
+    /// # Panics
+    ///
+    /// Panics when called outside a tokio runtime context (the supervisor
+    /// dispatches onto the runtime it was created in).
+    pub fn new(config: SupervisorConfig, service: Arc<S>) -> Self {
         Supervisor {
-            queue,
-            cancels,
+            service,
+            semaphore: Arc::new(Semaphore::new(config.max_in_flight)),
+            cancels: Arc::new(Mutex::new(HashMap::new())),
+            admitted: Arc::new(AtomicUsize::new(0)),
+            capacity: config.max_in_flight + config.queue_capacity,
             config,
+            runtime: tokio::runtime::Handle::current(),
         }
     }
 
     /// Submit a request. Returns a receiver for its terminal outcome, or a
     /// typed error immediately when the request is rejected at the door
-    /// (duplicate id, or queue full → `OVERLOADED` backpressure).
+    /// (duplicate id, or admission bound reached → `OVERLOADED`
+    /// backpressure).
     pub fn try_submit(
         &self,
         request: Request,
@@ -121,39 +113,40 @@ impl Supervisor {
             cancels.insert(request.id, cancel.clone());
         }
 
+        let capacity = self.capacity;
+        if self
+            .admitted
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |admitted| {
+                (admitted < capacity).then_some(admitted + 1)
+            })
+            .is_err()
+        {
+            lock(&self.cancels).remove(&request.id);
+            return Err(WireError::new(
+                ErrorCode::Overloaded,
+                "request queue is full",
+            ));
+        }
+
         let requested = request
             .deadline_ms
             .map(|ms| Duration::from_millis(u64::from(ms)))
             .unwrap_or(self.config.default_deadline)
             .min(self.config.max_deadline);
+        let deadline = Instant::now() + requested;
         let (respond, receiver) = oneshot::channel();
-        let job = Job {
-            request,
-            respond,
-            cancel,
-            deadline: Instant::now() + requested,
-        };
-
-        match self.queue.try_send(job) {
-            Ok(()) => Ok(receiver),
-            Err(error) => {
-                let id = match &error {
-                    mpsc::error::TrySendError::Full(job)
-                    | mpsc::error::TrySendError::Closed(job) => job.request.id,
-                };
-                lock(&self.cancels).remove(&id);
-                match error {
-                    mpsc::error::TrySendError::Full(_) => Err(WireError::new(
-                        ErrorCode::Overloaded,
-                        "request queue is full",
-                    )),
-                    mpsc::error::TrySendError::Closed(_) => Err(WireError::new(
-                        ErrorCode::Internal,
-                        "supervisor is shut down",
-                    )),
-                }
-            }
-        }
+        let semaphore = self.semaphore.clone();
+        let service = self.service.clone();
+        let cancels = self.cancels.clone();
+        let admitted = self.admitted.clone();
+        self.runtime.spawn(async move {
+            let outcome =
+                acquire_and_run(semaphore, service.as_ref(), &request, &cancel, deadline).await;
+            admitted.fetch_sub(1, Ordering::SeqCst);
+            lock(&cancels).remove(&request.id);
+            let _ = respond.send(outcome);
+        });
+        Ok(receiver)
     }
 
     /// Request cooperative cancellation of a queued or in-flight request.
@@ -167,6 +160,34 @@ impl Supervisor {
             None => false,
         }
     }
+}
+
+/// Wait for an execution slot, then run. A queued request resolves its own
+/// cancellation or deadline instead of waiting behind in-flight handlers.
+async fn acquire_and_run(
+    semaphore: Arc<Semaphore>,
+    service: &impl EngineService,
+    request: &Request,
+    cancel: &CancelSignal,
+    deadline: Instant,
+) -> RequestOutcome {
+    let _permit = tokio::select! {
+        biased;
+        () = cancel.cancelled() => {
+            return Err(WireError::new(ErrorCode::Cancelled, "cancelled while queued"));
+        }
+        () = tokio::time::sleep_until(deadline) => {
+            return Err(WireError::new(
+                ErrorCode::DeadlineExceeded,
+                "request deadline elapsed while queued",
+            ));
+        }
+        permit = semaphore.acquire_owned() => match permit {
+            Ok(permit) => permit,
+            Err(_) => return Err(WireError::new(ErrorCode::Internal, "supervisor is shut down")),
+        },
+    };
+    run_job(service, request, cancel, deadline).await
 }
 
 async fn run_job(
@@ -206,7 +227,6 @@ fn lock(registry: &CancelRegistry) -> std::sync::MutexGuard<'_, HashMap<RequestI
 mod tests {
     use super::*;
     use serde_json::{Value, json};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Notify;
 
     fn request(id: RequestId) -> Request {
@@ -286,45 +306,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_queue_yields_typed_overload_backpressure() {
+    async fn admission_beyond_capacity_yields_typed_overload_backpressure() {
         let service = Arc::new(Gate {
             release: Notify::new(),
             started: Notify::new(),
         });
+        // max_in_flight 1 + queue_capacity 2 = exactly 3 admitted.
         let supervisor = Supervisor::new(config(1, 2), service.clone());
-
-        // One request occupies the single in-flight slot...
         let in_flight = supervisor.try_submit(request(0)).expect("accepted");
         service.started.notified().await;
-        // ...then fill the queue. The dispatcher may have pulled one job out
-        // of the channel while waiting for a permit, so up to capacity + 1
-        // submissions can be accepted before OVERLOADED appears.
         let mut accepted = vec![in_flight];
-        let mut overloaded = None;
-        for id in 1..=4 {
-            match supervisor.try_submit(request(id)) {
-                Ok(receiver) => accepted.push(receiver),
-                Err(error) => {
-                    overloaded = Some(error);
-                    break;
-                }
-            }
+        for id in 1..=2 {
+            accepted.push(supervisor.try_submit(request(id)).expect("within bounds"));
         }
-        let error = overloaded.expect("submission beyond bounds must be rejected");
+        let error = supervisor
+            .try_submit(request(3))
+            .expect_err("submission beyond bounds must be rejected");
         assert_eq!(error.code, ErrorCode::Overloaded);
         assert_eq!(error.retry, crate::error::Retryability::AfterBackoff);
-        assert!(
-            accepted.len() <= 4,
-            "accepted {} > queue+in-flight+1",
-            accepted.len()
-        );
 
-        // Backpressure is not deadlock: released requests all complete.
+        // Backpressure is not deadlock: released requests all complete, and
+        // completion frees admission slots for new submissions.
         // Release sequentially — Notify stores at most one permit.
         for receiver in accepted {
             service.release.notify_one();
             assert!(receiver.await.expect("responded").is_ok());
         }
+        let receiver = supervisor.try_submit(request(3)).expect("slot freed");
+        service.started.notified().await;
+        service.release.notify_one();
+        assert!(receiver.await.expect("responded").is_ok());
     }
 
     #[tokio::test]
@@ -349,6 +360,27 @@ mod tests {
         service.started.notified().await;
         service.release.notify_one();
         assert!(receiver.await.expect("responded").is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancel_resolves_queued_request_behind_hung_handler() {
+        let service = Arc::new(Gate {
+            release: Notify::new(),
+            started: Notify::new(),
+        });
+        let supervisor = Supervisor::new(config(1, 4), service.clone());
+        let in_flight = supervisor.try_submit(request(1)).expect("accepted");
+        service.started.notified().await;
+
+        // Queued behind the hung handler; must resolve without a slot.
+        let queued = supervisor.try_submit(request(2)).expect("accepted");
+        assert!(supervisor.cancel(2));
+        let error = queued.await.expect("responded").expect_err("cancelled");
+        assert_eq!(error.code, ErrorCode::Cancelled);
+
+        // The in-flight request was untouched and still completes.
+        service.release.notify_one();
+        assert!(in_flight.await.expect("responded").is_ok());
     }
 
     #[tokio::test]
@@ -384,6 +416,35 @@ mod tests {
         let receiver = supervisor.try_submit(slow).expect("accepted");
         let outcome = receiver.await.expect("responded");
         let error = outcome.expect_err("must time out");
+        assert_eq!(error.code, ErrorCode::DeadlineExceeded);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_request_deadline_resolves_behind_hung_handler() {
+        // One slot, occupied by a non-cooperating handler with a long
+        // deadline; a queued request with a short deadline must still
+        // resolve on time.
+        let supervisor = Supervisor::new(config(1, 4), Arc::new(Sleeper));
+        let mut hog = request(1);
+        hog.deadline_ms = Some(5_000);
+        let hog_receiver = supervisor.try_submit(hog).expect("accepted");
+
+        let mut queued = request(2);
+        queued.deadline_ms = Some(50);
+        let started = tokio::time::Instant::now();
+        let queued_receiver = supervisor.try_submit(queued).expect("accepted");
+        let error = queued_receiver
+            .await
+            .expect("responded")
+            .expect_err("queued deadline");
+        assert_eq!(error.code, ErrorCode::DeadlineExceeded);
+        assert!(
+            started.elapsed() < Duration::from_millis(1000),
+            "queued request waited for the hung handler: {:?}",
+            started.elapsed()
+        );
+
+        let error = hog_receiver.await.expect("responded").expect_err("hog");
         assert_eq!(error.code, ErrorCode::DeadlineExceeded);
     }
 

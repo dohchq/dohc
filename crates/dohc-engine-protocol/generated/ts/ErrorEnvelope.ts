@@ -4,4 +4,4 @@ import type { WireError } from "./WireError";
 /**
  * A failed response, or a connection-level error when `id` is absent.
  */
-export type ErrorEnvelope = { id: number | null, error: WireError, };
+export type ErrorEnvelope = { id?: number | null, error: WireError, };

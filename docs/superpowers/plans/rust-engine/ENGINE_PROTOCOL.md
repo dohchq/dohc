@@ -193,11 +193,26 @@ on a negotiated capability.
 Key decisions baked in:
 
 - **All wire integers ≤ 2^53−1** (`MAX_WIRE_INTEGER`), validated on both
-  sides, so TS uses plain `number`. 64-bit identifiers that need more range
-  must be strings (like `WorkspaceHandle`).
+  sides, so TS uses plain `number`. The rule covers every representation:
+  typed fields, blob-chunk stream ids at the frame layer, and integer-valued
+  floats inside JSON payloads (`1e20` is rejected exactly like
+  `100000000000000000000`, matching the TS walker's `Number.isInteger`
+  check). 64-bit identifiers that need more range must be strings (like
+  `WorkspaceHandle`).
 - **Bounds are session state**: `helloAck.limits` advertises the engine's
   `WireLimits`; both encoder and decoder enforce them; every bound has
-  limit−1/limit/limit+1 tests.
+  limit−1/limit/limit+1 tests. The encoder additionally serializes through a
+  bounded writer, so an envelope whose fields are individually in-bounds but
+  whose aggregate encoding exceeds `maxFrameBytes` is refused mid-write
+  instead of being materialized first.
+- **Nullable fields**: encoders always emit them explicitly (`null` — the
+  canonical form); decoders on both sides also accept omission. Generated TS
+  types are `field?: T | null` accordingly.
+- **Cross-language validation parity**: the generated JSON Schema encodes
+  the no-nested-batch invariant (`not` on batch items) and the TS validator
+  range-checks schemars' fixed-width integer formats (`uint32` etc.) plus
+  the 2^53−1 cap on 64-bit values, so a message the TS side accepts cannot
+  fail Rust deserialization on bounds, and vice versa.
 - **Canonical encoding** for fixtures/traces: sorted-key compact JSON,
   byte-identical from Rust (`serde_json::Value`'s BTreeMap ordering) and TS
   (`canonicalJson()` in `ts/schemaValidator.mts`). ASCII keys only in
@@ -209,14 +224,20 @@ Key decisions baked in:
 
 ### Supervisor skeleton (replaces thread-per-request)
 
-`supervisor::Supervisor` (feature `supervisor`, tokio): bounded mpsc queue →
-semaphore-bounded in-flight spawn, per-request `CancelSignal` (a std-only
-waker primitive, so core crates stay tokio-free per portability guardrail 2),
-deadline clamped to a configured max and enforced by `select!` even against
-uncooperative handlers, typed `OVERLOADED` on a full queue, duplicate
-in-flight ids rejected. Tested: peak-concurrency bound, overload
-backpressure + drain, cooperative cancel of in-flight requests, deadline
-expiry, deadline clamping (deterministic paused-time tests).
+`supervisor::Supervisor` (feature `supervisor`, tokio): counter-bounded
+admission (`max_in_flight + queue_capacity`; beyond it, typed `OVERLOADED`)
+feeding per-request tasks that race an execution-slot semaphore against the
+request's own cancellation and deadline — so a queued request resolves
+`CANCELLED`/`DEADLINE_EXCEEDED` on time even while a hung handler pins every
+slot, instead of waiting behind it. Per-request `CancelSignal` is a std-only
+waker primitive (core crates stay tokio-free per portability guardrail 2);
+deadlines are clamped to a configured max and enforced by `select!` even
+against uncooperative handlers; duplicate in-flight ids are rejected. Slots
+are granted in approximate submission order (tokio's fair semaphore); strict
+FIFO is not a protocol guarantee. Tested: peak-concurrency bound, overload
+backpressure + drain + slot reuse, cooperative cancel of in-flight and of
+queued requests, deadline expiry in-flight and while queued, deadline
+clamping (deterministic paused-time tests).
 
 ### Transports
 

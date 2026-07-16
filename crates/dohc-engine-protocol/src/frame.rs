@@ -20,7 +20,7 @@
 //! codec at all — no base64, no re-encoding.
 
 use crate::error::{FrameDecodeError, LimitKind, LimitViolation};
-use crate::limits::WireLimits;
+use crate::limits::{MAX_WIRE_INTEGER, WireLimits};
 
 /// Frame header magic: "dohc protocol 1".
 pub const FRAME_MAGIC: [u8; 4] = *b"DOP1";
@@ -73,6 +73,14 @@ pub fn encode_blob_chunk_frame(
     bytes: &[u8],
     limits: &WireLimits,
 ) -> Result<Vec<u8>, LimitViolation> {
+    if stream_id > MAX_WIRE_INTEGER {
+        return Err(LimitViolation {
+            limit: LimitKind::IntegerRange,
+            field: "blob chunk stream id",
+            actual: stream_id,
+            max: MAX_WIRE_INTEGER,
+        });
+    }
     if bytes.len() as u64 > u64::from(limits.max_blob_chunk_bytes) {
         return Err(LimitViolation {
             limit: LimitKind::BlobChunkBytes,
@@ -219,6 +227,11 @@ impl FrameDecoder {
                         .try_into()
                         .map_err(|_| FrameDecodeError::TruncatedHeader)?,
                 );
+                // Wire integers must stay JS-number safe; a stream id above
+                // 2^53-1 could never match its announced blobStart.streamId.
+                if stream_id > MAX_WIRE_INTEGER {
+                    return Err(FrameDecodeError::BlobStreamIdTooLarge { stream_id });
+                }
                 Frame::BlobChunk {
                     stream_id,
                     fin: flags & BLOB_FLAG_FIN != 0,

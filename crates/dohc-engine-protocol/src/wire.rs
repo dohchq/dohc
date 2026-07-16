@@ -27,6 +27,11 @@ pub type RequestId = u64;
 pub struct WorkspaceHandle(pub String);
 
 /// Every message that can cross the transport, tagged by `type`.
+///
+/// Nullable-field contract: encoders emit every nullable field explicitly
+/// (`null` when absent - the canonical form); decoders on both sides also
+/// accept the field being omitted. The generated TS types are therefore
+/// `field?: T | null`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(schemars::JsonSchema, ts_rs::TS))]
 #[cfg_attr(feature = "bindings", ts(export))]
@@ -59,7 +64,7 @@ pub struct Hello {
     /// On reconnect after an engine restart: the generation the client last
     /// saw, so the engine can tell resume-after-restart from first contact.
     /// The engine always issues a fresh generation in `helloAck`.
-    #[cfg_attr(feature = "bindings", ts(type = "number | null"))]
+    #[cfg_attr(feature = "bindings", ts(type = "number | null", optional))]
     pub last_session_generation: Option<u64>,
 }
 
@@ -92,12 +97,15 @@ pub struct Request {
     /// injection uses the reserved `testkit.` namespace.
     pub method: String,
     /// Target workspace, when the method is workspace-scoped.
+    #[cfg_attr(feature = "bindings", ts(optional = nullable))]
     pub workspace: Option<WorkspaceHandle>,
     /// Relative deadline. The engine clamps it to its maximum and fails the
     /// request with `DEADLINE_EXCEEDED` when it elapses.
+    #[cfg_attr(feature = "bindings", ts(optional = nullable))]
     pub deadline_ms: Option<u32>,
     /// Required on retryable mutations: the engine deduplicates replays of
     /// the same key after timeouts/reconnects (exactly-once acknowledgement).
+    #[cfg_attr(feature = "bindings", ts(optional = nullable))]
     pub idempotency_key: Option<String>,
     /// Method-specific parameters; validated per-method behind the envelope
     /// layer, bounded here as a JSON tree.
@@ -121,7 +129,7 @@ pub struct Response {
 #[cfg_attr(feature = "bindings", ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct ErrorEnvelope {
-    #[cfg_attr(feature = "bindings", ts(type = "number | null"))]
+    #[cfg_attr(feature = "bindings", ts(type = "number | null", optional))]
     pub id: Option<RequestId>,
     pub error: WireError,
 }
@@ -168,10 +176,11 @@ pub struct BlobStart {
     #[cfg_attr(feature = "bindings", ts(type = "number"))]
     pub stream_id: u64,
     /// Total size when known up front, letting the receiver preflight bounds.
-    #[cfg_attr(feature = "bindings", ts(type = "number | null"))]
+    #[cfg_attr(feature = "bindings", ts(type = "number | null", optional))]
     pub total_bytes: Option<u64>,
     /// Lowercase hex SHA-256 of the full blob, when known, for end-to-end
     /// integrity verification.
+    #[cfg_attr(feature = "bindings", ts(optional = nullable))]
     pub sha256: Option<String>,
 }
 
@@ -181,7 +190,26 @@ pub struct BlobStart {
 #[cfg_attr(feature = "bindings", ts(export))]
 #[serde(rename_all = "camelCase")]
 pub struct Batch {
+    #[cfg_attr(feature = "bindings", schemars(schema_with = "batch_envelopes_schema"))]
     pub envelopes: Vec<Envelope>,
+}
+
+/// Schema for `Batch.envelopes` encoding the no-nesting invariant: items are
+/// any envelope except another batch, so the generated TS validator rejects
+/// nested batches exactly like `Envelope::validate`.
+#[cfg(feature = "bindings")]
+fn batch_envelopes_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "array",
+        "items": {
+            "$ref": "#",
+            "not": {
+                "type": "object",
+                "properties": { "type": { "const": "batch" } },
+                "required": ["type"]
+            }
+        }
+    })
 }
 
 /// Encode an envelope into a complete control frame (header + JSON payload),
@@ -192,11 +220,66 @@ pub fn encode_control(
     limits: &WireLimits,
 ) -> Result<Vec<u8>, EnvelopeDecodeError> {
     envelope.validate(limits)?;
-    let payload = serde_json::to_vec(envelope).map_err(|error| EnvelopeDecodeError::Json {
-        line: error.line(),
-        column: error.column(),
-    })?;
-    crate::frame::encode_control_frame(&payload, limits).map_err(EnvelopeDecodeError::Limit)
+    // Serialize through a bounded writer: an envelope whose fields are
+    // individually in-bounds can still exceed the frame bound in aggregate,
+    // and it must be refused without first materializing the oversized
+    // payload.
+    let mut writer = BoundedWriter::new(limits.max_frame_bytes as usize);
+    if let Err(error) = serde_json::to_writer(&mut writer, envelope) {
+        if writer.overflowed {
+            return Err(EnvelopeDecodeError::Limit(LimitViolation {
+                limit: LimitKind::FrameBytes,
+                field: "control frame payload",
+                actual: writer.attempted as u64,
+                max: u64::from(limits.max_frame_bytes),
+            }));
+        }
+        return Err(EnvelopeDecodeError::Json {
+            line: error.line(),
+            column: error.column(),
+        });
+    }
+    crate::frame::encode_control_frame(&writer.buf, limits).map_err(EnvelopeDecodeError::Limit)
+}
+
+/// A `Vec` sink that refuses to grow past `max`: serialization of an
+/// oversized envelope fails at the bound instead of allocating the full
+/// payload first.
+struct BoundedWriter {
+    buf: Vec<u8>,
+    max: usize,
+    attempted: usize,
+    overflowed: bool,
+}
+
+impl BoundedWriter {
+    fn new(max: usize) -> Self {
+        BoundedWriter {
+            buf: Vec::new(),
+            max,
+            attempted: 0,
+            overflowed: false,
+        }
+    }
+}
+
+impl std::io::Write for BoundedWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        self.attempted = self.attempted.saturating_add(data.len());
+        if self.attempted > self.max {
+            self.overflowed = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "control frame payload bound exceeded",
+            ));
+        }
+        self.buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// Decode and validate a control-frame payload. Arbitrary input yields a
@@ -375,9 +458,20 @@ fn check_json(
                     check_integer(unsigned, field)?;
                 } else if let Some(signed) = number.as_i64() {
                     check_integer(signed.unsigned_abs(), field)?;
+                } else if let Some(float) = number.as_f64() {
+                    // Integer-valued floats (e.g. 1e20) must respect the
+                    // wire-integer bound, matching the TS walker's
+                    // Number.isInteger check. Finite by construction
+                    // (serde_json rejects NaN/Infinity).
+                    if float.fract() == 0.0 && float.abs() > MAX_WIRE_INTEGER as f64 {
+                        return Err(LimitViolation {
+                            limit: LimitKind::IntegerRange,
+                            field,
+                            actual: float.abs() as u64,
+                            max: MAX_WIRE_INTEGER,
+                        });
+                    }
                 }
-                // Finite f64 values are within JSON number range by
-                // construction (serde_json rejects NaN/Infinity).
             }
             Value::String(string) => check_string(string, field, limits)?,
             Value::Array(items) => {
