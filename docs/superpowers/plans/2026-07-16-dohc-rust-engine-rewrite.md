@@ -218,16 +218,28 @@ implements the additive-upgrade dance. `engineDbSchema.ts` is also the
 second-churniest file in the repo (23 commits/30d) — freezing it is part of
 the freeze policy below.
 
-### The Y.Doc update log is a prunable cache — correction to Rev 1
+### Y.Doc rows: local-only cache vs replicated durable lineage — correction to Rev 1/Rev 2
 
-`ydoc_updates`/`ydoc_snapshots` are documented in-schema
-(`engineDbSchema.ts:263-289`) as a **local-only, prunable fast-resume
-cache** — "a closed session may prune to a single snapshot"; the settled
-markdown projection is the durable canonical artifact. The rewrite scope for
-R11a is therefore: the resume cache, snapshot/compaction, leases, replication
-of `ydoc.update` ops, and the settle pipeline — with the settle step's
-correctness (Y.Doc → markdown provenance) carrying the durability weight.
-This correction also drives the mandatory pre-reset settle phase at cutover.
+Two distinct regimes; R11 must not conflate them:
+
+- **Local-only sessions**: `ydoc_updates`/`ydoc_snapshots` are documented
+  in-schema (`engineDbSchema.ts:263-289`) as a prunable fast-resume cache —
+  "a closed session may prune to a single snapshot"; the settled markdown
+  projection carries the durability weight.
+- **Replicated sessions**: the engine journals `ydoc.update` operations and
+  **explicitly never prunes those CRDT rows on close**, because peers
+  bootstrap from that lineage (`ydocEngineDriver.ts:999-1007`,
+  `ydocEngineDriver.ts:1090-1098`, `syncApply.ts:139-144`). For replicated
+  rich docs the CRDT lineage itself is durable canonical state; markdown is
+  a projection.
+
+R11a's scope covers both regimes: resume cache + pruning policy for
+local-only docs; durable lineage retention, export/reseed handling, and
+`ydoc.update` replication for replicated docs; snapshots/compaction, leases,
+and the settle pipeline for both. The mandatory pre-reset settle phase at
+cutover stands (markdown must be fresh before any reset), and the reset's
+epoch re-key restarts replicated lineage on the new epoch — the loss ledger
+must list pre-reset replicated lineage explicitly.
 
 ### Kernel spike and silent fallback — confirmed
 
@@ -630,6 +642,14 @@ Concretely, not just protocol-level:
 
 Pass → R11a starts as soon as R04's storage foundation lands. Fail → the
 program pauses for an Ice decision. There is no fallback menu.
+
+> **Verdict 2026-07-16: PASS** (PR #140, yjs 13.6.30 ↔ yrs 0.27.3 pinned).
+> Binding carry-forward constraints recorded in `DECISIONS.md`: every
+> wire-facing yrs `Doc` uses `OffsetKind::Utf16` (the byte-offset default is
+> wire-unsafe); nested frontmatter map keys sorted before projection/
+> content-addressing; UTF-16 well-formedness validated at the adapter; both
+> engines share the declared root schema; projection provenance accounts for
+> y-prosemirror's destructive normalization.
 
 ### Boundary design
 
@@ -1256,7 +1276,7 @@ attention" is flagged to Ice as accepted risk.
 | --- | --- |
 | Test skipped/weakened/deleted for parity | assertion-count parity + skipped-test ratchet + mutation smoke in CI |
 | Stub/placeholder satisfies compiler | CI grep: `todo!`/`unimplemented!`/placeholder patterns |
-| Unapproved unsafe | `#![forbid(unsafe_code)]` — compile failure |
+| Unapproved unsafe | `#![forbid(unsafe_code)]` compile failure in ordinary crates, plus a CI scan matching every `unsafe` occurrence across all crates (incl. any approved FFI crate, which cannot carry the forbid attr) to an `UNSAFE.md` approval entry |
 | Workspace/auth/lock/policy/secret invariant weakened | invariant test suites + reviewer B checklist (accepted-risk residual) |
 | Schema/protocol change without contract + migration update | integrator-owned paths + CI check on generated files |
 | Unexplained differential mismatch | harness: every mismatch must attach an explanation or open a stop |
@@ -1301,8 +1321,9 @@ Waves 1 through cutover.
 
 Do not begin porting `versionedTextStore.ts`. Open Wave 0:
 
-1. Program directory + SHARDS.tsv + schemas + packet builder + WINDOWS_DEV.md
-   + execution log; Codex CLI fix.
+1. Program directory + SHARDS.tsv + schemas + WINDOWS_DEV.md + execution
+   log; Codex CLI fix. (The reviewer-packet builder is R01-ORACLE's, not
+   R00's — no Tier 1/2 review cell runs before it exists.)
 2. The yrs spike (fixtures harvested from Ice's dogfood engine.db first).
 3. `ENGINE_SCOPE.md`, `BEHAVIOR_INVENTORY.tsv`, `STATE_OWNERSHIP.tsv`,
    `PORTING.md`, `LANGUAGE_SEMANTICS_MATRIX.md`, `TEST_ORACLE.md`.

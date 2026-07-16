@@ -53,3 +53,13 @@ source of truth every orchestrator session loads first).
   sorting, UTF-16 well-formedness at adapter, shared root schema +
   destructive projection provenance). Safety fences verified held
   (copy-only harvest, fixtures local/gitignored, zero unsafe).
+- PR #137 review round 2: CodeRabbit APPROVED; Codex posted 8 findings
+  (1 P1: replicated Y.Doc rows are durable lineage, not prunable cache —
+  plan section split into local-only vs replicated regimes; 7 P2: SHARDS
+  gate rows GATE0/GATE6 for resolvable deps, R01-CONTRACTS shard for
+  Gate 0 contract docs, R05 owns versions module, R13b owns flagged
+  integration files, packet-builder ownership consistency, unsafe CI scan
+  detector). All fixed.
+- PR #139 CI BLOCKED: GitHub Actions billing failure at the org — no job
+  starts on any runner. Escalated to Ice (open decision 2 now includes
+  restoring Actions billing).
