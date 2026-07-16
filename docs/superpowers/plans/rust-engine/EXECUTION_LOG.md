@@ -156,3 +156,9 @@ source of truth every orchestrator session loads first).
   P2s dispatched (realpathSync.native for 8.3 aliases; frontmatter
   classifier Date-object collapse). Verdict FIXES-NEEDED narrowly;
   certification completes on the two closures.
+- PR #140 residuals closed (22fdf09a): realpathSync.native with live
+  8.3-alias refusal probe (COM-obtained short name); yamlPlain classifier
+  fix with pinned Date-pair + key-reorder regression checks on every run.
+  Local review cycle complete: implementer -> 2 adversarial -> 15-fix
+  batch -> re-check -> 2 residuals -> verified. Re-runs green (23/23
+  fidelity --require-harvested; 25/25 strict smoke).
