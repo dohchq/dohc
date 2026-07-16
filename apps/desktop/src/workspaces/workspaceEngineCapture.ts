@@ -237,6 +237,8 @@ export interface WorkspaceGeneratedTextArchiveResult {
   changed: boolean;
 }
 
+export type WorkspaceGeneratedTextIdentityValidator = (text: string) => boolean;
+
 // Finishes an engine-coordinated single-file rename: call with ok=true after
 // the disk move succeeded, ok=false to roll the engine rename back.
 export type WorkspaceEngineRenameFinisher = (ok: boolean) => Promise<void>;
@@ -341,6 +343,10 @@ export interface WorkspaceEngineCapture {
     // Strict first-create mode: any existing engine object or disk file is a
     // collision, even when its bytes happen to equal the generated text.
     createOnly?: true;
+    // Marker-validated recovery for legacy or crash-interrupted generated
+    // files whose stable object id was not persisted by the caller. Existing
+    // engine and disk text must both pass inside the serialized write.
+    recoverExistingText?: WorkspaceGeneratedTextIdentityValidator;
     metadata?: ActorNeutralWriteMetadata;
   }): Promise<WorkspaceGeneratedTextWriteResult>;
   // Moves a generated Markdown artifact to another visible Markdown path,
@@ -349,7 +355,10 @@ export interface WorkspaceEngineCapture {
   archiveGeneratedTextFile(input: {
     fromPath: string;
     toPath: string;
-    expectedObjectId: string;
+    expectedObjectId?: string;
+    // When expectedObjectId was not durably recorded, recover it atomically
+    // from either the live source or an already-renamed archive destination.
+    recoverExistingText?: WorkspaceGeneratedTextIdentityValidator;
     metadata?: ActorNeutralWriteMetadata;
   }): Promise<WorkspaceGeneratedTextArchiveResult>;
   // Engine-coordinated single-file rename (product rename flows call this
@@ -452,6 +461,23 @@ function assertGeneratedMarkdownPath(path: string): string {
     throw new Error(`Generated text must use a safe visible Markdown path: ${path}`);
   }
   return check.normalized;
+}
+
+function assertGeneratedTextRecoveryIdentity(
+  path: string,
+  text: string,
+  validate: WorkspaceGeneratedTextIdentityValidator,
+): void {
+  let matches = false;
+  try {
+    matches = validate(text);
+  } catch {
+    // A recovery validator is evidence, not an execution surface: any parser
+    // failure is simply a non-match and must fail closed.
+  }
+  if (!matches) {
+    throw new Error(`Generated Markdown ownership marker does not match: ${path}`);
+  }
 }
 
 type DiskTextState =
@@ -2335,6 +2361,12 @@ export function createWorkspaceEngineCapture(
         if (Buffer.byteLength(input.text, "utf8") > MAX_ENGINE_CAPTURE_TEXT_BYTES) {
           throw new Error(`Generated Markdown is too large to track: ${path}`);
         }
+        if (input.recoverExistingText) {
+          // Recovery may only replace an owned projection with another text
+          // carrying the same durable identity; otherwise the next crash
+          // retry would lose its proof of ownership.
+          assertGeneratedTextRecoveryIdentity(path, input.text, input.recoverExistingText);
+        }
         await settleAndCloseLiveYDocSessions(
           (candidate) => candidate === path,
           "Saved latest edits before refreshing generated content",
@@ -2347,8 +2379,11 @@ export function createWorkspaceEngineCapture(
         if (current?.contentKind === "binary") {
           throw new Error(`Generated Markdown cannot replace a binary file: ${path}`);
         }
-        if (input.createOnly && input.expectedObjectId) {
-          throw new Error("Generated Markdown cannot be both create-only and an owned update.");
+        if (
+          (input.createOnly && (input.expectedObjectId || input.recoverExistingText)) ||
+          (input.expectedObjectId && input.recoverExistingText)
+        ) {
+          throw new Error("Generated Markdown write authority is ambiguous.");
         }
         if (input.createOnly && current) {
           throw new Error(`Generated Markdown destination already exists: ${path}`);
@@ -2357,6 +2392,8 @@ export function createWorkspaceEngineCapture(
           if (!current || current.objectId !== input.expectedObjectId) {
             throw new Error(`Generated Markdown identity no longer matches: ${path}`);
           }
+        } else if (input.recoverExistingText && current) {
+          assertGeneratedTextRecoveryIdentity(path, current.text, input.recoverExistingText);
         } else if (current && current.text !== input.text) {
           // First creation may be retried after a crash, but it may not adopt
           // and overwrite an unrelated tracked file merely because the path
@@ -2375,7 +2412,15 @@ export function createWorkspaceEngineCapture(
         ) {
           throw new Error(`Generated Markdown cannot safely replace the file on disk: ${path}`);
         }
-        if (!current && disk.kind === "text" && disk.text !== input.text) {
+        if (input.recoverExistingText && disk.kind === "text") {
+          assertGeneratedTextRecoveryIdentity(path, disk.text, input.recoverExistingText);
+        }
+        if (
+          !current &&
+          !input.recoverExistingText &&
+          disk.kind === "text" &&
+          disk.text !== input.text
+        ) {
           throw new Error(`Generated Markdown destination already exists on disk: ${path}`);
         }
 
@@ -2387,7 +2432,11 @@ export function createWorkspaceEngineCapture(
         // Preserve a manually edited disk preimage in history before the
         // canonical generated copy replaces it. This never grants that edit
         // authority over the chat source; it only keeps recovery honest.
-        if (current && disk.kind === "text" && disk.text !== current.text) {
+        if (
+          disk.kind === "text" &&
+          disk.text !== current?.text &&
+          (Boolean(current) || Boolean(input.recoverExistingText))
+        ) {
           await writeIfChanged(engine, versionId, path, disk, {
             origin: "local-file",
             summary: `Saved edits before refreshing ${pathBasename(path)}`,
@@ -2424,6 +2473,11 @@ export function createWorkspaceEngineCapture(
         if (fromPath === toPath) {
           throw new Error("Generated Markdown archive destination must be different.");
         }
+        if (Boolean(input.expectedObjectId) === Boolean(input.recoverExistingText)) {
+          throw new Error(
+            "Generated Markdown archive requires exactly one ownership authority.",
+          );
+        }
         await settleAndCloseLiveYDocSessions(
           (candidate) => candidate === fromPath || candidate === toPath,
           "Saved latest edits before archiving generated content",
@@ -2436,21 +2490,80 @@ export function createWorkspaceEngineCapture(
         let source = await engine.readTextFile({ workspaceId, versionId, path: fromPath });
         let destination = await engine.readTextFile({ workspaceId, versionId, path: toPath });
 
+        if (!source && !destination && input.recoverExistingText) {
+          // A pre-delta projection may exist only on disk because no engine
+          // object had been created yet. Capture exactly one marker-validated
+          // side before continuing through the normal identity-preserving
+          // archive path. Two present paths are ambiguous and fail below.
+          const sourceDisk = await readDiskTextState(rootPath, fromPath);
+          const destinationDisk = await readDiskTextState(rootPath, toPath);
+          const recoverPath =
+            sourceDisk.kind === "text" && destinationDisk.kind === "absent"
+              ? fromPath
+              : sourceDisk.kind === "absent" && destinationDisk.kind === "text"
+                ? toPath
+                : undefined;
+          const recoverDisk = recoverPath === fromPath ? sourceDisk : destinationDisk;
+          if (recoverPath && recoverDisk.kind === "text") {
+            assertGeneratedTextRecoveryIdentity(
+              recoverPath,
+              recoverDisk.text,
+              input.recoverExistingText,
+            );
+            await writeIfChanged(engine, versionId, recoverPath, recoverDisk, {
+              origin: "local-file",
+              summary: `Recovered generated ${pathBasename(recoverPath)}`,
+              correlationId: `generated-recovery-${randomUUID()}`,
+            });
+            source = await engine.readTextFile({ workspaceId, versionId, path: fromPath });
+            destination = await engine.readTextFile({ workspaceId, versionId, path: toPath });
+          }
+        }
+
         if (!source) {
           // Crash-retry/idempotency: the engine rename already completed.
-          if (!destination || destination.objectId !== input.expectedObjectId) {
+          if (!destination) {
             throw new Error(`Generated Markdown archive source is unavailable: ${fromPath}`);
           }
           if (destination.contentKind === "binary") {
             throw new Error(`Generated Markdown archive is unexpectedly binary: ${toPath}`);
           }
+          if (
+            input.expectedObjectId &&
+            destination.objectId !== input.expectedObjectId
+          ) {
+            throw new Error(`Generated Markdown archive source is unavailable: ${fromPath}`);
+          }
+          if (input.recoverExistingText) {
+            assertGeneratedTextRecoveryIdentity(
+              toPath,
+              destination.text,
+              input.recoverExistingText,
+            );
+          }
           const sourceDisk = await readDiskTextState(rootPath, fromPath);
           const destinationDisk = await readDiskTextState(rootPath, toPath);
+          if (input.recoverExistingText && sourceDisk.kind === "text") {
+            assertGeneratedTextRecoveryIdentity(
+              fromPath,
+              sourceDisk.text,
+              input.recoverExistingText,
+            );
+          }
+          if (input.recoverExistingText && destinationDisk.kind === "text") {
+            assertGeneratedTextRecoveryIdentity(
+              toPath,
+              destinationDisk.text,
+              input.recoverExistingText,
+            );
+          }
           if (
             sourceDisk.kind === "binary" ||
             sourceDisk.kind === "untracked-content" ||
             sourceDisk.kind === "unreadable" ||
-            (sourceDisk.kind === "text" && sourceDisk.text !== destination.text)
+            (!input.recoverExistingText &&
+              sourceDisk.kind === "text" &&
+              sourceDisk.text !== destination.text)
           ) {
             throw new Error(
               `Generated Markdown archive source changed before recovery: ${fromPath}`,
@@ -2496,14 +2609,31 @@ export function createWorkspaceEngineCapture(
           };
         }
 
-        if (source.contentKind === "binary" || source.objectId !== input.expectedObjectId) {
+        if (
+          source.contentKind === "binary" ||
+          (input.expectedObjectId && source.objectId !== input.expectedObjectId)
+        ) {
           throw new Error(`Generated Markdown identity no longer matches: ${fromPath}`);
+        }
+        if (input.recoverExistingText) {
+          assertGeneratedTextRecoveryIdentity(
+            fromPath,
+            source.text,
+            input.recoverExistingText,
+          );
         }
         if (destination) {
           throw new Error(`Generated Markdown archive destination already exists: ${toPath}`);
         }
         const sourceDisk = await readDiskTextState(rootPath, fromPath);
         const destinationDisk = await readDiskTextState(rootPath, toPath);
+        if (input.recoverExistingText && sourceDisk.kind === "text") {
+          assertGeneratedTextRecoveryIdentity(
+            fromPath,
+            sourceDisk.text,
+            input.recoverExistingText,
+          );
+        }
         if (
           sourceDisk.kind === "binary" ||
           sourceDisk.kind === "untracked-content" ||

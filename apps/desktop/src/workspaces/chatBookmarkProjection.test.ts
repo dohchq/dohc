@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { formatChatBookmarkProjection } from "./chatBookmarkProjection";
+import {
+  formatChatBookmarkProjection,
+  isChatBookmarkProjectionFor,
+} from "./chatBookmarkProjection";
 
 describe("formatChatBookmarkProjection", () => {
   it("formats a live projection with provenance and agent attribution", () => {
@@ -79,5 +82,34 @@ describe("formatChatBookmarkProjection", () => {
     expect(() =>
       formatChatBookmarkProjection({ ...base, mode: "live", state: "stale" }),
     ).toThrow(/staleAtMs/u);
+  });
+
+  it("recognizes only the canonical bookmark-specific frontmatter identity", () => {
+    const text = formatChatBookmarkProjection({
+      bookmarkId: 'bookmark-"identity',
+      threadId: "thread-identity",
+      title: "Identity",
+      mode: "live",
+      updatedAtMs: 0,
+      messages: [],
+    });
+
+    expect(isChatBookmarkProjectionFor(text, 'bookmark-"identity')).toBe(true);
+    expect(isChatBookmarkProjectionFor(text, "bookmark-other")).toBe(false);
+    expect(
+      isChatBookmarkProjectionFor(
+        `# Unrelated\n\nbookmark_id: ${JSON.stringify('bookmark-"identity')}\n`,
+        'bookmark-"identity',
+      ),
+    ).toBe(false);
+    expect(
+      isChatBookmarkProjectionFor(
+        text.replace(
+          'bookmark_id: "bookmark-\\\"identity"',
+          'bookmark_id: "bookmark-\\\"identity"\nbookmark_id: "bookmark-\\\"identity"',
+        ),
+        'bookmark-"identity',
+      ),
+    ).toBe(false);
   });
 });

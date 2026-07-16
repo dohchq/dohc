@@ -48,6 +48,39 @@ function agentLabel(message: ChatBookmarkProjectionMessage): string {
 }
 
 /**
+ * Recognizes the durable identity written into every chat bookmark projection.
+ * This intentionally parses only our canonical frontmatter scalars instead of
+ * accepting a matching string elsewhere in the document body.
+ */
+export function isChatBookmarkProjectionFor(text: string, bookmarkId: string): boolean {
+  const lines = text.replace(/\r\n?/gu, "\n").split("\n");
+  if (lines[0] !== "---") return false;
+  const closingIndex = lines.indexOf("---", 1);
+  if (closingIndex < 2) return false;
+
+  let parsedType: string | undefined;
+  let parsedBookmarkId: string | undefined;
+  for (const line of lines.slice(1, closingIndex)) {
+    if (line.startsWith("dohc_type:")) {
+      if (parsedType !== undefined) return false;
+      parsedType = line.slice("dohc_type:".length).trim();
+      continue;
+    }
+    if (!line.startsWith("bookmark_id:")) continue;
+    if (parsedBookmarkId !== undefined) return false;
+    const scalar = line.slice("bookmark_id:".length).trim();
+    try {
+      const parsed = JSON.parse(scalar) as unknown;
+      if (typeof parsed !== "string") return false;
+      parsedBookmarkId = parsed;
+    } catch {
+      return false;
+    }
+  }
+  return parsedType === "chat-bookmark" && parsedBookmarkId === bookmarkId;
+}
+
+/**
  * Formats a receiver-owned, read-only Markdown projection of authorized chat.
  * Authorization and message selection happen before this pure formatter is
  * called; it never resolves ids or reads hidden source state by itself.

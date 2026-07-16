@@ -434,7 +434,10 @@ import {
 import { addChatMentionsToWorkspaceGraph } from "./workspaces/chatMentionGraphOverlay";
 import { formatChatBookmarkProjection } from "./workspaces/chatBookmarkProjection";
 import { projectChatBookmarksAfterPull } from "./workspaces/chatBookmarkPullProjection";
-import { writeChatBookmarkProjection } from "./workspaces/chatBookmarkProjectionWrite";
+import {
+  archiveChatBookmarkProjection,
+  writeChatBookmarkProjection,
+} from "./workspaces/chatBookmarkProjectionWrite";
 import {
   collectZipEntries,
   copyIntoWorkspace,
@@ -4691,20 +4694,23 @@ function registerIpcHandlers(): void {
       try {
         if (bookmark.state === "archived") {
           const archivedPath = chatBookmarkArchiveDestination(bookmark);
-          if (bookmark.projectionObjectId) {
-            // archiveGeneratedTextFile is idempotent when the engine rename
-            // completed but the process died before this generation became ready.
-            await capture.archiveGeneratedTextFile({
-              fromPath: bookmark.destinationPath,
-              toPath: archivedPath,
-              expectedObjectId: bookmark.projectionObjectId,
-            });
-          }
+          // Recovery validates the bookmark-specific frontmatter when legacy
+          // state or a crash left projectionObjectId unclaimed. It can recover
+          // from either side of an already-completed engine rename.
+          const archived = await archiveChatBookmarkProjection({
+            bookmark,
+            archivedPath,
+            capture,
+          });
           const ready = await store.markBookmarkReady({
             workspaceId: workspace.workspaceId,
             ownerUserId: bookmark.ownerUserId,
             bookmarkId: bookmark.bookmarkId,
             generation: bookmark.generation,
+            projectionObjectId: archived.objectId,
+            // The store owns the logical active projection path. The capture
+            // layer has already moved this exact object to archivedPath.
+            projectionPath: bookmark.destinationPath,
           });
           return ready.bookmark;
         }

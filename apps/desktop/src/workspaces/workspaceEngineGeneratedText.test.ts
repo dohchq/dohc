@@ -7,6 +7,11 @@ import {
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
+import { formatChatBookmarkProjection } from "./chatBookmarkProjection";
+import {
+  archiveChatBookmarkProjection,
+  writeChatBookmarkProjection,
+} from "./chatBookmarkProjectionWrite";
 
 const roots: string[] = [];
 
@@ -22,12 +27,174 @@ async function write(rootPath: string, path: string, text: string): Promise<void
   await writeFile(absolute, text, "utf8");
 }
 
+function bookmarkProjection(bookmarkId: string, title: string): string {
+  return formatChatBookmarkProjection({
+    bookmarkId,
+    threadId: `thread-${bookmarkId}`,
+    title,
+    mode: "live",
+    updatedAtMs: 1_000,
+    messages: [],
+  });
+}
+
 afterEach(async () => {
   closeTrackedEngineDbHandlesForTest();
   await Promise.all(roots.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
 describe("WorkspaceEngineCapture generated Markdown", () => {
+  it("recovers legacy and crash-interrupted bookmark identity from durable frontmatter", async () => {
+    const rootPath = await root();
+    const legacyPath = "Bookmarks/Chats/legacy.md";
+    const legacyText = bookmarkProjection("bookmark-legacy", "Legacy projection");
+    await write(rootPath, legacyPath, legacyText);
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "generated-bookmark-recovery-test",
+      rootPath,
+    });
+
+    const upgraded = await writeChatBookmarkProjection({
+      bookmark: { bookmarkId: "bookmark-legacy", destinationPath: legacyPath },
+      text: bookmarkProjection("bookmark-legacy", "Refreshed legacy projection"),
+      capture,
+    });
+    expect(await readFile(join(rootPath, legacyPath), "utf8")).toContain(
+      "# Refreshed legacy projection",
+    );
+
+    // Simulate a crash after the generated write committed but before the
+    // bookmark outbox durably recorded upgraded.objectId.
+    const retried = await writeChatBookmarkProjection({
+      bookmark: { bookmarkId: "bookmark-legacy", destinationPath: legacyPath },
+      text: bookmarkProjection("bookmark-legacy", "Crash retry projection"),
+      capture,
+    });
+    expect(retried.objectId).toBe(upgraded.objectId);
+    expect(await readFile(join(rootPath, legacyPath), "utf8")).toContain(
+      "# Crash retry projection",
+    );
+    await capture.stop();
+  });
+
+  it("rejects unclaimed bookmark recovery and archive when the marker is unrelated or corrupt", async () => {
+    const rootPath = await root();
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "generated-bookmark-collision-test",
+      rootPath,
+    });
+    const unrelatedPath = "Bookmarks/Chats/unrelated.md";
+    const unrelatedText = bookmarkProjection("bookmark-someone-else", "Unrelated");
+    await capture.writeGeneratedTextFile({ path: unrelatedPath, text: unrelatedText });
+
+    await expect(
+      writeChatBookmarkProjection({
+        bookmark: { bookmarkId: "bookmark-ours", destinationPath: unrelatedPath },
+        text: bookmarkProjection("bookmark-ours", "Ours"),
+        capture,
+      }),
+    ).rejects.toThrow(/ownership marker does not match/u);
+    await expect(
+      archiveChatBookmarkProjection({
+        bookmark: { bookmarkId: "bookmark-ours", destinationPath: unrelatedPath },
+        archivedPath: "Bookmarks/Chats/Archived/unrelated.md",
+        capture,
+      }),
+    ).rejects.toThrow(/ownership marker does not match/u);
+    expect(await readFile(join(rootPath, unrelatedPath), "utf8")).toBe(unrelatedText);
+
+    const corruptPath = "Bookmarks/Chats/corrupt.md";
+    await writeChatBookmarkProjection({
+      bookmark: { bookmarkId: "bookmark-corrupt", destinationPath: corruptPath },
+      text: bookmarkProjection("bookmark-corrupt", "Before corruption"),
+      capture,
+    });
+    await write(rootPath, corruptPath, "# Marker removed by unrelated content\n");
+    await expect(
+      archiveChatBookmarkProjection({
+        bookmark: { bookmarkId: "bookmark-corrupt", destinationPath: corruptPath },
+        archivedPath: "Bookmarks/Chats/Archived/corrupt.md",
+        capture,
+      }),
+    ).rejects.toThrow(/ownership marker does not match/u);
+    expect(await readFile(join(rootPath, corruptPath), "utf8")).toBe(
+      "# Marker removed by unrelated content\n",
+    );
+    expect(
+      await capture.fileObjectIdForPath("Bookmarks/Chats/Archived/corrupt.md"),
+    ).toBeNull();
+    await capture.stop();
+  });
+
+  it("recovers an unclaimed archive across a crash and restores with fresh ownership", async () => {
+    const rootPath = await root();
+    const capture = createWorkspaceEngineCapture({
+      workspaceId: "generated-bookmark-archive-recovery-test",
+      rootPath,
+    });
+    const legacyBookmark = {
+      bookmarkId: "bookmark-disk-only-archive",
+      destinationPath: "Bookmarks/Chats/disk-only-archive.md",
+    };
+    const legacyArchivedPath = "Bookmarks/Chats/Archived/disk-only-archive.md";
+    await write(
+      rootPath,
+      legacyBookmark.destinationPath,
+      bookmarkProjection(legacyBookmark.bookmarkId, "Disk-only legacy archive"),
+    );
+    const legacyArchived = await archiveChatBookmarkProjection({
+      bookmark: legacyBookmark,
+      archivedPath: legacyArchivedPath,
+      capture,
+    });
+    expect(await capture.fileObjectIdForPath(legacyArchivedPath)).toBe(
+      legacyArchived.objectId,
+    );
+    await expect(
+      readFile(join(rootPath, legacyBookmark.destinationPath), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+
+    const bookmark = {
+      bookmarkId: "bookmark-archive-recovery",
+      destinationPath: "Bookmarks/Chats/recover-archive.md",
+    };
+    const archivedPath = "Bookmarks/Chats/Archived/recover-archive.md";
+    const created = await writeChatBookmarkProjection({
+      bookmark,
+      text: bookmarkProjection(bookmark.bookmarkId, "Before archive"),
+      capture,
+    });
+
+    const archived = await archiveChatBookmarkProjection({
+      bookmark,
+      archivedPath,
+      capture,
+    });
+    expect(archived.objectId).toBe(created.objectId);
+    // Simulate a crash after rename but before markBookmarkReady persisted the
+    // recovered object id. Recovery must recognize the archived side.
+    const retried = await archiveChatBookmarkProjection({
+      bookmark,
+      archivedPath,
+      capture,
+    });
+    expect(retried).toMatchObject({ objectId: created.objectId, changed: false });
+
+    // Reactivation clears the archived ownership in the store, so the active
+    // path is a new projection while the archived object remains untouched.
+    const restored = await writeChatBookmarkProjection({
+      bookmark,
+      text: bookmarkProjection(bookmark.bookmarkId, "Restored projection"),
+      capture,
+    });
+    expect(restored.objectId).not.toBe(created.objectId);
+    expect(await capture.fileObjectIdForPath(archivedPath)).toBe(created.objectId);
+    expect(await capture.fileObjectIdForPath(bookmark.destinationPath)).toBe(
+      restored.objectId,
+    );
+    await capture.stop();
+  });
+
   it("materializes idempotently and preserves object identity across live refreshes", async () => {
     const rootPath = await root();
     const capture = createWorkspaceEngineCapture({

@@ -7,24 +7,37 @@ type GeneratedWriteInput = Parameters<WorkspaceEngineCapture["writeGeneratedText
 describe("chat bookmark projection ownership", () => {
   it("does not grant first projection authority over a pre-existing destination", async () => {
     const writeGeneratedTextFile = vi.fn(async (input: GeneratedWriteInput) => {
-      if (!input.expectedObjectId) {
+      if (
+        !input.recoverExistingText ||
+        !input.recoverExistingText(
+          "---\ndohc_type: chat-bookmark\nbookmark_id: \"someone-elses-bookmark\"\n---\n",
+        )
+      ) {
         throw new Error("Generated Markdown destination already exists");
       }
-      return { path: "Bookmarks/Chats/post.md", objectId: input.expectedObjectId, changed: true };
+      return {
+        path: "Bookmarks/Chats/post.md",
+        objectId: input.expectedObjectId ?? "object-recovered-projection",
+        changed: true,
+      };
     });
 
     await expect(
       writeChatBookmarkProjection({
-        bookmark: { destinationPath: "Bookmarks/Chats/post.md" },
+        bookmark: {
+          bookmarkId: "bookmark-post",
+          destinationPath: "Bookmarks/Chats/post.md",
+        },
         text: "# Saved post\n",
         capture: { writeGeneratedTextFile },
       }),
     ).rejects.toThrow(/destination already exists/u);
-    expect(writeGeneratedTextFile).toHaveBeenCalledWith({
+    const recoveryInput = writeGeneratedTextFile.mock.calls[0]?.[0];
+    expect(recoveryInput).toMatchObject({
       path: "Bookmarks/Chats/post.md",
       text: "# Saved post\n",
-      createOnly: true,
     });
+    expect(recoveryInput?.recoverExistingText).toEqual(expect.any(Function));
   });
 
   it("reuses only the object id already persisted as this bookmark's projection", async () => {
@@ -37,6 +50,7 @@ describe("chat bookmark projection ownership", () => {
     await expect(
       writeChatBookmarkProjection({
         bookmark: {
+          bookmarkId: "bookmark-post",
           destinationPath: "Bookmarks/Chats/post.md",
           projectionObjectId: "object-owned-projection",
         },
