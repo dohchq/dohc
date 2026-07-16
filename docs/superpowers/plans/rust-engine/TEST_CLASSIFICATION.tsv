@@ -45,3 +45,6 @@ apps/desktop/src/workspaces/shareMounts.test.ts	505	portable-behavioral	none	2	u
 apps/desktop/src/workspaces/workspaceVersionOperations.test.ts	681	sql-state-oracle	4 raw db.prepare sites	2	version-ops capability shard
 apps/desktop/src/workspaces/workspaceFiles.test.ts	774	portable-behavioral	none	2	file watcher/listing conventions via fs + public API
 apps/desktop/src/workspaces/workspaceEngineCapture.test.ts	1871	sql-state-oracle	10 raw db.prepare sites	2	largest desktop shard; mirrors workspace-engine oracle patterns for capture
+packages/workspace-engine/src/linkedChatStore.feed.test.ts	1351	sql-state-oracle	2 db.prepare sites (direct chat_messages / chat_attachments inserts) plus a raw SELECT against chat_messages	1	new at 958cdfd3 (PR #136): follow / personal-feed + feed-cursor contract for the linked-chat store; foundational chat oracle
+packages/workspace-engine/src/linkedChatStore.placeholder-provenance.test.ts	134	sql-state-oracle	3 rawDb() call sites	1	new at 958cdfd3 (PR #136): channel-placeholder provenance / deferred-parent apply contract; small focused chat oracle
+packages/workspace-engine/src/linkedChatStore.replication-validation.test.ts	245	portable-behavioral	none (public applyReplicationOp API only)	1	new at 958cdfd3 (PR #136): replication-op validation/idempotency (invalid-payload rejection, apply-then-skip); public API only

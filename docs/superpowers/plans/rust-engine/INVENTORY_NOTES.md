@@ -3,6 +3,13 @@
 Ambiguities, retired-code observations, and decision-required items
 surfaced by the inventory agents. Review before Gate 0.
 
+> Re-extraction note (PR #144): the original inventory was extracted one merge
+> stale (at 5b6d2009, before PR #136 merged). The **chats** and **schema**
+> clusters have since been re-extracted against the correct baseline `958cdfd3`
+> per BEHAVIOR_DELTA, and their rows in BEHAVIOR_INVENTORY / DETERMINISM_AUDIT /
+> TEST_CLASSIFICATION now reflect that baseline. All other clusters remain as
+> originally extracted at 5b6d2009.
+
 ## Cluster: versions
 
 36 rows total for cluster "versions" from packages/workspace-engine/src/versionedTextStore.ts (6272 lines, read in full).
@@ -28,7 +35,7 @@ All lazy-additive upgrade blocks (rows 5-19) share one structural risk not fully
 
 Two columns (content_kind variants, ensureBinaryContentKindColumns) and three individual ALTER helpers (channel_id, author_json, sync_record_only) all reimplement the identical "PRAGMA table_info → ALTER → re-check on race" pattern; ensureNullableColumn is the generic version but the three named helpers predate it and were never consolidated. Pure simplification opportunity for the rewrite, not a behavior difference.
 
-ENGINE_SCHEMA_VERSION has been 1 since inception per this file — there is no exercised version-bump/upgrade-from-v1-to-v2 path in this module; the only "version mismatch" behavior tested is the corruption case (any version != 1 is fail-closed corrupt, never migrated). If the Rust rewrite needs real schema-version migrations, that machinery does not exist yet anywhere in this file and would need to be designed fresh, not ported.
+ENGINE_SCHEMA_VERSION has been 1 since inception per this file — there is still no exercised version-bump/upgrade-from-v1-to-v2 path in this module, and the only "version mismatch" behavior tested is the corruption case (any version != 1 is fail-closed corrupt, never migrated). Migration machinery does now exist, though (corrected at 958cdfd3): PR #136 added a generic `engine_migrations` ledger — a named-marker table with a BEGIN IMMEDIATE + re-check-after-lock repair runner (`repairDeferredChatParentsOnce`), currently driving the single `deferred-chat-parent-repair-v1` backfill. See the schema-migration-ledger-table and schema-migration-repair-deferred-chat-parents rows in BEHAVIOR_INVENTORY. So a Rust rewrite that needs real migrations would extend/port that ledger mechanism rather than design one from scratch; what still does not exist is a schema-VERSION-numbered upgrade path built on top of it.
 
 ## Cluster: chats
 
