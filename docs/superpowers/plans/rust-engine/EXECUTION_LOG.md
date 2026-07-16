@@ -296,3 +296,19 @@ source of truth every orchestrator session loads first).
   POSIX. Two adversarial reviewers launched (bypass+regression;
   cross-platform-breadth product call) — the breadth is a conscious
   decision for Ice, not auto-shipped.
+- PR #145 product-coherence review: APPROVE-WITH-FIXES, verdict reframed.
+  KEY FINDING (P1): validateUserWritePath gates the disk->engine CAPTURE
+  path, not just dohc writes — so universal rejection makes dohc silently
+  DROP legal-on-host files that already exist in the user's folder
+  (VersionedTextStoreError -> console.error only), and (P2) one such file
+  permanently disables the Rust fast scanner for the workspace after N
+  reconciles. That silent folder<->dohc divergence is the real 'obvious
+  workspace' violation, not the rule itself. Recommendation: ship universal
+  rejection (right for portability — a Windows peer self-protects at its own
+  materialize boundary, so universal is about SYNC PORTABILITY not peer
+  protection) BUT (a) surface capture rejections to the user, never silent;
+  (b) kernel scan collect-and-continue, not throw-and-disable; (c) surface
+  search diagnostics to renderer. Long-term dohc-native answer:
+  escape-on-materialize (logical path primitive, Windows disk name a
+  reversible mirage). P1 + kernel-disable P2 are release blockers. Holding
+  fix batch for reviewer 1/2 (bypass/regression).
