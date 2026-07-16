@@ -539,3 +539,38 @@ source of truth every orchestrator session loads first).
 - Housekeeping: .gitignore now ignores in-worktree target-*/ dirs (agents
   keep using in-worktree CARGO_TARGET_DIR despite WINDOWS_DEV out-of-repo
   convention).
+
+## 2026-07-17 — CAL-3 merged · GATE 1 PASSED (calibration checkpoint)
+
+- CAL-3 #153 MERGED: dohc-engine-files crate (scan/hash/diff/reconcile,
+  path floor, bounded streaming sha256 pool, FilesActor, dirty-generation
+  state machine). 44 tests. Both false-delete vectors sealed (transient-IO
+  fail-closed + size-cap-grow retained_over_cap); dirty mark unlosable via
+  sticky AtomicBool; everything bounded (max_entries incl. dirs/skipped);
+  POSIX floor corrected.
+- CALIBRATION RECORD across the 3 trial slices — the review cell caught
+  FIVE P1-class foundation bugs before any propagated:
+  CAL-1: file-id identity (path-canon forked a 2nd writer); fence mutated
+  rejected files. CAL-2: fork provenance (workspace-global vs source
+  version); deduped-write read live snapshot. CAL-3: size-cap-grow
+  false-delete. Plus the differential-tautology lesson (harness must
+  exercise divergence paths + capture all fields) and a current-product
+  floor bug (TS kernel over-excludes .DOHC on POSIX — BEHAVIOR_DELTA §7.2).
+- GATE 1 READ = PROCEED (calibration checkpoint, not go/no-go — full
+  commitment already decided). The architecture is sound and BORING:
+  pure bounded domain logic + single-owner actor on a dedicated thread +
+  tokio command loop + cancellation-between-units + non-tautological
+  differentials. It composed slice→slice with ZERO rework; PORTING/
+  contracts mapped line-for-line; the review cell is indispensable and
+  stays for every shard.
+- Three items scheduled into the capability waves (not blockers, flagged
+  by the slices): (a) a files/runtime NAMED-FAULT-POINT seam for R07's
+  watcher/materialization crash traces; (b) the tolerant-vs-fail-closed
+  scan decision for the false-delete defense (R07); (c) R07's TWO-PHASE
+  apply-ack (persisted pending plan, manifest advance gated on
+  materialization ack) before reconcile drives real fallible capture.
+- PHASE 2 (durable core) opens: R04 storage-core machinery — complete the
+  migration ledger, backup/integrity/corruption-recovery, the durable
+  materialization-job pipeline, blob storage, and harden the versioned-text
+  core schema. Domain-specific tables (chats/secrets/sync/ydoc/search) come
+  with their capability shards per SHARDS ownership.
