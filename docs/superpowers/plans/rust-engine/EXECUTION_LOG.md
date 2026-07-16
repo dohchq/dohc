@@ -104,3 +104,21 @@ source of truth every orchestrator session loads first).
   Wave 0 day one (fence check moved :680 -> :852). Plan citations made
   symbol-based. The plan's Wave-0 freeze on engineDbSchema.ts + sync wire
   surfaces needs Ice to enforce starting now.
+- R01-CONTRACTS delivered (PR #143): PORTING.md (15 mapping sections),
+  STATE_OWNERSHIP.tsv (40 resources, column-validated),
+  LANGUAGE_SEMANTICS_MATRIX.md (84 rows, ~60 named semantics/* fixtures
+  with owning-shard index). Load-bearing: 4 independent same-DB
+  connections with separate serializers enumerated for deletion; Windows
+  junction detection weakens on naive Rust port (reparse-point detection
+  required, matrix 7.6); JSON integral-float formatting breaks journal
+  byte-parity (timestamps as i64); materialization today is plain
+  writeFile (durable-job pipeline is a delta with oracle impact); engine
+  has zero cancellation (drain semantics fixture-pinned).
+- CURRENT-PRODUCT security findings from #143 (independent of rewrite):
+  validateWorkspacePath accepts NTFS ADS ':' segments, drive-relative
+  paths, and Windows device names; search policy read fails OPEN to
+  no-rules on any error incl. EACCES (searchIndex.ts:53-77). Both
+  escalated to Ice as NEEDS-DECISION — candidate TS hotfixes ahead of the
+  rewrite.
+- Gate 0 dual adversarial review of the contract set launched (two
+  clean-context reviewers, approve-together requirement).

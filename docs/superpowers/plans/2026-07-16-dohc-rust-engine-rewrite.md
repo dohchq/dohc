@@ -188,8 +188,8 @@ Authority spans: `packages/workspace-engine` (~34 files; SQLite stores +
 domain logic; `versionedTextStore.ts` alone is 6,272 lines);
 `apps/desktop/src/workspaces/workspaceEngineCapture.ts` (2,418 lines —
 capture, reconciliation, materialization, version ops, policy application,
-Y.Doc session coordination, the `enqueue` promise-chain serializer at
-lines 888–909); `workspaceWatcher.ts` + `workspaceActivity.ts`;
+Y.Doc session coordination, the `enqueue` promise-chain serializer —
+cite the symbol, the file drifts); `workspaceWatcher.ts` + `workspaceActivity.ts`;
 `relaySyncEngine.ts`; `apps/desktop/src/main.ts` (6,130 lines — authorization,
 store singletons, IPC, shutdown); and the narrow Rust accelerator
 (`crates/workspace-kernel` + `packages/workspace-kernel-client`).
