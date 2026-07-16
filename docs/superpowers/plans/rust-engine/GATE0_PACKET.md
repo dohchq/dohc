@@ -66,11 +66,15 @@
 
 ## What happens on your go
 
-Merges (#137→#138→#140→#141→#142→#143, branch cleanup per repo rule) →
-R02 lands the Cargo workspace + CI over the merged crates → GATE0 flips in
-SHARDS.tsv → Wave 1 opens: R04 storage core + the three calibration slices,
-R01-DETERMINISM retrofit, R11b/R13b adapter work behind their deps. The
-engine freeze becomes binding at Wave 1 open.
+Merges (#137/#138/#140/#141/#142/#143/#144, branch cleanup per repo rule)
+→ R02 lands the Cargo workspace + local-runner scripts over the merged
+crates. GATE0 flips ONLY when every SHARDS GATE0 dependency is done —
+YRS-SPIKE ✓, R01-INVENTORY ✓, REINV ✓, R01-CONTRACTS ✓, R01-ORACLE ✓,
+**R01-DETERMINISM** (not yet started — implements the injection retrofit),
+**TS-NATIVE-CI** (now the R02 local-runner native evidence), R02, R03 ✓.
+Then Wave 1 opens: R04 storage core + the three calibration slices,
+R11a/R11b/R13b behind their deps. The engine freeze is binding at Wave 1
+open. SHARDS row status is authoritative over this prose.
 
 ## Standing risks (tracked, not blocking your decision)
 

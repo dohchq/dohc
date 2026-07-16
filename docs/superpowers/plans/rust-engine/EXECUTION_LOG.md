@@ -373,3 +373,14 @@ source of truth every orchestrator session loads first).
   (desktop search blocks chat too on broken policy — pre-existing, safe;
   frozen-index staleness window — self-healing). Hotfix ready to merge
   pending codex bot confirmation; unblocks R01-DETERMINISM.
+- PR #137 review round 7 (SHARDS ownership completeness class): fixed 4
+  concrete items — R15 cutover glob narrowed (cutoverReset*/cutover_real*)
+  to not overlap R15-REHEARSE; R13b gains share/workspace consumers
+  (sharedView/sharedChannels/shareMounts/workspaceFiles/workspaceSearch/
+  workspaceGraph + collab ydocEngineProviderSession); R16 gains
+  collab/** + agents/** deletion ownership; GATE0_PACKET close-sequence
+  now names all GATE0 deps (incl. R01-DETERMINISM, TS-NATIVE-CI). Installed
+  a structural OWNERSHIP MODEL provision at SHARDS.tsv head: owned_paths
+  are the starting allocation, integrator refines at shard-open via
+  repo-wide import scan, the pre-merge hook is advisory until Wave 1 —
+  defusing consumer-enumeration as integrator-upkeep, not a merge blocker.
