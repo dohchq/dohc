@@ -6609,6 +6609,13 @@ function registerIpcHandlers(): void {
                 entries: [],
                 done: true,
                 limitHit: false,
+                // Surface WHY the results are empty instead of a silent blank:
+                // the workspace policy file could not be applied, so search
+                // fails closed until it is fixed.
+                notice: `Search paused: workspace policy could not be applied — ${decision.message}`.slice(
+                  0,
+                  500,
+                ),
               }),
             );
           }

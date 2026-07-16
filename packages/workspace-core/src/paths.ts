@@ -32,6 +32,24 @@ export function stripWindowsAliasSuffix(segment: string): string {
   return segment.replace(/[. ]+$/, "");
 }
 
+// On Windows an 8.3 short-name alias resolves to its long form, so `DOHC~1`
+// addresses `.dohc` and `SHARED~1` addresses `shared-with-me`. A reserved guard
+// that only compared literal segments would let those aliases through. This
+// detects a short-name-shaped segment whose expansion COULD be `stem` (the 8.3
+// base of a reserved name): Windows keeps `base + "~" + digits` within 8 chars,
+// shrinking the base as the collision index grows, so the alias prefix is the
+// stem truncated to that width. Platform-independent on purpose — a reservation
+// bypass must never depend on the guard running on the OS that expands aliases.
+function isReserved83Alias(segment: string, stem: string): boolean {
+  const match = /^([a-z0-9]{1,8})~(\d+)$/i.exec(segment);
+  if (!match) return false;
+  const baseLen = Math.min(stem.length, 7 - match[2].length);
+  return baseLen >= 1 && match[1].toUpperCase() === stem.slice(0, baseLen);
+}
+
+const DOHC_SHORT_NAME_STEM = "DOHC"; // 8.3 base of `.dohc`
+const SHARED_WITH_ME_SHORT_NAME_STEM = "SHARED"; // 8.3 base of `shared-with-me`
+
 // Case-insensitive: on default macOS/Windows filesystems .DOHC aliases .dohc,
 // so a case-sensitive guard would let writes overwrite dohc metadata. Reserved
 // at ANY depth — a nested `notes/.dohc/x` is just as internal as a top-level
@@ -43,7 +61,7 @@ function isDohcMetadataPath(relativePath: string): boolean {
     .toLowerCase()
     .split("/")
     .map(stripWindowsAliasSuffix)
-    .some((segment) => segment === ".dohc");
+    .some((segment) => segment === ".dohc" || isReserved83Alias(segment, DOHC_SHORT_NAME_STEM));
 }
 
 // The top-level shared-with-me projection: share mounts materialize there,
@@ -52,12 +70,8 @@ function isDohcMetadataPath(relativePath: string): boolean {
 // validation (validateUserReadPath) allows it while every write surface
 // refuses it.
 export function isSharedWithMePath(relativePath: string): boolean {
-  const segments = relativePath
-    .replaceAll("\\", "/")
-    .toLowerCase()
-    .split("/")
-    .map(stripWindowsAliasSuffix);
-  return segments[0] === "shared-with-me";
+  const first = relativePath.replaceAll("\\", "/").toLowerCase().split("/").map(stripWindowsAliasSuffix)[0] ?? "";
+  return first === "shared-with-me" || isReserved83Alias(first, SHARED_WITH_ME_SHORT_NAME_STEM);
 }
 
 export function isReservedPath(relativePath: string): boolean {
@@ -97,32 +111,100 @@ export function isSiteSourcePath(relativePath: string): boolean {
   );
 }
 
+// Win32 resolves these basenames to devices — bare or with any extension
+// ("nul", "NUL.md", "com1.tar.gz") — so such a segment never lands in the
+// workspace tree. The superscript digits alias the ASCII ones (COM¹ = COM1).
+const WINDOWS_DEVICE_NAME_RE =
+  /^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³]|conin\$|conout\$|clock\$)$/i;
+
+// Device matching uses the name before the first dot with trailing spaces
+// stripped: "NUL .txt" opens the NUL device too.
+function isWindowsDeviceSegment(segment: string): boolean {
+  const base = segment.split(".", 1)[0] ?? segment;
+  return WINDOWS_DEVICE_NAME_RE.test(stripWindowsAliasSuffix(base));
+}
+
+// A generated-8.3-SHAPED segment that does NOT alias a reserved name (those
+// are caught by Check A). Used only by Check B below.
+const SHORT_NAME_ALIAS_RE = /^[^.\s]{1,8}~\d+(?:\.[^.\s]{1,3})?$/;
+
+// CHECK B — MATERIALIZE HAZARD (disk-write safety only). A segment that is
+// unsafe to WRITE onto a Windows disk but is otherwise host-legal: an NTFS
+// Alternate Data Stream / drive-relative colon, a reserved device basename, or
+// a generic 8.3-shape name (`report~1.pdf`). A colon is a legal filename byte
+// off Windows and these names are ordinary files there, so this is gated to
+// win32 by the caller and runs ONLY at actual disk write/create sinks — never
+// on classify/capture/read (that was the over-block). Reserved aliases are
+// already refused by Check A before this runs.
+function hasMaterializeHazard(segment: string): boolean {
+  return (
+    segment.includes(":") ||
+    isWindowsDeviceSegment(segment) ||
+    SHORT_NAME_ALIAS_RE.test(stripWindowsAliasSuffix(segment))
+  );
+}
+
 export type WritePathValidation =
   | { ok: true; normalized: string }
-  | { ok: false; reason: "traversal" | "absolute" | "reserved" | "invalid" };
+  | {
+      ok: false;
+      reason: "traversal" | "absolute" | "reserved" | "invalid" | "unsupported-name";
+    };
 
+// Write-side validation — CHECK A only (reserved-path). Gates classification,
+// capture, persisted-row checks, and the engine store write, none of which
+// touch the local disk, so it never applies the materialize hazard (Check B):
+// a synced/host-legal name like "report~1.pdf" must classify and capture on
+// every platform. Actual disk sinks use validateUserMaterializePath instead.
 export function validateUserWritePath(
   relativePath: string,
   options: { allowIgnoredSegments?: boolean } = {},
 ): WritePathValidation {
   return validateWorkspacePath(relativePath, {
-    ...options,
+    allowIgnoredSegments: options.allowIgnoredSegments,
     reserved: isReservedPath,
+    rejectHostUnsafeNames: false,
   });
 }
 
-// Read-side validation: identical pipeline to validateUserWritePath except
-// the shared-with-me projection is readable — it is a WRITE reservation, not
-// a secret. `.dohc` metadata stays refused at any depth, and traversal /
-// encoding / ignored-segment rules are byte-identical to the write side so
-// the two validators can never drift on what a path MEANS.
+// Disk-write validation — CHECK A + CHECK B. THE validator for every sink that
+// does writeFile/mkdir/rename/create of a user-controlled path. Check B is
+// gated to Windows (it protects the LOCAL disk), so a name that cannot be
+// written here (`nul.md`, `a:b`, `report~1.pdf`) is refused with
+// `unsupported-name`; `platform` is injectable for tests. Reserved violations
+// still win (Check A runs first).
+export function validateUserMaterializePath(
+  relativePath: string,
+  options: { allowIgnoredSegments?: boolean; platform?: NodeJS.Platform } = {},
+): WritePathValidation {
+  const platform = options.platform ?? process.platform;
+  return validateWorkspacePath(relativePath, {
+    allowIgnoredSegments: options.allowIgnoredSegments,
+    reserved: isReservedPath,
+    rejectHostUnsafeNames: platform === "win32",
+  });
+}
+
+// Read-side validation — CHECK A only (read variant). The shared-with-me
+// projection is readable (a WRITE reservation, not a secret), so only `.dohc`
+// metadata stays refused at any depth. Traversal / encoding / ignored-segment
+// rules are byte-identical to the write side. The materialize hazard is NOT
+// applied to reads (an existing on-disk file must be readable on every
+// platform, whatever its name) with ONE win32-only exception: a colon in a
+// workspace-RELATIVE read path is always an NTFS Alternate Data Stream
+// reference (relative paths carry no drive letters), which dohc never reads —
+// so it is refused on Windows. Off Windows a colon is a legal filename byte and
+// reads accept it. `platform` is injectable for tests.
 export function validateUserReadPath(
   relativePath: string,
-  options: { allowIgnoredSegments?: boolean } = {},
+  options: { allowIgnoredSegments?: boolean; platform?: NodeJS.Platform } = {},
 ): WritePathValidation {
+  const platform = options.platform ?? process.platform;
   return validateWorkspacePath(relativePath, {
-    ...options,
+    allowIgnoredSegments: options.allowIgnoredSegments,
     reserved: isDohcMetadataPath,
+    rejectHostUnsafeNames: false,
+    rejectAdsColon: platform === "win32",
   });
 }
 
@@ -131,6 +213,8 @@ function validateWorkspacePath(
   options: {
     allowIgnoredSegments?: boolean;
     reserved: (normalized: string) => boolean;
+    rejectHostUnsafeNames: boolean;
+    rejectAdsColon?: boolean;
   },
 ): WritePathValidation {
   if (relativePath.includes("\0")) return { ok: false, reason: "invalid" };
@@ -168,9 +252,23 @@ function validateWorkspacePath(
     .filter((segment) => segment !== "" && segment !== ".")
     .join("/");
   if (normalized.length === 0) return { ok: false, reason: "invalid" };
+  // Check A (reserved) runs BEFORE Check B so a reserved alias always reports
+  // "reserved", never "unsupported-name".
   if (options.reserved(normalized)) return { ok: false, reason: "reserved" };
   if (!options.allowIgnoredSegments && hasIgnoredSegment(normalized)) {
     return { ok: false, reason: "reserved" };
+  }
+  // Check B (materialize hazard) — disk sinks only, gated to win32 by the
+  // caller via rejectHostUnsafeNames (which already covers the ADS colon). On
+  // reads only the win32 ADS-colon slice of Check B applies (rejectAdsColon).
+  if (options.rejectHostUnsafeNames) {
+    for (const segment of normalized.split("/")) {
+      if (hasMaterializeHazard(segment)) return { ok: false, reason: "unsupported-name" };
+    }
+  } else if (options.rejectAdsColon) {
+    for (const segment of normalized.split("/")) {
+      if (segment.includes(":")) return { ok: false, reason: "unsupported-name" };
+    }
   }
   return { ok: true, normalized };
 }

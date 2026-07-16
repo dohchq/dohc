@@ -17,7 +17,9 @@ import {
   EXPECTED_ENGINE_EVENT_EXPIRY_MS,
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
+  UnsupportedWorkspacePathError,
   WORKSPACE_KERNEL_FAILURE_DISABLE_THRESHOLD,
+  assertGeneratedMarkdownPath,
   configureWorkspaceKernelRuntime,
   createDefaultDiskWriter,
   createWorkspaceEngineCapture,
@@ -1166,10 +1168,11 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     ).toBe(true);
   });
 
-  // ADVERSARIAL (fail-open gap): a malformed-but-valid JSON-RPC result must be
-  // rejected INSIDE the try so the existing catch falls back to TS — never
-  // throw outside the fallback and break reconciliation. Each shape counts as a
-  // kernel failure toward the disable-after-N guard.
+  // ADVERSARIAL (fail-open gap): a malformed RESULT ENVELOPE must be rejected
+  // INSIDE the try so the existing catch falls back to TS — never throw outside
+  // the fallback and break reconciliation. Each envelope shape means the kernel
+  // itself is broken, so it counts as a kernel failure toward the
+  // disable-after-N guard.
   const malformedScanResults: Array<{ name: string; result: unknown }> = [
     { name: "an empty object (files undefined)", result: {} },
     { name: "an explicit undefined files field", result: { files: undefined } },
@@ -1178,30 +1181,6 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     {
       name: "an entry missing its path",
       result: { files: [{ size: 1, sha256: "a".repeat(64), mediaType: "text/markdown" }] },
-    },
-    {
-      name: "a traversal path",
-      result: {
-        files: [
-          { path: "../escape.md", size: 1, sha256: "a".repeat(64), mediaType: "text/markdown" },
-        ],
-      },
-    },
-    {
-      name: "an absolute path",
-      result: {
-        files: [
-          { path: "/etc/passwd", size: 1, sha256: "a".repeat(64), mediaType: "text/plain" },
-        ],
-      },
-    },
-    {
-      name: "a backslash-escaping path",
-      result: {
-        files: [
-          { path: "notes\\..\\..\\escape.md", size: 1, sha256: "a".repeat(64), mediaType: "text/markdown" },
-        ],
-      },
     },
     {
       name: "a non-hex sha256",
@@ -1216,6 +1195,12 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     {
       name: "a non-string mediaType",
       result: { files: [{ path: "note.md", size: 1, sha256: "a".repeat(64), mediaType: 7 }] },
+    },
+    {
+      // A "." path as a failedPath would blanket-skip every delete, so it must
+      // force the fallback, not be collected.
+      name: "a degenerate '.' path",
+      result: { files: [{ path: ".", size: 1, sha256: "a".repeat(64), mediaType: "text/markdown" }] },
     },
   ];
 
@@ -1246,6 +1231,62 @@ describe("workspaceEngineCapture startup reconciliation", () => {
       ]);
       // The malformed result counted as a kernel failure.
       expect(errors.some((entry) => entry.context === "kernel scan fallback")).toBe(true);
+    });
+  }
+
+  // ADVERSARIAL (over-block / kernel-disable regression): a single unsafe or
+  // unportable PATH in an otherwise well-formed kernel result is one bad entry,
+  // NOT a broken kernel. It must be SKIPPED (never captured), reported as a
+  // reconciliation failure, and must NOT count toward the disable-after-N guard
+  // — the fast scanner keeps serving every OTHER real file.
+  const unsafePathScanEntries: Array<{ name: string; path: string }> = [
+    { name: "a traversal path", path: "../escape.md" },
+    { name: "an absolute path", path: "/etc/passwd" },
+    { name: "a backslash-escaping path", path: "notes\\..\\..\\escape.md" },
+    { name: "a reserved .dohc path", path: ".dohc/secret" },
+  ];
+
+  for (const { name, path } of unsafePathScanEntries) {
+    it(`skips ${name} without disabling the kernel or aborting the scan`, async () => {
+      const root = await tempRoot();
+      await write(root, "note.md", "real disk content\n");
+      mockValidHandshake();
+      const scanSpy = vi
+        .spyOn(WorkspaceKernelClient.prototype, "scan")
+        .mockResolvedValue({
+          files: [
+            {
+              path: "note.md",
+              mediaType: "text/markdown",
+              size: Buffer.byteLength("real disk content\n"),
+              sha256: sha256Utf8("real disk content\n"),
+            },
+            { path, size: 1, sha256: "a".repeat(64), mediaType: "text/markdown" },
+          ],
+        } as never);
+      const errors: Array<{ context: string; error: unknown }> = [];
+      delete process.env.DOHC_KERNEL_SIDECAR;
+      process.env.DOHC_KERNEL_BINARY_PATH = process.execPath;
+
+      const engine = capture(root, {
+        onError(context, error) {
+          errors.push({ context, error });
+        },
+      });
+      engine.start();
+      await engine.stop();
+
+      // The kernel served the scan (no fallback) and the safe file was captured.
+      expect(scanSpy).toHaveBeenCalledWith(root);
+      expect(readEngineMoments(root).map((m) => [m.path, m.operation])).toEqual([
+        ["note.md", "write"],
+      ]);
+      // The bad path never became a workspace file.
+      expect(readSnapshotKinds(root).map((s) => s.path)).not.toContain(path);
+      // It was NOT treated as a kernel fault (no fallback), so the fast scanner
+      // stays enabled; it surfaces as a skipped reconciliation path instead.
+      expect(errors.some((entry) => entry.context === "kernel scan fallback")).toBe(false);
+      expect(errors.some((entry) => entry.context === "reconciliation scan")).toBe(true);
     });
   }
 
@@ -1309,6 +1350,36 @@ describe("workspaceEngineCapture startup reconciliation", () => {
       ["note.md", "write"],
     ]);
     expect(errors.some((entry) => entry.context === "kernel scan fallback")).toBe(true);
+  });
+});
+
+describe("assertGeneratedMarkdownPath host-unsafe rejection (materialize boundary)", () => {
+  it("throws a TYPED unsupported-name error only when the host is Windows", () => {
+    // Windows-illegal names that can arrive from a sync peer and cannot be
+    // materialized on a Windows disk.
+    for (const path of ["nul.md", "notes.md:hidden.md", "DOHC~1.md"]) {
+      expect(() => assertGeneratedMarkdownPath(path, "win32")).toThrow(
+        UnsupportedWorkspacePathError,
+      );
+      try {
+        assertGeneratedMarkdownPath(path, "win32");
+      } catch (error) {
+        expect(error).toBeInstanceOf(UnsupportedWorkspacePathError);
+        expect((error as UnsupportedWorkspacePathError).code).toBe("unsupported-name");
+        expect((error as UnsupportedWorkspacePathError).workspacePath).toBe(path);
+      }
+      // Same names are host-legal off Windows: no typed rejection.
+      expect(assertGeneratedMarkdownPath(path, "linux")).toBe(path);
+    }
+  });
+
+  it("still rejects genuinely-unsafe generated paths generically on every host", () => {
+    expect(() => assertGeneratedMarkdownPath("../escape.md", "linux")).toThrow(
+      /safe visible Markdown path/,
+    );
+    expect(() => assertGeneratedMarkdownPath("notes/plan.txt", "linux")).toThrow(
+      /safe visible Markdown path/,
+    );
   });
 });
 

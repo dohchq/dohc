@@ -12,18 +12,34 @@ import {
   parseVisibilityPolicy,
   resolveEffectivePolicy,
   type FilesPolicyRule,
+  type PolicyParseResult,
   type VisibilityPolicyRule,
 } from "./effectivePolicy";
 import type { EngineSqliteDb } from "./engineDbSchema";
 import { threadDisplayTitle } from "./chatThreadTitle";
 
-const POLICY_FILE_MAX_BYTES = 64 * 1024;
+// Must match the desktop policy reader's cap (MAX_WORKSPACE_SETTINGS_FILE_BYTES,
+// 256 KiB): now that oversize fails CLOSED, a file the desktop accepts and
+// applies must not be treated as broken here, or search would silently pause
+// on a policy both layers consider valid.
+const POLICY_FILE_MAX_BYTES = 256 * 1024;
 const THREAD_HEADER_MESSAGE_ID = "__thread__";
 const MIN_TRIGRAM_QUERY_CHARS = 3;
+
+export interface EngineSearchPolicyDiagnostic {
+  file: string;
+  reason: "unreadable" | "invalid";
+  detail: string;
+}
 
 export interface EngineSearchPolicySnapshot {
   filesPolicy: FilesPolicyRule[] | null;
   visibilityPolicy: VisibilityPolicyRule[] | null;
+  // Fail-closed marker. An ABSENT policy file means defaults (null rules, no
+  // diagnostic); a policy file that EXISTS but cannot be read or parsed must
+  // never widen search, so while a diagnostic is present nothing is indexed
+  // or returned (same posture as the desktop's resolveEngineSearchPolicy).
+  diagnostics: EngineSearchPolicyDiagnostic[];
 }
 
 export interface IndexedSearchCandidateFile {
@@ -50,30 +66,51 @@ function tableHasRows(db: EngineSqliteDb, sql: string, ...params: unknown[]): bo
   return Boolean(db.prepare(sql).get(...params));
 }
 
+type PolicyFileRead<T> = {
+  rules: T[] | null;
+  diagnostic: EngineSearchPolicyDiagnostic | null;
+};
+
 function readPolicyFile<T>(
   rootDir: string,
   fileName: string,
-  parse: (text: string) => { ok: true; rules: T[] } | { ok: false },
-): T[] | null {
+  parse: (text: string) => PolicyParseResult<T>,
+): PolicyFileRead<T> {
+  const broken = (
+    reason: EngineSearchPolicyDiagnostic["reason"],
+    detail: string,
+  ): PolicyFileRead<T> => ({ rules: null, diagnostic: { file: fileName, reason, detail } });
   const path = join(rootDir, ".dohc", fileName);
+  let text: string;
   try {
     const info = lstatSync(path);
-    if (info.isSymbolicLink() || !info.isFile() || info.size > POLICY_FILE_MAX_BYTES) {
-      return null;
+    if (info.isSymbolicLink() || !info.isFile()) {
+      return broken("unreadable", "policy file must be a regular file");
     }
-    const parsed = parse(readFileSync(path, "utf8"));
-    return parsed.ok ? parsed.rules : null;
+    if (info.size > POLICY_FILE_MAX_BYTES) {
+      return broken("unreadable", `policy file exceeds ${POLICY_FILE_MAX_BYTES} bytes`);
+    }
+    text = readFileSync(path, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    return null;
+    // ENOENT means the file is absent, which is a valid configuration (the
+    // defaults apply). Anything else means a policy file may exist that we
+    // failed to read (EACCES, EIO, ...), so filtering must fail closed.
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { rules: null, diagnostic: null };
+    return broken("unreadable", code ?? String(error));
   }
+  const parsed = parse(text);
+  if (!parsed.ok) return broken("invalid", parsed.errors.join("; "));
+  return { rules: parsed.rules, diagnostic: null };
 }
 
 export function readEngineSearchPolicySync(rootDir: string): EngineSearchPolicySnapshot {
-  return {
-    filesPolicy: readPolicyFile(rootDir, "files.toml", parseFilesPolicy),
-    visibilityPolicy: readPolicyFile(rootDir, "visibility.toml", parseVisibilityPolicy),
-  };
+  const files = readPolicyFile(rootDir, "files.toml", parseFilesPolicy);
+  const visibility = readPolicyFile(rootDir, "visibility.toml", parseVisibilityPolicy);
+  const diagnostics: EngineSearchPolicyDiagnostic[] = [];
+  if (files.diagnostic) diagnostics.push(files.diagnostic);
+  if (visibility.diagnostic) diagnostics.push(visibility.diagnostic);
+  return { filesPolicy: files.rules, visibilityPolicy: visibility.rules, diagnostics };
 }
 
 export function pathIsSearchIndexed(
@@ -81,6 +118,9 @@ export function pathIsSearchIndexed(
   path: string,
   policy = readEngineSearchPolicySync(rootDir),
 ): boolean {
+  // A broken policy file fails CLOSED: policy filtering is never silently
+  // disabled, so nothing is searchable until the file is fixed or removed.
+  if (policy.diagnostics.length > 0) return false;
   const resolved = resolveEffectivePolicy({
     path,
     filesPolicy: policy.filesPolicy,
@@ -111,6 +151,21 @@ export function upsertFileSearchIndex(input: {
   workspaceId: WorkspaceId;
   snapshot: TextFileSnapshot;
 }): void {
+  const policy = readEngineSearchPolicySync(input.rootDir);
+  // Broken policy = freeze the file index: don't delete-then-skip (which would
+  // drop this file from a healthy index). Leave FTS rows untouched — query-time
+  // pathIsSearchIndexed fails file search closed while degraded — but INVALIDATE
+  // index_state so a fix triggers a full rebuild that picks up everything
+  // written during the degraded window (a new file would otherwise stay missing
+  // because ensureSearchIndexForVersion skips already-stated versions).
+  if (policy.diagnostics.length > 0) {
+    input.db
+      .prepare(
+        "DELETE FROM engine_search_index_state WHERE workspace_id = ? AND version_id = ?",
+      )
+      .run(input.workspaceId, input.snapshot.versionId);
+    return;
+  }
   deleteFileIndexRow({
     db: input.db,
     workspaceId: input.workspaceId,
@@ -118,7 +173,7 @@ export function upsertFileSearchIndex(input: {
     objectId: input.snapshot.objectId,
   });
   if (input.snapshot.contentKind === "binary") return;
-  if (!pathIsSearchIndexed(input.rootDir, input.snapshot.path)) return;
+  if (!pathIsSearchIndexed(input.rootDir, input.snapshot.path, policy)) return;
   input.db
     .prepare(
       `INSERT INTO engine_search_files_fts (workspace_id, version_id, object_id, path, text)
@@ -227,29 +282,13 @@ export function upsertChatMessageSearchIndex(input: {
     );
 }
 
-export function ensureSearchIndexForVersion(input: {
+function rebuildFileSearchIndexForVersion(input: {
   db: EngineSqliteDb;
   rootDir: string;
   workspaceId: WorkspaceId;
   versionId: VersionId;
-  nowMs: number;
-  corrupt: (cause?: unknown) => Error;
+  policy: EngineSearchPolicySnapshot;
 }): void {
-  if (
-    tableHasRows(
-      input.db,
-      "SELECT 1 FROM engine_search_index_state WHERE workspace_id = ? AND version_id = ?",
-      input.workspaceId,
-      input.versionId,
-    )
-  ) {
-    return;
-  }
-
-  const policy = readEngineSearchPolicySync(input.rootDir);
-  input.db
-    .prepare("DELETE FROM engine_search_files_fts WHERE workspace_id = ? AND version_id = ?")
-    .run(input.workspaceId, input.versionId);
   const files = input.db
     .prepare(
       `SELECT candidate.*, b.text
@@ -280,7 +319,7 @@ export function ensureSearchIndexForVersion(input: {
   );
   for (const row of files) {
     const path = String(row.path);
-    if (!pathIsSearchIndexed(input.rootDir, path, policy)) continue;
+    if (!pathIsSearchIndexed(input.rootDir, path, input.policy)) continue;
     insertFile.run(
       input.workspaceId,
       input.versionId,
@@ -288,6 +327,47 @@ export function ensureSearchIndexForVersion(input: {
       path,
       String(row.text),
     );
+  }
+}
+
+export function ensureSearchIndexForVersion(input: {
+  db: EngineSqliteDb;
+  rootDir: string;
+  workspaceId: WorkspaceId;
+  versionId: VersionId;
+  nowMs: number;
+  corrupt: (cause?: unknown) => Error;
+}): void {
+  if (
+    tableHasRows(
+      input.db,
+      "SELECT 1 FROM engine_search_index_state WHERE workspace_id = ? AND version_id = ?",
+      input.workspaceId,
+      input.versionId,
+    )
+  ) {
+    return;
+  }
+
+  const policy = readEngineSearchPolicySync(input.rootDir);
+  input.db
+    .prepare("DELETE FROM engine_search_files_fts WHERE workspace_id = ? AND version_id = ?")
+    .run(input.workspaceId, input.versionId);
+  // A broken policy fails closed for FILE indexing only: file visibility is
+  // exactly what the policy governs, so leave the file index empty. Chat
+  // indexing (which file policy does NOT govern) still runs below, and no
+  // index_state is recorded while degraded so fixing/removing the policy file
+  // triggers a full rebuild. Query-time pathIsSearchIndexed also fails file
+  // search closed regardless of what the index happens to hold.
+  const policyOk = policy.diagnostics.length === 0;
+  if (policyOk) {
+    rebuildFileSearchIndexForVersion({
+      db: input.db,
+      rootDir: input.rootDir,
+      workspaceId: input.workspaceId,
+      versionId: input.versionId,
+      policy,
+    });
   }
 
   input.db
@@ -338,13 +418,18 @@ export function ensureSearchIndexForVersion(input: {
       }),
     );
   }
-  input.db
-    .prepare(
-      `INSERT INTO engine_search_index_state (workspace_id, version_id, indexed_at_ms)
-       VALUES (?, ?, ?)
-       ON CONFLICT(workspace_id, version_id) DO UPDATE SET indexed_at_ms = excluded.indexed_at_ms`,
-    )
-    .run(input.workspaceId, input.versionId, input.nowMs);
+  // Only mark the version indexed when the file index is authoritative. While
+  // the policy is degraded the file index was intentionally skipped, so
+  // leaving index_state unset forces a rebuild once the policy is fixed.
+  if (policyOk) {
+    input.db
+      .prepare(
+        `INSERT INTO engine_search_index_state (workspace_id, version_id, indexed_at_ms)
+         VALUES (?, ?, ?)
+         ON CONFLICT(workspace_id, version_id) DO UPDATE SET indexed_at_ms = excluded.indexed_at_ms`,
+      )
+      .run(input.workspaceId, input.versionId, input.nowMs);
+  }
 }
 
 function ftsQueryForSubstring(query: string): string | null {
@@ -395,9 +480,15 @@ export function querySearchIndex(input: {
   query: string;
   limit: number;
 }): IndexedSearchCandidate[] | null {
-  const match = ftsQueryForSubstring(input.query);
-  if (!match) return null;
   const policy = readEngineSearchPolicySync(input.rootDir);
+  const match = ftsQueryForSubstring(input.query);
+  if (!match) {
+    // A query too short for the trigram index normally returns null so the
+    // caller does a linear scan — but under a broken policy that linear scan
+    // fails OPEN (default visibility), so fail CLOSED with an empty result set
+    // (non-null) to suppress the fallback. A healthy policy keeps the null.
+    return policy.diagnostics.length > 0 ? [] : null;
+  }
   const candidates: IndexedSearchCandidate[] = [];
   const seenFiles = new Set<string>();
   for (const row of input.db

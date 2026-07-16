@@ -442,6 +442,187 @@ describe("workspace engine search", () => {
     }
   });
 
+  it("fails FILE search closed on a broken policy, keeps CHAT search, and recovers once fixed", async () => {
+    await mkdir(join(root, ".dohc"), { recursive: true });
+    await writeFile(join(root, ".dohc", "files.toml"), "not [ valid toml");
+    const versions = versionStore();
+    const chats = chatStore();
+    const main = await versions.ensureMainVersion({ workspaceId: "workspace-a" });
+    await versions.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/plan.md",
+      text: "FAIL_CLOSED_NEEDLE\n",
+      metadata: { origin: "api" },
+    });
+    // A chat thread whose message carries the SAME needle: file policy does not
+    // govern chat visibility, so a broken files.toml must not hide it. The
+    // thread links an innocuous file so the chat hit comes from the message.
+    const topic = await versions.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/topic.md",
+      text: "unrelated topic\n",
+      metadata: { origin: "api" },
+    });
+    const thread = await chats.createThread({
+      workspaceId: "workspace-a",
+      title: "Planning",
+      linkedFile: { objectId: topic.object.id, pathHint: "notes/topic.md" },
+    });
+    await chats.sendMessage({
+      workspaceId: "workspace-a",
+      threadId: thread.id,
+      author: { kind: "human", displayName: "Ice" },
+      body: "FAIL_CLOSED_NEEDLE from a chat message.",
+    });
+
+    // File hits fail closed and nothing lands in the file index...
+    const broken = await searchWorkspaceEngine({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      query: "FAIL_CLOSED_NEEDLE",
+      versions,
+      chats,
+    });
+    expect(broken.some((result) => result.surface === "file")).toBe(false);
+    // ...but the chat hit still surfaces (file policy does not govern chat).
+    expect(
+      broken.some((result) => result.surface === "chat" && result.threadId === thread.id),
+    ).toBe(true);
+    const db = new DatabaseSync(join(root, VERSIONED_TEXT_STORE_RELATIVE_PATH));
+    try {
+      const rows = db.prepare("SELECT text FROM engine_search_files_fts").all();
+      expect(JSON.stringify(rows)).not.toContain("FAIL_CLOSED_NEEDLE");
+    } finally {
+      db.close();
+    }
+
+    // Fixing the policy file recovers file search: no stale empty index state.
+    await writeFile(
+      join(root, ".dohc", "files.toml"),
+      '[[rule]]\npath = "docs/**"\nsearchable = false\n',
+    );
+    const recovered = await searchWorkspaceEngine({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      query: "FAIL_CLOSED_NEEDLE",
+      versions,
+      chats,
+    });
+    expect(
+      recovered.some((result) => result.surface === "file" && result.path === "notes/plan.md"),
+    ).toBe(true);
+    expect(
+      recovered.some((result) => result.surface === "chat" && result.threadId === thread.id),
+    ).toBe(true);
+  });
+
+  it("freezes the file index on a broken policy instead of dropping an edited file", async () => {
+    const versions = versionStore();
+    const chats = chatStore();
+    const main = await versions.ensureMainVersion({ workspaceId: "workspace-a" });
+    await versions.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/a.md",
+      text: "FREEZE_NEEDLE v1\n",
+      metadata: { origin: "api" },
+    });
+    // A search builds the index AND records index_state for this version.
+    await expect(
+      searchWorkspaceEngine({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        query: "FREEZE_NEEDLE",
+        versions,
+        chats,
+      }),
+    ).resolves.toHaveLength(1);
+
+    // Break the policy, then edit the existing file AND create a NEW one. The
+    // incremental upsert must not drop the edited file, and must invalidate
+    // index_state so the new file (written during the degraded window) is not
+    // lost after the fix.
+    await mkdir(join(root, ".dohc"), { recursive: true });
+    await writeFile(join(root, ".dohc", "files.toml"), "not [ valid toml");
+    await versions.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/a.md",
+      text: "FREEZE_NEEDLE v2\n",
+      metadata: { origin: "api" },
+    });
+    await versions.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/added-while-degraded.md",
+      text: "FREEZE_NEEDLE new file\n",
+      metadata: { origin: "api" },
+    });
+    // While degraded, file search fails closed.
+    await expect(
+      searchWorkspaceEngine({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        query: "FREEZE_NEEDLE",
+        versions,
+        chats,
+      }),
+    ).resolves.toEqual([]);
+
+    // Fixing the policy rebuilds: BOTH the edited file and the file added
+    // during the degraded window are searchable — no external reindex needed.
+    await rm(join(root, ".dohc", "files.toml"));
+    const recovered = await searchWorkspaceEngine({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      query: "FREEZE_NEEDLE",
+      versions,
+      chats,
+    });
+    const recoveredPaths = recovered.filter((r) => r.surface === "file").map((r) => r.path);
+    expect(recoveredPaths).toContain("notes/a.md");
+    expect(recoveredPaths).toContain("notes/added-while-degraded.md");
+  });
+
+  it("fails closed for SHORT queries under a broken policy (no linear fail-open)", async () => {
+    const versions = versionStore();
+    const chats = chatStore();
+    const main = await versions.ensureMainVersion({ workspaceId: "workspace-a" });
+    await versions.writeTextFile({
+      workspaceId: "workspace-a",
+      versionId: main.id,
+      path: "notes/a.md",
+      text: "shortq needle\n",
+      metadata: { origin: "api" },
+    });
+    // Healthy policy: a 2-char query (below the trigram floor) still works via
+    // the linear scan.
+    await expect(
+      searchWorkspaceEngine({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        query: "sh",
+        versions,
+        chats,
+      }),
+    ).resolves.toMatchObject([{ surface: "file", path: "notes/a.md" }]);
+
+    // Broken policy: the short-query linear fallback must NOT leak files.
+    await mkdir(join(root, ".dohc"), { recursive: true });
+    await writeFile(join(root, ".dohc", "visibility.toml"), "not [ valid toml");
+    await expect(
+      searchWorkspaceEngine({
+        workspaceId: "workspace-a",
+        versionId: main.id,
+        query: "sh",
+        versions,
+        chats,
+      }),
+    ).resolves.toEqual([]);
+  });
+
   it("searches a freshly forked version and incrementally reflects a write in the fork", async () => {
     const versions = versionStore();
     const chats = chatStore();
@@ -657,6 +838,40 @@ describe("engine file path classifier (shared by search and capture)", () => {
   it("tracks ordinary workspace text paths", () => {
     expect(classifyEngineFilePath("notes/today.md")).toEqual({ kind: "tracked" });
     expect(classifyEngineFilePath("environment.md")).toEqual({ kind: "tracked" });
+  });
+
+  it("tracks host-legal names that would be Windows-unsafe to WRITE (no capture drop)", () => {
+    // Capture classification (write variant) runs Check A only, NOT the
+    // materialize hazard — so a synced "report~1.pdf" (or a colon / device /
+    // 8.3-shaped name) is tracked and captured on every platform, never
+    // dropped. Materialize protects the local disk separately.
+    for (const path of ["report~1.pdf", "notes/meeting 9:30.md", "con.py", "DOHC~1.md"]) {
+      expect(classifyEngineFilePath(path)).toEqual({ kind: "tracked" });
+    }
+    // Read classification tracks the colon-free host-legal names too; an
+    // ADS-colon path is blocked on Windows reads (covered in paths.test.ts).
+    for (const path of ["report~1.pdf", "con.py", "DOHC~1.md"]) {
+      expect(classifyEngineFilePathForRead(path)).toEqual({ kind: "tracked" });
+    }
+  });
+
+  it("still IGNORES 8.3 short-name aliases of `.dohc` (Check A, reserved bypass)", () => {
+    // DOHC~1 resolves to `.dohc` on Windows, so it must never classify as a
+    // capturable file — the reserved guard catches the alias on every platform.
+    for (const path of ["DOHC~1", "dohc~1", "notes/DOHC~1/x.md", "DOHC~100"]) {
+      expect(classifyEngineFilePath(path)).toEqual({ kind: "ignored" });
+      expect(classifyEngineFilePathForRead(path)).toEqual({ kind: "ignored" });
+    }
+  });
+
+  it("classifies 8.3 aliases of secret files as SECRET on read and write", () => {
+    // A secret file's 8.3 alias keeps its `.env` extension (SECRET~1.ENV), so
+    // the secret floor still marks it protected — read surfaces (asset/export/
+    // MCP) that honor the floor never leak it.
+    for (const path of ["SECRET~1.ENV", "config/PRODUC~1.ENV"]) {
+      expect(classifyEngineFilePath(path)).toEqual({ kind: "secret" });
+      expect(classifyEngineFilePathForRead(path)).toEqual({ kind: "secret" });
+    }
   });
 
   it("read classification sees mounted shares as the mount does", () => {

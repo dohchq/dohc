@@ -1,4 +1,8 @@
-import { validateUserReadPath, validateUserWritePath } from "@dohc/workspace-core";
+import {
+  validateUserMaterializePath,
+  validateUserReadPath,
+  validateUserWritePath,
+} from "@dohc/workspace-core";
 import { mkdir, open, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, relative, sep } from "node:path";
 import { join } from "node:path";
@@ -142,7 +146,7 @@ async function writeContainedFile(
   const { exclusive = false, signal } = options;
   assertWriteNotAborted(signal);
   const label = kind === "asset" ? "Asset" : "Restore";
-  const validated = validateUserWritePath(relativePath);
+  const validated = validateUserMaterializePath(relativePath);
   if (!validated.ok) {
     throw new Error(`Invalid ${kind} path (${validated.reason}): ${relativePath}`);
   }

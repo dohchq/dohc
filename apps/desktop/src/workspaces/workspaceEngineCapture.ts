@@ -1,5 +1,9 @@
 import type { WatcherEvent } from "@dohc/workspace-core";
-import { validateUserWritePath } from "@dohc/workspace-core";
+import {
+  validateUserMaterializePath,
+  validateUserReadPath,
+  validateUserWritePath,
+} from "@dohc/workspace-core";
 import {
   classifyEngineFilePath,
   compareVersionFiles,
@@ -451,8 +455,35 @@ function pathBasename(path: string): string {
   return index >= 0 ? path.slice(index + 1) : path;
 }
 
-function assertGeneratedMarkdownPath(path: string): string {
-  const check = validateUserWritePath(path);
+// A materialize/write refused SOLELY because the filename is not writable on
+// THIS host (a Windows-illegal name — colon/ADS, device name, 8.3 alias —
+// arriving from a sync peer, or generated for one). Distinct from a generic
+// "unsafe path" so the desktop can surface it as an actionable, user-facing
+// diagnostic ("unsupported filename for this platform") instead of a silent
+// console line. The file stays safe in engine state; only THIS host's disk
+// cannot represent the name.
+export class UnsupportedWorkspacePathError extends Error {
+  readonly code = "unsupported-name" as const;
+  constructor(readonly workspacePath: string) {
+    super(
+      `This filename can't be written on this platform and was skipped on disk: ${workspacePath}`,
+    );
+    this.name = "UnsupportedWorkspacePathError";
+  }
+}
+
+// Exported for direct tests of the typed host-unsafe rejection; production
+// callers omit `platform` so it defaults to the real host. This is a
+// materialize boundary (generated Markdown is written to the local disk), so
+// it opts into the host-unsafe-name check, gated to Windows.
+export function assertGeneratedMarkdownPath(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const check = validateUserMaterializePath(path, { platform });
+  if (!check.ok && check.reason === "unsupported-name") {
+    throw new UnsupportedWorkspacePathError(path);
+  }
   if (
     !check.ok ||
     check.normalized !== path ||
@@ -627,7 +658,13 @@ function assertEngineWritablePath(
   policy: WorkspaceEnginePolicySnapshot,
   options: { protected?: boolean } = {},
 ): void {
-  const check = validateUserWritePath(path);
+  // The disk-materialize boundary runs Check A + Check B (win32): a name that
+  // cannot be written on THIS disk is refused here (and surfaced) while
+  // classification/capture/store writes stayed permissive (Check A only).
+  const check = validateUserMaterializePath(path);
+  if (!check.ok && check.reason === "unsupported-name") {
+    throw new UnsupportedWorkspacePathError(path);
+  }
   if (!check.ok || check.normalized !== path) {
     throw new Error(`Engine refused to write unsafe workspace path: ${path}`);
   }
@@ -757,14 +794,21 @@ function firstExistingWorkspaceKernelBinaryPath(): string | null {
 }
 
 // Runtime validation of a kernel.scan result BEFORE any of it is trusted as the
-// authoritative disk listing. A malformed-but-valid JSON-RPC result (e.g.
-// `{}` -> files: undefined, or an entry with a traversal path / non-hex sha)
-// throws here, INSIDE the try, so the existing catch takes the tolerant TS
-// path and the failure counts toward the disable-after-N guard. Each entry must
-// carry a safe normalized RELATIVE path (same validation the TS write path
-// uses), a finite non-negative size, a hex sha256, and a string mediaType.
+// authoritative disk listing. A malformed RESULT ENVELOPE (non-object, missing
+// files array, non-object entry, non-string path, or an entry with a bad
+// size/sha/mediaType) throws here INSIDE the try, so the catch takes the
+// tolerant TS path and the failure counts toward the disable-after-N guard —
+// that shape of garbage means the kernel itself is broken. A well-formed entry
+// whose PATH fails read validation is different: it is one bad/unportable path,
+// not a kernel fault, so it is collected as a skipped failedPath (deduped) and
+// the scan keeps every OTHER real file. Each accepted entry carries a safe
+// normalized RELATIVE path (read validation — capture must see host-legal
+// names), a finite non-negative size, a hex sha256, and a string mediaType.
 // Duplicate paths are de-duped (first wins).
-function validateKernelScanFiles(result: unknown): ReconcileScanFile[] {
+function validateKernelScanFiles(result: unknown): {
+  files: ReconcileScanFile[];
+  failedPaths: string[];
+} {
   if (typeof result !== "object" || result === null) {
     throw new Error("Kernel scan returned a non-object result.");
   }
@@ -774,6 +818,7 @@ function validateKernelScanFiles(result: unknown): ReconcileScanFile[] {
   }
   const seen = new Set<string>();
   const validated: ReconcileScanFile[] = [];
+  const failedPaths: string[] = [];
   for (const entry of files) {
     if (typeof entry !== "object" || entry === null) {
       throw new Error("Kernel scan returned a non-object file entry.");
@@ -783,9 +828,28 @@ function validateKernelScanFiles(result: unknown): ReconcileScanFile[] {
     if (typeof path !== "string") {
       throw new Error("Kernel scan returned a file entry without a string path.");
     }
-    const check = validateUserWritePath(path);
+    // Capture is a READ: a scan lists files that already exist on disk, so
+    // host-legal names must be captured, never rejected (read validation
+    // applies traversal/absolute/reserved/normalization but not the
+    // Windows-write-only host-unsafe-name checks). A path that still fails
+    // (traversal, .dohc, non-normalized) is a bad entry — but a single bad
+    // path is not a whole-kernel fault: collect it as a skipped failure and
+    // keep seeding every OTHER real file, never throw-and-disable the fast
+    // scanner for the workspace.
+    // A "." (or empty) path is not a real subtree the scan skipped — as a
+    // failedPath it would make isUnderScanFailedPath treat EVERY snapshot as
+    // unreadable and silently freeze all delete reconciliation. That is
+    // whole-result garbage, so force the tolerant TS fallback instead.
+    if (path === "." || path === "") {
+      throw new Error(`Kernel scan returned a degenerate file path: ${JSON.stringify(path)}.`);
+    }
+    const check = validateUserReadPath(path);
     if (!check.ok || check.normalized !== path) {
-      throw new Error(`Kernel scan returned an unsafe file path: ${path}`);
+      if (!seen.has(path)) {
+        seen.add(path);
+        failedPaths.push(path);
+      }
+      continue;
     }
     if (
       typeof record.size !== "number" ||
@@ -804,7 +868,7 @@ function validateKernelScanFiles(result: unknown): ReconcileScanFile[] {
     seen.add(path);
     validated.push({ path });
   }
-  return validated;
+  return { files: validated, failedPaths };
 }
 
 async function fallbackReconcileScan(rootPath: string): Promise<ReconcileScan> {
@@ -936,9 +1000,9 @@ export function createWorkspaceEngineCapture(
       const result = await client.scan(rootPath);
       // Validate the shape INSIDE the try so a malformed-but-valid result falls
       // back to TS instead of throwing outside the fallback during reconcile.
-      const files = validateKernelScanFiles(result);
+      const { files, failedPaths } = validateKernelScanFiles(result);
       workspaceKernelConsecutiveFailures = 0;
-      return { files, failedPaths: [] };
+      return { files, failedPaths };
     } catch (error) {
       workspaceKernelConsecutiveFailures += 1;
       if (workspaceKernelConsecutiveFailures >= WORKSPACE_KERNEL_FAILURE_DISABLE_THRESHOLD) {

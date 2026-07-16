@@ -67,6 +67,18 @@ describe("applyBatch", () => {
     expect(model.limitHit).toBe(true);
   });
 
+  it("carries a fail-closed notice and keeps it once set", () => {
+    let model = beginSearch("s1");
+    expect(model.notice).toBeNull();
+    model = applyBatch(
+      model,
+      batch({ entries: [], done: true, notice: "Search paused: policy error" }),
+    );
+    expect(model.notice).toBe("Search paused: policy error");
+    // beginSearch clears it for the next run.
+    expect(beginSearch("s2").notice).toBeNull();
+  });
+
   it("beginSearch resets prior results", () => {
     let model = beginSearch("s1");
     model = applyBatch(model, batch({ entries: [entry("a.md")] }));

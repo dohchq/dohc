@@ -1,9 +1,11 @@
 // Pure MCP tool implementations. Each operates on a workspace ROOT dir and a
 // state HOME (the desktop registry/state location). EVERY workspace-relative
-// path argument is validated through validateUserWritePath before it touches
-// the filesystem — traversal (../, percent-encoded, the reserved .dohc dir)
-// is rejected here, the #1 security requirement. Writes are scoped to the root
-// and never auto-apply a boundary crossing.
+// write path is validated through validateUserMaterializePath (reads through
+// validateUserReadPath) before it touches the filesystem — traversal (../,
+// percent-encoded, the reserved .dohc dir) is rejected here, the #1 security
+// requirement, and disk-write mutations also refuse names that cannot be
+// materialized on this host. Writes are scoped to the root and never
+// auto-apply a boundary crossing.
 
 import {
   addFileChanges,
@@ -14,8 +16,8 @@ import {
   hasWebDependency,
   mediaTypeForPath,
   packageManagerFromFiles,
+  validateUserMaterializePath,
   validateUserReadPath,
-  validateUserWritePath,
   type ChangeAuthor,
   type ChangeProvenance,
   type ChangeSetKind,
@@ -96,7 +98,7 @@ const DEFAULT_SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024;
 const SEARCH_PREVIEW_CHARS = 200;
 
 // Is `absolute` REALLY inside `root` after resolving symlinks? Lexical
-// containment (validateUserWritePath) stops ../ and friends, but a symlink that
+// containment (the path validators) stops ../ and friends, but a symlink that
 // already exists inside the workspace can still point outside it; every later
 // fs call would follow it. We realpath the deepest EXISTING ancestor (the file
 // itself for reads, its parent chain for not-yet-created targets) and require
@@ -137,7 +139,7 @@ async function safeResolve(
   const validated =
     access === "read"
       ? validateUserReadPath(relativePath)
-      : validateUserWritePath(relativePath);
+      : validateUserMaterializePath(relativePath);
   if (!validated.ok) {
     return { ok: false, reason: `path rejected (${validated.reason}): ${relativePath}` };
   }

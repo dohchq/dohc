@@ -346,6 +346,28 @@ describe("parseSearchResultsEvent (preload boundary)", () => {
     ).toEqual({ searchId: "s2", entries: [], done: true, limitHit: true });
   });
 
+  it("accepts and rebuilds an optional fail-closed notice, rejecting a bad one", () => {
+    expect(
+      parseSearchResultsEvent({
+        searchId: "s3",
+        entries: [],
+        done: true,
+        limitHit: false,
+        notice: "Search paused: policy error",
+      }),
+    ).toEqual({
+      searchId: "s3",
+      entries: [],
+      done: true,
+      limitHit: false,
+      notice: "Search paused: policy error",
+    });
+    // A present-but-empty or oversized notice is a malformed event: dropped.
+    expect(parseSearchResultsEvent({ ...batch, notice: "" })).toBeNull();
+    expect(parseSearchResultsEvent({ ...batch, notice: "x".repeat(501) })).toBeNull();
+    expect(parseSearchResultsEvent({ ...batch, notice: 7 })).toBeNull();
+  });
+
   it("rejects unsafe paths: absolute, traversal, backslash, null byte, drive letter", () => {
     for (const path of [
       "/etc/passwd",

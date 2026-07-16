@@ -1,5 +1,6 @@
 import {
   classifyPath,
+  validateUserMaterializePath,
   validateUserReadPath,
   validateUserWritePath,
 } from "@dohc/workspace-core";
@@ -215,7 +216,7 @@ export async function createFile(
   rootPath: string,
   relativePath: string,
 ): Promise<string> {
-  const validated = validateUserWritePath(relativePath);
+  const validated = validateUserMaterializePath(relativePath);
   if (!validated.ok) {
     throw new Error(`Invalid file path (${validated.reason}): ${relativePath}`);
   }
@@ -263,7 +264,7 @@ export async function resolveImportDestination(
   if (targetDir === undefined || targetDir === "") {
     return { absDir: realRoot, relDir: "" };
   }
-  const validated = validateUserWritePath(targetDir);
+  const validated = validateUserMaterializePath(targetDir);
   if (!validated.ok) {
     throw new Error(`Invalid import destination (${validated.reason}): ${targetDir}`);
   }
@@ -350,7 +351,7 @@ export async function copyIntoWorkspace(
   let skipped = 0;
   for (const source of absolutePaths) {
     const name = basename(source);
-    const validated = validateUserWritePath(name);
+    const validated = validateUserMaterializePath(name);
     if (!validated.ok) {
       skipped += 1;
       continue;
@@ -457,7 +458,7 @@ export async function createFolder(
   rootPath: string,
   relativePath: string,
 ): Promise<string> {
-  const validated = validateUserWritePath(relativePath);
+  const validated = validateUserMaterializePath(relativePath);
   if (!validated.ok) {
     throw new Error(`Invalid folder path (${validated.reason}): ${relativePath}`);
   }
@@ -475,8 +476,9 @@ export async function createFolder(
 
 // ONE move engine for rename + drag-move (F2 and DnD both land here).
 // Rules, in order:
-//   1. BOTH sides pass validateUserWritePath — traversal, absolute paths, and
-//      reserved/ignored internals are refused on either side.
+//   1. Source passes Check A (reserved/traversal) — it already exists, so a
+//      host-unsafe-but-real name must still be movable; destination passes the
+//      full materialize check (we WRITE the new name on this disk).
 //   2. Folder into itself/descendant refused (mirrors planDrop's UI no-op).
 //   3. Source: realpath-contain the PARENT, then refuse a symlink source —
 //      the tree never lists symlinks, so no legitimate caller moves one.
@@ -499,7 +501,7 @@ export async function movePath(
   if (!from.ok) {
     throw new Error(`Invalid move source (${from.reason}): ${fromPath}`);
   }
-  const to = validateUserWritePath(toPath);
+  const to = validateUserMaterializePath(toPath);
   if (!to.ok) {
     throw new Error(`Invalid move destination (${to.reason}): ${toPath}`);
   }

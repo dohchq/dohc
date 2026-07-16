@@ -6,6 +6,7 @@ import {
   isReservedPath,
   validateAttachedFolder,
   validateWorkspaceRootChoice,
+  validateUserMaterializePath,
   validateUserReadPath,
   validateUserWritePath,
   hasIgnoredSegment,
@@ -161,6 +162,182 @@ describe("path traversal", () => {
     const result = validateUserWritePath("finance/./reports/q1.md");
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.normalized).toBe("finance/reports/q1.md");
+  });
+});
+
+describe("Check A — reserved-path (security core, every surface, every platform)", () => {
+  // 8.3 short-name aliases of `.dohc`: on Windows these resolve to the reserved
+  // dir, so they must be refused on reads AND writes on EVERY platform (the
+  // guard can't depend on running where the alias expands).
+  const dohcAliases = [
+    "DOHC~1",
+    "dohc~1",
+    "DOHC~1/engine.db",
+    "notes/DOHC~1/x.md",
+    "DOHC~1./x.md",
+    "DOHC~100", // 4 + "~" + 3 digits = 8 chars, the longest valid form
+  ];
+
+  it("rejects `.dohc` 8.3 aliases as reserved on write, read, and materialize", () => {
+    for (const candidate of dohcAliases) {
+      expect(validateUserWritePath(candidate)).toEqual({ ok: false, reason: "reserved" });
+      expect(validateUserReadPath(candidate)).toEqual({ ok: false, reason: "reserved" });
+      expect(validateUserMaterializePath(candidate, { platform: "win32" })).toMatchObject({
+        ok: false,
+        reason: "reserved",
+      });
+      expect(validateUserMaterializePath(candidate, { platform: "linux" })).toMatchObject({
+        ok: false,
+        reason: "reserved",
+      });
+      expect(isReservedPath(candidate)).toBe(true);
+    }
+  });
+
+  it("rejects `shared-with-me` 8.3 aliases on WRITE but allows them on READ", () => {
+    for (const candidate of ["SHARED~1/alex/brief.md", "share~10/x.md", "SHARED~2"]) {
+      // Write reservation (like shared-with-me itself).
+      expect(validateUserWritePath(candidate)).toEqual({ ok: false, reason: "reserved" });
+      expect(validateUserMaterializePath(candidate, { platform: "win32" })).toMatchObject({
+        ok: false,
+        reason: "reserved",
+      });
+      // Readable, exactly like the long-form shared-with-me projection.
+      expect(validateUserReadPath(candidate).ok).toBe(true);
+    }
+  });
+
+  it("does NOT treat non-reserved tilde names as reserved (only the alias stems)", () => {
+    for (const candidate of [
+      "report~1.pdf",
+      "draft~2.md",
+      "DOHC~1.md", // has an extension → aliases a long .md name, not `.dohc`
+      "DOHCXY~1", // prefix past the stem → a real user file
+      "shar~1", // too short to be the shared-with-me stem
+      "LONGDI~1/notes.md",
+    ]) {
+      expect(isReservedPath(candidate)).toBe(false);
+      expect(validateUserWritePath(candidate).ok).toBe(true);
+      expect(validateUserReadPath(candidate).ok).toBe(true);
+    }
+  });
+});
+
+describe("Check B — materialize hazard (disk-write only, win32-gated)", () => {
+  // Host-legal off Windows, unsafe to WRITE onto a Windows disk, and NOT
+  // reserved aliases: ADS/drive colons, device names, generic 8.3 shapes.
+  const hazards = [
+    "notes.md:hidden",
+    "notes.md:hidden:$DATA",
+    "C:foo",
+    "docs/report.md:stream",
+    "a/b:stream/c.md",
+    "NUL",
+    "nul",
+    "nul.md",
+    "CON",
+    "con.md",
+    "CON.md.txt",
+    "PRN",
+    "prn.log",
+    "AUX",
+    "COM1",
+    "com1.tar.gz",
+    "COM9",
+    "LPT1",
+    "lpt9.md",
+    "docs/nul.md",
+    "NUL .txt",
+    "nul.",
+    "CONIN$",
+    "conout$.md",
+    "CLOCK$",
+    "SECRET~1.ENV",
+    "LONGDI~1/notes.md",
+    "report~1.pdf",
+    "draft~2.md",
+    "DOHC~12345", // 8.3-SHAPED but too long to be a real `.dohc` alias
+  ];
+
+  it("rejects hazards on a Windows materialize with a typed reason", () => {
+    for (const candidate of hazards) {
+      expect(validateUserMaterializePath(candidate, { platform: "win32" })).toEqual({
+        ok: false,
+        reason: "unsupported-name",
+      });
+    }
+  });
+
+  it("allows the SAME names on a non-Windows materialize (host-legal there)", () => {
+    for (const candidate of hazards) {
+      expect(validateUserMaterializePath(candidate, { platform: "linux" }).ok).toBe(true);
+      expect(validateUserMaterializePath(candidate, { platform: "darwin" }).ok).toBe(true);
+    }
+  });
+
+  it("allows the SAME names on the default write path (classify/capture) and non-win32 reads", () => {
+    for (const candidate of hazards) {
+      // Check A only — never applies the materialize hazard.
+      expect(validateUserWritePath(candidate).ok).toBe(true);
+      // Reads accept them on non-Windows (colon is a legal filename byte there).
+      expect(validateUserReadPath(candidate, { platform: "linux" }).ok).toBe(true);
+      expect(validateUserReadPath(candidate, { platform: "darwin" }).ok).toBe(true);
+    }
+  });
+
+  it("blocks ADS-colon on WINDOWS reads only (not device/8.3 names)", () => {
+    // A colon in a workspace-relative read path is always an ADS reference on
+    // Windows, which dohc never reads.
+    for (const candidate of ["notes.md:hidden", "C:foo", "docs/report.md:stream"]) {
+      expect(validateUserReadPath(candidate, { platform: "win32" })).toEqual({
+        ok: false,
+        reason: "unsupported-name",
+      });
+      expect(validateUserReadPath(candidate, { platform: "linux" }).ok).toBe(true);
+    }
+    // Non-colon hazards (device names, 8.3 shapes) still READ fine on Windows —
+    // an existing file with that name must stay readable/capturable.
+    for (const candidate of ["nul.md", "report~1.pdf", "CONIN$", "LONGDI~1/notes.md"]) {
+      expect(validateUserReadPath(candidate, { platform: "win32" }).ok).toBe(true);
+    }
+    // Ordinary names read fine on Windows.
+    for (const candidate of ["notes/today.md", "finance/q1 report.md", "a/b/c.txt"]) {
+      expect(validateUserReadPath(candidate, { platform: "win32" }).ok).toBe(true);
+    }
+  });
+
+  it("still rejects genuine traversal/reserved before the hazard check", () => {
+    expect(validateUserMaterializePath("../nul.md", { platform: "win32" })).toMatchObject({
+      ok: false,
+      reason: "traversal",
+    });
+    expect(validateUserMaterializePath(".dohc/x", { platform: "win32" })).toMatchObject({
+      ok: false,
+      reason: "reserved",
+    });
+  });
+
+  it("still accepts device/tilde lookalikes even on a Windows materialize", () => {
+    for (const candidate of [
+      "CONFIG.md",
+      "console.md",
+      "NULL.md",
+      "aux-data.md",
+      "COM10.md",
+      "LPT0.md",
+      "com1ander.md",
+      "nul stuff.md",
+      "notes/prny.md",
+      "notes~backup.md",
+      "verylongname~1.md",
+      "draft~one.md",
+      "~1.md",
+      "my file~1.md",
+      "release.notes~2.md",
+      "tilde~.md",
+    ]) {
+      expect(validateUserMaterializePath(candidate, { platform: "win32" }).ok).toBe(true);
+    }
   });
 });
 

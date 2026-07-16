@@ -3,7 +3,7 @@ import {
   databaseOpLogPath,
   mediaTypeForPath,
   serializeDatabaseOperation,
-  validateUserWritePath,
+  validateUserMaterializePath,
   type ChangeAuthor,
   type DatabaseRowOp,
 } from "@dohc/workspace-core";
@@ -271,7 +271,7 @@ async function writeWorkspaceBytes(
   relativePath: string,
   bytes: Buffer,
 ): Promise<string> {
-  const validated = validateUserWritePath(relativePath);
+  const validated = validateUserMaterializePath(relativePath);
   if (!validated.ok) {
     throw new Error(`Invalid database path (${validated.reason}): ${relativePath}`);
   }

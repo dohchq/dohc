@@ -488,6 +488,16 @@ export function SearchView(props: {
         </div>
       ) : null}
 
+      {model.notice ? (
+        <div
+          data-testid="search-policy-notice"
+          role="status"
+          className="border-b border-line bg-panel-2 px-3 py-1.5 text-[11px] text-warning"
+        >
+          {model.notice}
+        </div>
+      ) : null}
+
       {model.status === "idle" ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
           <Search size={20} aria-hidden strokeWidth={1.9} className="text-line" />
