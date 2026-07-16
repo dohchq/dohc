@@ -19,3 +19,6 @@ source of truth every orchestrator session loads first).
   server-side; `codex update` self-updater fails from Git Bash
   (PowerShell sub-invocation error); updated via pwsh installer to
   0.144.5; `codex exec` on the gpt-5.6-sol default verified working.
+- Portability guardrails added to the plan (library-first core, trait
+  seams in core crates, in-process protocol transport) + open decision 9
+  (mobile/web hosts deferred). Requested and approved by Ice.

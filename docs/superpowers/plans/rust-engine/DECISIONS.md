@@ -37,3 +37,4 @@ Append-only. Every entry: date, decision, decider, rationale pointer.
 | 6 | Account/DM/registry saga model | open |
 | 7 | Agent-run attribution under Rust | open |
 | 8 | Dogfood/canary duration before stable | open |
+| 9 | Mobile/web hosts — deferred; portability guardrails added 2026-07-16 (Ice) | deferred |

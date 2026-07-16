@@ -130,6 +130,10 @@ Strategy: **parallel dormant construction with atomic authority cutover.**
    attribution under Rust with `.dohc/agent-runs.json` as a derived projection
    (recommended).
 8. **Dogfood duration**: minimum canary/soak evidence before stable release.
+9. **Mobile/web hosts**: explicitly deferred; the portability guardrails
+   (library-first core, trait seams, in-process transport) hold the door
+   open at near-zero cost. Building an FFI host or WASM target is a separate
+   future decision.
 
 ## Why this rewrite exists
 
@@ -385,6 +389,40 @@ changes. **Write ownership is at module/table-family level, not crate level**
 (see orchestration) — multiple shards extend `dohc-engine-domain` and
 `dohc-engine-storage` concurrently in disjoint modules.
 
+### Portability guardrails (mobile/web option value)
+
+The rewrite does not build mobile or web surfaces, but it must not foreclose
+them. Rust is the standard shared-core substrate for iOS/Android (Signal,
+1Password, Mozilla Application Services ship one Rust core via FFI/UniFFI),
+`yrs` compiles to wasm32, and SQLite runs in browsers over OPFS — but only if
+platform assumptions stay out of the core. Three guardrails, enforced from
+the first capability shard:
+
+1. **Library-first invariant.** `dohc-workspace-engine` (the binary) is a
+   thin host over an embeddable library API. A second host — a mobile FFI
+   shell that cannot spawn child processes (iOS forbids sidecars) — must be
+   possible without touching domain crates. Enforced in CI: the core crates
+   (`domain`, `storage`, `crypto`, `collab`, `sync`, `protocol`) never depend
+   on the binary/supervisor layer.
+2. **Platform seams stay behind traits in core crates.** No direct
+   tokio/thread/process/filesystem calls in the core crates; clock, spawn,
+   and fs access go through the same trait seams the testkit already
+   requires for deterministic clocks, fault points, and fixture filesystems.
+   The verification program and the portability story are the same
+   abstraction, paid for once. Desktop-specific responsibilities
+   (watching, materialization against a real user file tree) stay isolated
+   in `dohc-engine-files`/`dohc-engine-runtime`, which mobile/web hosts
+   would not link.
+3. **In-process transport.** The R03 protocol/bindings design must admit a
+   direct-call transport alongside framed IPC, so an embedded engine does
+   not serialize to itself. (Design constraint on the spike, not extra
+   work now.)
+
+Mobile UI, mobile's app-container workspace model, and any web surface remain
+out of scope (open decision 9). Future non-desktop clients would lean on the
+replication substrate — journals, cursors, Y.Doc durability, idempotent
+apply — which is exactly what Rust owns after this rewrite.
+
 ### Rust policy
 
 Pinned stable toolchain (`rust-toolchain.toml`), edition 2024, committed
@@ -434,8 +472,10 @@ string/collection/blob/batch sizes; streaming without base64-ing blobs;
 backpressure with explicit overload errors; retryability classification;
 stable machine error codes; capability negotiation; restart/reconnect;
 redaction-safe diagnostics; deterministic fixtures readable by both test
-suites; **and named fault points as a first-class testkit feature** (see
-verification). NDJSON + thread-per-request is the seed, not the target.
+suites; **named fault points as a first-class testkit feature** (see
+verification); **and an in-process direct-call transport alongside framed
+IPC** (portability guardrail 3 — an embedded engine must not serialize to
+itself). NDJSON + thread-per-request is the seed, not the target.
 
 Only desktop main connects during an active desktop session; renderer/CLI/MCP
 proxy through validated desktop main. A renderer-supplied path or ID is never
