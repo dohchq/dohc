@@ -615,13 +615,21 @@ convention:
   floor, and that confinement is tested.
 - **The cutover build is the sole, explicit exception** (otherwise R15's
   reset could not be rehearsed or executed without bypassing the fence):
-  a distinct build produced only after Gate 6 authorization, which runs
-  exclusively the reset state machine. It requires an explicit
-  `--cutover` invocation plus a signed on-disk authorization marker
-  materialized by Ice's Gate 6 sign-off (rehearsals use a rehearsal-scoped
-  marker valid only against clone-marked roots); without the marker it
-  refuses to start. It never writes INTO a v1 database — it moves the v1
-  store aside per the state machine — and it refuses ordinary shadow work.
+  a distinct build that runs exclusively the reset state machine, gated by
+  a two-tier marker so rehearsal is possible *before* Gate 6 and real
+  cutover only *after* it — resolving the otherwise-circular dependency
+  (Gate 6 authorization requires a completed clone-reset rehearsal, which
+  requires this build):
+  - **Rehearsal tier** (available from Phase 5, no Gate 6 needed): runs only
+    against roots bearing BOTH a `SHADOW_CLONE` marker and a
+    harness-written rehearsal token; refuses any un-cloned/real root. This
+    is what produces the Gate 6 rehearsal evidence.
+  - **Real-cutover tier** (only after Gate 6): requires an `--cutover`
+    invocation plus a signed on-disk authorization marker materialized by
+    Ice's Gate 6 sign-off; only this tier may operate on a real
+    (non-clone) root.
+  Either tier never writes INTO a v1 database — it moves the v1 store aside
+  per the state machine — and refuses ordinary shadow work.
 - **Post-cutover (TS must not touch Rust workspaces):** Rust initializes at
   `schema_version = 2`; every TS writer that validates the schema fails
   closed via the `schema_version` corrupt() check in
@@ -699,7 +707,8 @@ response, then reopen and prove exactly-once durable convergence.
 **R11 splits**: R11a (Rust durable cache/snapshots/compaction/leases) starts
 only after Gate 0 passes and R04 lands (the spike verdict is necessary, not
 sufficient); R11b (the TS live-adapter protocol and editor
-integration) starts as soon as R03's protocol freezes, so the adapter
+integration) starts once Gate 0 has passed and R03's protocol freezes
+(SHARDS deps: R03;GATE0), so the adapter
 accumulates dogfood hours through Phases 4–6 instead of debuting at shadow
 replay.
 

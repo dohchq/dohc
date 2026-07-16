@@ -258,3 +258,10 @@ source of truth every orchestrator session loads first).
   decisions 3-8 per recommendation; both security hotfixes approved;
   NEEDS-DECISION defaults approved. PR #139 workflow retired;
   TS-NATIVE-CI repurposed to local runner scripts under R02.
+- PR #137 review round 5 (2 P1 + P2s): R09 now owns
+  desktopAgentDispatchStore.ts deletion (Gate 5 raw-writer requirement had
+  no executable owner); cutover-build fence exception split into two tiers
+  (rehearsal tier available Phase 5 for clones, real-cutover tier only
+  post-Gate-6) resolving the circular Gate 6<->rehearsal dependency I
+  introduced last round; R15/R16 placeholder owned_paths made concrete
+  globs; R11b start text gated on Gate 0.

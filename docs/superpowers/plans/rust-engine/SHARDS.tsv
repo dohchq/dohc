@@ -16,7 +16,7 @@ CAL-2	versioned-write-read-history-restore	1	R04	crates/dohc-engine-domain/src/v
 CAL-3	scan-hash-reconcile-cancel	1	R03;GATE0	crates/dohc-engine-files/**	calibration	high	1	planned	-	-
 R05	identity-blobs-versions-moments-restore	2	R04	crates/dohc-engine-domain/src/{identity,blobs,moments,versions}*	ported	critical	1	planned	-	-
 R08	secrets	2	R04	crates/dohc-engine-crypto/**	ported	critical	1	planned	-	-
-R09	chats-readstate-dispatch	2	R04	crates/dohc-engine-domain/src/chats*;crates/dohc-engine-storage/src/chat_tables*	ported	high	2	planned	-	-
+R09	chats-readstate-dispatch	2	R04	crates/dohc-engine-domain/src/chats*;crates/dohc-engine-storage/src/chat_tables*;apps/desktop/src/agents/desktopAgentDispatchStore.ts	ported	high	2	planned	-	-
 R11a	ydoc-durable-cache	2	YRS-SPIKE;R04	crates/dohc-engine-collab/**	ported+spike-fuzz	critical	1	planned	-	-
 R11b	ydoc-live-adapter	2	R03;GATE0	packages/workspace-engine-client/src/ydoc*	adapter suite	critical	1	planned	-	-
 R12	search	2	R04	crates/dohc-engine-runtime/src/search*	ported	high	2	planned	-	-
@@ -28,5 +28,5 @@ R13b	desktop-adapter-dormant	3	R03;GATE0	apps/desktop/src/workspaces/engineClien
 R13	daemon-composition-shadow-replay	4	R05;R06;R07;R08;R09;R10;R11a;R11b;R12;R13b	crates/dohc-workspace-engine/**	replay	critical	1	planned	-	-
 R14	robustness-closure	5	R13	fuzz/**;soak configs	fuzz+soak	high	1	planned	-	-
 GATE6	gate-release-candidate	5	R14;R10b	-	-	-	-	planned	-	-
-R15	atomic-cutover-reset	cutover	GATE6	cutover wiring	rehearsal	critical	1	planned	-	-
-R16	legacy-deletion-hardening	post	R15	deletions	audit	high	1	planned	-	-
+R15	atomic-cutover-reset	cutover	GATE6	apps/desktop/src/workspaces/cutover*;crates/dohc-workspace-engine/src/cutover*	rehearsal	critical	1	planned	-	-
+R16	legacy-deletion-hardening	post	R15	packages/workspace-engine/src/**;apps/desktop/src/workspaces/**	audit	high	1	planned	-	-
