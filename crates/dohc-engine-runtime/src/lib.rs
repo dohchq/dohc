@@ -8,14 +8,17 @@
 //! - **One writer, one owner.** [`actor::WorkspaceActor`] owns the connection
 //!   on its worker thread; it never crosses threads and there is no second
 //!   connection to the same file.
-//! - **Canonical-identity keying.** [`identity::EngineDbIdentity`] resolves any
-//!   alias (redundant components, relative forms, symlinks, Windows junctions /
-//!   8.3 names) to one identity via `std::fs::canonicalize`, so
-//!   [`supervisor::WorkspaceSupervisor`] returns the *same* actor for aliased
-//!   paths.
+//! - **File-identity keying.** [`identity::EngineDbIdentity`] keys on the OS
+//!   file identity (POSIX `dev`+`ino`, Windows volume+file-index), so every
+//!   alias that addresses the same bytes — filename-case aliases, file
+//!   symlinks, junctions, and hard links — converges on one actor.
+//!   [`supervisor::WorkspaceSupervisor`] dedups on it and never holds its lock
+//!   across the blocking open; [`WorkspaceSupervisor::global`] makes the
+//!   guarantee process-wide.
 //! - **Explicit lifecycle + deterministic Drop.** `open → ready → draining →
 //!   closed`; dropping an actor or the supervisor joins the worker and releases
-//!   the connection — no detached task outlives its owner.
+//!   the connection — no detached task outlives its owner, and a panicking
+//!   worker still publishes `Closed`.
 //!
 //! The crate is dormant: nothing here is reachable from product code.
 

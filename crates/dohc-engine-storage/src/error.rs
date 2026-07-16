@@ -51,6 +51,13 @@ pub enum StorageError {
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
+
+    /// A retry reused an idempotency key with a *different* payload than the
+    /// originally recorded request. Replaying would either drop the new write
+    /// or return a stale result, so the store fails closed instead of guessing
+    /// (a same-payload retry stays exactly-once).
+    #[error("idempotency key was reused with a different payload")]
+    IdempotencyKeyReuseMismatch,
 }
 
 impl StorageError {
@@ -64,6 +71,7 @@ impl StorageError {
             StorageError::InvalidInput { .. } => "invalid-input",
             StorageError::DocumentTooLarge { .. } => "document-too-large",
             StorageError::PersistFailed { .. } => "persist-failed",
+            StorageError::IdempotencyKeyReuseMismatch => "idempotency-key-reuse-mismatch",
         }
     }
 

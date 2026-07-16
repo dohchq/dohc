@@ -18,7 +18,7 @@ use dohc_engine_storage::{
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
 
 /// Bound on the actor's command queue. Backpressure blocks the sender rather
@@ -228,6 +228,30 @@ impl ActorHandle {
             .map_err(RuntimeError::Storage)
     }
 
+    /// Enqueue a compound write WITHOUT waiting for its result, failing fast
+    /// with [`RuntimeError::Overloaded`] if the bounded queue is full. This is
+    /// the observable-backpressure path: the blocking [`ActorHandle::write`]
+    /// waits for space, whereas this reports saturation immediately (the
+    /// protocol's `OVERLOADED`). The result is not delivered to the caller.
+    pub fn try_submit_write(
+        &self,
+        write: CompoundWrite,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<(), RuntimeError> {
+        // A single-slot reply channel is created and immediately dropped; the
+        // worker's later `reply.send` fails harmlessly.
+        let (reply, _reply_rx) = sync_channel(1);
+        match self.tx.try_send(Command::Write {
+            write,
+            faults,
+            reply,
+        }) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(_)) => Err(RuntimeError::Overloaded),
+            Err(TrySendError::Disconnected(_)) => Err(RuntimeError::ActorUnavailable),
+        }
+    }
+
     /// Read a document by id.
     pub fn read(&self, doc_id: &str) -> Result<Option<Document>, RuntimeError> {
         let (reply, reply_rx) = sync_channel(1);
@@ -263,6 +287,19 @@ fn worker_main(
     state: Arc<AtomicU8>,
     startup_tx: SyncSender<Result<(), StorageError>>,
 ) {
+    // Publish Closed on ANY exit — normal return OR a panic unwind (e.g. a
+    // panicking fault injector). Declared before `store` so `store` (and its
+    // connection) drops first, then this guard publishes Closed: a reader that
+    // observes Closed is guaranteed the writer handle is already gone.
+    struct ClosedGuard(Arc<AtomicU8>);
+    impl Drop for ClosedGuard {
+        fn drop(&mut self) {
+            self.0
+                .store(LifecycleState::Closed.as_u8(), Ordering::Release);
+        }
+    }
+    let _closed_guard = ClosedGuard(Arc::clone(&state));
+
     let mut store = match EngineStore::open(&db_path, now_ms) {
         Ok(store) => store,
         Err(err) => {
@@ -307,10 +344,10 @@ fn worker_main(
         }
     }
 
-    // Release the connection first, then publish Closed — a reader observing
-    // Closed is guaranteed the writer handle is gone.
+    // Normal exit: drop the connection explicitly, then the `_closed_guard`
+    // publishes Closed as it falls out of scope (same ordering the guard
+    // guarantees on a panic unwind).
     drop(store);
-    state.store(LifecycleState::Closed.as_u8(), Ordering::Release);
 }
 
 fn snapshot(store: &EngineStore) -> Result<StoreSnapshot, StorageError> {

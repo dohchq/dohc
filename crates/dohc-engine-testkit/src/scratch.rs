@@ -98,3 +98,43 @@ pub fn try_make_dir_alias(target: &Path, link: &Path) -> io::Result<bool> {
         Ok(false)
     }
 }
+
+/// Attempt to create a **file** symlink `link` → `target`.
+///
+/// Returns `Ok(true)` if created, `Ok(false)` if the platform refused it
+/// (Windows without symlink privilege). File symlinks address the same bytes,
+/// so opening through one must converge on the target's file identity.
+pub fn try_make_file_symlink(target: &Path, link: &Path) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        match std::os::unix::fs::symlink(target, link) {
+            Ok(()) => Ok(true),
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+    #[cfg(windows)]
+    {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => Ok(true),
+            Err(err)
+                if err.kind() == io::ErrorKind::PermissionDenied
+                    || err.raw_os_error() == Some(1314) =>
+            {
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (target, link);
+        Ok(false)
+    }
+}
+
+/// Create a hard link `link` → `target` (same inode / file index, so the same
+/// file identity). Hard links are unprivileged on all supported platforms.
+pub fn make_hardlink(target: &Path, link: &Path) -> io::Result<()> {
+    std::fs::hard_link(target, link)
+}

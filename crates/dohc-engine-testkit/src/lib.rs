@@ -4,11 +4,13 @@
 //! calibration signal for the storage + runtime slices:
 //!
 //! - [`scratch::ScratchDir`] — a self-cleaning temp workspace with a canonical
-//!   `.dohc/engine/engine.db` path, plus [`scratch::try_make_dir_alias`] for
-//!   the symlink/junction identity-convergence fixture.
-//! - [`faults::ScriptedFaults`] — a single-shot injector for the named storage
-//!   fault points (`storage.before-persist`,
-//!   `storage.after-commit-before-ack`).
+//!   `.dohc/engine/engine.db` path, plus alias fixtures for identity
+//!   convergence: [`scratch::try_make_dir_alias`] (symlink/junction),
+//!   [`scratch::try_make_file_symlink`], and [`scratch::make_hardlink`].
+//! - [`faults::ScriptedFaults`] / [`faults::PanicFaults`] /
+//!   [`faults::GateFaults`] — injectors for the named storage fault points
+//!   (`storage.before-persist`, `storage.after-commit-before-ack`) that crash,
+//!   panic, or wedge the worker respectively.
 //! - [`harness`] — crash-during-write simulation and adversarial
 //!   database builders (foreign v1 fingerprint, unversioned foreign store).
 //!
@@ -21,5 +23,5 @@ pub mod faults;
 pub mod harness;
 pub mod scratch;
 
-pub use faults::ScriptedFaults;
-pub use scratch::{ScratchDir, try_make_dir_alias};
+pub use faults::{GateFaults, PanicFaults, ScriptedFaults};
+pub use scratch::{ScratchDir, make_hardlink, try_make_dir_alias, try_make_file_symlink};

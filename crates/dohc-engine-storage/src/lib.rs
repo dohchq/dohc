@@ -7,10 +7,13 @@
 //!
 //! - **One writer per store.** [`EngineStore`] owns a single [`rusqlite`]
 //!   connection; it is neither `Sync` nor cloneable, so a second writer to the
-//!   same file is a type error, not a convention (`PORTING.md` §5, §9).
-//! - **The open ritual lives in one place** ([`schema::open_engine_db`]):
-//!   `busy_timeout`, `foreign_keys = ON`, WAL, fingerprint validate-or-init,
-//!   `quick_check`.
+//!   same file is a type error, not a convention (`PORTING.md` §5, §9). The
+//!   low-level open primitive is crate-private; `dohc-engine-runtime`'s
+//!   file-id-keyed supervisor is the enforced single entry point.
+//! - **The open ritual lives in one place** ([`EngineStore::open`]):
+//!   `busy_timeout`, `foreign_keys = ON`, then the fingerprint fence, then —
+//!   only for an accepted store — WAL, `synchronous`, validate-or-init,
+//!   `quick_check`. A rejected store is left byte-unchanged.
 //! - **The v1-vs-v2 fence.** A database stamped with any schema version other
 //!   than `2` is rejected with [`StorageError::UnsupportedFingerprint`] — never
 //!   auto-migrated, never written over (`plan §Day-one Rust schema`).
@@ -30,8 +33,9 @@
 pub mod error;
 pub mod faults;
 pub mod limits;
-pub mod schema;
 pub mod store;
+
+pub(crate) mod schema;
 
 pub use error::StorageError;
 pub use faults::{FaultAction, FaultInjector, FaultPoint, NoFaults};
@@ -39,5 +43,4 @@ pub use limits::{
     ENGINE_SCHEMA_VERSION, ENGINE_SQLITE_BUSY_TIMEOUT_MS, MAX_DOCUMENT_BODY_BYTES,
     MAX_IDENTIFIER_BYTES,
 };
-pub use schema::open_engine_db;
 pub use store::{CompoundWrite, Document, EngineStore, WriteOutcome};

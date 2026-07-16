@@ -65,6 +65,24 @@ pub fn write_foreign_unversioned_db(db_path: &Path) -> FixtureResult {
     Ok(())
 }
 
+/// Open a read-only connection that keeps the WAL alive: while it is held, a
+/// writer's close is NOT the last connection, so SQLite does not checkpoint on
+/// that close. This lets a test prove data is recoverable *from the WAL*
+/// (before any checkpoint folds it into the main file) on reopen.
+pub fn open_readonly_keeper(db_path: &Path) -> rusqlite::Result<Connection> {
+    Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+}
+
+/// The `-wal` sidecar path for a database file.
+pub fn wal_sidecar(db_path: &Path) -> std::path::PathBuf {
+    let mut os = db_path.as_os_str().to_owned();
+    os.push("-wal");
+    std::path::PathBuf::from(os)
+}
+
 /// Convenience: build a compound write with distinct request/doc identifiers.
 pub fn sample_write(request_id: &str, doc_id: &str, body: &str, now_ms: i64) -> CompoundWrite {
     CompoundWrite {

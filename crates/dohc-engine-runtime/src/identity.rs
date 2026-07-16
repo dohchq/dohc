@@ -1,68 +1,70 @@
-//! Canonical physical `engine.db` identity.
+//! Canonical physical `engine.db` identity, keyed on **OS file identity**.
 //!
-//! The workspace actor is keyed by canonical file identity, **not** by lexical
-//! path, workspace id, or session handle (`plan §Workspace actor model`).
-//! Aliases — redundant path components, relative vs absolute forms, symlinks,
-//! and Windows directory junctions / 8.3 short names — must converge on one
-//! identity so they resolve to one actor and one writer connection.
+//! The workspace actor is keyed by true file identity — POSIX `(st_dev,
+//! st_ino)`, Windows `(volume serial, file index)` — **not** by a lexical or
+//! canonicalized path string (`plan §Workspace actor model`). This is the
+//! correct enforcement of the rewrite's core invariant (one writer per
+//! physical database): a path-based key silently forks a second writer for
+//! filename-case aliases (`engine.db` vs `ENGINE.DB` on case-insensitive
+//! volumes), file symlinks, and hard links — each of which addresses the *same*
+//! bytes. File identity collapses all of them onto one key.
 //!
-//! Resolution canonicalizes the deepest existing ancestor (the parent
-//! directory) and rejoins the file name, mirroring the TS engine's
-//! `canonicalEngineDbPath` (`versionedTextStore.ts:483-497`). `std::fs::
-//! canonicalize` resolves symlinks/junctions and expands 8.3 short names (the
-//! win32 finding in `LANGUAGE_SEMANTICS_MATRIX.md` §7.12), but on Windows it
-//! returns a `\\?\`-prefixed path — stripped here before comparison so the
-//! identity string matches Node-shaped identities (matrix §7.4).
+//! Identity is obtained via a metadata-only probe (a short-lived read handle
+//! closed immediately — it does NOT open a second writer connection). The
+//! `file-id` crate performs the platform-specific call behind a safe API, so
+//! these crates keep `#![forbid(unsafe_code)]`.
 
 use crate::error::RuntimeError;
-use std::path::{Path, PathBuf};
+use file_id::FileId;
+use std::path::Path;
 
 /// A canonical `engine.db` identity. Two paths that address the same physical
-/// database produce equal identities.
+/// database — via case-alias, symlink, junction, or hard link — produce equal
+/// identities.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct EngineDbIdentity(String);
+pub struct EngineDbIdentity(FileId);
 
 impl EngineDbIdentity {
-    /// Resolve `db_path` to a canonical identity. The parent directory must
-    /// already exist (the supervisor creates it before calling this).
-    pub fn resolve(db_path: &Path) -> Result<Self, RuntimeError> {
-        let parent = db_path.parent().ok_or(RuntimeError::Identity {
-            reason: "engine.db path has no parent directory",
-            source: None,
+    /// Resolve the identity of an **existing** file. Returns
+    /// [`RuntimeError::Identity`] if it cannot be probed (e.g. missing).
+    pub fn of_existing(path: &Path) -> Result<Self, RuntimeError> {
+        let id = file_id::get_file_id(path).map_err(|err| RuntimeError::Identity {
+            reason: "could not read file identity",
+            source: Some(err),
         })?;
-        let file_name = db_path.file_name().ok_or(RuntimeError::Identity {
-            reason: "engine.db path has no file name",
-            source: None,
-        })?;
-
-        let canonical_parent =
-            std::fs::canonicalize(parent).map_err(|err| RuntimeError::Identity {
-                reason: "parent directory is not canonicalizable",
-                source: Some(err),
-            })?;
-
-        let normalized_parent = strip_windows_verbatim_prefix(&canonical_parent);
-        let full = normalized_parent.join(file_name);
-        Ok(EngineDbIdentity(full.to_string_lossy().into_owned()))
+        Ok(EngineDbIdentity(id))
     }
 
-    /// The canonical identity string (stable, comparable).
-    pub fn as_str(&self) -> &str {
-        &self.0
+    /// Resolve the identity of `path`, creating an empty file first if it does
+    /// not yet exist so a brand-new database still gets a stable identity.
+    ///
+    /// The caller must hold the registry lock across this call: the
+    /// create-then-probe is the point where two concurrent opens of the same
+    /// new path must not both win.
+    pub(crate) fn resolve_or_create(path: &Path) -> Result<Self, RuntimeError> {
+        if !path.exists() {
+            // Create an empty file (no truncation if a race beat us to it).
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)
+                .map_err(|err| RuntimeError::Identity {
+                    reason: "could not create engine.db for identity resolution",
+                    source: Some(err),
+                })?;
+        }
+        Self::of_existing(path)
     }
-}
 
-/// Strip the Windows `\\?\` verbatim prefix (`\\?\C:\…` → `C:\…`,
-/// `\\?\UNC\srv\share` → `\\srv\share`) so identities match Node's
-/// `realpathSync.native` shape (matrix §7.4). A no-op on non-Windows paths and
-/// on already-plain paths.
-fn strip_windows_verbatim_prefix(path: &Path) -> PathBuf {
-    let text = path.to_string_lossy();
-    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{rest}"));
+    /// Resolve the identity of `path` only if it already exists (never
+    /// creates). Used by close/status lookups so a stray path cannot
+    /// materialize a database.
+    pub(crate) fn resolve_existing_opt(path: &Path) -> Result<Option<Self>, RuntimeError> {
+        if !path.exists() {
+            return Ok(None);
+        }
+        Self::of_existing(path).map(Some)
     }
-    if let Some(rest) = text.strip_prefix(r"\\?\") {
-        return PathBuf::from(rest);
-    }
-    path.to_path_buf()
 }

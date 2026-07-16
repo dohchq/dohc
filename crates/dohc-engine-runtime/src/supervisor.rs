@@ -1,91 +1,180 @@
 //! The session registry: one workspace actor per canonical `engine.db`
-//! identity. This is the Rust home of the TS engine's process-global
+//! **file identity**. This is the Rust home of the TS engine's process-global
 //! `storeWriteChains` map + `workspaceActivity` registry
 //! (`STATE_OWNERSHIP.tsv` row `actor-registry`). Its defining job is dedup by
-//! **file identity**: two aliased paths to the same database resolve to one
-//! actor — and therefore one writer connection — never two.
+//! file identity so two aliased paths to one database — case-alias, symlink,
+//! junction, or hard link — resolve to one actor, and therefore one writer
+//! connection, never two.
+//!
+//! Concurrency: the registry lock is **never held across the blocking actor
+//! spawn**. An open reserves its identity slot under the lock, releases the
+//! lock, performs the (potentially slow) open, then re-acquires to finalize —
+//! so `actor_count()` / `close()` stay responsive while another workspace is
+//! opening. Concurrent opens of the *same* identity serialize on a reservation
+//! and share the resulting actor.
 
-use crate::actor::{ActorHandle, WorkspaceActor};
+use crate::actor::{ActorHandle, LifecycleState, WorkspaceActor};
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 
-/// Owns every open workspace actor, keyed by canonical identity. Dropping the
-/// supervisor drops every actor, each of which joins its worker and releases
-/// its connection.
-#[derive(Default)]
+type Registry = HashMap<EngineDbIdentity, Slot>;
+
+/// A registry slot: either an in-flight reservation (a spawn is running with
+/// the lock released) or a live actor.
+enum Slot {
+    Reserving,
+    Active(WorkspaceActor),
+}
+
+/// Owns every open workspace actor, keyed by canonical file identity. Dropping
+/// the supervisor drops every actor, each of which joins its worker and
+/// releases its connection.
 pub struct WorkspaceSupervisor {
-    actors: Mutex<HashMap<EngineDbIdentity, WorkspaceActor>>,
+    registry: Mutex<Registry>,
+    ready: Condvar,
+}
+
+impl Default for WorkspaceSupervisor {
+    fn default() -> Self {
+        WorkspaceSupervisor::new()
+    }
 }
 
 impl WorkspaceSupervisor {
-    /// A fresh, empty supervisor.
+    /// A fresh, empty supervisor. Prefer [`WorkspaceSupervisor::global`] in
+    /// production so per-file uniqueness holds process-wide; construct isolated
+    /// instances in tests.
     pub fn new() -> Self {
-        WorkspaceSupervisor::default()
+        WorkspaceSupervisor {
+            registry: Mutex::new(HashMap::new()),
+            ready: Condvar::new(),
+        }
+    }
+
+    /// The process-global supervisor. The sidecar is one process with one
+    /// session registry; routing every open through this instance is what makes
+    /// "one writer per physical `engine.db`" a process-wide guarantee rather
+    /// than a per-instance one.
+    pub fn global() -> &'static WorkspaceSupervisor {
+        static GLOBAL: OnceLock<WorkspaceSupervisor> = OnceLock::new();
+        GLOBAL.get_or_init(WorkspaceSupervisor::new)
     }
 
     /// Open (or attach to) the workspace whose database is at `db_path`.
     ///
     /// The parent directory is created if missing, the path is resolved to a
-    /// canonical identity, and — if an actor for that identity already exists —
-    /// its handle is returned without opening a second connection. This is the
-    /// alias-convergence contract.
+    /// file identity (creating an empty database file if needed), and — if a
+    /// live actor for that identity already exists — its handle is returned
+    /// without opening a second connection. A dead actor (its worker panicked)
+    /// is evicted and re-opened.
     pub fn open(&self, db_path: &Path, now_ms: i64) -> Result<ActorHandle, RuntimeError> {
         ensure_parent_dir(db_path)?;
-        let identity = EngineDbIdentity::resolve(db_path)?;
 
-        // The lock is held across the blocking store open. For CAL-1 this
-        // serializes opens of *different* workspaces; the actor model makes
-        // that a throughput note, not a correctness one, and concurrent
-        // multi-workspace open is out of this slice's scope.
-        let mut actors = lock(&self.actors);
-        if let Some(actor) = actors.get(&identity) {
-            return Ok(actor.handle());
+        let mut dead: Option<WorkspaceActor> = None;
+        let identity;
+        {
+            let mut guard = lock(&self.registry);
+            identity = EngineDbIdentity::resolve_or_create(db_path)?;
+            loop {
+                let action = match guard.get(&identity) {
+                    Some(Slot::Active(actor)) => {
+                        if actor.lifecycle() == LifecycleState::Closed {
+                            Action::Evict
+                        } else {
+                            Action::Return
+                        }
+                    }
+                    Some(Slot::Reserving) => Action::Wait,
+                    None => Action::Reserve,
+                };
+                match action {
+                    Action::Return => {
+                        if let Some(Slot::Active(actor)) = guard.get(&identity) {
+                            return Ok(actor.handle());
+                        }
+                        continue; // slot changed under us; re-evaluate
+                    }
+                    Action::Evict => {
+                        if let Some(Slot::Active(actor)) = guard.remove(&identity) {
+                            dead = Some(actor);
+                        }
+                        guard.insert(identity.clone(), Slot::Reserving);
+                        break;
+                    }
+                    Action::Wait => {
+                        guard = wait(&self.ready, guard);
+                        continue;
+                    }
+                    Action::Reserve => {
+                        guard.insert(identity.clone(), Slot::Reserving);
+                        break;
+                    }
+                }
+            }
         }
-        let actor = WorkspaceActor::spawn(db_path.to_path_buf(), identity.clone(), 1, now_ms)?;
-        let handle = actor.handle();
-        actors.insert(identity, actor);
-        Ok(handle)
+        // Release the evicted actor's worker outside the lock.
+        drop(dead);
+
+        let spawned = WorkspaceActor::spawn(db_path.to_path_buf(), identity.clone(), 1, now_ms);
+        self.finalize_reservation(identity, spawned)
     }
 
     /// Close and reopen the actor for `db_path`, incrementing its session
-    /// generation. The old connection is fully released before the new one
-    /// opens (a single writer at all times — required on Windows, where an
-    /// open handle blocks reopen/delete).
+    /// generation. Generation continuity is preserved even if the predecessor's
+    /// worker panicked (a dead predecessor is treated as already-closed).
     pub fn restart(&self, db_path: &Path, now_ms: i64) -> Result<ActorHandle, RuntimeError> {
         ensure_parent_dir(db_path)?;
-        let identity = EngineDbIdentity::resolve(db_path)?;
 
-        let mut actors = lock(&self.actors);
-        let next_generation = match actors.remove(&identity) {
-            Some(mut actor) => {
-                let generation = actor.generation();
-                actor.close()?;
-                generation.saturating_add(1)
+        let (old, next_generation, identity) = {
+            let mut guard = lock(&self.registry);
+            let identity = EngineDbIdentity::resolve_or_create(db_path)?;
+            // Wait out any in-flight reservation for this identity.
+            while matches!(guard.get(&identity), Some(Slot::Reserving)) {
+                guard = wait(&self.ready, guard);
             }
-            None => 1,
+            let old = guard.remove(&identity);
+            let next_generation = match &old {
+                Some(Slot::Active(actor)) => actor.generation().saturating_add(1),
+                _ => 1,
+            };
+            guard.insert(identity.clone(), Slot::Reserving);
+            (old, next_generation, identity)
         };
-        let actor = WorkspaceActor::spawn(
+
+        // Close the predecessor outside the lock; a WorkerPanicked from a dead
+        // predecessor is expected here, not an error.
+        if let Some(Slot::Active(mut actor)) = old {
+            let _ = actor.close();
+        }
+
+        let spawned = WorkspaceActor::spawn(
             db_path.to_path_buf(),
             identity.clone(),
             next_generation,
             now_ms,
-        )?;
-        let handle = actor.handle();
-        actors.insert(identity, actor);
-        Ok(handle)
+        );
+        self.finalize_reservation(identity, spawned)
     }
 
     /// Close the actor for `db_path`, if open. Returns whether one was closed.
     pub fn close(&self, db_path: &Path) -> Result<bool, RuntimeError> {
-        let identity = EngineDbIdentity::resolve(db_path)?;
-        let removed = {
-            let mut actors = lock(&self.actors);
-            actors.remove(&identity)
+        let Some(identity) = EngineDbIdentity::resolve_existing_opt(db_path)? else {
+            return Ok(false);
         };
-        match removed {
+        let actor = {
+            let mut guard = lock(&self.registry);
+            while matches!(guard.get(&identity), Some(Slot::Reserving)) {
+                guard = wait(&self.ready, guard);
+            }
+            match guard.remove(&identity) {
+                Some(Slot::Active(actor)) => Some(actor),
+                _ => None,
+            }
+        };
+        match actor {
             Some(mut actor) => {
                 actor.close()?;
                 Ok(true)
@@ -97,8 +186,19 @@ impl WorkspaceSupervisor {
     /// Close every open actor.
     pub fn close_all(&self) -> Result<(), RuntimeError> {
         let drained: Vec<WorkspaceActor> = {
-            let mut actors = lock(&self.actors);
-            actors.drain().map(|(_, actor)| actor).collect()
+            let mut guard = lock(&self.registry);
+            let active_keys: Vec<EngineDbIdentity> = guard
+                .iter()
+                .filter(|(_, slot)| matches!(slot, Slot::Active(_)))
+                .map(|(identity, _)| identity.clone())
+                .collect();
+            active_keys
+                .into_iter()
+                .filter_map(|identity| match guard.remove(&identity) {
+                    Some(Slot::Active(actor)) => Some(actor),
+                    _ => None,
+                })
+                .collect()
         };
         let mut first_err = None;
         for mut actor in drained {
@@ -112,18 +212,57 @@ impl WorkspaceSupervisor {
         }
     }
 
-    /// Number of currently open actors.
+    /// Number of currently open (live) actors.
     pub fn actor_count(&self) -> usize {
-        lock(&self.actors).len()
+        lock(&self.registry)
+            .values()
+            .filter(|slot| matches!(slot, Slot::Active(_)))
+            .count()
     }
 
-    /// The session generation of the actor for `db_path`, if open.
+    /// The session generation of the live actor for `db_path`, if open.
     pub fn generation_of(&self, db_path: &Path) -> Result<Option<u64>, RuntimeError> {
-        let identity = EngineDbIdentity::resolve(db_path)?;
-        Ok(lock(&self.actors)
-            .get(&identity)
-            .map(WorkspaceActor::generation))
+        let Some(identity) = EngineDbIdentity::resolve_existing_opt(db_path)? else {
+            return Ok(None);
+        };
+        let guard = lock(&self.registry);
+        Ok(match guard.get(&identity) {
+            Some(Slot::Active(actor)) => Some(actor.generation()),
+            _ => None,
+        })
     }
+
+    /// Replace a reservation with the spawned actor (or clear it on failure),
+    /// waking any threads waiting on the same identity.
+    fn finalize_reservation(
+        &self,
+        identity: EngineDbIdentity,
+        spawned: Result<WorkspaceActor, RuntimeError>,
+    ) -> Result<ActorHandle, RuntimeError> {
+        let mut guard = lock(&self.registry);
+        let result = match spawned {
+            Ok(actor) => {
+                let handle = actor.handle();
+                guard.insert(identity, Slot::Active(actor));
+                Ok(handle)
+            }
+            Err(err) => {
+                guard.remove(&identity);
+                Err(err)
+            }
+        };
+        self.ready.notify_all();
+        result
+    }
+}
+
+/// The next step the open loop should take (computed without holding a borrow
+/// into the map across a mutation).
+enum Action {
+    Return,
+    Evict,
+    Wait,
+    Reserve,
 }
 
 fn ensure_parent_dir(db_path: &Path) -> Result<(), RuntimeError> {
@@ -139,6 +278,11 @@ fn ensure_parent_dir(db_path: &Path) -> Result<(), RuntimeError> {
 
 /// Recover the guard even if a prior holder panicked: a poisoned registry lock
 /// carries no invariant we cannot re-establish (the map is plain data).
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+fn lock(mutex: &Mutex<Registry>) -> MutexGuard<'_, Registry> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
+/// Wait on the condvar, recovering from a poisoned lock the same way.
+fn wait<'a>(cv: &Condvar, guard: MutexGuard<'a, Registry>) -> MutexGuard<'a, Registry> {
+    cv.wait(guard).unwrap_or_else(|poison| poison.into_inner())
 }

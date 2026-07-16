@@ -8,6 +8,7 @@ description = "CAL-1 calibration slice: one writable rusqlite connection per wor
 
 [dependencies]
 rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
 thiserror = "2"
 
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).

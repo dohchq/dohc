@@ -29,6 +29,12 @@ pub enum RuntimeError {
     #[error("workspace actor is unavailable")]
     ActorUnavailable,
 
+    /// The actor's bounded command queue is full. Explicit backpressure — the
+    /// protocol's `OVERLOADED` (`plan §Rust policy`: bounded everything, no
+    /// unbounded growth). Retry after backoff.
+    #[error("workspace actor command queue is full")]
+    Overloaded,
+
     /// The actor's worker thread panicked; the connection was released by
     /// unwinding but the session is dead.
     #[error("workspace actor worker thread panicked")]
@@ -43,6 +49,7 @@ impl RuntimeError {
             RuntimeError::Storage(err) => err.code(),
             RuntimeError::ThreadSpawn(_) => "thread-spawn-failed",
             RuntimeError::ActorUnavailable => "actor-unavailable",
+            RuntimeError::Overloaded => "overloaded",
             RuntimeError::WorkerPanicked => "worker-panicked",
         }
     }

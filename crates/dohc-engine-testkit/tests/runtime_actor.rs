@@ -3,11 +3,25 @@
 //! generations, and deterministic connection release on close.
 
 use dohc_engine_runtime::{
-    CompoundWrite, LifecycleState, NoFaults, WorkspaceSupervisor, WriteOutcome,
+    CompoundWrite, FaultInjector, FaultPoint, LifecycleState, NoFaults, WorkspaceSupervisor,
+    WriteOutcome,
 };
 use dohc_engine_storage::EngineStore;
-use dohc_engine_testkit::{ScratchDir, try_make_dir_alias};
+use dohc_engine_testkit::{
+    GateFaults, PanicFaults, ScratchDir, make_hardlink, try_make_dir_alias, try_make_file_symlink,
+};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Spin (bounded) until the actor behind `handle` publishes `Closed`, so panic
+/// teardown is observed deterministically without a fixed sleep.
+fn wait_for_closed(handle: &dohc_engine_runtime::ActorHandle) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while handle.lifecycle() != LifecycleState::Closed {
+        assert!(Instant::now() < deadline, "actor never reached Closed");
+        std::thread::yield_now();
+    }
+}
 
 fn write(request_id: &str, doc_id: &str, body: &str, now_ms: i64) -> CompoundWrite {
     CompoundWrite {
@@ -187,4 +201,206 @@ fn dropping_supervisor_releases_all_actors() {
     // Reopen proves the connection was released when the supervisor dropped.
     let store = EngineStore::open(&db, 2).expect("reopen after supervisor drop");
     assert_eq!(store.document_count().expect("docs"), 1);
+}
+
+// oracle: a hard link addresses the same bytes → same file identity → one
+// actor (a path-key would have forked a second writer).
+#[test]
+fn hardlink_converges_on_one_actor() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db path");
+    let sup = WorkspaceSupervisor::new();
+
+    // Open (creates + initializes the db), then hard-link a second name to it.
+    let a = sup.open(&db, 1).expect("open real");
+    a.write(write("r1", "k", "value", 1), Arc::new(NoFaults))
+        .expect("write");
+
+    let linked = db.parent().expect("engine dir").join("engine-hardlink.db");
+    make_hardlink(&db, &linked).expect("hard link");
+
+    let b = sup.open(&linked, 1).expect("open hardlink");
+    assert_eq!(a.identity(), b.identity(), "hard links share file identity");
+    assert_eq!(sup.actor_count(), 1, "one actor / one writer");
+    let doc = b.read("k").expect("read").expect("present");
+    assert_eq!(doc.body, "value");
+}
+
+// oracle: a filename-case alias on a case-insensitive volume addresses the same
+// file → one actor. Skips on case-sensitive filesystems.
+#[test]
+fn case_alias_converges_on_one_actor() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db path");
+    let sup = WorkspaceSupervisor::new();
+    let a = sup.open(&db, 1).expect("open");
+
+    // Upper-case the file name; on a case-insensitive volume this is the same
+    // file, on a case-sensitive one it does not exist.
+    let upper = db.parent().expect("dir").join("ENGINE.DB");
+    if !upper.exists() {
+        eprintln!("SKIP: case-sensitive filesystem — case-alias convergence N/A");
+        return;
+    }
+    let b = sup.open(&upper, 1).expect("open case alias");
+    assert_eq!(
+        a.identity(),
+        b.identity(),
+        "case aliases share file identity"
+    );
+    assert_eq!(sup.actor_count(), 1);
+}
+
+// oracle: a file symlink to the db converges on the same actor. Skips if the
+// platform refuses symlink creation.
+#[test]
+fn file_symlink_converges_on_one_actor() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db path");
+    let sup = WorkspaceSupervisor::new();
+    let a = sup.open(&db, 1).expect("open real");
+
+    let link = db.parent().expect("dir").join("engine-symlink.db");
+    match try_make_file_symlink(&db, &link) {
+        Ok(true) => {}
+        Ok(false) => {
+            eprintln!("SKIP: platform refused a file symlink (no privilege)");
+            return;
+        }
+        Err(err) => panic!("symlink creation failed: {err}"),
+    }
+
+    let b = sup.open(&link, 1).expect("open via symlink");
+    assert_eq!(
+        a.identity(),
+        b.identity(),
+        "symlink resolves to the target's id"
+    );
+    assert_eq!(sup.actor_count(), 1);
+}
+
+// oracle: a worker panic publishes Closed (panic-safe teardown) and the handle
+// fails cleanly rather than hanging.
+#[test]
+fn worker_panic_publishes_closed() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db path");
+    let sup = WorkspaceSupervisor::new();
+    let handle = sup.open(&db, 1).expect("open");
+
+    let panic_faults: Arc<dyn FaultInjector> = PanicFaults::at(FaultPoint::StorageBeforePersist);
+    let err = handle
+        .write(write("r1", "d1", "boom", 1), panic_faults)
+        .expect_err("panic in the worker surfaces as a lost reply");
+    assert_eq!(err.code(), "actor-unavailable");
+
+    wait_for_closed(&handle);
+    assert_eq!(handle.lifecycle(), LifecycleState::Closed);
+}
+
+// oracle: restart after a panicked predecessor preserves generation continuity
+// and yields a fresh, writable actor.
+#[test]
+fn restart_after_panicked_predecessor_continues_generation() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db path");
+    let sup = WorkspaceSupervisor::new();
+
+    let handle = sup.open(&db, 1).expect("open");
+    assert_eq!(sup.generation_of(&db).expect("gen"), Some(1));
+
+    let panic_faults: Arc<dyn FaultInjector> = PanicFaults::at(FaultPoint::StorageBeforePersist);
+    let _ = handle.write(write("r1", "d1", "boom", 1), panic_faults);
+    wait_for_closed(&handle);
+
+    // Restart evicts the dead actor and carries the generation forward.
+    let reopened = sup.restart(&db, 2).expect("restart");
+    assert_eq!(sup.generation_of(&db).expect("gen"), Some(2));
+    assert_eq!(sup.actor_count(), 1);
+
+    // The reopened actor is writable; the rolled-back panic left no data.
+    let outcome = reopened
+        .write(write("r2", "d2", "ok", 2), Arc::new(NoFaults))
+        .expect("write after restart");
+    assert_eq!(
+        outcome,
+        WriteOutcome::Acked {
+            seq: 1,
+            deduped: false
+        }
+    );
+    assert_eq!(reopened.snapshot().expect("snap").documents, 1);
+}
+
+// oracle: bounded backpressure is observable — filling the command queue behind
+// a wedged worker yields a typed Overloaded, not an unbounded queue or a hang.
+#[test]
+fn full_command_queue_reports_overloaded() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db path");
+    let sup = WorkspaceSupervisor::new();
+    let handle = sup.open(&db, 1).expect("open");
+
+    // Wedge the worker: it dequeues this write and parks inside the gate.
+    let gate = GateFaults::at(FaultPoint::StorageBeforePersist);
+    let gate_dyn: Arc<dyn FaultInjector> = gate.clone();
+    handle
+        .try_submit_write(write("wedge", "wd", "held", 1), gate_dyn)
+        .expect("submit wedger");
+    gate.wait_until_reached();
+
+    // Fill the bounded queue; a bounded number of submits must hit Overloaded.
+    let mut overloaded = false;
+    for i in 0..512 {
+        match handle.try_submit_write(
+            write(&format!("fill-{i}"), &format!("fd-{i}"), "x", 1),
+            Arc::new(NoFaults),
+        ) {
+            Ok(()) => {}
+            Err(err) if err.code() == "overloaded" => {
+                overloaded = true;
+                break;
+            }
+            Err(err) => panic!("unexpected error while filling queue: {err}"),
+        }
+    }
+    assert!(overloaded, "a full bounded queue must report Overloaded");
+
+    // Release the worker before teardown so close can drain (no deadlock).
+    gate.release();
+    sup.close_all().expect("close all");
+}
+
+// oracle: concurrent opens of the same file converge on ONE actor / ONE writer
+// (the reservation protocol dedups; the lock is not held across the spawn).
+#[test]
+fn concurrent_opens_share_one_actor() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db path");
+    let sup = Arc::new(WorkspaceSupervisor::new());
+
+    let mut joins = Vec::new();
+    for t in 0..8 {
+        let sup = Arc::clone(&sup);
+        let db = db.clone();
+        joins.push(std::thread::spawn(move || {
+            let handle = sup.open(&db, 1).expect("concurrent open");
+            handle
+                .write(
+                    write(&format!("r-{t}"), &format!("d-{t}"), "v", 1),
+                    Arc::new(NoFaults),
+                )
+                .expect("write");
+            handle
+        }));
+    }
+    let handles: Vec<_> = joins.into_iter().map(|j| j.join().expect("join")).collect();
+
+    assert_eq!(sup.actor_count(), 1, "all opens share one actor");
+    let first_identity = handles[0].identity();
+    for handle in &handles {
+        assert_eq!(handle.identity(), first_identity, "one file identity");
+    }
+    // Every concurrent write landed in the single store.
+    assert_eq!(handles[0].snapshot().expect("snap").documents, 8);
 }

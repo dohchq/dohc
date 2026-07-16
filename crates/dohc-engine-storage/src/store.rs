@@ -9,6 +9,7 @@ use crate::faults::{FaultAction, FaultInjector, FaultPoint};
 use crate::limits::{MAX_DOCUMENT_BODY_BYTES, MAX_IDENTIFIER_BYTES};
 use crate::schema::open_engine_db;
 use rusqlite::{Connection, TransactionBehavior};
+use sha2::{Digest, Sha256};
 use std::path::Path;
 
 /// A single owned writable connection. Not `Sync`, not cloneable: the workspace
@@ -96,9 +97,38 @@ pub struct Document {
     pub updated_at_ms: i64,
 }
 
+/// A prior request recovered from the idempotency ledger.
+struct RecordedRequest {
+    payload_hash: String,
+    result_seq: i64,
+}
+
+/// Deterministic fingerprint of a write's payload (`doc_id`, `body`, `op_kind`)
+/// as lowercase-hex SHA-256 over NUL-separated fields — the plan's
+/// content-addressing discipline (`PORTING.md` §10/§11). Stored in the
+/// idempotency ledger so a retry can be checked for payload equality.
+fn payload_fingerprint(write: &CompoundWrite) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(write.doc_id.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(write.body.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(write.op_kind.as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        // Infallible: writing to a String never fails.
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
 impl EngineStore {
     /// Open-or-create the store at `path`, applying the full open ritual and
-    /// the v1-vs-v2 fingerprint fence (`open_engine_db`).
+    /// the v1-vs-v2 fingerprint fence (`open_engine_db`). This is the low-level
+    /// writer primitive — the single-writer-per-file contract is enforced by
+    /// `dohc-engine-runtime`'s supervisor, which is the intended entry point.
     pub fn open(path: &Path, now_ms: i64) -> Result<Self, StorageError> {
         Ok(EngineStore {
             conn: open_engine_db(path, now_ms)?,
@@ -114,11 +144,20 @@ impl EngineStore {
         faults: &dyn FaultInjector,
     ) -> Result<WriteOutcome, StorageError> {
         write.validate()?;
+        let payload_hash = payload_fingerprint(write);
 
         // Idempotency pre-check: a retry whose ledger row was committed by a
         // prior attempt replays to the recorded result and never re-applies.
-        if let Some(seq) = self.lookup_request(&write.request_id)? {
-            return Ok(WriteOutcome::Acked { seq, deduped: true });
+        // A key reused with a DIFFERENT payload is rejected — replaying would
+        // drop the new write or return a stale result.
+        if let Some(recorded) = self.lookup_request(&write.request_id)? {
+            if recorded.payload_hash != payload_hash {
+                return Err(StorageError::IdempotencyKeyReuseMismatch);
+            }
+            return Ok(WriteOutcome::Acked {
+                seq: recorded.result_seq,
+                deduped: true,
+            });
         }
 
         let tx = self
@@ -143,9 +182,9 @@ impl EngineStore {
         let seq = tx.last_insert_rowid();
 
         tx.execute(
-            "INSERT INTO engine_requests (request_id, result_seq, committed_at) \
-             VALUES (?1, ?2, ?3)",
-            rusqlite::params![write.request_id, seq, write.now_ms],
+            "INSERT INTO engine_requests (request_id, payload_hash, result_seq, committed_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![write.request_id, payload_hash, seq, write.now_ms],
         )
         .map_err(StorageError::persist)?;
 
@@ -171,18 +210,31 @@ impl EngineStore {
         })
     }
 
-    fn lookup_request(&self, request_id: &str) -> Result<Option<i64>, StorageError> {
+    fn lookup_request(&self, request_id: &str) -> Result<Option<RecordedRequest>, StorageError> {
         self.conn
             .query_row(
-                "SELECT result_seq FROM engine_requests WHERE request_id = ?1",
+                "SELECT payload_hash, result_seq FROM engine_requests WHERE request_id = ?1",
                 [request_id],
-                |row| row.get::<_, i64>(0),
+                |row| {
+                    Ok(RecordedRequest {
+                        payload_hash: row.get(0)?,
+                        result_seq: row.get(1)?,
+                    })
+                },
             )
             .map(Some)
             .or_else(|err| match err {
                 rusqlite::Error::QueryReturnedNoRows => Ok(None),
                 other => Err(StorageError::corrupt(other)),
             })
+    }
+
+    /// The database's `PRAGMA synchronous` setting (`1` = NORMAL). Exposed so a
+    /// weakened-durability configuration is directly assertable.
+    pub fn synchronous_setting(&self) -> Result<i64, StorageError> {
+        self.conn
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .map_err(StorageError::corrupt)
     }
 
     /// Read a document by id (read-your-writes on the owned connection).
