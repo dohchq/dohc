@@ -9,7 +9,7 @@ R01-CONTRACTS	porting-guide;state-ownership;semantics-matrix	0	R01-INVENTORY	doc
 R02	cargo-ci	0	-	Cargo.toml;rust-toolchain.toml;.github/workflows/rust-*	-	medium	2	planned	codex/rust-engine-r02	-
 R03	protocol	0	-	crates/dohc-engine-protocol/**;packages/workspace-engine-client/**	protocol conformance	high	1	implemented but unverified	codex/rust-engine-r03	141
 TS-NATIVE-CI	oracle-baseline-local	0	-	tools/rust-engine-program/run-native-suite*	existing suite	medium	2	planned	-	-
-REINV	reinventory-chats-schema-958cdfd3	0	R01-INVENTORY	docs/superpowers/plans/rust-engine/BEHAVIOR_INVENTORY.tsv;docs/superpowers/plans/rust-engine/DETERMINISM_AUDIT.tsv;docs/superpowers/plans/rust-engine/TEST_CLASSIFICATION.tsv	-	high	1	in progress	-	-
+REINV	reinventory-chats-schema-958cdfd3	0	R01-INVENTORY	docs/superpowers/plans/rust-engine/BEHAVIOR_INVENTORY.tsv;docs/superpowers/plans/rust-engine/DETERMINISM_AUDIT.tsv;docs/superpowers/plans/rust-engine/TEST_CLASSIFICATION.tsv	-	high	1	implemented but unverified	-	138
 GATE0	gate-phase0-closure	0	YRS-SPIKE;R01-INVENTORY;REINV;R01-CONTRACTS;R01-ORACLE;R01-DETERMINISM;TS-NATIVE-CI;R02;R03	-	-	-	-	planned	-	-
 R04	storage-core	1	R02;R03;GATE0;REINV	crates/dohc-engine-storage/**	ported storage tests	critical	1	planned	-	-
 CAL-1	ws-open-close-txn-restart	1	R04	crates/dohc-engine-runtime/src/session*	calibration	high	1	planned	-	-

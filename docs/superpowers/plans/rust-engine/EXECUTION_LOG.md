@@ -327,3 +327,13 @@ source of truth every orchestrator session loads first).
   replace the stale chats+schema clusters on PR #138 and correct the
   'no migration machinery' claim in INVENTORY_NOTES. Once merged, REINV
   clears and R04/R09 unblock.
+- RE-INVENTORY merged into PR #138 (46de82a3): BEHAVIOR_INVENTORY
+  232->261 rows (75 stale chats/schema rows replaced by 104 corrected;
+  no behavior_id collisions; non-chats/schema clusters byte-identical),
+  DETERMINISM 123, TEST_CLASSIFICATION 49 (+3 verified chat test files).
+  INVENTORY_NOTES 'no migration machinery' claim corrected. ENDORSED
+  merge-agent deviation: kept the 5 dispatch-store determinism seams
+  (byte-identical at baseline, still valid) rather than the literal
+  remove-all instruction — correct call. GATE0_PACKET counts superseded:
+  261/218/49/123. REINV done; R04/R09 REINV-block cleared (still gated on
+  GATE0).
