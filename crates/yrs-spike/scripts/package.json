@@ -1,0 +1,23 @@
+{
+  "name": "@dohc/yrs-spike-scripts",
+  "private": true,
+  "type": "module",
+  "description": "Node driver for the yrs/Yjs interoperability spike (R11 abort criterion). Runs the fidelity corpus + harvested fixtures through the Rust yrs harness and the seeded alternating-driver fuzz.",
+  "scripts": {
+    "harvest": "node harvest.mjs",
+    "fidelity": "tsx fidelity.ts",
+    "fuzz": "tsx fuzz.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dohc/ydoc-projection": "workspace:*",
+    "@types/js-yaml": "^4.0.9",
+    "js-yaml": "^4.1.1",
+    "yjs": "13.6.30"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -2,6 +2,9 @@ packages:
   - "apps/*"
   - "packages/*"
   - "services/*"
+  # R11 spike: the Node driver for the yrs/Yjs interop harness needs the
+  # repo's pinned yjs + @dohc/ydoc-projection (see crates/yrs-spike).
+  - "crates/yrs-spike/scripts"
 
 # pnpm 10 ignores dependency build scripts by default; Electron's binary
 # download runs in its postinstall, so it must be allowlisted explicitly.
