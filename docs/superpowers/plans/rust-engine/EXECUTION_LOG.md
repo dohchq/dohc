@@ -285,3 +285,14 @@ source of truth every orchestrator session loads first).
   958cdfd3 and is unaffected. Delta register records the reconciliation; canonical BEHAVIOR_DELTA.md is PR #144 (26 new / 16 changed behaviors, +7,760/-50 across 36 engine files; 0 drift on secrets/Y.Doc/shared-channels/watcher/policy/search). NOTE: R01-ORACLE also forked at 958cdfd3 and is current — no oracle update owed.
   New REINV shard blocks R04/R09; GATE0 gains REINV dep. GATE0_PACKET counts
   232/218/46/117 are pre-merge and will move.
+- HOTFIX PR #145 up (023dbedd): path-validation (ADS ':' segments,
+  Windows device names, 8.3 short-name aliases rejected in
+  validateWorkspacePath covering both read+write paths) + search
+  fail-closed (ENOENT->defaults, EACCES/parse/oversized->fail closed with
+  typed diagnostic, no stale index). Tests: workspace-core 122,
+  workspace-engine 460+19 fs-lock, incl. ENOENT-vs-EACCES + broken-then-
+  fixed search e2e. DESIGN FLAG: rejections are cross-platform, not
+  Windows-only -> newly rejects meeting 10:30.md / nul.md / draft~2.md on
+  POSIX. Two adversarial reviewers launched (bypass+regression;
+  cross-platform-breadth product call) — the breadth is a conscious
+  decision for Ice, not auto-shipped.
