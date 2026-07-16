@@ -168,10 +168,12 @@ export function resolveWikilinkNavigation(
     const fileTarget = target.slice(0, hashIndex);
     const fragment = target.slice(hashIndex + 1);
     const match = findKnownWikilinkFile(fileTarget, currentPath, knownFiles);
-    if (match && fragment) {
+    if (match) {
       return {
         path: match.path,
-        headingTarget: { anchor: fragment, nonce },
+        ...(fragment
+          ? { headingTarget: { anchor: fragment, nonce } }
+          : {}),
       };
     }
     hashIndex = target.lastIndexOf("#", hashIndex - 1);

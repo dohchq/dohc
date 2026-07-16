@@ -138,6 +138,30 @@ describe("resolveWikilinkNavigation", () => {
       headingTarget: { anchor: "next-steps", nonce: 15 },
     });
   });
+
+  it("keeps a trailing empty fragment on the longest known hash filename", () => {
+    const competingFiles = [
+      ...files,
+      { path: "notes/release.md", title: "Release" },
+    ];
+    expect(
+      resolveWikilinkNavigation(
+        "notes/release#1.md#",
+        "today.md",
+        competingFiles,
+        18,
+      ),
+    ).toEqual({ path: "notes/release#1.md" });
+
+    expect(
+      resolveWikilinkNavigation(
+        "notes/release#1.md#",
+        "today.md",
+        [{ path: "notes/release#1.md", title: "Release 1" }],
+        19,
+      ),
+    ).toEqual({ path: "notes/release#1.md" });
+  });
 });
 
 describe("classifyForView dispatch", () => {

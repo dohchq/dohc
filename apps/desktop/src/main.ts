@@ -432,6 +432,7 @@ import {
   markPersonalFeedSeenReadOnlySafe,
 } from "./workspaces/chatFollowAccess";
 import { addChatMentionsToWorkspaceGraph } from "./workspaces/chatMentionGraphOverlay";
+import { resolveTrackedChatFilePath } from "./workspaces/chatFileReferenceResolution";
 import { formatChatBookmarkProjection } from "./workspaces/chatBookmarkProjection";
 import { projectChatBookmarksAfterPull } from "./workspaces/chatBookmarkPullProjection";
 import {
@@ -4581,27 +4582,31 @@ function registerIpcHandlers(): void {
       const key = `${reference.path}\0${reference.headingAnchor ?? ""}\0${reference.headingOccurrence ?? 0}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      const objectId = await capture.fileObjectIdForPath(reference.path);
-      if (!objectId) {
+      const trackedFile = await resolveTrackedChatFilePath(
+        reference.path,
+        capture.fileObjectIdForPath,
+      );
+      if (!trackedFile) {
         throw new Error(`Cannot mention ${reference.path} because dohc is not tracking it yet.`);
       }
+      const { objectId, path: resolvedPath } = trackedFile;
       if (!reference.headingAnchor) {
-        resolved.push({ objectId, pathHint: reference.path });
+        resolved.push({ objectId, pathHint: resolvedPath });
         continue;
       }
-      const source = await readWorkspaceText(workspace.rootPath, reference.path);
+      const source = await readWorkspaceText(workspace.rootPath, resolvedPath);
       const heading = findWorkspaceHeading(extractWorkspaceHeadings(source.text), {
         anchor: reference.headingAnchor,
         occurrence: reference.headingOccurrence,
       });
       if (!heading) {
         throw new Error(
-          `The heading #${reference.headingAnchor} no longer exists in ${reference.path}.`,
+          `The heading #${reference.headingAnchor} no longer exists in ${resolvedPath}.`,
         );
       }
       resolved.push({
         objectId,
-        pathHint: reference.path,
+        pathHint: resolvedPath,
         headingText: heading.text,
         headingAnchor: heading.anchor,
         headingOccurrence: heading.occurrence,
