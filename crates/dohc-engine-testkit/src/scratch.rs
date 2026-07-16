@@ -24,7 +24,10 @@ impl ScratchDir {
             COUNTER.fetch_add(1, Ordering::Relaxed),
         );
         let path = std::env::temp_dir().join(unique);
-        std::fs::create_dir_all(&path)?;
+        // `create_dir` (not `create_dir_all`): a pre-existing path — stale
+        // state from PID reuse or a prior crash — must fail loudly, never be
+        // silently reused and contaminate a durability test.
+        std::fs::create_dir(&path)?;
         Ok(ScratchDir { path })
     }
 

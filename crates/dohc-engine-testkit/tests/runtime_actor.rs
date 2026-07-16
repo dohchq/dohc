@@ -7,6 +7,7 @@ use dohc_engine_runtime::{
     WriteOutcome,
 };
 use dohc_engine_storage::EngineStore;
+use dohc_engine_testkit::harness::wal_sidecar;
 use dohc_engine_testkit::{
     GateFaults, PanicFaults, ScratchDir, make_hardlink, try_make_dir_alias, try_make_file_symlink,
 };
@@ -159,9 +160,10 @@ fn restart_bumps_generation_and_preserves_state() {
     assert_eq!(reopened.snapshot().expect("snap").documents, 2);
 }
 
-// oracle: close deterministically releases the connection — a fresh direct
-// EngineStore::open on the same path succeeds (on Windows this only works if
-// the prior handle was truly released).
+// oracle: close deterministically releases the connection. A second open alone
+// does NOT prove release (SQLite permits concurrent connections), so we assert
+// the WAL sidecar was checkpointed away — which only happens when the LAST
+// connection closes — and, on Windows, that the file is now deletable.
 #[test]
 fn close_releases_the_connection() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -176,8 +178,25 @@ fn close_releases_the_connection() {
     assert_eq!(handle.lifecycle(), LifecycleState::Closed);
     assert_eq!(sup.actor_count(), 0);
 
-    // The actor's connection is gone: a brand-new writer opens cleanly and
-    // sees the committed state.
+    // Last-connection close checkpoints and removes the -wal sidecar; a still-
+    // open connection would leave it behind.
+    let wal = wal_sidecar(&db);
+    assert!(
+        !wal.exists(),
+        "-wal must be gone once the last writer closed"
+    );
+
+    // On Windows an open handle blocks deletion; being able to rename the file
+    // proves no handle remains. (POSIX allows unlink of open files, so this is
+    // a Windows-specific release proof.)
+    #[cfg(windows)]
+    {
+        let moved = db.with_extension("moved");
+        std::fs::rename(&db, &moved).expect("db must be movable after release");
+        std::fs::rename(&moved, &db).expect("restore");
+    }
+
+    // And a brand-new writer opens cleanly and sees the committed state.
     let store = EngineStore::open(&db, 2).expect("reopen after release");
     assert_eq!(store.document_count().expect("docs"), 1);
 }

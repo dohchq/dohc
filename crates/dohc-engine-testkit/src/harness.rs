@@ -70,10 +70,7 @@ pub fn write_foreign_unversioned_db(db_path: &Path) -> FixtureResult {
 /// that close. This lets a test prove data is recoverable *from the WAL*
 /// (before any checkpoint folds it into the main file) on reopen.
 pub fn open_readonly_keeper(db_path: &Path) -> rusqlite::Result<Connection> {
-    Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-    )
+    Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
 }
 
 /// The `-wal` sidecar path for a database file.

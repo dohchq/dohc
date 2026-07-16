@@ -22,11 +22,21 @@ use std::sync::{Condvar, Mutex, MutexGuard, OnceLock};
 
 type Registry = HashMap<EngineDbIdentity, Slot>;
 
-/// A registry slot: either an in-flight reservation (a spawn is running with
-/// the lock released) or a live actor.
+/// A registry slot. `Reserving` and `Closing` are both "busy" placeholders held
+/// while the lock is released for a blocking spawn or close: a concurrent open
+/// of the same identity waits on the condvar rather than forking a second
+/// writer while the first is still opening OR still closing.
 enum Slot {
     Reserving,
+    Closing,
     Active(WorkspaceActor),
+}
+
+impl Slot {
+    /// Whether this slot is a transient placeholder that a waiter must wait out.
+    fn is_busy(&self) -> bool {
+        matches!(self, Slot::Reserving | Slot::Closing)
+    }
 }
 
 /// Owns every open workspace actor, keyed by canonical file identity. Dropping
@@ -87,7 +97,7 @@ impl WorkspaceSupervisor {
                             Action::Return
                         }
                     }
-                    Some(Slot::Reserving) => Action::Wait,
+                    Some(Slot::Reserving | Slot::Closing) => Action::Wait,
                     None => Action::Reserve,
                 };
                 match action {
@@ -131,8 +141,8 @@ impl WorkspaceSupervisor {
         let (old, next_generation, identity) = {
             let mut guard = lock(&self.registry);
             let identity = EngineDbIdentity::resolve_or_create(db_path)?;
-            // Wait out any in-flight reservation for this identity.
-            while matches!(guard.get(&identity), Some(Slot::Reserving)) {
+            // Wait out any in-flight reservation/close for this identity.
+            while guard.get(&identity).is_some_and(Slot::is_busy) {
                 guard = wait(&self.ready, guard);
             }
             let old = guard.remove(&identity);
@@ -160,31 +170,38 @@ impl WorkspaceSupervisor {
     }
 
     /// Close the actor for `db_path`, if open. Returns whether one was closed.
+    ///
+    /// The identity is kept reserved (a `Closing` marker) while the connection
+    /// is released outside the lock, so a concurrent `open` cannot spawn a
+    /// replacement writer before the old one is actually gone.
     pub fn close(&self, db_path: &Path) -> Result<bool, RuntimeError> {
         let Some(identity) = EngineDbIdentity::resolve_existing_opt(db_path)? else {
             return Ok(false);
         };
         let actor = {
             let mut guard = lock(&self.registry);
-            while matches!(guard.get(&identity), Some(Slot::Reserving)) {
+            while guard.get(&identity).is_some_and(Slot::is_busy) {
                 guard = wait(&self.ready, guard);
             }
             match guard.remove(&identity) {
-                Some(Slot::Active(actor)) => Some(actor),
+                Some(Slot::Active(actor)) => {
+                    guard.insert(identity.clone(), Slot::Closing);
+                    Some(actor)
+                }
                 _ => None,
             }
         };
-        match actor {
-            Some(mut actor) => {
-                actor.close()?;
-                Ok(true)
-            }
-            None => Ok(false),
-        }
+        let Some(mut actor) = actor else {
+            return Ok(false);
+        };
+        let close_result = actor.close();
+        self.clear_markers(std::slice::from_ref(&identity));
+        close_result.map(|()| true)
     }
 
     /// Close every open actor.
     pub fn close_all(&self) -> Result<(), RuntimeError> {
+        let mut closing = Vec::new();
         let drained: Vec<WorkspaceActor> = {
             let mut guard = lock(&self.registry);
             let active_keys: Vec<EngineDbIdentity> = guard
@@ -195,7 +212,11 @@ impl WorkspaceSupervisor {
             active_keys
                 .into_iter()
                 .filter_map(|identity| match guard.remove(&identity) {
-                    Some(Slot::Active(actor)) => Some(actor),
+                    Some(Slot::Active(actor)) => {
+                        guard.insert(identity.clone(), Slot::Closing);
+                        closing.push(identity);
+                        Some(actor)
+                    }
                     _ => None,
                 })
                 .collect()
@@ -206,10 +227,21 @@ impl WorkspaceSupervisor {
                 first_err.get_or_insert(err);
             }
         }
+        self.clear_markers(&closing);
         match first_err {
             Some(err) => Err(err),
             None => Ok(()),
         }
+    }
+
+    /// Remove `Closing` markers and wake any threads waiting on those
+    /// identities.
+    fn clear_markers(&self, identities: &[EngineDbIdentity]) {
+        let mut guard = lock(&self.registry);
+        for identity in identities {
+            guard.remove(identity);
+        }
+        self.ready.notify_all();
     }
 
     /// Number of currently open (live) actors.
@@ -270,10 +302,22 @@ fn ensure_parent_dir(db_path: &Path) -> Result<(), RuntimeError> {
         reason: "engine.db path has no parent directory",
         source: None,
     })?;
-    std::fs::create_dir_all(parent).map_err(|err| RuntimeError::Identity {
-        reason: "could not create engine.db parent directory",
-        source: Some(err),
-    })
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    // Owner-only on Unix (matches the TS engine's `.dohc/engine` 0o700 so a
+    // world-searchable directory never exposes workspace contents); a no-op on
+    // Windows, where ACLs govern access.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(parent)
+        .map_err(|err| RuntimeError::Identity {
+            reason: "could not create engine.db parent directory",
+            source: Some(err),
+        })
 }
 
 /// Recover the guard even if a prior holder panicked: a poisoned registry lock

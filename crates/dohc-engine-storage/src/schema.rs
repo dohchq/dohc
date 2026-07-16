@@ -113,11 +113,12 @@ enum Disposition {
 /// supervisor (a file-id-keyed registry); this function is the low-level
 /// primitive it drives, not a general-purpose entry point.
 pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<Connection, StorageError> {
-    let conn = Connection::open_with_flags(
+    // No `SQLITE_OPEN_URI`: the path is a literal filename, never a SQLite URI
+    // (a `file:`-prefixed workspace path must not be reinterpreted, and query
+    // parameters must not alter open behavior).
+    let mut conn = Connection::open_with_flags(
         path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_CREATE
-            | OpenFlags::SQLITE_OPEN_URI,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
     )
     .map_err(StorageError::corrupt)?;
 
@@ -131,7 +132,7 @@ pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<Connection, Sto
     // Step 4: the store is ours — the file-mutating pragmas are now safe.
     apply_persistent_pragmas(&conn)?;
     match disposition {
-        Disposition::Fresh => initialize_v2(&conn, now_ms)?,
+        Disposition::Fresh => initialize_v2(&mut conn, now_ms)?,
         Disposition::ExistingV2 => validate_v2(&conn)?,
     }
     integrity_check(&conn)?;
@@ -179,8 +180,10 @@ fn classify_fingerprint(conn: &Connection) -> Result<Disposition, StorageError> 
         ENGINE_SCHEMA_VERSION => Ok(Disposition::ExistingV2),
         0 => {
             // Either a brand-new empty file or a non-empty foreign database
-            // that never stamped a version. Refuse to init over the latter.
-            if has_any_user_table(conn)? {
+            // that never stamped a version. Refuse to init over the latter —
+            // ANY user object (table, view, index, or trigger), not just a
+            // table, marks the file as someone else's.
+            if has_any_user_object(conn)? {
                 Err(StorageError::ForeignDatabase)
             } else {
                 Ok(Disposition::Fresh)
@@ -193,11 +196,10 @@ fn classify_fingerprint(conn: &Connection) -> Result<Disposition, StorageError> 
     }
 }
 
-fn has_any_user_table(conn: &Connection) -> Result<bool, StorageError> {
+fn has_any_user_object(conn: &Connection) -> Result<bool, StorageError> {
     let count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM sqlite_schema \
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+            "SELECT COUNT(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
             [],
             |row| row.get(0),
         )
@@ -205,34 +207,25 @@ fn has_any_user_table(conn: &Connection) -> Result<bool, StorageError> {
     Ok(count > 0)
 }
 
-fn initialize_v2(conn: &Connection, now_ms: i64) -> Result<(), StorageError> {
+fn initialize_v2(conn: &mut Connection, now_ms: i64) -> Result<(), StorageError> {
     // Create every table eagerly and stamp the fingerprint in one transaction
-    // so a crash mid-init leaves an empty file (still openable as fresh),
-    // never a half-schema store.
-    conn.execute_batch("BEGIN IMMEDIATE")
+    // so a crash mid-init leaves an empty file (still openable as fresh), never
+    // a half-schema store. The typed `Transaction` rolls back on drop, so an
+    // early return never leaves a dangling open transaction.
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(StorageError::persist)?;
-
-    let result = (|| {
-        conn.execute_batch(V2_SCHEMA_DDL)?;
-        conn.execute(
-            "INSERT INTO engine_migrations (id, checksum, applied_at) VALUES (?1, ?2, ?3)",
-            rusqlite::params![BASELINE_MIGRATION_ID, BASELINE_MIGRATION_CHECKSUM, now_ms],
-        )?;
-        // user_version participates in the transaction and is rolled back with
-        // it if the commit never lands.
-        conn.pragma_update(None, "user_version", ENGINE_SCHEMA_VERSION)?;
-        Ok::<(), rusqlite::Error>(())
-    })();
-
-    match result {
-        Ok(()) => conn.execute_batch("COMMIT").map_err(StorageError::persist),
-        Err(err) => {
-            // Best-effort rollback on the error path (mirrors the TS
-            // ROLLBACK-after-failed-work swallow, `versionedTextStore.ts:3566`).
-            let _ = conn.execute_batch("ROLLBACK");
-            Err(StorageError::persist(err))
-        }
-    }
+    tx.execute_batch(V2_SCHEMA_DDL)
+        .map_err(StorageError::persist)?;
+    tx.execute(
+        "INSERT INTO engine_migrations (id, checksum, applied_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![BASELINE_MIGRATION_ID, BASELINE_MIGRATION_CHECKSUM, now_ms],
+    )
+    .map_err(StorageError::persist)?;
+    // user_version participates in the transaction and rolls back with it.
+    tx.pragma_update(None, "user_version", ENGINE_SCHEMA_VERSION)
+        .map_err(StorageError::persist)?;
+    tx.commit().map_err(StorageError::persist)
 }
 
 fn validate_v2(conn: &Connection) -> Result<(), StorageError> {
@@ -250,6 +243,22 @@ fn validate_v2(conn: &Connection) -> Result<(), StorageError> {
         if !present {
             return Err(StorageError::StateCorrupt { source: None });
         }
+    }
+    // A `user_version = 2` stamp with the right table NAMES is not proof the
+    // store is ours (a foreign db can fake both). Require our baseline
+    // migration-ledger row — a cheap own-store fingerprint beyond table names.
+    let baseline_present: bool = conn
+        .query_row(
+            "SELECT 1 FROM engine_migrations WHERE id = ?1",
+            [BASELINE_MIGRATION_ID],
+            |_| Ok(true),
+        )
+        .or_else(|err| match err {
+            rusqlite::Error::QueryReturnedNoRows => Ok(false),
+            other => Err(StorageError::corrupt(other)),
+        })?;
+    if !baseline_present {
+        return Err(StorageError::StateCorrupt { source: None });
     }
     Ok(())
 }

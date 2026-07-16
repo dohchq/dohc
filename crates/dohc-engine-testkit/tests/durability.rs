@@ -307,8 +307,11 @@ fn document_body_bound_is_enforced_at_the_edge() {
         .expect_err("over-limit must fail");
     assert_eq!(err.code(), "document-too-large");
 
-    // The rejected over-limit write left no trace (validation before the txn).
+    // The rejected over-limit write left no trace in ANY compound-write
+    // component (validation runs before the transaction opens).
     assert_eq!(store.document_count().expect("docs"), 2);
+    assert_eq!(store.journal_len().expect("journal"), 2);
+    assert_eq!(store.request_ledger_len().expect("ledger"), 2);
 }
 
 // oracle: close/reopen/mutate cycle — the reopened store stays writable and
