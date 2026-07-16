@@ -150,3 +150,9 @@ source of truth every orchestrator session loads first).
   citation provenance; line nits). Combined 17-finding fix batch (12 from
   completeness incl. 5 P1 census gaps + these 7) dispatched to the
   contracts shard.
+- PR #140 re-check: 13/15 VERIFIED behaviorally (live junction refusal,
+  child-death rejection, wire clientId, replay determinism, crafted
+  undeclared-root failure; weakening sweep clean). 2 residual one-line
+  P2s dispatched (realpathSync.native for 8.3 aliases; frontmatter
+  classifier Date-object collapse). Verdict FIXES-NEEDED narrowly;
+  certification completes on the two closures.
