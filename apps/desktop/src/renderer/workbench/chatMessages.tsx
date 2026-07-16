@@ -437,6 +437,7 @@ export function ChatMessageList(props: {
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   // When provided, each message gets a reaction row (pills + quick-pick).
   reactionControls?: ChatReactionControls;
+  flashMessageId?: string | null;
   onMessageElement?: (messageId: string, element: HTMLLIElement | null) => void;
 }) {
   const candidates = props.mentionCandidates ?? [];
@@ -467,7 +468,11 @@ export function ChatMessageList(props: {
                 ref={(element) => props.onMessageElement?.(message.id, element)}
                 data-testid={`${props.testIdPrefix}-message`}
                 data-message-id={message.id}
-                className="group"
+                className={`group transition-shadow ${
+                  props.flashMessageId === message.id
+                    ? "rounded-xl ring-2 ring-agent/30 ring-offset-2 ring-offset-bg"
+                    : ""
+                }`}
               >
                 <span className="flex items-baseline gap-1.5">
                   <span

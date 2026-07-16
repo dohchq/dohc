@@ -1761,6 +1761,7 @@ export function ChatsView(props: {
         dm,
         ...(focusMessageId ? { focusMessageId } : {}),
       });
+      focusedMessageJump.current = null;
       setMessages([]);
       setReactions([]);
       setDecisions([]);
@@ -1768,6 +1769,8 @@ export function ChatsView(props: {
       setRunRecords({});
       setReplyTarget(null);
       setResolveTargetMessageId(null);
+      setFlashMessageId(null);
+      messageNodes.current.clear();
       setMessagesLoading(true);
       try {
         await loadDmConversation(dm, token);
@@ -2832,6 +2835,7 @@ export function ChatsView(props: {
               endRef={messagesEndRef}
               mentionCandidates={mentionCandidates}
               onOpenPath={props.onOpenPath}
+              flashMessageId={flashMessageId}
               onMessageElement={(messageId, element) => {
                 if (element) messageNodes.current.set(messageId, element);
                 else messageNodes.current.delete(messageId);

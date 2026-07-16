@@ -2125,7 +2125,7 @@ describe("ChatsView direct messages", () => {
     expect(screen.getByTestId("chats-new-dm")).toBeTruthy();
   });
 
-  it("scrolls a canonical DM backlink to its focused message", async () => {
+  it("scrolls and highlights a canonical DM backlink's focused message", async () => {
     const focused = message({
       id: "message-focus",
       threadId: "thread-dm-1",
@@ -2147,6 +2147,38 @@ describe("ChatsView direct messages", () => {
     await waitFor(() => {
       expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
     });
+    expect(screen.getByTestId("chats-dm-message").className).toContain("ring-2");
+  });
+
+  it("clears focused-message state and refs when a DM is opened normally", async () => {
+    const user = userEvent.setup();
+    const focused = message({
+      id: "message-focus",
+      threadId: "thread-dm-1",
+      body: "Same id, different navigation",
+    });
+    const pendingRefresh = new Promise<never>(() => undefined);
+    bridgeMock.syncDms
+      .mockResolvedValueOnce({ available: true, dms: [dm()] })
+      .mockImplementation(() => pendingRefresh);
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [focused] });
+
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: {
+        level: "dm",
+        dm: dm(),
+        focusMessageId: focused.id,
+      },
+    });
+
+    const initiallyFocused = await screen.findByTestId("chats-dm-message");
+    await waitFor(() => expect(initiallyFocused.className).toContain("ring-2"));
+
+    await user.click(screen.getByTestId("chats-dm-back"));
+    await user.click(await screen.findByTestId("chats-dm-item"));
+    const normallyOpened = await screen.findByTestId("chats-dm-message");
+    expect(normallyOpened.className).not.toContain("ring-2");
   });
 
   it("opens a DM into its single running conversation and sends on Enter", async () => {
