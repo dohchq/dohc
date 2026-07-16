@@ -14,3 +14,8 @@ source of truth every orchestrator session loads first).
   authenticated (icedevera), clean tree.
 - Wave 0 opened: R00 scaffolding (this commit), YRS-SPIKE and
   R01-INVENTORY launched as background workstreams.
+- R00 PR: dohc-ai/dohc#137.
+- Codex CLI fixed (R00 checklist): 0.142.5 rejected `gpt-5.6-sol`
+  server-side; `codex update` self-updater fails from Git Bash
+  (PowerShell sub-invocation error); updated via pwsh installer to
+  0.144.5; `codex exec` on the gpt-5.6-sol default verified working.
