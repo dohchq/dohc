@@ -1196,6 +1196,12 @@ describe("workspaceEngineCapture startup reconciliation", () => {
       name: "a non-string mediaType",
       result: { files: [{ path: "note.md", size: 1, sha256: "a".repeat(64), mediaType: 7 }] },
     },
+    {
+      // A "." path as a failedPath would blanket-skip every delete, so it must
+      // force the fallback, not be collected.
+      name: "a degenerate '.' path",
+      result: { files: [{ path: ".", size: 1, sha256: "a".repeat(64), mediaType: "text/markdown" }] },
+    },
   ];
 
   for (const { name, result } of malformedScanResults) {

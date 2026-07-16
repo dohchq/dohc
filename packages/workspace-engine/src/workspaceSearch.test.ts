@@ -860,6 +860,16 @@ describe("engine file path classifier (shared by search and capture)", () => {
     }
   });
 
+  it("classifies 8.3 aliases of secret files as SECRET on read and write", () => {
+    // A secret file's 8.3 alias keeps its `.env` extension (SECRET~1.ENV), so
+    // the secret floor still marks it protected — read surfaces (asset/export/
+    // MCP) that honor the floor never leak it.
+    for (const path of ["SECRET~1.ENV", "config/PRODUC~1.ENV"]) {
+      expect(classifyEngineFilePath(path)).toEqual({ kind: "secret" });
+      expect(classifyEngineFilePathForRead(path)).toEqual({ kind: "secret" });
+    }
+  });
+
   it("read classification sees mounted shares as the mount does", () => {
     // Write-side: everything under shared-with-me is ignored (not captured).
     expect(classifyEngineFilePath("shared-with-me/alex/.env")).toEqual({ kind: "ignored" });

@@ -836,6 +836,13 @@ function validateKernelScanFiles(result: unknown): {
     // path is not a whole-kernel fault: collect it as a skipped failure and
     // keep seeding every OTHER real file, never throw-and-disable the fast
     // scanner for the workspace.
+    // A "." (or empty) path is not a real subtree the scan skipped — as a
+    // failedPath it would make isUnderScanFailedPath treat EVERY snapshot as
+    // unreadable and silently freeze all delete reconciliation. That is
+    // whole-result garbage, so force the tolerant TS fallback instead.
+    if (path === "." || path === "") {
+      throw new Error(`Kernel scan returned a degenerate file path: ${JSON.stringify(path)}.`);
+    }
     const check = validateUserReadPath(path);
     if (!check.ok || check.normalized !== path) {
       if (!seen.has(path)) {
