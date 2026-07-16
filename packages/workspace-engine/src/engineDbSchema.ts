@@ -405,6 +405,17 @@ const CHAT_CHANNEL_TABLES_DDL = `
     channel_id TEXT NOT NULL,
     PRIMARY KEY (workspace_id, wire_id)
   );
+  -- A replicated thread may arrive before the channel-create op from another
+  -- origin. Keep provenance for only those synthetic rows so the later
+  -- authoritative create can replace their guessed metadata without making
+  -- ordinary, already-mapped channels mutable under conflicting create ops.
+  CREATE TABLE IF NOT EXISTS chat_channel_placeholders (
+    workspace_id TEXT NOT NULL,
+    channel_id TEXT NOT NULL,
+    wire_id TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, channel_id),
+    UNIQUE (workspace_id, wire_id)
+  );
   -- Reactions (WS-MU-C2): a set-membership CRDT of emoji reactions. ONE row per
   -- (message, emoji, author) CELL — the row is an LWW register holding the
   -- winning state ('added'|'removed') and its at_ms clock. Tombstones ('removed'

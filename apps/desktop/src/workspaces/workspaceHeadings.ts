@@ -9,6 +9,18 @@ export interface WorkspaceHeading {
   endOffset: number;
 }
 
+export interface WorkspaceHeadingRecord {
+  text: string;
+  level: number;
+  anchor: string;
+  occurrence: number;
+  line: number;
+}
+
+const MAX_HEADING_RECORDS = 2_000;
+const MAX_HEADING_TEXT_LENGTH = 300;
+const MAX_HEADING_ANCHOR_LENGTH = 400;
+
 interface PendingHeading extends Omit<WorkspaceHeading, "anchor" | "occurrence" | "endOffset"> {}
 
 function visibleHeadingText(value: string): string {
@@ -147,6 +159,29 @@ export function extractWorkspaceHeadings(markdown: string): WorkspaceHeading[] {
       endOffset: nextBoundary ?? markdown.length,
     };
   });
+}
+
+export function workspaceHeadingRecords(
+  headings: readonly WorkspaceHeading[],
+): WorkspaceHeadingRecord[] {
+  const records: WorkspaceHeadingRecord[] = [];
+  for (const heading of headings) {
+    if (records.length >= MAX_HEADING_RECORDS) break;
+    // An altered anchor would no longer navigate to the real Markdown
+    // heading, so omit unrepresentable anchors instead of returning a broken
+    // mention target. Display text can be safely bounded independently.
+    if (heading.anchor.length > MAX_HEADING_ANCHOR_LENGTH) continue;
+    const text = heading.text.slice(0, MAX_HEADING_TEXT_LENGTH).trimEnd();
+    if (!text) continue;
+    records.push({
+      text,
+      level: heading.level,
+      anchor: heading.anchor,
+      occurrence: heading.occurrence,
+      line: heading.line,
+    });
+  }
+  return records;
 }
 
 export function findWorkspaceHeading(

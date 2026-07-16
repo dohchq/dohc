@@ -437,6 +437,7 @@ export function ChatMessageList(props: {
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   // When provided, each message gets a reaction row (pills + quick-pick).
   reactionControls?: ChatReactionControls;
+  onMessageElement?: (messageId: string, element: HTMLLIElement | null) => void;
 }) {
   const candidates = props.mentionCandidates ?? [];
   // Group active reactions by message once per render.
@@ -463,6 +464,7 @@ export function ChatMessageList(props: {
             return (
               <li
                 key={message.id}
+                ref={(element) => props.onMessageElement?.(message.id, element)}
                 data-testid={`${props.testIdPrefix}-message`}
                 data-message-id={message.id}
                 className="group"

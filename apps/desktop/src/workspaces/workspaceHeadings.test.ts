@@ -3,6 +3,7 @@ import {
   extractWorkspaceHeadings,
   findWorkspaceHeading,
   headingAnchorBase,
+  workspaceHeadingRecords,
   workspaceHeadingSection,
 } from "./workspaceHeadings";
 
@@ -76,6 +77,21 @@ describe("workspace headings", () => {
     expect(headings.map((heading) => heading.text)).toEqual([
       "Visible after invalid opener",
     ]);
+  });
+
+  it("keeps the heading picker usable when an ordinary heading exceeds IPC limits", () => {
+    const headings = extractWorkspaceHeadings([
+      `# ${"a".repeat(500)}`,
+      "## Still available",
+    ].join("\n"));
+
+    expect(workspaceHeadingRecords(headings)).toEqual([{
+      text: "Still available",
+      level: 2,
+      anchor: "still-available",
+      occurrence: 0,
+      line: 2,
+    }]);
   });
 
   it("resolves encoded anchors and falls back to text occurrence", () => {

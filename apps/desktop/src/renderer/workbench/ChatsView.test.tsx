@@ -2125,6 +2125,30 @@ describe("ChatsView direct messages", () => {
     expect(screen.getByTestId("chats-new-dm")).toBeTruthy();
   });
 
+  it("scrolls a canonical DM backlink to its focused message", async () => {
+    const focused = message({
+      id: "message-focus",
+      threadId: "thread-dm-1",
+      body: "Focused DM mention",
+    });
+    bridgeMock.listChatMessages.mockResolvedValue({ messages: [focused] });
+    vi.mocked(Element.prototype.scrollIntoView).mockClear();
+
+    renderView(vi.fn(), vi.fn(), {
+      variant: "page",
+      initialNav: {
+        level: "dm",
+        dm: dm(),
+        focusMessageId: focused.id,
+      },
+    });
+
+    expect(await screen.findByText("Focused DM mention")).toBeTruthy();
+    await waitFor(() => {
+      expect(Element.prototype.scrollIntoView).toHaveBeenCalledWith({ block: "center" });
+    });
+  });
+
   it("opens a DM into its single running conversation and sends on Enter", async () => {
     const user = userEvent.setup();
     const pendingRefresh = new Promise<never>(() => undefined);

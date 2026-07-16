@@ -1,11 +1,25 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   assertChatFollowWriteAllowed,
+  listChatChannelsReadOnlySafe,
   listChatFollowsReadOnlySafe,
   markPersonalFeedSeenReadOnlySafe,
 } from "./chatFollowAccess";
 
-describe("shared-view chat follow access", () => {
+describe("shared-view chat access", () => {
+  it("lists channels without creating General in a read-only shared view", async () => {
+    const seedGeneral = vi.fn(async () => undefined);
+    const list = vi.fn(async () => ["shared-channel"]);
+
+    await expect(listChatChannelsReadOnlySafe({
+      readOnly: true,
+      seedGeneral,
+      list,
+    })).resolves.toEqual(["shared-channel"]);
+    expect(seedGeneral).not.toHaveBeenCalled();
+    expect(list).toHaveBeenCalledOnce();
+  });
+
   it("lists existing follows without seeding defaults in a read-only shared view", async () => {
     const seedDefaults = vi.fn(async () => undefined);
     const list = vi.fn(async () => ["existing-follow"]);

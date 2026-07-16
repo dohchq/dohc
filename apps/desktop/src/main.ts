@@ -417,14 +417,16 @@ import {
 import {
   extractWorkspaceHeadings,
   findWorkspaceHeading,
+  workspaceHeadingRecords,
 } from "./workspaces/workspaceHeadings";
 import {
-  assertChatFollowWriteAllowed,
+  listChatChannelsReadOnlySafe,
   listChatFollowsReadOnlySafe,
   markPersonalFeedSeenReadOnlySafe,
 } from "./workspaces/chatFollowAccess";
 import { addChatMentionsToWorkspaceGraph } from "./workspaces/chatMentionGraphOverlay";
 import { formatChatBookmarkProjection } from "./workspaces/chatBookmarkProjection";
+import { projectChatBookmarksAfterPull } from "./workspaces/chatBookmarkPullProjection";
 import {
   collectZipEntries,
   copyIntoWorkspace,
@@ -1231,6 +1233,22 @@ async function presenceRelayTransportForScope(
 }
 
 const serializeSharedChannelSync = createKeyedSerializer();
+let materializePendingChatBookmarksForWorkspace:
+  | ((workspaceId: string) => Promise<void>)
+  | null = null;
+
+async function projectPendingChatBookmarksAfterPull(workspaceId: string): Promise<void> {
+  await projectChatBookmarksAfterPull({
+    readOnly: Boolean(sharedViewOf(workspaceId)),
+    project: async () => {
+      await materializePendingChatBookmarksForWorkspace?.(workspaceId);
+    },
+    reportError: (error) => {
+      console.error(`[desktop] post-pull chat bookmark projection (${workspaceId}):`, error);
+    },
+  });
+}
+
 function syncWorkspaceSharedChannels(workspaceId: string): Promise<void> {
   return serializeSharedChannelSync(workspaceId, () =>
     runSharedChannelSyncPass(workspaceId),
@@ -1279,6 +1297,7 @@ async function runSharedChannelSyncPass(workspaceId: string): Promise<void> {
     if (result.changed || result.endedShareIds.length > 0 || result.readOnlyShareIds.length > 0) {
       notifyRenderer();
     }
+    if (result.changed) await projectPendingChatBookmarksAfterPull(workspaceId);
   } catch (error) {
     console.error(`[desktop] shared channel sync failed for ${workspaceId}:`, error);
   }
@@ -1395,6 +1414,11 @@ function engineForWorkspace(
     // MU-C4: joined shared channels refresh on the same cadence as the
     // workspace's own sync (best-effort; never fails the pass).
     syncSharedChannels: () => syncWorkspaceSharedChannels(workspace.workspaceId),
+    // A replicated chat message can mark a live bookmark pending without
+    // touching the file watcher. Project immediately after the pull commits;
+    // the periodic worker remains only a crash/retry backstop.
+    afterSuccessfulPull: () =>
+      projectPendingChatBookmarksAfterPull(workspace.workspaceId),
     // Post-pass open-conflict truth: pulled peer resolutions and local
     // resolutions both clear the status-bar/notice conflict state, and the
     // ids lifecycle the pending remote-resolve notice (0P-C gate fix).
@@ -3237,13 +3261,7 @@ function registerIpcHandlers(): void {
     const workspace = requireWorkspace(input.workspaceId);
     const source = await readWorkspaceText(workspace.rootPath, input.path);
     return ListWorkspaceHeadingsResult.parse({
-      headings: extractWorkspaceHeadings(source.text).map((heading) => ({
-        text: heading.text,
-        level: heading.level,
-        anchor: heading.anchor,
-        occurrence: heading.occurrence,
-        line: heading.line,
-      })),
+      headings: workspaceHeadingRecords(extractWorkspaceHeadings(source.text)),
     });
   });
 
@@ -3746,13 +3764,16 @@ function registerIpcHandlers(): void {
     let info;
     try {
       info = await fetchSharedChannelInfo({ relay, shareId: input.shareId });
-      await pullSharedChannel({
+      const pulled = await pullSharedChannel({
         rootDir: workspace.rootPath,
         workspaceId: workspace.workspaceId,
         relay,
         shareId: info.shareId,
         channelWireId: info.channelWireId,
       });
+      if (pulled.applied > 0) {
+        await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
+      }
     } catch (error) {
       if (error instanceof ShareUnavailableError) {
         throw new Error("That shared channel isn't available anymore.");
@@ -4766,6 +4787,17 @@ function registerIpcHandlers(): void {
     }
   }
 
+  // Relay engines are created outside this IPC-registration scope, while the
+  // projection worker shares the bookmark serialization helpers above. Bridge
+  // them once at startup; every caller still goes through the shared-view gate
+  // in projectPendingChatBookmarksAfterPull.
+  materializePendingChatBookmarksForWorkspace = async (workspaceId) => {
+    const workspace = findWorkspace(workspaceId);
+    const capture = activity.engineCaptureFor(workspaceId);
+    if (!workspace || !capture) return;
+    await materializePendingChatBookmarks(workspace, capture);
+  };
+
   ipcMain.handle(CHANNELS.listEngineMoments, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListEngineMomentsPayload.parse(payload);
@@ -4989,6 +5021,7 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    assertWritableWorkspace(workspace);
     // The chat links to the file's STABLE engine object id (never the path),
     // so the link survives renames; the path rides along as a display hint.
     const fileObjectId = await capture.fileObjectIdForPath(input.path);
@@ -5028,6 +5061,10 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    // Shared-channel access is narrower than workspace access. Enforce the
+    // workspace's server-owned read-only boundary first; renderer UI state is
+    // never authorization.
+    assertWritableWorkspace(workspace);
     // MU-C4 (CodeRabbit security): a READ-ONLY shared-channel grant rejects
     // writes at the main boundary, BEFORE any durable local row — the
     // renderer disabling its composer is honesty, not authorization.
@@ -5108,6 +5145,7 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    assertWritableWorkspace(workspace);
     const store = linkedChatStoreFor(workspace);
     await assertSharedChannelWritable({
       workspaceId: workspace.workspaceId,
@@ -5237,9 +5275,15 @@ function registerIpcHandlers(): void {
     // fast and the local rows answer.
     await syncWorkspaceSharedChannels(workspace.workspaceId);
     const store = linkedChatStoreFor(workspace);
-    // First chat use auto-creates the workspace's default channel.
-    await store.ensureGeneralChannel({ workspaceId: workspace.workspaceId });
-    const channels = await store.listChannels({ workspaceId: workspace.workspaceId });
+    // First chat use auto-creates General only for an owned workspace. Merely
+    // listing a shared view is read-only and must not seed durable state.
+    const channels = await listChatChannelsReadOnlySafe({
+      readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
+      seedGeneral: async () => {
+        await store.ensureGeneralChannel({ workspaceId: workspace.workspaceId });
+      },
+      list: () => store.listChannels({ workspaceId: workspace.workspaceId }),
+    });
     // Wire identities let the renderer match channels against share grants.
     const wireIdEntries = await Promise.all(
       channels.map(async (channel) => [
@@ -5335,10 +5379,7 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
-    assertChatFollowWriteAllowed({
-      readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
-      reject: () => assertWritableWorkspace(workspace),
-    });
+    assertWritableWorkspace(workspace);
     await warmCredentialCache();
     const store = linkedChatStoreFor(workspace);
     let targetKind: "person" | "agent" | "channel" | "thread";
@@ -5488,6 +5529,7 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    assertWritableWorkspace(workspace);
     const channel = await linkedChatStoreFor(workspace).createChannel({
       workspaceId: workspace.workspaceId,
       name: input.name,
@@ -5524,6 +5566,7 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    assertWritableWorkspace(workspace);
     // MU-C4 (CodeRabbit security): read-only shared channels reject the
     // composer at the main boundary, before any durable row.
     await assertSharedChannelWritable({
@@ -5579,6 +5622,7 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    assertWritableWorkspace(workspace);
     const state = await linkedChatStoreFor(workspace).markThreadRead({
       workspaceId: workspace.workspaceId,
       threadId: input.threadId,
@@ -5631,6 +5675,7 @@ function registerIpcHandlers(): void {
       input.workspaceId,
       "Chats are not enabled for this workspace.",
     );
+    assertWritableWorkspace(workspace);
     await warmCredentialCache();
     // MU-C4 (CodeRabbit security): reactions are writes too — a read-only
     // shared channel rejects them before any durable row.
@@ -5654,6 +5699,9 @@ function registerIpcHandlers(): void {
     });
     // MU-C4: reactions in a joined shared channel push out promptly too.
     void syncWorkspaceSharedChannels(workspace.workspaceId);
+    // Reactions are journaled workspace mutations just like messages and
+    // decision changes, so the owner's cloud workspace must be nudged too.
+    activity.queueCloudSync(workspace.workspaceId);
     return SetChatReactionResult.parse({
       reaction: { ...chatReactionForIpc(reaction), state: reaction.state },
       viewerAuthorId: localUserId(),
@@ -5781,13 +5829,16 @@ function registerIpcHandlers(): void {
         // The DM peek confirmed it — claim it here (or confirm this is home).
         if (!claimDmHome(dmHomeFile(), shareId, workspace.workspaceId)) continue;
         const info = await fetchSharedChannelInfo({ relay, shareId });
-        await pullSharedChannel({
+        const pulled = await pullSharedChannel({
           rootDir: workspace.rootPath,
           workspaceId: workspace.workspaceId,
           relay,
           shareId: info.shareId,
           channelWireId: info.channelWireId,
         });
+        if (pulled.applied > 0) {
+          await projectPendingChatBookmarksAfterPull(workspace.workspaceId);
+        }
         const joined: JoinedSharedChannel = {
           shareId: info.shareId,
           channelWireId: info.channelWireId,
@@ -5825,7 +5876,10 @@ function registerIpcHandlers(): void {
     await warmCredentialCache();
     const relay = dmRelayConnection();
     const store = linkedChatStoreFor(workspace);
-    if (relay) {
+    // The read-shaped DM refresh can auto-join grants and push journal ops.
+    // Shared views may list their existing local rows, but never run those
+    // durable reconciliation steps.
+    if (relay && !sharedViewOf(workspace.workspaceId)) {
       try {
         // Born-shared auto-join: discover + join received DM grants.
         await autoJoinReceivedDms(workspace, relay);
@@ -5859,7 +5913,9 @@ function registerIpcHandlers(): void {
     // A DM needs the full collaboration surface: a signed-in relay session AND
     // a synced workspace — the DM's canonical log is this workspace's relay
     // bucket, so an unsynced workspace could never deliver it.
-    const { workspace, remote } = await remoteForWorkspace(input.workspaceId);
+    const workspace = requireWorkspace(input.workspaceId);
+    assertWritableWorkspace(workspace);
+    const { remote } = await remoteForWorkspace(input.workspaceId);
     const { capture } = await requireEngineCapture(
       input.workspaceId,
       "Chats are not enabled for this workspace.",
@@ -6225,7 +6281,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.resumeThreadDispatch, async (event, payload) => {
     assertTrustedSender(event);
     const input = ResumeThreadDispatchPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
+    const workspace = requireWorkspace(input.workspaceId);
+    assertWritableWorkspace(workspace);
     await chatDispatchService.resumeThreadDispatch(
       input.workspaceId,
       input.threadId,

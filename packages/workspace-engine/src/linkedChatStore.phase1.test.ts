@@ -1145,6 +1145,107 @@ describe("phase-one linked chat model", () => {
     ]);
   });
 
+  it("backfills only an out-of-order thread placeholder from its authoritative channel", async () => {
+    const engine = await makeEngine("channel-placeholder");
+    const localChannel = await engine.store.createChannel({
+      workspaceId: WORKSPACE_ID,
+      name: "Project Updates",
+    });
+    const threadOp: SyncReplicationEnvelope = {
+      workspaceId: WORKSPACE_ID,
+      originId: "origin-placeholder-thread",
+      originSeq: 0,
+      opKind: "chat.thread.create",
+      payload: {
+        threadId: "remote-thread",
+        title: "Remote thread",
+        createdAtMs: 3000,
+        channelSlug: "project-updates",
+        channelWireId: "wire-remote-project-updates",
+      },
+      recordedAtMs: 3000,
+    };
+    await engine.store.applyReplicationOp(threadOp);
+
+    const placeholder = (await engine.store.listChannels({ workspaceId: WORKSPACE_ID })).find(
+      (channel) => channel.id !== localChannel.id,
+    );
+    expect(placeholder).toMatchObject({
+      name: "project-updates",
+      slug: "project-updates-2",
+      kind: "channel",
+      createdAtMs: 3000,
+      updatedAtMs: 3000,
+    });
+    if (!placeholder) throw new Error("Expected an out-of-order channel placeholder.");
+
+    const channelOp: SyncReplicationEnvelope = {
+      workspaceId: WORKSPACE_ID,
+      originId: "origin-authoritative-channel",
+      originSeq: 0,
+      opKind: "chat.channel.create",
+      payload: {
+        channelId: "remote-channel-id",
+        name: "Remote Project Updates",
+        slug: "project-updates",
+        kind: "dm",
+        createdAtMs: 1000,
+        wireId: "wire-remote-project-updates",
+      },
+      recordedAtMs: 1000,
+    };
+    await expect(engine.store.applyReplicationOp(channelOp)).resolves.toMatchObject({
+      status: "applied",
+    });
+
+    const authoritative = (await engine.store.listChannels({ workspaceId: WORKSPACE_ID })).find(
+      (channel) => channel.id === placeholder.id,
+    );
+    expect(authoritative).toMatchObject({
+      id: placeholder.id,
+      name: "Remote Project Updates",
+      slug: "project-updates-2",
+      kind: "dm",
+      createdAtMs: 1000,
+      updatedAtMs: 1000,
+    });
+    expect(
+      await engine.store.listChannelThreads({
+        workspaceId: WORKSPACE_ID,
+        channelId: placeholder.id,
+      }),
+    ).toEqual([expect.objectContaining({ thread: expect.objectContaining({ id: "remote-thread" }) })]);
+    expect(
+      rawDbFor(engine, (db) =>
+        db
+          .prepare(
+            "SELECT 1 FROM chat_channel_placeholders WHERE workspace_id = ? AND channel_id = ?",
+          )
+          .get(WORKSPACE_ID, placeholder.id),
+      ),
+    ).toBeUndefined();
+
+    await expect(engine.store.applyReplicationOp(channelOp)).resolves.toMatchObject({
+      status: "skipped",
+    });
+    await engine.store.applyReplicationOp({
+      ...channelOp,
+      originId: "origin-conflicting-channel",
+      payload: {
+        ...channelOp.payload,
+        name: "Conflicting Name",
+        kind: "channel",
+        createdAtMs: 500,
+      },
+      recordedAtMs: 500,
+    });
+    expect(
+      (await engine.store.listChannels({ workspaceId: WORKSPACE_ID })).find(
+        (channel) => channel.id === placeholder.id,
+      ),
+    ).toEqual(authoritative);
+  });
+
   it("maintains an agent-only CAS cursor and human-authored unread threads", async () => {
     const engine = await makeEngine("agent-read", 0);
     const channel = await engine.store.ensureGeneralChannel({

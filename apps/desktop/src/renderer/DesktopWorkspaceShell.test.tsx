@@ -507,6 +507,7 @@ describe("targeted chat navigation", () => {
       channelId: "dm-local",
       channelWireId: "dm-wire",
       threadId: "dm-thread",
+      focusMessageId: "message-dm",
     });
     if (mentionTarget.surface !== "dm") throw new Error("Expected DM target");
     expect(resolveCanonicalDm(mentionTarget, [dm])).toEqual(dm);
@@ -526,7 +527,51 @@ describe("targeted chat navigation", () => {
       title: "Direct message",
       incoming: 1,
       outgoing: 0,
-    })).toEqual(mentionTarget);
+    })).toEqual({
+      surface: "dm",
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      threadId: "dm-thread",
+    });
+  });
+
+  it("preserves a DM mention message target through canonical navigation", async () => {
+    const dm = {
+      channelId: "dm-local",
+      channelWireId: "dm-wire",
+      name: "alice@example.com",
+      peerLabel: "Alice",
+      role: "owner" as const,
+      shareId: null,
+      threadId: "dm-thread",
+      unreadCount: 0,
+      connected: true,
+    };
+    const open = vi.fn();
+
+    await runCanonicalDmNavigation({
+      locator: {
+        channelId: dm.channelId,
+        channelWireId: dm.channelWireId,
+        threadId: dm.threadId,
+        focusMessageId: "message-dm",
+      },
+      syncDms: async () => ({ available: true, dms: [dm] }),
+      isCurrent: () => true,
+      open,
+    });
+
+    expect(open).toHaveBeenCalledWith({
+      level: "dm",
+      dm,
+      focusMessageId: "message-dm",
+    });
+    expect(
+      chatsNavigationRequiresRemount(
+        { level: "dm", dm, focusMessageId: "message-old" },
+        { level: "dm", dm, focusMessageId: "message-dm" },
+      ),
+    ).toBe(true);
   });
 
   it("does not reopen Chats when destination navigation supersedes a delayed DM lookup", async () => {

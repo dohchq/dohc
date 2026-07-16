@@ -133,7 +133,7 @@ export type ChatsNav =
     }
   // Direct messages (WS-MU-C3): one running conversation per DM (the
   // anti-forum rule), plus a one-step "new message" composer.
-  | { level: "dm"; dm: DmRecord }
+  | { level: "dm"; dm: DmRecord; focusMessageId?: string }
   | { level: "dm-new" };
 
 type Nav = ChatsNav;
@@ -1754,9 +1754,13 @@ export function ChatsView(props: {
   );
 
   const openDm = useCallback(
-    async (dm: DmRecord) => {
+    async (dm: DmRecord, focusMessageId?: string) => {
       const token = ++liveToken.current;
-      setNav({ level: "dm", dm });
+      setNav({
+        level: "dm",
+        dm,
+        ...(focusMessageId ? { focusMessageId } : {}),
+      });
       setMessages([]);
       setReactions([]);
       setDecisions([]);
@@ -1942,7 +1946,7 @@ export function ChatsView(props: {
       else if (seed.level === "thread") {
         void openThread(seed.channel, seed.thread, seed.focusMessageId);
       }
-      else if (seed.level === "dm") void openDm(seed.dm);
+      else if (seed.level === "dm") void openDm(seed.dm, seed.focusMessageId);
       else if (seed.level === "dm-new") setNav({ level: "dm-new" });
     }
     const drafts = props.initialDrafts;
@@ -2377,18 +2381,26 @@ export function ChatsView(props: {
   }, []);
 
   useEffect(() => {
+    const focusMessageId =
+      nav.level === "thread" || nav.level === "dm" ? nav.focusMessageId : undefined;
+    const conversationId =
+      nav.level === "thread"
+        ? nav.thread.id
+        : nav.level === "dm"
+          ? nav.dm.threadId
+          : undefined;
     if (
-      nav.level !== "thread" ||
-      !nav.focusMessageId ||
+      !focusMessageId ||
+      !conversationId ||
       messagesLoading ||
-      !messages.some((message) => message.id === nav.focusMessageId)
+      !messages.some((message) => message.id === focusMessageId)
     ) {
       return;
     }
-    const jumpKey = `${nav.thread.id}:${nav.focusMessageId}`;
+    const jumpKey = `${conversationId}:${focusMessageId}`;
     if (focusedMessageJump.current === jumpKey) return;
     focusedMessageJump.current = jumpKey;
-    const frame = requestAnimationFrame(() => scrollToMessage(nav.focusMessageId!));
+    const frame = requestAnimationFrame(() => scrollToMessage(focusMessageId));
     return () => cancelAnimationFrame(frame);
   }, [messages, messagesLoading, nav, scrollToMessage]);
 
@@ -2820,6 +2832,10 @@ export function ChatsView(props: {
               endRef={messagesEndRef}
               mentionCandidates={mentionCandidates}
               onOpenPath={props.onOpenPath}
+              onMessageElement={(messageId, element) => {
+                if (element) messageNodes.current.set(messageId, element);
+                else messageNodes.current.delete(messageId);
+              }}
               reactionControls={{
                 reactions,
                 viewerAuthorId,

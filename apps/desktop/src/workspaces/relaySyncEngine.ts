@@ -44,6 +44,11 @@ export interface CloudSyncEngineOptions {
   // throw here is logged and never fails the workspace's own pass, so a
   // revoked share can't wedge file sync into permanent backoff.
   syncSharedChannels?: () => Promise<void>;
+  // Runs after the workspace pull has fully succeeded through the capture
+  // gate (including materialization and cursor commit). Follow-up projection
+  // work such as live chat bookmarks must be prompt, but is ancillary: a
+  // failure is logged and contained so it cannot put relay sync into backoff.
+  afterSuccessfulPull?: () => Promise<void>;
   debounceMs?: number;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
@@ -189,6 +194,13 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
     // runRelaySync) completes the bootstrap; a throw above leaves the next
     // retry pull-only.
     bootstrapPullPending = false;
+    if (options.afterSuccessfulPull) {
+      try {
+        await options.afterSuccessfulPull();
+      } catch (error) {
+        console.error(`[desktop] post-pull work failed for ${options.rootDir}:`, error);
+      }
+    }
     // Shared channels ride the same cadence but never gate the pass: chat
     // replay touches no workspace files, so it runs OUTSIDE runRelaySync's
     // capture gate, and its failures are contained here.

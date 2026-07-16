@@ -269,6 +269,55 @@ function isNormalizedPathHint(path: unknown): path is string {
   return result.ok && result.normalized === path;
 }
 
+const REPLICATED_CHAT_ID_MAX_LENGTH = 256;
+const REPLICATED_CHANNEL_SLUG_MAX_LENGTH = 200;
+
+function isBoundedReplicatedId(value: unknown, maxLength = REPLICATED_CHAT_ID_MAX_LENGTH) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maxLength &&
+    value.trim() === value &&
+    !PROJECTION_FIELD_CONTROL_CHAR.test(value)
+  );
+}
+
+function isReplicatedTimestamp(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isValidReplicatedThreadCreatePayload(
+  value: unknown,
+): value is ChatThreadCreatePayload {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  const payload = value as Record<string, unknown>;
+  if (
+    !isBoundedReplicatedId(payload.threadId) ||
+    typeof payload.title !== "string" ||
+    payload.title.length > 200 ||
+    (payload.title !== "" && payload.title.trim() !== payload.title) ||
+    !isReplicatedTimestamp(payload.createdAtMs) ||
+    (payload.linkedObjectId !== undefined &&
+      !isBoundedReplicatedId(payload.linkedObjectId, 200)) ||
+    (payload.linkedPathHint !== undefined && !isNormalizedPathHint(payload.linkedPathHint)) ||
+    (payload.linkedAtMs !== undefined && !isReplicatedTimestamp(payload.linkedAtMs)) ||
+    (payload.channelSlug !== undefined &&
+      (!isBoundedReplicatedId(payload.channelSlug, REPLICATED_CHANNEL_SLUG_MAX_LENGTH) ||
+        !/^[a-z0-9]+(?:-[a-z0-9]+)*$/u.test(payload.channelSlug as string))) ||
+    (payload.channelWireId !== undefined && !isBoundedReplicatedId(payload.channelWireId))
+  ) {
+    return false;
+  }
+  const hasLinkedOwner = payload.linkedObjectId !== undefined;
+  const hasChannelOwner =
+    payload.channelSlug !== undefined || payload.channelWireId !== undefined;
+  if (hasLinkedOwner === hasChannelOwner) return false;
+  if (!hasLinkedOwner && (payload.linkedPathHint !== undefined || payload.linkedAtMs !== undefined)) {
+    return false;
+  }
+  return true;
+}
+
 function normalizeThreadTitle(title: string): string {
   const normalized = title.trim();
   if (!normalized || normalized.length > 200) {
@@ -1598,16 +1647,82 @@ function wireIdForChannelId(
   return row ? stringValue(row.wire_id) : undefined;
 }
 
+function recordChannelPlaceholder(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  channelId: ChatChannelId,
+  wireId: string,
+): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO chat_channel_placeholders (workspace_id, channel_id, wire_id)
+     VALUES (?, ?, ?)`,
+  ).run(workspaceId, channelId, wireId);
+}
+
+function isChannelPlaceholder(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  channelId: ChatChannelId,
+  wireId: string,
+): boolean {
+  return Boolean(
+    db
+      .prepare(
+        `SELECT 1 FROM chat_channel_placeholders
+         WHERE workspace_id = ? AND channel_id = ? AND wire_id = ?`,
+      )
+      .get(workspaceId, channelId, wireId),
+  );
+}
+
+function replaceChannelPlaceholderMetadata(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  channelId: ChatChannelId,
+  wireId: string,
+  payload: ChatChannelCreatePayload,
+): void {
+  const slugOwner = db
+    .prepare("SELECT channel_id FROM chat_channels WHERE workspace_id = ? AND slug = ?")
+    .get(workspaceId, payload.slug);
+  const localSlug =
+    !slugOwner || stringValue(slugOwner.channel_id) === channelId
+      ? payload.slug
+      : nextFreeChannelSlug(db, workspaceId, payload.slug, channelId);
+  db.prepare(
+    `UPDATE chat_channels
+     SET name = ?, slug = ?, kind = ?, created_at_ms = ?, updated_at_ms = ?
+     WHERE workspace_id = ? AND channel_id = ?`,
+  ).run(
+    payload.name,
+    localSlug,
+    payload.kind,
+    payload.createdAtMs,
+    payload.createdAtMs,
+    workspaceId,
+    channelId,
+  );
+  db.prepare(
+    `DELETE FROM chat_channel_placeholders
+     WHERE workspace_id = ? AND channel_id = ? AND wire_id = ?`,
+  ).run(workspaceId, channelId, wireId);
+}
+
 // Same slug + DIFFERENT wire id means two distinct channels: the importer
 // keeps its local slug and gives the incoming channel a numbered variant,
 // mirroring how name collisions are settled elsewhere in the engine.
-function nextFreeChannelSlug(db: SqliteDb, workspaceId: WorkspaceId, slug: string): string {
-  const taken = (candidate: string) =>
-    Boolean(
-      db
-        .prepare("SELECT 1 FROM chat_channels WHERE workspace_id = ? AND slug = ?")
-        .get(workspaceId, candidate),
-    );
+function nextFreeChannelSlug(
+  db: SqliteDb,
+  workspaceId: WorkspaceId,
+  slug: string,
+  excludingChannelId?: ChatChannelId,
+): string {
+  const taken = (candidate: string) => {
+    const row = db
+      .prepare("SELECT channel_id FROM chat_channels WHERE workspace_id = ? AND slug = ?")
+      .get(workspaceId, candidate);
+    return Boolean(row && stringValue(row.channel_id) !== excludingChannelId);
+  };
   if (!taken(slug)) return slug;
   for (let suffix = 2; ; suffix += 1) {
     const candidate = `${slug}-${suffix}`;
@@ -4026,7 +4141,18 @@ export function createLinkedChatStore(
                 throw corruptStore();
               }
             }
-            if (mappedChannelId === undefined) {
+            if (
+              mappedChannelId !== undefined &&
+              isChannelPlaceholder(db, workspaceId, mappedChannelId, payload.wireId)
+            ) {
+              replaceChannelPlaceholderMetadata(
+                db,
+                workspaceId,
+                mappedChannelId,
+                payload.wireId,
+                payload,
+              );
+            } else if (mappedChannelId === undefined) {
               const existingAgent = carriesAgentWire
                 ? db
                     .prepare("SELECT * FROM chat_channels WHERE workspace_id = ? AND slug = ?")
@@ -4076,7 +4202,8 @@ export function createLinkedChatStore(
             );
           }
         } else if (input.opKind === "chat.thread.create") {
-          const payload = input.payload;
+          const payload: unknown = input.payload;
+          if (!isValidReplicatedThreadCreatePayload(payload)) throw corruptStore();
           if (
             !db
               .prepare("SELECT 1 FROM chat_threads WHERE workspace_id = ? AND thread_id = ?")
@@ -4167,6 +4294,12 @@ export function createLinkedChatStore(
                 }
                 if (typeof payload.channelWireId === "string") {
                   recordChannelWireId(db, workspaceId, payload.channelWireId, channelId);
+                  recordChannelPlaceholder(
+                    db,
+                    workspaceId,
+                    channelId,
+                    payload.channelWireId,
+                  );
                 }
               }
             }

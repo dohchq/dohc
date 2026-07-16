@@ -171,13 +171,17 @@ export function chatsNavigationRequiresRemount(
   // when the destination thread is already live, remount it with the new
   // focus target so ChatsView gets another chance to scroll (and so clicking
   // the same backlink twice remains useful after the user has scrolled away).
-  return next.level === "thread" && Boolean(next.focusMessageId);
+  return (
+    (next.level === "thread" || next.level === "dm") &&
+    Boolean(next.focusMessageId)
+  );
 }
 
 export interface DmChatLocator {
   channelId?: string;
   channelWireId?: string;
   threadId: string;
+  focusMessageId?: string;
 }
 
 type ChatOpenTarget =
@@ -197,6 +201,7 @@ export function chatMentionOpenTarget(mention: ChatFileMentionRecord): ChatOpenT
       channelId: mention.channelId,
       channelWireId: mention.channelWireId,
       threadId: mention.thread.id,
+      focusMessageId: mention.message.id,
     };
   }
   if (!mention.channelId || !mention.channelName) {
@@ -304,7 +309,17 @@ export async function runCanonicalDmNavigation(input: {
     const result = await input.syncDms();
     if (!input.isCurrent()) return;
     const dm = result.available ? resolveCanonicalDm(input.locator, result.dms) : null;
-    input.open(dm ? { level: "dm", dm } : { level: "channels" });
+    input.open(
+      dm
+        ? {
+            level: "dm",
+            dm,
+            ...(input.locator.focusMessageId
+              ? { focusMessageId: input.locator.focusMessageId }
+              : {}),
+          }
+        : { level: "channels" },
+    );
   } catch {
     if (input.isCurrent()) input.open({ level: "channels" });
   }
