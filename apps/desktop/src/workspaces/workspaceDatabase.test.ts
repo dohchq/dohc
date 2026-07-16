@@ -91,6 +91,22 @@ describe("applyDatabaseEdit", () => {
     });
   });
 
+  it("stamps the persisted operationId from an injected createId seam", async () => {
+    await importToDatabase(root, "imports/wallet.csv", "finance/wallet.sqlite", "transactions");
+    await applyDatabaseEdit(
+      root,
+      "finance/wallet.sqlite",
+      { table: "transactions", op: "update", pkColumn: "id", rowId: "txn_001", payload: { category: "Groceries" } },
+      AUTHOR,
+      1_700_000_000_000,
+      { createId: () => "op_fixed_0001" },
+    );
+    const log = await readFile(join(root, databaseOpLogPath("finance/wallet.sqlite")), "utf8");
+    const ops = log.trim().split("\n").map((l) => JSON.parse(l));
+    // Both the injected id and the injected clock are deterministic in the log.
+    expect(ops[0]).toMatchObject({ operationId: "op_fixed_0001", appliedAt: 1_700_000_000_000 });
+  });
+
   it("edits exactly one row via rowid even when a guessed id column is duplicated", async () => {
     // An externally-created database where "id" is an ordinary, non-unique
     // column (imports declare id as a pk, but arbitrary user dbs don't).

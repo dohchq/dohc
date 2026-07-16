@@ -404,6 +404,10 @@ export interface WorkspaceEngineCaptureOptions {
   // (PR 08) sharing the same engine.db.
   secretStore?: SecretFileStore;
   now?: () => number;
+  // Injectable id seam (oracle/tests) for the correlationId stamped on every
+  // capture/version/restore write. Omitted ⇒ a real randomUUID, identical to
+  // today's behavior.
+  createId?: () => string;
   onError?: (context: string, error: unknown) => void;
   // Outcome of each background HISTORY-CAPTURE task (batch capture and
   // reconciliation passes). With the engine as a flagged workspace's SOLE
@@ -881,6 +885,7 @@ export function createWorkspaceEngineCapture(
 ): WorkspaceEngineCapture {
   const { workspaceId, rootPath } = options;
   const now = options.now ?? (() => Date.now());
+  const createId = options.createId ?? (() => randomUUID());
   const onError =
     options.onError ??
     ((context: string, error: unknown) => {
@@ -1407,7 +1412,7 @@ export function createWorkspaceEngineCapture(
     const metadata: ActorNeutralWriteMetadata = {
       origin: "local-file",
       summary: "Reconciled offline edits",
-      correlationId: `reconcile-${randomUUID()}`,
+      correlationId: `reconcile-${createId()}`,
     };
     // Routes to the ACTIVE version: after a mid-switch crash this is the
     // recovery pass (the destination was recorded active before the disk was
@@ -1792,7 +1797,7 @@ export function createWorkspaceEngineCapture(
           {
             origin: "local-file",
             summary: "Saved latest edits",
-            correlationId: `version-create-${randomUUID()}`,
+            correlationId: `version-create-${createId()}`,
           },
         );
         const version = await engine.createNamedVersion({
@@ -1838,7 +1843,7 @@ export function createWorkspaceEngineCapture(
         // Nothing is ever lost: the current disk state (including edits still
         // inside the watcher settle window) is captured into the version the
         // user is leaving.
-        const correlationId = `version-switch-${randomUUID()}`;
+        const correlationId = `version-switch-${createId()}`;
         await reconcileDiskIntoVersion(
           engine,
           fromVersionId,
@@ -1896,7 +1901,7 @@ export function createWorkspaceEngineCapture(
           {
             origin: "local-file",
             summary: "Saved latest edits",
-            correlationId: `version-compare-${randomUUID()}`,
+            correlationId: `version-compare-${createId()}`,
           },
         );
         const textChanges = await compareVersionFiles(engine, {
@@ -1929,7 +1934,7 @@ export function createWorkspaceEngineCapture(
         const policy = await readPolicyForTask();
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
-        const correlationId = `version-merge-${randomUUID()}`;
+        const correlationId = `version-merge-${createId()}`;
         // WS-G2-C-2 (gate fix 2): a merge materializes results into the active
         // folder. Vacate live sessions first so a later settle can't overwrite
         // the merged result / reopen a stale lineage.
@@ -2219,7 +2224,7 @@ export function createWorkspaceEngineCapture(
             );
           }
           const secretPath = secretMoment.path;
-          const secretCorrelationId = `restore-${randomUUID()}`;
+          const secretCorrelationId = `restore-${createId()}`;
           // Capture the file's latest disk state first so a restore can never
           // destroy an edit the store has not recorded yet.
           const disk = await readDiskSecretState(rootPath, secretPath);
@@ -2307,7 +2312,7 @@ export function createWorkspaceEngineCapture(
           throw new Error("A rename can't be restored directly.");
         }
         const path = moment.path;
-        const correlationId = `restore-${randomUUID()}`;
+        const correlationId = `restore-${createId()}`;
         // Capture the file's latest disk state first so a restore can never
         // destroy an edit the engine has not recorded yet — the pre-restore
         // content stays one moment back in history.
@@ -2491,7 +2496,7 @@ export function createWorkspaceEngineCapture(
         const metadata: ActorNeutralWriteMetadata = input.metadata ?? {
           origin: "api",
           summary: `Updated generated ${pathBasename(path)}`,
-          correlationId: `generated-write-${randomUUID()}`,
+          correlationId: `generated-write-${createId()}`,
         };
         // Preserve a manually edited disk preimage in history before the
         // canonical generated copy replaces it. This never grants that edit
@@ -2577,7 +2582,7 @@ export function createWorkspaceEngineCapture(
             await writeIfChanged(engine, versionId, recoverPath, recoverDisk, {
               origin: "local-file",
               summary: `Recovered generated ${pathBasename(recoverPath)}`,
-              correlationId: `generated-recovery-${randomUUID()}`,
+              correlationId: `generated-recovery-${createId()}`,
             });
             source = await engine.readTextFile({ workspaceId, versionId, path: fromPath });
             destination = await engine.readTextFile({ workspaceId, versionId, path: toPath });
@@ -2710,7 +2715,7 @@ export function createWorkspaceEngineCapture(
         const metadata: ActorNeutralWriteMetadata = input.metadata ?? {
           origin: "api",
           summary: `Archived ${pathBasename(fromPath)}`,
-          correlationId: `generated-archive-${randomUUID()}`,
+          correlationId: `generated-archive-${createId()}`,
         };
         const canonical = source.text;
         if (sourceDisk.kind === "text" && sourceDisk.text !== canonical) {

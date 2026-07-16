@@ -207,11 +207,21 @@ export function applyDatabaseEdit(
   edit: DatabaseEdit,
   author: ChangeAuthor,
   nowMs: number,
-  options: { signal?: AbortSignal } = {},
+  // Injectable id seam (oracle/tests) for the persisted operationId. Omitted ⇒
+  // a real randomUUID, identical to today's behavior.
+  options: { signal?: AbortSignal; createId?: () => string } = {},
 ): Promise<DatabaseSnapshotView> {
   return enqueueEdit(`${rootPath}\u0000${relativePath}`, () => {
     if (options.signal?.aborted) throw new Error("Database edit was cancelled.");
-    return applyDatabaseEditNow(rootPath, relativePath, edit, author, nowMs, options.signal);
+    return applyDatabaseEditNow(
+      rootPath,
+      relativePath,
+      edit,
+      author,
+      nowMs,
+      options.signal,
+      options.createId,
+    );
   });
 }
 
@@ -222,6 +232,7 @@ async function applyDatabaseEditNow(
   author: ChangeAuthor,
   nowMs: number,
   signal?: AbortSignal,
+  createId: () => string = randomUUID,
 ): Promise<DatabaseSnapshotView> {
   const { realTarget, normalized } = await resolveWorkspaceFile(rootPath, relativePath);
   if (signal?.aborted) throw new Error("Database edit was cancelled.");
@@ -237,7 +248,7 @@ async function applyDatabaseEditNow(
   const logAbs = join(rootPath, logRel);
   await mkdir(dirname(logAbs), { recursive: true });
   const operation = createDatabaseOperation({
-    operationId: randomUUID(),
+    operationId: createId(),
     databasePath: normalized,
     table: edit.table,
     op: edit.op,

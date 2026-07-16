@@ -2572,7 +2572,14 @@ function requireAuthorizedWorkspace(
   return requireWorkspace(workspaceId);
 }
 
-function registerIpcHandlers(): void {
+// Injectable clock/id seams (oracle/tests) for renderer-initiated database
+// edits, whose nowMs becomes appliedAt (and createId the operationId) in the
+// persisted JSONL operation log. Omitted ⇒ the real wall clock / randomUUID,
+// identical to today's behavior.
+function registerIpcHandlers(
+  deps: { now?: () => number; createId?: () => string } = {},
+): void {
+  const now = deps.now ?? (() => Date.now());
   ipcMain.handle(CHANNELS.reloadRenderer, async (event) => {
     assertTrustedSender(event);
     const sender = event.sender;
@@ -4284,7 +4291,8 @@ function registerIpcHandlers(): void {
         input.relativePath,
         input.edit,
         { kind: "user", userId: "local" },
-        Date.now(),
+        now(),
+        deps.createId ? { createId: deps.createId } : {},
       ),
     );
   });

@@ -73,6 +73,23 @@ describe("desktop agent dispatch store", () => {
     });
   });
 
+  it("mints claimed run ids from an injected createRunId seam", () => {
+    requireDispatch().close();
+    dispatch = createDesktopAgentDispatchStore(root, {
+      createRunId: () => "run_injected_0001",
+    });
+    dispatch.store.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message-injected",
+      threadId: THREAD_ID,
+    });
+    const claim = dispatch.store.claimNextPending(WORKSPACE_ID, {
+      command: "codex exec",
+    });
+    if (!claim) throw new Error("Expected the pending dispatch to be claimed.");
+    expect(claim.run.runId).toBe("run_injected_0001");
+  });
+
   it("records and resolves run-message links through the desktop adapter", () => {
     const store = requireDispatch().store;
     store.recordTrigger({

@@ -39,6 +39,11 @@ export interface SiteSdkHostContext {
   // Test/lifecycle seam for proving that preview cancellation terminates the
   // owned search handle. Production callers use startRipgrepSearch.
   searchStarter?: SiteSdkSearchStarter;
+  // Injectable clock/id seams (oracle/tests) for database edits made through
+  // the site SDK. Omitted ⇒ the real wall clock / randomUUID, identical to
+  // today's behavior.
+  now?: () => number;
+  createId?: () => string;
 }
 
 export type SiteSdkSearchStarter = typeof startRipgrepSearch;
@@ -343,8 +348,8 @@ export async function invokeSiteSdkHost(
         path,
         edit,
         { kind: "user", userId: "local" },
-        Date.now(),
-        { signal: context.signal },
+        context.now?.() ?? Date.now(),
+        { signal: context.signal, ...(context.createId ? { createId: context.createId } : {}) },
       );
     }
     case "ui.open": {
