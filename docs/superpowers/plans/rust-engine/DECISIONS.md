@@ -36,6 +36,33 @@ Append-only. Every entry: date, decision, decider, rationale pointer.
 6. Oracle = existing ~22k-line suite ported to implementation-neutral
    adapter + differential traces + named-fault-point crash injection.
 
+## 2026-07-16 — yrs interoperability spike: PASS (sole abort criterion cleared)
+
+- **Decider:** evidence-based per locked decision 4 ("yrs owns Y.Doc
+  durability iff the spike passes"); verdict delivered by the YRS-SPIKE
+  shard, subject to PR #140 review verification.
+- **Evidence:** 21/21 fidelity corpus docs (12 synthetic + 9 harvested real
+  dogfood lineages: 9 snapshots + 163 durable updates from an
+  integrity-checked copy); 500 seeds × 2 modes = 1,000 fuzz runs
+  (7,519 JS edits / 5,906 yrs edits / 25,532 shuffled deliveries /
+  5,131 duplicates / 1,742 truncated updates all rejected cleanly);
+  semantic state-vector equality and compaction convergence-neutrality.
+  Pinned pair: **yjs 13.6.30 ↔ yrs 0.27.3** (audited as one unit).
+- **Binding carry-forward constraints for R11 (spike findings):**
+  1. Every wire-facing yrs `Doc` MUST be constructed with
+     `OffsetKind::Utf16` — the default `OffsetKind::Bytes` is wire-unsafe
+     against Yjs (real divergence + a Yjs struct-store crash on non-ASCII
+     text).
+  2. Nested `Any::Map` key order is nondeterministic through yrs
+     re-encode: sort nested frontmatter keys in `yDocToMarkdown` before
+     cutover; do not content-address unsorted snapshot blobs.
+  3. The TS adapter validates `isWellFormed()` UTF-16 at the boundary.
+  4. Yjs wire format carries no root-type kinds — both engines share the
+     declared dohc root schema; `yDocToMarkdown` is destructive
+     (y-prosemirror drops PM-schema-invalid elements, observed in two real
+     dogfood docs) — projection provenance must account for this.
+- **Rationale pointer:** `crates/yrs-spike/SPIKE_REPORT.md` (PR #140).
+
 ## Open — require Ice at Gate 0 (recommendations in plan)
 
 | # | Decision | Status |

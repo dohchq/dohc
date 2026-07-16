@@ -46,3 +46,10 @@ source of truth every orchestrator session loads first).
   runner (open decision 2).
 - R03 protocol spike launched (background agent, isolated worktree,
   branch codex/rust-engine-r03).
+- YRS-SPIKE verdict: PASS (PR #140). 21/21 fidelity docs incl. 9 real
+  dogfood lineages; 1,000 seeded fuzz runs clean; yjs 13.6.30 <-> yrs
+  0.27.3 pinned. Sole abort criterion cleared. Binding R11 constraints
+  recorded in DECISIONS.md (OffsetKind::Utf16 mandatory, nested map key
+  sorting, UTF-16 well-formedness at adapter, shared root schema +
+  destructive projection provenance). Safety fences verified held
+  (copy-only harvest, fixtures local/gitignored, zero unsafe).
