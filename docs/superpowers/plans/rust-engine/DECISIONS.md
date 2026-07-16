@@ -87,16 +87,39 @@ Append-only. Every entry: date, decision, decider, rationale pointer.
   (fidelity 23/23 `--require-harvested`, fuzz 500/500 `--strict`). Ice
   ratifies (or overrides) as part of the Gate 0 decision packet.
 
-## Open — require Ice at Gate 0 (recommendations in plan)
+## 2026-07-16 — Gate 0 decisions (Ice, in-session, via GATE0_PACKET.md)
 
-| # | Decision | Status |
+- **yrs PASS ratified** (provisional flag lifted). Sub-choice: the pinned
+  converging-prefix invariant for yjs non-atomic applies is ACCEPTED — no
+  snapshot/restore wrap in R11b.
+- **Protocol ratified**: length-framed JSON control frames + raw binary
+  blob-chunk frames, serde-struct single schema source (per PR #141).
+- **GitHub CI SKIPPED** (supersedes the billing blocker): evidence is
+  local-first — native Windows runs on the dev machine + Linux via WSL;
+  macOS untested during construction and MUST be revisited before any Mac
+  release (recorded as pre-release obligation, replaces old open
+  decision 2). PR #139's workflow is retired; native-suite evidence moves
+  to R02's local runner scripts.
+- **Freeze**: Ice enforces no further TS-engine changes on main. In-flight
+  engine changes already on main are IMPORTANT FEATURES and are
+  **integrated, not discarded**: every engine commit since the inventory
+  baseline (958cdfd3) is reconciled into BEHAVIOR_DELTA.md and the
+  inventory/contract artifacts before the affected shards port.
+- **Security hotfixes approved**: TS fixes this week for (a)
+  validateWorkspacePath ADS/device-name/8.3 bypasses, (b) search policy
+  fail-open → fail-closed. Both land with BEHAVIOR_DELTA entries and
+  become approved deltas the Rust port inherits.
+- **Remaining NEEDS-DECISION items**: defaults approved — stricter
+  behavior with every difference recorded as a documented delta/fixture.
+
+| # | Decision | Resolution (Ice, 2026-07-16) |
 | --- | --- | --- |
-| 1 | Protocol (after R03 spike) | open |
-| 2 | Mandatory 4-platform Rust CI matrix (needed week one) | open |
-| 3 | Relay HTTP client ownership at cutover | open |
-| 4 | Standalone CLI/MCP stay external writers | open |
-| 5 | Share mounts in the atomic cutover | open |
-| 6 | Account/DM/registry saga model | open |
-| 7 | Agent-run attribution under Rust | open |
-| 8 | Dogfood/canary duration before stable | open |
-| 9 | Mobile/web hosts — deferred; portability guardrails added 2026-07-16 (Ice) | deferred |
+| 1 | Protocol | framed JSON + binary chunks (ratified) |
+| 2 | CI matrix | GitHub CI skipped; local-first (Windows native + WSL Linux); macOS deferred to pre-release revisit |
+| 3 | Relay HTTP client | Rust-owned at cutover |
+| 4 | Standalone CLI/MCP | remain external filesystem writers |
+| 5 | Share mounts | cut over in the same atomic release |
+| 6 | Account/DM/registry | TS-owned + crash-recoverable Rust sagas |
+| 7 | Agent-run attribution | Rust authority; agent-runs.json becomes derived projection |
+| 8 | Dogfood duration | minimum 2 weeks before stable |
+| 9 | Mobile/web hosts | deferred; portability guardrails stand |

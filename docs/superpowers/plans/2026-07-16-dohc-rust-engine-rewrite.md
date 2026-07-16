@@ -111,7 +111,14 @@ Strategy: **parallel dormant construction with atomic authority cutover.**
    becomes the repo default immediately. No grand build-an-oracle-from-scratch
    phase.
 
-## Open decisions still requiring Ice's approval at Gate 0
+## Open decisions — RESOLVED at Gate 0 (2026-07-16)
+
+> All items below were resolved by Ice on 2026-07-16; the authoritative
+> record is `DECISIONS.md` ("Gate 0 decisions"). Headline changes: GitHub
+> CI is skipped in favor of local-first evidence (Windows native + WSL
+> Linux; macOS deferred to a mandatory pre-release revisit), and in-flight
+> TS-engine changes on main are integrated via BEHAVIOR_DELTA
+> reconciliation, not discarded. The list below is retained for context.
 
 1. **Protocol**: framed JSON + binary streaming vs CBOR/MessagePack vs
    Protobuf — decided by the R03 spike, approved by Ice.
@@ -937,10 +944,17 @@ infrastructure is a separate initiative (today no budget is CI-enforced at
 all). p99 gating waits for post-cutover telemetry; do not gate on runner
 noise. Do not invent numbers; record baselines first.
 
-### Cross-platform matrix
+### Cross-platform matrix (amended 2026-07-16: GitHub CI skipped)
 
-Every cutover candidate passes on Windows x64, macOS x64, macOS arm64, Linux
-x64: Rust build/format/lint/tests, protocol conformance, filesystem/path
+Evidence is local-first per Ice's Gate 0 decision: native Windows x64 runs
+on the dev machine plus Linux x64 via WSL, driven by R02's local runner
+scripts with recorded results in the execution log. macOS (x64 and arm64)
+is untested during construction; **revisiting macOS evidence is a
+mandatory pre-release obligation before any Mac distribution** — a cutover
+candidate may ship to Ice's own Windows dogfood without it, but Gate 7's
+"every supported platform" claim shrinks to {Windows, Linux-WSL} until
+macOS evidence exists. The original target set for eventual release
+remains Windows x64, macOS x64, macOS arm64, Linux x64: Rust build/format/lint/tests, protocol conformance, filesystem/path
 suite, SQLite migration/integrity suite, packaged binary
 presence/hash/version smoke, sidecar parent-death and restart, workspace
 cleanup/handle release. Full engine-adjacent Electron E2E per platform before
@@ -1129,7 +1143,11 @@ on the port's critical path (`versionedTextStore.ts` 34, `engineDbSchema.ts`
 
 - **From Wave 0**: freeze `engineDbSchema.ts` and the sync/replication wire
   surfaces (schema and wire churn invalidates the most downstream Rust work
-  per commit).
+  per commit). Ice enforces this as of 2026-07-16. Engine changes already
+  landed on main since the inventory baseline (958cdfd3) are **important
+  features to integrate, not noise to discard**: a delta-reconciliation
+  pass records each in `BEHAVIOR_DELTA.md` and updates the affected
+  inventory/contract rows before their shards port.
 - **From Wave 1 (Phase 2 open)**: full engine feature freeze. Exceptions
   require Ice's approval, and the excepted PR must update
   `BEHAVIOR_DELTA.md` and the affected SHARDS.tsv rows in the same PR —

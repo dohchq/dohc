@@ -1,4 +1,13 @@
-# Gate 0 decision packet — for Ice
+# Gate 0 decision packet — RESOLVED 2026-07-16
+
+> Ice approved all recommendations in-session: yrs PASS ratified
+> (converging-prefix accepted), protocol ratified, GitHub CI skipped
+> (local-first evidence; macOS deferred to pre-release), freeze enforced by
+> Ice with in-flight engine changes integrated via delta reconciliation,
+> decisions 3–8 per recommendation, both security hotfixes approved,
+> NEEDS-DECISION defaults approved. Authoritative record: DECISIONS.md.
+
+# (original packet below)
 
 > One page + links. Gate 0 closes Phase 0 and opens Wave 1 capability work
 > (R04 storage core + calibration slices). Everything below is evidence-

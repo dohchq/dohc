@@ -250,3 +250,11 @@ source of truth every orchestrator session loads first).
   9 NEEDS-DECISION items incl. 2 recommended current-product TS hotfixes.
   Gate 0 close sequence documented: merges -> R02 -> GATE0 flips ->
   Wave 1.
+- GATE 0 DECISIONS RESOLVED by Ice (in-session): yrs PASS ratified
+  (converging-prefix accepted); protocol ratified; GitHub CI SKIPPED ->
+  local-first evidence (Windows native + WSL Linux; macOS = mandatory
+  pre-release revisit); freeze enforced by Ice with in-flight engine
+  changes INTEGRATED via BEHAVIOR_DELTA reconciliation (not discarded);
+  decisions 3-8 per recommendation; both security hotfixes approved;
+  NEEDS-DECISION defaults approved. PR #139 workflow retired;
+  TS-NATIVE-CI repurposed to local runner scripts under R02.
