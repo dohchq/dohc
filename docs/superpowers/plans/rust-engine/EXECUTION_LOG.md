@@ -80,3 +80,13 @@ source of truth every orchestrator session loads first).
   5 non-blocking P2 hardening findings (symlink-bypassable harvest guard,
   hang-on-crash driver, u32 overflow nit, truncation-only fault model to
   narrow in report, Node>=22 note). Fix batch pending reviewer 2/2.
+- PR #140 local Claude review 2/2 (evidence integrity): verdict UPHELD
+  with independent reproduction (fidelity re-run, 25-seed fuzz matching
+  report distributions ~2%, determinism probe 3x identical, Bytes crash
+  re-demonstrated at yrs block.rs:1613). 2 P1 (synthetic-only fallback
+  silently passes without harvested fixtures + single-update-blob corpus
+  never exercises reverse-order path; truncation acceptance warns instead
+  of failing) + 4 P2 (pinned Bytes probe, base clientID by construction,
+  undeclaredRoot placeholder equality, skip-vs-fault classifier). Codex
+  bot added 4 P2s. All 15 findings dispatched to the spike fixer as one
+  batch; strict re-certification run required before re-review.
