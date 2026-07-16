@@ -1246,6 +1246,126 @@ describe("phase-one linked chat model", () => {
     ).toEqual(authoritative);
   });
 
+  it("numbers the local slug for direct replicated channels with distinct wire identities", async () => {
+    const engine = await makeEngine("direct-channel-slug-collision");
+    const firstOp: SyncReplicationEnvelope = {
+      workspaceId: WORKSPACE_ID,
+      originId: "origin-direct-channel-a",
+      originSeq: 0,
+      opKind: "chat.channel.create",
+      payload: {
+        channelId: "remote-channel-a",
+        name: "Project Updates",
+        slug: "project-updates",
+        kind: "channel",
+        createdAtMs: 1000,
+        wireId: "wire-project-updates-a",
+      },
+      recordedAtMs: 1000,
+    };
+    const secondOp: SyncReplicationEnvelope = {
+      workspaceId: WORKSPACE_ID,
+      originId: "origin-direct-channel-b",
+      originSeq: 0,
+      opKind: "chat.channel.create",
+      payload: {
+        channelId: "remote-channel-b",
+        name: "Project_Updates",
+        slug: "project-updates",
+        kind: "channel",
+        createdAtMs: 2000,
+        wireId: "wire-project-updates-b",
+      },
+      recordedAtMs: 2000,
+    };
+
+    await expect(engine.store.applyReplicationOp(firstOp)).resolves.toMatchObject({
+      status: "applied",
+    });
+    await expect(engine.store.applyReplicationOp(secondOp)).resolves.toMatchObject({
+      status: "applied",
+    });
+
+    const channels = await engine.store.listChannels({ workspaceId: WORKSPACE_ID });
+    expect(channels.map(({ name, slug }) => ({ name, slug }))).toEqual([
+      { name: "Project Updates", slug: "project-updates" },
+      { name: "Project_Updates", slug: "project-updates-2" },
+    ]);
+    const first = channels.find((channel) => channel.slug === "project-updates");
+    const second = channels.find((channel) => channel.slug === "project-updates-2");
+    if (!first || !second) throw new Error("Expected both colliding replicated channels.");
+    expect(
+      await engine.store.getChannelWireId({
+        workspaceId: WORKSPACE_ID,
+        channelId: first.id,
+      }),
+    ).toBe("wire-project-updates-a");
+    expect(
+      await engine.store.getChannelWireId({
+        workspaceId: WORKSPACE_ID,
+        channelId: second.id,
+      }),
+    ).toBe("wire-project-updates-b");
+  });
+
+  it("treats a repeated pre-wire channel slug as the same idempotent channel", async () => {
+    const engine = await makeEngine("direct-pre-wire-channel");
+    const firstOp: SyncReplicationEnvelope = {
+      workspaceId: WORKSPACE_ID,
+      originId: "origin-pre-wire-a",
+      originSeq: 0,
+      opKind: "chat.channel.create",
+      payload: {
+        channelId: "legacy-channel",
+        name: "Legacy Updates",
+        slug: "legacy-updates",
+        kind: "channel",
+        createdAtMs: 1000,
+      },
+      recordedAtMs: 1000,
+    };
+    const conflictingReplay: SyncReplicationEnvelope = {
+      workspaceId: WORKSPACE_ID,
+      originId: "origin-pre-wire-b",
+      originSeq: 0,
+      opKind: "chat.channel.create",
+      payload: {
+        channelId: "legacy-channel",
+        name: "Conflicting Legacy Name",
+        slug: "legacy-updates",
+        kind: "dm",
+        createdAtMs: 500,
+      },
+      recordedAtMs: 500,
+    };
+
+    await expect(engine.store.applyReplicationOp(firstOp)).resolves.toMatchObject({
+      status: "applied",
+    });
+    await expect(engine.store.applyReplicationOp(conflictingReplay)).resolves.toMatchObject({
+      status: "applied",
+    });
+    await expect(engine.store.applyReplicationOp(firstOp)).resolves.toMatchObject({
+      status: "skipped",
+    });
+
+    const channels = await engine.store.listChannels({ workspaceId: WORKSPACE_ID });
+    expect(channels).toHaveLength(1);
+    expect(channels[0]).toMatchObject({
+      name: "Legacy Updates",
+      slug: "legacy-updates",
+      kind: "channel",
+      createdAtMs: 1000,
+      updatedAtMs: 1000,
+    });
+    expect(
+      await engine.store.getChannelWireId({
+        workspaceId: WORKSPACE_ID,
+        channelId: channels[0]!.id,
+      }),
+    ).toBeNull();
+  });
+
   it("maintains an agent-only CAS cursor and human-authored unread threads", async () => {
     const engine = await makeEngine("agent-read", 0);
     const channel = await engine.store.ensureGeneralChannel({

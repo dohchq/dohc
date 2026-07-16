@@ -4291,15 +4291,17 @@ export function createLinkedChatStore(
                     input.recordedAtMs,
                     input.recordedAtMs,
                   );
+                  if (typeof payload.channelWireId === "string") {
+                    recordChannelPlaceholder(
+                      db,
+                      workspaceId,
+                      channelId,
+                      payload.channelWireId,
+                    );
+                  }
                 }
                 if (typeof payload.channelWireId === "string") {
                   recordChannelWireId(db, workspaceId, payload.channelWireId, channelId);
-                  recordChannelPlaceholder(
-                    db,
-                    workspaceId,
-                    channelId,
-                    payload.channelWireId,
-                  );
                 }
               }
             }
