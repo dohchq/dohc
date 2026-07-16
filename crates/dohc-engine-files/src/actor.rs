@@ -19,10 +19,9 @@ use crate::reconcile::{ReconcileController, ReconcileRun, ScanGeneration};
 use crate::scan::{ScanOutcome, Scanner};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::sync_channel as std_sync_channel;
 use std::thread::JoinHandle;
-use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, OwnedPermit};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -88,9 +87,6 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<ReconcileRun, FilesError>>,
     },
-    /// The injected watcher-overflow signal. Fire-and-forget: marking dirty is
-    /// pure in-memory bookkeeping with no failure mode to report.
-    MarkDirty,
     Stats {
         reply: oneshot::Sender<FilesStats>,
     },
@@ -102,6 +98,11 @@ pub struct FilesActor {
     tx: mpsc::Sender<Command>,
     close_permit: Option<OwnedPermit<Command>>,
     state: Arc<AtomicU8>,
+    /// A sticky watcher-overflow flag, set by [`FilesHandle::notify_overflow`]
+    /// INDEPENDENT of the command channel so a dirty mark can NEVER be lost to
+    /// backpressure. The worker folds it into the controller at the top of each
+    /// command, before any dirty-clearing reconcile runs.
+    pending_overflow: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -109,18 +110,27 @@ impl FilesActor {
     /// Spawn the actor's worker thread and build the scanner (which spins up the
     /// bounded hash pool). Blocks until startup completes so a pool-spawn or
     /// bad-root failure propagates synchronously.
+    ///
+    /// **Must be called OFF the async runtime** (it blocks on a startup
+    /// handshake). From within a tokio runtime use [`FilesActor::spawn_async`],
+    /// which offloads the blocking startup to a dedicated thread. A debug
+    /// assertion catches on-runtime misuse (CAL-2 parity with the runtime
+    /// actor's sync-context guard).
     pub fn spawn(root: PathBuf, bounds: ScanBounds) -> Result<Self, FilesError> {
+        debug_assert_off_runtime();
         let (tx, rx) = mpsc::channel::<Command>(CHANNEL_CAPACITY);
         // Reserve the dedicated Close slot up front (the channel is empty, so
         // this cannot fail).
         let close_permit = tx.clone().try_reserve_owned().ok();
         let state = Arc::new(AtomicU8::new(LifecycleState::Opening.as_u8()));
+        let pending_overflow = Arc::new(AtomicBool::new(false));
         let (startup_tx, startup_rx) = std_sync_channel::<Result<(), FilesError>>(1);
 
         let worker_state = Arc::clone(&state);
+        let worker_overflow = Arc::clone(&pending_overflow);
         let worker = std::thread::Builder::new()
             .name("dohc-files-actor".to_owned())
-            .spawn(move || worker_main(root, bounds, rx, worker_state, startup_tx))
+            .spawn(move || worker_main(root, bounds, rx, worker_state, worker_overflow, startup_tx))
             .map_err(|_| FilesError::PoolUnavailable {
                 reason: "could not spawn files actor worker thread",
             })?;
@@ -130,6 +140,7 @@ impl FilesActor {
                 tx,
                 close_permit,
                 state,
+                pending_overflow,
                 worker: Some(worker),
             }),
             Ok(Err(err)) => {
@@ -143,11 +154,29 @@ impl FilesActor {
         }
     }
 
+    /// Spawn from WITHIN a tokio runtime: the blocking startup handshake runs on
+    /// a dedicated OS thread (off the runtime) and the result is awaited, so no
+    /// runtime worker is blocked and [`FilesActor::spawn`]'s off-runtime guard
+    /// is respected.
+    pub async fn spawn_async(root: PathBuf, bounds: ScanBounds) -> Result<Self, FilesError> {
+        let (tx, rx) = oneshot::channel();
+        std::thread::Builder::new()
+            .name("dohc-files-spawn".to_owned())
+            .spawn(move || {
+                let _ = tx.send(FilesActor::spawn(root, bounds));
+            })
+            .map_err(|_| FilesError::PoolUnavailable {
+                reason: "could not spawn files actor startup thread",
+            })?;
+        rx.await.map_err(|_| FilesError::ActorUnavailable)?
+    }
+
     /// A clonable, message-only handle for issuing commands.
     pub fn handle(&self) -> FilesHandle {
         FilesHandle {
             tx: self.tx.clone(),
             state: Arc::clone(&self.state),
+            pending_overflow: Arc::clone(&self.pending_overflow),
         }
     }
 
@@ -191,6 +220,7 @@ impl Drop for FilesActor {
 pub struct FilesHandle {
     tx: mpsc::Sender<Command>,
     state: Arc<AtomicU8>,
+    pending_overflow: Arc<AtomicBool>,
 }
 
 impl FilesHandle {
@@ -234,15 +264,13 @@ impl FilesHandle {
     }
 
     /// Notify the actor of a watcher overflow — the injected event source hook.
-    /// Sets the dirty generation, forcing the next reconcile to do a full
-    /// rescan. Fails fast with [`FilesError::Overloaded`] if the bounded queue
-    /// is full (backpressure), never blocking the caller unboundedly.
-    pub fn notify_overflow(&self) -> Result<(), FilesError> {
-        match self.tx.try_send(Command::MarkDirty) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(FilesError::Overloaded),
-            Err(TrySendError::Closed(_)) => Err(FilesError::ActorUnavailable),
-        }
+    /// Sets a sticky dirty flag INDEPENDENT of the command channel, so the mark
+    /// can NEVER be lost to backpressure (unlike a `try_send`, which drops on a
+    /// full queue). The worker folds the flag into the controller at the top of
+    /// each command, before any dirty-clearing reconcile, so the forced full
+    /// rescan is guaranteed. Infallible and non-blocking.
+    pub fn notify_overflow(&self) {
+        self.pending_overflow.store(true, Ordering::Release);
     }
 
     /// Snapshot reconcile + pool state.
@@ -289,11 +317,24 @@ impl FilesHandle {
     }
 }
 
+/// Debug-only guard: [`FilesActor::spawn`] blocks on a startup handshake, which
+/// would stall a tokio worker thread. Catch on-runtime misuse cheaply in debug
+/// builds (mirrors `dohc-engine-runtime`'s sync-context guard); use
+/// [`FilesActor::spawn_async`] from within a runtime.
+#[inline]
+fn debug_assert_off_runtime() {
+    debug_assert!(
+        tokio::runtime::Handle::try_current().is_err(),
+        "FilesActor::spawn called from within a tokio runtime; use FilesActor::spawn_async"
+    );
+}
+
 fn worker_main(
     root: PathBuf,
     bounds: ScanBounds,
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
+    pending_overflow: Arc<AtomicBool>,
     startup_tx: std::sync::mpsc::SyncSender<Result<(), FilesError>>,
 ) {
     // Publish Closed on ANY exit (declared before the scanner so the scanner —
@@ -323,6 +364,15 @@ fn worker_main(
     drop(startup_tx);
 
     while let Some(cmd) = rx.blocking_recv() {
+        // Fold any sticky watcher-overflow signal into the controller BEFORE
+        // handling this command, so a dirty mark set during the previous
+        // (possibly long) command is never lost — and, critically, is applied
+        // before any dirty-clearing reconcile in THIS command runs. An overflow
+        // that arrives DURING a reconcile's scan re-sets the flag and is folded
+        // at the next command, so a change is never dropped.
+        if pending_overflow.swap(false, Ordering::AcqRel) {
+            controller.mark_dirty();
+        }
         match cmd {
             Command::Scan { token, reply } => {
                 let _ = reply.send(scanner.scan(&root, &token));
@@ -332,9 +382,6 @@ fn worker_main(
             }
             Command::ReconcileIfDirty { token, reply } => {
                 let _ = reply.send(controller.reconcile_if_dirty(&scanner, &root, &token));
-            }
-            Command::MarkDirty => {
-                controller.mark_dirty();
             }
             Command::Stats { reply } => {
                 let gauge = scanner.pool().gauge();

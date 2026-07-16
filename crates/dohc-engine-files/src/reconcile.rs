@@ -15,7 +15,7 @@
 //!   pending rescan, but the flag is cleared ONLY by a completed reconcile, so
 //!   evidence of a change is never lost (`plan §Workspace actor model`).
 
-use crate::diff::{ScanDiff, ScanManifest, diff_scans};
+use crate::diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
 use crate::error::FilesError;
 use crate::scan::{ScanOutcome, Scanner};
 use std::path::Path;
@@ -71,6 +71,12 @@ pub struct ReconcilePlan {
     pub from_generation: ScanGeneration,
     pub to_generation: ScanGeneration,
     pub ops: Vec<CaptureOp>,
+    /// Previously-tracked paths that are STILL on disk but now exceed the size
+    /// cap. A distinct, no-op disposition: NOT an `Ingest` (can't re-hash),
+    /// NEVER a `Retire` (the file exists). The engine keeps them tracked at
+    /// their last-known-good content (`BEHAVIOR_DELTA.md` CAL-3). Surfaced for
+    /// R07 materialization so it can leave these files untouched.
+    pub retained_over_cap: Vec<String>,
     /// Whether this reconcile cleared a pending dirty generation.
     pub cleared_dirty: bool,
 }
@@ -111,6 +117,7 @@ impl ReconcilePlan {
             from_generation,
             to_generation,
             ops,
+            retained_over_cap: diff.retained_over_cap,
             cleared_dirty,
         }
     }
@@ -120,7 +127,8 @@ impl ReconcilePlan {
         self.ops.len()
     }
 
-    /// Whether the plan is empty (disk already converged with the engine).
+    /// Whether the plan has no actionable ops (retained-over-cap is a no-op
+    /// disposition and does not count here).
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
     }
@@ -213,7 +221,30 @@ impl ReconcileController {
         let from = self.generation;
         let to = from.next();
         let cleared_dirty = self.dirty;
-        self.manifest = ScanManifest::from_listing(&listing);
+
+        // Build the next manifest from the tracked files, then CARRY FORWARD the
+        // last-known-good entries for over-cap-but-present files so they stay
+        // tracked (never dropped, never retired) — the P1 size-cap-grow
+        // false-delete fix (`BEHAVIOR_DELTA.md` CAL-3).
+        let mut entries: Vec<(String, ManifestEntry)> = listing
+            .files
+            .iter()
+            .map(|f| {
+                (
+                    f.path.clone(),
+                    ManifestEntry {
+                        size: f.size,
+                        sha256: f.sha256.clone(),
+                    },
+                )
+            })
+            .collect();
+        for path in &diff.retained_over_cap {
+            if let Some(prior_entry) = self.manifest.get(path) {
+                entries.push((path.clone(), prior_entry.clone()));
+            }
+        }
+        self.manifest = ScanManifest::from_entries(entries);
         self.generation = to;
         self.dirty = false;
 

@@ -90,6 +90,30 @@ impl Scratch {
             false
         }
     }
+
+    /// Best-effort DIRECTORY symlink `rel` → absolute `target`; returns whether
+    /// created (for symlink-cycle tests; skipped gracefully if unavailable).
+    pub fn try_symlink_dir(&self, rel: &str, target: &Path) -> bool {
+        let link = self
+            .path
+            .join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if let Some(parent) = link.parent() {
+            std::fs::create_dir_all(parent).expect("create parents");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, &link).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(target, &link).is_ok()
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = target;
+            false
+        }
+    }
 }
 
 impl Drop for Scratch {

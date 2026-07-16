@@ -23,8 +23,15 @@ pub enum OverCapPolicy {
 #[derive(Debug, Clone, Copy)]
 pub struct ScanBounds {
     /// Hard cap on the number of tracked files. Exceeding it is a fail-closed
-    /// [`crate::FilesError::TooManyFiles`], never a truncated listing.
+    /// [`crate::FilesError::TooManyFiles`], never a truncated listing. Over-cap
+    /// *skipped* files count against this too, so a tree of millions of over-cap
+    /// files also fails closed (bounded skipped set).
     pub max_files: usize,
+    /// Hard cap on the TOTAL filesystem entries traversed (files + skipped +
+    /// directories), bounding the DFS working set so a directory-heavy tree
+    /// (millions of empty dirs) cannot grow the pending-directory stack or the
+    /// walk unbounded. Exceeding it is [`crate::FilesError::TooManyEntries`].
+    pub max_entries: usize,
     /// Inclusive cap on a single file's byte length. `size <= max_file_bytes`
     /// is hashed; a larger file follows [`ScanBounds::over_cap`].
     pub max_file_bytes: u64,
@@ -49,6 +56,9 @@ impl Default for ScanBounds {
     fn default() -> Self {
         ScanBounds {
             max_files: 200_000,
+            // Generous headroom over max_files for directories + skipped files;
+            // still bounded so a pathological tree fails closed.
+            max_entries: 5_000_000,
             max_file_bytes: 64 * 1024 * 1024,
             // Infallible: 64 * 1024 is non-zero.
             read_buffer_bytes: NonZeroUsize::new(64 * 1024).unwrap_or(NonZeroUsize::MIN),
@@ -89,6 +99,12 @@ impl ScanBoundsBuilder {
     /// Set the max-files cap.
     pub fn max_files(mut self, cap: usize) -> Self {
         self.bounds.max_files = cap;
+        self
+    }
+
+    /// Set the max-entries (total traversed) cap.
+    pub fn max_entries(mut self, cap: usize) -> Self {
+        self.bounds.max_entries = cap;
         self
     }
 

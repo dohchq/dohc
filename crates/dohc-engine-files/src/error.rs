@@ -15,6 +15,13 @@ pub enum FilesError {
     #[error("workspace scan exceeded the max-files bound of {cap}")]
     TooManyFiles { cap: usize },
 
+    /// The scan traversed more filesystem entries (files + skipped +
+    /// directories) than `max_entries`. Bounds the DFS working set so a
+    /// directory-heavy or over-cap-heavy tree fails closed rather than growing
+    /// memory unbounded.
+    #[error("workspace scan exceeded the max-entries bound of {cap}")]
+    TooManyEntries { cap: usize },
+
     /// A file exceeded `max_file_bytes` and the configured over-cap policy is
     /// [`crate::bounds::OverCapPolicy::Error`]. (The default policy skips such
     /// files into the listing's `skipped` set instead.)
@@ -74,6 +81,7 @@ impl FilesError {
     pub fn code(&self) -> &'static str {
         match self {
             FilesError::TooManyFiles { .. } => "too-many-files",
+            FilesError::TooManyEntries { .. } => "too-many-entries",
             FilesError::FileTooLarge { .. } => "file-too-large",
             FilesError::DiffTooLarge { .. } => "diff-too-large",
             FilesError::ScanIo { .. } => "scan-io",

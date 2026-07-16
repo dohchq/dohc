@@ -65,6 +65,11 @@ impl ScanManifest {
         ScanManifest { entries }
     }
 
+    /// The prior entry for a path, if tracked.
+    pub fn get(&self, path: &str) -> Option<&ManifestEntry> {
+        self.entries.get(path)
+    }
+
     /// Number of tracked entries.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -84,17 +89,29 @@ pub struct ScanDiff {
     pub added: Vec<FileEntry>,
     pub changed: Vec<FileEntry>,
     pub removed: Vec<String>,
+    /// Previously-tracked paths that are STILL on disk but now exceed the size
+    /// cap (present in the current listing's `skipped` set). These must NOT be
+    /// classified `removed` — the file exists; only its content is too large to
+    /// re-hash. The reconcile keeps them tracked at their last-known-good
+    /// content (see `reconcile.rs` and `BEHAVIOR_DELTA.md` CAL-3). A file that
+    /// is truly gone from disk (absent from BOTH files and skipped) is the only
+    /// thing that reaches `removed`.
+    pub retained_over_cap: Vec<String>,
 }
 
 impl ScanDiff {
-    /// Total number of diff entries.
+    /// Total number of actionable diff entries (retained is a no-op disposition,
+    /// so it is excluded from the bound count).
     pub fn len(&self) -> usize {
         self.added.len() + self.changed.len() + self.removed.len()
     }
 
     /// Whether the diff is empty (the scan converged with the prior generation).
     pub fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.changed.is_empty() && self.removed.is_empty()
+        self.added.is_empty()
+            && self.changed.is_empty()
+            && self.removed.is_empty()
+            && self.retained_over_cap.is_empty()
     }
 }
 
@@ -136,26 +153,43 @@ where
         }
     }
 
-    // A path in the prior manifest but not in the current listing was removed.
+    // Presence is BOTH tracked files AND the skipped (over-cap-but-present)
+    // set: a path present in either still exists on disk.
     let present: BTreeMap<&str, ()> = current
         .files
         .iter()
         .map(|f| (f.path.as_str(), ()))
         .collect();
-    let mut removed: Vec<String> = prior
-        .entries
-        .keys()
-        .filter(|path| !present.contains_key(path.as_str()))
-        .cloned()
+    let skipped_present: BTreeMap<&str, ()> = current
+        .skipped
+        .iter()
+        .map(|s| (s.path.as_str(), ()))
         .collect();
+
+    let mut removed = Vec::new();
+    let mut retained_over_cap = Vec::new();
+    for path in prior.entries.keys() {
+        if present.contains_key(path.as_str()) {
+            continue; // classified unchanged/changed above
+        }
+        if skipped_present.contains_key(path.as_str()) {
+            // Still on disk, only now over the size cap → retain, never remove.
+            retained_over_cap.push(path.clone());
+        } else {
+            // Absent from disk entirely → removed.
+            removed.push(path.clone());
+        }
+    }
 
     added.sort_by(|a, b| a.path.cmp(&b.path));
     changed.sort_by(|a, b| a.path.cmp(&b.path));
     removed.sort();
+    retained_over_cap.sort();
     ScanDiff {
         added,
         changed,
         removed,
+        retained_over_cap,
     }
 }
 

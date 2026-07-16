@@ -1,15 +1,27 @@
 //! Differential harness (CAL-3 calibration signal).
 //!
-//! Non-tautological by construction: the goldens are the reference accelerator's
-//! own committed fixtures (`fixtures/workspace-kernel/*.json`), whose `size` and
-//! `sha256` values were computed by the TS/kernel engine — a DIFFERENT engine.
-//! This crate's actor-native scan/diff must reproduce them byte-for-byte, so a
-//! wrong hash, a dropped hash comparison, a floor miss, or a media-type slip is
-//! a mismatch, not a pass. The extended trace additionally exercises the
-//! divergence-prone paths the CAL-2 tautology lesson demands: added/changed/
-//! removed, a size-cap boundary, a path-floor exclusion, a rename (remove+add),
-//! and a cancellation mid-scan leaving resumable state — with every field a
-//! divergence could hide in captured in the normalized state.
+//! The goldens are the reference accelerator's own committed fixtures
+//! (`fixtures/workspace-kernel/*.json`). Note the honest scope of what each
+//! field proves:
+//!
+//! - `size` and `sha256` are **engine-independent** ground truth — any correct
+//!   implementation computes the same bytes, so agreement confirms this crate
+//!   computes them correctly, but it is NOT itself a cross-engine parity check.
+//!   The real cross-engine check is the TS `workspace-kernel-client` test suite
+//!   that validates these SAME fixtures against the TS/kernel path; keeping both
+//!   engines pinned to one fixture set is what makes them comparable.
+//! - The **engine-SPECIFIC** surface — media-type classification and every
+//!   path-floor decision (reserved segments, nested reserved, write-temp
+//!   prefix, db-sidecar keep-vs-exclude) — is where a divergence actually
+//!   hides, so those are covered exhaustively here
+//!   (`scan_media_types_cover_every_branch`, `floor_rules_cover_keep_and_exclude`)
+//!   rather than by the two media types the JSON fixtures happen to include.
+//!
+//! The extended trace exercises the divergence-prone paths the CAL-2 tautology
+//! lesson demands: added/changed/removed, a size-cap boundary, a path-floor
+//! exclusion, a rename (remove+add), and a cancellation mid-scan leaving
+//! resumable state — with every field a divergence could hide in captured in
+//! the normalized state.
 //!
 //! The seeded-bug-catch proof lives beside the diff engine
 //! (`src/diff.rs::seeded_bug_is_caught_by_the_golden`): it flips the hash
@@ -182,6 +194,83 @@ fn reconcile_matches_kernel_golden() {
     assert_eq!(normalize(&diff.changed), fixture.expected.changed);
     assert_eq!(normalize(&diff.added), fixture.expected.added);
     assert_eq!(diff.removed, fixture.expected.removed);
+}
+
+// ---- engine-specific surface: media types + floor rules ---------------------
+
+#[test]
+fn scan_media_types_cover_every_branch() {
+    let cases: &[(&str, &str)] = &[
+        ("a.js", "text/javascript"),
+        ("a.mjs", "text/javascript"),
+        ("a.cjs", "text/javascript"),
+        ("a.jsx", "text/javascript"),
+        ("a.ts", "application/typescript"),
+        ("a.tsx", "application/typescript"),
+        ("a.mts", "application/typescript"),
+        ("a.cts", "application/typescript"),
+        ("a.csv", "text/csv"),
+        ("a.css", "text/css"),
+        ("a.scss", "text/css"),
+        ("a.db", "application/vnd.sqlite3"),
+        ("a.sqlite", "application/vnd.sqlite3"),
+        ("a.sqlite3", "application/vnd.sqlite3"),
+        ("a.html", "text/html"),
+        ("a.htm", "text/html"),
+        ("a.jpg", "image/jpeg"),
+        ("a.jpeg", "image/jpeg"),
+        ("a.json", "application/json"),
+        ("a.jsonl", "application/x-ndjson"),
+        ("a.ndjson", "application/x-ndjson"),
+        ("a.m4a", "audio/mp4"),
+        ("a.md", "text/markdown"),
+        ("a.markdown", "text/markdown"),
+        ("a.pdf", "application/pdf"),
+        ("a.png", "image/png"),
+        ("a.sh", "text/plain"),
+        ("a.txt", "text/plain"),
+        ("noext", "application/octet-stream"),
+        ("a.bin", "application/octet-stream"),
+    ];
+    let ws = Scratch::new();
+    for (name, _) in cases {
+        ws.write(name, b"x");
+    }
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let listing = scan_completed(&scanner, ws.path());
+    let by_path: std::collections::BTreeMap<&str, &str> = listing
+        .files
+        .iter()
+        .map(|f| (f.path.as_str(), f.media_type))
+        .collect();
+    for (name, want) in cases {
+        assert_eq!(
+            by_path.get(*name).copied(),
+            Some(*want),
+            "media type for {name}"
+        );
+    }
+}
+
+#[test]
+fn floor_rules_cover_keep_and_exclude() {
+    let ws = Scratch::new();
+    // Kept:
+    ws.write("keep/notes.md", b"a");
+    ws.write("data/store.db", b"b"); // a db FILE is tracked (only sidecars are excluded)
+    ws.write("logs/app-wal", b"c"); // NOT a db sidecar (no db base) → kept
+    // Excluded:
+    ws.write(".dohc/engine/engine.db", b"x"); // reserved segment at root
+    ws.write("a/b/.git/config", b"x"); // nested reserved
+    ws.write("node_modules/p/i.js", b"x"); // reserved
+    ws.write(".dohc-write-tmp.part", b"x"); // write-temp prefix
+    ws.write("data/store.db-wal", b"x"); // db sidecar
+    ws.write("data/store.sqlite-shm", b"x"); // db sidecar
+
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let listing = scan_completed(&scanner, ws.path());
+    let paths: Vec<&str> = listing.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(paths, ["data/store.db", "keep/notes.md", "logs/app-wal"]);
 }
 
 // ---- harness-level sensitivity (a hash flip flips the plan) -----------------

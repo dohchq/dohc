@@ -208,6 +208,59 @@ fn pre_cancelled_token_yields_no_partial_listing() {
 }
 
 #[test]
+fn max_entries_bounds_a_directory_heavy_tree() {
+    let ws = Scratch::new();
+    // Many directories, few tracked files: max_files alone would not catch a
+    // pure-directory explosion; max_entries bounds the DFS working set.
+    for i in 0..60 {
+        ws.write(&format!("d{i:03}/keep.txt"), b"x");
+    }
+    let bounds = ScanBounds::builder().max_entries(10).build();
+    let scanner = Scanner::new(bounds).expect("scanner");
+    let err = scanner
+        .scan(ws.path(), &CancellationToken::new())
+        .expect_err("directory-heavy tree must fail closed");
+    assert_eq!(err.code(), "too-many-entries");
+}
+
+#[test]
+fn over_cap_skipped_files_count_toward_max_files() {
+    let ws = Scratch::new();
+    // Every file is over a 4-byte cap → all skipped; more skipped than
+    // max_files → fail closed (the skipped set is bounded too).
+    for i in 0..6 {
+        ws.write(&format!("big{i}.bin"), b"way over cap");
+    }
+    let bounds = ScanBounds::builder()
+        .max_file_bytes(4)
+        .max_files(2)
+        .over_cap(OverCapPolicy::Skip)
+        .build();
+    let scanner = Scanner::new(bounds).expect("scanner");
+    let err = scanner
+        .scan(ws.path(), &CancellationToken::new())
+        .expect_err("over-cap-heavy tree must fail closed");
+    assert_eq!(err.code(), "too-many-files");
+}
+
+#[test]
+fn symlink_directory_cycle_terminates_and_tracks_nothing_under_loop() {
+    let ws = Scratch::new();
+    ws.write("A/real.md", b"real\n");
+    // A/loop -> A creates a directory cycle. The scanner never follows a
+    // symlinked directory, so the cycle is simply not descended.
+    let made = ws.try_symlink_dir("A/loop", &ws.path().join("A"));
+
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let listing = scan(&scanner, ws.path());
+    // Terminates; only the real file is tracked, nothing under the loop.
+    assert_eq!(paths(&listing), ["A/real.md"]);
+    if !made {
+        eprintln!("note: directory symlink unavailable on this host; termination holds vacuously");
+    }
+}
+
+#[test]
 fn invalid_root_is_typed() {
     let ws = Scratch::new();
     let missing = ws.path().join("does-not-exist");

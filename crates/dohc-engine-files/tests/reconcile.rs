@@ -251,6 +251,84 @@ fn overflow_during_cancelled_rescan_is_not_lost() {
 }
 
 #[test]
+fn size_cap_grow_retains_never_retires_the_false_delete_regression() {
+    // P1 REGRESSION: a previously-tracked file edited PAST the size cap must be
+    // RETAINED (still on disk, last-known-good kept), never classified `removed`
+    // and Retired — that would forget live user data.
+    use dohc_engine_files::OverCapPolicy;
+    let ws = Scratch::new();
+    ws.write("doc.md", b"small\n"); // 6 bytes, under an 8-byte cap
+    let bounds = ScanBounds::builder()
+        .max_file_bytes(8)
+        .over_cap(OverCapPolicy::Skip)
+        .build();
+    let scanner = Scanner::new(bounds).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    let token = CancellationToken::new();
+
+    let base = plan(
+        ctrl.reconcile(&scanner, ws.path(), &token)
+            .expect("baseline"),
+    );
+    assert_eq!(ingest_paths(&base, IngestReason::Added), ["doc.md"]);
+    assert_eq!(ctrl.tracked_len(), 1);
+
+    // Grow it past the cap.
+    ws.write("doc.md", b"now this content is definitely over the cap\n");
+    let grown = plan(
+        ctrl.reconcile(&scanner, ws.path(), &token)
+            .expect("reconcile"),
+    );
+    assert!(
+        retire_paths(&grown).is_empty(),
+        "an over-cap-grow of a present file must NEVER be retired (the false-delete)"
+    );
+    assert!(ingest_paths(&grown, IngestReason::Added).is_empty());
+    assert!(ingest_paths(&grown, IngestReason::Changed).is_empty());
+    assert_eq!(
+        grown.retained_over_cap,
+        ["doc.md"],
+        "distinct retain disposition"
+    );
+    // Still tracked at last-known-good (not dropped from the manifest).
+    assert_eq!(ctrl.tracked_len(), 1);
+
+    // Shrink back under the cap with new content → detected as a normal change.
+    ws.write("doc.md", b"tiny\n");
+    let shrunk = plan(
+        ctrl.reconcile(&scanner, ws.path(), &token)
+            .expect("reconcile"),
+    );
+    assert_eq!(ingest_paths(&shrunk, IngestReason::Changed), ["doc.md"]);
+    assert!(retire_paths(&shrunk).is_empty());
+    assert!(shrunk.retained_over_cap.is_empty());
+}
+
+#[test]
+fn genuinely_deleted_over_cap_absent_file_is_still_removed() {
+    // The complement of the P1 fix: a file that is truly gone from BOTH the
+    // tracked and skipped sets is still `removed`.
+    let ws = Scratch::new();
+    ws.write("gone.md", b"here\n");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    let token = CancellationToken::new();
+    let _ = plan(
+        ctrl.reconcile(&scanner, ws.path(), &token)
+            .expect("baseline"),
+    );
+
+    ws.remove("gone.md");
+    let p = plan(
+        ctrl.reconcile(&scanner, ws.path(), &token)
+            .expect("reconcile"),
+    );
+    assert_eq!(retire_paths(&p), ["gone.md"]);
+    assert!(p.retained_over_cap.is_empty());
+    assert_eq!(ctrl.tracked_len(), 0);
+}
+
+#[test]
 fn diff_bound_trips_when_change_set_too_large() {
     let ws = Scratch::new();
     for i in 0..5 {

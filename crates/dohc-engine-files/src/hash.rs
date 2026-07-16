@@ -47,6 +47,10 @@ pub enum HashOutcome {
     /// A non-benign io error; the scan surfaces this as
     /// [`FilesError::ScanIo`].
     Io { kind: std::io::ErrorKind },
+    /// The hash job panicked (contained by the worker's `catch_unwind`, so the
+    /// worker survives and the batch still yields a result instead of wedging).
+    /// The scan surfaces this as a fail-closed [`FilesError::PoolUnavailable`].
+    Panicked,
 }
 
 /// The outcome of a whole batched hash run.
@@ -209,6 +213,13 @@ impl HashPool {
                     .map_err(|_| FilesError::PoolUnavailable {
                         reason: "hash pool result channel closed",
                     })?;
+                // A contained worker panic fails the whole run closed, in
+                // bounded time — never a hang.
+                if indexed.outcome == HashOutcome::Panicked {
+                    return Err(FilesError::PoolUnavailable {
+                        reason: "a hash worker panicked",
+                    });
+                }
                 if let Some(slot) = slots.get_mut(indexed.index) {
                     *slot = Some(indexed.outcome);
                 }
@@ -263,7 +274,13 @@ fn worker_main(
             }
         };
         gauge.enter();
-        let outcome = hash_one(&job, &mut buffer);
+        // Contain a panicking hash so a poisoned job never wedges the batch's
+        // result drain (`recv` would otherwise block forever waiting on a
+        // result the dead worker can't produce). The worker survives and the
+        // batch surfaces a typed, fail-closed outcome.
+        let outcome =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hash_one(&job, &mut buffer)))
+                .unwrap_or(HashOutcome::Panicked);
         gauge.leave();
         // If the result channel is gone the pool is being torn down; stop.
         if result_tx
@@ -278,7 +295,25 @@ fn worker_main(
     }
 }
 
+/// Test-only panic injection: when set, a hash job whose absolute path contains
+/// this marker panics, exercising the worker's `catch_unwind` wedge defense.
+/// Compiled out entirely in non-test builds (zero production cost).
+#[cfg(test)]
+pub(crate) static TEST_PANIC_ON: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 fn hash_one(job: &Job, buffer: &mut [u8]) -> HashOutcome {
+    #[cfg(test)]
+    {
+        let marker = TEST_PANIC_ON
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone();
+        if let Some(marker) = marker
+            && job.abs.to_string_lossy().contains(&marker)
+        {
+            panic!("injected hash worker panic (test)");
+        }
+    }
     let mut file = match std::fs::File::open(&job.abs) {
         Ok(file) => file,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return HashOutcome::Vanished,
@@ -318,4 +353,53 @@ fn to_hex(digest: &[u8]) -> String {
         let _ = write!(hex, "{byte:02x}");
     }
     hex
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dohc-hashtest-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    #[test]
+    fn worker_panic_fails_closed_without_wedging() {
+        let dir = temp_dir("panic");
+        for i in 0..6 {
+            std::fs::write(dir.join(format!("f{i}.txt")), b"data").expect("write");
+        }
+        // The job whose path contains "f3.txt" panics the worker mid-hash.
+        *TEST_PANIC_ON.lock().unwrap_or_else(|p| p.into_inner()) = Some("f3.txt".to_owned());
+
+        let pool = HashPool::new(2, 4096).expect("pool");
+        let inputs: Vec<HashInput> = (0..6)
+            .map(|i| HashInput {
+                index: i,
+                abs: dir.join(format!("f{i}.txt")),
+            })
+            .collect();
+        let token = CancellationToken::new();
+
+        // Run on a side thread so a REGRESSION (a wedge/hang) surfaces as a
+        // bounded test failure rather than hanging the whole suite.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = pool.hash_batched(&inputs, &token);
+            let _ = tx.send(matches!(result, Err(FilesError::PoolUnavailable { .. })));
+        });
+        let got = rx.recv_timeout(std::time::Duration::from_secs(10));
+        *TEST_PANIC_ON.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        let _ = worker.join();
+
+        assert_eq!(
+            got,
+            Ok(true),
+            "a panicking hash worker must fail closed (PoolUnavailable) in bounded time, not hang"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

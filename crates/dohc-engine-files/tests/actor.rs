@@ -17,7 +17,9 @@ async fn actor_scans_through_the_async_loop() {
     let ws = Scratch::new();
     ws.write("notes/a.md", b"# A\n");
     ws.write("b.txt", b"beta");
-    let actor = FilesActor::spawn(ws.path().to_path_buf(), ScanBounds::default()).expect("spawn");
+    let actor = FilesActor::spawn_async(ws.path().to_path_buf(), ScanBounds::default())
+        .await
+        .expect("spawn");
     let handle = actor.handle();
     assert_eq!(handle.lifecycle(), LifecycleState::Ready);
 
@@ -33,7 +35,9 @@ async fn actor_scans_through_the_async_loop() {
 async fn actor_reconcile_advances_generation_and_reports_stats() {
     let ws = Scratch::new();
     ws.write("a.md", b"alpha\n");
-    let actor = FilesActor::spawn(ws.path().to_path_buf(), ScanBounds::default()).expect("spawn");
+    let actor = FilesActor::spawn_async(ws.path().to_path_buf(), ScanBounds::default())
+        .await
+        .expect("spawn");
     let handle = actor.handle();
 
     let run = handle
@@ -59,7 +63,9 @@ async fn actor_reconcile_advances_generation_and_reports_stats() {
 async fn injected_overflow_marks_dirty_then_reconcile_converges() {
     let ws = Scratch::new();
     ws.write("a.md", b"one\n");
-    let actor = FilesActor::spawn(ws.path().to_path_buf(), ScanBounds::default()).expect("spawn");
+    let actor = FilesActor::spawn_async(ws.path().to_path_buf(), ScanBounds::default())
+        .await
+        .expect("spawn");
     let handle = actor.handle();
 
     // Establish a converged baseline.
@@ -71,7 +77,7 @@ async fn injected_overflow_marks_dirty_then_reconcile_converges() {
 
     // Inject a watcher-overflow signal (the stubbed event source) after an edit.
     ws.write("a.md", b"two\n");
-    handle.notify_overflow().expect("overflow accepted");
+    handle.notify_overflow();
     // The signal is async bookkeeping; observe it via stats (ordered behind it
     // on the same FIFO queue).
     assert!(handle.stats().await.expect("stats").dirty);
@@ -106,7 +112,9 @@ async fn concurrent_cancel_leaves_a_consistent_actor_state() {
     for i in 0..40 {
         ws.write(&format!("f{i:03}.md"), format!("body-{i}\n").as_bytes());
     }
-    let actor = FilesActor::spawn(ws.path().to_path_buf(), ScanBounds::default()).expect("spawn");
+    let actor = FilesActor::spawn_async(ws.path().to_path_buf(), ScanBounds::default())
+        .await
+        .expect("spawn");
     let handle = actor.handle();
 
     let token = CancellationToken::new();
@@ -147,7 +155,9 @@ async fn deadline_trips_to_typed_error_committing_nothing() {
     let bounds = ScanBounds::builder()
         .hash_workers(std::num::NonZeroUsize::new(1).unwrap())
         .build();
-    let actor = FilesActor::spawn(ws.path().to_path_buf(), bounds).expect("spawn");
+    let actor = FilesActor::spawn_async(ws.path().to_path_buf(), bounds)
+        .await
+        .expect("spawn");
     let handle = actor.handle();
 
     let token = CancellationToken::new();
@@ -171,8 +181,9 @@ async fn deadline_trips_to_typed_error_committing_nothing() {
 async fn close_is_deterministic_and_idempotent() {
     let ws = Scratch::new();
     ws.write("a.md", b"alpha\n");
-    let mut actor =
-        FilesActor::spawn(ws.path().to_path_buf(), ScanBounds::default()).expect("spawn");
+    let mut actor = FilesActor::spawn_async(ws.path().to_path_buf(), ScanBounds::default())
+        .await
+        .expect("spawn");
     let handle = actor.handle();
     let _ = handle
         .reconcile(CancellationToken::new())
@@ -192,4 +203,71 @@ async fn close_is_deterministic_and_idempotent() {
     // The handle now observes the actor gone.
     assert!(handle.scan(CancellationToken::new()).await.is_err());
     assert_eq!(handle.lifecycle(), LifecycleState::Closed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn overflow_is_never_lost_even_when_the_queue_is_saturated() {
+    // Regression for the dirty-mark-at-actor-boundary P2: notify_overflow must
+    // set the dirty bit even when the command channel is full — it uses a sticky
+    // atomic, not a try_send that could return Overloaded and drop the mark.
+    let ws = Scratch::new();
+    // Enough content that a single-worker scan occupies the worker while we
+    // saturate the queue (no reconcile runs during this window, only the scan).
+    let one_mib = vec![b'x'; 1024 * 1024];
+    for i in 0..12 {
+        ws.write(&format!("big/f{i:02}.bin"), &one_mib);
+    }
+    let bounds = ScanBounds::builder()
+        .hash_workers(std::num::NonZeroUsize::new(1).unwrap())
+        .build();
+    let actor = FilesActor::spawn_async(ws.path().to_path_buf(), bounds)
+        .await
+        .expect("spawn");
+    let handle = actor.handle();
+
+    // Establish a converged baseline (dirty cleared).
+    let _ = handle
+        .reconcile(CancellationToken::new())
+        .await
+        .expect("baseline");
+    assert!(!handle.stats().await.expect("stats").dirty);
+
+    // Wedge the worker with a long SCAN (not a reconcile — so nothing clears
+    // dirty during this window), then saturate the command queue with stats.
+    let wedge = {
+        let handle = handle.clone();
+        tokio::spawn(async move { handle.scan(CancellationToken::new()).await })
+    };
+    let mut saturators = Vec::new();
+    for _ in 0..80u32 {
+        let handle = handle.clone();
+        saturators.push(tokio::spawn(async move { handle.stats().await }));
+    }
+    // Give the wedge + saturators time to fill the 64-slot queue.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // notify_overflow returns () and cannot fail — the mark is set regardless of
+    // the full queue.
+    handle.notify_overflow();
+
+    // Drain everything.
+    let _ = wedge.await.expect("join wedge").expect("scan");
+    for s in saturators {
+        let _ = s.await;
+    }
+
+    // The overflow was folded into the controller (no reconcile cleared it), so
+    // the actor ends dirty — the mark was NOT lost to backpressure.
+    assert!(
+        handle.stats().await.expect("stats").dirty,
+        "overflow mark lost under queue saturation"
+    );
+    // And a dirty-driven reconcile now runs a real rescan (not a no-op).
+    assert!(matches!(
+        handle
+            .reconcile_if_dirty(CancellationToken::new())
+            .await
+            .expect("if-dirty"),
+        ReconcileRun::Completed(_)
+    ));
 }

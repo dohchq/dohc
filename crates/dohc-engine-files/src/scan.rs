@@ -141,6 +141,13 @@ impl Scanner {
                         kind,
                     });
                 }
+                // Defensive: hash_batched already fails closed on a worker
+                // panic, so this arm is unreachable in practice.
+                HashOutcome::Panicked => {
+                    return Err(FilesError::PoolUnavailable {
+                        reason: "a hash worker panicked",
+                    });
+                }
             }
         }
 
@@ -155,6 +162,10 @@ impl Scanner {
         let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
         let mut files: Vec<Candidate> = Vec::new();
         let mut skipped: Vec<SkippedPath> = Vec::new();
+        // Total filesystem entries traversed (files + skipped + directories +
+        // anything else iterated). Bounds the DFS working set so a
+        // directory-heavy tree cannot grow the stack unbounded.
+        let mut entries: usize = 0;
 
         while let Some(dir) = stack.pop() {
             if token.is_cancelled() {
@@ -169,6 +180,14 @@ impl Scanner {
                 // Between-unit cancellation: per directory entry.
                 if token.is_cancelled() {
                     return Ok(EnumOutcome::Cancelled);
+                }
+                // Bound the total traversal (dirs included) — fail closed rather
+                // than grow the working set unbounded.
+                entries = entries.saturating_add(1);
+                if entries > self.bounds.max_entries {
+                    return Err(FilesError::TooManyEntries {
+                        cap: self.bounds.max_entries,
+                    });
                 }
                 let entry = match entry {
                     Ok(entry) => entry,
@@ -219,6 +238,14 @@ impl Scanner {
                                 size,
                                 reason: SkipReason::OverCap,
                             });
+                            // Over-cap skipped files count toward max_files too,
+                            // so a tree of millions of over-cap files also fails
+                            // closed instead of growing the skipped set.
+                            if skipped.len() > self.bounds.max_files {
+                                return Err(FilesError::TooManyFiles {
+                                    cap: self.bounds.max_files,
+                                });
+                            }
                             continue;
                         }
                         OverCapPolicy::Error => {
