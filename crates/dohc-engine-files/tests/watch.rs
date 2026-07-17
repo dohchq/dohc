@@ -239,3 +239,62 @@ async fn native_watcher_marks_unavailable_after_the_watched_root_is_deleted() {
     );
     watcher.stop().expect("stop");
 }
+
+/// R14 F1 regression: delete-then-recreate the watched root inside the health
+/// poll window. The recreated directory exists (so an existence-only check
+/// would see a healthy directory and do nothing), but the OS watch is still
+/// bound to the DELETED object -- so a file created in the NEW root would be
+/// silently missed forever. The identity-based health check must catch the
+/// swap, reattach to the new directory, and surface the change (either as a
+/// dirty generation, or as `is_unavailable` if reattach cannot recover).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn probe_root_delete_recreate_race_is_not_silently_missed() {
+    let ws = Scratch::new();
+    let root = ws.path().to_path_buf();
+    let actor = dohc_engine_files::FilesActor::spawn_async(root.clone(), ScanBounds::default())
+        .await
+        .expect("actor");
+    let handle = actor.handle();
+    let ready = NativeWatcher::start(root.clone(), handle.clone(), CancellationToken::new())
+        .await
+        .expect("watch start");
+    let mut watcher = ready.watcher;
+    apply_and_ack(&handle, ready.initial_reconcile).await;
+    assert!(!handle.stats().await.expect("stats").dirty);
+
+    // Delete then IMMEDIATELY recreate the root as a NEW directory object --
+    // the race the reviewer identified (403us on Windows, always winnable).
+    std::fs::remove_dir_all(&root).expect("delete root");
+    std::fs::create_dir(&root).expect("recreate root");
+
+    // The identity-based health poll must notice the swap. Reattach to the
+    // recreated directory succeeds (it exists), so the change surfaces as a
+    // dirty generation rather than a permanently-dead watch.
+    wait_dirty(&handle).await;
+
+    // Prove the reattached watch is LIVE on the new directory (not the dead
+    // object): after clearing dirty, a fresh write into the recreated root
+    // must produce new dirty evidence.
+    let run = handle
+        .reconcile_if_dirty(CancellationToken::new())
+        .await
+        .expect("reconcile after swap");
+    apply_and_ack(&handle, run).await;
+    assert!(!handle.stats().await.expect("clean after swap").dirty);
+
+    ws.write("after-recreate.md", b"must be seen by the reattached watch");
+    wait_dirty(&handle).await;
+    let deleted = handle
+        .reconcile_if_dirty(CancellationToken::new())
+        .await
+        .expect("reconcile new file");
+    let plan = apply_and_ack(&handle, deleted).await;
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, CaptureOp::Ingest { path, .. } if path == "after-recreate.md")),
+        "the file created in the recreated root was not captured -- the watch is silently dead"
+    );
+
+    watcher.stop().expect("stop");
+}

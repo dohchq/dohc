@@ -42,13 +42,16 @@ const WATCH_REATTACH_ATTEMPTS: usize = 3;
 /// Backoff between reattach attempts, run inline on the dedicated watcher OS
 /// thread (never the async runtime).
 const WATCH_REATTACH_BACKOFF: Duration = Duration::from_millis(200);
-/// How often the idle watcher thread verifies the watched root still exists
-/// as a directory. On at least one real backend (observed: the Windows
-/// `ReadDirectoryChangesW` path), deleting the watched root produces NO
-/// error callback at all -- the watch simply goes silently dead, with no
-/// event, no error, no further notifications, ever. Backend-error re-attach
-/// alone cannot catch that case, so this is a small, bounded, independent
-/// liveness check: cheap (`symlink_metadata`, once per interval, only while
+/// How often the idle watcher thread verifies the watched root is still the
+/// SAME directory object the OS watch was attached to. On at least one real
+/// backend (observed: the Windows `ReadDirectoryChangesW` path), deleting the
+/// watched root produces NO error callback at all -- the watch simply goes
+/// silently dead, with no event, no error, no further notifications, ever.
+/// Worse, a delete-then-recreate of the root (restore-from-backup,
+/// unzip-over, sync-client folder replace) leaves a directory at the path but
+/// the OS watch still bound to the DELETED object, so existence alone cannot
+/// tell the two apart. The check therefore compares OS file identity, not
+/// mere existence -- cheap (`get_file_id`, once per interval, only while
 /// otherwise idle), and it is what actually catches "watched root replaced"
 /// on the platforms where the callback stays silent.
 const WATCH_ROOT_HEALTH_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -245,6 +248,16 @@ impl NativeWatcher {
     /// rather than continue relying on a dead watch. Distinct from
     /// [`NativeWatcher::is_degraded`], which stays set even after a
     /// successful re-attach.
+    ///
+    /// TODO(R14 follow-up, tracked as a composition obligation): no
+    /// PRODUCTION consumer polls this yet. The files watcher is still dormant
+    /// -- nothing composes [`NativeWatcher`] into a live workspace supervisor,
+    /// so "restart the watcher/workspace on unavailable" has no home until the
+    /// composition shard that wires the files actor + watcher into the daemon
+    /// lands. When that composition happens, the owning supervisor MUST poll
+    /// this (or take a signal from it) and restart the watcher/workspace;
+    /// otherwise a permanently-lost watch stays silent at the product layer,
+    /// re-opening the exact silent-dead-watch class this flag exists to close.
     pub fn is_unavailable(&self) -> bool {
         self.unavailable.load(Ordering::Acquire)
     }
@@ -340,6 +353,11 @@ fn watcher_thread(
         }));
         return;
     }
+    // Capture the identity of the exact directory object the watch is now
+    // bound to, so the health poll can detect a delete-then-recreate that
+    // existence alone would miss. `None` (unreadable) simply forces the first
+    // poll to treat the root as changed and reattach.
+    let mut watched_identity = file_id::get_file_id(&root).ok();
     if ready.send(Ok(())).is_err() {
         return;
     }
@@ -364,14 +382,24 @@ fn watcher_thread(
             }
             // Idle: no burst in progress. Wake periodically (rather than
             // blocking on `rx.recv()` forever) to independently verify the
-            // watched root still exists -- see `WATCH_ROOT_HEALTH_POLL_INTERVAL`.
+            // watched root is still the SAME directory object the watch was
+            // bound to -- see `WATCH_ROOT_HEALTH_POLL_INTERVAL`.
             _ => match rx.recv_timeout(WATCH_ROOT_HEALTH_POLL_INTERVAL) {
                 Ok(message) => Some(message),
                 Err(RecvTimeoutError::Timeout) => {
-                    if !unavailable.load(Ordering::Acquire) && !root_is_healthy(&root) {
+                    if !unavailable.load(Ordering::Acquire)
+                        && !root_identity_matches(&root, watched_identity.as_ref())
+                    {
                         loop_degraded.store(true, Ordering::Release);
                         handle.notify_overflow();
                         attempt_reattach(&mut watcher, &root, &unavailable);
+                        // On a successful reattach, rebind identity to the
+                        // NEW directory object so we don't reattach every
+                        // poll forever; on exhaustion `unavailable` is set and
+                        // this identity is irrelevant.
+                        if !unavailable.load(Ordering::Acquire) {
+                            watched_identity = file_id::get_file_id(&root).ok();
+                        }
                     }
                     None
                 }
@@ -431,6 +459,12 @@ fn attempt_reattach(
     root: &Path,
     unavailable: &AtomicBool,
 ) {
+    // Drop any stale watch first. On a delete-then-recreate the backend may
+    // still hold a path-keyed watch bound to the DELETED directory object, so
+    // a bare `watch()` can be a no-op that never re-points at the new inode;
+    // an explicit unwatch (ignored if there is nothing to drop) forces a
+    // genuine rebind. Harmless on the backend-error path too.
+    let _ = watcher.unwatch(root);
     for attempt in 0..WATCH_REATTACH_ATTEMPTS {
         if watcher.watch(root, RecursiveMode::Recursive).is_ok() {
             return;
@@ -442,15 +476,18 @@ fn attempt_reattach(
     unavailable.store(true, Ordering::Release);
 }
 
-/// Whether `root` still exists as a directory (lstat, matching this crate's
-/// never-follow-into-a-symlink convention elsewhere -- `scan.rs`,
-/// `reconcile.rs`'s `StdAbsenceProbe`). Any error (not found, permission
-/// denied, or anything else) is treated as unhealthy: this feeds a
-/// re-attach attempt, never a silent skip.
-fn root_is_healthy(root: &Path) -> bool {
-    std::fs::symlink_metadata(root)
-        .map(|metadata| metadata.file_type().is_dir())
-        .unwrap_or(false)
+/// Whether `root` is still the SAME directory object the watch was bound to,
+/// by OS file identity ((st_dev, st_ino) / (volume serial, file index)) --
+/// NOT mere existence, which cannot distinguish the original directory from a
+/// delete-then-recreate that leaves the OS watch pointing at a dead inode.
+/// Any ambiguity (the root is unreadable now, or its identity was unreadable
+/// at attach) is treated as NOT matching, so it feeds a re-attach attempt
+/// rather than a silent skip.
+fn root_identity_matches(root: &Path, watched: Option<&file_id::FileId>) -> bool {
+    match (watched, file_id::get_file_id(root).ok()) {
+        (Some(expected), Some(current)) => *expected == current,
+        _ => false,
+    }
 }
 
 /// R14 robustness coverage: bounded re-attach and the startup deadline.

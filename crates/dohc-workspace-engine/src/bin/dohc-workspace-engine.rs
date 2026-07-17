@@ -80,18 +80,34 @@ where
     let mut read_buf = vec![0_u8; READ_CHUNK_BYTES];
     let mut authenticated = false;
     let mut keep_running = true;
+    let mut read_error: Option<io::Error> = None;
     let active_requests = Arc::new(Mutex::new(HashSet::new()));
     let mut request_tasks = JoinSet::new();
     while keep_running {
         if *writer_gone_rx.borrow() {
             break;
         }
+        // Reap completed forwarder tasks each iteration so the JoinSet cannot
+        // retain one handle per request for the whole session (bounded memory
+        // in a long-lived daemon). `try_join_next` is cheap and non-blocking.
+        reap_completed(&mut request_tasks);
         let read = tokio::select! {
             changed = writer_gone_rx.changed() => {
                 let _ = changed;
                 break;
             }
-            read = input.read(&mut read_buf) => read?,
+            read = input.read(&mut read_buf) => read,
+        };
+        let read = match read {
+            Ok(read) => read,
+            Err(error) => {
+                // A read error (e.g. ECONNRESET -- the NORMAL close for a
+                // socket transport) must still fall through to the shared
+                // cancel/drain/close tail below, never propagate straight out
+                // and abort in-flight work + skip the workspace close.
+                read_error = Some(error);
+                break;
+            }
         };
         if read == 0 {
             break;
@@ -199,8 +215,21 @@ where
     let writer_result = writer
         .await
         .map_err(|_| io::Error::other("stdout writer task failed"))?;
+    // Surface the guaranteed-run workspace close first (a resource/durability
+    // failure), then the transport read error that triggered shutdown, then
+    // any writer failure. All shutdown work above has already run regardless.
     close_result?;
+    if let Some(error) = read_error {
+        return Err(error);
+    }
     writer_result
+}
+
+/// Non-blockingly drain every already-completed task from `tasks`. Called once
+/// per read-loop iteration so a long-lived daemon does not accumulate a
+/// finished-task handle per request until shutdown.
+fn reap_completed(tasks: &mut JoinSet<()>) {
+    while tasks.try_join_next().is_some() {}
 }
 
 async fn write_output<W: AsyncWrite + Unpin>(
@@ -390,13 +419,27 @@ async fn drain_requests_then_close<C>(
 where
     C: FnOnce() -> Result<(), RuntimeError> + Send + 'static,
 {
+    // Join EVERY forwarder to completion. A JoinError on one must NOT
+    // short-circuit and skip the guaranteed workspace close below, so record
+    // the first one and keep draining.
+    let mut forwarder_error: Option<io::Error> = None;
     while let Some(result) = request_tasks.join_next().await {
-        result.map_err(|_| io::Error::other("request forwarder task failed"))?;
+        if result.is_err() && forwarder_error.is_none() {
+            forwarder_error = Some(io::Error::other("request forwarder task failed"));
+        }
     }
-    tokio::task::spawn_blocking(close_workspaces)
+    // Close workspaces UNCONDITIONALLY -- the drain-before-close guarantee
+    // must hold even when a forwarder panicked.
+    let close_result = tokio::task::spawn_blocking(close_workspaces)
         .await
-        .map_err(|_| io::Error::other("workspace close task failed"))?
-        .map_err(|_| io::Error::other("workspace close failed"))
+        .map_err(|_| io::Error::other("workspace close task failed"))
+        .and_then(|inner| inner.map_err(|_| io::Error::other("workspace close failed")));
+    // A close failure (resource/durability) outranks a forwarder JoinError.
+    match (close_result, forwarder_error) {
+        (Err(close_error), _) => Err(close_error),
+        (Ok(()), Some(forwarder_error)) => Err(forwarder_error),
+        (Ok(()), None) => Ok(()),
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -525,6 +568,45 @@ mod tests {
             buf.put_slice(&this.bytes[this.pos..this.pos + take]);
             this.pos += take;
             Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A reader that yields `hello` + `n` request frames on its first poll,
+    /// then returns a read ERROR (simulating e.g. a socket ECONNRESET -- the
+    /// normal close for a stream transport). Proves the error path still
+    /// drains/closes.
+    struct HelloThenRequestsThenError {
+        bytes: Vec<u8>,
+        pos: usize,
+    }
+
+    impl HelloThenRequestsThenError {
+        fn new(request_ids: &[u64]) -> Self {
+            let mut bytes = hello_bytes();
+            for id in request_ids {
+                bytes.extend_from_slice(&request_bytes(*id));
+            }
+            HelloThenRequestsThenError { bytes, pos: 0 }
+        }
+    }
+
+    impl AsyncRead for HelloThenRequestsThenError {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut TaskContext<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            if this.pos < this.bytes.len() {
+                let take = (this.bytes.len() - this.pos).min(buf.remaining());
+                buf.put_slice(&this.bytes[this.pos..this.pos + take]);
+                this.pos += take;
+                return Poll::Ready(Ok(()));
+            }
+            Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "simulated connection reset",
+            )))
         }
     }
 
@@ -694,5 +776,91 @@ mod tests {
             closed.load(std::sync::atomic::Ordering::SeqCst),
             "workspaces must be closed once the in-flight request has drained"
         );
+    }
+
+    /// F2 regression: a read ERROR (not just EOF) must still fall through to
+    /// the cancel/drain/close tail -- it must NOT propagate straight out,
+    /// abandoning in-flight work and skipping the workspace close. Socket
+    /// transports report ECONNRESET as their NORMAL close.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_error_still_drains_and_closes_workspaces() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let service = Arc::new(CountingService {
+            calls: Arc::clone(&calls),
+        });
+        let supervisor = Arc::new(Supervisor::new(SupervisorConfig::default(), service));
+
+        let closed = Arc::new(AtomicBool::new(false));
+        let close_witness = Arc::clone(&closed);
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_transport(
+                TEST_AUTH_TOKEN.to_owned(),
+                HelloThenRequestsThenError::new(&[1]),
+                SinkWriter,
+                supervisor,
+                move || {
+                    close_witness.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+            ),
+        )
+        .await
+        .expect("daemon shut down after a read error");
+
+        assert!(
+            outcome.is_err(),
+            "a read error must ultimately surface, after a clean shutdown"
+        );
+        assert!(
+            closed.load(std::sync::atomic::Ordering::SeqCst),
+            "workspaces must be closed even when shutdown was triggered by a read error"
+        );
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the in-flight request must have drained (been processed), not been abandoned"
+        );
+    }
+
+    /// F3 regression: completed forwarder tasks are reaped from the JoinSet
+    /// instead of accumulating a finished-handle per request. Proves
+    /// `reap_completed` drops finished tasks while retaining pending ones (the
+    /// bounded-memory invariant the read loop relies on each iteration).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reap_completed_drops_finished_tasks_and_retains_pending() {
+        let mut tasks: JoinSet<()> = JoinSet::new();
+        for _ in 0..8 {
+            tasks.spawn(async {});
+        }
+        let gate = Arc::new(Notify::new());
+        let pending_gate = Arc::clone(&gate);
+        tasks.spawn(async move {
+            pending_gate.notified().await;
+        });
+
+        // Let the eight instant tasks finish.
+        for _ in 0..50 {
+            if tasks.len() <= 1 {
+                break;
+            }
+            reap_completed(&mut tasks);
+            if tasks.len() <= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        reap_completed(&mut tasks);
+
+        assert_eq!(
+            tasks.len(),
+            1,
+            "completed tasks must be reaped; only the still-pending task should remain"
+        );
+        gate.notify_one();
+        let _ = tasks.join_next().await.expect("pending task completes");
+        reap_completed(&mut tasks);
+        assert_eq!(tasks.len(), 0, "the set is empty once all tasks are reaped");
     }
 }

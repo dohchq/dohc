@@ -1,4 +1,4 @@
-//! Cutover-blocking fuzz family 3/3: replication envelopes.
+//! Cutover-blocking fuzz families: replication envelopes (generic + secret).
 //!
 //! Surfaces under test:
 //! - `serde_json::from_slice::<ReplicationEnvelope>` -- arbitrary bytes off
@@ -9,6 +9,10 @@
 //!   values (adversarial strings, huge/negative integers, oversized
 //!   payloads) run through the actual production validate-then-transact
 //!   boundary, not a reimplementation of it.
+//! - `dohc_engine_sync::apply_secret_envelope` -- the 4th untrusted input
+//!   surface: ENCRYPTED secret replication envelopes (`secret.file.put` /
+//!   `secret.file.delete`), including structurally-plausible-but-invalid
+//!   secret payloads (random iv/tag/sha/byte-length).
 //!
 //! Properties asserted:
 //! - **No panic** (implicit: proptest fails the case on any panic).
@@ -19,13 +23,19 @@
 //!   (non-empty/bounded `workspace_id`/`origin_id`/`op_kind`, `origin_seq`
 //!   in the wire-integer range, payload under the byte cap) must be
 //!   rejected WITHOUT the caller's `mutation` closure ever running.
+//! - **No untrusted secret applies**: against a fresh store with no prior
+//!   version state, no random secret envelope may reach
+//!   `ApplyOutcome::Applied` (an `Err` or a no-op `Skipped` is fine -- both
+//!   mean nothing was durably written).
 //! - **No unbounded growth**: the payload byte cap
 //!   (`model::MAX_PAYLOAD_BYTES`, 10 MiB) and identifier byte cap
 //!   (`MAX_IDENTIFIER_BYTES`, 512) are enforced against generated input, not
 //!   merely assumed.
 
 use dohc_engine_storage::{EngineStore, NoFaults};
-use dohc_engine_sync::{ReplicationEnvelope, SyncError, apply_envelope_with};
+use dohc_engine_sync::{
+    ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with, apply_secret_envelope,
+};
 use dohc_engine_testkit::ScratchDir;
 use proptest::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -100,15 +110,91 @@ fn arbitrary_envelope() -> impl Strategy<Value = ReplicationEnvelope> {
         )
 }
 
+/// A secret replication `op_kind`: biased toward the two real secret kinds so
+/// the apply path is actually exercised, plus arbitrary junk kinds that must
+/// be rejected as unsupported.
+fn secret_op_kind() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just("secret.file.put".to_owned()),
+        Just("secret.file.delete".to_owned()),
+        arbitrary_string(),
+    ]
+}
+
+/// A secret payload: nulls/scalars plus a `secret.file.put`-SHAPED object with
+/// random field values (random base64-ish iv/tag, random sha, random byte
+/// length). Structurally plausible, never actually valid against a fresh
+/// store.
+fn arbitrary_secret_payload() -> impl Strategy<Value = serde_json::Value> {
+    prop_oneof![
+        Just(serde_json::Value::Null),
+        "[a-zA-Z0-9]{0,64}".prop_map(|value| serde_json::json!(value)),
+        (
+            "[a-zA-Z0-9._/-]{0,64}",
+            "[a-zA-Z0-9._/-]{0,64}",
+            "[a-zA-Z0-9+/=]{0,64}",
+            "[a-zA-Z0-9+/=]{0,64}",
+            "[a-f0-9]{0,64}",
+            any::<i64>(),
+        )
+            .prop_map(|(version_id, path, iv, tag, sha, byte_length)| {
+                serde_json::json!({
+                    "versionId": version_id,
+                    "path": path,
+                    "metadata": { "origin": "replication", "summary": null, "correlationId": null },
+                    "ivBase64": iv,
+                    "authTagBase64": tag,
+                    "ciphertextSha256": sha,
+                    "byteLength": byte_length,
+                })
+            }),
+    ]
+}
+
+fn arbitrary_secret_envelope() -> impl Strategy<Value = ReplicationEnvelope> {
+    (
+        arbitrary_string(),
+        arbitrary_string(),
+        any::<i64>(),
+        secret_op_kind(),
+        arbitrary_secret_payload(),
+        any::<i64>(),
+    )
+        .prop_map(
+            |(workspace_id, origin_id, origin_seq, op_kind, payload, recorded_at_ms)| {
+                ReplicationEnvelope {
+                    workspace_id,
+                    origin_id,
+                    origin_seq,
+                    op_kind,
+                    payload,
+                    recorded_at_ms,
+                }
+            },
+        )
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(256))]
 
     /// Arbitrary bytes as purported wire JSON: deserialization never panics,
-    /// and a value that fails to deserialize is a clean `Err`, never a
-    /// partially-populated `ReplicationEnvelope`.
+    /// and any successfully-decoded envelope is a COMPLETE value that
+    /// round-trips (re-serialize + re-parse yields an equal envelope) -- i.e.
+    /// serde never hands back a partially-populated struct that would then
+    /// re-encode to something different.
     #[test]
     fn arbitrary_bytes_deserialize_cleanly_or_fail_closed(bytes in prop::collection::vec(any::<u8>(), 0..2048)) {
-        let _ = serde_json::from_slice::<ReplicationEnvelope>(&bytes);
+        if let Ok(envelope) = serde_json::from_slice::<ReplicationEnvelope>(&bytes) {
+            let reencoded =
+                serde_json::to_vec(&envelope).expect("a decoded envelope re-serializes");
+            let roundtrip = serde_json::from_slice::<ReplicationEnvelope>(&reencoded)
+                .expect("re-parse of a self-produced encoding");
+            prop_assert_eq!(
+                envelope,
+                roundtrip,
+                "a decoded envelope must be a complete, round-tripping value"
+            );
+        }
     }
 
     /// Structurally-random envelopes through the REAL apply boundary: never
@@ -142,6 +228,23 @@ proptest! {
         // (SequenceGap/CoordinateDiverged) is covered by
         // `dohc-engine-sync`'s own unit tests, not this fuzz target.
     }
+
+    /// 4th untrusted surface: encrypted secret replication envelopes through
+    /// `apply_secret_envelope`. Never panics; against a fresh store with NO
+    /// prior version state, no random secret envelope may reach
+    /// `ApplyOutcome::Applied` (an `Err`, or a no-op `Skipped`, is fine --
+    /// neither writes a durable secret).
+    #[test]
+    fn structurally_random_secret_envelopes_never_apply(
+        envelope in arbitrary_secret_envelope(),
+    ) {
+        let (_scratch, mut engine) = store();
+        let result = apply_secret_envelope(&mut engine, &envelope, &NoFaults);
+        prop_assert!(
+            !matches!(result, Ok(ApplyOutcome::Applied(()))),
+            "an untrusted secret envelope must never apply against a store with no prior state: {envelope:?} -> {result:?}"
+        );
+    }
 }
 
 /// Seed-corpus sanity: a real, valid envelope applies cleanly.
@@ -160,6 +263,23 @@ fn seed_valid_envelope_applies() {
         Ok::<(), SyncError>(())
     });
     assert!(outcome.is_ok(), "seed envelope must apply: {outcome:?}");
+}
+
+/// Seed-corpus sanity: a non-secret `op_kind` routed to the secret applier is
+/// rejected as unsupported (never panics, never applies).
+#[test]
+fn seed_non_secret_op_kind_is_rejected_by_secret_applier() {
+    let (_scratch, mut engine) = store();
+    let envelope = ReplicationEnvelope {
+        workspace_id: "ws".to_owned(),
+        origin_id: "peer-a".to_owned(),
+        origin_seq: 1,
+        op_kind: "fuzz.not-a-secret".to_owned(),
+        payload: serde_json::Value::Null,
+        recorded_at_ms: 1_000,
+    };
+    let result = apply_secret_envelope(&mut engine, &envelope, &NoFaults);
+    assert!(matches!(result, Err(SyncError::UnsupportedOperation)));
 }
 
 /// Seed-corpus sanity: an empty `workspace_id` is refused before the

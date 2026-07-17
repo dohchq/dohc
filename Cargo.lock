@@ -312,6 +312,7 @@ version = "0.1.0"
 dependencies = [
  "dohc-engine-storage",
  "dohc-engine-testkit",
+ "file-id",
  "notify",
  "serde",
  "serde_json",

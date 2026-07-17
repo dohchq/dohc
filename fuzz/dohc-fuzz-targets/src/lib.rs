@@ -2,10 +2,11 @@
 //! engine's remote/cross-process input surfaces.
 //!
 //! Per the program plan's "Fuzzing -- prioritized by input trust" section,
-//! this covers the three cutover-blocking families (remote/cross-process
-//! input): IPC framing/protocol validation (`tests/protocol_framing.rs`),
-//! Y.Doc update ingestion (`tests/ydoc_update.rs`), and replication
-//! envelopes (`tests/replication_envelope.rs`).
+//! this covers the cutover-blocking families (remote/cross-process input):
+//! IPC framing/protocol validation (`tests/protocol_framing.rs`), Y.Doc
+//! update ingestion (`tests/ydoc_update.rs`), and replication envelopes --
+//! both the generic apply boundary and the encrypted-secret apply boundary
+//! (`tests/replication_envelope.rs`).
 //!
 //! Every test in this crate asserts the same three properties against
 //! arbitrary and structurally-mutated input:

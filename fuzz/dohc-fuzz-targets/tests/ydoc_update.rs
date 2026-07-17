@@ -27,7 +27,7 @@
 //!   without validating it is a legal Unicode scalar value first.
 //!
 //! A DETERMINISTIC, MINIMAL WITNESS for the second shape is captured below
-//! (`known_crash_witness_yrs_char_decode_ub`) -- 39 bytes, reproducible on
+//! (`known_crash_witness_yrs_char_decode_ub`) -- 41 bytes, reproducible on
 //! this machine/toolchain/lockfile. It is marked `#[ignore]` so it never
 //! runs as part of the required `cargo test --workspace` gate (an aborting
 //! test process cannot be part of a required gate), but it stays in the

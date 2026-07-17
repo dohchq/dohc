@@ -105,10 +105,10 @@ proptest! {
     }
 
     /// A single-byte flip anywhere in a real, valid encoded frame must never
-    /// panic, and must never decode into an envelope that isn't byte-for-byte
-    /// what a correct decoder would produce for THAT exact mutated input
-    /// (i.e. decode_control on the yielded payload is itself well-behaved:
-    /// either a typed error, or a value that re-encodes losslessly).
+    /// panic. When the mutated frame still yields a decodable control
+    /// envelope, that envelope must be a COMPLETE, self-consistent value: its
+    /// JSON re-encoding decodes back to an equal envelope (no partially-
+    /// populated / lossy decode from adversarial-but-parseable input).
     #[test]
     fn single_byte_flip_of_a_valid_frame_never_panics(
         index in 0usize..200,
@@ -119,14 +119,21 @@ proptest! {
         frame[index] ^= flip_bits.max(1); // guarantee an actual change
         let mut decoder = FrameDecoder::new(WireLimits::default());
         decoder.push(&frame);
-        // Every arm is intentionally a no-op: the property under test is
-        // "never panics", which proptest enforces implicitly. The match is
-        // written out (instead of `let _ =`) to keep every possible decode
-        // outcome named and readable.
         if let Ok(Some(Frame::Control(payload))) = decoder.next_frame() {
             // Either a typed error (fail-closed) or a bit flip that still
-            // happens to be well-formed JSON -- both are fine here.
-            let _ = decode_control(&payload, &WireLimits::default());
+            // happens to be well-formed -- if it decoded, prove the value is
+            // complete by round-tripping it through its own JSON encoding.
+            if let Ok(envelope) = decode_control(&payload, &WireLimits::default()) {
+                let reencoded =
+                    serde_json::to_vec(&envelope).expect("a decoded envelope re-serializes");
+                let roundtrip = decode_control(&reencoded, &WireLimits::default())
+                    .expect("re-decode of a self-produced encoding");
+                prop_assert_eq!(
+                    envelope,
+                    roundtrip,
+                    "a decoded envelope must round-trip losslessly"
+                );
+            }
         }
     }
 
@@ -143,11 +150,13 @@ proptest! {
         }
     }
 
-    /// An adversarial payload-length claim (from a tiny 12-byte header) must
-    /// be refused from the header alone -- proving the decoder never tries to
-    /// buffer/allocate toward a claimed length before enough bytes exist.
+    /// An over-limit payload-length claim in a tiny 12-byte header (with NO
+    /// payload bytes following) must be rejected immediately with an `Err`,
+    /// decided from the header alone rather than waiting for the claimed bytes
+    /// to arrive. (This asserts header-driven rejection; it does not directly
+    /// measure the decoder's internal buffer size, which is private.)
     #[test]
-    fn oversized_length_claim_is_refused_without_buffering(claimed_len in any::<u32>()) {
+    fn oversized_length_claim_is_refused_from_the_header(claimed_len in any::<u32>()) {
         let mut header = Vec::with_capacity(12);
         header.extend_from_slice(b"DOP1");
         header.push(1); // control frame type
