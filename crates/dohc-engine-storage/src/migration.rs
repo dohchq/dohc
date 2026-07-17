@@ -891,15 +891,25 @@ CREATE VIRTUAL TABLE engine_search_chat_messages_fts USING fts5(
 );
 
 -- Durable per-version index generation. A committed row for (workspace,
--- version) names a fully-built file index generation; its ABSENCE forces
--- ensure_search_index_for_version to (re)build. A degraded-file-policy window
--- deliberately leaves this unset so fixing the policy triggers a full rebuild
--- (the fail-closed freeze-not-drop model). Committed in the SAME transaction as
--- the FTS rows it certifies, so a query never observes a torn mid-index state.
+-- version) names a fully-built index generation; its ABSENCE forces
+-- ensure_search_index_for_version to (re)build. Committed in the SAME
+-- transaction as the FTS rows it certifies, so a query never observes a torn
+-- mid-index state.
+--
+-- `file_policy_degraded` extends the TS logical shape (a recorded Rust delta):
+-- 1 marks a generation built while the FILE policy was broken (file index
+-- FROZEN, chat index authoritative). Recording it durably means a stable
+-- degraded window does NOT re-index chat on every query (the TS engine, which
+-- leaves NO state row while degraded, re-wipes+rebuilds chat per query), and a
+-- degraded↔healthy TRANSITION is what triggers the file rebuild — not the
+-- mere absence of a row. The timestamp affinity is INTEGER per the
+-- R04/R08/R09/R11a convention (an engine-internal repair marker, never
+-- cross-engine compared).
 CREATE TABLE engine_search_index_state (
-    workspace_id  TEXT    NOT NULL,
-    version_id    TEXT    NOT NULL,
-    indexed_at_ms INTEGER NOT NULL,
+    workspace_id         TEXT    NOT NULL,
+    version_id           TEXT    NOT NULL,
+    indexed_at_ms        INTEGER NOT NULL,
+    file_policy_degraded INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (workspace_id, version_id)
 ) STRICT;
 ";

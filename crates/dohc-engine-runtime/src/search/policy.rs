@@ -588,6 +588,13 @@ fn read_policy_file<T>(
     // `symlink_metadata` does NOT follow the final symlink, so a symlinked
     // policy file is rejected as unreadable (parity with the TS `lstatSync`
     // symlink refusal) rather than followed off-tree.
+    //
+    // TOCTOU: this is a stat-then-open double-open (a symlink could be swapped
+    // in between), matching the TS `lstatSync`-then-`readFileSync` behavior. It
+    // is NOT a leak vector — the bytes are only ever consumed AS policy, and a
+    // non-TOML / oversize / non-file result fails CLOSED (a diagnostic that
+    // freezes FILE search), never widens it. Left as-is for TS parity rather
+    // than hardened to an open-by-handle read.
     let meta = match std::fs::symlink_metadata(&path) {
         Ok(meta) => meta,
         Err(err) => {

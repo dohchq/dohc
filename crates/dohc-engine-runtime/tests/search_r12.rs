@@ -58,7 +58,7 @@ fn start_thread(store: &mut EngineStore, channel_id: &str, thread_id: &str, body
         .create_channel(
             WS,
             channel_id,
-            "General",
+            &format!("Channel {channel_id}"),
             ChatChannelKind::Channel,
             now,
             &NO_FAULTS,
@@ -111,7 +111,7 @@ fn send(store: &mut EngineStore, thread_id: &str, message_id: &str, body: &str, 
 fn ensure_index(store: &mut EngineStore, root: &Path, now: i64) {
     let outcome = store
         .write_with(&NO_FAULTS, |tx| {
-            ensure_search_index_for_version(tx, root, WS, V, now)
+            ensure_search_index_for_version(tx, root, WS, V, now, &NO_FAULTS)
         })
         .expect("ensure index");
     assert!(matches!(outcome, TxnOutcome::Committed(())));
@@ -367,7 +367,7 @@ fn crash_mid_index_reopen_repairs() {
         let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
         let outcome = store
             .write_with(faults.as_ref(), |tx| {
-                ensure_search_index_for_version(tx, &root, WS, V, 30)
+                ensure_search_index_for_version(tx, &root, WS, V, 30, &NO_FAULTS)
             })
             .expect("write");
         assert!(matches!(outcome, TxnOutcome::Crashed { committed: false }));
@@ -478,4 +478,203 @@ fn trigram_prefilter_is_case_insensitive_and_min_three() {
         two.is_none(),
         "sub-trigram query falls back (None) under a healthy policy"
     );
+}
+
+// -------------------------------- 8. read_with rebuild is atomic across a crash
+
+/// The P1 regression: `search_workspace`/`ensure` can run on an autocommit
+/// (`read_with`) connection. A crash MID-rebuild — after the chat FTS wipe,
+/// before the rebuild inserts — must NOT leave a torn/empty generation. The
+/// savepoint inside `ensure_search_index_for_version` is what guarantees this on
+/// a connection with no enclosing transaction.
+#[test]
+fn read_with_rebuild_is_atomic_across_mid_rebuild_crash() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+
+    write_file(&mut store, "obj-ok", "notes/plan.md", "needle here", 10);
+    start_thread(&mut store, "chan-1", "th-1", "chat needle", 20);
+    ensure_index(&mut store, &root, 30); // healthy: chat indexed, state row set
+
+    let count_chat = |store: &EngineStore| -> i64 {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM engine_search_chat_messages_fts WHERE workspace_id=?1",
+                    rusqlite::params![WS],
+                    |r| r.get(0),
+                )
+            })
+            .expect("count")
+    };
+    let before = count_chat(&store);
+    assert!(before > 0, "chat index should be populated");
+
+    // Force a re-index by dropping the state row (mirrors a degraded-window
+    // invalidation), then run ensure on a READ_WITH (autocommit) connection with
+    // a mid-rebuild crash armed.
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "DELETE FROM engine_search_index_state WHERE workspace_id=?1",
+                rusqlite::params![WS],
+            )?;
+            Ok::<(), dohc_engine_runtime::SearchError>(())
+        })
+        .expect("drop state");
+
+    let faults = ScriptedFaults::crash_at(FaultPoint::SearchIndexMidRebuild);
+    store
+        .read_with(|conn| ensure_search_index_for_version(conn, &root, WS, V, 40, faults.as_ref()))
+        .expect("ensure on read_with");
+    assert!(faults.fired(), "the mid-rebuild crash must have fired");
+
+    // Atomicity: the chat wipe rolled back — the prior generation is intact, not
+    // a torn/empty index, and no state row was certified.
+    assert_eq!(
+        count_chat(&store),
+        before,
+        "a mid-rebuild crash on the read_with path must preserve the prior generation"
+    );
+    let state_rows: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM engine_search_index_state WHERE workspace_id=?1",
+                rusqlite::params![WS],
+                |r| r.get(0),
+            )
+        })
+        .expect("state count");
+    assert_eq!(state_rows, 0, "no torn generation may be certified");
+    // The granular reader (which never calls ensure) sees the intact rows.
+    let hits = store
+        .read_with(|conn| query_chat_messages_granular(conn, WS, "needle", 100))
+        .expect("granular");
+    assert!(
+        !hits.is_empty(),
+        "granular chat search sees no torn/partial state"
+    );
+
+    // A clean re-run repairs and certifies.
+    store
+        .read_with(|conn| ensure_search_index_for_version(conn, &root, WS, V, 50, &NO_FAULTS))
+        .expect("repair");
+    let repaired = run_search(&store, &root, "needle");
+    assert!(repaired.iter().any(|r| r.surface == SearchSurface::Chat));
+}
+
+// ---------------------------------------- 9. an orphan thread never breaks search
+
+#[test]
+fn orphan_thread_does_not_disable_all_search() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+
+    write_file(&mut store, "obj-ok", "notes/plan.md", "needle here", 10);
+    start_thread(&mut store, "chan-1", "th-1", "chat needle", 20);
+    ensure_index(&mut store, &root, 30);
+
+    // Delete the channel out from under its thread (chat_threads.channel_id has
+    // no FK/cascade), orphaning th-1, and drop the state row to force a rebuild.
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "DELETE FROM chat_channels WHERE workspace_id=?1 AND channel_id=?2",
+                rusqlite::params![WS, "chan-1"],
+            )?;
+            tx.execute(
+                "DELETE FROM engine_search_index_state WHERE workspace_id=?1",
+                rusqlite::params![WS],
+            )?;
+            Ok::<(), dohc_engine_runtime::SearchError>(())
+        })
+        .expect("orphan");
+
+    // The rebuild must SKIP the orphan thread's header, not hard-error the whole
+    // search surface: file search still works.
+    let results = run_search(&store, &root, "needle");
+    assert!(
+        results
+            .iter()
+            .any(|r| r.surface == SearchSurface::File && r.path == "notes/plan.md"),
+        "an orphan thread must not disable file search: {results:?}"
+    );
+}
+
+// ------------------------------ 10. degraded policy does not re-index chat per query
+
+#[test]
+fn degraded_policy_does_not_reindex_chat_per_query() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+
+    start_thread(&mut store, "chan-1", "th-1", "chat needle", 20);
+    std::fs::create_dir_all(root.join(".dohc")).expect("mkdir");
+    std::fs::write(root.join(".dohc").join("files.toml"), "not = valid [[[").expect("write");
+
+    ensure_index(&mut store, &root, 30); // degraded: chat built, state row degraded=1
+
+    // FTS rowid is monotonic on insert, so a re-wipe+rebuild would advance
+    // MAX(rowid). Capture it, run several searches, and assert it is UNCHANGED —
+    // proving the stable degraded window does not re-index chat per query.
+    let max_rowid = |store: &EngineStore| -> i64 {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COALESCE(MAX(rowid), 0) FROM engine_search_chat_messages_fts WHERE workspace_id=?1",
+                    rusqlite::params![WS],
+                    |r| r.get(0),
+                )
+            })
+            .expect("max rowid")
+    };
+    let baseline = max_rowid(&store);
+    assert!(baseline > 0, "chat index built once under degraded policy");
+
+    for _ in 0..4 {
+        let results = run_search(&store, &root, "needle");
+        assert!(results.iter().any(|r| r.surface == SearchSurface::Chat));
+        assert!(
+            !results.iter().any(|r| r.surface == SearchSurface::File),
+            "file search stays closed under a broken files.toml"
+        );
+    }
+    assert_eq!(
+        max_rowid(&store),
+        baseline,
+        "chat must not be re-indexed on every query during a stable degraded window"
+    );
+}
+
+// ------------------------------------ 11. many chat threads all return (single fetch)
+
+#[test]
+fn multiple_chat_threads_all_return() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+
+    // Several threads each matching the query; the grouped single-fetch preview
+    // must surface every one.
+    start_thread(&mut store, "chan-1", "th-1", "alpha needle one", 20);
+    start_thread(&mut store, "chan-2", "th-2", "beta needle two", 21);
+    start_thread(&mut store, "chan-3", "th-3", "gamma needle three", 22);
+    ensure_index(&mut store, &root, 30);
+
+    let results = run_search(&store, &root, "needle");
+    for th in ["th-1", "th-2", "th-3"] {
+        assert!(
+            results
+                .iter()
+                .any(|r| r.surface == SearchSurface::Chat && r.thread_id.as_deref() == Some(th)),
+            "thread {th} missing from grouped chat previews: {results:?}"
+        );
+    }
 }

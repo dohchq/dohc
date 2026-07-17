@@ -6,6 +6,17 @@
 //! File candidates are re-checked LIVE against the current policy at read time
 //! (a policy changed after indexing must still be honored) and de-duped; a
 //! broken FILE policy fails the file half closed while chat search stays live.
+//!
+//! ## Reader invariant (defense in depth) — DO NOT REMOVE
+//!
+//! The degraded-window "freeze, don't drop" model deliberately LEAVES file rows
+//! in `engine_search_files_fts` while the FILE policy is broken. The no-leak
+//! guarantee therefore rests on EVERY reader of that table re-checking
+//! [`path_is_search_indexed`] against the freshly-read policy before returning a
+//! row — which fails closed (returns nothing) while degraded. Any new reader of
+//! `engine_search_files_fts` MUST apply the same re-check, or it will serve
+//! frozen rows a broken policy is supposed to hide. `query_search_index` is
+//! currently the sole reader and does this; keep it that way.
 
 use crate::search::policy::{path_is_search_indexed, read_engine_search_policy};
 use crate::search::{

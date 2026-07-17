@@ -14,8 +14,21 @@ use crate::search::policy::{
     read_engine_search_policy,
 };
 use crate::search::{SearchError, THREAD_HEADER_MESSAGE_ID};
+use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
 use rusqlite::{Connection, params};
 use std::path::Path;
+
+/// Consult the mid-rebuild crash point. Unlike the storage crate's per-op write
+/// lane (cfg-gated to be provably zero-cost), this is polled ONCE per index
+/// rebuild — an infrequent, heavy operation — so a single `NoFaults` poll (a
+/// trivial match returning `Continue`) is negligible and left ungated. Ungated
+/// also keeps the crash regression testable via a `ScriptedFaults` injector
+/// without depending on the runtime crate's `fault-injection` feature being
+/// unified on for `cargo test`.
+#[inline]
+fn should_crash(faults: &dyn FaultInjector, point: FaultPoint) -> bool {
+    faults.poll(point) == FaultAction::Crash
+}
 
 /// Untitled-thread snippet cap (`THREAD_SNIPPET_TITLE_MAX_CHARS`).
 const THREAD_SNIPPET_TITLE_MAX_CHARS: usize = 80;
@@ -131,10 +144,16 @@ fn insert_file_index_row(
 
 /// Upsert a single text file's FTS row, respecting the fail-closed FILE policy
 /// freeze. Ports `upsertFileSearchIndex` (`searchIndex.ts`). Reads the policy
-/// off `root_dir`; a broken policy FREEZES the file index (rows untouched) and
-/// invalidates `engine_search_index_state` for the version so a later fix
-/// triggers a full rebuild. Otherwise the row is delete-then-conditionally-
-/// re-inserted (a policy-excluded path ends delete-only).
+/// off `root_dir`; a broken policy FREEZES the file index — the FTS rows AND the
+/// `engine_search_index_state` row are left untouched, so nothing is dropped
+/// while degraded. The degraded generation is marked `file_policy_degraded = 1`
+/// by [`ensure_search_index_for_version`], and the later degraded→healthy
+/// TRANSITION (not the mere presence/absence of a state row) is what rebuilds
+/// the file index and picks up everything written during the degraded window.
+/// Query-time `path_is_search_indexed` fails file search closed meanwhile.
+///
+/// Under a healthy policy the row is delete-then-conditionally-re-inserted (a
+/// binary/policy-excluded path ends delete-only).
 pub fn upsert_file_search_index(
     conn: &Connection,
     root_dir: &Path,
@@ -146,12 +165,8 @@ pub fn upsert_file_search_index(
 ) -> Result<(), SearchError> {
     let policy = read_engine_search_policy(root_dir);
     if policy.is_degraded() {
-        // Freeze, don't drop: leave FTS rows, but invalidate index_state so a
-        // fix rebuilds everything written during the degraded window.
-        conn.execute(
-            "DELETE FROM engine_search_index_state WHERE workspace_id = ?1 AND version_id = ?2",
-            params![workspace_id, version_id],
-        )?;
+        // Freeze, don't drop: leave every FTS row and the state row exactly as
+        // they are. The healthy-transition rebuild reconciles later.
         return Ok(());
     }
     delete_file_index_row(conn, workspace_id, version_id, object_id)?;
@@ -279,9 +294,16 @@ fn rebuild_chat_index_for_workspace(
     conn: &Connection,
     workspace_id: &str,
 ) -> Result<(), SearchError> {
-    // Header rows: one per thread, ORDER BY created_at_ms, thread_id. The
-    // ownership validation is fail-closed (both/neither owner, or a channel
-    // owner that no longer exists, is corrupt state — never a search row).
+    // Header rows: one per thread, ORDER BY created_at_ms, thread_id. A thread
+    // whose ownership is malformed (both/neither owner) or whose channel owner
+    // is gone (an orphan left by a channel delete — `chat_threads.channel_id`
+    // has no FK/cascade, and a replicated store can be transiently inconsistent)
+    // is SKIPPED, never a hard error: one bad thread must at most omit its own
+    // header row, not disable search workspace-wide. (Diverges from the TS
+    // `validatedThreadSearchRow` throw; recorded as a robustness delta — the
+    // skip is strictly fail-safe: a skipped thread simply is not searchable by
+    // title until repaired, and its messages still index in the loop below,
+    // matching the TS message loop which never validates ownership.)
     {
         let mut stmt = conn.prepare(
             "SELECT t.thread_id, t.title, t.linked_object_id, t.channel_id, \
@@ -311,17 +333,18 @@ fn rebuild_chat_index_for_workspace(
             let first_body: Option<String> = row.get(4)?;
             let channel_owner_exists: i64 = row.get(5)?;
             if thread_id.is_empty() {
-                return Err(SearchError::Corrupt("thread search row missing thread_id"));
+                // A row with no id cannot key an FTS row at all — skip it.
+                continue;
             }
-            // Exactly one owner (the fail-closed XOR).
-            match (linked_object_id.is_some(), channel_id.is_some()) {
-                (true, true) | (false, false) => {
-                    return Err(SearchError::Corrupt("thread has both or neither owner"));
-                }
-                _ => {}
+            // Exactly one owner (the XOR). A malformed thread is skipped, not a
+            // hard error.
+            if linked_object_id.is_some() == channel_id.is_some() {
+                continue;
             }
+            // A channel thread whose channel row is gone is an orphan: skip its
+            // header (its messages still index below), never break all search.
             if channel_id.is_some() && channel_owner_exists != 1 {
-                return Err(SearchError::Corrupt("channel thread owner missing"));
+                continue;
             }
             let display = thread_display_title(&title, first_body.as_deref());
             conn.execute(
@@ -374,68 +397,141 @@ fn rebuild_chat_index_for_workspace(
 }
 
 /// Ensure the FTS index for `version_id` is built, repairing durably. Ports
-/// `ensureSearchIndexForVersion` (`searchIndex.ts`).
+/// `ensureSearchIndexForVersion` (`searchIndex.ts`) with two hardening deltas.
 ///
-/// A committed `engine_search_index_state` row for `(workspace, version)` short-
-/// circuits (idempotent). Otherwise the file index for the version and the chat
-/// index for the WHOLE workspace (chat is not versioned) are wiped and rebuilt,
-/// then the state row is written — but ONLY when the FILE policy is healthy:
-/// while degraded, the file index is intentionally skipped and the state row is
-/// left unset (fail-closed, scoped to files) so fixing the policy triggers a
-/// full rebuild. Chat indexing runs regardless of the FILE policy.
+/// **Atomic on any connection.** The whole rebuild (FTS wipes + inserts + the
+/// state row) runs inside its OWN `SAVEPOINT`, so it is atomic and crash-safe
+/// regardless of whether the caller is inside a transaction (`write_with`) or on
+/// an autocommit borrow (`read_with`). A crash mid-rebuild rolls the savepoint
+/// back — no reader ever observes a torn/partial generation, and no state row is
+/// certified. (The TS engine relied on its `serialize()` single BEGIN/COMMIT;
+/// the Rust query path can run on a bare connection, so the savepoint carries
+/// the guarantee instead of the caller.)
 ///
-/// MUST run inside the caller's single transaction so a query never observes a
-/// torn mid-index state, and so a crash mid-rebuild rolls back to leave the
-/// state row unwritten (reopen repairs).
+/// **Durable degraded marker.** `engine_search_index_state.file_policy_degraded`
+/// records whether a generation was built under a broken FILE policy. Work
+/// happens only when there is no state row OR the degraded status CHANGED since
+/// the last build:
+/// - healthy build: wipe+rebuild the version's files, rebuild chat, mark `0`.
+/// - degraded build: FREEZE the file FTS (leave every row — nothing dropped),
+///   rebuild chat (chat is independent of the FILE policy), mark `1`.
+/// - a degraded→healthy transition rebuilds files (picking up degraded-window
+///   writes); a stable degraded window is a cheap early-return, so chat is NOT
+///   re-wiped+rebuilt on every query (the TS per-query rebuild is avoided).
+///
+/// Query-time `path_is_search_indexed` still fails FILE search closed while
+/// degraded regardless of what the frozen file index holds.
 pub fn ensure_search_index_for_version(
     conn: &Connection,
     root_dir: &Path,
     workspace_id: &str,
     version_id: &str,
     now_ms: i64,
+    faults: &dyn FaultInjector,
 ) -> Result<(), SearchError> {
-    let already: Option<i64> = conn
+    let policy = read_engine_search_policy(root_dir);
+    let current_degraded = policy.is_degraded();
+
+    // The last-built degraded status for this version, if any. `None` = never
+    // built; `Some(stored)` = built under that FILE-policy health.
+    let stored_degraded: Option<bool> = conn
         .query_row(
-            "SELECT 1 FROM engine_search_index_state \
+            "SELECT file_policy_degraded FROM engine_search_index_state \
              WHERE workspace_id = ?1 AND version_id = ?2",
             params![workspace_id, version_id],
-            |row| row.get(0),
+            |row| row.get::<_, i64>(0),
         )
-        .map(Some)
+        .map(|v| Some(v != 0))
         .or_else(|err| match err {
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
             other => Err(SearchError::from(other)),
         })?;
-    if already.is_some() {
+    if stored_degraded == Some(current_degraded) {
+        // Up to date: healthy-stable or degraded-stable. No rebuild, no per-query
+        // chat wipe.
         return Ok(());
     }
 
-    let policy = read_engine_search_policy(root_dir);
-    conn.execute(
-        "DELETE FROM engine_search_files_fts WHERE workspace_id = ?1 AND version_id = ?2",
-        params![workspace_id, version_id],
-    )?;
-    let policy_ok = !policy.is_degraded();
-    if policy_ok {
-        rebuild_file_index_for_version(conn, &policy, workspace_id, version_id)?;
+    // Atomic rebuild in its own savepoint so a crash rolls the whole thing back
+    // even on an autocommit connection.
+    const SAVEPOINT: &str = "dohc_search_ensure";
+    conn.execute_batch(&format!("SAVEPOINT {SAVEPOINT}"))?;
+    match rebuild_within_savepoint(
+        conn,
+        &policy,
+        workspace_id,
+        version_id,
+        now_ms,
+        current_degraded,
+        faults,
+    ) {
+        Ok(true) => {
+            conn.execute_batch(&format!("RELEASE {SAVEPOINT}"))?;
+            Ok(())
+        }
+        Ok(false) => {
+            // Crash-injection fired mid-rebuild: undo everything, leave no torn
+            // generation and no state row.
+            conn.execute_batch(&format!("ROLLBACK TO {SAVEPOINT}; RELEASE {SAVEPOINT}"))?;
+            Ok(())
+        }
+        Err(err) => {
+            let _ = conn.execute_batch(&format!("ROLLBACK TO {SAVEPOINT}; RELEASE {SAVEPOINT}"));
+            Err(err)
+        }
     }
+}
 
+/// The rebuild body, run inside the caller's savepoint. Returns `Ok(true)` on a
+/// complete rebuild, `Ok(false)` when the mid-rebuild crash fault fired (the
+/// caller rolls back).
+fn rebuild_within_savepoint(
+    conn: &Connection,
+    policy: &SearchPolicySnapshot,
+    workspace_id: &str,
+    version_id: &str,
+    now_ms: i64,
+    current_degraded: bool,
+    faults: &dyn FaultInjector,
+) -> Result<bool, SearchError> {
+    if !current_degraded {
+        // Healthy: the file index is authoritative — wipe and rebuild it.
+        conn.execute(
+            "DELETE FROM engine_search_files_fts WHERE workspace_id = ?1 AND version_id = ?2",
+            params![workspace_id, version_id],
+        )?;
+        rebuild_file_index_for_version(conn, policy, workspace_id, version_id)?;
+    }
+    // Degraded: FREEZE the file FTS (no wipe, no rebuild) — nothing is dropped.
+
+    // Chat is independent of the FILE policy and is rebuilt on every (re)index.
     conn.execute(
         "DELETE FROM engine_search_chat_messages_fts WHERE workspace_id = ?1",
         params![workspace_id],
     )?;
+    // Crash-injection point: chat FTS is wiped but not yet rebuilt. Without the
+    // savepoint an autocommit connection would leave this DELETE durable (a torn
+    // empty chat index); the rollback proves it does not.
+    if should_crash(faults, FaultPoint::SearchIndexMidRebuild) {
+        return Ok(false);
+    }
     rebuild_chat_index_for_workspace(conn, workspace_id)?;
 
-    // Only certify the version indexed when the FILE index is authoritative.
-    if policy_ok {
-        conn.execute(
-            "INSERT INTO engine_search_index_state (workspace_id, version_id, indexed_at_ms) \
-             VALUES (?1, ?2, ?3) \
-             ON CONFLICT(workspace_id, version_id) DO UPDATE SET indexed_at_ms = excluded.indexed_at_ms",
-            params![workspace_id, version_id, now_ms],
-        )?;
-    }
-    Ok(())
+    conn.execute(
+        "INSERT INTO engine_search_index_state \
+         (workspace_id, version_id, indexed_at_ms, file_policy_degraded) \
+         VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(workspace_id, version_id) DO UPDATE SET \
+           indexed_at_ms = excluded.indexed_at_ms, \
+           file_policy_degraded = excluded.file_policy_degraded",
+        params![
+            workspace_id,
+            version_id,
+            now_ms,
+            i64::from(current_degraded)
+        ],
+    )?;
+    Ok(true)
 }
 
 /// Whether a path would be indexed as a file at all, ignoring policy rules —

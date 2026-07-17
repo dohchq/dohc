@@ -44,6 +44,7 @@ pub use query::{
 };
 
 use rusqlite::Connection;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// The sentinel message id for a thread's header row.
@@ -122,6 +123,10 @@ pub struct SearchResult {
     /// 1-based line number of the match within the candidate text.
     pub line: usize,
     pub preview: String,
+    /// UTF-8 **byte** offsets into `preview` bounding the matched substring:
+    /// `&preview[match_start..match_end]` is always a valid slice on a char
+    /// boundary (safe to byte-slice, unlike a char/UTF-16 index). See
+    /// [`preview_line_matches`] for the contract.
     pub match_start: usize,
     pub match_end: usize,
     /// Present on chat results.
@@ -168,10 +173,20 @@ fn split_lines(text: &str) -> Vec<&str> {
     lines
 }
 
-/// A single line's preview window (`previewForLine`). Indices are char-based
-/// (Rust) rather than UTF-16 (JS); identical for ASCII/BMP text, with a small
-/// known divergence in window centering for astral-plane text (the match itself
-/// is always correct — the FTS differential does not depend on preview offsets).
+/// The UTF-8 byte offset of the `n`-th char in `s` (or `s.len()` if past the
+/// end). Used to convert a char position into a byte offset into the preview so
+/// the returned offsets are safe to byte-slice.
+fn char_to_byte(s: &str, char_index: usize) -> usize {
+    s.char_indices()
+        .nth(char_index)
+        .map_or_else(|| s.len(), |(byte, _)| byte)
+}
+
+/// A single line's preview window (`previewForLine`). The window is centered by
+/// CHAR position (matching the JS char/UTF-16 windowing for BMP text; astral
+/// text can shift the window a few code units — the match itself is always
+/// correct). The returned offsets are UTF-8 **byte** offsets into the preview
+/// string so a Rust consumer can byte-slice them without panicking.
 fn preview_for_line(line: &str, match_index: usize, query_len: usize) -> (String, usize, usize) {
     let chars: Vec<char> = line.chars().collect();
     let line_len = chars.len();
@@ -184,17 +199,23 @@ fn preview_for_line(line: &str, match_index: usize, query_len: usize) -> (String
         .saturating_add(WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS)
         .min(line_len);
     let preview: String = chars[window_start..window_end].iter().collect();
-    let preview_len = window_end.saturating_sub(window_start);
-    let match_start = match_index.saturating_sub(window_start).min(preview_len);
-    let match_end = match_index
+    let preview_char_len = window_end.saturating_sub(window_start);
+    let match_start_char = match_index
+        .saturating_sub(window_start)
+        .min(preview_char_len);
+    let match_end_char = match_index
         .saturating_add(query_len)
         .saturating_sub(window_start)
-        .min(preview_len)
-        .max(match_start);
+        .min(preview_char_len)
+        .max(match_start_char);
+    let match_start = char_to_byte(&preview, match_start_char);
+    let match_end = char_to_byte(&preview, match_end_char);
     (preview, match_start, match_end)
 }
 
-/// A raw preview hit before it is wrapped in a [`SearchResult`].
+/// A raw preview hit before it is wrapped in a [`SearchResult`]. `match_start`
+/// and `match_end` are UTF-8 byte offsets into `preview` (see
+/// [`preview_line_matches`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreviewMatch {
     pub line: usize,
@@ -206,7 +227,9 @@ pub struct PreviewMatch {
 /// Line-level substring matches within `text` for a normalized (lowercased)
 /// `query`, capped at `remaining`. Ports `textMatches` (`workspaceSearch.ts`):
 /// case-insensitive per line via first-occurrence, windowed preview centered on
-/// the match. Pure.
+/// the match. Pure. `match_start`/`match_end` are UTF-8 **byte** offsets into
+/// each hit's `preview` — `&preview[match_start..match_end]` is the matched text
+/// and is always on a char boundary.
 pub fn preview_line_matches(text: &str, query: &str, remaining: usize) -> Vec<PreviewMatch> {
     let mut out: Vec<PreviewMatch> = Vec::new();
     if query.is_empty() || remaining == 0 {
@@ -270,13 +293,42 @@ pub fn search_workspace(
         .unwrap_or(MAX_RESULT_LIMIT)
         .min(MAX_RESULT_LIMIT);
 
-    index::ensure_search_index_for_version(conn, root_dir, workspace_id, version_id, now_ms)?;
+    index::ensure_search_index_for_version(
+        conn,
+        root_dir,
+        workspace_id,
+        version_id,
+        now_ms,
+        &dohc_engine_storage::NoFaults,
+    )?;
     let Some(candidates) =
         query::query_search_index(conn, root_dir, workspace_id, version_id, query, limit)?
     else {
         // Too short for the trigram index and policy healthy: no index-backed
         // results (the linear fallback is a desktop-adapter concern).
         return Ok(Vec::new());
+    };
+
+    // Fetch the matching chat rows ONCE and group by thread (rowid order
+    // preserved), instead of re-running the FTS MATCH per chat candidate.
+    let chat_rows_by_thread = if candidates
+        .iter()
+        .any(|c| matches!(c, SearchCandidate::Chat { .. }))
+    {
+        let rows = query::query_chat_messages_granular(
+            conn,
+            workspace_id,
+            query,
+            i64::try_from(MAX_FTS_FETCH).unwrap_or(i64::MAX),
+        )?;
+        let mut grouped: HashMap<String, Vec<query::GranularChatMessageSearchResult>> =
+            HashMap::new();
+        for row in rows {
+            grouped.entry(row.thread_id.clone()).or_default().push(row);
+        }
+        grouped
+    } else {
+        HashMap::new()
     };
 
     let mut results: Vec<SearchResult> = Vec::new();
@@ -307,18 +359,12 @@ pub fn search_workspace(
             }
             SearchCandidate::Chat { thread_id } => {
                 let title = chat_thread_display_title(conn, workspace_id, &thread_id)?;
-                // Preview each matching indexed row (header + messages) of this
-                // thread, in rowid order.
-                let rows = query::query_chat_messages_granular(
-                    conn,
-                    workspace_id,
-                    query,
-                    i64::try_from(MAX_FTS_FETCH).unwrap_or(i64::MAX),
-                )?;
+                // Preview this thread's matching indexed rows (header + messages)
+                // in rowid order — from the single grouped fetch above.
+                let Some(rows) = chat_rows_by_thread.get(&thread_id) else {
+                    continue;
+                };
                 for row in rows {
-                    if row.thread_id != thread_id {
-                        continue;
-                    }
                     if results.len() >= cap {
                         break;
                     }
@@ -415,5 +461,17 @@ mod tests {
     fn preview_respects_remaining_cap() {
         let text = "match\nmatch\nmatch";
         assert_eq!(preview_line_matches(text, "match", 2).len(), 2);
+    }
+
+    #[test]
+    fn preview_offsets_are_byte_offsets_safe_on_astral_text() {
+        // A 4-byte emoji before the match: the returned offsets are UTF-8 byte
+        // offsets into `preview`, so byte-slicing lands exactly on the match and
+        // never panics on a char boundary.
+        let hits = preview_line_matches("\u{1F600}\u{1F600} needle here", "needle", 10);
+        assert_eq!(hits.len(), 1);
+        let hit = &hits[0];
+        // Byte-slice (would panic mid-emoji if the offsets were char indices).
+        assert_eq!(&hit.preview[hit.match_start..hit.match_end], "needle");
     }
 }
