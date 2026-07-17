@@ -1099,3 +1099,68 @@ source of truth every orchestrator session loads first).
   discharge the engine-side ydoc replay-parity gate + R10 conflict-apply binary
   + compose the real sidecar the R13b adapter talks to. Then R14 robustness,
   GATE6, R15-REHEARSE, R15 cutover (ICE checkpoint), R16.
+
+- R13 daemon-composition + shadow-replay GATE PASSED (PR #180, squash-merged at
+  migration ordinal 8 `v1-shadow-clone`; ledger now 9; branch deleted). THE
+  composition: new `crates/dohc-workspace-engine` (in-process EngineService +
+  auth-gated DOP1 stdio daemon, R03 supervisor, bounded queues) serving
+  workspace.open/close, versionedText.write/read, ydoc.apply, conflicts.*,
+  search.query — SINGLE-WRITER preserved (one actor-owned EngineStore, proven).
+  Effective owned_paths expanded to `dohc-engine-runtime/**` (additive
+  supervisor/actor to serve domain ops without a 2nd writer) + `dohc-engine-
+  collab/**` (the replay-parity gate). This was the DEEPEST review of the
+  program (the CRDT-safety gate the cutover rests on): 2 reviewers + 4 gate
+  re-verifies + multiple Codex/CodeRabbit rounds.
+  * Composition/single-writer/shadow-fence/auth: APPROVED against the real
+    daemon binary (single-writer audit, 40-concurrent-write, fence refuses every
+    malformed marker, auth rejects before-hello/wrong/empty, bounded queues shed
+    load 165+836-OVERLOADED, additive-runtime regression clean).
+  * Replay-parity gate (the CRDT-safety backstop): APPROVED sound-for-shadow
+    after a saga — a P0 false-negative (overlap-slice divergence) fixed via
+    candidate-clock-coverage; then Codex found park-pending interactions
+    (mixed-pending coverage bypass, compaction-prunes-parked, parked-interior-
+    split, mirrored-resolve-content) all fixed; then a fix ROUND REGRESSED it
+    (differential 6->596 via a mid-pair-delete hole + 41/3000 yrs panics),
+    both fixed (restored base∪candidate delete-boundary check; wrapped the gate
+    in catch_unwind->ReplayParityViolation). FINAL re-verify: divergences back
+    to 13 (all the tracked hostile-peer resend-re-encode content-parity class;
+    honest-only 37k-update corpus = 0 divergences/0 rejections/0 panics), zero
+    escaping panics, no false positives. Sound for the dormant/shadow scope.
+  * Snapshot-hash integrity (CodeRabbit Critical): local conflicts.open accepted
+    the client's blobSha256 unchecked -> could write a corrupt (sha,text) pair;
+    now verified before any durable write. + 3 conflict-apply integrity fixes.
+  * Replicated mirrored-resolve scoped to a SAFE subset: apply-incoming-text
+    converges; path-change/merged/stale-head/binary/divergent all ACK-and-defer
+    (Ok + advance the peer ack so replication converges, no content, leave the
+    conflict Open for reconciliation) — NEVER Err-rollback (which would halt
+    replication) and NEVER a wrong apply. Local resolve made idempotent via the
+    ledger. The contract-diverging `resolvedText` requirement removed.
+  * Shadow fence hardened: migration ordinal 8 stamps a `shadow_clone` token
+    (empty in real stores) verified before any write, closing the marker-only +
+    validate->open TOCTOU (a real v2 store under a valid marker is refused).
+  404 tests, green 2x. `#![forbid(unsafe_code)]`, no unwrap/expect/panic in
+  non-test, single-writer preserved.
+- **TRACKED OBLIGATIONS from R13 (recorded on SHARDS rows):**
+  1. **GATE-COMPLETE (new row, CUTOVER-GATING, on R15's dep list):** before any
+     LIVE editing at cutover, close the 13-seed resend-re-encode +
+     parked-delete-in-dependency-scalar content-parity residual (hostile-peer-
+     only) AND root-cause the yrs slice.rs:282/store.rs:234 unwinds (catch_unwind
+     currently CONTAINS but masks them — a future honest input that unwinds yrs
+     would be silently rejected). Acceptance test = the reviewer's inductive
+     gate-driven differential (`adversarial_inductive_probe.rs` DOHC_SEQS) at 0
+     genuine divergences + the 13 seeds as regressions. Also the perf redesign
+     (O(doc)-per-append -> cached/incremental base). R15 now deps GATE-COMPLETE.
+  2. **R10-CONFLICT-COMPLETE (new row):** full mirrored-resolve semantics
+     (path-change, merged content, stale-head reconciliation, binary content);
+     R13's ACK-flagged Open conflicts + imported resolve ops are the substrate.
+  3. **BINCONFLICT (new row):** binary conflict-side schema/persistence (migration
+     ordinal 9).
+  4. R14 gains the 3 R13 daemon-liveness items (cancellable admission, halt-on-
+     writer-failure, drain-before-close) alongside the R07 watcher-hardening.
+- **WAVE 4 (composition) — R13 DONE.** The Rust engine is a working shadow-mode
+  daemon on main: all domains composed, gate sound-for-shadow, single-writer +
+  shadow-fence + auth proven. Remaining: R14 robustness (fuzz/soak + the
+  deferred liveness/watcher items), GATE-COMPLETE + R10-CONFLICT-COMPLETE, GATE6,
+  R15-REHEARSE, R15 cutover (ICE checkpoint: cutover scope + dogfood reset +
+  member-share-reset semantics), R16 legacy deletion. R13b-rest (desktop adapter
+  remaining surfaces) also pending.
