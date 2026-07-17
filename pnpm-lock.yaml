@@ -65,6 +65,9 @@ importers:
       '@dohc/workspace-engine':
         specifier: workspace:*
         version: link:../../packages/workspace-engine
+      '@dohc/workspace-engine-client':
+        specifier: workspace:*
+        version: link:../../packages/workspace-engine-client
       '@dohc/workspace-fs':
         specifier: workspace:*
         version: link:../../packages/workspace-fs

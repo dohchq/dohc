@@ -1,7 +1,7 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createWorkspaceActivity } from "./workspaceActivity";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 
@@ -33,6 +33,41 @@ function workspace(): CreatedWorkspace {
 // the engine capture can stamp settled batches with agent authorship while a
 // dohc-tracked run is active.
 describe("workspaceActivity capture hooks", () => {
+  it("fires and contains the dormant Rust shadow observer only when supplied", async () => {
+    const captureBatch = vi.fn();
+    const onRustEngineShadowActivity = vi.fn(async () => {
+      throw new Error("shadow adapter unavailable");
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const activity = createWorkspaceActivity(() => {}, {
+      captureFor: () =>
+        ({
+          start: vi.fn(),
+          captureBatch,
+          stop: vi.fn(async () => undefined),
+        }) as never,
+      onRustEngineShadowActivity,
+    });
+    await activity.open(workspace());
+    await writeFile(join(root, "shadow.md"), "shadow");
+
+    await vi.waitFor(
+      () => {
+        expect(captureBatch).toHaveBeenCalled();
+        expect(onRustEngineShadowActivity).toHaveBeenCalledWith({
+          workspaceId: "activity-test",
+          rootPath: root,
+        });
+        expect(errorSpy).toHaveBeenCalledWith(
+          expect.stringContaining("Rust engine shadow activity failed"),
+          expect.any(Error),
+        );
+      },
+      { timeout: 3_000 },
+    );
+    await activity.stopAll();
+  });
+
   it("wires the live agent-run slot into captureFor's hooks", async () => {
     let liveSlot: (() => unknown) | null = null;
     const activity = createWorkspaceActivity(() => {}, {

@@ -198,6 +198,25 @@ function readEngineMomentAuthors(rootPath: string): Array<Record<string, unknown
 }
 
 describe("workspaceEngineCapture batch capture", () => {
+  it("accepts the dormant Rust adapter composition slot without reading it", async () => {
+    const root = await tempRoot();
+    const transport = {
+      sendRequest: vi.fn(),
+      onEvent: vi.fn(() => () => {}),
+    };
+    const engine = createWorkspaceEngineCapture({
+      workspaceId: "engine-capture-test",
+      rootPath: root,
+      rustEngineAdapter: { transport },
+    });
+
+    engine.start();
+    await engine.flush();
+    expect(transport.sendRequest).not.toHaveBeenCalled();
+    expect(transport.onEvent).not.toHaveBeenCalled();
+    await engine.stop();
+  });
+
   it("captures an in-cap binary file as a binary moment", async () => {
     const root = await tempRoot();
     const pngLike = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
