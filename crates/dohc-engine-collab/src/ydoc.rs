@@ -349,6 +349,17 @@ impl Ydoc {
         })
     }
 
+    /// Delete `len` raw UTF-16 units starting at `index` from the
+    /// [`ROOT_PLAINTEXT`] text (NOT snapped to a code-point boundary — used to
+    /// construct interior-scalar-split delete probes) and return the encoded
+    /// v1 delta. Test/probe helper, mirroring [`Ydoc::plaintext_insert`].
+    pub fn plaintext_delete(&self, index: u32, len: u32) -> Vec<u8> {
+        let t = self.doc.get_or_insert_text(ROOT_PLAINTEXT);
+        self.with_delta(|txn| {
+            t.remove_range(txn, index, len);
+        })
+    }
+
     /// Append a `<paragraph>` holding `text` to the [`ROOT_BODY`] fragment and
     /// return the encoded v1 delta.
     pub fn richdoc_append_paragraph(&self, text: &str) -> Vec<u8> {
@@ -545,7 +556,7 @@ fn diffs_json<D>(diffs: Vec<yrs::types::text::Diff<D>>) -> Value {
     Value::Array(items)
 }
 
-fn any_to_json(any: &Any) -> Value {
+pub(crate) fn any_to_json(any: &Any) -> Value {
     match any {
         Any::Null | Any::Undefined => Value::Null,
         Any::Bool(b) => json!(b),

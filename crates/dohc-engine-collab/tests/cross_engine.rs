@@ -473,6 +473,67 @@ fn assert_delete_boundary_rejected(tag: &str, base_hex: &str, candidate_hex: &st
     );
 }
 
+/// Parked-delete-in-dependency-scalar sub-case: a delete-only update can
+/// target a `(client, clock)` range the receiver has NEVER seen (it carries
+/// no struct blocks at all, just a delete-set entry) — yrs tracks this as its
+/// own internal "dangling" delete-set entry, which is invisible to
+/// `has_missing_updates()`/`pending_update_v1()` (those track missing ITEM
+/// structs, not missing delete targets). When the dependency (the item the
+/// delete actually targets) arrives later and turns out to be a multi-unit
+/// scalar whose interior the delete range lands on, yrs silently drops the
+/// WHOLE scalar (proven below: without the fix the converged text is empty
+/// instead of a partial-surrogate remainder) while a from-scratch Yjs peer
+/// would diverge (constraint 3's U+FFFD sanitization). Mirrors
+/// `replay_parity_rejects_parked_interior_split_on_dependency_arrival` (the
+/// insert-side sibling of this fix) — parking is a replicated-lineage
+/// concept, so this is remote-path only.
+#[test]
+fn replay_parity_rejects_parked_delete_in_dependency_scalar_on_dependency_arrival() {
+    let (mut ts, key) = setup_parity_store("parked-delete-dependency", Regime::Replicated);
+    let producer = Ydoc::wire();
+    let dependency = producer.plaintext_insert(0, "\u{1F600}"); // 😀, 2-unit scalar
+    let delete = producer.plaintext_delete(0, 1); // targets only the first UTF-16 unit
+
+    let parked = apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "delete-peer".to_owned(),
+            origin_seq: 1,
+            bytes: delete,
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect(
+        "a delete referencing an as-yet-unknown target must be accepted (nothing to reject yet)",
+    );
+    assert!(matches!(
+        parked,
+        TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })
+    ));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+
+    let error = apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "dependency-peer".to_owned(),
+            origin_seq: 1,
+            bytes: dependency,
+        },
+        &NoFaults,
+        1_002,
+    )
+    .expect_err("the dependency's arrival must reject once it reveals the interior split");
+    assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(persisted.doc.plaintext_string(), "");
+}
+
 #[test]
 fn replay_parity_rejects_delete_high_surrogate_on_both_paths() {
     assert_delete_boundary_rejected(
@@ -872,4 +933,439 @@ fn nested_frontmatter_keys_are_sorted_deterministically() {
         a < b && b < d && d < g,
         "nested keys not sorted in projection:\n{markdown}"
     );
+}
+
+// ---- inductive content-parity sweep (residual class: hostile re-encode) ----
+//
+// The reviewer's residual: a peer re-encodes an already-known `(client,
+// clock)` with DIFFERENT content — WITHOUT a clock shortfall (the
+// candidate-clock-coverage check sees full coverage) and WITHOUT an interior-
+// scalar edit boundary named on the wire (the structural boundary pass sees
+// nothing). No honest peer ever redefines a clock it has already used, so
+// this corpus is adversarial-construction-only: for many base texts (plain
+// ASCII, ASCII interleaved with multi-unit emoji, accented Latin), corrupt
+// EVERY ASCII byte of the SAME wire update's string payload to a different
+// ASCII byte and drive it back through the gate as a "candidate" claiming the
+// identical (client, clock) range as the already-integrated base. Each must
+// be rejected; none may panic.
+
+/// Locate the string payload of a `plaintext_insert(0, text)` delta: the
+/// fixed `plainText` root-name marker, a 1-byte length prefix (valid for the
+/// short ASCII/emoji test strings used here, all under 128 UTF-8 bytes), then
+/// the payload itself.
+fn plaintext_payload_range(update: &[u8]) -> std::ops::Range<usize> {
+    let marker = b"plainText";
+    let marker_at = update
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .expect("plainText root marker present");
+    let len_at = marker_at + marker.len();
+    let payload_len = update[len_at] as usize;
+    let start = len_at + 1;
+    start..start + payload_len
+}
+
+#[test]
+fn replay_parity_rejects_content_redefinition_sweep() {
+    let bases = [
+        "hello",
+        "a\u{1F600}b",          // ascii + one 2-unit emoji + ascii
+        "x\u{1F600}\u{1F601}y", // ascii + two 2-unit emoji + ascii
+        "cafe over there",
+        "\u{1F600}mid\u{1F601}",
+    ];
+    let mut cases = 0usize;
+    for text in bases {
+        let producer = Ydoc::wire();
+        let base_update = producer.plaintext_insert(0, text);
+        let payload = plaintext_payload_range(&base_update);
+
+        let seeded = Ydoc::wire();
+        seeded.apply(&base_update).expect("seed base");
+
+        for i in payload.clone() {
+            let original = base_update[i];
+            if !original.is_ascii() {
+                continue; // only flip whole ASCII bytes — keeps the patched
+                          // payload valid UTF-8 without reshaping multi-byte
+                          // sequences elsewhere in the string.
+            }
+            let replacement = if original == b'z' { b'y' } else { b'z' };
+            let mut hostile = base_update.clone();
+            hostile[i] = replacement;
+            assert!(
+                std::str::from_utf8(&hostile[payload.clone()]).is_ok(),
+                "patch must stay valid UTF-8: text={text:?} offset={i}"
+            );
+
+            let error = validate_replay_parity_for_test(&seeded, &hostile).expect_err(&format!(
+                "content redefinition must be rejected: text={text:?} offset={i}"
+            ));
+            assert!(
+                matches!(error, CollabError::ReplayParityViolation { .. }),
+                "text={text:?} offset={i}: {error:?}"
+            );
+            cases += 1;
+        }
+    }
+    assert!(cases >= 20, "expected a broad hostile sweep, got {cases}");
+    eprintln!("content-parity sweep: {cases} hostile redefinitions rejected, 0 panics");
+}
+
+/// The gate is not re-exported at the crate root (it is reached through the
+/// durable append paths); drive it the same way `append_local_update` does —
+/// through a store, so the exact production call path is exercised.
+fn validate_replay_parity_for_test(seeded: &Ydoc, hostile: &[u8]) -> Result<(), CollabError> {
+    let mut ts = fresh_store("content-parity-sweep");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    dohc_engine_collab::ensure_marker(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        Regime::LocalOnly,
+        &NoFaults,
+        1_000,
+    )
+    .expect("marker");
+    record_local_update(
+        &mut ts.store,
+        &key,
+        &seeded.encode_full_state(),
+        &NoFaults,
+        1_001,
+    )
+    .expect("seed base into store");
+    record_local_update(&mut ts.store, &key, hostile, &NoFaults, 1_002).map(|_| ())
+}
+
+// ---- cross-type redefinition (CodeRabbit gap: kind-change evades string-only
+// content-parity) --------------------------------------------------------------
+//
+// A hostile peer can re-encode an existing STRING clock `(client, clock)` as a
+// DIFFERENT content KIND — JSON, binary, embed, format, a Type, or deleted —
+// evading a string-only units comparison (no string units to compare) while
+// the scratch state vector still marks the clock covered (union-coverage
+// passes). yrs dedup-by-ID vs a from-scratch yjs peer can render it
+// divergently, the same threat model as the string-content residual. The gate
+// tracks a per-clock structural identity for ALL kinds, so a kind change at a
+// known live clock is rejected.
+
+/// A length-prefixed lib0 string (1-byte length is valid for the short test
+/// payloads here). Used to hand-build `read_string`/`read_json`/`read_key`
+/// fields in adversarial candidate wire bytes.
+fn lib0_string(s: &str) -> Vec<u8> {
+    let mut out = vec![s.len() as u8];
+    out.extend_from_slice(s.as_bytes());
+    out
+}
+
+/// Build a candidate v1 update that re-encodes the SAME `(client, clock=0)` as
+/// `base` (a `plaintext_insert(0, "a")` string block) but with a different
+/// content kind. Reuses `base`'s exact client/clock/parent header (so the
+/// candidate collides on the id) and swaps the info byte's content-ref nibble
+/// (`base` has no origin/parent-sub bits set, so the low nibble IS the kind and
+/// the high bits stay zero), then appends the kind's content payload and an
+/// empty delete set.
+fn redefine_string_clock_as(base: &[u8], content_ref: u8, content_payload: &[u8]) -> Vec<u8> {
+    let marker = b"plainText";
+    let marker_at = base
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .expect("plainText root marker present in base");
+    let info_at = marker_at - 3; // info, parent_info(0x01), strlen(0x09), name...
+    assert_eq!(
+        base[info_at], 0x04,
+        "base info byte is a no-origin String item"
+    );
+    assert_eq!(base[marker_at - 2], 0x01, "parent_info(true)");
+    assert_eq!(base[marker_at - 1], 0x09, "plainText length prefix");
+    let header_end = marker_at + marker.len();
+    let mut out = base[..header_end].to_vec();
+    out[info_at] = content_ref; // swap String -> content_ref (high bits stay 0)
+    out.extend_from_slice(content_payload);
+    out.push(0x00); // empty delete set
+    out
+}
+
+/// The six cross-type redefinition payloads the reviewer named, each claiming
+/// the base's string clock as a different content kind.
+fn cross_type_redefinition_cases() -> Vec<(&'static str, u8, Vec<u8>)> {
+    let deleted = vec![0x01u8]; // ContentDeleted: read_len = 1 (one tombstone clock)
+    let json = {
+        // ContentJSON decodes `read_len + 1` strings; read_len=0 → one JSON
+        // string → one clock (colliding with the base's clock 0).
+        let mut p = vec![0x00u8];
+        p.extend_from_slice(&lib0_string("\"b\""));
+        p
+    };
+    let binary = vec![0x01u8, b'b']; // ContentBinary: read_buf len=1, one byte
+    let embed = lib0_string("true"); // ContentEmbed: read_json = a JSON string
+    let format = {
+        // ContentFormat: read_key (string) + read_json (JSON string).
+        let mut p = lib0_string("b");
+        p.extend_from_slice(&lib0_string("true"));
+        p
+    };
+    let type_ref = vec![0x01u8]; // ContentType: TypeRef::Map (TYPE_REFS_MAP = 1)
+    vec![
+        ("deleted", 1, deleted),
+        ("json", 2, json),
+        ("binary", 3, binary),
+        ("embed", 5, embed),
+        ("format", 6, format),
+        ("type", 7, type_ref),
+    ]
+}
+
+#[test]
+fn replay_parity_rejects_cross_type_redefinition_on_both_paths() {
+    for (name, content_ref, payload) in cross_type_redefinition_cases() {
+        let producer = Ydoc::wire();
+        let base = producer.plaintext_insert(0, "a");
+        let candidate = redefine_string_clock_as(&base, content_ref, &payload);
+        let candidate_sha = dohc_engine_collab::hex_sha256(&candidate);
+
+        // Local path.
+        let (mut local, lkey) =
+            setup_parity_store(&format!("xtype-{name}-local"), Regime::LocalOnly);
+        record_local_update(&mut local.store, &lkey, &base, &NoFaults, 1_001)
+            .expect("string base accepted");
+        let err = record_local_update(&mut local.store, &lkey, &candidate, &NoFaults, 1_002)
+            .expect_err(&format!("{name} local must reject the kind change"));
+        assert!(
+            matches!(err, CollabError::ReplayParityViolation { .. }),
+            "{name} local: {err:?}"
+        );
+        assert_eq!(count(&local.store, "ydoc_updates", &lkey), 1);
+        assert!(
+            local
+                .store
+                .get_binary_blob(&candidate_sha)
+                .expect("blob lookup")
+                .is_none(),
+            "{name} local: rejected redefinition must not reach the blob store"
+        );
+
+        // Remote path.
+        let (mut remote, rkey) =
+            setup_parity_store(&format!("xtype-{name}-remote"), Regime::Replicated);
+        apply_remote_update(
+            &mut remote.store,
+            &rkey,
+            &RemoteUpdate {
+                origin_id: "peer".to_owned(),
+                origin_seq: 1,
+                bytes: base.clone(),
+            },
+            &NoFaults,
+            1_001,
+        )
+        .expect("remote string base accepted");
+        let rerr = apply_remote_update(
+            &mut remote.store,
+            &rkey,
+            &RemoteUpdate {
+                origin_id: "peer".to_owned(),
+                origin_seq: 2,
+                bytes: candidate.clone(),
+            },
+            &NoFaults,
+            1_002,
+        )
+        .expect_err(&format!("{name} remote must reject the kind change"));
+        assert!(
+            matches!(rerr, CollabError::ReplayParityViolation { .. }),
+            "{name} remote: {rerr:?}"
+        );
+        assert_eq!(count(&remote.store, "ydoc_updates", &rkey), 1);
+        assert!(
+            remote
+                .store
+                .get_binary_blob(&candidate_sha)
+                .expect("blob lookup")
+                .is_none(),
+            "{name} remote: rejected redefinition must not reach the blob store"
+        );
+    }
+}
+
+#[test]
+fn replay_parity_accepts_same_kind_same_payload_resend_for_each_content_kind() {
+    // Positive control / no-false-positive: a full-state RESEND that re-encodes
+    // an existing clock with the SAME kind + SAME payload must ACCEPT. Build a
+    // single-item doc of each non-string content kind directly on an empty
+    // lineage (the item lands at clock 0), then resend the identical bytes; the
+    // gate must accept (the second record dedups). Covers a doc that
+    // legitimately contains embed / format content, plus binary and type.
+    for (name, content_ref, payload) in cross_type_redefinition_cases() {
+        // `deleted` is a lone tombstone, not a meaningful "content" doc.
+        // `json` (legacy ContentJSON) cannot round-trip durably in yrs 0.27.3:
+        // its encoder writes `write_len(N)` + N strings but its decoder reads
+        // `read_len` + N+1 strings, so a re-encoded JSON lineage is not
+        // re-decodable — no honest doc ever carries it (yjs replaced it with
+        // ContentAny). It stays covered by the REJECTION test above.
+        if name == "deleted" || name == "json" {
+            continue;
+        }
+        // A no-origin, named-root single item of this kind at (client, 0).
+        let producer = Ydoc::wire();
+        let string_base = producer.plaintext_insert(0, "a");
+        let doc_update = redefine_string_clock_as(&string_base, content_ref, &payload);
+
+        let (mut ts, key) = setup_parity_store(&format!("resend-{name}"), Regime::LocalOnly);
+        let first = record_local_update(&mut ts.store, &key, &doc_update, &NoFaults, 1_001)
+            .unwrap_or_else(|e| panic!("{name} base must be accepted, got: {e:?}"));
+        assert!(
+            matches!(first, TxnOutcome::Committed(ref a) if !a.deduped),
+            "{name} base committed"
+        );
+        let resend = record_local_update(&mut ts.store, &key, &doc_update, &NoFaults, 1_002)
+            .unwrap_or_else(|e| panic!("{name} same-kind same-payload resend must accept: {e:?}"));
+        assert!(
+            matches!(resend, TxnOutcome::Committed(ref a) if a.deduped),
+            "{name} resend dedups (no false positive)"
+        );
+        assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+    }
+}
+
+#[test]
+fn replay_parity_accepts_embed_resend_with_reordered_map_keys() {
+    // The make-or-break false-positive boundary for the payload fingerprint: a
+    // legitimate resend can re-encode an embed's map value with a DIFFERENT key
+    // order (yrs `Any::Map` is HashMap-backed — constraint 2). The canonical
+    // fingerprint sorts nested keys, so `{"a":1,"b":2}` and `{"b":2,"a":1}` are
+    // the SAME payload and the resend must ACCEPT. (A raw-byte fingerprint would
+    // false-reject this.)
+    let producer = Ydoc::wire();
+    let string_base = producer.plaintext_insert(0, "a");
+    let base = redefine_string_clock_as(&string_base, 5, &lib0_string("{\"a\":1,\"b\":2}"));
+    let reordered = redefine_string_clock_as(&string_base, 5, &lib0_string("{\"b\":2,\"a\":1}"));
+
+    let (mut ts, key) = setup_parity_store("embed-reordered-map", Regime::LocalOnly);
+    record_local_update(&mut ts.store, &key, &base, &NoFaults, 1_001).expect("embed base accepted");
+    let outcome = record_local_update(&mut ts.store, &key, &reordered, &NoFaults, 1_002)
+        .expect("a same-map different-key-order embed resend must not be false-rejected");
+    // Same logical embed, re-encoded: the gate accepts. Whether yrs dedups the
+    // reordered bytes or journals them, it must NOT be a parity violation.
+    assert!(matches!(outcome, TxnOutcome::Committed(_)));
+}
+
+// ---- honest delete+GC+resend must ACCEPT (regression guard) -----------------
+//
+// The reviewer's honest-corpus differential found a cutover-blocking false
+// positive: after a delete+GC, a normal reconnect/resync full-state RESEND
+// carries the deleted clock as `ContentDeleted` while the durable base still
+// holds it as a live `String`. Recording the deleted clock's identity as a
+// `Tombstone` made the gate flag established-live-vs-candidate-tombstone as a
+// hostile redefinition and reject the WHOLE resend — dropping every insert
+// bundled in it and keeping deleted content, diverging from honest peers.
+//
+// The distinguisher: a legitimate delete/GC carries the clock in the
+// candidate's OWN delete-set; a hostile bare `ContentDeleted` has an empty
+// delete-set. Only the latter is rejected.
+
+#[test]
+fn replay_parity_accepts_honest_delete_gc_resend() {
+    // Minimal repro: insert "abc" -> delete "b" + GC (yrs GC is on by default)
+    // -> full-state resend (carries clock 1 as ContentDeleted, covered by its
+    // own delete-set). The resend must ACCEPT and the durable doc converge to
+    // "ac" (NOT be rejected and stuck at "abc").
+    let (mut ts, key) = setup_parity_store("honest-delete-gc-resend", Regime::LocalOnly);
+    let producer = Ydoc::wire();
+    let insert = producer.plaintext_insert(0, "abc");
+    record_local_update(&mut ts.store, &key, &insert, &NoFaults, 1_001).expect("insert abc");
+
+    let _delete = producer.plaintext_delete(1, 1); // producer: "ac", clock 1 deleted+GC'd
+    assert_eq!(producer.plaintext_string(), "ac");
+    let resend = producer.encode_full_state();
+
+    let outcome = record_local_update(&mut ts.store, &key, &resend, &NoFaults, 1_002)
+        .expect("an honest delete+GC full-state resend must NOT be rejected");
+    assert!(matches!(outcome, TxnOutcome::Committed(_)));
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(
+        persisted.doc.plaintext_string(),
+        "ac",
+        "durable must converge to the deleted-content result, not stay at 'abc'"
+    );
+}
+
+#[test]
+fn replay_parity_accepts_honest_delete_gc_resend_on_remote_path() {
+    let (mut ts, key) = setup_parity_store("honest-delete-gc-resend-remote", Regime::Replicated);
+    let producer = Ydoc::wire();
+    let insert = producer.plaintext_insert(0, "abc");
+    apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "peer".to_owned(),
+            origin_seq: 1,
+            bytes: insert,
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect("remote insert abc");
+    let _delete = producer.plaintext_delete(1, 1);
+    let resend = producer.encode_full_state();
+    apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "peer".to_owned(),
+            origin_seq: 2,
+            bytes: resend,
+        },
+        &NoFaults,
+        1_002,
+    )
+    .expect("an honest delete+GC full-state resend must NOT be rejected on the remote path");
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(persisted.doc.plaintext_string(), "ac");
+}
+
+#[test]
+fn replay_parity_accepts_delete_delta_landing_deleted_content() {
+    // The plain delete path (a delete-set-only update, no resend) still lands
+    // "ac" — deletes are never redefinitions and must always apply.
+    let (mut ts, key) = setup_parity_store("delete-delta", Regime::LocalOnly);
+    let producer = Ydoc::wire();
+    let insert = producer.plaintext_insert(0, "abc");
+    record_local_update(&mut ts.store, &key, &insert, &NoFaults, 1_001).expect("insert abc");
+    let delete = producer.plaintext_delete(1, 1);
+    record_local_update(&mut ts.store, &key, &delete, &NoFaults, 1_002).expect("delete b delta");
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(persisted.doc.plaintext_string(), "ac");
+}
+
+#[test]
+fn replay_parity_accepts_gc_disabled_resend_retaining_deleted_content() {
+    // A resend from a GC-disabled peer retains the deleted clock as LIVE
+    // `String` content (still in the delete-set). `merge_updates` re-merges the
+    // wire updates without a doc, so no GC runs — the merged update carries
+    // clock 1 as live "b" AND deletes it. The candidate's clock-1 identity
+    // equals the base's (live "b"), so it's a clean resend and must ACCEPT.
+    let (mut ts, key) = setup_parity_store("gc-disabled-resend", Regime::LocalOnly);
+    let producer = Ydoc::wire();
+    let insert = producer.plaintext_insert(0, "abc");
+    let delete = producer.plaintext_delete(1, 1);
+    record_local_update(&mut ts.store, &key, &insert, &NoFaults, 1_001).expect("insert abc");
+    let gc_off_resend =
+        dohc_engine_collab::merge_updates(&[insert, delete]).expect("merge without GC");
+    let outcome = record_local_update(&mut ts.store, &key, &gc_off_resend, &NoFaults, 1_002)
+        .expect("a GC-disabled resend retaining deleted content must accept");
+    assert!(matches!(outcome, TxnOutcome::Committed(_)));
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(persisted.doc.plaintext_string(), "ac");
 }
