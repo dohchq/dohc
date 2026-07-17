@@ -423,6 +423,24 @@ fn bounds_query_length_and_limit() {
     // A pathologically long query is bounded (no results, no FTS blow-up).
     let long = "n".repeat(50_000);
     assert!(run_search(&store, &root, &long).is_empty());
+    // At the primitive: an over-long query FAILS CLOSED (Some(empty)), never the
+    // `None` fallback sentinel — so an adapter cannot turn it into a linear scan.
+    let overlong = store
+        .read_with(|conn| query_search_index(conn, &root, WS, V, &long, 100))
+        .expect("q");
+    assert_eq!(
+        overlong,
+        Some(Vec::new()),
+        "over-long query must fail closed, not fall back"
+    );
+    // A too-short query under a healthy policy stays the fallback sentinel (None).
+    let short = store
+        .read_with(|conn| query_search_index(conn, &root, WS, V, "ne", 100))
+        .expect("q");
+    assert!(
+        short.is_none(),
+        "sub-trigram query keeps the None fallback sentinel"
+    );
 
     // limit <= 0 short-circuits.
     let none = store

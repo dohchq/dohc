@@ -49,19 +49,34 @@ pub struct GranularChatMessageSearchResult {
     pub text: String,
 }
 
-/// Build the FTS MATCH expression for a substring query. Ports
-/// `ftsQueryForSubstring`: trim; a query under [`MIN_TRIGRAM_QUERY_CHARS`]
-/// chars returns `None` (too short for the trigram index); otherwise a quoted
-/// phrase with embedded `"` doubled. A query over [`MAX_QUERY_CHARS`] also
-/// returns `None` — a Rust-added DoS bound (approved-delta), set far above any
-/// real query so normal search is byte-identical to TS.
-fn fts_query_for_substring(query: &str) -> Option<String> {
+/// How a raw query classifies against the trigram/length bounds.
+enum QueryTerm {
+    /// Under [`MIN_TRIGRAM_QUERY_CHARS`]: the trigram index cannot serve it. The
+    /// caller MAY fall back to a linear scan (`None` at the public boundary).
+    TooShort,
+    /// Over [`MAX_QUERY_CHARS`]: a Rust-added DoS bound. This FAILS CLOSED (empty
+    /// results, never a linear-scan fallback) so a pathological query cannot turn
+    /// into an expensive full scan in an adapter.
+    TooLong,
+    /// A usable FTS MATCH phrase (embedded `"` doubled).
+    Match(String),
+}
+
+/// Classify a substring query. Ports `ftsQueryForSubstring` for the phrase
+/// construction, but distinguishes too-short (fallback-eligible) from too-long
+/// (fail-closed) so the two never share the ambiguous `None` sentinel. The
+/// length bound is set far above any real query, so normal search is
+/// byte-identical to TS.
+fn classify_query(query: &str) -> QueryTerm {
     let normalized = query.trim();
     let char_count = normalized.chars().count();
-    if !(MIN_TRIGRAM_QUERY_CHARS..=MAX_QUERY_CHARS).contains(&char_count) {
-        return None;
+    if char_count < MIN_TRIGRAM_QUERY_CHARS {
+        return QueryTerm::TooShort;
     }
-    Some(format!("\"{}\"", normalized.replace('"', "\"\"")))
+    if char_count > MAX_QUERY_CHARS {
+        return QueryTerm::TooLong;
+    }
+    QueryTerm::Match(format!("\"{}\"", normalized.replace('"', "\"\"")))
 }
 
 /// Clamp an incoming result limit to the DoS ceiling. A non-positive limit
@@ -83,10 +98,12 @@ fn fetch_size(limit: usize, multiplier: usize) -> i64 {
 /// Query the FTS index for `query`, returning policy-filtered candidates capped
 /// at `limit`. Ports `querySearchIndex` (`searchIndex.ts`).
 ///
-/// Returns `None` when the query is too short for the trigram index AND the
+/// Returns `None` ONLY when the query is too short for the trigram index AND the
 /// FILE policy is healthy — the caller may then fall back to a linear scan.
 /// Under a broken FILE policy a too-short query returns `Some(empty)` instead,
-/// suppressing that fallback (which would fail OPEN). A well-formed query always
+/// suppressing that fallback (which would fail OPEN). An OVER-long query always
+/// returns `Some(empty)` (fail closed — never the fallback sentinel, so a
+/// pathological query cannot become a linear scan). A well-formed query always
 /// returns `Some`, with the file half empty while the policy is degraded and the
 /// chat half unaffected.
 pub fn query_search_index(
@@ -98,21 +115,24 @@ pub fn query_search_index(
     limit: i64,
 ) -> Result<Option<Vec<SearchCandidate>>, SearchError> {
     let policy = read_engine_search_policy(root_dir);
-    let Some(limit) = clamp_limit(limit) else {
-        // A non-positive limit: nothing to do, but keep the fail-closed posture
-        // (empty, not None) under a degraded policy so no linear fallback runs.
-        return Ok(if policy.is_degraded() {
+    // A too-short query is the only case that may fall back to a linear scan (and
+    // only under a healthy policy). Everything else that yields no FTS term
+    // (over-long, non-positive limit) fails closed with an empty, non-`None`
+    // result so no unfiltered fallback runs.
+    let fallback_or_empty = || {
+        if policy.is_degraded() {
             Some(Vec::new())
         } else {
             None
-        });
+        }
     };
-    let Some(match_expr) = fts_query_for_substring(query) else {
-        return Ok(if policy.is_degraded() {
-            Some(Vec::new())
-        } else {
-            None
-        });
+    let Some(limit) = clamp_limit(limit) else {
+        return Ok(fallback_or_empty());
+    };
+    let match_expr = match classify_query(query) {
+        QueryTerm::Match(term) => term,
+        QueryTerm::TooShort => return Ok(fallback_or_empty()),
+        QueryTerm::TooLong => return Ok(Some(Vec::new())),
     };
 
     let mut candidates: Vec<SearchCandidate> = Vec::new();
@@ -177,9 +197,9 @@ pub fn query_search_index(
 }
 
 /// Query chat-message rows granularly (`queryChatMessagesGranular`). Returns
-/// `[]` for a too-short query or a non-positive limit; maps the sentinel header
-/// message id to `None`. Independent of the FILE policy — chat search survives a
-/// broken file policy.
+/// `[]` for a too-short OR over-long query or a non-positive limit; maps the
+/// sentinel header message id to `None`. Independent of the FILE policy — chat
+/// search survives a broken file policy.
 pub fn query_chat_messages_granular(
     conn: &Connection,
     workspace_id: &str,
@@ -189,7 +209,8 @@ pub fn query_chat_messages_granular(
     let Some(limit) = clamp_limit(limit) else {
         return Ok(Vec::new());
     };
-    let Some(match_expr) = fts_query_for_substring(query) else {
+    let QueryTerm::Match(match_expr) = classify_query(query) else {
+        // Too short or too long: nothing to serve (no fallback surface here).
         return Ok(Vec::new());
     };
     let mut stmt = conn.prepare(
@@ -222,24 +243,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn short_query_is_none() {
-        assert_eq!(fts_query_for_substring("ab"), None);
-        assert_eq!(fts_query_for_substring("  a "), None);
+    fn short_query_is_too_short() {
+        assert!(matches!(classify_query("ab"), QueryTerm::TooShort));
+        assert!(matches!(classify_query("  a "), QueryTerm::TooShort));
     }
 
     #[test]
     fn quotes_and_escapes() {
-        assert_eq!(fts_query_for_substring("abc").as_deref(), Some("\"abc\""));
-        assert_eq!(
-            fts_query_for_substring("a\"b\"c").as_deref(),
-            Some("\"a\"\"b\"\"c\"")
-        );
+        assert!(matches!(classify_query("abc"), QueryTerm::Match(t) if t == "\"abc\""));
+        assert!(matches!(classify_query("a\"b\"c"), QueryTerm::Match(t) if t == "\"a\"\"b\"\"c\""));
     }
 
     #[test]
-    fn over_long_query_bounded() {
+    fn over_long_query_is_too_long_not_short() {
+        // Over-long must classify distinctly from too-short so it can fail closed
+        // rather than share the fallback sentinel.
         let long = "a".repeat(MAX_QUERY_CHARS + 1);
-        assert_eq!(fts_query_for_substring(&long), None);
+        assert!(matches!(classify_query(&long), QueryTerm::TooLong));
     }
 
     #[test]
