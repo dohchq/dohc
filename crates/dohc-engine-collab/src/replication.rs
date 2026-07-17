@@ -12,8 +12,11 @@
 
 use dohc_engine_storage::{put_binary_blob, EngineStore, FaultInjector, TxnOutcome};
 
-use crate::durable::{append_row, blob_seq_in_log, query_marker, validate_update_bytes, Regime};
+use crate::durable::{
+    append_row, blob_seq_in_log, maybe_compact, query_marker, validate_update_bytes, Regime,
+};
 use crate::error::CollabError;
+use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
 use crate::DocKey;
 
 /// Who produced an update — the actor tag journaled into `ydoc_updates`.
@@ -95,27 +98,40 @@ pub fn apply_remote_update(
         origin_id: remote.origin_id.clone(),
     };
 
-    store.write_with(faults, |tx| {
-        let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
-        // A remote ydoc.update only makes sense against a replicated lineage;
-        // a local-only doc does not participate in replication.
-        if marker.regime != Regime::Replicated {
-            return Err(CollabError::InvalidIdentifier {
-                reason: "remote update applied to a non-replicated lineage",
-            });
-        }
-        // Idempotent dedup: an already-integrated update is a strict no-op,
-        // NOT re-journaled and NOT echoed.
-        if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
-            return Ok(ReplicationApplyOutcome::Deduped { seq: existing });
-        }
-        put_binary_blob(tx, &remote.bytes)?;
-        let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
-        Ok(ReplicationApplyOutcome::Applied {
-            seq,
-            // Echo suppression: a remote update is durable in our lineage but is
-            // never re-emitted as our own outbound op.
-            emit_outbound: false,
-        })
-    })
+    let outcome = store.write_with(
+        faults,
+        |tx| -> Result<ReplicationApplyOutcome, CollabError> {
+            let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+            // A remote ydoc.update only makes sense against a replicated lineage;
+            // a local-only doc does not participate in replication.
+            if marker.regime != Regime::Replicated {
+                return Err(CollabError::InvalidIdentifier {
+                    reason: "remote update applied to a non-replicated lineage",
+                });
+            }
+            // Idempotent dedup: an already-integrated update is a strict no-op,
+            // NOT re-journaled and NOT echoed.
+            if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
+                return Ok(ReplicationApplyOutcome::Deduped { seq: existing });
+            }
+            put_binary_blob(tx, &remote.bytes)?;
+            let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
+            Ok(ReplicationApplyOutcome::Applied {
+                seq,
+                // Echo suppression: a remote update is durable in our lineage but is
+                // never re-emitted as our own outbound op.
+                emit_outbound: false,
+            })
+        },
+    )?;
+    // Self-bound the log: a genuinely-applied remote update folds the log once it
+    // grows past the threshold (a replicated fold keeps a full-state snapshot,
+    // never prunes — peers still bootstrap). A dedup/crash does nothing.
+    if matches!(
+        outcome,
+        TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })
+    ) {
+        let _ = maybe_compact(store, key, DEFAULT_COMPACTION_THRESHOLD, faults, now_ms)?;
+    }
+    Ok(outcome)
 }

@@ -21,7 +21,7 @@ use dohc_engine_storage::{
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::error::CollabError;
-use crate::limits::{MAX_PROJECTION_BYTES, MAX_YDOC_UPDATE_BYTES};
+use crate::limits::{DEFAULT_COMPACTION_THRESHOLD, MAX_PROJECTION_BYTES, MAX_YDOC_UPDATE_BYTES};
 use crate::ydoc::{ContentKind, Projection, Ydoc};
 use crate::DocKey;
 
@@ -230,7 +230,10 @@ pub fn ensure_marker(
 /// Append a locally-produced update to the durable log (advancing the head).
 /// Validates the bytes BEFORE any blob put / journal (constraint 5: never
 /// journal bytes that fail validation); content-addresses them; and dedups on
-/// the blob sha so a crash-retry is exactly-once.
+/// the blob sha so a crash-retry is exactly-once. Self-bounds the log: a
+/// genuinely-new append triggers compaction once the pending count reaches the
+/// default threshold, so a long-lived session that never explicitly compacts
+/// still keeps a finite log (the "everything bounded" invariant).
 pub fn record_local_update(
     store: &mut EngineStore,
     key: &DocKey,
@@ -241,7 +244,7 @@ pub fn record_local_update(
     validate_update_bytes(update)?;
     let sha = crate::hex_sha256(update);
 
-    store.write_with(faults, |tx| {
+    let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
         let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
         // Idempotent dedup: an update already in this doc's log is a no-op.
         if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
@@ -260,7 +263,32 @@ pub fn record_local_update(
             // regime; a local-only doc's .md is its channel.
             emit_outbound: marker.regime == Regime::Replicated,
         })
-    })
+    })?;
+    self_bound_log(store, key, &outcome, faults, now_ms)?;
+    Ok(outcome)
+}
+
+/// After a genuinely-new append, fold the log if it has grown past the default
+/// threshold (self-bounding). A dedup or a crash does nothing. Compaction is
+/// convergence-neutral for BOTH regimes (it keeps a full-state snapshot; only a
+/// local-only CLOSE prunes to nothing), so this is safe to run mid-session
+/// regardless of regime.
+pub(crate) fn self_bound_log(
+    store: &mut EngineStore,
+    key: &DocKey,
+    outcome: &TxnOutcome<AppendOutcome>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<(), CollabError> {
+    if let TxnOutcome::Committed(app) = outcome {
+        if !app.deduped {
+            // Best-effort fold; a fault-injected compaction crash is harmless
+            // (the append is already durable) and leaves the log for the next
+            // fold. `maybe_compact` no-ops below threshold.
+            let _ = maybe_compact(store, key, DEFAULT_COMPACTION_THRESHOLD, faults, now_ms)?;
+        }
+    }
+    Ok(())
 }
 
 /// Fold the update log into a fresh full-state snapshot once the pending count
@@ -373,13 +401,21 @@ pub fn claim_base(
 
     store.write_with(faults, |tx| {
         // Upsert the marker first (FK parent for the snapshot), stamping the
-        // replicated regime + content kind.
+        // replicated regime + content kind. In the INDIVIDUAL-FIRST flow the
+        // marker already exists as `local-only` (created by `ensure_marker`), so
+        // claiming a base must PROMOTE it to `replicated` — a `DO NOTHING` here
+        // would leave `regime = 'local-only'`, and the next `close_session`
+        // would take the prune branch and DELETE the just-claimed base
+        // (destroying the shared lineage). Promote-on-claim keeps "open when
+        // shared"; it also repairs a stale `content_kind`.
         tx.execute(
             "INSERT INTO ydoc_docs \
              (workspace_id, version_id, object_id, content_kind, regime, \
               head_update_seq, head_snapshot_seq, base_claimed, updated_at_ms) \
              VALUES (?1, ?2, ?3, ?4, 'replicated', 0, 0, 0, ?5) \
-             ON CONFLICT(workspace_id, version_id, object_id) DO NOTHING",
+             ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET \
+               regime = 'replicated', content_kind = excluded.content_kind, \
+               updated_at_ms = excluded.updated_at_ms",
             rusqlite::params![
                 key.workspace_id,
                 key.version_id,
@@ -430,13 +466,16 @@ pub fn claim_base(
 
 /// Settle: project the reconstructed Y.Doc to markdown (with provenance),
 /// content-address the markdown into `binary_blobs`, and enqueue a durable
-/// materialization job (R04's pipeline) in the SAME transaction. The job id is
-/// deterministic in `(key, content sha, generation)`, and the enqueue is
-/// dedup-guarded, so a crash after commit but before ack replays exactly-once.
+/// materialization job (R04's pipeline) in the SAME transaction.
 ///
-/// `generation` orders settles for the target path (a newer generation
-/// supersedes an older on-disk one); the injected `now_ms` is a monotone,
-/// regime-independent generation.
+/// **Clock-independent exactly-once.** The generation is a DURABLE, monotone
+/// per-doc `settle_seq` (never the wall clock): a re-settle of UNCHANGED content
+/// reuses the current generation (idempotent no-op even if the clock advanced —
+/// a crash-retry dedups); a settle of CHANGED content bumps the generation (so a
+/// content revert re-materializes, and a newer settle supersedes an older
+/// on-disk generation for the path). The job id is deterministic in `(key,
+/// content sha, generation)` and dedup-guarded, so a crash after commit but
+/// before ack replays exactly-once regardless of the clock.
 pub fn settle(
     store: &mut EngineStore,
     key: &DocKey,
@@ -458,21 +497,38 @@ pub fn settle(
     let markdown_bytes = projection.markdown.clone().into_bytes();
     let content_sha = crate::hex_sha256(&markdown_bytes);
     let sv_bytes = persisted.doc.encode_state_vector();
-    let generation = now_ms;
-    // Deterministic job id: identical content+generation for this doc yields the
-    // same id, so re-enqueue after a crash is a dedup, not a duplicate.
-    let job_id = crate::hex_sha256(
-        format!(
-            "{}\0{}\0{}\0{}\0{}",
-            key.workspace_id, key.version_id, key.object_id, content_sha, generation
-        )
-        .as_bytes(),
-    );
 
     store.write_with(faults, |tx| {
         // Persist the markdown + the provenance state vector as content blobs.
         put_binary_blob(tx, &markdown_bytes)?;
         put_binary_blob(tx, &sv_bytes)?;
+
+        // Durable per-doc settle counter + last-materialized content.
+        let (settle_seq, last_sha): (i64, Option<String>) = tx
+            .query_row(
+                "SELECT settle_seq, last_settled_sha FROM ydoc_docs \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(map_sql)?
+            .ok_or(CollabError::NoMarker)?;
+        // Unchanged content reuses the current generation (idempotent); changed
+        // content bumps it. Clock-free either way.
+        let content_changed = last_sha.as_deref() != Some(content_sha.as_str());
+        let generation = if content_changed {
+            settle_seq + 1
+        } else {
+            settle_seq
+        };
+        let job_id = crate::hex_sha256(
+            format!(
+                "{}\0{}\0{}\0{}\0{}",
+                key.workspace_id, key.version_id, key.object_id, content_sha, generation
+            )
+            .as_bytes(),
+        );
 
         // Dedup: a job with this deterministic id already present ⇒ exactly-once.
         let already: Option<i64> = tx
@@ -504,6 +560,22 @@ pub fn settle(
                 now_ms,
             },
         )?;
+        // Advance the durable settle counter only on a real content change.
+        if content_changed {
+            tx.execute(
+                "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6 \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                rusqlite::params![
+                    key.workspace_id,
+                    key.version_id,
+                    key.object_id,
+                    generation,
+                    content_sha,
+                    now_ms,
+                ],
+            )
+            .map_err(map_sql)?;
+        }
         Ok(SettleOutcome {
             projection: projection.clone(),
             job_id: job_id.clone(),

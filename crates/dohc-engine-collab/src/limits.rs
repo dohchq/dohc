@@ -18,8 +18,11 @@ pub const MAX_YDOC_UPDATE_BYTES: usize = 5 * 1024 * 1024;
 /// design Risk 3). This is the retention bound that keeps the log finite.
 pub const DEFAULT_COMPACTION_THRESHOLD: u32 = 64;
 
-/// Maximum number of remote updates applied in a single replication batch, so a
-/// hostile/buggy peer cannot force an unbounded apply loop in one call.
+/// FORWARD CONTRACT (not active protection today). `apply_remote_update` applies
+/// exactly one update per call, so nothing enforces this yet. It is the bound a
+/// future BATCH-apply entrypoint (R11b's replication drain) MUST cap its input
+/// at, so a hostile/buggy peer cannot force an unbounded apply loop in one call.
+/// Do not assume it is enforced until a batch entrypoint wires it.
 pub const MAX_REPLICATION_APPLY_BATCH: usize = 4096;
 
 /// Maximum size of a settled markdown projection materialized in one settle, in

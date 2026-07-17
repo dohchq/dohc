@@ -5,6 +5,19 @@
 //! lease adds the finer-grained per-lineage exclusion the co-editing lifecycle
 //! needs, and releases DETERMINISTICALLY on `Drop` (never stranded "live" on a
 //! panic or an early return during a failed open).
+//!
+//! **Scope: PROCESS-LOCAL, per-registry.** Exclusion holds only within one
+//! [`LeaseRegistry`] in one process — two independent registries (or two
+//! processes) can each grant a lease for the same [`DocKey`], exactly like the
+//! TS `globalLiveYDocReservations` (a per-process module-global set). CROSS-
+//! PROCESS exclusion is NOT this type's job: it rides the store's single owned
+//! writer connection (one writer per `engine.db`) plus the durable base-once
+//! re-check in `claim_base`. Pass ONE registry per process to the code that
+//! opens sessions.
+//!
+//! If the internal mutex is ever poisoned (a thread panicked while holding it),
+//! [`LeaseRegistry::acquire`] fails closed (no lease is granted) rather than
+//! risk double-granting.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};

@@ -666,3 +666,28 @@ source of truth every orchestrator session loads first).
     in the `--workspace` unification set; they run under `--features
     fault-injection` / `--all-features`, and clippy `--all-features` compiles
     them in the gate above.)
+- REVIEW ROUND 1 (two clean-context reviewers; non-tautology re-confirmed by
+  regenerating all fixtures from Node yjs 13.6.30). Fixes applied on branch:
+  - P1 (blocker) — local→shared transition destroyed the lineage: `claim_base`
+    upsert was `ON CONFLICT DO NOTHING`, leaving an individual-first doc's
+    marker `local-only` while writing the base, so the next `close_session`
+    pruned the just-claimed base. Now `DO UPDATE SET regime='replicated',
+    content_kind=excluded.content_kind` — promote-on-claim ("open when shared").
+    Regression: `local_to_shared_transition_keeps_the_base`.
+  - P2 — log now SELF-bounds: `record_local_update` / `apply_remote_update`
+    auto-trigger compaction past `DEFAULT_COMPACTION_THRESHOLD` (was
+    caller-driven; the const was dead). Regression:
+    `append_self_bounds_the_log_at_threshold`.
+  - P2 — settle is now CLOCK-INDEPENDENT: generation is a durable monotone
+    per-doc `settle_seq` (never reset, incremented only on a content change),
+    not `now_ms`; a crash-retry with an advanced clock dedups. Added
+    `settle_seq`/`last_settled_sha` columns to the ordinal-2 ydoc migration.
+    Regression: the settle-crash test now retries with a different clock.
+  - P2 — `MAX_REPLICATION_APPLY_BATCH` doc marked a FORWARD CONTRACT (not active
+    today; single-update apply).
+  - P2 — lease doc now states PROCESS-LOCAL/per-registry scope + poison
+    fail-closed; regression `leases_are_process_local_per_registry`.
+  - EVIDENCE: 2026-07-17T01:12:00.814Z | run-rust-checks | win32/x64 | PASS |
+    fmt=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS
+    cargo-deny=PASS cargo-audit=SKIP. collab `--features fault-injection`: 6
+    cross_engine + 14 durable_regimes = 20 PASS.

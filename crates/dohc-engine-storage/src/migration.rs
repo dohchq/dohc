@@ -402,6 +402,13 @@ CREATE TABLE ydoc_docs (
     head_update_seq   INTEGER NOT NULL DEFAULT 0,
     head_snapshot_seq INTEGER NOT NULL DEFAULT 0,
     base_claimed      INTEGER NOT NULL DEFAULT 0,
+    -- Durable, monotone-forever settle generation (NEVER reset, even by a
+    -- local-only close-prune): makes the settle job id clock-independent so a
+    -- crash-retry with an advanced wall clock still dedups. `last_settled_sha`
+    -- records the content last materialized so an unchanged re-settle is an
+    -- idempotent no-op while a content change bumps the generation.
+    settle_seq        INTEGER NOT NULL DEFAULT 0,
+    last_settled_sha  TEXT,
     updated_at_ms     INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, version_id, object_id),
     FOREIGN KEY (workspace_id, object_id)

@@ -122,6 +122,117 @@ fn replicated_close_never_prunes_the_lineage() {
     assert_eq!(before, after, "content preserved across replicated close");
 }
 
+#[test]
+fn local_to_shared_transition_keeps_the_base() {
+    // INDIVIDUAL-FIRST → shared (a CORE workflow, product invariant "open when
+    // shared"). A doc starts local-only; later it is shared, which claims a base.
+    // The claim MUST promote the marker to replicated so the next close compacts-
+    // not-prunes and the just-claimed base survives for peers.
+    let mut ts = fresh_store("local-to-shared");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    assert_eq!(
+        read_marker(&ts.store, &key).expect("m").expect("m").regime,
+        Regime::LocalOnly
+    );
+
+    let (base, _) = plaintext_base_and_delta();
+    committed(
+        claim_base(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            &base,
+            &NoFaults,
+            1_100,
+        )
+        .expect("base"),
+    );
+    // Promoted to replicated by the claim.
+    assert_eq!(
+        read_marker(&ts.store, &key).expect("m").expect("m").regime,
+        Regime::Replicated,
+        "claim_base must promote local-only → replicated"
+    );
+    assert_eq!(count(&ts.store, "ydoc_snapshots", &key), 1, "base claimed");
+
+    // Close must now COMPACT (not prune), preserving the base for peers.
+    let out =
+        committed(close_session(&mut ts.store, &key, false, &NoFaults, 2_000).expect("close"));
+    assert!(
+        matches!(out, CloseOutcome::Compacted(_)),
+        "shared close compacts"
+    );
+    assert!(
+        count(&ts.store, "ydoc_snapshots", &key) >= 1,
+        "base survives close"
+    );
+    assert!(
+        load_persisted(&ts.store, &key).expect("load").is_some(),
+        "lineage reconstructs"
+    );
+}
+
+#[test]
+fn append_self_bounds_the_log_at_threshold() {
+    // The "everything bounded" invariant: a long-lived session that NEVER calls
+    // maybe_compact/close_session must still keep a finite log — record_local_update
+    // self-triggers compaction past the default threshold.
+    let mut ts = fresh_store("self-bound");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let threshold = dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD as i64;
+    let doc = Ydoc::wire();
+    for i in 0..(threshold + 1) {
+        let d = doc.plaintext_insert(i as u32, "x");
+        committed(record_local_update(&mut ts.store, &key, &d, &NoFaults, 1_000 + i).expect("rec"));
+    }
+    // The log folded itself: far fewer than threshold+1 update rows remain, and a
+    // snapshot exists.
+    let updates = count(&ts.store, "ydoc_updates", &key);
+    assert!(
+        updates <= 1,
+        "log self-bounded, {updates} update rows remain"
+    );
+    assert!(
+        count(&ts.store, "ydoc_snapshots", &key) >= 1,
+        "a snapshot was folded"
+    );
+    // Content is intact after the self-compaction.
+    let persisted = load_persisted(&ts.store, &key).expect("load").expect("m");
+    assert_eq!(
+        persisted
+            .doc
+            .plaintext_string()
+            .chars()
+            .filter(|c| *c == 'x')
+            .count() as i64,
+        threshold + 1
+    );
+}
+
 // ---- base-once --------------------------------------------------------------
 
 #[test]
@@ -377,6 +488,24 @@ fn a_lease_is_exclusive_and_releases_on_drop() {
     let _released = registry.acquire(&key).expect("reacquire after drop");
 }
 
+#[test]
+fn leases_are_process_local_per_registry() {
+    // Exclusivity is PROCESS-LOCAL, per-registry (mirrors the TS module-global
+    // reservation set): two independent registries can each grant a lease for the
+    // same key. Cross-process/registry exclusion is the store connection's job,
+    // not this type's — this test encodes that boundary so it is not mistaken for
+    // a global lock.
+    let key = test_key();
+    let reg_a = LeaseRegistry::new();
+    let reg_b = LeaseRegistry::new();
+    let _a = reg_a.acquire(&key).expect("registry A grants");
+    let _b = reg_b
+        .acquire(&key)
+        .expect("registry B also grants (independent)");
+    // Within a single registry it is still exclusive.
+    assert!(matches!(reg_a.acquire(&key), Err(CollabError::LeaseHeld)));
+}
+
 // ---- settle -----------------------------------------------------------------
 
 #[test]
@@ -542,9 +671,11 @@ mod crash {
                 1,
                 "job durable"
             );
+            // Retry with a DIFFERENT wall clock: the generation is a durable
+            // per-doc counter, not now_ms, so this still dedups exactly-once.
             let retry =
-                committed(settle(&mut store, &key, "n.md", &NoFaults, 5_000).expect("retry"));
-            assert!(retry.deduped, "retry deduped");
+                committed(settle(&mut store, &key, "n.md", &NoFaults, 999_999).expect("retry"));
+            assert!(retry.deduped, "retry deduped despite advanced clock");
             assert_eq!(
                 store.pending_materialization_count().expect("jobs"),
                 1,
