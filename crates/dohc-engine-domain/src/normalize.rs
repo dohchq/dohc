@@ -61,6 +61,7 @@ pub struct MomentRow {
     pub after_blob_sha256: String,
     pub before_present: bool,
     pub before_blob_sha256: Option<String>,
+    pub before_latest_moment_id: Option<String>,
     pub metadata_origin: String,
     pub sync_record_only: bool,
 }
@@ -143,6 +144,7 @@ pub(crate) fn capture(
                 after_blob_sha256: m.after_blob_sha256,
                 before_present: m.before_present,
                 before_blob_sha256: m.before_blob_sha256,
+                before_latest_moment_id: m.before_latest_moment_id,
                 metadata_origin: m.metadata_origin,
                 sync_record_only: m.sync_record_only,
             });
@@ -221,7 +223,7 @@ impl NormalizedState {
         }
         for m in &self.moments {
             out.push_str(&format!(
-                "moment order={} id={} version={} object={} path={} recorded={} op={} after={} before_present={} before={} origin={} sync_only={}\n",
+                "moment order={} id={} version={} object={} path={} recorded={} op={} after={} before_present={} before={} before_latest={} origin={} sync_only={}\n",
                 m.moment_order,
                 field(&m.moment_id),
                 field(&m.version_id),
@@ -232,6 +234,7 @@ impl NormalizedState {
                 m.after_blob_sha256,
                 m.before_present,
                 m.before_blob_sha256.as_deref().unwrap_or("-"),
+                m.before_latest_moment_id.as_deref().unwrap_or("-"),
                 field(&m.metadata_origin),
                 m.sync_record_only,
             ));

@@ -5,7 +5,9 @@
 //! seam CAL-1 pins; the versioning compound commits ride it via
 //! `EngineStore::write_with`.
 
-use dohc_engine_domain::{CreateNamedVersion, NoFaults, VersionedTextStore, WriteText};
+use dohc_engine_domain::{
+    CreateNamedVersion, NoFaults, RollbackTextFileMutation, VersionedTextStore, WriteText,
+};
 use dohc_engine_storage::{EngineStore, FaultPoint};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 
@@ -44,6 +46,38 @@ fn fork_input(request_id: Option<&str>) -> CreateNamedVersion {
         from_version_id: "main".to_owned(),
         now_ms: 20,
         request_id: request_id.map(str::to_owned),
+    }
+}
+
+fn seed_overwrite(db: &std::path::Path) {
+    seed_main_with_file(db);
+    let mut store = EngineStore::open(db, 2).expect("reopen");
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "o1".to_owned(),
+                path: "a.md".to_owned(),
+                text: "overwritten".to_owned(),
+                moment_id: "m2".to_owned(),
+                metadata_origin: "user".to_owned(),
+                author_json: None,
+                now_ms: 20,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("overwrite");
+}
+
+fn rollback_input() -> RollbackTextFileMutation {
+    RollbackTextFileMutation {
+        workspace_id: WS.to_owned(),
+        version_id: "main".to_owned(),
+        path: "a.md".to_owned(),
+        mutation_moment_id: "m2".to_owned(),
+        legacy_before_text: None,
     }
 }
 
@@ -166,4 +200,58 @@ fn restore_crash_before_persist_leaves_active_unchanged() {
         "feat",
         "rolled-back restore must not move the active pointer"
     );
+}
+
+// oracle: versions-rollback-text-file-mutation at storage.before-persist rolls
+// the entire history surgery back; reopening shows the overwrite and m2 intact.
+#[test]
+fn rollback_crash_before_persist_leaves_mutation_intact() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_overwrite(&db);
+
+    {
+        let mut store = EngineStore::open(&db, 3).expect("reopen");
+        let mut vt = VersionedTextStore::new(&mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
+        let err = vt
+            .rollback_text_file_mutation(&rollback_input(), faults.as_ref())
+            .expect_err("crash before persist");
+        assert_eq!(err.code(), "persist-failed");
+    }
+
+    let mut store = EngineStore::open(&db, 4).expect("reopen after crash");
+    let vt = VersionedTextStore::new(&mut store);
+    assert_eq!(
+        vt.read_text(WS, "main", "a.md").unwrap().unwrap().text,
+        "overwritten"
+    );
+    assert!(vt.get_moment(WS, "m2").expect("moment").is_some());
+}
+
+// oracle: versions-rollback-text-file-mutation at
+// storage.after-commit-before-ack is already durable; reopening shows m2 gone
+// and the prior snapshot restored.
+#[test]
+fn rollback_crash_after_commit_is_durable() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_overwrite(&db);
+
+    {
+        let mut store = EngineStore::open(&db, 3).expect("reopen");
+        let mut vt = VersionedTextStore::new(&mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
+        let err = vt
+            .rollback_text_file_mutation(&rollback_input(), faults.as_ref())
+            .expect_err("crash after commit");
+        assert_eq!(err.code(), "persist-failed");
+    }
+
+    let mut store = EngineStore::open(&db, 4).expect("reopen after crash");
+    let vt = VersionedTextStore::new(&mut store);
+    let restored = vt.read_text(WS, "main", "a.md").unwrap().unwrap();
+    assert_eq!(restored.text, "base");
+    assert_eq!(restored.latest_moment_id, "m1");
+    assert!(vt.get_moment(WS, "m2").expect("moment").is_none());
 }

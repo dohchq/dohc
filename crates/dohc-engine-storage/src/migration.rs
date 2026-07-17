@@ -917,6 +917,18 @@ CREATE TABLE engine_search_index_state (
 /// The `id` of the R12 search migration.
 pub(crate) const SEARCH_MIGRATION_ID: &str = "v1-search";
 
+/// Ordinal 5 (R05 versioning residual). Adds the durable pointer from a moment
+/// to the moment that produced its concrete rollback preimage.
+const V1_MOMENT_BEFORE_LINK_DDL: &str = "\
+ALTER TABLE moments ADD COLUMN before_latest_moment_id TEXT;
+-- Rust originally encoded no-preimage/concrete-preimage as 0/1. Normalize to
+-- the TS tri-state: 0 legacy-unset, 1 explicit-absent, 2 concrete-preimage.
+UPDATE moments SET before_present = before_present + 1 WHERE before_present IN (0, 1);
+";
+
+/// The `id` of the R05 moment-preimage-link migration.
+pub(crate) const MOMENT_BEFORE_LINK_MIGRATION_ID: &str = "v1-moment-before-link";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -953,6 +965,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: SEARCH_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_SEARCH_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 5,
+        id: MOMENT_BEFORE_LINK_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_MOMENT_BEFORE_LINK_DDL,
         sets_user_version: None,
     },
 ];
@@ -1262,11 +1281,11 @@ mod tests {
     // waiting for a real future schema change.
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     fn two_migrations() -> Vec<Migration> {
-        // The frozen list now ends at ordinal 4 (R12 search), so a synthetic
-        // probe appends at ordinal 5.
+        // The frozen list now ends at ordinal 5 (R05 moment preimage links), so
+        // a synthetic probe appends at ordinal 6.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 5,
+            ordinal: 6,
             id: "r04-probe",
             kind: MigrationKind::Transactional,
             sql: M2_SQL,
@@ -1381,10 +1400,11 @@ mod tests {
         // Resume: baseline is skipped (idempotent); the between-steps crash
         // fired before the secrets migration (ordinal 1), so resume applies the
         // secrets migration (1), the Y.Doc migration (2), the chats migration
-        // (3), the search migration (4), AND the probe (5).
+        // (3), the search migration (4), the moment-link migration (5), AND
+        // the probe (6).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 5 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 6 });
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -1481,7 +1501,7 @@ mod tests {
         }
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 5,
+            ordinal: 6,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
@@ -1499,7 +1519,7 @@ mod tests {
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();
         changed.push(Migration {
-            ordinal: 5,
+            ordinal: 6,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
@@ -1519,7 +1539,7 @@ mod tests {
         // baseline first (transactional), then a non-transactional idempotent step.
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 5,
+            ordinal: 6,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
