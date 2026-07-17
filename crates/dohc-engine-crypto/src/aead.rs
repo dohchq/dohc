@@ -65,6 +65,20 @@ impl SealedSecret {
         ciphertext_base64: &str,
         byte_length: usize,
     ) -> Result<Self, CryptoError> {
+        // Enforce the 1 MiB cap and a cheap encoded-length precheck BEFORE
+        // decoding, so a poison DB/replication row cannot make us allocate and
+        // decode a huge string only to reject it (everything bounded; the cap
+        // `seal` enforces must also hold on the read/ingest path).
+        if byte_length > MAX_SECRET_FILE_BYTES {
+            return Err(CryptoError::PlaintextTooLarge);
+        }
+        let expected_encoded_len = byte_length
+            .div_ceil(3)
+            .checked_mul(4)
+            .ok_or(CryptoError::InvalidBase64)?;
+        if ciphertext_base64.len() != expected_encoded_len {
+            return Err(CryptoError::InvalidBase64);
+        }
         let iv_vec = base64::strict_decode_exact(iv_base64, SECRET_IV_BYTES)?;
         let tag_vec = base64::strict_decode_exact(auth_tag_base64, SECRET_TAG_BYTES)?;
         let ciphertext = base64::strict_decode_exact(ciphertext_base64, byte_length)?;
@@ -304,6 +318,31 @@ mod tests {
     #[test]
     fn aad_is_byte_exact() {
         assert_eq!(secret_aad("ws", "p"), b"dohc-secret-v1\0ws\0p".to_vec());
+    }
+
+    #[test]
+    fn from_base64_rejects_oversize_and_mismatched_length() {
+        // Declared byte_length over the cap is rejected before any decode.
+        let over = MAX_SECRET_FILE_BYTES + 1;
+        assert_eq!(
+            SealedSecret::from_base64("AAAAAAAAAAAAAAAA", "AAAAAAAAAAAAAAAAAAAAAA==", "", over)
+                .unwrap_err(),
+            CryptoError::PlaintextTooLarge
+        );
+        // Ciphertext string whose length doesn't match the declared byte_length
+        // is rejected as invalid base64 (cheap precheck before decode).
+        let sealed = seal(&key(), "ws1", ".env", b"hello").unwrap();
+        let wrong_len = sealed.byte_length() + 3;
+        assert_eq!(
+            SealedSecret::from_base64(
+                &sealed.iv_base64(),
+                &sealed.auth_tag_base64(),
+                &sealed.ciphertext_base64(),
+                wrong_len,
+            )
+            .unwrap_err(),
+            CryptoError::InvalidBase64
+        );
     }
 
     #[test]

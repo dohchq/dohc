@@ -140,7 +140,13 @@ pub fn unwrap(
     let iv = decode_env(&envelope.iv_base64)?;
     let tag = decode_env(&envelope.auth_tag_base64)?;
     let mut buffer = decode_env(&envelope.ciphertext_base64)?;
-    if iv.len() != IV_BYTES || tag.len() != crate::aead::SECRET_TAG_BYTES {
+    // Validate every fixed-size field's length explicitly (salt/IV/tag), so a
+    // malformed envelope fails closed on shape before the KDF/AEAD run rather
+    // than deriving a KEK from a wrong-length salt.
+    if salt.len() != SALT_BYTES
+        || iv.len() != IV_BYTES
+        || tag.len() != crate::aead::SECRET_TAG_BYTES
+    {
         return Err(CryptoError::EnvelopeUnwrapFailed);
     }
     let kek = derive_kek(passphrase, &salt)?;

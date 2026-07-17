@@ -82,10 +82,9 @@ impl SecretOp {
 /// `Debug` is HAND-WRITTEN to redact `text` — this is the one secret-bearing
 /// input type, so a stray `tracing::debug!(?input)`, `format!("{write:?}")`,
 /// panic message, or error context must never spill the cleartext (the
-/// plaintext-never-leaks-into-logs invariant). `Clone` is derived deliberately:
-/// callers may need to retain the request, and the copy stays inside this typed
-/// carrier, never a formatter.
-#[derive(Clone)]
+/// plaintext-never-leaks-into-logs invariant). `Clone` is deliberately NOT
+/// derived: cleartext should live in as few copies as possible, so a caller
+/// must consciously reconstruct the request rather than silently duplicate it.
 pub struct SecretWrite {
     pub workspace_id: String,
     pub version_id: String,
@@ -197,18 +196,22 @@ impl<'a> SecretFileStore<'a> {
         validate_origin(&input.metadata_origin)?;
 
         let ws = &input.workspace_id;
-        // Pre-transaction reads (single-writer: authoritative). Verify version,
-        // reject a duplicate moment id, and compare against the current tip.
+        // Pre-transaction reads (single-writer: authoritative). Check the
+        // DESIRED STATE FIRST: if the tip already equals `text`, this is an
+        // idempotent no-op — including an exactly-once retry of a write that
+        // committed but crashed before the ack. Only a genuine content change
+        // reaches the duplicate-moment-id guard, so a committed retry is never
+        // misreported as `DuplicateMomentId`.
         let no_op = self.store.read_with(|conn| {
             require_version(conn, ws, &input.version_id)?;
-            if secret_moment_exists(conn, ws, &input.moment_id)? {
-                return Err(DomainError::DuplicateMomentId);
-            }
             if let Some(tip) = self.select_tip(conn, ws, &input.version_id, &input.path)? {
                 let current = aead::open(self.key, ws, &input.path, &tip)?;
                 if current.as_bytes() == input.text.as_bytes() {
                     return Ok(true);
                 }
+            }
+            if secret_moment_exists(conn, ws, &input.moment_id)? {
+                return Err(DomainError::DuplicateMomentId);
             }
             Ok::<bool, DomainError>(false)
         })?;
@@ -283,15 +286,23 @@ impl<'a> SecretFileStore<'a> {
         validate_origin(&input.metadata_origin)?;
 
         let ws = &input.workspace_id;
+        // Desired-state first: an already-absent tip is an idempotent no-op
+        // (including an exactly-once retry of a delete that committed then
+        // crashed before the ack), so a committed retry is never misreported as
+        // `DuplicateMomentId`. Only a delete that will actually change state
+        // reaches the duplicate-moment-id guard.
         let has_tip = self.store.read_with(|conn| {
             require_version(conn, ws, &input.version_id)?;
+            if self
+                .select_tip(conn, ws, &input.version_id, &input.path)?
+                .is_none()
+            {
+                return Ok(false);
+            }
             if secret_moment_exists(conn, ws, &input.moment_id)? {
                 return Err(DomainError::DuplicateMomentId);
             }
-            Ok::<bool, DomainError>(
-                self.select_tip(conn, ws, &input.version_id, &input.path)?
-                    .is_some(),
-            )
+            Ok::<bool, DomainError>(true)
         })?;
         if !has_tip {
             return Ok(None);

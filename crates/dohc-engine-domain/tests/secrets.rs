@@ -104,6 +104,58 @@ fn round_trips_through_the_single_materialization_accessor() {
 }
 
 #[test]
+fn committed_write_retry_with_same_moment_id_is_idempotent_not_duplicate() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+
+    let text = "SECRET=v1";
+    let first = write(&mut store, &key, ".env", text, "sm1", 10);
+    assert!(first.changed);
+
+    // Exactly-once retry: same moment_id + same text (a committed-but-not-acked
+    // write re-driven). Desired-state-first makes this an idempotent no-op, NOT
+    // a DuplicateMomentId error.
+    let mut secrets = SecretFileStore::new(&mut store, &key);
+    let retry = secrets
+        .write_secret_file(
+            &SecretWrite {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: ".env".to_owned(),
+                text: text.to_owned(),
+                moment_id: "sm1".to_owned(),
+                metadata_origin: "local-file".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                now_ms: 11,
+            },
+            &NO_FAULTS,
+        )
+        .expect("retry");
+    assert!(!retry.changed, "committed retry is an idempotent no-op");
+
+    // A genuine duplicate-id conflict (same id, DIFFERENT content) still fails.
+    let conflict = secrets.write_secret_file(
+        &SecretWrite {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: ".env".to_owned(),
+            text: "SECRET=v2-different".to_owned(),
+            moment_id: "sm1".to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 12,
+        },
+        &NO_FAULTS,
+    );
+    assert_eq!(conflict.unwrap_err().code(), "duplicate-moment-id");
+}
+
+#[test]
 fn plaintext_never_leaks_into_engine_db_or_wal() {
     let scratch = ScratchDir::new().unwrap();
     let db = scratch.engine_db_path().unwrap();

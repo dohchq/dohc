@@ -62,6 +62,13 @@ const COMPARED_TABLES: &[&str] = &[
     "fork_base_snapshots",
     "moments",
     "materialization_jobs",
+    // R08 secret-backed-file tables: their ciphertext tips / fork bases /
+    // history moments are durable state, so a backup missing or truncating them
+    // must fail the restore-test row-count compare (never mark a lossy copy
+    // verified).
+    "secret_files",
+    "secret_fork_bases",
+    "secret_moments",
 ];
 
 /// Extra headroom (bytes) required over the source size before a backup is
