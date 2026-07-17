@@ -302,15 +302,90 @@ CREATE TABLE materialization_jobs (
 CREATE INDEX idx_materialization_jobs_status ON materialization_jobs(status);
 ";
 
+/// Ordinal 1 (R08 secrets shard, appended via the migration-append capability
+/// contract). Adds the three secret-backed-file tables — encrypted tips, fork
+/// bases, and metadata-only history moments — whose logical shapes match the TS
+/// engine's `secret_files` / `secret_fork_bases` / `secret_moments`
+/// (`engineDbSchema.ts`). Only ciphertext + IV + tag (base64 TEXT) and byte
+/// lengths are stored; plaintext never enters any column. `STRICT` + `INTEGER`
+/// timestamps follow the R04 baseline convention (the TS `REAL` columns are an
+/// engine-internal detail; cross-engine parity rides the AEAD ciphertext, not
+/// the SQLite column affinity — see `LANGUAGE_SEMANTICS_MATRIX.md` §10.5).
+const V1_SECRETS_DDL: &str = "\
+CREATE TABLE secret_files (
+    workspace_id     TEXT    NOT NULL,
+    version_id       TEXT    NOT NULL,
+    path             TEXT    NOT NULL,
+    iv_base64        TEXT    NOT NULL,
+    auth_tag_base64  TEXT    NOT NULL,
+    ciphertext_base64 TEXT   NOT NULL,
+    byte_length      INTEGER NOT NULL,
+    updated_at_ms    INTEGER NOT NULL,
+    latest_moment_id TEXT    NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, path),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE secret_fork_bases (
+    workspace_id      TEXT    NOT NULL,
+    version_id        TEXT    NOT NULL,
+    path              TEXT    NOT NULL,
+    iv_base64         TEXT    NOT NULL,
+    auth_tag_base64   TEXT    NOT NULL,
+    ciphertext_base64 TEXT    NOT NULL,
+    byte_length       INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, path),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE secret_moments (
+    workspace_id            TEXT    NOT NULL,
+    moment_order            INTEGER NOT NULL,
+    moment_id               TEXT    NOT NULL,
+    version_id              TEXT    NOT NULL,
+    path                    TEXT    NOT NULL,
+    recorded_at_ms          INTEGER NOT NULL,
+    operation               TEXT    NOT NULL,
+    metadata_origin         TEXT    NOT NULL,
+    metadata_summary        TEXT,
+    metadata_correlation_id TEXT,
+    after_present           INTEGER NOT NULL,
+    after_iv_base64         TEXT,
+    after_auth_tag_base64   TEXT,
+    after_ciphertext_base64 TEXT,
+    after_byte_length       INTEGER,
+    PRIMARY KEY (workspace_id, moment_id),
+    UNIQUE (workspace_id, moment_order),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX idx_secret_moments_version_order
+    ON secret_moments(workspace_id, version_id, moment_order);
+CREATE INDEX idx_secret_moments_path_order
+    ON secret_moments(workspace_id, version_id, path, moment_order);
+";
+
+/// The `id` of the R08 secrets migration.
+pub(crate) const SECRETS_MIGRATION_ID: &str = "v1-secrets";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
-pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[Migration {
-    ordinal: 0,
-    id: BASELINE_MIGRATION_ID,
-    kind: MigrationKind::Transactional,
-    sql: V2_BASELINE_DDL,
-    sets_user_version: Some(ENGINE_SCHEMA_VERSION),
-}];
+pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
+    Migration {
+        ordinal: 0,
+        id: BASELINE_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V2_BASELINE_DDL,
+        sets_user_version: Some(ENGINE_SCHEMA_VERSION),
+    },
+    Migration {
+        ordinal: 1,
+        id: SECRETS_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SECRETS_DDL,
+        sets_user_version: None,
+    },
+];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
 /// re-verified against the ledger.
@@ -617,9 +692,11 @@ mod tests {
     // waiting for a real future schema change.
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     fn two_migrations() -> Vec<Migration> {
+        // The frozen list now ends at ordinal 1 (R08 secrets), so a synthetic
+        // probe appends at ordinal 2.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 1,
+            ordinal: 2,
             id: "r04-probe",
             kind: MigrationKind::Transactional,
             sql: M2_SQL,
@@ -627,6 +704,9 @@ mod tests {
         });
         v
     }
+
+    /// Count of frozen baseline migrations (baseline + secrets = 2).
+    const BASELINE_COUNT: u32 = BASELINE_MIGRATIONS.len() as u32;
 
     #[test]
     fn baseline_applies_once_and_is_idempotent() {
@@ -636,7 +716,12 @@ mod tests {
 
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("run");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 1 });
+        assert_eq!(
+            out,
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_COUNT
+            }
+        );
         // Second run is a no-op: already applied, checksum matches.
         let out2 = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("run2");
         assert_eq!(out2, MigrationOutcome::Applied { newly_applied: 0 });
@@ -676,10 +761,16 @@ mod tests {
             // simulated process death:
         }
 
-        // Reopen and re-run with no fault: recovers cleanly.
+        // Reopen and re-run with no fault: recovers cleanly, applying the whole
+        // frozen list (baseline + secrets).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("recover");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 1 });
+        assert_eq!(
+            out,
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_COUNT
+            }
+        );
     }
 
     #[test]
@@ -717,10 +808,12 @@ mod tests {
             assert_eq!(base, 1, "baseline must be durably recorded");
         }
 
-        // Resume: baseline is skipped (idempotent), probe applies.
+        // Resume: baseline is skipped (idempotent); the between-steps crash
+        // fired before the secrets migration (ordinal 1), so resume applies the
+        // secrets migration AND the probe (ordinal 2).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 1 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 2 });
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -817,7 +910,7 @@ mod tests {
         }
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 1,
+            ordinal: 2,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
@@ -835,7 +928,7 @@ mod tests {
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();
         changed.push(Migration {
-            ordinal: 1,
+            ordinal: 2,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
@@ -855,7 +948,7 @@ mod tests {
         // baseline first (transactional), then a non-transactional idempotent step.
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 1,
+            ordinal: 2,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",

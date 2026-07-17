@@ -13,6 +13,10 @@ fault-injection = ["dohc-engine-storage/fault-injection"]
 
 [dependencies]
 dohc-engine-storage = { path = "../dohc-engine-storage" }
+# R08 secrets crypto: AES-256-GCM secret-file AEAD + redaction-safe plaintext /
+# key types. The secret domain store encrypts on write and decrypts only in the
+# single authorized materialization accessor; ciphertext-only reaches storage.
+dohc-engine-crypto = { path = "../dohc-engine-crypto" }
 # The domain composes its versioning SQL against the transaction/connection the
 # storage core hands it; it owns the version/moment semantics, storage owns the
 # connection, open ritual, txn boundary, and fault seam.
@@ -26,6 +30,9 @@ thiserror = "2"
 # Depending on the testkit here also unifies the storage `fault-injection`
 # feature ON for `cargo test`, arming the version-create / restore fault points.
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
+# Parse the R08 cross-engine ciphertext fixture (produced by Node) in the
+# secret store's TS-written-secret-decrypts test.
+serde_json = "1"
 
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]

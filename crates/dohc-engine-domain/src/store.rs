@@ -803,7 +803,7 @@ fn non_empty(value: &str, field: &'static str) -> Result<(), DomainError> {
 /// percent-decoding, and the complete reserved-name set are owned by the
 /// `dohc-engine-files` path-floor shard. It rejects the high-value cases so a
 /// clearly-unsafe path never becomes a durable alias/moment here.
-fn validate_path(path: &str) -> Result<(), DomainError> {
+pub(crate) fn validate_path(path: &str) -> Result<(), DomainError> {
     if path.is_empty() {
         return Err(DomainError::InvalidPath {
             reason: "path must not be empty",
