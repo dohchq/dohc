@@ -601,3 +601,29 @@ source of truth every orchestrator session loads first).
   identity/restore completion. R07 (watcher/materialization) inherits the
   3 deferred items (files-side fault seam, tolerant-vs-fail-closed scan,
   two-phase apply-ack — now available via R04's job pipeline).
+
+## 2026-07-17 — R08 merged (secrets) · R11a next (Y.Doc durable cache)
+
+- R08 #157 MERGED: dohc-engine-crypto (AES-256-GCM, scrypt envelope,
+  zeroizing redaction-safe types) + secrets domain. Cross-engine parity
+  BYTE-EXACT and independently verified (fixtures regenerated from Node
+  v24.16.0; AAD byte-exact vs secretFileStore.ts; bidirectional). Plaintext-
+  never-leaks independently scan-verified (db+wal+shm, post-checkpoint).
+  Migration ordinal 1 (v1-secrets). 2 adversarial reviews caught: P1
+  SecretWrite plaintext-via-Debug (redacted); seal_with_iv nonce-reuse
+  footgun (test-gated, out of public API); 2 zeroization gaps; base64
+  Node-mismatch; delete-tombstone documented (§9.1). All fixed + extra bot
+  findings (bounded base64, idempotent write/delete, backup table coverage).
+- INTEGRATOR NOTE (for composition/R07): the generic dohc-engine-files
+  materialization executor would write CIPHERTEXT to a secret path; a
+  secret-aware executor (decrypt-before-write via materialize_secret_file)
+  is the required integration point before the dormant pipeline runs on
+  secret jobs (BEHAVIOR_DELTA §9.2). Not a blocker (pipeline dormant).
+- R11a opens (migration ordinal 2, ydoc tables): the Rust durable Y.Doc
+  cache/snapshots/compaction/leases + replication of ydoc.update ops +
+  settle pipeline, in dohc-engine-collab. Applies the 5 binding yrs
+  constraints (DECISIONS.md: OffsetKind::Utf16, nested-map key sorting,
+  UTF-16 well-formedness, shared root schema, destructive-projection
+  provenance, yjs non-atomic applyUpdate). Respects the local-only-cache vs
+  replicated-durable-lineage regime distinction. R11b (TS live adapter) is
+  separate/later.
