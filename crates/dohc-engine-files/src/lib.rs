@@ -70,7 +70,7 @@ pub use scan::{
 };
 pub use watch::{
     NativeWatcher, StubWatchSource, WATCH_EVENT_QUEUE_CAPACITY, WATCH_HARD_DEADLINE, WATCH_SETTLE,
-    WatchEvent, WatchStart, apply_event,
+    WATCH_STARTUP_DEADLINE, WatchEvent, WatchStart, apply_event,
 };
 
 // The cancellation primitive the actor loop consumes, re-exported so a caller

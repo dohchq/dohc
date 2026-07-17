@@ -1,0 +1,21 @@
+[package]
+name = "dohc-fuzz-targets"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+publish.workspace = true
+description = "R14 robustness closure: bounded property-test / input-validation regression suite over the engine's remote/cross-process input surfaces (IPC framing, Y.Doc update ingestion, replication envelopes). Runs under plain `cargo test --workspace` (proptest-based) so it works identically on native Windows MSVC and Linux/WSL -- cargo-fuzz/libFuzzer is not required and is NOT part of the required gate."
+
+[dependencies]
+dohc-engine-protocol = { path = "../../crates/dohc-engine-protocol" }
+dohc-engine-collab = { path = "../../crates/dohc-engine-collab" }
+dohc-engine-sync = { path = "../../crates/dohc-engine-sync" }
+dohc-engine-storage = { path = "../../crates/dohc-engine-storage" }
+dohc-engine-testkit = { path = "../../crates/dohc-engine-testkit" }
+serde_json = "1"
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true

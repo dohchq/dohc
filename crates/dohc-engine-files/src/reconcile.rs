@@ -249,6 +249,39 @@ impl ReconcileController {
         }
     }
 
+    /// A controller seeded with a manifest recovered from a process restart
+    /// (R14 robustness: manifest rehydration), rather than the empty
+    /// baseline [`ReconcileController::new`] starts from. Without this, every
+    /// restart treats every already-tracked, unchanged file as freshly
+    /// `Added` — safe (capture is a content-equality no-op downstream) but
+    /// wasteful, and it loses the `Added`-vs-`Changed` distinction. Seeding
+    /// the manifest lets the first post-restart reconcile report only the
+    /// changes that actually happened while the process was down.
+    ///
+    /// Still starts **dirty**, same as [`ReconcileController::new`]: a
+    /// rehydrated manifest is a last-known-good snapshot, not proof the disk
+    /// still matches it, so the mandatory post-restart full reconcile is
+    /// never skipped.
+    ///
+    /// Building the seed `ScanManifest` from the domain's own captured-file
+    /// records (rather than a caller-supplied one, as here) is a deliberate
+    /// follow-up: this crate does not depend on the domain layer (see
+    /// `capture.rs`), so the actual rehydration SOURCE lives above this
+    /// primitive.
+    pub fn rehydrated(manifest: ScanManifest, generation: ScanGeneration) -> Self {
+        ReconcileController {
+            manifest,
+            generation,
+            dirty: true,
+            dirty_epoch: 1,
+            outstanding: false,
+            degraded_signature: None,
+            degraded_epoch: 0,
+            identical_degraded_count: 0,
+            quarantined_paths: Vec::new(),
+        }
+    }
+
     /// The current committed generation.
     pub fn generation(&self) -> ScanGeneration {
         self.generation

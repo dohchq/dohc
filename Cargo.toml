@@ -35,6 +35,7 @@ members = [
     "crates/dohc-engine-sync",
     "crates/dohc-workspace-engine",
     "crates/yrs-spike",
+    "fuzz/dohc-fuzz-targets",
 ]
 exclude = [
     "crates/workspace-kernel",
