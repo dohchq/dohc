@@ -68,6 +68,39 @@ export interface SyncRelayShareRow {
   revokedAtMs: number | null;
 }
 
+export interface WorkspaceSyncIdentity {
+  replicationEpoch: string;
+  streamIdentity: string;
+}
+
+export type ClaimWorkspaceIdentityResult =
+  | "claimed"
+  | "matched"
+  | "epoch-superseded"
+  | "epoch-unknown"
+  | "stream-mismatch";
+
+export type VerifyWorkspaceIdentityResult = Exclude<
+  ClaimWorkspaceIdentityResult,
+  "claimed"
+>;
+
+export type EnforceWorkspaceIdentityResult =
+  | ClaimWorkspaceIdentityResult
+  | "identity-required";
+
+export type RotateWorkspaceIdentityResult =
+  | "rotated"
+  | "not-owner"
+  | "unchanged"
+  | "epoch-superseded";
+
+export interface AppendLogBatchGuardContext {
+  enforceWorkspaceIdentity(
+    identity: WorkspaceSyncIdentity | null,
+  ): EnforceWorkspaceIdentityResult;
+}
+
 export interface SyncRelayStorage {
   close(): void;
   claimWorkspace(input: {
@@ -75,6 +108,25 @@ export interface SyncRelayStorage {
     ownerUserId: string;
     createdAtMs: number;
   }): "created" | "owned" | "not-owner";
+  getWorkspaceIdentity(workspaceId: string): WorkspaceSyncIdentity | null;
+  getEpochLogFloor(workspaceId: string): number;
+  verifyWorkspaceIdentity(input: {
+    workspaceId: string;
+    replicationEpoch: string;
+    streamIdentity: string;
+  }): VerifyWorkspaceIdentityResult;
+  claimWorkspaceIdentity(input: {
+    workspaceId: string;
+    replicationEpoch: string;
+    streamIdentity: string;
+  }): ClaimWorkspaceIdentityResult;
+  rotateWorkspaceIdentity(input: {
+    workspaceId: string;
+    ownerUserId: string;
+    replicationEpoch: string;
+    streamIdentity: string;
+    rotatedAtMs: number;
+  }): RotateWorkspaceIdentityResult;
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean;
   putBlob(input: {
     workspaceId: string;
@@ -117,7 +169,7 @@ export interface SyncRelayStorage {
     // between the check and the insert — a route-level re-check alone leaves
     // a gap where a concurrent revoke commits after the check but before the
     // transaction opens.
-    guard?: () => void;
+    guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult;
   fetchLogPage(input: {
     workspaceId: string;
@@ -214,7 +266,23 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       CREATE TABLE IF NOT EXISTS sync_relay_workspaces (
         workspace_id TEXT PRIMARY KEY,
         owner_user_id TEXT NOT NULL,
-        created_at_ms INTEGER NOT NULL
+        created_at_ms INTEGER NOT NULL,
+        replication_epoch TEXT,
+        stream_identity TEXT,
+        epoch_log_floor INTEGER
+      );
+
+      -- Every epoch that stops being active remains durable here. This makes
+      -- stale pre-reset credentials permanently identifiable after rotation.
+      CREATE TABLE IF NOT EXISTS sync_relay_epoch_supersessions (
+        workspace_id TEXT NOT NULL,
+        replication_epoch TEXT NOT NULL,
+        stream_identity TEXT NOT NULL,
+        superseded_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (workspace_id, replication_epoch, stream_identity),
+        FOREIGN KEY (workspace_id)
+          REFERENCES sync_relay_workspaces(workspace_id)
+          ON DELETE CASCADE
       );
 
       CREATE TABLE IF NOT EXISTS sync_relay_log (
@@ -327,6 +395,22 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         "ALTER TABLE sync_relay_blobs ADD COLUMN created_at_ms INTEGER NOT NULL DEFAULT 0",
       );
     }
+    // R10b lazy additive migration: existing relay databases predate sync
+    // identity. Both columns stay nullable so legacy workspaces remain unset
+    // until the first identity-bearing request claims them.
+    const workspaceColumns = db
+      .prepare("PRAGMA table_info(sync_relay_workspaces)")
+      .all()
+      .map((row) => String(row.name));
+    if (!workspaceColumns.includes("replication_epoch")) {
+      db.exec("ALTER TABLE sync_relay_workspaces ADD COLUMN replication_epoch TEXT");
+    }
+    if (!workspaceColumns.includes("stream_identity")) {
+      db.exec("ALTER TABLE sync_relay_workspaces ADD COLUMN stream_identity TEXT");
+    }
+    if (!workspaceColumns.includes("epoch_log_floor")) {
+      db.exec("ALTER TABLE sync_relay_workspaces ADD COLUMN epoch_log_floor INTEGER");
+    }
     db.exec("COMMIT");
   } catch (error) {
     try {
@@ -417,6 +501,301 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       } catch {}
       throw error;
     }
+  }
+
+  getWorkspaceIdentity(workspaceId: string): WorkspaceSyncIdentity | null {
+    const row = this.db
+      .prepare(
+        `SELECT replication_epoch, stream_identity
+         FROM sync_relay_workspaces
+         WHERE workspace_id = ?`,
+      )
+      .get(workspaceId);
+    if (row === undefined) return null;
+    const replicationEpoch = row.replication_epoch;
+    const streamIdentity = row.stream_identity;
+    if (replicationEpoch == null && streamIdentity == null) return null;
+    if (typeof replicationEpoch !== "string" || typeof streamIdentity !== "string") {
+      throw new Error("sync relay workspace identity is partially populated");
+    }
+    return { replicationEpoch, streamIdentity };
+  }
+
+  getEpochLogFloor(workspaceId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT epoch_log_floor
+         FROM sync_relay_workspaces
+         WHERE workspace_id = ?`,
+      )
+      .get(workspaceId);
+    if (row === undefined) throw new Error("workspace does not exist");
+    if (row.epoch_log_floor == null) return 0;
+    const floor = Number(row.epoch_log_floor);
+    if (!Number.isSafeInteger(floor) || floor < 0) {
+      throw new Error("sync relay workspace epoch log floor is invalid");
+    }
+    return floor;
+  }
+
+  verifyWorkspaceIdentity(input: {
+    workspaceId: string;
+    replicationEpoch: string;
+    streamIdentity: string;
+  }): VerifyWorkspaceIdentityResult {
+    const row = this.db
+      .prepare(
+        `SELECT replication_epoch, stream_identity
+         FROM sync_relay_workspaces
+         WHERE workspace_id = ?`,
+      )
+      .get(input.workspaceId);
+    if (row === undefined) {
+      throw new Error("cannot verify identity for an absent workspace");
+    }
+    const current = workspaceIdentityFromRow(row);
+    // Reads never establish identity. An identity-bearing GET against an
+    // unset workspace has no coordinate to match and is therefore unknown.
+    if (current === null) return "epoch-unknown";
+    return this.classifyWorkspaceIdentity(input.workspaceId, current, input);
+  }
+
+  claimWorkspaceIdentity(input: {
+    workspaceId: string;
+    replicationEpoch: string;
+    streamIdentity: string;
+  }): ClaimWorkspaceIdentityResult {
+    // The common path is verification only. Do this SELECT before taking a
+    // write lock so matched identity-bearing pulls/claims do not serialize
+    // against relay writers.
+    const initial = this.db
+      .prepare(
+        `SELECT replication_epoch, stream_identity
+         FROM sync_relay_workspaces
+         WHERE workspace_id = ?`,
+      )
+      .get(input.workspaceId);
+    if (initial === undefined) {
+      throw new Error("cannot claim identity for an absent workspace");
+    }
+    const initialIdentity = workspaceIdentityFromRow(initial);
+    if (initialIdentity !== null) {
+      return this.classifyWorkspaceIdentity(
+        input.workspaceId,
+        initialIdentity,
+        input,
+      );
+    }
+
+    // Only first adoption needs a write transaction. Re-read after acquiring
+    // the lock to close the race with another claimant.
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT replication_epoch, stream_identity
+           FROM sync_relay_workspaces
+           WHERE workspace_id = ?`,
+        )
+        .get(input.workspaceId);
+      if (row === undefined) {
+        throw new Error("cannot claim identity for an absent workspace");
+      }
+      const current = workspaceIdentityFromRow(row);
+      if (current === null) {
+        this.db
+          .prepare(
+            `UPDATE sync_relay_workspaces
+             SET replication_epoch = ?, stream_identity = ?, epoch_log_floor = 0
+             WHERE workspace_id = ?`,
+          )
+          .run(input.replicationEpoch, input.streamIdentity, input.workspaceId);
+        this.db.exec("COMMIT");
+        return "claimed";
+      }
+      const result = this.classifyWorkspaceIdentity(input.workspaceId, current, input);
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
+  rotateWorkspaceIdentity(input: {
+    workspaceId: string;
+    ownerUserId: string;
+    replicationEpoch: string;
+    streamIdentity: string;
+    rotatedAtMs: number;
+  }): RotateWorkspaceIdentityResult {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT owner_user_id, replication_epoch, stream_identity
+           FROM sync_relay_workspaces
+           WHERE workspace_id = ?`,
+        )
+        .get(input.workspaceId);
+      if (row === undefined || row.owner_user_id !== input.ownerUserId) {
+        this.db.exec("COMMIT");
+        return "not-owner";
+      }
+      const replicationEpoch = row.replication_epoch;
+      const streamIdentity = row.stream_identity;
+      if (replicationEpoch == null && streamIdentity != null) {
+        throw new Error("sync relay workspace identity is partially populated");
+      }
+      if (replicationEpoch != null && typeof replicationEpoch !== "string") {
+        throw new Error("sync relay workspace identity has an invalid epoch");
+      }
+      if (streamIdentity == null && replicationEpoch != null) {
+        throw new Error("sync relay workspace identity is partially populated");
+      }
+      if (streamIdentity != null && typeof streamIdentity !== "string") {
+        throw new Error("sync relay workspace identity has an invalid stream");
+      }
+      if (
+        replicationEpoch === input.replicationEpoch &&
+        streamIdentity === input.streamIdentity
+      ) {
+        this.db.exec("COMMIT");
+        return "unchanged";
+      }
+
+      // An epoch number that has entered history must never become active
+      // again, even under a freshly minted stream id. This prevents a reset
+      // generation from being resurrected by changing only half the coordinate.
+      const targetEpochWasSuperseded =
+        this.db
+          .prepare(
+            `SELECT 1 AS ok
+             FROM sync_relay_epoch_supersessions
+             WHERE workspace_id = ? AND replication_epoch = ?
+             LIMIT 1`,
+          )
+          .get(input.workspaceId, input.replicationEpoch) !== undefined;
+      if (targetEpochWasSuperseded) {
+        this.db.exec("COMMIT");
+        return "epoch-superseded";
+      }
+      if (typeof replicationEpoch === "string" && typeof streamIdentity === "string") {
+        const alreadyRecorded =
+          this.db
+            .prepare(
+              `SELECT 1 AS ok
+               FROM sync_relay_epoch_supersessions
+               WHERE workspace_id = ? AND replication_epoch = ? AND stream_identity = ?`,
+            )
+            .get(input.workspaceId, replicationEpoch, streamIdentity) !== undefined;
+        if (!alreadyRecorded) {
+          this.assertWorkspaceQuota(
+            input.workspaceId,
+            Buffer.byteLength(replicationEpoch, "utf8") +
+              Buffer.byteLength(streamIdentity, "utf8"),
+          );
+        }
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO sync_relay_epoch_supersessions (
+              workspace_id, replication_epoch, stream_identity, superseded_at_ms
+          ) VALUES (?, ?, ?, ?)`,
+          )
+          .run(
+            input.workspaceId,
+            replicationEpoch,
+            streamIdentity,
+            Math.trunc(input.rotatedAtMs),
+          );
+      }
+      const floor = Number(
+        this.db
+          .prepare(
+            `SELECT COALESCE(MAX(relay_seq), 0) AS floor
+             FROM sync_relay_log
+             WHERE workspace_id = ?`,
+          )
+          .get(input.workspaceId)?.floor ?? 0,
+      );
+      this.db
+        .prepare(
+          `UPDATE sync_relay_workspaces
+           SET replication_epoch = ?, stream_identity = ?, epoch_log_floor = ?
+           WHERE workspace_id = ?`,
+        )
+        .run(input.replicationEpoch, input.streamIdentity, floor, input.workspaceId);
+      this.db.exec("COMMIT");
+      return "rotated";
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
+  private classifyWorkspaceIdentity(
+    workspaceId: string,
+    current: WorkspaceSyncIdentity,
+    presented: WorkspaceSyncIdentity,
+  ): VerifyWorkspaceIdentityResult {
+    if (
+      current.replicationEpoch === presented.replicationEpoch &&
+      current.streamIdentity === presented.streamIdentity
+    ) {
+      return "matched";
+    }
+    const coordinateWasSuperseded =
+      this.db
+        .prepare(
+          `SELECT 1 AS ok
+           FROM sync_relay_epoch_supersessions
+           WHERE workspace_id = ? AND replication_epoch = ? AND stream_identity = ?`,
+        )
+        .get(
+          workspaceId,
+          presented.replicationEpoch,
+          presented.streamIdentity,
+        ) !== undefined;
+    if (coordinateWasSuperseded) return "epoch-superseded";
+    if (current.replicationEpoch !== presented.replicationEpoch) {
+      return "epoch-unknown";
+    }
+    return "stream-mismatch";
+  }
+
+  private enforceWorkspaceIdentityInTransaction(
+    workspaceId: string,
+    presented: WorkspaceSyncIdentity | null,
+  ): EnforceWorkspaceIdentityResult {
+    const row = this.db
+      .prepare(
+        `SELECT replication_epoch, stream_identity
+         FROM sync_relay_workspaces
+         WHERE workspace_id = ?`,
+      )
+      .get(workspaceId);
+    if (row === undefined) {
+      throw new Error("cannot enforce identity for an absent workspace");
+    }
+    const current = workspaceIdentityFromRow(row);
+    if (presented === null) {
+      return current === null ? "matched" : "identity-required";
+    }
+    if (current !== null) {
+      return this.classifyWorkspaceIdentity(workspaceId, current, presented);
+    }
+    this.db
+      .prepare(
+        `UPDATE sync_relay_workspaces
+         SET replication_epoch = ?, stream_identity = ?, epoch_log_floor = 0
+         WHERE workspace_id = ?`,
+      )
+      .run(presented.replicationEpoch, presented.streamIdentity, workspaceId);
+    return "claimed";
   }
 
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean {
@@ -695,7 +1074,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     workspaceId: string;
     originId: string;
     ops: SyncRelayLogInput[];
-    guard?: () => void;
+    guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -703,7 +1082,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       // comment): BEGIN IMMEDIATE serializes writers, so a revoke committed
       // by another writer is either already visible here (guard throws, batch
       // rolls back) or must wait for this COMMIT — there is no in-between.
-      input.guard?.();
+      input.guard?.({
+        enforceWorkspaceIdentity: (identity) =>
+          this.enforceWorkspaceIdentityInTransaction(input.workspaceId, identity),
+      });
       let inserted = 0;
       let skipped = 0;
       let addedLogBytes = 0;
@@ -844,11 +1226,28 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
          WHERE workspace_id = ?`,
       )
       .get(workspaceId);
+    // Epoch supersessions are append-only identity history. Count both
+    // identifier payloads so repeated rotations cannot grow the relay DB
+    // outside the same per-workspace cap as log/blob/key-envelope history.
+    const supersessionRow = this.db
+      .prepare(
+        `SELECT COALESCE(
+           SUM(
+             length(CAST(replication_epoch AS BLOB)) +
+             length(CAST(stream_identity AS BLOB))
+           ),
+           0
+         ) AS bytes
+         FROM sync_relay_epoch_supersessions
+         WHERE workspace_id = ?`,
+      )
+      .get(workspaceId);
     return (
       Number(blobRow?.bytes ?? 0) +
       Number(logRow?.bytes ?? 0) +
       Number(envelopeRow?.bytes ?? 0) +
-      Number(envelopeHistoryRow?.bytes ?? 0)
+      Number(envelopeHistoryRow?.bytes ?? 0) +
+      Number(supersessionRow?.bytes ?? 0)
     );
   }
 
@@ -1090,6 +1489,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
 function sha256HexUtf8(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+function workspaceIdentityFromRow(
+  row: Record<string, unknown>,
+): WorkspaceSyncIdentity | null {
+  const replicationEpoch = row.replication_epoch;
+  const streamIdentity = row.stream_identity;
+  if (replicationEpoch == null && streamIdentity == null) return null;
+  if (typeof replicationEpoch !== "string" || typeof streamIdentity !== "string") {
+    throw new Error("sync relay workspace identity is partially populated");
+  }
+  return { replicationEpoch, streamIdentity };
 }
 
 function asObject(value: unknown): Record<string, unknown> | null {
