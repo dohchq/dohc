@@ -465,6 +465,380 @@ CREATE INDEX idx_ydoc_snapshots_doc_uptoseq
 /// The `id` of the R11a Y.Doc durable-cache migration.
 pub(crate) const YDOC_MIGRATION_ID: &str = "v1-ydoc";
 
+/// Ordinal 3 (R09 chats domain, appended via the migration-append capability
+/// contract). Adds the chat surface tables — threads/channels/messages,
+/// reactions/decisions/attachments/mentions, read-state, follows/personal-feed/
+/// bookmarks, and the durable dispatch ledger + agent-run records — whose
+/// logical shapes match the TS engine's chat cluster (`engineDbSchema.ts`
+/// `CHAT_CHANNEL_TABLES_DDL` / `CHAT_PHASE_ONE_DDL` / `CHAT_FEED_DDL` /
+/// `CHAT_BOOKMARK_DDL` / `AGENT_DISPATCH_DDL` + the `chat_threads` /
+/// `chat_messages` core). The TS store grows these across a create-path plus
+/// lazy `ensureNullableColumn` upgrades (`chat_threads.channel_id`,
+/// `chat_messages.author_user_id`/`parent_message_id`/`origin`,
+/// `chat_attachments.heading_*`, `chat_bookmark_outbox.projection_object_id`);
+/// the fresh Rust baseline folds every such column into the initial shape so a
+/// day-one Rust store equals a fully-upgraded TS store.
+///
+/// `STRICT` + `INTEGER` timestamps follow the R04 baseline convention. TS stores
+/// SOME chat timestamps as `REAL` (`chat_threads`/`chat_channels`/read-state/
+/// reactions/follows/feed/bookmarks) and some as `INTEGER`
+/// (`chat_decisions`/`chat_mentions`/`chat_dispatch_*`/`agent_run_records`); the
+/// affinity is an engine-internal detail (semantics matrix §2.4). Cross-engine
+/// parity rides logical row shape and content-addressed identity (channel wire
+/// ids, sha256 projection paths), not the SQLite column affinity — the same
+/// `REAL`→`INTEGER` rationale R08/R11a recorded for their timestamp columns.
+///
+/// CHECK constraints mirror the TS schema's fail-closed enum columns
+/// (`chat_decisions.state`, `chat_attachments.target_kind`, `chat_follows`
+/// target-kind/state, `chat_bookmarks` target-kind/mode/state,
+/// `chat_bookmark_outbox.projection_state`, `chat_dispatch_ledger.state`) so a
+/// corrupt/forward value can never be stored and later silently misread.
+///
+/// The trailing block is the deferred-chat-parent repair (BEHAVIOR_DELTA §D2 /
+/// `engineDbSchema.ts:779-837`): it moves replicated replies whose parent has
+/// not arrived into `chat_pending_message_parents` and NULLs cross-thread/self
+/// parent links. Because this migration CREATEs `chat_messages` empty in the
+/// same transaction immediately before, the repair is ALWAYS a no-op on a Rust
+/// store (and a foreign/TS `engine.db` never reaches this runner — the v1-vs-v2
+/// fingerprint fence in `schema.rs` rejects it before any migration runs). It is
+/// folded in as a keyed, checksum-gated record of the exact TS repair SQL — the
+/// semantic contract R10 replicated-apply and any future TS→Rust importer must
+/// converge to — not a live data-rewrite path. Kept over dropping it so the
+/// repair semantics live in one auditable place next to the tables they touch.
+const V1_CHATS_DDL: &str = "\
+-- Channels + per-thread read cursors (WS-E). Durable rows key on channel_id;
+-- the slug UNIQUE index is a collision-safe lookup alias per workspace.
+CREATE TABLE chat_channels (
+    workspace_id  TEXT    NOT NULL,
+    channel_id    TEXT    NOT NULL,
+    name          TEXT    NOT NULL,
+    slug          TEXT    NOT NULL,
+    kind          TEXT    NOT NULL CHECK (kind IN ('channel', 'dm', 'agent')),
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, channel_id)
+) STRICT;
+CREATE UNIQUE INDEX idx_chat_channels_slug ON chat_channels(workspace_id, slug);
+
+CREATE TABLE chat_thread_read_state (
+    workspace_id       TEXT    NOT NULL,
+    thread_id          TEXT    NOT NULL,
+    last_read_sequence INTEGER NOT NULL,
+    revision           INTEGER NOT NULL,
+    updated_at_ms      INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, thread_id)
+) STRICT;
+
+-- (workspace, wire_id) -> channel_id. A locally created channel's wire id is
+-- its own channel_id; the auto-created 'general'/'My agent' channels use
+-- deterministic well-known wire ids so independently minted rows converge.
+CREATE TABLE chat_channel_wire_ids (
+    workspace_id TEXT NOT NULL,
+    wire_id      TEXT NOT NULL,
+    channel_id   TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, wire_id)
+) STRICT;
+CREATE INDEX idx_chat_channel_wire_ids_channel
+    ON chat_channel_wire_ids(workspace_id, channel_id);
+
+-- Provenance for channels synthesized by a thread that replicated before its
+-- channel-create op; the authoritative create later replaces the guess in place.
+CREATE TABLE chat_channel_placeholders (
+    workspace_id TEXT NOT NULL,
+    channel_id   TEXT NOT NULL,
+    wire_id      TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, channel_id),
+    UNIQUE (workspace_id, wire_id)
+) STRICT;
+
+CREATE TABLE chat_threads (
+    workspace_id     TEXT    NOT NULL,
+    thread_id        TEXT    NOT NULL,
+    title            TEXT    NOT NULL,
+    created_at_ms    INTEGER NOT NULL,
+    updated_at_ms    INTEGER NOT NULL,
+    linked_object_id TEXT,
+    linked_path_hint TEXT,
+    linked_at_ms     INTEGER,
+    channel_id       TEXT,
+    PRIMARY KEY (workspace_id, thread_id)
+) STRICT;
+CREATE INDEX idx_chat_threads_workspace_created
+    ON chat_threads(workspace_id, created_at_ms, thread_id);
+CREATE INDEX idx_chat_threads_linked_file
+    ON chat_threads(workspace_id, linked_object_id, created_at_ms, thread_id);
+CREATE INDEX idx_chat_threads_channel
+    ON chat_threads(workspace_id, channel_id, updated_at_ms, thread_id);
+
+CREATE TABLE chat_messages (
+    workspace_id        TEXT    NOT NULL,
+    thread_id           TEXT    NOT NULL,
+    message_order       INTEGER NOT NULL,
+    message_id          TEXT    NOT NULL,
+    author_kind         TEXT    NOT NULL CHECK (author_kind IN ('human', 'agent')),
+    author_display_name TEXT    NOT NULL,
+    author_user_id      TEXT,
+    parent_message_id   TEXT,
+    origin              TEXT,
+    body                TEXT    NOT NULL,
+    created_at_ms       INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, message_id),
+    UNIQUE (workspace_id, thread_id, message_order),
+    FOREIGN KEY (workspace_id, thread_id)
+      REFERENCES chat_threads(workspace_id, thread_id) ON DELETE CASCADE
+) STRICT;
+CREATE INDEX idx_chat_messages_thread_order
+    ON chat_messages(workspace_id, thread_id, message_order);
+CREATE INDEX idx_chat_messages_thread_created
+    ON chat_messages(workspace_id, thread_id, created_at_ms, message_id);
+CREATE INDEX idx_chat_messages_workspace_created
+    ON chat_messages(workspace_id, created_at_ms, message_id);
+CREATE INDEX idx_chat_messages_author_feed
+    ON chat_messages(workspace_id, author_user_id, author_kind, created_at_ms DESC, message_id DESC);
+
+-- Reactions (WS-MU-C2): one LWW register per (message, emoji, author) cell.
+-- Tombstones ('removed') retained; reads filter state='added'. No FK: a
+-- cross-origin reaction op can precede the message it targets.
+CREATE TABLE chat_reactions (
+    workspace_id        TEXT    NOT NULL,
+    reaction_id         TEXT    NOT NULL,
+    thread_id           TEXT    NOT NULL,
+    message_id          TEXT    NOT NULL,
+    emoji               TEXT    NOT NULL,
+    author_id           TEXT    NOT NULL,
+    author_kind         TEXT    NOT NULL CHECK (author_kind IN ('human', 'agent')),
+    author_display_name TEXT    NOT NULL,
+    state               TEXT    NOT NULL CHECK (state IN ('added', 'removed')),
+    at_ms               INTEGER NOT NULL,
+    origin_id           TEXT    NOT NULL,
+    origin_seq          INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, message_id, emoji, author_id)
+) STRICT;
+CREATE INDEX idx_chat_reactions_thread
+    ON chat_reactions(workspace_id, thread_id, message_id);
+
+CREATE TABLE chat_decisions (
+    workspace_id           TEXT    NOT NULL,
+    thread_id              TEXT    NOT NULL,
+    message_id             TEXT    NOT NULL,
+    state                  TEXT    NOT NULL CHECK (state IN ('open', 'resolved')),
+    resolved_by_message_id TEXT,
+    at_ms                  INTEGER NOT NULL,
+    origin_id              TEXT    NOT NULL,
+    origin_seq             INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, message_id)
+) STRICT;
+CREATE INDEX idx_chat_decisions_thread_state
+    ON chat_decisions(workspace_id, thread_id, state, message_id);
+
+CREATE TABLE chat_attachments (
+    workspace_id       TEXT    NOT NULL,
+    attachment_id      TEXT    NOT NULL,
+    thread_id          TEXT    NOT NULL,
+    message_id         TEXT    NOT NULL,
+    target_kind        TEXT    NOT NULL CHECK (target_kind = 'file'),
+    object_id          TEXT,
+    path_hint          TEXT,
+    heading_text       TEXT,
+    heading_anchor     TEXT,
+    heading_occurrence INTEGER,
+    created_at_ms      INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, attachment_id)
+) STRICT;
+CREATE INDEX idx_chat_attachments_thread_message
+    ON chat_attachments(workspace_id, thread_id, message_id, created_at_ms, attachment_id);
+CREATE INDEX idx_chat_attachments_file_object
+    ON chat_attachments(workspace_id, object_id, created_at_ms DESC, attachment_id DESC);
+CREATE INDEX idx_chat_attachments_file_path
+    ON chat_attachments(workspace_id, path_hint, created_at_ms DESC, attachment_id DESC);
+
+CREATE TABLE chat_pending_message_parents (
+    workspace_id      TEXT NOT NULL,
+    child_message_id  TEXT NOT NULL,
+    thread_id         TEXT NOT NULL,
+    parent_message_id TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, child_message_id)
+) STRICT;
+CREATE INDEX idx_chat_pending_message_parents_parent
+    ON chat_pending_message_parents(workspace_id, thread_id, parent_message_id);
+
+CREATE TABLE chat_agent_read_state (
+    workspace_id            TEXT    NOT NULL,
+    thread_id               TEXT    NOT NULL,
+    last_read_created_at_ms INTEGER NOT NULL,
+    last_read_message_id    TEXT    NOT NULL,
+    revision                INTEGER NOT NULL,
+    updated_at_ms           INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, thread_id)
+) STRICT;
+
+CREATE TABLE chat_mentions (
+    workspace_id  TEXT    NOT NULL,
+    thread_id     TEXT    NOT NULL,
+    message_id    TEXT    NOT NULL,
+    handle        TEXT    NOT NULL,
+    author_kind   TEXT    NOT NULL CHECK (author_kind IN ('human', 'agent')),
+    created_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, message_id, handle)
+) STRICT;
+CREATE INDEX idx_chat_mentions_handle
+    ON chat_mentions(workspace_id, handle, created_at_ms, message_id);
+
+-- Receiver-owned personal Feed state (LWW registers with retained tombstones).
+CREATE TABLE chat_follows (
+    workspace_id  TEXT    NOT NULL,
+    owner_user_id TEXT    NOT NULL,
+    target_kind   TEXT    NOT NULL CHECK (target_kind IN ('person', 'agent', 'channel', 'thread')),
+    target_id     TEXT    NOT NULL,
+    state         TEXT    NOT NULL CHECK (state IN ('following', 'unfollowed')),
+    updated_at_ms INTEGER NOT NULL,
+    origin_id     TEXT    NOT NULL,
+    origin_seq    INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, owner_user_id, target_kind, target_id)
+) STRICT;
+CREATE INDEX idx_chat_follows_active
+    ON chat_follows(workspace_id, owner_user_id, state, target_kind, target_id);
+
+CREATE TABLE chat_feed_read_state (
+    workspace_id            TEXT    NOT NULL,
+    owner_user_id           TEXT    NOT NULL,
+    last_seen_created_at_ms INTEGER NOT NULL,
+    last_seen_message_id    TEXT    NOT NULL,
+    updated_at_ms           INTEGER NOT NULL,
+    origin_id               TEXT    NOT NULL,
+    origin_seq              INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, owner_user_id)
+) STRICT;
+
+CREATE TABLE chat_bookmarks (
+    workspace_id     TEXT    NOT NULL,
+    bookmark_id      TEXT    NOT NULL,
+    owner_user_id    TEXT    NOT NULL,
+    target_kind      TEXT    NOT NULL CHECK (target_kind IN ('message', 'thread')),
+    target_id        TEXT    NOT NULL,
+    thread_id        TEXT    NOT NULL,
+    message_id       TEXT,
+    mode             TEXT    NOT NULL CHECK (mode IN ('live', 'snapshot')),
+    destination_path TEXT    NOT NULL,
+    state            TEXT    NOT NULL CHECK (state IN ('active', 'archived')),
+    created_at_ms    INTEGER NOT NULL,
+    updated_at_ms    INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, bookmark_id),
+    UNIQUE (workspace_id, owner_user_id, target_kind, target_id)
+) STRICT;
+CREATE INDEX idx_chat_bookmarks_owner_state
+    ON chat_bookmarks(workspace_id, owner_user_id, state, updated_at_ms DESC, bookmark_id);
+CREATE INDEX idx_chat_bookmarks_live_thread
+    ON chat_bookmarks(workspace_id, thread_id, mode, state);
+
+CREATE TABLE chat_bookmark_outbox (
+    workspace_id         TEXT    NOT NULL,
+    bookmark_id          TEXT    NOT NULL,
+    generation           INTEGER NOT NULL,
+    projected_generation INTEGER NOT NULL DEFAULT 0,
+    projection_state     TEXT    NOT NULL CHECK (projection_state IN ('pending', 'ready', 'failed', 'stale')),
+    last_projected_at_ms INTEGER,
+    projection_object_id TEXT,
+    failure_reason       TEXT,
+    updated_at_ms        INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, bookmark_id)
+) STRICT;
+CREATE INDEX idx_chat_bookmark_outbox_pending
+    ON chat_bookmark_outbox(workspace_id, projection_state, updated_at_ms, bookmark_id);
+
+-- Durable agent-dispatch ledger + private run records (single-writer
+-- replacement for the desktop's raw second connection, STATE_OWNERSHIP DELETED).
+CREATE TABLE chat_dispatch_ledger (
+    workspace_id       TEXT    NOT NULL,
+    trigger_message_id TEXT    NOT NULL,
+    thread_id          TEXT    NOT NULL,
+    state              TEXT    NOT NULL CHECK (state IN ('pending', 'running', 'done', 'failed')),
+    run_id             TEXT,
+    failure_reason     TEXT,
+    attempt_count      INTEGER NOT NULL DEFAULT 0,
+    created_at_ms      INTEGER NOT NULL,
+    updated_at_ms      INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, trigger_message_id)
+) STRICT;
+CREATE INDEX idx_chat_dispatch_ledger_state
+    ON chat_dispatch_ledger(workspace_id, state, created_at_ms, trigger_message_id);
+
+CREATE TABLE chat_dispatch_scan_cursor (
+    workspace_id      TEXT    NOT NULL,
+    max_created_at_ms INTEGER NOT NULL,
+    updated_at_ms     INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id)
+) STRICT;
+
+CREATE TABLE agent_run_records (
+    workspace_id        TEXT    NOT NULL,
+    run_id              TEXT    NOT NULL,
+    thread_id           TEXT    NOT NULL,
+    trigger_message_id  TEXT    NOT NULL,
+    command             TEXT    NOT NULL,
+    started_at_ms       INTEGER NOT NULL,
+    ended_at_ms         INTEGER,
+    exit_code           INTEGER,
+    failure_reason      TEXT,
+    log_path            TEXT,
+    failure_note_posted INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (workspace_id, run_id)
+) STRICT;
+CREATE INDEX idx_agent_run_records_thread_started
+    ON agent_run_records(workspace_id, thread_id, started_at_ms);
+CREATE UNIQUE INDEX idx_agent_run_records_run_id ON agent_run_records(run_id);
+
+-- Local-only provenance from agent-authored chat reports to their private
+-- runner trace. Deliberately absent from every replication/projection/export.
+CREATE TABLE run_message_links (
+    workspace_id TEXT NOT NULL,
+    message_id   TEXT NOT NULL,
+    run_id       TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, message_id)
+) STRICT;
+CREATE INDEX idx_run_message_links_run
+    ON run_message_links(workspace_id, run_id, message_id);
+
+CREATE TABLE chat_dispatch_pause (
+    workspace_id  TEXT    NOT NULL,
+    thread_id     TEXT    NOT NULL,
+    paused        INTEGER NOT NULL,
+    reason        TEXT,
+    updated_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, thread_id)
+) STRICT;
+
+-- Deferred-chat-parent repair (BEHAVIOR_DELTA §D2). No-op on a fresh store;
+-- keyed to the `v1-chats` ledger row so it runs exactly once per database.
+INSERT OR IGNORE INTO chat_pending_message_parents (
+    workspace_id, child_message_id, thread_id, parent_message_id
+)
+SELECT child.workspace_id, child.message_id, child.thread_id, child.parent_message_id
+FROM chat_messages child
+WHERE child.parent_message_id IS NOT NULL
+  AND child.parent_message_id <> child.message_id
+  AND NOT EXISTS (
+    SELECT 1 FROM chat_messages parent
+    WHERE parent.workspace_id = child.workspace_id
+      AND parent.message_id = child.parent_message_id
+  );
+UPDATE chat_messages AS child
+SET parent_message_id = NULL
+WHERE child.parent_message_id IS NOT NULL
+  AND (
+    child.parent_message_id = child.message_id
+    OR NOT EXISTS (
+      SELECT 1 FROM chat_messages parent
+      WHERE parent.workspace_id = child.workspace_id
+        AND parent.thread_id = child.thread_id
+        AND parent.message_id = child.parent_message_id
+    )
+  );
+";
+
+/// The `id` of the R09 chats-domain migration.
+pub(crate) const CHATS_MIGRATION_ID: &str = "v1-chats";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -487,6 +861,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: YDOC_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_YDOC_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 3,
+        id: CHATS_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_CHATS_DDL,
         sets_user_version: None,
     },
 ];
@@ -796,11 +1177,11 @@ mod tests {
     // waiting for a real future schema change.
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     fn two_migrations() -> Vec<Migration> {
-        // The frozen list now ends at ordinal 2 (R11a Y.Doc), so a synthetic
-        // probe appends at ordinal 3.
+        // The frozen list now ends at ordinal 3 (R09 chats), so a synthetic
+        // probe appends at ordinal 4.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 3,
+            ordinal: 4,
             id: "r04-probe",
             kind: MigrationKind::Transactional,
             sql: M2_SQL,
@@ -809,7 +1190,7 @@ mod tests {
         v
     }
 
-    /// Count of frozen baseline migrations (baseline + secrets + ydoc = 3).
+    /// Count of frozen baseline migrations (baseline + secrets + ydoc + chats).
     const BASELINE_COUNT: u32 = BASELINE_MIGRATIONS.len() as u32;
 
     #[test]
@@ -914,10 +1295,11 @@ mod tests {
 
         // Resume: baseline is skipped (idempotent); the between-steps crash
         // fired before the secrets migration (ordinal 1), so resume applies the
-        // secrets migration (1), the Y.Doc migration (2), AND the probe (3).
+        // secrets migration (1), the Y.Doc migration (2), the chats migration
+        // (3), AND the probe (4).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 3 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 4 });
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -1014,7 +1396,7 @@ mod tests {
         }
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 3,
+            ordinal: 4,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
@@ -1032,7 +1414,7 @@ mod tests {
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();
         changed.push(Migration {
-            ordinal: 3,
+            ordinal: 4,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
@@ -1052,7 +1434,7 @@ mod tests {
         // baseline first (transactional), then a non-transactional idempotent step.
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 3,
+            ordinal: 4,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",

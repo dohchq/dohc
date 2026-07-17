@@ -512,3 +512,48 @@ safe/workspace-relative paths and treats routed paths as secret.
 - `base64::forgiving_decode` reproduces Node `Buffer`'s `=`-terminator semantics
   exactly (stops at the first `=`), so the key-file parser neither accepts a
   malformed file Node rejects nor rejects one it accepts.
+
+## 10. R09 (chats domain) — approved deltas & documented divergences
+
+### 10.1 DELIBERATE DIVERGENCE: `decode_feed_cursor` is stricter (fail-closed) on non-engine-minted cursors
+
+`encode_feed_cursor` is byte-identical to the TS `encodeFeedCursor`
+(`Buffer.from(JSON.stringify([createdAtMs, messageId]), "utf8").toString("base64url")`),
+and every cursor this engine EMITS round-trips byte-exact on both sides (pinned
+by `crates/dohc-engine-domain/tests/chats.rs::feed_cursor_encode_matches_ts_and_ts_cursor_decodes`).
+`decode_feed_cursor` (matrix 4.8) deliberately tightens acceptance of
+NON-engine-minted (adversarial client) cursors in two ways: (1) `createdAtMs`
+must be an integral `i64` (TS accepts any finite JS number — but the feed only
+ever emits integral coordinates, so a fractional/out-of-range value was never a
+cursor this engine minted); (2) the message-id length cap counts Unicode scalar
+values (`chars().count()`) rather than JS UTF-16 units, so an astral string near
+the 256 boundary can be accepted on one engine and rejected on the other. Both
+directions are Rust-stricter-fail-closed, which is the safe direction for
+untrusted input; the store already fails closed as `invalid-follow-target` on any
+decode/shape violation. **R10 / the differential harness must treat this as
+intended, not a bug** — it is documented in `decode_feed_cursor`'s rustdoc.
+
+### 10.2 PARITY (not a delta): `normalize_body` matches JS `String.prototype.trimEnd`
+
+`normalize_body` trims the ECMAScript trimEnd whitespace set, NOT Rust's
+`char::is_whitespace` (Unicode `White_Space`). The two differ at exactly two code
+points: JS trims U+FEFF (ZWNBSP, not `White_Space`) and does NOT trim U+0085
+(NEL, which IS `White_Space`). Using `char::is_whitespace` would store/project a
+body ending in ZWNBSP differently from TS. `is_js_trim_ws` encodes the JS set so
+normalized bodies are byte-identical across engines (regression:
+`normalize_body_matches_js_trimend_including_zwnbsp`).
+
+### 10.3 SCOPED LIMIT: durable dispatch is a single-writer state machine with a startup reclaim
+
+R09 ships the LOCAL dispatch state machine (`enqueue`/`claim`/`complete`/`fail`
++ `reclaim_running_dispatches`), the single-writer replacement for the deleted
+`desktopAgentDispatchStore` raw second connection. Liveness is guaranteed by:
+`complete_dispatch`/`fail_dispatch` transition `running -> done/failed` (unblocking
+the workspace claim guard), and `reclaim_running_dispatches` is the startup reaper
+— any `running` row observed at call time belongs to a crashed process (the live
+run would hold the writer), so it is marked ended-with-failure and its trigger
+requeued to `pending` when `attempt_count < max_attempts` (bounded retry, TS
+`requeueFailedTrigger` `< 2`), else left terminally `failed`. There is no
+wall-clock heartbeat/lease (the single-writer invariant makes one unnecessary);
+if a future multi-worker model lands, a lease column would replace the
+"any-running-is-crashed" assumption.
