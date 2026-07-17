@@ -2,8 +2,8 @@ mod common;
 
 use common::Scratch;
 use dohc_engine_files::{
-    CancellationToken, CaptureError, CaptureOp, CaptureSink, IngestReason, ReconcileController,
-    ReconcileRun, ScanBounds, Scanner, apply_then_ack,
+    CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesError, IngestReason,
+    ReconcileController, ReconcileRun, ScanBounds, Scanner, apply_then_ack,
 };
 use dohc_engine_storage::NoFaults;
 use std::collections::{BTreeMap, BTreeSet};
@@ -87,6 +87,83 @@ fn failed_apply_keeps_prior_manifest_entry_and_continues_the_batch() {
             .expect("retry prepare"),
     );
     assert!(matches!(retry.ops.as_slice(), [CaptureOp::Ingest { path, .. }] if path == "a.md"));
+}
+
+#[test]
+fn stale_retire_plan_is_refused_before_any_op_reaches_the_sink() {
+    let ws = Scratch::new();
+    ws.write("p.md", b"live");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let baseline = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("baseline prepare"),
+    );
+    let mut sink = IdempotentSink::default();
+    apply_then_ack(&mut controller, &baseline, &mut sink, &NoFaults).expect("baseline ack");
+
+    ws.remove("p.md");
+    let stale_retire = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("retire prepare"),
+    );
+    assert!(matches!(
+        stale_retire.ops.as_slice(),
+        [CaptureOp::Retire { path }] if path == "p.md"
+    ));
+
+    sink.fail.insert("p.md".to_owned());
+    apply_then_ack(&mut controller, &stale_retire, &mut sink, &NoFaults)
+        .expect("failed retire is acknowledged without dropping manifest state");
+    ws.write("p.md", b"live");
+    sink.fail.clear();
+    let intervening = completed(
+        controller
+            .reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
+            .expect("intervening prepare"),
+    );
+    assert!(intervening.is_empty());
+    apply_then_ack(&mut controller, &intervening, &mut sink, &NoFaults).expect("intervening ack");
+
+    sink.calls.clear();
+    let err = apply_then_ack(&mut controller, &stale_retire, &mut sink, &NoFaults)
+        .expect_err("stale destructive plan must fail before apply");
+    assert!(matches!(err, FilesError::StaleReconcilePlan));
+    assert!(
+        sink.calls.is_empty(),
+        "stale retire must never reach the sink"
+    );
+    assert!(controller.tracks_path("p.md"));
+    assert_eq!(controller.tracked_len(), 1);
+    assert!(!controller.is_dirty());
+}
+
+#[test]
+fn second_reconcile_is_refused_while_a_plan_is_outstanding() {
+    let ws = Scratch::new();
+    ws.write("a.md", b"a");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let plan = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("first prepare"),
+    );
+
+    let err = controller
+        .reconcile(&scanner, ws.path(), &CancellationToken::new())
+        .expect_err("a second live plan must not be handed out");
+    assert!(matches!(err, FilesError::StaleReconcilePlan));
+
+    apply_then_ack(
+        &mut controller,
+        &plan,
+        &mut IdempotentSink::default(),
+        &NoFaults,
+    )
+    .expect("original plan remains acknowledgeable");
 }
 
 #[cfg(feature = "fault-injection")]

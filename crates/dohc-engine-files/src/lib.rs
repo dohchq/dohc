@@ -58,10 +58,11 @@ pub use materialize::{
 };
 pub use policy::{
     PathClassification, classify_engine_file_path, classify_engine_file_path_for_read,
+    classify_engine_file_path_normalized,
 };
 pub use reconcile::{
-    AbsenceProbe, CaptureOp, IngestReason, ReconcileController, ReconcilePlan, ReconcileRun,
-    ScanGeneration, StdAbsenceProbe,
+    AbsenceProbe, CaptureOp, DEGRADED_RESCAN_BACKOFF, IngestReason, MAX_QUARANTINED_PATHS,
+    ReconcileController, ReconcilePlan, ReconcileRun, ScanGeneration, StdAbsenceProbe,
 };
 pub use scan::{
     FailedPath, FileEntry, ScanIoFaultInjector, ScanIoOperation, ScanListing, ScanOutcome, Scanner,

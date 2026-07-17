@@ -18,6 +18,8 @@ use crate::{CancellationToken, FilesError, FilesHandle, ReconcileRun};
 use notify::{RecursiveMode, Watcher};
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -119,6 +121,7 @@ pub struct WatchStart {
 /// no notification can arrive after stop returns.
 pub struct NativeWatcher {
     stop_tx: SyncSender<ThreadMessage>,
+    degraded: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -133,16 +136,28 @@ impl NativeWatcher {
     ) -> Result<WatchStart, FilesError> {
         let (message_tx, message_rx) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
         let stop_tx = message_tx.clone();
+        let degraded = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let thread_handle = handle.clone();
+        let thread_degraded = Arc::clone(&degraded);
         let worker = std::thread::Builder::new()
             .name("dohc-native-watcher".to_owned())
-            .spawn(move || watcher_thread(root, thread_handle, message_rx, message_tx, ready_tx))
+            .spawn(move || {
+                watcher_thread(
+                    root,
+                    thread_handle,
+                    message_rx,
+                    message_tx,
+                    thread_degraded,
+                    ready_tx,
+                );
+            })
             .map_err(|_| FilesError::WatcherUnavailable {
                 reason: "could not spawn watcher thread",
             })?;
         let mut watcher = NativeWatcher {
             stop_tx,
+            degraded,
             worker: Some(worker),
         };
         match ready_rx.await {
@@ -182,6 +197,12 @@ impl NativeWatcher {
             reason: "watcher thread panicked",
         })
     }
+
+    /// Whether the notify backend has reported an error since startup. Sticky
+    /// so a supervisor can observe watcher loss even after a rescan completes.
+    pub fn is_degraded(&self) -> bool {
+        self.degraded.load(Ordering::Acquire)
+    }
 }
 
 impl Drop for NativeWatcher {
@@ -195,11 +216,19 @@ fn watcher_thread(
     handle: FilesHandle,
     rx: Receiver<ThreadMessage>,
     callback_tx: SyncSender<ThreadMessage>,
+    degraded: Arc<AtomicBool>,
     ready: tokio::sync::oneshot::Sender<Result<(), FilesError>>,
 ) {
     let config = notify::Config::default().with_follow_symlinks(false);
+    let callback_handle = handle.clone();
     let mut watcher = match notify::RecommendedWatcher::new(
-        move |_event| {
+        move |event: Result<notify::Event, notify::Error>| {
+            if event.is_err() {
+                degraded.store(true, Ordering::Release);
+                callback_handle.notify_overflow();
+                // TODO(R14 robustness): re-attach the native watch after a
+                // backend error or watched-root replacement.
+            }
             // A full queue already contains abundant evidence of a change, so
             // further callbacks coalesce without allocating unbounded memory.
             let _ = callback_tx.try_send(ThreadMessage::Event);

@@ -131,7 +131,9 @@ impl<'a> VersionedTextStore<'a> {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.version_id, "version_id")?;
         non_empty(&input.moment_id, "moment_id")?;
-        validate_plaintext_storable_path(&input.path)?;
+        let mut normalized_input = input.clone();
+        normalized_input.path = validate_plaintext_storable_path(&input.path)?;
+        let input = &normalized_input;
         validate_text(&input.text)?;
 
         // `object_id` is part of the durable result for a first write, so it is
@@ -366,9 +368,9 @@ impl<'a> VersionedTextStore<'a> {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.version_id, "version_id")?;
         non_empty(&input.moment_id, "moment_id")?;
-        // TS parity: delete addresses an existing alias and does not introduce
-        // a new plaintext path, so it intentionally keeps the plain path gate.
-        validate_path(&input.path)?;
+        let mut normalized_input = input.clone();
+        normalized_input.path = validate_addressable_plaintext_path(&input.path)?;
+        let input = &normalized_input;
 
         let ws = &input.workspace_id;
         let (object, before) = self.store.read_with(|conn| {
@@ -465,11 +467,10 @@ impl<'a> VersionedTextStore<'a> {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.version_id, "version_id")?;
         non_empty(&input.moment_id, "moment_id")?;
-        validate_path(&input.from_path)?;
-        // A rename destination introduces a path just like a write. R07 closes
-        // the carried R05 obligation by routing it through the secret floor;
-        // the source remains on plain validation exactly like the TS store.
-        validate_plaintext_storable_path(&input.to_path)?;
+        let mut normalized_input = input.clone();
+        normalized_input.from_path = validate_addressable_plaintext_path(&input.from_path)?;
+        normalized_input.to_path = validate_plaintext_storable_path(&input.to_path)?;
+        let input = &normalized_input;
         if input.from_path == input.to_path {
             return Err(DomainError::InvalidPath {
                 reason: "rename source and destination must differ",
@@ -593,9 +594,9 @@ impl<'a> VersionedTextStore<'a> {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.version_id, "version_id")?;
         non_empty(&input.mutation_moment_id, "moment_id")?;
-        // TS parity: rollback addresses a prior durable mutation and never
-        // passes through normalizePlaintextStorablePath.
-        validate_path(&input.path)?;
+        let mut normalized_input = input.clone();
+        normalized_input.path = validate_addressable_plaintext_path(&input.path)?;
+        let input = &normalized_input;
 
         let ws = &input.workspace_id;
         let prep = self.store.read_with(|conn| {
@@ -705,11 +706,12 @@ impl<'a> VersionedTextStore<'a> {
         version_id: &str,
         path: &str,
     ) -> Result<Option<TextSnapshot>, DomainError> {
+        let path = validate_addressable_plaintext_path(path)?;
         self.store.read_with(|conn| {
             if !version_exists(conn, workspace_id, version_id)? {
                 return Err(DomainError::VersionNotFound);
             }
-            let Some(object_id) = alias_object_id(conn, workspace_id, version_id, path)? else {
+            let Some(object_id) = alias_object_id(conn, workspace_id, version_id, &path)? else {
                 return Ok(None);
             };
             get_snapshot(conn, workspace_id, version_id, &object_id)
@@ -1229,20 +1231,39 @@ pub(crate) fn validate_path(path: &str) -> Result<(), DomainError> {
     Ok(())
 }
 
-/// Store-door guard for operations that can introduce a plaintext alias. The
-/// domain's legacy structural validation stays first for stable error behavior;
-/// R07's platform-independent classifier then prevents secret content from
-/// entering plaintext snapshots or moments.
-fn validate_plaintext_storable_path(path: &str) -> Result<(), DomainError> {
-    validate_path(path)?;
-    if dohc_engine_files::policy::classify_engine_file_path(path)
-        == dohc_engine_files::policy::PathClassification::Secret
-    {
+/// Store-door guard for operations that introduce a plaintext alias. Only a
+/// tracked classification is eligible, and the returned key is canonical.
+fn validate_plaintext_storable_path(path: &str) -> Result<String, DomainError> {
+    use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
+
+    let (classification, normalized) = classify_engine_file_path_normalized(path);
+    if classification != PathClassification::Tracked {
         return Err(DomainError::InvalidPath {
-            reason: "secret-classified path cannot be stored as plaintext; secret-backed files go through the secret file store",
+            reason: "path is not eligible for plaintext storage",
         });
     }
-    Ok(())
+    validate_path(path)?;
+    normalized.ok_or(DomainError::InvalidPath {
+        reason: "tracked path is missing its normalized form",
+    })
+}
+
+/// Normalize a path used only to address an existing plaintext alias. Secret
+/// paths are allowed so an absent/secret lookup reports absence honestly;
+/// structurally invalid, reserved, and ignored paths remain rejected.
+fn validate_addressable_plaintext_path(path: &str) -> Result<String, DomainError> {
+    use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
+
+    let (classification, normalized) = classify_engine_file_path_normalized(path);
+    if classification == PathClassification::Ignored {
+        return Err(DomainError::InvalidPath {
+            reason: "path is not addressable plaintext content",
+        });
+    }
+    validate_path(path)?;
+    normalized.ok_or(DomainError::InvalidPath {
+        reason: "addressable path is missing its normalized form",
+    })
 }
 
 fn validate_text(text: &str) -> Result<(), DomainError> {

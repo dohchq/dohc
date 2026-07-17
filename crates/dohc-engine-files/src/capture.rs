@@ -130,6 +130,7 @@ pub fn apply_then_ack(
     sink: &mut dyn CaptureSink,
     faults: &dyn FaultInjector,
 ) -> Result<CaptureApplyResult, FilesError> {
+    controller.ensure_plan_fresh(plan)?;
     let result = apply_reconcile_plan(plan, sink, faults);
     if result.completed() {
         controller.acknowledge_capture(plan, &result.applied_paths, &result.failed_applies)?;

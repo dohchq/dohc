@@ -8,9 +8,9 @@ mod common;
 
 use common::Scratch;
 use dohc_engine_files::{
-    AbsenceProbe, CancellationToken, CaptureError, CaptureOp, CaptureSink, IngestReason,
-    ReconcileController, ReconcileRun, ScanBounds, ScanIoFaultInjector, ScanIoOperation, Scanner,
-    StubWatchSource, WatchEvent, apply_then_ack,
+    AbsenceProbe, CancellationToken, CaptureError, CaptureOp, CaptureSink, DEGRADED_RESCAN_BACKOFF,
+    IngestReason, ReconcileController, ReconcileRun, ScanBounds, ScanIoFaultInjector,
+    ScanIoOperation, Scanner, StubWatchSource, WatchEvent, apply_then_ack,
 };
 use dohc_engine_storage::NoFaults;
 use std::io::ErrorKind;
@@ -400,6 +400,52 @@ fn unreadable_path_degrades_but_other_paths_capture_and_it_is_never_retired() {
         "last-known-good locked entry is retained"
     );
     assert!(ctrl.is_dirty(), "degraded pass stays retryable");
+}
+
+#[test]
+fn persistently_degraded_path_stops_forcing_perpetual_rescans() {
+    let ws = Scratch::new();
+    ws.write("locked.md", b"last known good");
+    ws.write("stable.md", b"stable");
+    let normal = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    reconcile_and_apply(&mut ctrl, &normal, ws.path(), &CancellationToken::new());
+
+    ws.write("readable.md", b"captured despite degradation");
+    let degraded_scanner = Scanner::new_with_io_faults(
+        ScanBounds::default(),
+        Arc::new(PermissionDeniedAt { path: "locked.md" }),
+    )
+    .expect("faulted scanner");
+    ctrl.mark_dirty();
+
+    for pass in 0..DEGRADED_RESCAN_BACKOFF {
+        let prepared = plan(
+            ctrl.reconcile_if_dirty(&degraded_scanner, ws.path(), &CancellationToken::new())
+                .expect("degraded reconcile"),
+        );
+        assert!(prepared.degraded);
+        assert!(retire_paths(&prepared).is_empty());
+        if pass == 0 {
+            assert_eq!(
+                ingest_paths(&prepared, IngestReason::Added),
+                ["readable.md"]
+            );
+        }
+        apply_then_ack(&mut ctrl, &prepared, &mut AcceptAll, &NoFaults)
+            .expect("degraded apply/ack");
+    }
+
+    assert!(!ctrl.is_dirty(), "identical degradation must back off");
+    assert!(ctrl.tracks_path("locked.md"));
+    assert!(ctrl.tracks_path("readable.md"));
+    assert_eq!(ctrl.tracked_len(), 3);
+    assert_eq!(ctrl.quarantined_paths(), ["locked.md"]);
+    assert!(matches!(
+        ctrl.reconcile_if_dirty(&degraded_scanner, ws.path(), &CancellationToken::new())
+            .expect("quarantined converge"),
+        ReconcileRun::Converged
+    ));
 }
 
 struct ReappearedProbe;

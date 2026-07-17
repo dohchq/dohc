@@ -12,7 +12,9 @@
 //! Only Check A lives here: absolute/traversal/NUL rejection, stable percent
 //! decoding, ignored/reserved segments, and reserved 8.3 aliases. NTFS ADS,
 //! device basenames, and generic 8.3-shaped materialization hazards are Check B
-//! concerns at actual disk-write sinks and are intentionally out of scope.
+//! concerns at actual disk-write sinks and are intentionally out of scope,
+//! except for the win32-only read ADS-colon floor matching
+//! `validateUserReadPath`.
 
 /// The security disposition of a workspace-relative file path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,15 +32,22 @@ const SHARED_WITH_ME_SHORT_NAME_STEM: &str = "SHARED";
 
 /// Classify a write/capture path using the platform-independent Check-A floor.
 pub fn classify_engine_file_path(path: &str) -> PathClassification {
+    classify_engine_file_path_normalized(path).0
+}
+
+/// Classify a write/capture path and return the canonical relative path used
+/// for durable keys. Invalid, reserved, and ignored paths have no normalized
+/// form because callers must not address or persist them.
+pub fn classify_engine_file_path_normalized(path: &str) -> (PathClassification, Option<String>) {
     let Some(normalized) = validate_workspace_path(path, ReservedMode::Write) else {
-        return PathClassification::Ignored;
+        return (PathClassification::Ignored, None);
     };
     // Kept as a separate check to mirror the TS classifier's own guard even
     // though validation also rejects ignored segments by default.
     if has_ignored_segment(path) {
-        return PathClassification::Ignored;
+        return (PathClassification::Ignored, None);
     }
-    classify_normalized_secret(&normalized)
+    (classify_normalized_secret(&normalized), Some(normalized))
 }
 
 /// Read-side classification. `shared-with-me` is readable, then classified
@@ -49,6 +58,10 @@ pub fn classify_engine_file_path_for_read(path: &str) -> PathClassification {
         return PathClassification::Ignored;
     };
     if has_ignored_segment(path) {
+        return PathClassification::Ignored;
+    }
+    #[cfg(windows)]
+    if candidate.split('/').any(|segment| segment.contains(':')) {
         return PathClassification::Ignored;
     }
     if is_shared_with_me_path(&candidate) {
@@ -395,6 +408,19 @@ mod tests {
         assert_cases_read(
             PathClassification::Ignored,
             &[".dohc/engine/engine.db", "../escape.md"],
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_side_rejects_win32_ads_colons_before_shared_mount_recursion() {
+        assert_cases_read(
+            PathClassification::Ignored,
+            &[
+                ".env::$DATA",
+                "notes/a:b.md",
+                "shared-with-me/alex/.env::$DATA",
+            ],
         );
     }
 

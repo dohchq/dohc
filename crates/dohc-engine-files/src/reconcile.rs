@@ -19,9 +19,16 @@ use crate::diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
 use crate::error::FilesError;
 use crate::scan::{ScanOutcome, Scanner};
 use std::collections::BTreeSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
+
+/// Identical degraded observations are retried this many times before the
+/// controller quarantines them and stops self-forcing immediate full scans.
+pub const DEGRADED_RESCAN_BACKOFF: usize = 3;
+/// Maximum number of degraded paths retained for diagnostics/quarantine.
+pub const MAX_QUARANTINED_PATHS: usize = 256;
 
 /// A monotonically increasing scan generation. Generation 0 is the pre-scan
 /// baseline; each completed apply/ack increments it.
@@ -86,6 +93,9 @@ pub struct ReconcilePlan {
     /// Callers mirror TS `onCaptureOutcome({ok:false})` while still applying
     /// every independent safe operation.
     pub degraded: bool,
+    /// Paths whose observation was degraded or whose absence was unconfirmed.
+    /// They remain last-known-good and feed the bounded retry quarantine.
+    pub degraded_paths: Vec<String>,
     /// Whether the plan was prepared because a dirty generation was pending.
     pub prepared_from_dirty: bool,
     /// Dirty epoch observed when this plan was prepared. An overflow arriving
@@ -104,6 +114,7 @@ impl ReconcilePlan {
         prepared_from_dirty: bool,
         dirty_epoch: u64,
         degraded: bool,
+        degraded_paths: Vec<String>,
     ) -> Self {
         let mut ops: Vec<CaptureOp> = Vec::with_capacity(diff.len());
         for file in diff.added {
@@ -135,6 +146,7 @@ impl ReconcilePlan {
             retained_over_cap: diff.retained_over_cap,
             unconfirmed_removed: diff.unconfirmed_removed,
             degraded,
+            degraded_paths,
             prepared_from_dirty,
             dirty_epoch,
         }
@@ -201,6 +213,11 @@ pub struct ReconcileController {
     generation: ScanGeneration,
     dirty: bool,
     dirty_epoch: u64,
+    outstanding: bool,
+    degraded_signature: Option<u64>,
+    degraded_epoch: u64,
+    identical_degraded_count: usize,
+    quarantined_paths: Vec<String>,
 }
 
 impl Default for ReconcileController {
@@ -218,6 +235,11 @@ impl ReconcileController {
             generation: ScanGeneration::default(),
             dirty: true,
             dirty_epoch: 1,
+            outstanding: false,
+            degraded_signature: None,
+            degraded_epoch: 0,
+            identical_degraded_count: 0,
+            quarantined_paths: Vec::new(),
         }
     }
 
@@ -234,6 +256,16 @@ impl ReconcileController {
     /// Number of files in the last committed manifest.
     pub fn tracked_len(&self) -> usize {
         self.manifest.len()
+    }
+
+    /// Whether the committed manifest still tracks an exact normalized path.
+    pub fn tracks_path(&self, path: &str) -> bool {
+        self.manifest.get(path).is_some()
+    }
+
+    /// Bounded last-known degraded paths retained by the retry quarantine.
+    pub fn quarantined_paths(&self) -> &[String] {
+        &self.quarantined_paths
     }
 
     /// Mark the generation dirty — a watcher overflow / uncertainty signal.
@@ -264,6 +296,9 @@ impl ReconcileController {
         token: &CancellationToken,
         absence_probe: &dyn AbsenceProbe,
     ) -> Result<ReconcileRun, FilesError> {
+        if self.outstanding {
+            return Err(FilesError::StaleReconcilePlan);
+        }
         let listing = match scanner.scan(root, token)? {
             // Cancelled mid-scan: commit nothing. Dirty and generation stay put
             // — the state is consistent and the work is resumable.
@@ -272,6 +307,11 @@ impl ReconcileController {
         };
 
         let scan_degraded = listing.degraded();
+        let mut degraded_paths: Vec<String> = listing
+            .failed
+            .iter()
+            .map(|failed| failed.path.clone())
+            .collect();
         let mut diff = diff_scans(&self.manifest, &listing, scanner.bounds())?;
 
         // False-delete defense, second layer: even a clean scan's apparent
@@ -293,20 +333,26 @@ impl ReconcileController {
         diff.unconfirmed_removed.extend(lstat_unconfirmed);
         diff.unconfirmed_removed.sort();
         diff.unconfirmed_removed.dedup();
+        degraded_paths.extend(diff.unconfirmed_removed.iter().cloned());
+        degraded_paths.sort();
+        degraded_paths.dedup();
         let degraded = scan_degraded || !diff.unconfirmed_removed.is_empty();
 
         let from = self.generation;
         let to = from.next();
         let prepared_from_dirty = self.dirty;
         let dirty_epoch = self.dirty_epoch;
-        Ok(ReconcileRun::Completed(ReconcilePlan::from_diff(
+        let plan = ReconcilePlan::from_diff(
             diff,
             from,
             to,
             prepared_from_dirty,
             dirty_epoch,
             degraded,
-        )))
+            degraded_paths,
+        );
+        self.outstanding = true;
+        Ok(ReconcileRun::Completed(plan))
     }
 
     /// Reconcile only if a rescan is pending. Returns [`ReconcileRun::Converged`]
@@ -331,7 +377,10 @@ impl ReconcileController {
         applied_paths: &[String],
         failed_applies: &[String],
     ) -> Result<(), FilesError> {
-        if plan.from_generation != self.generation || plan.to_generation != self.generation.next() {
+        if !self.outstanding
+            || plan.from_generation != self.generation
+            || plan.to_generation != self.generation.next()
+        {
             return Err(FilesError::StaleReconcilePlan);
         }
         let applied: BTreeSet<&str> = applied_paths.iter().map(String::as_str).collect();
@@ -355,12 +404,63 @@ impl ReconcileController {
         }
         self.manifest = next;
         self.generation = plan.to_generation;
-        // A degraded scan or failed apply stays dirty so the next pass retries
-        // instead of treating an incomplete observation/application as settled.
-        self.dirty =
-            self.dirty_epoch != plan.dirty_epoch || plan.degraded || !failed_applies.is_empty();
+        self.outstanding = false;
+        self.update_degraded_retry_state(plan, failed_applies);
         Ok(())
     }
+
+    /// Refuse stale work before any sink effect. A newer dirty epoch supersedes
+    /// the prepared plan and releases its outstanding slot for a fresh scan.
+    pub(crate) fn ensure_plan_fresh(&mut self, plan: &ReconcilePlan) -> Result<(), FilesError> {
+        let generation_matches =
+            plan.from_generation == self.generation && plan.to_generation == self.generation.next();
+        let epoch_matches = plan.dirty_epoch == self.dirty_epoch;
+        if self.outstanding && generation_matches && epoch_matches {
+            return Ok(());
+        }
+        if self.outstanding && generation_matches && !epoch_matches {
+            self.outstanding = false;
+        }
+        Err(FilesError::StaleReconcilePlan)
+    }
+
+    fn update_degraded_retry_state(&mut self, plan: &ReconcilePlan, failed_applies: &[String]) {
+        let newer_signal = self.dirty_epoch != plan.dirty_epoch;
+        let mut degraded_paths = plan.degraded_paths.clone();
+        degraded_paths.extend(failed_applies.iter().cloned());
+        degraded_paths.sort();
+        degraded_paths.dedup();
+
+        if degraded_paths.is_empty() {
+            self.degraded_signature = None;
+            self.degraded_epoch = 0;
+            self.identical_degraded_count = 0;
+            self.quarantined_paths.clear();
+            self.dirty = newer_signal;
+            return;
+        }
+
+        let signature = degraded_path_signature(&degraded_paths);
+        if self.degraded_signature == Some(signature) && self.degraded_epoch == plan.dirty_epoch {
+            self.identical_degraded_count = self.identical_degraded_count.saturating_add(1);
+        } else {
+            self.degraded_signature = Some(signature);
+            self.degraded_epoch = plan.dirty_epoch;
+            self.identical_degraded_count = 1;
+        }
+        degraded_paths.truncate(MAX_QUARANTINED_PATHS);
+        self.quarantined_paths = degraded_paths;
+        self.dirty = newer_signal || self.identical_degraded_count < DEGRADED_RESCAN_BACKOFF;
+    }
+}
+
+fn degraded_path_signature(paths: &[String]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    paths.len().hash(&mut hasher);
+    for path in paths {
+        path.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn absolute_path(root: &Path, relative: &str) -> Option<PathBuf> {

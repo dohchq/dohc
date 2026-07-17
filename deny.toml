@@ -43,6 +43,12 @@ allow = [
     # `subtle` (aes-gcm → constant-time tag comparison) with the R08
     # secrets crypto crate (dohc-engine-crypto).
     "BSD-3-Clause",
+    # ISC: permissive, OSI-approved, FSF-libre. Enters via inotify and
+    # inotify-sys through the R07 notify watcher on Linux.
+    "ISC",
+    # CC0-1.0: public-domain dedication with a permissive fallback. Enters via
+    # the R07 notify watcher crate itself.
+    "CC0-1.0",
 ]
 confidence-threshold = 0.9
 # Our own workspace crates are unpublished (publish = false) and carry no
