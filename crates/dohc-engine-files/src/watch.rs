@@ -129,10 +129,6 @@ impl StubWatchSource {
 
 enum ThreadMessage {
     Event,
-    /// The notify backend reported an error on its callback thread. Distinct
-    /// from `Event` so the watcher thread's main loop can attempt a bounded
-    /// re-attach without perturbing the settle/hard-deadline event timers.
-    BackendError,
     Stop,
 }
 
@@ -197,6 +193,7 @@ impl NativeWatcher {
             WATCH_STARTUP_DEADLINE,
             ready_rx,
             &mut watcher.worker,
+            &watcher.stop_tx,
             &watcher.unavailable,
         )
         .await
@@ -277,6 +274,7 @@ async fn await_ready_with_deadline(
     deadline: Duration,
     ready_rx: tokio::sync::oneshot::Receiver<Result<(), FilesError>>,
     worker: &mut Option<JoinHandle<()>>,
+    stop_tx: &SyncSender<ThreadMessage>,
     unavailable: &AtomicBool,
 ) -> Result<(), FilesError> {
     match tokio::time::timeout(deadline, ready_rx).await {
@@ -289,11 +287,14 @@ async fn await_ready_with_deadline(
             // The worker has not signaled readiness within the deadline.
             // `notify`'s attach call is not cancellable, so it may genuinely
             // be stuck in a native OS call; synchronously joining it here
-            // would risk hanging this caller too. Detach the join onto a
-            // background reaper thread instead: this caller gets a bounded,
-            // observable failure now, and the worker is still eventually
-            // reclaimed if/when the OS call returns, rather than a
-            // synchronous hang OR a silently forgotten thread.
+            // would risk hanging this caller too. Signal Stop (so if/when the
+            // thread does reach its command loop it exits immediately -- it
+            // also self-exits via the dropped `ready` receiver before the
+            // loop), then detach the join onto a background reaper: this
+            // caller gets a bounded, observable failure now, and the worker is
+            // still eventually reclaimed, rather than a synchronous hang OR a
+            // silently forgotten thread that keeps running.
+            let _ = stop_tx.send(ThreadMessage::Stop);
             if let Some(worker) = worker.take() {
                 let _ = std::thread::Builder::new()
                     .name("dohc-native-watcher-startup-reaper".to_owned())
@@ -320,18 +321,21 @@ fn watcher_thread(
 ) {
     let config = notify::Config::default().with_follow_symlinks(false);
     let callback_handle = handle.clone();
-    let error_callback_tx = callback_tx.clone();
     let loop_degraded = Arc::clone(&degraded);
+    // Sticky, NON-DROPPABLE backend-error signal. The bounded `callback_tx`
+    // event queue can drop a `try_send` under load, so a re-attach request
+    // must NOT ride on it: a dropped `Event` merely loses a wake (the health
+    // poll still fires within the interval), but a dropped re-attach request
+    // would leave a genuinely-dead watch un-reattached. This flag is set by
+    // the callback and consumed by the main loop each iteration.
+    let backend_error_pending = Arc::new(AtomicBool::new(false));
+    let callback_backend_error = Arc::clone(&backend_error_pending);
     let mut watcher = match notify::RecommendedWatcher::new(
         move |event: Result<notify::Event, notify::Error>| {
             if event.is_err() {
                 degraded.store(true, Ordering::Release);
+                callback_backend_error.store(true, Ordering::Release);
                 callback_handle.notify_overflow();
-                // Ask the watcher thread's main loop to attempt a bounded
-                // re-attach (it owns the `notify::Watcher`, not this
-                // callback). A full queue already contains abundant evidence
-                // of a change, so a coalesced signal here is never lost work.
-                let _ = error_callback_tx.try_send(ThreadMessage::BackendError);
             }
             // A full queue already contains abundant evidence of a change, so
             // further callbacks coalesce without allocating unbounded memory.
@@ -365,6 +369,19 @@ fn watcher_thread(
     let mut first_event: Option<Instant> = None;
     let mut settle_at: Option<Instant> = None;
     loop {
+        // Consume the non-droppable backend-error signal first, so a re-attach
+        // request set by the callback is never lost to a full event queue.
+        // During a burst we wake on each event; while idle the health poll
+        // wakes us within the interval -- so this fires within one interval
+        // even if every `Event` `try_send` was dropped under load.
+        if backend_error_pending.swap(false, Ordering::AcqRel)
+            && !unavailable.load(Ordering::Acquire)
+        {
+            attempt_reattach(&mut watcher, &root, &unavailable);
+            if !unavailable.load(Ordering::Acquire) {
+                watched_identity = file_id::get_file_id(&root).ok();
+            }
+        }
         let message = match (first_event, settle_at) {
             (Some(first), Some(settle)) => {
                 let deadline = first + WATCH_HARD_DEADLINE;
@@ -420,11 +437,6 @@ fn watcher_thread(
                 } else {
                     first_event.get_or_insert(now);
                     settle_at = Some(now + WATCH_SETTLE);
-                }
-            }
-            Some(ThreadMessage::BackendError) => {
-                if !unavailable.load(Ordering::Acquire) {
-                    attempt_reattach(&mut watcher, &root, &unavailable);
                 }
             }
             Some(ThreadMessage::Stop) => {
@@ -573,11 +585,17 @@ mod tests {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let _ = ready_tx.send(Ok(()));
         let mut worker: Option<JoinHandle<()>> = Some(std::thread::spawn(|| {}));
+        let (stop_tx, _stop_rx) = mpsc::sync_channel::<ThreadMessage>(1);
         let unavailable = AtomicBool::new(false);
 
-        let result =
-            await_ready_with_deadline(Duration::from_secs(5), ready_rx, &mut worker, &unavailable)
-                .await;
+        let result = await_ready_with_deadline(
+            Duration::from_secs(5),
+            ready_rx,
+            &mut worker,
+            &stop_tx,
+            &unavailable,
+        )
+        .await;
 
         assert!(result.is_ok());
         assert!(!unavailable.load(Ordering::Acquire));
@@ -593,6 +611,9 @@ mod tests {
         let mut worker: Option<JoinHandle<()>> = Some(std::thread::spawn(|| {
             std::thread::sleep(Duration::from_millis(500));
         }));
+        // A live receiver so the belt-and-suspenders Stop send has somewhere
+        // to land (its buffer) rather than erroring.
+        let (stop_tx, _stop_rx) = mpsc::sync_channel::<ThreadMessage>(1);
         let unavailable = AtomicBool::new(false);
 
         let started = Instant::now();
@@ -600,6 +621,7 @@ mod tests {
             Duration::from_millis(20),
             ready_rx,
             &mut worker,
+            &stop_tx,
             &unavailable,
         )
         .await;
