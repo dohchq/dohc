@@ -180,14 +180,17 @@ pub enum ReconcileRun {
 }
 
 /// Final destructive-retire guard. Production uses `symlink_metadata` (lstat,
-/// never stat); the trait makes the TOCTOU-surprising-success branch directly
-/// testable on every platform.
+/// never stat) to distinguish a path gone as a regular file (retire) from a
+/// regular-file reappearance or an indeterminate error (retain). The trait
+/// keeps all three outcomes directly testable on every platform.
 pub trait AbsenceProbe: Send + Sync {
-    /// True only when the exact path's absence was confirmed.
+    /// True when the tracked regular file is confirmed gone, including when a
+    /// non-regular entry now occupies its path. False retains on either a
+    /// regular-file reappearance or an indeterminate probe error.
     fn confirms_absent(&self, absolute_path: &Path) -> bool;
 }
 
-/// Production confirmed-absence probe.
+/// Production probe: gone/non-regular retires; regular or indeterminate retains.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StdAbsenceProbe;
 
@@ -197,9 +200,12 @@ impl AbsenceProbe for StdAbsenceProbe {
             Err(err) if matches!(err.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
                 true
             }
-            // Success means the path reappeared; any other error means the
-            // engine cannot prove absence. Both retain rather than delete.
-            Ok(_) | Err(_) => false,
+            // The scanner tracks regular files only. A directory, symlink, or
+            // other non-regular replacement confirms that tracked file gone.
+            Ok(metadata) => !metadata.file_type().is_file(),
+            // Permission, lock, sharing, and other errors cannot prove the
+            // regular file gone, so retain its last-known-good state.
+            Err(_) => false,
         }
     }
 }
@@ -315,9 +321,9 @@ impl ReconcileController {
         let mut diff = diff_scans(&self.manifest, &listing, scanner.bounds())?;
 
         // False-delete defense, second layer: even a clean scan's apparent
-        // removals get one final lstat. Only ENOENT/ENOTDIR confirms retirement;
-        // surprising success (TOCTOU reappearance), permission denial, locks,
-        // and every other result retain last-known-good state.
+        // removals get one final lstat. Absence or a non-regular replacement
+        // confirms the tracked regular file is gone. Regular-file reappearance,
+        // permission denial, locks, and other errors retain last-known-good.
         let mut confirmed_removed = Vec::with_capacity(diff.removed.len());
         let mut lstat_unconfirmed = Vec::new();
         for path in diff.removed.drain(..) {

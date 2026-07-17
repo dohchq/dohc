@@ -3,9 +3,12 @@ mod common;
 use common::Scratch;
 use dohc_engine_files::{
     CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesHandle, IngestReason,
-    NativeWatcher, ReconcileRun, ScanBounds, WATCH_SETTLE, apply_reconcile_plan,
+    NativeWatcher, ReconcileRun, ScanBounds, WATCH_HARD_DEADLINE, WATCH_SETTLE,
+    apply_reconcile_plan,
 };
 use dohc_engine_storage::NoFaults;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 struct AcceptAll;
@@ -126,4 +129,67 @@ async fn native_watcher_stop_joins_and_no_notification_arrives_after_return() {
     ws.write("after-stop.md", b"must not notify");
     tokio::time::sleep(WATCH_SETTLE + Duration::from_millis(200)).await;
     assert!(!handle.stats().await.expect("stats").dirty);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn continuous_event_stream_still_flushes_at_the_hard_deadline() {
+    let ws = Scratch::new();
+    let actor =
+        dohc_engine_files::FilesActor::spawn_async(ws.path().to_path_buf(), ScanBounds::default())
+            .await
+            .expect("actor");
+    let handle = actor.handle();
+    let ready = NativeWatcher::start(
+        ws.path().to_path_buf(),
+        handle.clone(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("watch start");
+    let mut watcher = ready.watcher;
+    apply_and_ack(&handle, ready.initial_reconcile).await;
+
+    // Let startup-side filesystem noise settle, then establish a clean point
+    // before beginning the intentionally never-quiet stream.
+    tokio::time::sleep(WATCH_SETTLE + Duration::from_millis(200)).await;
+    if handle.stats().await.expect("startup stats").dirty {
+        let run = handle
+            .reconcile_if_dirty(CancellationToken::new())
+            .await
+            .expect("startup reconcile");
+        apply_and_ack(&handle, run).await;
+    }
+    assert!(!handle.stats().await.expect("clean stats").dirty);
+
+    let stop_writes = Arc::new(AtomicBool::new(false));
+    let writer_stop = Arc::clone(&stop_writes);
+    let storm_path = ws.path().join("storm.md");
+    let started = Instant::now();
+    let writer = std::thread::spawn(move || {
+        let mut sequence = 0_u64;
+        while !writer_stop.load(Ordering::Acquire) {
+            std::fs::write(&storm_path, sequence.to_le_bytes()).expect("storm write");
+            sequence = sequence.saturating_add(1);
+            std::thread::sleep(WATCH_SETTLE / 10);
+        }
+    });
+
+    let latest_allowed = started + WATCH_HARD_DEADLINE + Duration::from_secs(1);
+    let flushed_in_time = loop {
+        if handle.stats().await.expect("storm stats").dirty {
+            break true;
+        }
+        if Instant::now() >= latest_allowed {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    stop_writes.store(true, Ordering::Release);
+    writer.join().expect("join storm writer");
+    watcher.stop().expect("stop watcher");
+
+    assert!(
+        flushed_in_time,
+        "continuous events did not flush within the hard-deadline bound"
+    );
 }

@@ -279,8 +279,18 @@ fn watcher_thread(
         match message {
             Some(ThreadMessage::Event) => {
                 let now = Instant::now();
-                first_event.get_or_insert(now);
-                settle_at = Some(now + WATCH_SETTLE);
+                if first_event.is_some_and(|first| {
+                    now.saturating_duration_since(first) >= WATCH_HARD_DEADLINE
+                }) {
+                    // A ready queued event must not postpone the hard bound:
+                    // publish the whole burst even when the queue never drains.
+                    handle.notify_overflow();
+                    first_event = None;
+                    settle_at = None;
+                } else {
+                    first_event.get_or_insert(now);
+                    settle_at = Some(now + WATCH_SETTLE);
+                }
             }
             Some(ThreadMessage::Stop) => {
                 // Final-flush parity: pending evidence is published before the

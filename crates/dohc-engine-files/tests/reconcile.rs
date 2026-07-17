@@ -339,6 +339,28 @@ fn genuinely_deleted_over_cap_absent_file_is_still_removed() {
 }
 
 #[test]
+fn tracked_file_replaced_by_directory_is_retired() {
+    let ws = Scratch::new();
+    ws.write("notes.md", b"tracked file");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    let token = CancellationToken::new();
+    reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    assert!(ctrl.tracks_path("notes.md"));
+
+    ws.remove("notes.md");
+    std::fs::create_dir(ws.path().join("notes.md")).expect("replace file with directory");
+
+    let replaced = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    assert_eq!(retire_paths(&replaced), ["notes.md"]);
+    assert!(replaced.unconfirmed_removed.is_empty());
+    assert!(
+        !ctrl.tracks_path("notes.md"),
+        "acknowledging the retire must stop tracking the former file"
+    );
+}
+
+#[test]
 fn diff_bound_trips_when_change_set_too_large() {
     let ws = Scratch::new();
     for i in 0..5 {
@@ -454,6 +476,40 @@ impl AbsenceProbe for ReappearedProbe {
     fn confirms_absent(&self, _absolute_path: &Path) -> bool {
         false
     }
+}
+
+struct TransientUnreadableProbe;
+
+impl AbsenceProbe for TransientUnreadableProbe {
+    fn confirms_absent(&self, _absolute_path: &Path) -> bool {
+        false
+    }
+}
+
+#[test]
+fn transient_unreadable_removal_candidate_is_retained_not_retired() {
+    let ws = Scratch::new();
+    ws.write("locked.md", b"last known good");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &CancellationToken::new());
+    ws.remove("locked.md");
+
+    let prepared = plan(
+        ctrl.reconcile_with_absence_probe(
+            &scanner,
+            ws.path(),
+            &CancellationToken::new(),
+            &TransientUnreadableProbe,
+        )
+        .expect("indeterminate reconcile"),
+    );
+    assert!(retire_paths(&prepared).is_empty());
+    assert_eq!(prepared.unconfirmed_removed, ["locked.md"]);
+    assert!(prepared.degraded);
+    apply_then_ack(&mut ctrl, &prepared, &mut AcceptAll, &NoFaults)
+        .expect("ack retained candidate");
+    assert!(ctrl.tracks_path("locked.md"));
 }
 
 #[test]
