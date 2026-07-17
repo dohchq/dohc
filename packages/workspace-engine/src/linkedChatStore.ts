@@ -2,6 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
+import {
+  AGENT_CHANNEL_WIRE_ID,
+  GENERAL_CHANNEL_WIRE_ID,
+} from "@dohc/security-contract/chat-wire-ids";
 import type {
   ChannelThreadSummary,
   ChatAgentReadState,
@@ -140,8 +144,7 @@ export const GENERAL_CHANNEL_NAME = "general";
 // mints general independently, so a deterministic well-known wire id is what
 // lets those rows converge as ONE channel. Every other channel's wire id is
 // its creator's local channel id (globally unique uuid).
-export const GENERAL_CHANNEL_WIRE_ID = "channel_wire_general_v1";
-export const AGENT_CHANNEL_WIRE_ID = "channel_wire_agent_v1";
+export { AGENT_CHANNEL_WIRE_ID, GENERAL_CHANNEL_WIRE_ID };
 export const AGENT_CHANNEL_NAME = "My agent";
 const OPENING_MESSAGE_BODY_SNIPPET_MAX_CHARS = 500;
 // Display-title derivation lives in chatThreadTitle.ts (a leaf shared with

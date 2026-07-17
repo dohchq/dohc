@@ -75,6 +75,25 @@ pub enum FaultPoint {
     /// when the caller ran the ensure on an autocommit (read-only-borrow)
     /// connection — the savepoint is what makes that hold. `search.mid-rebuild`.
     SearchIndexMidRebuild,
+
+    // ---- replication (TEST_ORACLE §3.5 points 22-26) --------------------
+    /// Inside the compound domain-mutation + replication-journal transaction.
+    /// A crash leaves neither half visible. `sync.during-journal-txn`.
+    SyncDuringJournalTxn,
+    /// Imported state, applied-op record, and peer ack are staged but not yet
+    /// committed. A crash leaves all three absent. `sync.before-apply-commit`.
+    SyncBeforeApplyCommit,
+    /// The imported-op transaction committed but its fetch cursor did not. A
+    /// restart refetches and idempotently skips it.
+    /// `sync.between-apply-and-cursor-commit`.
+    SyncBetweenApplyAndCursorCommit,
+    /// Relay accepted a pushed batch before the local high-water mark became
+    /// durable. Retrying relies on coordinate dedup.
+    /// `sync.after-push-before-cursor-persist`.
+    SyncAfterPushBeforeCursorPersist,
+    /// Referenced blobs are staged but hydration has not committed. A crash
+    /// applies no op and advances no cursor. `sync.before-blob-hydrate-commit`.
+    SyncBeforeBlobHydrateCommit,
 }
 
 impl FaultPoint {
@@ -99,6 +118,11 @@ impl FaultPoint {
                 "materialize.after-rename-before-complete"
             }
             FaultPoint::SearchIndexMidRebuild => "search.mid-rebuild",
+            FaultPoint::SyncDuringJournalTxn => "sync.during-journal-txn",
+            FaultPoint::SyncBeforeApplyCommit => "sync.before-apply-commit",
+            FaultPoint::SyncBetweenApplyAndCursorCommit => "sync.between-apply-and-cursor-commit",
+            FaultPoint::SyncAfterPushBeforeCursorPersist => "sync.after-push-before-cursor-persist",
+            FaultPoint::SyncBeforeBlobHydrateCommit => "sync.before-blob-hydrate-commit",
         }
     }
 }

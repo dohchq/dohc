@@ -1,0 +1,93 @@
+use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, hex_sha256};
+use rusqlite::{OptionalExtension, params};
+
+use crate::SyncError;
+use crate::journal::crashes;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlobContent {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlobHydration {
+    pub sha256: String,
+    pub content: BlobContent,
+}
+
+/// Hash-verify and hydrate a bounded content-addressed blob in one transaction.
+/// Existing content is re-verified; a hash collision or poisoned row fails
+/// closed instead of being overwritten.
+pub fn hydrate_blob_content(
+    store: &mut EngineStore,
+    blob: &BlobHydration,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<()>, SyncError> {
+    let bytes = match &blob.content {
+        BlobContent::Text(text) => text.as_bytes(),
+        BlobContent::Binary(bytes) => bytes.as_slice(),
+    };
+    if hex_sha256(bytes) != blob.sha256 {
+        return Err(SyncError::BlobInvalid);
+    }
+    let outcome = store.write_with(faults, |tx| {
+        match &blob.content {
+            BlobContent::Text(text) => {
+                let existing: Option<(i64, String)> = tx
+                    .query_row(
+                        "SELECT byte_length,text FROM blobs WHERE sha256=?1",
+                        [&blob.sha256],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(SyncError::corrupt)?;
+                let byte_length = i64::try_from(text.len()).map_err(|_| SyncError::BlobInvalid)?;
+                if let Some((stored_len, stored)) = existing {
+                    if stored_len != byte_length || stored != text.as_str() {
+                        return Err(SyncError::BlobInvalid);
+                    }
+                } else {
+                    tx.execute(
+                        "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                        params![blob.sha256, byte_length, text],
+                    )
+                    .map_err(SyncError::persist)?;
+                }
+            }
+            BlobContent::Binary(bytes) => {
+                if bytes.len() > 5 * 1024 * 1024 {
+                    return Err(SyncError::BlobInvalid);
+                }
+                let existing: Option<(i64, Vec<u8>)> = tx
+                    .query_row(
+                        "SELECT byte_length,bytes FROM binary_blobs WHERE sha256=?1",
+                        [&blob.sha256],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(SyncError::corrupt)?;
+                let byte_length = i64::try_from(bytes.len()).map_err(|_| SyncError::BlobInvalid)?;
+                if let Some((stored_len, stored)) = existing {
+                    if stored_len != byte_length || stored.as_slice() != bytes.as_slice() {
+                        return Err(SyncError::BlobInvalid);
+                    }
+                } else {
+                    tx.execute(
+                        "INSERT INTO binary_blobs (sha256,byte_length,bytes) VALUES (?1,?2,?3)",
+                        params![blob.sha256, byte_length, bytes],
+                    )
+                    .map_err(SyncError::persist)?;
+                }
+            }
+        }
+        if crashes(faults, FaultPoint::SyncBeforeBlobHydrateCommit) {
+            return Err(SyncError::FaultCrash);
+        }
+        Ok(())
+    });
+    match outcome {
+        Err(SyncError::FaultCrash) => Ok(TxnOutcome::Crashed { committed: false }),
+        other => other,
+    }
+}

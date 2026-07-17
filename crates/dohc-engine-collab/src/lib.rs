@@ -36,7 +36,10 @@ pub use durable::{
 };
 pub use error::CollabError;
 pub use lease::{Lease, LeaseRegistry};
-pub use replication::{apply_remote_update, RemoteUpdate, ReplicationApplyOutcome, UpdateOrigin};
+pub use replication::{
+    apply_remote_update, apply_remote_update_in_transaction, RemoteUpdate, ReplicationApplyOutcome,
+    UpdateOrigin,
+};
 pub use ydoc::{
     merge_updates, ContentKind, OffsetMode, Projection, Ydoc, ROOT_BODY, ROOT_FRONTMATTER,
     ROOT_META, ROOT_PLAINTEXT,

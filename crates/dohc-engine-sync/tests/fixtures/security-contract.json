@@ -1,0 +1,98 @@
+{
+  "wireIds": {
+    "agent": "channel_wire_agent_v1",
+    "general": "channel_wire_general_v1"
+  },
+  "vectors": [
+    {
+      "path": "notes/today.md",
+      "rustClaimed": true,
+      "write": "tracked",
+      "read": "tracked"
+    },
+    {
+      "path": "config/app.env",
+      "rustClaimed": true,
+      "write": "secret",
+      "read": "secret"
+    },
+    {
+      "path": ".env",
+      "rustClaimed": true,
+      "write": "secret",
+      "read": "secret"
+    },
+    {
+      "path": "config/.env.local",
+      "rustClaimed": true,
+      "write": "secret",
+      "read": "secret"
+    },
+    {
+      "path": "config/secret.env. ",
+      "rustClaimed": true,
+      "write": "secret",
+      "read": "secret"
+    },
+    {
+      "path": "notes/.git/config",
+      "rustClaimed": true,
+      "write": "ignored",
+      "read": "ignored"
+    },
+    {
+      "path": "node_modules/pkg/index.js",
+      "rustClaimed": true,
+      "write": "ignored",
+      "read": "ignored"
+    },
+    {
+      "path": "shared-with-me/alex/brief.md",
+      "rustClaimed": true,
+      "write": "ignored",
+      "read": "tracked"
+    },
+    {
+      "path": "shared-with-me/alex/.env",
+      "rustClaimed": true,
+      "write": "ignored",
+      "read": "secret"
+    },
+    {
+      "path": "shared-with-me/.env/brief.md",
+      "rustClaimed": true,
+      "write": "ignored",
+      "read": "secret"
+    },
+    {
+      "path": "nested/.dohc-write-temp",
+      "rustClaimed": true,
+      "write": "ignored",
+      "read": "ignored"
+    },
+    {
+      "path": "windows\\backslash.env",
+      "rustClaimed": false,
+      "write": "secret",
+      "read": "secret"
+    },
+    {
+      "path": "encoded/secrets%2eenv",
+      "rustClaimed": false,
+      "write": "secret",
+      "read": "secret"
+    },
+    {
+      "path": "../escape.env",
+      "rustClaimed": false,
+      "write": "ignored",
+      "read": "ignored"
+    },
+    {
+      "path": "C:/absolute.env",
+      "rustClaimed": false,
+      "write": "ignored",
+      "read": "ignored"
+    }
+  ]
+}

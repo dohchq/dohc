@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
-import { AGENT_CHANNEL_WIRE_ID } from "@dohc/workspace-engine/linkedChatStore";
+import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
 
 export interface SyncRelayLogInput {
   originSeq: number;

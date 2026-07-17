@@ -20,6 +20,7 @@
 //! carried on [`RemoteUpdate`] is that cursor's input).
 
 use dohc_engine_storage::{put_binary_blob, EngineStore, FaultInjector, TxnOutcome};
+use rusqlite::Transaction;
 
 use crate::durable::{
     append_row, blob_seq_in_log, maybe_compact, query_marker, validate_update_bytes, Regime,
@@ -94,6 +95,31 @@ pub fn apply_remote_update(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
+    let outcome = store.write_with(faults, |tx| {
+        apply_remote_update_in_transaction(tx, key, remote, now_ms)
+    })?;
+    // Self-bound the log: a genuinely-applied remote update folds the log once it
+    // grows past the threshold (a replicated fold keeps a full-state snapshot,
+    // never prunes — peers still bootstrap). A dedup/crash does nothing.
+    if matches!(
+        outcome,
+        TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })
+    ) {
+        let _ = maybe_compact(store, key, DEFAULT_COMPACTION_THRESHOLD, faults, now_ms)?;
+    }
+    Ok(outcome)
+}
+
+/// Transaction-composable form used by `dohc-engine-sync`: the Y.Doc lineage
+/// mutation can share one commit with the imported replication coordinate and
+/// peer ack. Callers outside that envelope should use [`apply_remote_update`],
+/// which also runs the post-commit compaction check.
+pub fn apply_remote_update_in_transaction(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    remote: &RemoteUpdate,
+    now_ms: i64,
+) -> Result<ReplicationApplyOutcome, CollabError> {
     validate_update_bytes(&remote.bytes)?;
     if remote.origin_id.is_empty()
         || remote.origin_id.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES
@@ -107,40 +133,19 @@ pub fn apply_remote_update(
         origin_id: remote.origin_id.clone(),
     };
 
-    let outcome = store.write_with(
-        faults,
-        |tx| -> Result<ReplicationApplyOutcome, CollabError> {
-            let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
-            // A remote ydoc.update only makes sense against a replicated lineage;
-            // a local-only doc does not participate in replication.
-            if marker.regime != Regime::Replicated {
-                return Err(CollabError::InvalidIdentifier {
-                    reason: "remote update applied to a non-replicated lineage",
-                });
-            }
-            // Idempotent dedup: an already-integrated update is a strict no-op,
-            // NOT re-journaled and NOT echoed.
-            if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
-                return Ok(ReplicationApplyOutcome::Deduped { seq: existing });
-            }
-            put_binary_blob(tx, &remote.bytes)?;
-            let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
-            Ok(ReplicationApplyOutcome::Applied {
-                seq,
-                // Echo suppression: a remote update is durable in our lineage but is
-                // never re-emitted as our own outbound op.
-                emit_outbound: false,
-            })
-        },
-    )?;
-    // Self-bound the log: a genuinely-applied remote update folds the log once it
-    // grows past the threshold (a replicated fold keeps a full-state snapshot,
-    // never prunes — peers still bootstrap). A dedup/crash does nothing.
-    if matches!(
-        outcome,
-        TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })
-    ) {
-        let _ = maybe_compact(store, key, DEFAULT_COMPACTION_THRESHOLD, faults, now_ms)?;
+    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    if marker.regime != Regime::Replicated {
+        return Err(CollabError::InvalidIdentifier {
+            reason: "remote update applied to a non-replicated lineage",
+        });
     }
-    Ok(outcome)
+    if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
+        return Ok(ReplicationApplyOutcome::Deduped { seq: existing });
+    }
+    put_binary_blob(tx, &remote.bytes)?;
+    let seq = append_row(tx, key, &sha, origin.actor_id(), now_ms)?;
+    Ok(ReplicationApplyOutcome::Applied {
+        seq,
+        emit_outbound: false,
+    })
 }

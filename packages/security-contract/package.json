@@ -1,0 +1,23 @@
+{
+  "name": "@dohc/security-contract",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./engine-path-floor": "./src/enginePathFloor.ts",
+    "./chat-wire-ids": "./src/chatWireIds.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@dohc/workspace-contracts": "workspace:*",
+    "@dohc/workspace-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.19",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.9"
+  }
+}

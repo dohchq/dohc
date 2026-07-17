@@ -344,6 +344,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "dohc-engine-sync"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "dohc-engine-collab",
+ "dohc-engine-domain",
+ "dohc-engine-storage",
+ "dohc-engine-testkit",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "dohc-engine-testkit"
 version = "0.1.0"
 dependencies = [

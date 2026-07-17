@@ -343,5 +343,5 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // R08 secrets migration (ordinal 1), the R11a Y.Doc migration (ordinal 2),
     // the R09 chats migration (ordinal 3), and the R12 search migration
     // (ordinal 4).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 5);
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 6);
 }
