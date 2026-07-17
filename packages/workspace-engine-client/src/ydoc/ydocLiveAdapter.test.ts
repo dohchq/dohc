@@ -149,6 +149,59 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
+  it("rejects a split masked behind offsetting U+FFFD deletions (BYPASS-1)", async () => {
+    // Reviewer repro: a single raw transaction deletes two pre-existing U+FFFD
+    // while a mid-surrogate split adds two, netting to zero. Aggregate counting
+    // misses it; deleted-U+FFFD accounting rejects it. Divergence vs the real
+    // R11a engine: yrs="😀x" vs editor="�x�" (crates/dohc-engine-collab).
+    const engine = seedPlaintextEngine("��😀");
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    expect(() =>
+      session.applyLocalEdit((doc) => {
+        const text = doc.getText("plainText");
+        text.delete(0, 2);
+        text.insert(1, "x");
+      }),
+    ).toThrow(IllFormedUtf16EditError);
+    expect(engine.recordedUpdates).toHaveLength(0);
+    expect(engine.requests.map((request) => request.method)).not.toContain(
+      YDOC_METHOD.recordUpdate,
+    );
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("allows a clean delete of pre-existing U+FFFD with a clean insert", async () => {
+    const engine = seedPlaintextEngine("�abc");
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    const result = await session.applyLocalEdit((doc) => {
+      const text = doc.getText("plainText");
+      text.delete(0, 1);
+      text.insert(0, "x");
+    });
+    expect(result?.seq).toBe(1);
+    expect(session.doc.getText("plainText").toString()).toBe("xabc");
+    expect(engine.recordedUpdates).toHaveLength(1);
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
   it("catches an opaque surrogate split with the net-new replacement backstop", async () => {
     const engine = seedPlaintextEngine();
     const adapter = new YdocLiveAdapter(engine);

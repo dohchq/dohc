@@ -247,6 +247,14 @@ function visitSharedValueStrings(
   visitJsonStrings(value, visitor);
 }
 
+function countReplacementChars(value: string): number {
+  let count = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.charCodeAt(index) === 0xfffd) count += 1;
+  }
+  return count;
+}
+
 interface RootUtf16Snapshot {
   readonly strings: readonly string[];
   readonly replacementCount: number;
@@ -262,7 +270,7 @@ function snapshotDocUtf16(doc: Y.Doc): DocUtf16Snapshot {
     snapshot.set(root, {
       strings,
       replacementCount: strings.reduce(
-        (count, item) => count + [...item].filter((unit) => unit === "�").length,
+        (count, item) => count + countReplacementChars(item),
         0,
       ),
     });
@@ -270,26 +278,94 @@ function snapshotDocUtf16(doc: Y.Doc): DocUtf16Snapshot {
   return snapshot;
 }
 
+// Minimal view of Yjs' internal item list, used ONLY to count U+FFFD that this
+// transaction DELETED. Yjs sanitizes a split surrogate pair to U+FFFD in every
+// public read (toString/toDelta) and even in item storage, so a masked split
+// (delete N pre-existing U+FFFD while a mid-pair split adds N) nets to zero in
+// aggregate counts. Counting the deleted U+FFFD separately closes that bypass.
+interface YjsInternalItem {
+  readonly deleted: boolean;
+  readonly right: YjsInternalItem | null;
+  readonly content: { readonly str?: string; readonly type?: YjsInternalType };
+}
+interface YjsInternalType {
+  readonly _start: YjsInternalItem | null;
+}
+
+function countDeletedTextReplacementChars(type: YjsInternalType): number {
+  let total = 0;
+  const walk = (start: YjsInternalItem | null, ancestorDeleted: boolean): void => {
+    let item = start;
+    while (item) {
+      const deleted = ancestorDeleted || item.deleted;
+      const content = item.content;
+      if (typeof content.str === "string") {
+        if (deleted) total += countReplacementChars(content.str);
+      } else if (content.type) {
+        walk(content.type._start, deleted);
+      }
+      item = item.right;
+    }
+  };
+  walk(type._start, false);
+  return total;
+}
+
+// Per-root count of U+FFFD contained in text the transaction `delta` DELETED,
+// reconstructed by replaying `beforeState` + `delta` into a gc:false clone
+// (which retains deleted content as tombstones) and walking the deleted items.
+function deletedReplacementCounts(
+  beforeState: Uint8Array,
+  delta: Uint8Array,
+): ReadonlyMap<string, number> {
+  const clone = new Y.Doc({ gc: false });
+  Y.applyUpdate(clone, beforeState);
+  Y.applyUpdate(clone, delta);
+  const counts = new Map<string, number>();
+  for (const [root, value] of clone.share) {
+    counts.set(
+      root,
+      countDeletedTextReplacementChars(value as unknown as YjsInternalType),
+    );
+  }
+  return counts;
+}
+
 function assertDocUtf16IsSafe(
   doc: Y.Doc,
   before: DocUtf16Snapshot,
+  computeDeleted: () => ReadonlyMap<string, number>,
 ): void {
   const after = snapshotDocUtf16(doc);
-  for (const [root, current] of after) {
+  let hasReplacement = false;
+  for (const [, current] of after) {
     for (const value of current.strings) {
+      // A lone surrogate survives directly in non-text values (map/attribute
+      // strings are not sanitized) — reject it unconditionally.
       if (!isWellFormedUtf16(value)) throw new IllFormedUtf16EditError();
     }
+    if (current.replacementCount > 0) hasReplacement = true;
+  }
+  // Fast path: no U+FFFD anywhere post-edit ⇒ no split (masked or otherwise)
+  // could have occurred, so skip the clone entirely (the common case).
+  if (!hasReplacement) return;
 
-    // Opaque Yjs mutations do not expose their intended UTF-16 boundaries.
-    // A net-new literal U+FFFD is conservatively rejected because it is also
-    // how Yjs exposes a split surrogate pair (cross_engine.rs:264).
-    // R11a/R13 OBLIGATION: retain the engine replay-parity gate for arbitrary
-    // opaque splits that no live TypeScript scan can reconstruct.
-    if (
-      current.replacementCount > (before.get(root)?.replacementCount ?? 0)
-    ) {
-      throw new IllFormedUtf16EditError();
-    }
+  // A split surfaces as a NET-NEW U+FFFD once offsetting deletions are counted:
+  // newFFFD = after − before + deleted. Reject any root with newFFFD > 0. This
+  // catches the masked split (cross_engine.rs:264) without over-rejecting a
+  // clean delete of pre-existing U+FFFD (a net decrease → newFFFD ≤ 0).
+  // R11a/R13 OBLIGATION (REQUIRED, not optional): the engine-side yjs↔yrs
+  // replay-parity gate must catch the general opaque split that no live
+  // TypeScript scan can reconstruct — see crates/dohc-engine-collab and the
+  // bypass1 probe. Ydoc::apply (crates/dohc-engine-collab/src/ydoc.rs) has no
+  // such gate today; R13 must add it before any encoded editor path journals.
+  const deleted = computeDeleted();
+  for (const [root, current] of after) {
+    const newReplacement =
+      current.replacementCount -
+      (before.get(root)?.replacementCount ?? 0) +
+      (deleted.get(root) ?? 0);
+    if (newReplacement > 0) throw new IllFormedUtf16EditError();
   }
 }
 
@@ -333,6 +409,7 @@ function assertTextEditIsValid(text: string, edit: YdocLocalTextEdit): void {
 interface LocalRecordCapture {
   readonly options: ApplyLocalUpdateOptions | undefined;
   readonly before: DocUtf16Snapshot;
+  readonly beforeState: Uint8Array;
   operation?: Promise<YdocRecordUpdateResult>;
   rejection?: Error;
 }
@@ -588,7 +665,14 @@ export class YdocAdapterSession {
       if (origin !== LOCAL_EDITOR_ORIGIN) return;
 
       const capture = this.activeLocalRecordCapture;
-      assertDocUtf16IsSafe(this.doc, capture?.before ?? snapshotDocUtf16(this.doc));
+      assertDocUtf16IsSafe(
+        this.doc,
+        capture?.before ?? snapshotDocUtf16(this.doc),
+        () =>
+          capture
+            ? deletedReplacementCounts(capture.beforeState, update)
+            : new Map<string, number>(),
+      );
       const operation = this.enqueueRecordUpdate(update, capture?.options);
       if (capture !== null) capture.operation = operation;
     } catch (error) {
@@ -614,6 +698,7 @@ export class YdocAdapterSession {
     const capture: LocalRecordCapture = {
       options,
       before: snapshotDocUtf16(this.doc),
+      beforeState: Y.encodeStateAsUpdate(this.doc),
     };
     this.activeLocalRecordCapture = capture;
     try {
