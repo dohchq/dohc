@@ -183,6 +183,13 @@ impl Ydoc {
         self.doc.transact().has_missing_updates()
     }
 
+    pub(crate) fn pending_update_v1(&self) -> Option<Vec<u8>> {
+        let txn = self.doc.transact();
+        txn.store()
+            .pending_update()
+            .map(|pending| pending.update.encode_v1())
+    }
+
     pub(crate) fn state_vector(&self) -> StateVector {
         self.doc.transact().state_vector()
     }

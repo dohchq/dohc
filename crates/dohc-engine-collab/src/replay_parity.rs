@@ -66,14 +66,18 @@ pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), Colla
     let scratch = Ydoc::wire();
     scratch.apply(&base_bytes)?;
     scratch.apply(candidate)?;
-    if scratch.has_missing_updates() {
-        return Ok(());
-    }
+    let pending_ends = match scratch.pending_update_v1() {
+        Some(bytes) => scan_v1(&bytes)?.claimed_clocks,
+        None => BTreeMap::new(),
+    };
     let scratch_sv = scratch.state_vector();
     for (client, claimed_end) in candidate_structure.claimed_clocks {
-        if scratch_sv.get(&client) < claimed_end {
+        let integrated = scratch_sv.get(&client);
+        let pending = pending_ends.get(&client).copied().unwrap_or(0);
+        if integrated < claimed_end && pending < claimed_end {
             return Err(CollabError::ReplayParityViolation {
-                reason: "the replay did not integrate every clock claimed by the candidate"
+                reason: "a candidate clock was neither integrated nor parked \
+                         (yrs discarded wire data)"
                     .to_owned(),
             });
         }

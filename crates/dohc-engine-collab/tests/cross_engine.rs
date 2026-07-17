@@ -14,7 +14,7 @@ mod common;
 use common::*;
 use dohc_engine_collab::{
     apply_remote_update, load_persisted, maybe_compact, record_local_update, ydoc::OffsetMode,
-    CollabError, ContentKind, Regime, RemoteUpdate, ReplicationApplyOutcome, Ydoc,
+    CollabError, CompactOutcome, ContentKind, Regime, RemoteUpdate, ReplicationApplyOutcome, Ydoc,
 };
 use dohc_engine_storage::{NoFaults, TxnOutcome};
 
@@ -422,6 +422,84 @@ fn replay_parity_rejects_overlap_slice_divergence_on_remote_path() {
 }
 
 #[test]
+fn replay_parity_rejects_mixed_parked_and_discarded_clocks_on_both_paths() {
+    let origin_a = Ydoc::wire();
+    let dependency = origin_a.plaintext_insert(0, "a");
+    let origin_b = Ydoc::wire();
+    origin_b.apply(&dependency).expect("seed dependent peer");
+    let dependent = origin_b.plaintext_insert(1, "b");
+    let overlap = decode_hex(OVERLAP_U2_HEX);
+    let mixed = dohc_engine_collab::merge_updates(&[overlap, dependent])
+        .expect("merge discarded and missing-dependency blocks");
+    let mixed_sha = dohc_engine_collab::hex_sha256(&mixed);
+
+    let (mut local, local_key) = setup_parity_store("mixed-parity-local", Regime::LocalOnly);
+    let overlap_base = decode_hex(OVERLAP_U1_HEX);
+    record_local_update(
+        &mut local.store,
+        &local_key,
+        &overlap_base,
+        &NoFaults,
+        1_001,
+    )
+    .expect("overlap base");
+    let local_error = record_local_update(&mut local.store, &local_key, &mixed, &NoFaults, 1_002)
+        .expect_err("mixed local candidate must fail closed");
+    assert!(matches!(
+        local_error,
+        CollabError::ReplayParityViolation { .. }
+    ));
+    assert_eq!(count(&local.store, "ydoc_updates", &local_key), 1);
+    assert!(
+        local
+            .store
+            .get_binary_blob(&mixed_sha)
+            .expect("local blob lookup")
+            .is_none(),
+        "rejected mixed candidate must not reach the local blob store"
+    );
+
+    let (mut remote, remote_key) = setup_parity_store("mixed-parity-remote", Regime::Replicated);
+    apply_remote_update(
+        &mut remote.store,
+        &remote_key,
+        &RemoteUpdate {
+            origin_id: "peer-overlap".to_owned(),
+            origin_seq: 1,
+            bytes: overlap_base,
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect("remote overlap base");
+    let remote_error = apply_remote_update(
+        &mut remote.store,
+        &remote_key,
+        &RemoteUpdate {
+            origin_id: "peer-mixed".to_owned(),
+            origin_seq: 1,
+            bytes: mixed,
+        },
+        &NoFaults,
+        1_002,
+    )
+    .expect_err("mixed remote candidate must fail closed");
+    assert!(matches!(
+        remote_error,
+        CollabError::ReplayParityViolation { .. }
+    ));
+    assert_eq!(count(&remote.store, "ydoc_updates", &remote_key), 1);
+    assert!(
+        remote
+            .store
+            .get_binary_blob(&mixed_sha)
+            .expect("remote blob lookup")
+            .is_none(),
+        "rejected mixed candidate must not reach the remote blob store"
+    );
+}
+
+#[test]
 fn replay_parity_accepts_clean_resend_and_sequential_append() {
     let (mut ts, key) = setup_parity_store("valid-resend-append", Regime::LocalOnly);
     let producer = Ydoc::wire();
@@ -526,6 +604,71 @@ fn replay_parity_parks_cross_origin_missing_dependency_then_converges() {
         .expect("load")
         .expect("marker");
     assert_eq!(persisted.doc.plaintext_string(), "ab");
+}
+
+#[test]
+fn compaction_preserves_parked_updates_until_dependency_arrives() {
+    let (mut ts, key) = setup_parity_store("parked-compaction", Regime::Replicated);
+    let origin_a = Ydoc::wire();
+    let dependency = origin_a.plaintext_insert(0, "a");
+    let origin_b = Ydoc::wire();
+    origin_b.apply(&dependency).expect("seed dependent peer");
+    let dependent = origin_b.plaintext_insert(1, "b");
+
+    apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "origin-b".to_owned(),
+            origin_seq: 1,
+            bytes: dependent,
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect("missing dependency must park");
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+
+    let skipped = maybe_compact(&mut ts.store, &key, 0, &NoFaults, 1_002)
+        .expect("forced compaction must inspect parked state");
+    assert!(matches!(
+        skipped,
+        TxnOutcome::Committed(CompactOutcome::Skipped { pending: 1 })
+    ));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+    assert_eq!(count(&ts.store, "ydoc_snapshots", &key), 0);
+
+    apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "origin-a".to_owned(),
+            origin_seq: 1,
+            bytes: dependency,
+        },
+        &NoFaults,
+        1_003,
+    )
+    .expect("dependency arrival must resolve the parked update");
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 2);
+    let resolved = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(resolved.doc.plaintext_string(), "ab");
+
+    let compacted = maybe_compact(&mut ts.store, &key, 0, &NoFaults, 1_004)
+        .expect("resolved lineage may compact");
+    assert!(matches!(
+        compacted,
+        TxnOutcome::Committed(CompactOutcome::Compacted {
+            pruned_updates: 2,
+            ..
+        })
+    ));
+    let reconstructed = load_persisted(&ts.store, &key)
+        .expect("load compacted")
+        .expect("marker");
+    assert_eq!(reconstructed.doc.plaintext_string(), "ab");
 }
 
 #[test]

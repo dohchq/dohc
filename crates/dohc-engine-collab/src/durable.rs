@@ -402,6 +402,9 @@ pub fn maybe_compact(
     if pending < i64::from(threshold) || pending <= 0 {
         return Ok(TxnOutcome::Committed(CompactOutcome::Skipped { pending }));
     }
+    if persisted.doc.has_missing_updates() {
+        return Ok(TxnOutcome::Committed(CompactOutcome::Skipped { pending }));
+    }
 
     // Encode the full-state snapshot + its state vector from the reconstructed
     // doc (read phase). Single writer per store ⇒ the head cannot advance
