@@ -3,7 +3,11 @@ import * as Y from "yjs";
 import {
   IllFormedUtf16EditError,
   RemoteYdocApplyError,
+  YdocResyncNeededError,
+  YdocSessionQuarantinedError,
   YdocLiveAdapter,
+  isWellFormedUtf16,
+  type EngineTransport,
 } from "./ydocLiveAdapter";
 import { YdocLoopbackEngine } from "./ydocLoopbackEngine";
 import { openEngineYdocProviderSession } from "./ydocProviderSession";
@@ -55,7 +59,33 @@ function findPartiallyAppliedMalformedUpdate(fullUpdate: Uint8Array): Uint8Array
 }
 
 describe("YdocLiveAdapter", () => {
-  it("rejects ill-formed live UTF-16 before journaling", async () => {
+  it("falls back when String.isWellFormed is unavailable at runtime", () => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      String.prototype,
+      "isWellFormed",
+    );
+    try {
+      Object.defineProperty(String.prototype, "isWellFormed", {
+        configurable: true,
+        value: undefined,
+      });
+      expect(isWellFormedUtf16("😀")).toBe(true);
+      expect(isWellFormedUtf16("\ud800")).toBe(false);
+      expect(isWellFormedUtf16("\udc00")).toBe(false);
+    } finally {
+      if (descriptor === undefined) {
+        Reflect.deleteProperty(String.prototype, "isWellFormed");
+      } else {
+        Object.defineProperty(String.prototype, "isWellFormed", descriptor);
+      }
+    }
+  });
+
+  it("pins the dormant R13 resync wire method name", () => {
+    expect(YDOC_METHOD.resync).toBe("ydoc.resync");
+  });
+
+  it("rejects and quarantines an opaque ill-formed edit without wedging Yjs", async () => {
     const engine = seedPlaintextEngine();
     const adapter = new YdocLiveAdapter(engine);
     const session = await adapter.openSession({
@@ -75,6 +105,149 @@ describe("YdocLiveAdapter", () => {
     );
     const text = session.doc.getText("plainText").toString();
     expect(text.charCodeAt(0)).toBe(0xd800);
+    expect(() =>
+      session.applyLocalEdit((doc) => {
+        doc.getText("plainText").insert(1, "safe");
+      }),
+    ).toThrow(YdocSessionQuarantinedError);
+    expect(engine.recordedUpdates).toHaveLength(0);
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("rejects the R11a surrogate-split lineage before a structured transaction", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    await session.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "😀",
+    });
+
+    // This is the exact makeSurrogateProbe lineage asserted by
+    // crates/dohc-engine-collab/tests/cross_engine.rs:264.
+    expect(() =>
+      session.applyLocalTextEdit({
+        root: "plainText",
+        index: 1,
+        insert: "X",
+      }),
+    ).toThrow(IllFormedUtf16EditError);
+    expect(session.doc.getText("plainText").toString()).toBe("😀");
+    expect(engine.sessionText(session.sessionId)).toBe("😀");
+    expect(engine.recordedUpdates).toHaveLength(1);
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("catches an opaque surrogate split with the net-new replacement backstop", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    await session.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "😀",
+    });
+    expect(() =>
+      session.applyLocalEdit((doc) => {
+        doc.getText("plainText").insert(1, "X");
+      }),
+    ).toThrow(IllFormedUtf16EditError);
+    expect(session.doc.getText("plainText").toString()).toBe("�X�");
+    expect(engine.recordedUpdates).toHaveLength(1);
+    expect(() =>
+      session.applyLocalTextEdit({ root: "plainText", index: 0, insert: "Y" }),
+    ).toThrow(YdocSessionQuarantinedError);
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("rejects ill-formed text in an undeclared map root", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    expect(() =>
+      session.applyLocalEdit((doc) => {
+        doc.getMap("custom").set("k", "\ud800");
+      }),
+    ).toThrow(IllFormedUtf16EditError);
+    expect(engine.recordedUpdates).toHaveLength(0);
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("rejects ill-formed Y.Text attribute keys and values", async () => {
+    const attributes = [
+      { ["\ud800key"]: "value" },
+      { key: "\udc00value" },
+    ];
+    for (const attribute of attributes) {
+      const engine = seedPlaintextEngine();
+      const adapter = new YdocLiveAdapter(engine);
+      const session = await adapter.openSession({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: PATH,
+        contentKind: "plaintext",
+      });
+      await session.applyLocalTextEdit({
+        root: "plainText",
+        index: 0,
+        insert: "A",
+      });
+
+      expect(() =>
+        session.applyLocalEdit((doc) => {
+          doc.getText("plainText").format(0, 1, attribute);
+        }),
+      ).toThrow(IllFormedUtf16EditError);
+      expect(engine.recordedUpdates).toHaveLength(1);
+
+      await session.close({ settle: false });
+      adapter.dispose();
+    }
+  });
+
+  it("rejects ill-formed Y.Text embed content", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    expect(() =>
+      session.applyLocalEdit((doc) => {
+        doc.getText("plainText").insertEmbed(0, { note: "\ud800" });
+      }),
+    ).toThrow(IllFormedUtf16EditError);
+    expect(engine.recordedUpdates).toHaveLength(0);
 
     await session.close({ settle: false });
     adapter.dispose();
@@ -97,11 +270,14 @@ describe("YdocLiveAdapter", () => {
     const fullUpdate = Y.encodeStateAsUpdate(source);
     const malformed = findPartiallyAppliedMalformedUpdate(fullUpdate);
     const surfacedErrors: RemoteYdocApplyError[] = [];
+    session.onRemoteApplyError(() => {
+      throw new Error("listener failure");
+    });
     session.onRemoteApplyError((error) => {
       surfacedErrors.push(error);
     });
 
-    engine.emitRemoteUpdate(session.sessionId, malformed);
+    expect(() => engine.emitRemoteUpdate(session.sessionId, malformed)).not.toThrow();
 
     const surfaced = surfacedErrors[0];
     expect(surfaced).toBeInstanceOf(RemoteYdocApplyError);
@@ -118,6 +294,40 @@ describe("YdocLiveAdapter", () => {
     expect(Array.from(Y.encodeStateVector(session.doc))).toEqual(
       Array.from(Y.encodeStateVector(source)),
     );
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("contains a throwing remote-update listener and continues delivery", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    const source = new Y.Doc();
+    Y.applyUpdate(source, session.initialUpdate);
+    const text = source.getText("plainText");
+    const beforeFirst = Y.encodeStateVector(source);
+    text.insert(0, "A");
+    const first = Y.encodeStateAsUpdate(source, beforeFirst);
+    const beforeSecond = Y.encodeStateVector(source);
+    text.insert(1, "B");
+    const second = Y.encodeStateAsUpdate(source, beforeSecond);
+    const delivered: string[] = [];
+    session.onRemoteUpdate(() => {
+      throw new Error("listener failure");
+    });
+    session.onRemoteUpdate(() => {
+      delivered.push(session.doc.getText("plainText").toString());
+    });
+
+    expect(() => engine.applyRemoteUpdate(session.sessionId, first)).not.toThrow();
+    expect(() => engine.applyRemoteUpdate(session.sessionId, second)).not.toThrow();
+    expect(delivered).toEqual(["A", "AB"]);
 
     await session.close({ settle: false });
     adapter.dispose();
@@ -146,6 +356,176 @@ describe("YdocLiveAdapter", () => {
     expect([...settled.markdown]).toEqual([...content]);
 
     await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("surfaces a lost journal update and refuses a stale provider settle", async () => {
+    const engine = seedPlaintextEngine();
+    const recordFailure = new Error("injected record failure");
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.recordUpdate) throw recordFailure;
+        return engine.sendRequest(request);
+      },
+    };
+    const localErrors: unknown[] = [];
+    const provider = await openEngineYdocProviderSession({
+      transport,
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+      onRemoteUpdate: () => undefined,
+      onLocalEditError: (error) => localErrors.push(error),
+      scheduleSettle: () => () => undefined,
+    });
+    const update = plaintextUpdate(provider.initialUpdate, (text) => {
+      text.insert(0, "local");
+    });
+
+    provider.applyLocalUpdate(update);
+    await expect(provider.settleNow()).rejects.toBe(recordFailure);
+    expect(localErrors).toEqual([recordFailure]);
+    expect(engine.requests.map((request) => request.method)).not.toContain(
+      YDOC_METHOD.settle,
+    );
+  });
+
+  it("detects a per-session event sequence gap and marks the session stale", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    const source = new Y.Doc();
+    Y.applyUpdate(source, session.initialUpdate);
+    const text = source.getText("plainText");
+    const beforeFirst = Y.encodeStateVector(source);
+    text.insert(0, "A");
+    const first = Y.encodeStateAsUpdate(source, beforeFirst);
+    const beforeSecond = Y.encodeStateVector(source);
+    text.insert(1, "B");
+    const second = Y.encodeStateAsUpdate(source, beforeSecond);
+    const resyncErrors: YdocResyncNeededError[] = [];
+    session.onResyncNeeded((error) => resyncErrors.push(error));
+
+    engine.emitRemoteUpdate(session.sessionId, first);
+    engine.emitRemoteUpdate(session.sessionId, second, { seq: 3 });
+
+    expect(resyncErrors).toHaveLength(1);
+    expect(resyncErrors[0]?.reason).toBe("event-sequence-gap");
+    expect(session.doc.getText("plainText").toString()).toBe("A");
+    expect(() =>
+      session.applyLocalTextEdit({ root: "plainText", index: 1, insert: "C" }),
+    ).toThrow(YdocResyncNeededError);
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("surfaces remote event decode errors without throwing into dispatch", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    const resyncErrors: YdocResyncNeededError[] = [];
+    session.onResyncNeeded((error) => resyncErrors.push(error));
+
+    expect(() =>
+      engine.emitEvent({
+        seq: 1,
+        sessionGeneration: 1,
+        name: YDOC_EVENT.remoteUpdate,
+        payload: {
+          sessionId: session.sessionId,
+          updateBase64: "not-base64",
+        },
+      }),
+    ).not.toThrow();
+    expect(resyncErrors[0]?.reason).toBe("event-decode-failed");
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("rejects a structurally malformed loopback record update atomically", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    await expect(
+      engine.sendRequest({
+        id: 999,
+        method: YDOC_METHOD.recordUpdate,
+        workspace: WORKSPACE,
+        idempotencyKey: `${session.sessionId}:malformed`,
+        params: {
+          sessionId: session.sessionId,
+          updateBase64: "/w==",
+        },
+      }),
+    ).rejects.toThrow();
+    expect(engine.recordedUpdates).toHaveLength(0);
+    expect(engine.sessionText(session.sessionId)).toBe("");
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("uses independent record and event sequences for loopback sessions", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const firstSession = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    const secondSession = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    const firstRecord = await firstSession.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "A",
+    });
+    const secondRecord = await secondSession.applyLocalTextEdit({
+      root: "plainText",
+      index: 0,
+      insert: "B",
+    });
+    const firstRemote = plaintextUpdate(firstSession.initialUpdate, (text) => {
+      text.insert(0, "1");
+    });
+    const secondRemote = plaintextUpdate(secondSession.initialUpdate, (text) => {
+      text.insert(0, "2");
+    });
+    engine.emitRemoteUpdate(firstSession.sessionId, firstRemote);
+    engine.emitRemoteUpdate(secondSession.sessionId, secondRemote);
+
+    expect(firstRecord?.seq).toBe(1);
+    expect(secondRecord?.seq).toBe(1);
+    expect(engine.events.map((event) => event.seq)).toEqual([1, 1]);
+
+    await firstSession.close({ settle: false });
+    await secondSession.close({ settle: false });
     adapter.dispose();
   });
 
@@ -197,9 +577,12 @@ describe("YdocLiveAdapter", () => {
       workspace: WORKSPACE,
       params: { versionId: VERSION, path: PATH, contentKind: "plaintext" },
     });
-    expect(engine.requests[1]?.params).toMatchObject({
-      sessionId: "session-1",
-      updateBase64: expect.any(String),
+    expect(engine.requests[1]).toMatchObject({
+      idempotencyKey: "session-1:1",
+      params: {
+        sessionId: "session-1",
+        updateBase64: expect.stringMatching(/^[A-Za-z0-9+/]+={0,2}$/),
+      },
     });
     expect(engine.requests[2]?.params).toEqual({
       sessionId: "session-1",
@@ -219,7 +602,7 @@ describe("YdocLiveAdapter", () => {
       name: YDOC_EVENT.remoteUpdate,
       payload: {
         sessionId: "session-1",
-        updateBase64: expect.any(String),
+        updateBase64: expect.stringMatching(/^[A-Za-z0-9+/]+={0,2}$/),
       },
     });
   });

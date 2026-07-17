@@ -2,6 +2,7 @@ import type * as Y from "yjs";
 import {
   RemoteYdocApplyError,
   YdocLiveAdapter,
+  type YdocResyncNeededError,
   type EngineTransport,
   type YdocAdapterSession,
 } from "./ydocLiveAdapter";
@@ -21,6 +22,9 @@ export interface EngineYdocProviderSessionOptions {
   contentKind?: YdocContentKind;
   onRemoteUpdate: (update: Uint8Array) => void;
   onRemoteApplyError?: (error: RemoteYdocApplyError) => void;
+  onLocalEditError?: (error: unknown) => void;
+  onResyncNeeded?: (error: YdocResyncNeededError) => void;
+  onSessionError?: (error: unknown) => void;
   onSettled?: (result: YdocSettleResult) => void | Promise<void>;
   settleDebounceMs?: number;
   scheduleSettle?: (fn: () => void, ms: number) => () => void;
@@ -70,31 +74,49 @@ export async function openEngineYdocProviderSession(
   let journalChain: Promise<void> = Promise.resolve();
   let settleChain: Promise<void> = Promise.resolve();
   let cancelSettle: (() => void) | null = null;
+  let localEditError: unknown = null;
+
+  function notifyError(
+    callback: ((error: unknown) => void) | undefined,
+    error: unknown,
+  ): void {
+    try {
+      callback?.(error);
+    } catch {
+      // Provider error callbacks are observer boundaries and cannot be allowed
+      // to re-enter Yjs or the transport dispatcher.
+    }
+  }
+
+  function rememberLocalEditError(error: unknown): void {
+    if (localEditError === null) localEditError = error;
+    notifyError(options.onLocalEditError, error);
+  }
 
   async function runSettle(summary?: string): Promise<YdocSettleResult> {
     await journalChain;
-    let result!: YdocSettleResult;
-    let settleError: unknown;
-    settleChain = settleChain
-      .then(async () => {
-        result = await session.settle(
-          summary !== undefined ? { summary } : undefined,
-        );
-        await options.onSettled?.(result);
-      })
-      .catch((error: unknown) => {
-        settleError = error;
-      });
-    await settleChain;
-    if (settleError !== undefined) throw settleError;
-    return result;
+    if (localEditError !== null) throw localEditError;
+    const operation = settleChain.then(async () => {
+      const result = await session.settle(
+        summary !== undefined ? { summary } : undefined,
+      );
+      await options.onSettled?.(result);
+      return result;
+    });
+    settleChain = operation.then(
+      () => undefined,
+      () => undefined,
+    );
+    return operation;
   }
 
   function requestSettle(): void {
     cancelSettle?.();
     cancelSettle = scheduleSettle(() => {
       cancelSettle = null;
-      void runSettle().catch(() => undefined);
+      void runSettle().catch((error: unknown) => {
+        notifyError(options.onSessionError, error);
+      });
     }, settleDebounceMs);
   }
 
@@ -106,6 +128,12 @@ export async function openEngineYdocProviderSession(
   const unsubscribeRemoteError = session.onRemoteApplyError((error) => {
     options.onRemoteApplyError?.(error);
   });
+  const unsubscribeResync = session.onResyncNeeded((error) => {
+    options.onResyncNeeded?.(error);
+  });
+  const unsubscribeSessionError = session.onSessionError((error) => {
+    notifyError(options.onSessionError, error);
+  });
 
   return {
     doc: session.doc,
@@ -115,12 +143,21 @@ export async function openEngineYdocProviderSession(
 
     applyLocalUpdate(update) {
       if (closed) return;
-      // Validation and live-doc apply happen synchronously before the promise.
-      const operation = session.applyLocalUpdate(update);
+      let operation: Promise<unknown>;
+      try {
+        operation = session.applyLocalUpdate(update);
+      } catch (error) {
+        rememberLocalEditError(error);
+        throw error;
+      }
       journalChain = journalChain
         .then(() => operation)
         .then(() => undefined)
-        .catch(() => undefined);
+        .catch((error: unknown) => {
+          rememberLocalEditError(error);
+          throw error;
+        });
+      void journalChain.catch(() => undefined);
       requestSettle();
     },
 
@@ -141,6 +178,8 @@ export async function openEngineYdocProviderSession(
       cancelSettle = null;
       unsubscribeRemote();
       unsubscribeRemoteError();
+      unsubscribeResync();
+      unsubscribeSessionError();
       await journalChain;
       await settleChain;
       if (closeOptions?.settle !== false) {

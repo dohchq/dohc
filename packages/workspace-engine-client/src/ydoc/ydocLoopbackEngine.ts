@@ -27,6 +27,12 @@ interface LoopbackSession {
   contentKind: YdocContentKind;
   doc: Y.Doc;
   updateSeq: number;
+  eventSeq: number;
+}
+
+export interface EmitLoopbackRemoteUpdateOptions {
+  seq?: number;
+  sessionGeneration?: number;
 }
 
 export interface SeedLoopbackFileInput {
@@ -128,7 +134,6 @@ export class YdocLoopbackEngine implements EngineTransport {
   private readonly eventHandlers = new Set<(event: Event) => void>();
   private nextSessionId = 1;
   private nextMomentId = 1;
-  private nextEventSeq = 1;
 
   seedFile(input: SeedLoopbackFileInput): void {
     this.files.set(fileKey(input.workspace, input.versionId, input.path), {
@@ -169,16 +174,27 @@ export class YdocLoopbackEngine implements EngineTransport {
     this.emitRemoteUpdate(sessionId, update);
   }
 
-  emitRemoteUpdate(sessionId: string, update: Uint8Array): void {
+  emitRemoteUpdate(
+    sessionId: string,
+    update: Uint8Array,
+    options?: EmitLoopbackRemoteUpdateOptions,
+  ): void {
+    const session = this.requireSession(sessionId);
+    const seq = options?.seq ?? session.eventSeq + 1;
+    session.eventSeq = seq;
     const event: Event = {
-      seq: this.nextEventSeq++,
-      sessionGeneration: 1,
+      seq,
+      sessionGeneration: options?.sessionGeneration ?? 1,
       name: YDOC_EVENT.remoteUpdate,
       payload: {
         sessionId,
         updateBase64: encodeBase64(update),
       },
     };
+    this.emitEvent(event);
+  }
+
+  emitEvent(event: Event): void {
     this.events.push(event);
     for (const handler of this.eventHandlers) handler(event);
   }
@@ -188,7 +204,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       case YDOC_METHOD.open:
         return this.open(request);
       case YDOC_METHOD.recordUpdate:
-        return this.recordUpdate(request.params);
+        return this.recordUpdate(request);
       case YDOC_METHOD.settle:
         return this.settle(request.params);
       case YDOC_METHOD.applyExternalMarkdownEdit:
@@ -229,6 +245,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       contentKind,
       doc,
       updateSeq: 0,
+      eventSeq: 0,
     });
     return {
       sessionId,
@@ -239,8 +256,14 @@ export class YdocLoopbackEngine implements EngineTransport {
     };
   }
 
-  private recordUpdate(value: JsonValue): JsonValue {
-    const params = asObject(value, "ydoc.recordUpdate params");
+  private recordUpdate(request: Request): JsonValue {
+    if (
+      typeof request.idempotencyKey !== "string" ||
+      request.idempotencyKey.length === 0
+    ) {
+      throw new Error("ydoc.recordUpdate requires an idempotency key.");
+    }
+    const params = asObject(request.params, "ydoc.recordUpdate params");
     const session = this.requireSession(
       requiredString(params, "sessionId", "ydoc.recordUpdate params"),
     );
@@ -248,6 +271,9 @@ export class YdocLoopbackEngine implements EngineTransport {
       requiredString(params, "updateBase64", "ydoc.recordUpdate params"),
     );
     optionalString(params, "actorOriginId");
+    const validationDoc = new Y.Doc();
+    Y.applyUpdate(validationDoc, Y.encodeStateAsUpdate(session.doc));
+    Y.applyUpdate(validationDoc, update);
     Y.applyUpdate(session.doc, update);
     this.recordedUpdates.push(update);
     session.updateSeq += 1;

@@ -6,6 +6,9 @@ export const YDOC_METHOD = {
   settle: "ydoc.settle",
   applyExternalMarkdownEdit: "ydoc.applyExternalMarkdownEdit",
   close: "ydoc.close",
+  // R13 OBLIGATION (resync): implement this transport after a stale signal.
+  // R13 OBLIGATION (schema): add Rust serde counterparts for all ydoc.* shapes.
+  resync: "ydoc.resync",
 } as const;
 
 export const YDOC_EVENT = {
