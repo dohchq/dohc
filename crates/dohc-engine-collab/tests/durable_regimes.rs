@@ -58,6 +58,19 @@ fn local_only_close_prunes_the_cache() {
     }
     assert_eq!(count(&ts.store, "ydoc_updates", &key), 3);
 
+    // A close BEFORE settling refuses to prune (would discard unsettled edits).
+    assert!(matches!(
+        close_session(&mut ts.store, &key, false, &NoFaults, 1_500),
+        Err(CollabError::UnsettledClose)
+    ));
+    assert_eq!(
+        count(&ts.store, "ydoc_updates", &key),
+        3,
+        "refused close kept the cache"
+    );
+
+    // Settle the head, THEN close — now the .md covers the head, safe to prune.
+    committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_800).expect("settle"));
     let out =
         committed(close_session(&mut ts.store, &key, false, &NoFaults, 2_000).expect("close"));
     assert!(
@@ -409,6 +422,86 @@ fn local_edit_on_replicated_lineage_requests_broadcast() {
         "a new local edit on a replicated lineage broadcasts"
     );
     assert!(!out.deduped);
+}
+
+#[test]
+fn replicated_edit_before_base_is_not_broadcast() {
+    // A replicated marker whose base is NOT yet claimed must NOT broadcast local
+    // edits: a delta without the seed base leaves peers unable to reconstruct.
+    let mut ts = fresh_store("repl-no-base");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::Replicated,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let doc = Ydoc::wire();
+    let d = doc.plaintext_insert(0, "premature");
+    let out =
+        committed(record_local_update(&mut ts.store, &key, &d, &NoFaults, 1_100).expect("rec"));
+    assert!(
+        !out.emit_outbound,
+        "no broadcast before the base is claimed"
+    );
+}
+
+#[test]
+fn resettle_of_edited_doc_expects_prior_content_preimage() {
+    // The materializer must replace (not conflict-flag) an edited doc: the first
+    // settle expects the target ABSENT; a later settle of changed content expects
+    // the PREVIOUS settle's content still on disk.
+    use dohc_engine_storage::Preimage;
+    let mut ts = fresh_store("resettle");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let doc = Ydoc::wire();
+    let d1 = doc.plaintext_insert(0, "first");
+    committed(record_local_update(&mut ts.store, &key, &d1, &NoFaults, 1_000).expect("rec1"));
+    let s1 = committed(settle(&mut ts.store, &key, "n.md", &NoFaults, 5_000).expect("settle1"));
+    let j1 = ts
+        .store
+        .load_materialization_job(&s1.job_id)
+        .expect("load1")
+        .expect("job1");
+    assert_eq!(
+        j1.preimage,
+        Preimage::Absent,
+        "first settle expects absent target"
+    );
+
+    // Edit and re-settle: the new job must expect the FIRST content as preimage.
+    let d2 = doc.plaintext_insert(5, " second");
+    committed(record_local_update(&mut ts.store, &key, &d2, &NoFaults, 6_000).expect("rec2"));
+    let s2 = committed(settle(&mut ts.store, &key, "n.md", &NoFaults, 7_000).expect("settle2"));
+    assert!(!s2.deduped, "changed content is a new job");
+    let j2 = ts
+        .store
+        .load_materialization_job(&s2.job_id)
+        .expect("load2")
+        .expect("job2");
+    assert_eq!(
+        j2.preimage,
+        Preimage::Present(s1.content_sha256),
+        "re-settle expects the previous content on disk"
+    );
 }
 
 // ---- constraint 5: never journal invalid bytes ------------------------------

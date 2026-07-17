@@ -9,6 +9,15 @@
 //! idempotent no-op — and (b) tagging a remote-applied update with its peer
 //! origin and returning `emit_outbound = false`, so a remote update is journaled
 //! into the durable lineage but NEVER re-emitted as our own outbound op.
+//!
+//! DEDUP SPAN: the content-addressed fast-path spans the UN-FOLDED update log.
+//! Once an update is folded into a snapshot by compaction its row is pruned, so a
+//! redelivery of already-folded bytes is re-appended as a fresh row — but this is
+//! a CRDT NO-OP (re-applying an integrated update changes nothing; convergence is
+//! preserved, proven by the spike), and the redundant row is re-folded at the
+//! next compaction, so the log stays bounded. Durable cross-compaction dedup by a
+//! per-peer applied cursor is R11b's replication-drain job (the `origin_seq`
+//! carried on [`RemoteUpdate`] is that cursor's input).
 
 use dohc_engine_storage::{put_binary_blob, EngineStore, FaultInjector, TxnOutcome};
 

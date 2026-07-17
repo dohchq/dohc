@@ -691,3 +691,31 @@ source of truth every orchestrator session loads first).
     fmt=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS
     cargo-deny=PASS cargo-audit=SKIP. collab `--features fault-injection`: 6
     cross_engine + 14 durable_regimes = 20 PASS.
+- BOT REVIEW (coderabbit + codex, same round) — additional genuine findings
+  fixed on top of the reviewer-relayed set:
+  - CRITICAL (coderabbit) — `load_persisted` read marker/snapshot/tail in three
+    separate reads (a concurrent compaction could drop the tail → silent
+    omission). Now ONE DEFERRED read snapshot + reconstruction validated against
+    the marker head (shortfall ⇒ `Corrupt`, never a truncated doc).
+  - CRITICAL (coderabbit) — local-only `close_session` pruned without a settle
+    handoff (data loss). Now refuses (`UnsettledClose`) unless the current head's
+    projection == `last_settled_sha`; a doc with edits must settle before close.
+  - P2 (codex) — settle used `Preimage::Absent` on EVERY job, so an edited doc
+    conflict-flagged after its first on-disk write. Now `Present(last_settled_sha)`
+    on re-settle so the materializer replaces the previous projection.
+  - P2 (codex) — `emit_outbound` broadcast on a replicated marker BEFORE the base
+    was claimed (peers get a delta without the seed). Now gated on
+    `base_claimed`.
+  - MAJOR (coderabbit) — NUL/control bytes now rejected in `DocKey` (they could
+    forge a settle job-id collision across keys); `regime`/`content_kind` now
+    CHECK-constrained in the migration (fail closed at write, no silent
+    downgrade of a corrupted value).
+  - DEFERRED to R11b (documented, not silently) — durable cross-COMPACTION dedup
+    by a per-peer applied cursor: after a fold, a redelivery of already-folded
+    bytes is re-appended but is a CRDT no-op (convergence preserved, re-folded
+    at the next compaction). The `origin_seq` on `RemoteUpdate` is that cursor's
+    input; the replication drain is R11b's.
+  - EVIDENCE: 2026-07-17T01:21:51.532Z | run-rust-checks | win32/x64 | PASS |
+    fmt=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS
+    cargo-deny=PASS. collab `--features fault-injection`: 6 cross_engine + 16
+    durable_regimes = 22 PASS.

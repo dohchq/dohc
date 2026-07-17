@@ -42,6 +42,13 @@ pub enum CollabError {
     #[error("no Y.Doc marker for this document key")]
     NoMarker,
 
+    /// A local-only close would prune CRDT state whose edits no durable settle
+    /// covers (the current head is not reflected in the materialized markdown).
+    /// Settle first — markdown-is-the-artifact requires the artifact to exist
+    /// before the cache is discarded.
+    #[error("local-only close would discard unsettled edits; settle before closing")]
+    UnsettledClose,
+
     /// The persisted lineage is structurally inconsistent (e.g. a referenced
     /// blob is missing, or a snapshot fails to reconstruct).
     #[error("corrupt Y.Doc lineage: {reason}")]
@@ -63,6 +70,7 @@ impl CollabError {
             CollabError::BaseAlreadyClaimed => "base-already-claimed",
             CollabError::LeaseHeld => "lease-held",
             CollabError::NoMarker => "no-marker",
+            CollabError::UnsettledClose => "unsettled-close",
             CollabError::Corrupt { .. } => "corrupt-lineage",
             CollabError::Storage(_) => "storage",
         }

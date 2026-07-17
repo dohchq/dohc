@@ -151,17 +151,30 @@ pub fn load_persisted(
     store: &EngineStore,
     key: &DocKey,
 ) -> Result<Option<PersistedDoc>, CollabError> {
-    let marker = match store.read_with(|conn| query_marker(conn, key))? {
-        Some(m) => m,
+    // Read the marker, the latest snapshot, and the update tail from ONE
+    // consistent SQLite read snapshot (a single DEFERRED read transaction), so a
+    // concurrent compaction cannot delete the tail between reading the old
+    // snapshot and reading the updates and make reconstruction silently omit
+    // committed edits. (Single-writer-per-store already precludes an in-process
+    // race; this also closes the cross-process window.) The content-addressed
+    // blob bytes are fetched after — they are immutable under their sha, so
+    // reading them outside the snapshot is safe.
+    let loaded = store.read_with(|conn| -> Result<_, CollabError> {
+        let read_tx = conn.unchecked_transaction().map_err(map_sql)?;
+        let marker = match query_marker(&read_tx, key)? {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+        let snapshot = latest_snapshot(&read_tx, key)?;
+        let from_seq = snapshot.as_ref().map(|(seq, _)| *seq).unwrap_or(0);
+        let tail = updates_after(&read_tx, key, from_seq)?;
+        Ok(Some((marker, snapshot, tail)))
+    })?;
+    let (marker, snapshot, tail) = match loaded {
+        Some(triple) => triple,
         None => return Ok(None),
     };
-
-    // Latest snapshot (highest up_to_seq) and the update tail past it. Read the
-    // row metadata under the connection; fetch the referenced blobs after (the
-    // blob getter borrows the store immutably, same as this read).
-    let snapshot = store.read_with(|conn| latest_snapshot(conn, key))?;
     let from_seq = snapshot.as_ref().map(|(seq, _)| *seq).unwrap_or(0);
-    let tail = store.read_with(|conn| updates_after(conn, key, from_seq))?;
 
     let doc = Ydoc::wire();
     if let Some((_, snapshot_sha)) = &snapshot {
@@ -184,6 +197,19 @@ pub fn load_persisted(
         // (constraint 5); we surface it.
         doc.apply(&bytes)?;
         up_to = seq;
+    }
+
+    // Validate the reconstructed sequence against the marker head: the applied
+    // tail must reach exactly the recorded head. A shortfall means a committed
+    // update is missing (a torn lineage) — surface it, never return a silently
+    // truncated doc.
+    if up_to != marker.head_update_seq {
+        return Err(CollabError::Corrupt {
+            reason: format!(
+                "reconstruction reached seq {up_to} but marker head is {}",
+                marker.head_update_seq
+            ),
+        });
     }
 
     Ok(Some(PersistedDoc {
@@ -259,9 +285,11 @@ pub fn record_local_update(
         Ok(AppendOutcome {
             seq,
             deduped: false,
-            // A genuinely-new local edit replicates only under the replicated
-            // regime; a local-only doc's .md is its channel.
-            emit_outbound: marker.regime == Regime::Replicated,
+            // A genuinely-new local edit broadcasts only on a replicated lineage
+            // that has ALREADY claimed its base — a delta emitted before the base
+            // exists would reach peers without the seed they need to reconstruct.
+            // A local-only doc's .md is its channel.
+            emit_outbound: marker.regime == Regime::Replicated && marker.base_claimed,
         })
     })?;
     self_bound_log(store, key, &outcome, faults, now_ms)?;
@@ -553,9 +581,15 @@ pub fn settle(
                 job_id: job_id.clone(),
                 target_path: target_path.to_string(),
                 content_sha256: content_sha.clone(),
-                // The settle projection replaces whatever the last settle wrote;
-                // the pipeline revalidates the on-disk preimage before replacing.
-                preimage: Preimage::Absent,
+                // The preimage the materializer revalidates before replacing: the
+                // FIRST settle expects the target absent; a later settle expects
+                // the PREVIOUS settle's content still on disk (else an external
+                // editor wrote it — preserve-both). `Absent` on every settle would
+                // wrongly conflict-flag every edited doc after the first write.
+                preimage: match &last_sha {
+                    Some(sha) => Preimage::Present(sha.clone()),
+                    None => Preimage::Absent,
+                },
                 target_generation: generation,
                 now_ms,
             },
@@ -606,7 +640,25 @@ pub fn close_session(
             TxnOutcome::Crashed { committed } => TxnOutcome::Crashed { committed },
         });
     }
-    // Local-only: prune the CRDT cache to nothing, keep the marker.
+    // Local-only prune would DISCARD the CRDT cache. Refuse unless the current
+    // head is already covered by a durable settle (markdown-is-the-artifact: the
+    // artifact must exist before the cache is thrown away). A doc with no edits
+    // (`head_update_seq == 0`) has nothing to lose and prunes freely.
+    if marker.head_update_seq > 0 {
+        let persisted = load_persisted(store, key)?.ok_or(CollabError::NoMarker)?;
+        let content_sha = crate::hex_sha256(
+            persisted
+                .doc
+                .project(marker.content_kind)
+                .markdown
+                .as_bytes(),
+        );
+        let last_settled = store.read_with(|conn| last_settled_sha(conn, key))?;
+        if last_settled.as_deref() != Some(content_sha.as_str()) {
+            return Err(CollabError::UnsettledClose);
+        }
+    }
+    // Prune the CRDT cache to nothing, keep the marker.
     store.write_with(faults, |tx| {
         let removed_updates = tx
             .execute(
@@ -669,6 +721,20 @@ pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Mar
     )
     .optional()
     .map_err(map_sql)
+}
+
+/// The sha of the content the last settle materialized (or `None` if never
+/// settled) — the durable settle-handoff marker the local-only close guard reads.
+fn last_settled_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, CollabError> {
+    conn.query_row(
+        "SELECT last_settled_sha FROM ydoc_docs \
+         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+        rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .optional()
+    .map_err(map_sql)?
+    .ok_or(CollabError::NoMarker)
 }
 
 pub(crate) fn head_of(conn: &Connection, key: &DocKey) -> Result<(i64, i64, bool), CollabError> {
