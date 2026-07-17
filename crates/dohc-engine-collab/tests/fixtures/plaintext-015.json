@@ -1,0 +1,17 @@
+{
+ "seed": 15,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQGZlqrMAgAEAQlwbGFpblRleHQI8J+YgPCfjokA",
+  "AQGZlqrMAgTEmZaqzAIBmZaqzAICBWNhZsOpAA==",
+  "AQGZlqrMAgiEmZaqzAIDCeaXpeacrOiqngA=",
+  "AAGZlqrMAgEGAg==",
+  "AQGZlqrMAgtEmZaqzAIACWxpbmUKY29udAGZlqrMAgEGAg==",
+  "AAGZlqrMAgIGAg8B"
+ ],
+ "mergedUpdateB64": "AQSZlqrMAgAEAQlwbGFpblRleHQI8J+YgPCfjonEmZaqzAIBmZaqzAICBWNhZsOphJmWqswCAwnml6XmnKzoqp5EmZaqzAIACWxpbmUKY29udAGZlqrMAgIGAg8B",
+ "stateVectorB64": "AZmWqswCFA==",
+ "expected": {
+  "text": "linecont😀ca🎉日本語"
+ }
+}

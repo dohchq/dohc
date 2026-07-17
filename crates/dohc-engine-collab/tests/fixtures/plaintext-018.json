@@ -1,0 +1,18 @@
+{
+ "seed": 18,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQGxzpKxCQAEAQlwbGFpblRleHQDYcyBAA==",
+  "AQGxzpKxCQJEsc6SsQkAB1rDvHJpY2gA",
+  "AQGxzpKxCQjEsc6SsQkHsc6SsQkABWNhZsOpAA==",
+  "AAGxzpKxCQEIAg==",
+  "AQGxzpKxCQzEsc6SsQkDsc6SsQkECtmF2LHYrdio2KcBsc6SsQkBCAI=",
+  "AQGxzpKxCRHEsc6SsQkCsc6SsQkDDPCdlJjwnZSr8J2UpgGxzpKxCQEIAg==",
+  "AQGxzpKxCRfEsc6SsQkLsc6SsQkACtmF2LHYrdio2KcBsc6SsQkBCAI="
+ ],
+ "mergedUpdateB64": "AQaxzpKxCQAEAQlwbGFpblRleHQDYcyBRLHOkrEJAAdaw7xyaWNoxLHOkrEJB7HOkrEJAAVjYWbDqcSxzpKxCQOxzpKxCQQK2YXYsdit2KjYp8SxzpKxCQKxzpKxCQMM8J2UmPCdlKvwnZSmxLHOkrEJC7HOkrEJAArZhdix2K3YqNinAbHOkrEJAQgC",
+ "stateVectorB64": "AbHOkrEJHA==",
+ "expected": {
+  "text": "Z𝔘𝔫𝔦üمرحباrichféمرحباá"
+ }
+}

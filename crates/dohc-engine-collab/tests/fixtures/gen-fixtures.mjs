@@ -1,0 +1,300 @@
+// Cross-engine fixture generator for the R11a durable Y.Doc layer.
+//
+// Produces REAL yjs 13.6.30 update lineages + yjs-computed expectations that the
+// Rust durable pipeline must converge on. This is the non-tautological
+// cross-engine oracle (fixtures from real yjs, NOT Rust round-tripped) — the
+// same pattern the yrs spike and R08 used. Regenerate with:
+//
+//   node crates/dohc-engine-collab/tests/fixtures/gen-fixtures.mjs
+//
+// yjs is resolved from the workspace node_modules (pnpm; version pinned by
+// crates/yrs-spike/scripts/package.json → yjs 13.6.30, the audited interop
+// pair). Fixtures are committed so the Rust test is self-contained.
+
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+import { writeFileSync, readdirSync, unlinkSync } from "node:fs";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(here, "../../../..");
+// yjs lives in the pnpm node_modules of the working checkout. When this runs
+// from a git worktree (no node_modules of its own) fall back to the shared main
+// checkout three levels up (`<main>/.claude/worktrees/<wt>/`), or an override.
+const bases = [
+  process.env.DOHC_YJS_BASE,
+  repoRoot,
+  join(repoRoot, "crates/yrs-spike/scripts"),
+  join(repoRoot, "../../.."),
+  join(repoRoot, "../../../crates/yrs-spike/scripts"),
+].filter(Boolean);
+const require = createRequire(join(repoRoot, "package.json"));
+let yjsPath = null;
+for (const base of bases) {
+  try {
+    yjsPath = require.resolve("yjs", { paths: [base] });
+    break;
+  } catch {
+    /* try next base */
+  }
+}
+if (!yjsPath) {
+  throw new Error(
+    `could not resolve yjs from any base:\n${bases.join("\n")}\nrun 'pnpm install --filter @dohc/yrs-spike-scripts...' or set DOHC_YJS_BASE`,
+  );
+}
+const Y = require(yjsPath);
+
+const b64 = (u8) => Buffer.from(u8).toString("base64");
+
+// Deterministic PRNG (mulberry32) so regeneration is byte-stable per seed.
+function rng(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// A pool of strings spanning ASCII, CJK, emoji (surrogate pairs), RTL, combining.
+const POOL = [
+  "hello ",
+  "world",
+  "café",
+  "日本語",
+  "😀🎉",
+  "مرحبا",
+  "á", // combining acute
+  "\ttab",
+  "line\ncont",
+  "Zürich",
+  "naïve",
+  "𝔘𝔫𝔦",
+];
+
+// Capture one incremental update per transaction (mirrors one durable append).
+function capture(doc, edit) {
+  const before = Y.encodeStateVector(doc);
+  edit();
+  return b64(Y.encodeStateAsUpdate(doc, before));
+}
+
+// Valid UTF-16 code-point boundary offsets of a string (0, then after each code
+// point). A real editor NEVER edits inside a surrogate pair; splitting one
+// creates a lone surrogate yjs keeps but Rust cannot represent (binding
+// constraint 3), which the surrogateProbe fixture demonstrates separately. The
+// main corpus stays well-formed so cross-engine convergence is exact.
+function boundaries(str) {
+  const out = [0];
+  let u = 0;
+  for (const cp of str) {
+    u += cp.length; // 1 or 2 UTF-16 units
+    out.push(u);
+  }
+  return out;
+}
+
+function makePlaintext(seed) {
+  const r = rng(seed);
+  const doc = new Y.Doc();
+  const text = doc.getText("plainText");
+  const updates = [];
+  const ops = 4 + Math.floor(r() * 10);
+  for (let i = 0; i < ops; i++) {
+    const cur = text.toString();
+    const bounds = boundaries(cur); // valid code-point boundary offsets
+    if (bounds.length > 4 && r() < 0.3) {
+      // Delete a whole number of code points between two boundaries.
+      const bi = Math.floor(r() * (bounds.length - 2));
+      const at = bounds[bi];
+      const bj = bi + 1 + Math.floor(r() * Math.min(3, bounds.length - 1 - bi - 1));
+      const del = bounds[bj] - at;
+      updates.push(capture(doc, () => text.delete(at, del)));
+    } else {
+      const at = bounds[Math.floor(r() * bounds.length)];
+      const s = POOL[Math.floor(r() * POOL.length)];
+      updates.push(capture(doc, () => text.insert(at, s)));
+    }
+  }
+  return {
+    seed,
+    contentKind: "plaintext",
+    updates,
+    mergedUpdateB64: b64(Y.mergeUpdates(updates.map((u) => Buffer.from(u, "base64")))),
+    stateVectorB64: b64(Y.encodeStateVector(doc)),
+    expected: { text: text.toString() },
+  };
+}
+
+function paragraphRuns(xmlText) {
+  return xmlText.toDelta().map((op) => ({
+    text: typeof op.insert === "string" ? op.insert : "",
+    bold: !!(op.attributes && (op.attributes.bold || op.attributes.strong)),
+    italic: !!(op.attributes && (op.attributes.italic || op.attributes.em)),
+  }));
+}
+
+function makeRichdoc(seed) {
+  const r = rng(seed);
+  const doc = new Y.Doc();
+  const frag = doc.getXmlFragment("body");
+  const fm = doc.getMap("frontmatter");
+  const updates = [];
+
+  // Frontmatter: a couple of scalars.
+  updates.push(capture(doc, () => fm.set("title", POOL[Math.floor(r() * POOL.length)].trim() || "t")));
+  updates.push(capture(doc, () => fm.set("count", Math.floor(r() * 100))));
+
+  const paras = 2 + Math.floor(r() * 4);
+  for (let p = 0; p < paras; p++) {
+    updates.push(
+      capture(doc, () => {
+        const el = new Y.XmlElement("paragraph");
+        const t = new Y.XmlText();
+        const s = POOL[Math.floor(r() * POOL.length)] + POOL[Math.floor(r() * POOL.length)];
+        const attrs = {};
+        if (r() < 0.4) attrs.bold = true;
+        if (r() < 0.4) attrs.italic = true;
+        t.insert(0, s, Object.keys(attrs).length ? attrs : undefined);
+        el.insert(0, [t]);
+        frag.insert(frag.length, [el]);
+      }),
+    );
+  }
+  // A follow-up formatted insert into the first paragraph, if any.
+  if (frag.length > 0) {
+    updates.push(
+      capture(doc, () => {
+        const el = frag.get(0);
+        const t = el.get(0);
+        t.insert(0, "X", { bold: true });
+      }),
+    );
+  }
+
+  const paragraphs = [];
+  for (let i = 0; i < frag.length; i++) {
+    const el = frag.get(i);
+    const t = el.get(0);
+    paragraphs.push({ runs: paragraphRuns(t) });
+  }
+  const frontmatter = {};
+  for (const [k, v] of fm.entries()) frontmatter[k] = v;
+
+  return {
+    seed,
+    contentKind: "richdoc",
+    updates,
+    mergedUpdateB64: b64(Y.mergeUpdates(updates.map((u) => Buffer.from(u, "base64")))),
+    stateVectorB64: b64(Y.encodeStateVector(doc)),
+    expected: { frontmatter, paragraphs },
+  };
+}
+
+// The OffsetKind::Utf16 probe: a leading emoji makes byte and UTF-16 offsets of
+// a later boundary DIFFER without any mid-char panic. yjs measures in UTF-16, so
+// inserting at index 4 in "😀XYZ" lands before "Z". A Utf16 yrs doc must agree; a
+// Bytes yrs doc (index 4 = byte 4 = before "X") diverges.
+function makeOffsetProbe() {
+  const doc = new Y.Doc();
+  const text = doc.getText("plainText");
+  const base = capture(doc, () => text.insert(0, "😀XYZ"));
+  const insertUpdate = capture(doc, () => text.insert(4, "!"));
+  return {
+    seed: -1,
+    contentKind: "plaintext",
+    kind: "offsetProbe",
+    baseUpdateB64: base,
+    updates: [base, insertUpdate],
+    // The Rust test applies `baseUpdateB64` to a Utf16 doc and a Bytes doc, then
+    // does a LOCAL insert of "!" at UTF-16 index 4 on each; Utf16 must equal
+    // this yjs expectation, Bytes must not.
+    expected: { textAfterInsertAt4: text.toString(), insertChar: "!", insertIndex: 4 },
+  };
+}
+
+// Surrogate-split probe (binding constraint 3): inserting "X" at UTF-16 index 1
+// splits the emoji's surrogate pair. yjs keeps the lone surrogates (its string
+// stays ill-formed UTF-16); Rust strings CANNOT hold a lone surrogate, so yrs
+// diverges. The R11b live adapter must validate isWellFormed() and reject/
+// sanitize such an edit BEFORE journaling — this fixture pins that the boundary
+// check is load-bearing (Rust must diverge from yjs here).
+function makeSurrogateProbe() {
+  const doc = new Y.Doc();
+  const text = doc.getText("plainText");
+  const base = capture(doc, () => text.insert(0, "😀")); // one astral char (2 UTF-16 units)
+  const split = capture(doc, () => text.insert(1, "X")); // splits the surrogate pair
+  const yjsStr = text.toString();
+  return {
+    seed: -3,
+    contentKind: "plaintext",
+    kind: "surrogateProbe",
+    updates: [base, split],
+    // yjs keeps a lone surrogate here; the Rust replay cannot match it.
+    expected: { yjsText: yjsText(yjsStr), wellFormed: isWellFormedUtf16(yjsStr) },
+  };
+}
+
+// Encode the possibly-ill-formed yjs string as an array of UTF-16 code units so
+// the JSON fixture round-trips faithfully (JSON cannot carry a lone surrogate).
+function yjsText(str) {
+  const units = [];
+  for (let i = 0; i < str.length; i++) units.push(str.charCodeAt(i));
+  return units;
+}
+function isWellFormedUtf16(str) {
+  return typeof str.isWellFormed === "function"
+    ? str.isWellFormed()
+    : !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(str);
+}
+
+// Nested-frontmatter probe (binding constraint 2): yjs preserves object key
+// insertion order; yrs stores Any::Map as a HashMap and re-encodes in random
+// order. The Rust projection/canonical MUST sort nested keys, so the fixture's
+// expectation is the SORTED nested object.
+function makeNestedFrontmatter() {
+  const doc = new Y.Doc();
+  const fm = doc.getMap("frontmatter");
+  const updates = [];
+  updates.push(capture(doc, () => fm.set("zeta", "z")));
+  updates.push(
+    capture(doc, () => fm.set("meta", { gamma: "g", alpha: "a", beta: "b", delta: "d" })),
+  );
+  const frontmatter = {};
+  for (const [k, v] of fm.entries()) frontmatter[k] = v;
+  return {
+    seed: -2,
+    contentKind: "richdoc",
+    kind: "nestedFrontmatter",
+    updates,
+    mergedUpdateB64: b64(Y.mergeUpdates(updates.map((u) => Buffer.from(u, "base64")))),
+    expected: { frontmatter },
+  };
+}
+
+// Clear old generated fixtures (keep this generator + any .rs).
+for (const f of readdirSync(here)) {
+  if (f.endsWith(".json")) unlinkSync(join(here, f));
+}
+
+const manifest = [];
+function emit(fx) {
+  const name = fx.kind
+    ? `${fx.kind}.json`
+    : `${fx.contentKind}-${String(fx.seed).padStart(3, "0")}.json`;
+  writeFileSync(join(here, name), JSON.stringify(fx, null, 1));
+  manifest.push(name);
+}
+
+const SEEDS = 24;
+for (let s = 1; s <= SEEDS; s++) emit(makePlaintext(s));
+for (let s = 1; s <= SEEDS; s++) emit(makeRichdoc(1000 + s));
+emit(makeOffsetProbe());
+emit(makeSurrogateProbe());
+emit(makeNestedFrontmatter());
+
+writeFileSync(join(here, "_manifest.json"), JSON.stringify({ fixtures: manifest }, null, 1));
+console.log(`generated ${manifest.length} fixtures (${SEEDS} plaintext + ${SEEDS} richdoc + 3 probes)`);

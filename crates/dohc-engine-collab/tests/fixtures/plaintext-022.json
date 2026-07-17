@@ -1,0 +1,21 @@
+{
+ "seed": 22,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQGlxcjgDwAEAQlwbGFpblRleHQFY2Fmw6kA",
+  "AAGlxcjgDwEBAg==",
+  "AQGlxcjgDwTEpcXI4A8CpcXI4A8DCWxpbmUKY29udAGlxcjgDwEBAg==",
+  "AQGlxcjgDw1EpcXI4A8ABXdvcmxkAaXFyOAPAQEC",
+  "AAGlxcjgDwIBAg8C",
+  "AAGlxcjgDwMBAgcBDwI=",
+  "AQGlxcjgDxLEpcXI4A8KpcXI4A8LBAl0YWIBpcXI4A8DAQIHAQ8C",
+  "AQGlxcjgDxbEpcXI4A8NpcXI4A8OBAl0YWIBpcXI4A8DAQIHAQ8C",
+  "AQGlxcjgDxpEpcXI4A8NBmhlbGxvIAGlxcjgDwMBAgcBDwI=",
+  "AQGlxcjgDyDEpcXI4A8QpcXI4A8RBWNhZsOpAaXFyOAPAwECBwEPAg=="
+ ],
+ "mergedUpdateB64": "AQelxcjgDwAEAQlwbGFpblRleHQFY2Fmw6nEpcXI4A8CpcXI4A8DCWxpbmUKY29udESlxcjgDwAFd29ybGTEpcXI4A8KpcXI4A8LBAl0YWLEpcXI4A8NpcXI4A8OBAl0YWJEpcXI4A8NBmhlbGxvIMSlxcjgDxClxcjgDxEFY2Fmw6kBpcXI4A8DAQIHAQ8C",
+ "stateVectorB64": "AaXFyOAPJA==",
+ "expected": {
+  "text": "hello w\ttabocafédclin\nco\ttabnté"
+ }
+}

@@ -1,0 +1,15 @@
+{
+ "seed": 23,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQHemcnsAwAEAQlwbGFpblRleHQECXRhYgA=",
+  "AQHemcnsAwTE3pnJ7AMA3pnJ7AMBBWNhZsOpAA==",
+  "AQHemcnsAwiE3pnJ7AMDB1rDvHJpY2gA",
+  "AAHemcnsAwEJAQ=="
+ ],
+ "mergedUpdateB64": "AQPemcnsAwAEAQlwbGFpblRleHQECXRhYsTemcnsAwDemcnsAwEFY2Fmw6mE3pnJ7AMDB1rDvHJpY2gB3pnJ7AMBCQE=",
+ "stateVectorB64": "Ad6ZyewDDg==",
+ "expected": {
+  "text": "\tcafétabZrich"
+ }
+}

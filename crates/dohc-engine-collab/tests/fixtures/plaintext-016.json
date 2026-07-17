@@ -1,0 +1,21 @@
+{
+ "seed": 16,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQHIytXrCwAEAQlwbGFpblRleHQHWsO8cmljaAA=",
+  "AQHIytXrCwbEyMrV6wsByMrV6wsCBmhlbGxvIAA=",
+  "AQHIytXrCwzEyMrV6wsJyMrV6wsKBWNhZsOpAA==",
+  "AQHIytXrCxDEyMrV6wsMyMrV6wsNBmhlbGxvIAA=",
+  "AAHIytXrCwERAg==",
+  "AQHIytXrCxbEyMrV6wsMyMrV6wsQCPCfmIDwn46JAcjK1esLAREC",
+  "AQHIytXrCxrEyMrV6wsGyMrV6wsHCWxpbmUKY29udAHIytXrCwERAg==",
+  "AQHIytXrCyPEyMrV6wsTyMrV6wsUB1rDvHJpY2gByMrV6wsBEQI=",
+  "AQHIytXrCynEyMrV6wsSyMrV6wsTB1rDvHJpY2gByMrV6wsBEQI=",
+  "AQHIytXrCy/EyMrV6wsdyMrV6wseBmhlbGxvIAHIytXrCwERAg=="
+ ],
+ "mergedUpdateB64": "AQnIytXrCwAEAQlwbGFpblRleHQHWsO8cmljaMTIytXrCwHIytXrCwIGaGVsbG8gxMjK1esLCcjK1esLCgVjYWbDqcTIytXrCwzIytXrCw0GaGVsbG8gxMjK1esLDMjK1esLEAjwn5iA8J+OicTIytXrCwbIytXrCwcJbGluZQpjb250xMjK1esLE8jK1esLFAdaw7xyaWNoxMjK1esLEsjK1esLEwdaw7xyaWNoxMjK1esLHcjK1esLHgZoZWxsbyAByMrV6wsBEQI=",
+ "stateVectorB64": "AcjK1esLNQ==",
+ "expected": {
+  "text": "Zühlinehello \ncontellc😀🎉hZürichlZüricho aféo rich"
+ }
+}

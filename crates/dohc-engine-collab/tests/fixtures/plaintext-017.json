@@ -1,0 +1,21 @@
+{
+ "seed": 17,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQGYsJ2ZCAAEAQlwbGFpblRleHQDYcyBAA==",
+  "AQGYsJ2ZCAJEmLCdmQgABXdvcmxkAA==",
+  "AQGYsJ2ZCAfEmLCdmQgDmLCdmQgEA2HMgQA=",
+  "AAGYsJ2ZCAIAAQUC",
+  "AQGYsJ2ZCAnEmLCdmQgCmLCdmQgDBWNhZsOpAZiwnZkIAgABBQI=",
+  "AQGYsJ2ZCA3EmLCdmQgImLCdmQgECeaXpeacrOiqngGYsJ2ZCAIAAQUC",
+  "AQGYsJ2ZCBDEmLCdmQgNmLCdmQgOCWxpbmUKY29udAGYsJ2ZCAIAAQUC",
+  "AQGYsJ2ZCBnEmLCdmQgTmLCdmQgUA2HMgQGYsJ2ZCAIAAQUC",
+  "AQGYsJ2ZCBvEmLCdmQgCmLCdmQgJBmhlbGxvIAGYsJ2ZCAIAAQUC",
+  "AQGYsJ2ZCCHEmLCdmQgKmLCdmQgLCtmF2LHYrdio2KcBmLCdmQgCAAEFAg=="
+ ],
+ "mergedUpdateB64": "AQmYsJ2ZCAAEAQlwbGFpblRleHQDYcyBRJiwnZkIAAV3b3JsZMSYsJ2ZCAOYsJ2ZCAQDYcyBxJiwnZkIApiwnZkIAwVjYWbDqcSYsJ2ZCAiYsJ2ZCAQJ5pel5pys6KqexJiwnZkIDZiwnZkIDglsaW5lCmNvbnTEmLCdmQgTmLCdmQgUA2HMgcSYsJ2ZCAKYsJ2ZCAkGaGVsbG8gxJiwnZkICpiwnZkICwrZhdix2K3YqNinAZiwnZkIAgABBQI=",
+ "stateVectorB64": "AZiwnZkIJg==",
+ "expected": {
+  "text": "whello caمرحباféoá日lineá\ncont本語ŕ"
+ }
+}

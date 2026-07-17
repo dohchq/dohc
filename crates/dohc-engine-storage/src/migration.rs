@@ -368,6 +368,103 @@ CREATE INDEX idx_secret_moments_path_order
 /// The `id` of the R08 secrets migration.
 pub(crate) const SECRETS_MIGRATION_ID: &str = "v1-secrets";
 
+/// Ordinal 2 (R11a Y.Doc durable cache, appended via the migration-append
+/// capability contract). Adds the three durable-Y.Doc tables — the per-doc
+/// marker with its head pointers, the content-addressed durable update log, and
+/// the folded full-state snapshots — whose logical shapes match the TS engine's
+/// `ydoc_docs` / `ydoc_updates` / `ydoc_snapshots` (`engineDbSchema.ts`
+/// `ENGINE_YDOC_DDL`). Update and snapshot BYTES are content-addressed into the
+/// existing `binary_blobs` table; these tables carry only the sha references and
+/// the head pointers. `STRICT` + `INTEGER` timestamps follow the R04 baseline
+/// convention (the TS `REAL` columns are an engine-internal detail; the CRDT
+/// lineage rides the content-addressed blobs, not the SQLite column affinity —
+/// same rationale R08 recorded for its `REAL`→`INTEGER` timestamps).
+///
+/// Two columns extend the TS logical shape and are recorded deltas: `regime`
+/// distinguishes the local-only-prunable cache from the replicated never-prune
+/// durable lineage (the TS driver carries this as a constructor flag, not a
+/// column; making it a column makes each doc's regime durable and inspectable),
+/// and `base_claimed` makes the base-once discipline a durable per-doc fact the
+/// claim transaction re-checks (the TS driver derives it from lineage presence).
+///
+/// The marker's `FOREIGN KEY (workspace_id, object_id) → file_objects` keeps the
+/// GC-root accounting the TS schema documents: a `binary_blob` referenced by a
+/// live `ydoc_updates`/`ydoc_snapshots` row (reachable from a marker head) is a
+/// GC root, and deleting the rich-doc file cascades every ydoc_* row away so its
+/// blobs become collectable.
+const V1_YDOC_DDL: &str = "\
+CREATE TABLE ydoc_docs (
+    workspace_id      TEXT    NOT NULL,
+    version_id        TEXT    NOT NULL,
+    object_id         TEXT    NOT NULL,
+    -- CHECK-constrained so a corrupted/forward value can NEVER be stored and
+    -- later silently downgraded on read (a bad `regime` must not send a
+    -- replicated lineage down the pruning path; a bad `content_kind` must not
+    -- project the wrong root). Fail closed at write.
+    content_kind      TEXT    NOT NULL DEFAULT 'richdoc'
+                              CHECK (content_kind IN ('plaintext', 'richdoc')),
+    regime            TEXT    NOT NULL DEFAULT 'local-only'
+                              CHECK (regime IN ('local-only', 'replicated')),
+    head_update_seq   INTEGER NOT NULL DEFAULT 0,
+    head_snapshot_seq INTEGER NOT NULL DEFAULT 0,
+    base_claimed      INTEGER NOT NULL DEFAULT 0,
+    -- Durable, monotone-forever settle generation (NEVER reset, even by a
+    -- local-only close-prune): makes the settle job id clock-independent so a
+    -- crash-retry with an advanced wall clock still dedups. `last_settled_sha`
+    -- records the content last materialized so an unchanged re-settle is an
+    -- idempotent no-op while a content change bumps the generation.
+    settle_seq        INTEGER NOT NULL DEFAULT 0,
+    last_settled_sha  TEXT,
+    updated_at_ms     INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id),
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE ydoc_updates (
+    workspace_id       TEXT    NOT NULL,
+    version_id         TEXT    NOT NULL,
+    object_id          TEXT    NOT NULL,
+    seq                INTEGER NOT NULL,
+    update_blob_sha256 TEXT    NOT NULL,
+    actor_origin_id    TEXT,
+    recorded_at_ms     INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id, seq),
+    FOREIGN KEY (update_blob_sha256) REFERENCES binary_blobs(sha256),
+    FOREIGN KEY (workspace_id, version_id, object_id)
+      REFERENCES ydoc_docs(workspace_id, version_id, object_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX idx_ydoc_updates_doc_seq
+    ON ydoc_updates(workspace_id, version_id, object_id, seq);
+
+-- Content-addressed dedup index: an update blob already present in a doc's log
+-- makes a redelivered/echoed remote update an O(1) idempotent no-op.
+CREATE INDEX idx_ydoc_updates_doc_blob
+    ON ydoc_updates(workspace_id, version_id, object_id, update_blob_sha256);
+
+CREATE TABLE ydoc_snapshots (
+    workspace_id             TEXT    NOT NULL,
+    version_id               TEXT    NOT NULL,
+    object_id                TEXT    NOT NULL,
+    up_to_seq                INTEGER NOT NULL,
+    snapshot_blob_sha256     TEXT    NOT NULL,
+    state_vector_blob_sha256 TEXT    NOT NULL,
+    recorded_at_ms           INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, version_id, object_id, up_to_seq),
+    FOREIGN KEY (snapshot_blob_sha256) REFERENCES binary_blobs(sha256),
+    FOREIGN KEY (state_vector_blob_sha256) REFERENCES binary_blobs(sha256),
+    FOREIGN KEY (workspace_id, version_id, object_id)
+      REFERENCES ydoc_docs(workspace_id, version_id, object_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX idx_ydoc_snapshots_doc_uptoseq
+    ON ydoc_snapshots(workspace_id, version_id, object_id, up_to_seq DESC);
+";
+
+/// The `id` of the R11a Y.Doc durable-cache migration.
+pub(crate) const YDOC_MIGRATION_ID: &str = "v1-ydoc";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -383,6 +480,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: SECRETS_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_SECRETS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 2,
+        id: YDOC_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_YDOC_DDL,
         sets_user_version: None,
     },
 ];
@@ -692,11 +796,11 @@ mod tests {
     // waiting for a real future schema change.
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     fn two_migrations() -> Vec<Migration> {
-        // The frozen list now ends at ordinal 1 (R08 secrets), so a synthetic
-        // probe appends at ordinal 2.
+        // The frozen list now ends at ordinal 2 (R11a Y.Doc), so a synthetic
+        // probe appends at ordinal 3.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 2,
+            ordinal: 3,
             id: "r04-probe",
             kind: MigrationKind::Transactional,
             sql: M2_SQL,
@@ -705,7 +809,7 @@ mod tests {
         v
     }
 
-    /// Count of frozen baseline migrations (baseline + secrets = 2).
+    /// Count of frozen baseline migrations (baseline + secrets + ydoc = 3).
     const BASELINE_COUNT: u32 = BASELINE_MIGRATIONS.len() as u32;
 
     #[test]
@@ -810,10 +914,10 @@ mod tests {
 
         // Resume: baseline is skipped (idempotent); the between-steps crash
         // fired before the secrets migration (ordinal 1), so resume applies the
-        // secrets migration AND the probe (ordinal 2).
+        // secrets migration (1), the Y.Doc migration (2), AND the probe (3).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 2 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 3 });
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -910,7 +1014,7 @@ mod tests {
         }
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 2,
+            ordinal: 3,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
@@ -928,7 +1032,7 @@ mod tests {
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();
         changed.push(Migration {
-            ordinal: 2,
+            ordinal: 3,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
@@ -948,7 +1052,7 @@ mod tests {
         // baseline first (transactional), then a non-transactional idempotent step.
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 2,
+            ordinal: 3,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",

@@ -1,0 +1,16 @@
+{
+ "seed": 9,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQH8jvLPBQAEAQlwbGFpblRleHQFd29ybGQA",
+  "AQH8jvLPBQXE/I7yzwUD/I7yzwUECWxpbmUKY29udAA=",
+  "AAH8jvLPBQEMAQ==",
+  "AQH8jvLPBQ7E/I7yzwUJ/I7yzwUKBAl0YWIB/I7yzwUBDAE=",
+  "AAH8jvLPBQEMAg=="
+ ],
+ "mergedUpdateB64": "AQP8jvLPBQAEAQlwbGFpblRleHQFd29ybGTE/I7yzwUD/I7yzwUECWxpbmUKY29udMT8jvLPBQn8jvLPBQoECXRhYgH8jvLPBQEMAg==",
+ "stateVectorB64": "AfyO8s8FEg==",
+ "expected": {
+  "text": "worlline\n\ttabcod"
+ }
+}

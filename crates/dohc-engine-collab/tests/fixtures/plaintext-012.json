@@ -1,0 +1,17 @@
+{
+ "seed": 12,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQHboPGRAwAEAQlwbGFpblRleHQDYcyBAA==",
+  "AQHboPGRAwKE26DxkQMBBXdvcmxkAA==",
+  "AAHboPGRAwEEAg==",
+  "AQHboPGRAwfE26DxkQMF26DxkQMGBmhlbGxvIAHboPGRAwEEAg==",
+  "AQHboPGRAw3E26DxkQMC26DxkQMDA2HMgQHboPGRAwEEAg==",
+  "AQHboPGRAw/E26DxkQMJ26DxkQMKA2HMgQHboPGRAwEEAg=="
+ ],
+ "mergedUpdateB64": "AQXboPGRAwAEAQlwbGFpblRleHQDYcyBhNug8ZEDAQV3b3JsZMTboPGRAwXboPGRAwYGaGVsbG8gxNug8ZEDAtug8ZEDAwNhzIHE26DxkQMJ26DxkQMKA2HMgQHboPGRAwEEAg==",
+ "stateVectorB64": "Adug8ZEDEQ==",
+ "expected": {
+  "text": "áwáohelálo d"
+ }
+}

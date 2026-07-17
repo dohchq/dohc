@@ -1,0 +1,64 @@
+{
+ "seed": 1022,
+ "contentKind": "richdoc",
+ "updates": [
+  "AQGS0aKQCgAoAQtmcm9udG1hdHRlcgV0aXRsZQF3Bm5hw692ZQA=",
+  "AQGS0aKQCgEoAQtmcm9udG1hdHRlcgVjb3VudAF9JQA=",
+  "AQOS0aKQCgIHAQRib2R5AwlwYXJhZ3JhcGgHAJLRopAKAgYEAJLRopAKAw9uYcOvdmVsaW5lCmNvbnQA",
+  "AQWS0aKQChKHktGikAoCAwlwYXJhZ3JhcGgHAJLRopAKEgYGAJLRopAKEwRib2xkBHRydWWEktGikAoUE1rDvHJpY2jwnZSY8J2Uq/CdlKaGktGikAogBGJvbGQEbnVsbAA=",
+  "AQOS0aKQCiKHktGikAoSAwlwYXJhZ3JhcGgHAJLRopAKIgYEAJLRopAKIxPwnZSY8J2Uq/CdlKZaw7xyaWNoAA==",
+  "AQOS0aKQCjCHktGikAoiAwlwYXJhZ3JhcGgHAJLRopAKMAYEAJLRopAKMRPZhdix2K3YqNin5pel5pys6KqeAA==",
+  "AQOS0aKQCjpGktGikAoEBGJvbGQEdHJ1ZcSS0aKQCjqS0aKQCgQBWMaS0aKQCjuS0aKQCgQEYm9sZARudWxsAA=="
+ ],
+ "mergedUpdateB64": "AROS0aKQCgAoAQtmcm9udG1hdHRlcgV0aXRsZQF3Bm5hw692ZSgBC2Zyb250bWF0dGVyBWNvdW50AX0lBwEEYm9keQMJcGFyYWdyYXBoBwCS0aKQCgIGBACS0aKQCgMPbmHDr3ZlbGluZQpjb250h5LRopAKAgMJcGFyYWdyYXBoBwCS0aKQChIGBgCS0aKQChMEYm9sZAR0cnVlhJLRopAKFBNaw7xyaWNo8J2UmPCdlKvwnZSmhpLRopAKIARib2xkBG51bGyHktGikAoSAwlwYXJhZ3JhcGgHAJLRopAKIgYEAJLRopAKIxPwnZSY8J2Uq/CdlKZaw7xyaWNoh5LRopAKIgMJcGFyYWdyYXBoBwCS0aKQCjAGBACS0aKQCjET2YXYsdit2KjYp+aXpeacrOiqnkaS0aKQCgQEYm9sZAR0cnVlxJLRopAKOpLRopAKBAFYxpLRopAKO5LRopAKBARib2xkBG51bGwA",
+ "stateVectorB64": "AZLRopAKPQ==",
+ "expected": {
+  "frontmatter": {
+   "title": "naïve",
+   "count": 37
+  },
+  "paragraphs": [
+   {
+    "runs": [
+     {
+      "text": "X",
+      "bold": true,
+      "italic": false
+     },
+     {
+      "text": "naïveline\ncont",
+      "bold": false,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "Zürich𝔘𝔫𝔦",
+      "bold": true,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "𝔘𝔫𝔦Zürich",
+      "bold": false,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "مرحبا日本語",
+      "bold": false,
+      "italic": false
+     }
+    ]
+   }
+  ]
+ }
+}

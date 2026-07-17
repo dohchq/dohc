@@ -1,0 +1,17 @@
+{
+ "seed": -3,
+ "contentKind": "plaintext",
+ "kind": "surrogateProbe",
+ "updates": [
+  "AQH07uzvDQAEAQlwbGFpblRleHQE8J+YgAA=",
+  "AQH07uzvDQLE9O7s7w0A9O7s7w0BAVgA"
+ ],
+ "expected": {
+  "yjsText": [
+   65533,
+   88,
+   65533
+  ],
+  "wellFormed": true
+ }
+}

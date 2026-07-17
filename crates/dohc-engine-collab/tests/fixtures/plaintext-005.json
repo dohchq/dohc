@@ -1,0 +1,21 @@
+{
+ "seed": 5,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQGUzJa8CQAEAQlwbGFpblRleHQFY2Fmw6kA",
+  "AQGUzJa8CQRElMyWvAkABAl0YWIA",
+  "AQGUzJa8CQjElMyWvAkHlMyWvAkABm5hw692ZQA=",
+  "AAGUzJa8CQEAAw==",
+  "AQGUzJa8CQ1ElMyWvAkECtmF2LHYrdio2KcBlMyWvAkBAAM=",
+  "AQGUzJa8CRLElMyWvAkClMyWvAkDCeaXpeacrOiqngGUzJa8CQEAAw==",
+  "AQGUzJa8CRXElMyWvAkLlMyWvAkMCeaXpeacrOiqngGUzJa8CQEAAw==",
+  "AAGUzJa8CQIAAxcB",
+  "AAGUzJa8CQMAAw8CFwE=",
+  "AQGUzJa8CRjElMyWvAkElMyWvAkFBmhlbGxvIAGUzJa8CQMAAw8CFwE="
+ ],
+ "mergedUpdateB64": "AQeUzJa8CQAEAQlwbGFpblRleHQFY2Fmw6lElMyWvAkABAl0YWLElMyWvAkHlMyWvAkABm5hw692ZUSUzJa8CQQK2YXYsdit2KjYp8SUzJa8CQKUzJa8CQMJ5pel5pys6KqexJTMlrwJC5TMlrwJDAnml6XmnKzoqp7ElMyWvAkElMyWvAkFBmhlbGxvIAGUzJa8CQMAAw8CFwE=",
+ "stateVectorB64": "AZTMlrwJHg==",
+ "expected": {
+  "text": "مرا\thello tabnaïv日本e日本語é"
+ }
+}

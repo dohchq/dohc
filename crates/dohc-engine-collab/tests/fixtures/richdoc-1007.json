@@ -1,0 +1,44 @@
+{
+ "seed": 1007,
+ "contentKind": "richdoc",
+ "updates": [
+  "AQHdvZ7lBwAoAQtmcm9udG1hdHRlcgV0aXRsZQF3Bm5hw692ZQA=",
+  "AQHdvZ7lBwEoAQtmcm9udG1hdHRlcgVjb3VudAF9GAA=",
+  "AQfdvZ7lBwIHAQRib2R5AwlwYXJhZ3JhcGgHAN29nuUHAgYGAN29nuUHAwRib2xkBHRydWWG3b2e5QcEBml0YWxpYwR0cnVlhN29nuUHBQ/Zhdix2K3YqNind29ybGSG3b2e5QcPBGJvbGQEbnVsbIbdvZ7lBxAGaXRhbGljBG51bGwA",
+  "AQXdvZ7lBxKH3b2e5QcCAwlwYXJhZ3JhcGgHAN29nuUHEgYGAN29nuUHEwZpdGFsaWMEdHJ1ZYTdvZ7lBxQKCXRhYmhlbGxvIIbdvZ7lBx4GaXRhbGljBG51bGwA",
+  "AQHdvZ7lByDE3b2e5QcE3b2e5QcFAVgA"
+ ],
+ "mergedUpdateB64": "AQ/dvZ7lBwAoAQtmcm9udG1hdHRlcgV0aXRsZQF3Bm5hw692ZSgBC2Zyb250bWF0dGVyBWNvdW50AX0YBwEEYm9keQMJcGFyYWdyYXBoBwDdvZ7lBwIGBgDdvZ7lBwMEYm9sZAR0cnVlht29nuUHBAZpdGFsaWMEdHJ1ZYTdvZ7lBwUP2YXYsdit2KjYp3dvcmxkht29nuUHDwRib2xkBG51bGyG3b2e5QcQBml0YWxpYwRudWxsh929nuUHAgMJcGFyYWdyYXBoBwDdvZ7lBxIGBgDdvZ7lBxMGaXRhbGljBHRydWWE3b2e5QcUCgl0YWJoZWxsbyCG3b2e5QceBml0YWxpYwRudWxsxN29nuUHBN29nuUHBQFYAA==",
+ "stateVectorB64": "Ad29nuUHIQ==",
+ "expected": {
+  "frontmatter": {
+   "title": "naïve",
+   "count": 24
+  },
+  "paragraphs": [
+   {
+    "runs": [
+     {
+      "text": "X",
+      "bold": true,
+      "italic": false
+     },
+     {
+      "text": "مرحباworld",
+      "bold": true,
+      "italic": true
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "\ttabhello ",
+      "bold": false,
+      "italic": true
+     }
+    ]
+   }
+  ]
+ }
+}

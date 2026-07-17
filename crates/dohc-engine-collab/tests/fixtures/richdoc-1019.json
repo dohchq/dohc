@@ -1,0 +1,74 @@
+{
+ "seed": 1019,
+ "contentKind": "richdoc",
+ "updates": [
+  "AQG1zMeXDQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BWhlbGxvAA==",
+  "AQG1zMeXDQEoAQtmcm9udG1hdHRlcgVjb3VudAF9oQEA",
+  "AQW1zMeXDQIHAQRib2R5AwlwYXJhZ3JhcGgHALXMx5cNAgYGALXMx5cNAwZpdGFsaWMEdHJ1ZYS1zMeXDQQO5pel5pys6Kqed29ybGSGtczHlw0MBml0YWxpYwRudWxsAA==",
+  "AQO1zMeXDQ6HtczHlw0CAwlwYXJhZ3JhcGgHALXMx5cNDgYEALXMx5cNDwcJdGFiYcyBAA==",
+  "AQe1zMeXDRaHtczHlw0OAwlwYXJhZ3JhcGgHALXMx5cNFgYGALXMx5cNFwRib2xkBHRydWWGtczHlw0YBml0YWxpYwR0cnVlhLXMx5cNGQ7wn5iA8J+OiWhlbGxvIIa1zMeXDSMEYm9sZARudWxshrXMx5cNJAZpdGFsaWMEbnVsbAA=",
+  "AQW1zMeXDSaHtczHlw0WAwlwYXJhZ3JhcGgHALXMx5cNJgYGALXMx5cNJwRib2xkBHRydWWEtczHlw0oDFrDvHJpY2h3b3JsZIa1zMeXDTMEYm9sZARudWxsAA==",
+  "AQW1zMeXDTWHtczHlw0mAwlwYXJhZ3JhcGgHALXMx5cNNQYGALXMx5cNNgRib2xkBHRydWWEtczHlw03DXdvcmxk8J+YgPCfjomGtczHlw1ABGJvbGQEbnVsbAA=",
+  "AQO1zMeXDUJGtczHlw0EBGJvbGQEdHJ1ZcS1zMeXDUK1zMeXDQQBWMa1zMeXDUO1zMeXDQQEYm9sZARudWxsAA=="
+ ],
+ "mergedUpdateB64": "AR61zMeXDQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BWhlbGxvKAELZnJvbnRtYXR0ZXIFY291bnQBfaEBBwEEYm9keQMJcGFyYWdyYXBoBwC1zMeXDQIGBgC1zMeXDQMGaXRhbGljBHRydWWEtczHlw0EDuaXpeacrOiqnndvcmxkhrXMx5cNDAZpdGFsaWMEbnVsbIe1zMeXDQIDCXBhcmFncmFwaAcAtczHlw0OBgQAtczHlw0PBwl0YWJhzIGHtczHlw0OAwlwYXJhZ3JhcGgHALXMx5cNFgYGALXMx5cNFwRib2xkBHRydWWGtczHlw0YBml0YWxpYwR0cnVlhLXMx5cNGQ7wn5iA8J+OiWhlbGxvIIa1zMeXDSMEYm9sZARudWxshrXMx5cNJAZpdGFsaWMEbnVsbIe1zMeXDRYDCXBhcmFncmFwaAcAtczHlw0mBgYAtczHlw0nBGJvbGQEdHJ1ZYS1zMeXDSgMWsO8cmljaHdvcmxkhrXMx5cNMwRib2xkBG51bGyHtczHlw0mAwlwYXJhZ3JhcGgHALXMx5cNNQYGALXMx5cNNgRib2xkBHRydWWEtczHlw03DXdvcmxk8J+YgPCfjomGtczHlw1ABGJvbGQEbnVsbEa1zMeXDQQEYm9sZAR0cnVlxLXMx5cNQrXMx5cNBAFYxrXMx5cNQ7XMx5cNBARib2xkBG51bGwA",
+ "stateVectorB64": "AbXMx5cNRQ==",
+ "expected": {
+  "frontmatter": {
+   "title": "hello",
+   "count": 97
+  },
+  "paragraphs": [
+   {
+    "runs": [
+     {
+      "text": "X",
+      "bold": true,
+      "italic": false
+     },
+     {
+      "text": "日本語world",
+      "bold": false,
+      "italic": true
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "\ttabá",
+      "bold": false,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "😀🎉hello ",
+      "bold": true,
+      "italic": true
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "Zürichworld",
+      "bold": true,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "world😀🎉",
+      "bold": true,
+      "italic": false
+     }
+    ]
+   }
+  ]
+ }
+}

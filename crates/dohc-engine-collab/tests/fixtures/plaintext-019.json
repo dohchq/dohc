@@ -1,0 +1,15 @@
+{
+ "seed": 19,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQGbwLehAwAEAQlwbGFpblRleHQK2YXYsdit2KjYpwA=",
+  "AQGbwLehAwWEm8C3oQMECeaXpeacrOiqngA=",
+  "AQGbwLehAwjEm8C3oQMDm8C3oQMEA2HMgQA=",
+  "AQGbwLehAwrEm8C3oQMAm8C3oQMBCtmF2LHYrdio2KcA"
+ ],
+ "mergedUpdateB64": "AQSbwLehAwAEAQlwbGFpblRleHQK2YXYsdit2KjYp4SbwLehAwQJ5pel5pys6KqexJvAt6EDA5vAt6EDBANhzIHEm8C3oQMAm8C3oQMBCtmF2LHYrdio2KcA",
+ "stateVectorB64": "AZvAt6EDDw==",
+ "expected": {
+  "text": "ممرحبارحبáا日本語"
+ }
+}

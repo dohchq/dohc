@@ -61,6 +61,10 @@ const REQUIRED_TABLES: &[&str] = &[
     "secret_files",
     "secret_fork_bases",
     "secret_moments",
+    // R11a durable Y.Doc tables (migration ordinal 2).
+    "ydoc_docs",
+    "ydoc_updates",
+    "ydoc_snapshots",
 ];
 
 /// How an existing file was classified by the fingerprint fence.

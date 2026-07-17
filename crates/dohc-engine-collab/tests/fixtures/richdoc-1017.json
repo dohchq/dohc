@@ -1,0 +1,44 @@
+{
+ "seed": 1017,
+ "contentKind": "richdoc",
+ "updates": [
+  "AQHcxdjTAQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BWNhZsOpAA==",
+  "AQHcxdjTAQEoAQtmcm9udG1hdHRlcgVjb3VudAF9EgA=",
+  "AQPcxdjTAQIHAQRib2R5AwlwYXJhZ3JhcGgHANzF2NMBAgYEANzF2NMBAxbwnZSY8J2Uq/CdlKbZhdix2K3YqNinAA==",
+  "AQXcxdjTAQ+H3MXY0wECAwlwYXJhZ3JhcGgHANzF2NMBDwYGANzF2NMBEAZpdGFsaWMEdHJ1ZYTcxdjTAREPbmHDr3Zl5pel5pys6KqehtzF2NMBGQZpdGFsaWMEbnVsbAA=",
+  "AQPcxdjTARtG3MXY0wEEBGJvbGQEdHJ1ZcTcxdjTARvcxdjTAQQBWMbcxdjTARzcxdjTAQQEYm9sZARudWxsAA=="
+ ],
+ "mergedUpdateB64": "AQ3cxdjTAQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BWNhZsOpKAELZnJvbnRtYXR0ZXIFY291bnQBfRIHAQRib2R5AwlwYXJhZ3JhcGgHANzF2NMBAgYEANzF2NMBAxbwnZSY8J2Uq/CdlKbZhdix2K3YqNinh9zF2NMBAgMJcGFyYWdyYXBoBwDcxdjTAQ8GBgDcxdjTARAGaXRhbGljBHRydWWE3MXY0wERD25hw692ZeaXpeacrOiqnobcxdjTARkGaXRhbGljBG51bGxG3MXY0wEEBGJvbGQEdHJ1ZcTcxdjTARvcxdjTAQQBWMbcxdjTARzcxdjTAQQEYm9sZARudWxsAA==",
+ "stateVectorB64": "AdzF2NMBHg==",
+ "expected": {
+  "frontmatter": {
+   "title": "café",
+   "count": 18
+  },
+  "paragraphs": [
+   {
+    "runs": [
+     {
+      "text": "X",
+      "bold": true,
+      "italic": false
+     },
+     {
+      "text": "𝔘𝔫𝔦مرحبا",
+      "bold": false,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "naïve日本語",
+      "bold": false,
+      "italic": true
+     }
+    ]
+   }
+  ]
+ }
+}

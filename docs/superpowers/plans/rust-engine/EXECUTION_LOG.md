@@ -627,3 +627,95 @@ source of truth every orchestrator session loads first).
   provenance, yjs non-atomic applyUpdate). Respects the local-only-cache vs
   replicated-durable-lineage regime distinction. R11b (TS live adapter) is
   separate/later.
+
+## 2026-07-17 — R11a landed (Y.Doc durable cache — dohc-engine-collab)
+
+- New crate `dohc-engine-collab` added to the workspace members; migration
+  APPEND ordinal 2 (`v1-ydoc`: `ydoc_docs` / `ydoc_updates` / `ydoc_snapshots`,
+  content-addressed into `binary_blobs`) added to BASELINE_MIGRATIONS +
+  REQUIRED_TABLES. Two ordinal-count assertions bumped (storage migration
+  tests → probe ordinal 3; testkit `close_reopen_mutate_cycle` ledger 2→3).
+- TWO REGIMES kept distinct in a durable `regime` column: local-only (prunable
+  fast-resume cache, pruned to bare marker on close) vs replicated (base-once
+  durable lineage, compacted-not-pruned on close so peers bootstrap).
+- Behaviours: durable update append (bounded/validated/content-addressed/
+  dedup-idempotent), convergence-neutral snapshot+compaction, per-doc leases
+  (RAII, deterministic Drop), base-once claim (atomic re-check), idempotent +
+  echo-suppressed ydoc.update replication apply, settle→markdown projection
+  with provenance materialized via R04's job pipeline (deterministic job id,
+  exactly-once).
+- All 5 binding yrs constraints enforced in code (see ydoc.rs module docs).
+- Cross-engine (non-tautological) regression: `tests/fixtures/gen-fixtures.mjs`
+  emits REAL yjs 13.6.30 lineages + yjs-computed expectations (48 seeded
+  fixtures: 24 plaintext incl. CJK/emoji/RTL/astral + 24 richdoc incl. marks,
+  + offset/surrogate/nested probes). The durable append→reconstruct pipeline
+  converges on the yjs expectation for every fixture; compaction is
+  convergence-neutral; the offset probe pins OffsetKind::Utf16 as load-bearing;
+  the surrogate probe pins the isWellFormed() boundary as load-bearing (yrs
+  diverges from yjs on a surrogate split — R11b must validate/reject at the
+  boundary before journaling).
+- Crash/exactly-once via the shared storage fault seam (append + settle,
+  before-persist rollback + after-commit-before-ack kill→reopen→exactly-once).
+- EVIDENCE (run-rust-checks, native Windows):
+  - 2026-07-17T00:52:35.592Z | run-rust-checks | win32/x64 | PASS |
+    fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS
+    test --workspace=PASS cargo-deny=PASS cargo-audit=SKIP
+  - `cargo test -p dohc-engine-collab --features fault-injection`: 6
+    cross_engine + 11 durable_regimes (incl. 3 crash-recovery) = 17 PASS.
+    (The 3 crash tests need the crate's `fault-injection` feature, which is not
+    in the `--workspace` unification set; they run under `--features
+    fault-injection` / `--all-features`, and clippy `--all-features` compiles
+    them in the gate above.)
+- REVIEW ROUND 1 (two clean-context reviewers; non-tautology re-confirmed by
+  regenerating all fixtures from Node yjs 13.6.30). Fixes applied on branch:
+  - P1 (blocker) — local→shared transition destroyed the lineage: `claim_base`
+    upsert was `ON CONFLICT DO NOTHING`, leaving an individual-first doc's
+    marker `local-only` while writing the base, so the next `close_session`
+    pruned the just-claimed base. Now `DO UPDATE SET regime='replicated',
+    content_kind=excluded.content_kind` — promote-on-claim ("open when shared").
+    Regression: `local_to_shared_transition_keeps_the_base`.
+  - P2 — log now SELF-bounds: `record_local_update` / `apply_remote_update`
+    auto-trigger compaction past `DEFAULT_COMPACTION_THRESHOLD` (was
+    caller-driven; the const was dead). Regression:
+    `append_self_bounds_the_log_at_threshold`.
+  - P2 — settle is now CLOCK-INDEPENDENT: generation is a durable monotone
+    per-doc `settle_seq` (never reset, incremented only on a content change),
+    not `now_ms`; a crash-retry with an advanced clock dedups. Added
+    `settle_seq`/`last_settled_sha` columns to the ordinal-2 ydoc migration.
+    Regression: the settle-crash test now retries with a different clock.
+  - P2 — `MAX_REPLICATION_APPLY_BATCH` doc marked a FORWARD CONTRACT (not active
+    today; single-update apply).
+  - P2 — lease doc now states PROCESS-LOCAL/per-registry scope + poison
+    fail-closed; regression `leases_are_process_local_per_registry`.
+  - EVIDENCE: 2026-07-17T01:12:00.814Z | run-rust-checks | win32/x64 | PASS |
+    fmt=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS
+    cargo-deny=PASS cargo-audit=SKIP. collab `--features fault-injection`: 6
+    cross_engine + 14 durable_regimes = 20 PASS.
+- BOT REVIEW (coderabbit + codex, same round) — additional genuine findings
+  fixed on top of the reviewer-relayed set:
+  - CRITICAL (coderabbit) — `load_persisted` read marker/snapshot/tail in three
+    separate reads (a concurrent compaction could drop the tail → silent
+    omission). Now ONE DEFERRED read snapshot + reconstruction validated against
+    the marker head (shortfall ⇒ `Corrupt`, never a truncated doc).
+  - CRITICAL (coderabbit) — local-only `close_session` pruned without a settle
+    handoff (data loss). Now refuses (`UnsettledClose`) unless the current head's
+    projection == `last_settled_sha`; a doc with edits must settle before close.
+  - P2 (codex) — settle used `Preimage::Absent` on EVERY job, so an edited doc
+    conflict-flagged after its first on-disk write. Now `Present(last_settled_sha)`
+    on re-settle so the materializer replaces the previous projection.
+  - P2 (codex) — `emit_outbound` broadcast on a replicated marker BEFORE the base
+    was claimed (peers get a delta without the seed). Now gated on
+    `base_claimed`.
+  - MAJOR (coderabbit) — NUL/control bytes now rejected in `DocKey` (they could
+    forge a settle job-id collision across keys); `regime`/`content_kind` now
+    CHECK-constrained in the migration (fail closed at write, no silent
+    downgrade of a corrupted value).
+  - DEFERRED to R11b (documented, not silently) — durable cross-COMPACTION dedup
+    by a per-peer applied cursor: after a fold, a redelivery of already-folded
+    bytes is re-appended but is a CRDT no-op (convergence preserved, re-folded
+    at the next compaction). The `origin_seq` on `RemoteUpdate` is that cursor's
+    input; the replication drain is R11b's.
+  - EVIDENCE: 2026-07-17T01:21:51.532Z | run-rust-checks | win32/x64 | PASS |
+    fmt=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS
+    cargo-deny=PASS. collab `--features fault-injection`: 6 cross_engine + 16
+    durable_regimes = 22 PASS.

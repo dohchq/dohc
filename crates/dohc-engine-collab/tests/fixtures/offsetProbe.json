@@ -1,0 +1,15 @@
+{
+ "seed": -1,
+ "contentKind": "plaintext",
+ "kind": "offsetProbe",
+ "baseUpdateB64": "AQGo7KiKAQAEAQlwbGFpblRleHQH8J+YgFhZWgA=",
+ "updates": [
+  "AQGo7KiKAQAEAQlwbGFpblRleHQH8J+YgFhZWgA=",
+  "AQGo7KiKAQXEqOyoigEDqOyoigEEASEA"
+ ],
+ "expected": {
+  "textAfterInsertAt4": "😀XY!Z",
+  "insertChar": "!",
+  "insertIndex": 4
+ }
+}

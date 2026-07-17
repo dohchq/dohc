@@ -1,0 +1,20 @@
+{
+ "seed": 11,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQHe8b+HBQAEAQlwbGFpblRleHQECXRhYgA=",
+  "AQHe8b+HBQSE3vG/hwUDA2HMgQA=",
+  "AAHe8b+HBQECAg==",
+  "AQHe8b+HBQbE3vG/hwUD3vG/hwUEBm5hw692ZQHe8b+HBQECAg==",
+  "AQHe8b+HBQvE3vG/hwUJ3vG/hwUKCWxpbmUKY29udAHe8b+HBQECAg==",
+  "AAHe8b+HBQICAgcB",
+  "AQHe8b+HBRTE3vG/hwUL3vG/hwUMA2HMgQHe8b+HBQICAgcB",
+  "AAHe8b+HBQMCAgcBDgI=",
+  "AQHe8b+HBRbE3vG/hwUK3vG/hwUEB1rDvHJpY2gB3vG/hwUDAgIHAQ4C"
+ ],
+ "mergedUpdateB64": "AQbe8b+HBQAEAQlwbGFpblRleHQECXRhYoTe8b+HBQMDYcyBxN7xv4cFA97xv4cFBAZuYcOvdmXE3vG/hwUJ3vG/hwUKCWxpbmUKY29udMTe8b+HBQve8b+HBQwDYcyBxN7xv4cFCt7xv4cFBAdaw7xyaWNoAd7xv4cFAwICBwEOAg==",
+ "stateVectorB64": "Ad7xv4cFHA==",
+ "expected": {
+  "text": "\ttnïvláinconteZürichá"
+ }
+}

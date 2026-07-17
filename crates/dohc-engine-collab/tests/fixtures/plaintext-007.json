@@ -1,0 +1,15 @@
+{
+ "seed": 7,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQH3lKySBwAEAQlwbGFpblRleHQM8J2UmPCdlKvwnZSmAA==",
+  "AQH3lKySBwbE95SskgcD95SskgcEA2HMgQA=",
+  "AQH3lKySBwjE95SskgcD95SskgcGBWNhZsOpAA==",
+  "AQH3lKySBwzE95SskgcG95SskgcHCeaXpeacrOiqngA="
+ ],
+ "mergedUpdateB64": "AQT3lKySBwAEAQlwbGFpblRleHQM8J2UmPCdlKvwnZSmxPeUrJIHA/eUrJIHBANhzIHE95SskgcD95SskgcGBWNhZsOpxPeUrJIHBveUrJIHBwnml6XmnKzoqp4A",
+ "stateVectorB64": "AfeUrJIHDw==",
+ "expected": {
+  "text": "𝔘𝔫caféa日本語́𝔦"
+ }
+}
