@@ -851,3 +851,39 @@ source of truth every orchestrator session loads first).
   off the same main and both claimed ordinal 5. R05 was clean first → merged at
   ordinal 5. **R10 must rebase onto this main and take ordinal 6** (its testkit
   migration_ledger_len assertion 6→7) before it can merge.
+
+- R07 watcher/reconcile/pathfloor/policy GATE PASSED (PR #169, squash-merged;
+  NO migration ordinal consumed — files-side/in-memory only, so no collision
+  with R06's ordinal 7; branch deleted). Ported the `notify`-backed watcher,
+  tolerant/degraded scan (correcting CAL-3's whole-pass abort → BEHAVIOR_DELTA
+  §11.1), the secret-path floor classifier (`policy.rs`, platform-independent
+  port of `@dohc/security-contract`), two-phase apply-then-ack capture, and the
+  files-side fault seam. **DISCHARGED the R05 rename-secret-floor OBLIGATION**:
+  `rename_text_file(to_path)` now refused when secret-classified.
+  Two-lens cell: Reviewer 1 (secret-floor) APPROVED via a 30,672-path
+  differential (649 curated + 30,000 fuzz) — 0 secret→tracked leaks, classifier
+  byte-parity with the TS oracle, both gate directions fail-closed, deferred
+  Check-B proven secret-floor-safe. Reviewer 2 (capture/false-retire) proved
+  the core apply-ack exactly-once crash-safety + /-boundary-precise false-retire
+  prevention hold, but found two P1s: (1) a STALE reconcile plan's destructive
+  ops reached the sink BEFORE the staleness guard (apply-then-check) → a
+  CAL-3-class false-delete reachable via the public API — FIXED by validating
+  generation+epoch BEFORE the sink apply loop + a single-outstanding-plan
+  invariant; (2) the plaintext store door rejected only Secret, letting
+  reserved/ignored/traversal paths (DOHC~1 8.3-alias of .dohc metadata,
+  node_modules, .git, shared-with-me, %2e%2e traversal) into plaintext history
+  — FIXED to accept only Tracked (classify the normalized path), matching TS
+  validateUserWritePath, persisting the normalized key. Plus a HARD GATE fix:
+  cargo-deny FAILed on notify's ISC/CC0-1.0 inotify deps (the impl agent's
+  first 'green' missed it) — added ISC + CC0-1.0 to the deny.toml allow-list,
+  re-verified all five stages incl cargo-deny green 2x. Plus P2s: read-side
+  win32 ADS-colon rejection (`.env::$DATA` latent secret-alias) closed;
+  degraded-retry thrash backoff/quarantine added. Then a bot-finding round:
+  2 genuine codex-bot correctness bugs FIXED — hard-deadline drain (settle reset
+  could postpone the WATCH_HARD_DEADLINE indefinitely under an event storm) and
+  file→dir replacement never retired (StdAbsenceProbe made tri-state: not-a-
+  regular-file → retire, transient error → retain). Deferred to R14 (recorded
+  on the R14 row): full watcher auto-reattach, startup deadlines +
+  force-reconcile-on-restart, manifest rehydration on restart. green 2x.
+- **R05 rename-secret-floor OBLIGATION: DISCHARGED by R07** (was tracked on the
+  R07 row; now marked OBLIG-DISCHARGED).

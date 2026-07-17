@@ -23,12 +23,12 @@ R11a	ydoc-durable-cache	2	YRS-SPIKE;R04	crates/dohc-engine-collab/**	ported+spik
 R11b	ydoc-live-adapter	2	R03;GATE0	packages/workspace-engine-client/src/ydoc*	adapter suite	critical	1	planned	-	-
 R12	search	2	R04	crates/dohc-engine-runtime/src/search*	ported	high	2	gate passed	-	163
 R06	compare-merge-conflicts-materialization	3	R05	crates/dohc-engine-domain/src/{merge,conflicts}*;crates/dohc-engine-files/src/materialize*	ported	critical	1	planned	-	-
-R07	watcher-reconcile-pathfloor-policy	3	CAL-3;R05	crates/dohc-engine-files/src/{watch,policy}*	ported+OBLIG:gate-R05-rename-dest-through-secret-floor	critical	1	planned	-	-
+R07	watcher-reconcile-pathfloor-policy	3	CAL-3;R05	crates/dohc-engine-files/src/{watch,policy}*	ported+OBLIG-DISCHARGED:R05-rename-secret-floor	critical	1	gate passed	-	169
 R10	replication-cursors-shares	3	R04;R09	crates/dohc-engine-sync/**;packages/security-contract/**	ported+fault-model	critical	1	in progress	codex/rust-engine-r10	-
 R10b	relay-epoch-enforcement	3	R10	services/sync-relay/**	relay fault-model suite	critical	1	planned	-	-
 R13b	desktop-adapter-dormant	3	R03;GATE0	apps/desktop/src/workspaces/engineClient*;apps/desktop/src/main.ts;apps/desktop/src/workspaces/workspaceEngineCapture.ts;apps/desktop/src/workspaces/workspaceActivity.ts;apps/desktop/src/workspaces/relaySyncEngine.ts;apps/desktop/src/cli/**;packages/mcp/**;apps/desktop/src/workspaces/{sharedView,sharedChannels,shareMounts,workspaceFiles,workspaceSearch,workspaceGraph}*;apps/desktop/src/collab/ydocEngineProviderSession*	adapter E2E	critical	1	planned	-	-
 R13	daemon-composition-shadow-replay	4	R05;R06;R07;R08;R09;R10;R11a;R11b;R12;R13b	crates/dohc-workspace-engine/**	replay	critical	1	planned	-	-
-R14	robustness-closure	5	R13	fuzz/**;soak configs	fuzz+soak	high	1	planned	-	-
+R14	robustness-closure	5	R13	fuzz/**;soak configs	fuzz+soak+OBLIG:R07-watcher-reattach,startup-deadlines,manifest-rehydration	high	1	planned	-	-
 GATE6	gate-release-candidate	5	R14;R10b;R15-REHEARSE	-	-	-	-	planned	-	-
 R15-REHEARSE	cutover-rehearsal-tier	5	R13;R14	crates/dohc-workspace-engine/src/cutover_rehearse*	rehearsal-on-clones	critical	1	planned	-	-
 R15	atomic-cutover-reset	cutover	GATE6;R15-REHEARSE	apps/desktop/src/workspaces/cutoverReset*;crates/dohc-workspace-engine/src/cutover_real*	rehearsal	critical	1	planned	-	-
