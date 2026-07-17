@@ -115,6 +115,8 @@ pub fn apply_remote_update(
 /// mutation can share one commit with the imported replication coordinate and
 /// peer ack. Callers outside that envelope should use [`apply_remote_update`],
 /// which also runs the post-commit compaction check.
+/// Per-origin FIFO does not order cross-origin dependencies, so missing-dependency
+/// updates are durably parked; the parity gate rejects only proven divergence.
 pub fn apply_remote_update_in_transaction(
     tx: &Transaction<'_>,
     key: &DocKey,

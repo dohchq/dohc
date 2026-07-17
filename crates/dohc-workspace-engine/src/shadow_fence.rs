@@ -22,10 +22,18 @@ pub enum ShadowFenceError {
     MarkerMalformed,
     #[error("shadow clone marker could not be read")]
     MarkerUnreadable,
+    #[error("engine database is not bound to this shadow clone")]
+    DatabaseTokenMismatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedShadowRoot {
+    pub root: PathBuf,
+    pub token: String,
 }
 
 /// Validate and canonicalize a clone-marked root without creating any files.
-pub fn validate_shadow_root(root: &Path) -> Result<PathBuf, ShadowFenceError> {
+pub fn validate_shadow_root(root: &Path) -> Result<ValidatedShadowRoot, ShadowFenceError> {
     let canonical = std::fs::canonicalize(root).map_err(|_| ShadowFenceError::RootUnavailable)?;
     let marker = canonical.join(SHADOW_MARKER_RELATIVE_PATH);
     let metadata = match std::fs::metadata(&marker) {
@@ -42,7 +50,11 @@ pub fn validate_shadow_root(root: &Path) -> Result<PathBuf, ShadowFenceError> {
     if !valid_token(&token) {
         return Err(ShadowFenceError::MarkerMalformed);
     }
-    Ok(canonical)
+    let token = String::from_utf8(token).map_err(|_| ShadowFenceError::MarkerMalformed)?;
+    Ok(ValidatedShadowRoot {
+        root: canonical,
+        token,
+    })
 }
 
 /// Harness-only helper for a clone tool or integration test. Production daemon
@@ -85,7 +97,9 @@ mod tests {
         let scratch = ScratchDir::new().expect("scratch");
         write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
         assert_eq!(
-            validate_shadow_root(scratch.path()).expect("valid root"),
+            validate_shadow_root(scratch.path())
+                .expect("valid root")
+                .root,
             std::fs::canonicalize(scratch.path()).expect("canonical")
         );
     }

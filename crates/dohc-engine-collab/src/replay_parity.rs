@@ -12,9 +12,10 @@
 //! strictly inside a multi-unit scalar from both the durable base and candidate
 //! string blocks. Candidate left/right origins and delete-range endpoints must
 //! not name those clocks. Finally the candidate is applied to a scratch clone;
-//! pending dependencies fail closed. The live/durable document is never mutated.
+//! dependency-complete replay must integrate every clock claimed by the
+//! candidate. The live/durable document is never mutated.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use yrs::block::{
     BLOCK_GC_REF_NUMBER, BLOCK_ITEM_ANY_REF_NUMBER, BLOCK_ITEM_BINARY_REF_NUMBER,
@@ -26,7 +27,7 @@ use yrs::block::{
 use yrs::encoding::read::Read;
 use yrs::types::TypeRef;
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
-use yrs::{IdSet, Options, Update};
+use yrs::{ClientID, IdSet, Options, Update};
 
 use crate::{CollabError, Ydoc};
 
@@ -35,6 +36,7 @@ struct WireStructure {
     unsafe_boundaries: BTreeSet<ID>,
     insertion_boundaries: Vec<ID>,
     deletion_boundaries: Vec<ID>,
+    claimed_clocks: BTreeMap<ClientID, u32>,
 }
 
 /// Reject a valid v1 update whose structural edit boundaries cannot replay
@@ -65,9 +67,16 @@ pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), Colla
     scratch.apply(&base_bytes)?;
     scratch.apply(candidate)?;
     if scratch.has_missing_updates() {
-        return Err(CollabError::ReplayParityViolation {
-            reason: "the candidate has unresolved update dependencies".to_owned(),
-        });
+        return Ok(());
+    }
+    let scratch_sv = scratch.state_vector();
+    for (client, claimed_end) in candidate_structure.claimed_clocks {
+        if scratch_sv.get(&client) < claimed_end {
+            return Err(CollabError::ReplayParityViolation {
+                reason: "the replay did not integrate every clock claimed by the candidate"
+                    .to_owned(),
+            });
+        }
     }
     Ok(())
 }
@@ -97,6 +106,11 @@ fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
             };
             clock = clock.checked_add(len).ok_or_else(parity_clock_overflow)?;
         }
+        structure
+            .claimed_clocks
+            .entry(client)
+            .and_modify(|claimed| *claimed = (*claimed).max(clock))
+            .or_insert(clock);
     }
     let deletes = IdSet::decode(&mut decoder).map_err(parity_decode_error)?;
     for (client, ranges) in deletes.iter() {

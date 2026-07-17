@@ -143,8 +143,41 @@ async fn clone_marked_shadow_replay_composes_real_domains_end_to_end() {
         .expect("workspace close");
     assert_eq!(closed.result["closed"], true);
 
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                8,
+                "workspace.open",
+                None,
+                json!({ "rootDir": root_string(&scratch), "workspaceId": "ws-shadow" }),
+            ),
+        )
+        .await
+        .expect("matching shadow stamp must reopen");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("reopened handle");
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9, "workspace.close", Some(reopened_handle), json!({})),
+        )
+        .await
+        .expect("reopened workspace close");
+
     let db_path = scratch.engine_db_path().expect("db path");
     let mut store = EngineStore::open(&db_path, 103).expect("reopen after actor close");
+    assert!(!store.was_freshly_created());
+    let shadow_token: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT token FROM shadow_clone WHERE rowid_guard = 1",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("shadow token");
+    assert_eq!(shadow_token, TOKEN);
     let snapshot = VersionedTextStore::new(&mut store)
         .read_text("ws-shadow", "main", "notes/hello.md")
         .expect("disk read")
@@ -192,4 +225,103 @@ async fn clone_marker_cannot_bypass_ts_v1_fingerprint_refusal() {
         .await
         .expect_err("foreign fingerprint must fail");
     assert_eq!(error.code, ErrorCode::Internal);
+}
+
+#[tokio::test]
+async fn valid_marker_cannot_claim_an_unstamped_existing_v2_store() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db_path = scratch.engine_db_path().expect("db path");
+    let initial = {
+        let store = EngineStore::open(&db_path, 50).expect("create real v2 store");
+        assert!(store.was_freshly_created());
+        let ownership = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT engine_uuid, created_at_ms, engine_build, schema_version \
+                     FROM engine_ownership WHERE rowid_guard = 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+            })
+            .expect("ownership");
+        let first_write_rows: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT \
+                       (SELECT COUNT(*) FROM versioned_workspaces) + \
+                       (SELECT COUNT(*) FROM documents) + \
+                       (SELECT COUNT(*) FROM engine_requests) + \
+                       (SELECT COUNT(*) FROM replication_journal)",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("first-write rows");
+        let shadow_rows = store.table_row_count("shadow_clone").expect("shadow rows");
+        (ownership, first_write_rows, shadow_rows)
+    };
+    assert_eq!(initial.1, 0);
+    assert_eq!(initial.2, 0);
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({ "rootDir": root_string(&scratch), "workspaceId": "ws-shadow" }),
+            ),
+        )
+        .await
+        .expect_err("unstamped existing v2 store must be refused");
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+
+    let store = EngineStore::open(&db_path, 60).expect("reopen refused store");
+    assert!(!store.was_freshly_created());
+    let ownership = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT engine_uuid, created_at_ms, engine_build, schema_version \
+                 FROM engine_ownership WHERE rowid_guard = 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+        })
+        .expect("ownership after refusal");
+    let first_write_rows: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT \
+                   (SELECT COUNT(*) FROM versioned_workspaces) + \
+                   (SELECT COUNT(*) FROM documents) + \
+                   (SELECT COUNT(*) FROM engine_requests) + \
+                   (SELECT COUNT(*) FROM replication_journal)",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("first-write rows after refusal");
+    assert_eq!(ownership, initial.0);
+    assert_eq!(first_write_rows, initial.1);
+    assert_eq!(
+        store.table_row_count("shadow_clone").expect("shadow rows"),
+        0
+    );
 }

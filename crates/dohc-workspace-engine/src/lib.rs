@@ -106,8 +106,10 @@ impl EngineService {
     async fn workspace_open(&self, params: Value) -> Result<Value, WireError> {
         let params: WorkspaceOpenParams = parse(params)?;
         let _serial = self.open_lock.lock().await;
-        let root = shadow_fence::validate_shadow_root(PathBuf::from(&params.root_dir).as_path())
-            .map_err(|_| wire(ErrorCode::InvalidParams, "shadow workspace refused"))?;
+        let validated =
+            shadow_fence::validate_shadow_root(PathBuf::from(&params.root_dir).as_path())
+                .map_err(map_shadow_fence)?;
+        let root = validated.root;
         if let Some((handle, open)) = lock(&self.handles)
             .iter()
             .find(|(_, open)| open.root == root)
@@ -134,6 +136,20 @@ impl EngineService {
             .await
             .map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?
             .map_err(map_runtime)?;
+        let binding = actor.bind_shadow_clone(validated.token).await;
+        let binding_error = match binding {
+            Ok(true) => None,
+            Ok(false) => Some(map_shadow_fence(
+                shadow_fence::ShadowFenceError::DatabaseTokenMismatch,
+            )),
+            Err(error) => Some(map_runtime(error)),
+        };
+        if let Some(error) = binding_error {
+            let supervisor = self.supervisor;
+            let rejected_path = db_path.clone();
+            let _ = tokio::task::spawn_blocking(move || supervisor.close(&rejected_path)).await;
+            return Err(error);
+        }
         let sequence = self
             .next_handle
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -790,12 +806,17 @@ fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::ActorUnavailable | RuntimeError::WorkerPanicked => {
             ErrorCode::WorkspaceUnavailable
         }
-        RuntimeError::Domain(_) | RuntimeError::Collab(_) | RuntimeError::Sync(_) => {
-            ErrorCode::InvalidParams
-        }
+        RuntimeError::Domain(_)
+        | RuntimeError::Collab(_)
+        | RuntimeError::Sync(_)
+        | RuntimeError::Search(_) => ErrorCode::InvalidParams,
         _ => ErrorCode::Internal,
     };
     wire(code, "workspace operation failed")
+}
+
+fn map_shadow_fence(_error: shadow_fence::ShadowFenceError) -> WireError {
+    wire(ErrorCode::InvalidParams, "shadow workspace refused")
 }
 
 fn workspace_unavailable() -> WireError {

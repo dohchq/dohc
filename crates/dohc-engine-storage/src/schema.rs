@@ -56,6 +56,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "moments",
     // R06 conflict-object tables (migration ordinal 7).
     "conflicts",
+    // R13 shadow fence token (migration ordinal 8).
+    "shadow_clone",
     // R04 durability tables.
     "binary_blobs",
     "materialization_jobs",
@@ -125,7 +127,12 @@ enum Disposition {
 /// Open-or-create the engine database at `path`, applying the full open ritual
 /// and the v1-vs-v2 fingerprint fence, then running the ordered migration
 /// ledger. Any non-v2 fingerprint is rejected without mutating the file.
-pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<Connection, StorageError> {
+pub(crate) struct OpenedEngineDb {
+    pub conn: Connection,
+    pub freshly_created: bool,
+}
+
+pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<OpenedEngineDb, StorageError> {
     let mut conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
@@ -137,7 +144,7 @@ pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<Connection, Sto
 
     // Step 3: classify from read-only queries. A rejected store returns here
     // before any persistent pragma runs, so the file is left byte-unchanged.
-    let _disposition = classify_fingerprint(&conn)?;
+    let disposition = classify_fingerprint(&conn)?;
 
     // Step 4: the store is ours — the file-mutating pragmas are now safe.
     apply_persistent_pragmas(&conn)?;
@@ -160,7 +167,10 @@ pub(crate) fn open_engine_db(path: &Path, now_ms: i64) -> Result<Connection, Sto
 
     validate_v2(&conn)?;
     integrity_check(&conn)?;
-    Ok(conn)
+    Ok(OpenedEngineDb {
+        conn,
+        freshly_created: disposition == Disposition::Fresh,
+    })
 }
 
 fn apply_session_pragmas(conn: &Connection) -> Result<(), StorageError> {

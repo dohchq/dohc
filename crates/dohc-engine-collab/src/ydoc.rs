@@ -183,6 +183,10 @@ impl Ydoc {
         self.doc.transact().has_missing_updates()
     }
 
+    pub(crate) fn state_vector(&self) -> StateVector {
+        self.doc.transact().state_vector()
+    }
+
     /// The full state re-encoded as a single v1 update — the snapshot primitive.
     pub fn encode_full_state(&self) -> Vec<u8> {
         let txn = self.doc.transact();

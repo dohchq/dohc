@@ -10,7 +10,7 @@ use crate::limits::{MAX_DOCUMENT_BODY_BYTES, MAX_IDENTIFIER_BYTES};
 use crate::materialize::MaterializationJob;
 use crate::schema::open_engine_db;
 use crate::{blob, materialize};
-use rusqlite::{Connection, Transaction, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -28,6 +28,7 @@ fn is_safe_identifier(name: &str) -> bool {
 #[derive(Debug)]
 pub struct EngineStore {
     conn: Connection,
+    freshly_created: bool,
 }
 
 /// Inputs to one compound write. A faithful minimal analog of the engine's
@@ -173,9 +174,48 @@ impl EngineStore {
     /// writer primitive — the single-writer-per-file contract is enforced by
     /// `dohc-engine-runtime`'s supervisor, which is the intended entry point.
     pub fn open(path: &Path, now_ms: i64) -> Result<Self, StorageError> {
+        let opened = open_engine_db(path, now_ms)?;
         Ok(EngineStore {
-            conn: open_engine_db(path, now_ms)?,
+            conn: opened.conn,
+            freshly_created: opened.freshly_created,
         })
+    }
+
+    /// Whether this open initialized a fresh database rather than reopening an
+    /// existing v2 store.
+    pub fn was_freshly_created(&self) -> bool {
+        self.freshly_created
+    }
+
+    /// Bind a fresh store to a shadow marker, or verify an existing binding.
+    /// The actor calls this before exposing a shadow workspace for writes.
+    pub fn bind_shadow_clone_token(&mut self, token: &str) -> Result<bool, StorageError> {
+        if self.freshly_created {
+            match self.write_with(&crate::NoFaults, |tx| -> Result<(), StorageError> {
+                tx.execute(
+                    "INSERT INTO shadow_clone (rowid_guard, token) VALUES (1, ?1) \
+                     ON CONFLICT(rowid_guard) DO NOTHING",
+                    [token],
+                )
+                .map_err(StorageError::persist)?;
+                Ok(())
+            })? {
+                TxnOutcome::Committed(()) => {}
+                TxnOutcome::Crashed { .. } => {
+                    return Err(StorageError::PersistFailed { source: None });
+                }
+            }
+        }
+        let stored: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT token FROM shadow_clone WHERE rowid_guard = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::corrupt)?;
+        Ok(stored.as_deref() == Some(token))
     }
 
     /// The one generic transactional write API. Applies the domain mutation,

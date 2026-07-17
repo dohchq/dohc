@@ -130,6 +130,10 @@ enum Command {
     Snapshot {
         reply: oneshot::Sender<Result<StoreSnapshot, StorageError>>,
     },
+    BindShadowClone {
+        token: String,
+        reply: oneshot::Sender<Result<bool, StorageError>>,
+    },
     /// A long operation: a sequence of bounded units (one compound write each,
     /// one transaction each). The worker checks `token` BEFORE each unit and
     /// stops cooperatively at that between-unit boundary.
@@ -472,6 +476,20 @@ impl ActorHandle {
             .map_err(RuntimeError::Storage)
     }
 
+    /// Stamp a fresh shadow database or verify an existing shadow binding on
+    /// the actor-owned connection before the workspace can accept writes.
+    pub async fn bind_shadow_clone(&self, token: String) -> Result<bool, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::BindShadowClone { token, reply })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?
+            .map_err(RuntimeError::Storage)
+    }
+
     /// Execute a versioned-text write on the actor's single writer thread.
     pub async fn versioned_text_write(
         &self,
@@ -790,6 +808,9 @@ fn worker_main(
             }
             Command::Snapshot { reply } => {
                 let _ = reply.send(snapshot(&store));
+            }
+            Command::BindShadowClone { token, reply } => {
+                let _ = reply.send(store.bind_shadow_clone_token(&token));
             }
             Command::RunUnits {
                 units,
