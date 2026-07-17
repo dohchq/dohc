@@ -23,7 +23,8 @@ use dohc_engine_storage::{put_binary_blob, EngineStore, FaultInjector, TxnOutcom
 use rusqlite::Transaction;
 
 use crate::durable::{
-    append_row, blob_seq_in_log, maybe_compact, query_marker, validate_update_bytes, Regime,
+    append_row, blob_seq_in_log, load_for_replay_gate, maybe_compact, query_marker,
+    validate_update_bytes, Regime,
 };
 use crate::error::CollabError;
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
@@ -139,6 +140,8 @@ pub fn apply_remote_update_in_transaction(
             reason: "remote update applied to a non-replicated lineage",
         });
     }
+    let base = load_for_replay_gate(tx, key)?;
+    crate::validate_replay_parity(&base, &remote.bytes)?;
     if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
         return Ok(ReplicationApplyOutcome::Deduped { seq: existing });
     }

@@ -16,8 +16,9 @@
 //!    depends on HashMap iteration order.
 //! 3. **Well-formed UTF-16 at the boundary.** Rust `String` cannot hold a lone
 //!    surrogate, so every string this module produces is well-formed by
-//!    construction; [`Ydoc::apply`] additionally rejects an update that fails to
-//!    decode before it can mutate the doc.
+//!    construction. Raw [`Ydoc::apply`] remains the permissive yrs primitive;
+//!    durable callers additionally use [`crate::validate_replay_parity`] before
+//!    journaling so a wire edit cannot split a multi-unit scalar.
 //! 4. **Shared declared root schema; projection is destructive on the TS side.**
 //!    Roots are read through the declared dohc schema ([`ROOT_FRONTMATTER`],
 //!    [`ROOT_META`], [`ROOT_BODY`], [`ROOT_PLAINTEXT`]) — the Yjs v1 wire carries
@@ -176,6 +177,10 @@ impl Ydoc {
                 reason: e.to_string(),
             })?;
         Ok(())
+    }
+
+    pub(crate) fn has_missing_updates(&self) -> bool {
+        self.doc.transact().has_missing_updates()
     }
 
     /// The full state re-encoded as a single v1 update — the snapshot primitive.

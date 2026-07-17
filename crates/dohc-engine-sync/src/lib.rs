@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 mod apply;
+mod conflict_apply;
 mod cursor;
 mod error;
 mod hydration;
@@ -21,6 +22,7 @@ mod share;
 mod ydoc_apply;
 
 pub use apply::{ApplyOutcome, apply_chat_envelope, apply_envelope_with};
+pub use conflict_apply::{ConflictApplyResult, apply_conflict_envelope};
 pub use cursor::{
     CursorKind, RelayCursor, SharedPeerPosition, commit_relay_cursor, read_pushed_seq,
     read_relay_cursor, read_shared_peer_position,

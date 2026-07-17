@@ -13,6 +13,9 @@ fault-injection = ["dohc-engine-storage/fault-injection"]
 
 [dependencies]
 dohc-engine-storage = { path = "../dohc-engine-storage" }
+dohc-engine-domain = { path = "../dohc-engine-domain" }
+dohc-engine-collab = { path = "../dohc-engine-collab" }
+dohc-engine-sync = { path = "../dohc-engine-sync" }
 # OS file identity (POSIX dev+ino, Windows volume+file-index) as a hashable
 # value. Encapsulates the platform FFI so the engine crates keep
 # forbid(unsafe_code).
@@ -49,7 +52,6 @@ tokio = { version = "1", features = [
 # product would, so the FTS index is fed non-tautological data. Depending on the
 # testkit also unifies the storage `fault-injection` feature ON for `cargo test`,
 # arming the crash-injection at the index-commit boundary.
-dohc-engine-domain = { path = "../dohc-engine-domain" }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 rusqlite = { version = "0.37", features = ["bundled"] }
 

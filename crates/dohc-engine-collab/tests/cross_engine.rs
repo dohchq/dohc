@@ -13,7 +13,8 @@ mod common;
 
 use common::*;
 use dohc_engine_collab::{
-    load_persisted, maybe_compact, record_local_update, ydoc::OffsetMode, ContentKind, Regime, Ydoc,
+    load_persisted, maybe_compact, record_local_update, ydoc::OffsetMode, CollabError, ContentKind,
+    Regime, Ydoc,
 };
 use dohc_engine_storage::{NoFaults, TxnOutcome};
 
@@ -289,6 +290,39 @@ fn surrogate_split_diverges_proving_wellformed_boundary_is_load_bearing() {
         "a surrogate-split must diverge — the boundary must reject it (constraint 3)"
     );
     eprintln!("surrogate probe: rust={rust_units:?} diverges from yjs={yjs_units:?}");
+}
+
+#[test]
+fn replay_parity_gate_rejects_surrogate_probe_bypass1_before_journal() {
+    let fx = load_fixture("surrogateProbe");
+    let mut ts = fresh_store("surrogate-parity-gate");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    dohc_engine_collab::ensure_marker(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        Regime::LocalOnly,
+        &NoFaults,
+        1_000,
+    )
+    .expect("marker");
+    let base = decode_b64(&fx.updates[0]);
+    record_local_update(&mut ts.store, &key, &base, &NoFaults, 1_001).expect("base");
+
+    let bypass = decode_b64(&fx.updates[1]);
+    let bypass_sha = dohc_engine_collab::hex_sha256(&bypass);
+    let error = record_local_update(&mut ts.store, &key, &bypass, &NoFaults, 1_002)
+        .expect_err("surrogate split must fail closed");
+    assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+    assert!(
+        ts.store
+            .get_binary_blob(&bypass_sha)
+            .expect("blob lookup")
+            .is_none(),
+        "rejected update must not reach the blob store"
+    );
 }
 
 #[test]

@@ -13,6 +13,12 @@ pub enum CollabError {
     #[error("malformed Y.Doc update: {reason}")]
     MalformedUpdate { reason: String },
 
+    /// The update is valid Yjs v1 data, but one of its structural edit
+    /// boundaries lands inside a multi-unit Unicode scalar. Yjs can represent
+    /// that UTF-16 boundary while Rust strings cannot, so replay would diverge.
+    #[error("Y.Doc replay parity violation: {reason}")]
+    ReplayParityViolation { reason: String },
+
     /// An empty update — rejected before any blob put / journal.
     #[error("empty Y.Doc update")]
     EmptyUpdate,
@@ -64,6 +70,7 @@ impl CollabError {
     pub fn code(&self) -> &'static str {
         match self {
             CollabError::MalformedUpdate { .. } => "malformed-update",
+            CollabError::ReplayParityViolation { .. } => "replay-parity-violation",
             CollabError::EmptyUpdate => "empty-update",
             CollabError::UpdateTooLarge { .. } => "update-too-large",
             CollabError::InvalidIdentifier { .. } => "invalid-identifier",

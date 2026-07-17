@@ -272,6 +272,8 @@ pub fn record_local_update(
 
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
         let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+        let base = load_for_replay_gate(tx, key)?;
+        crate::validate_replay_parity(&base, update)?;
         // Idempotent dedup: an update already in this doc's log is a no-op.
         if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
             return Ok(AppendOutcome {
@@ -702,6 +704,51 @@ pub(crate) fn validate_update_bytes(update: &[u8]) -> Result<(), CollabError> {
     // Constraint 5: reject truncated/malformed bytes BEFORE journaling.
     Ydoc::validate_update(update)?;
     Ok(())
+}
+
+/// Reconstruct a lineage from the caller's connection/transaction for the
+/// replay-parity gate. Keeping this read inside the write transaction makes the
+/// checked base exactly the base that the append will extend.
+pub(crate) fn load_for_replay_gate(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError> {
+    query_marker(conn, key)?.ok_or(CollabError::NoMarker)?;
+    let snapshot = latest_snapshot(conn, key)?;
+    let from_seq = snapshot.as_ref().map_or(0, |(seq, _)| *seq);
+    let tail = updates_after(conn, key, from_seq)?;
+    let doc = Ydoc::wire();
+    if let Some((_, sha)) = snapshot {
+        let bytes = binary_blob_for_gate(conn, &sha)?;
+        doc.apply(&bytes)?;
+    }
+    for (seq, sha) in tail {
+        let bytes = binary_blob_for_gate(conn, &sha).map_err(|error| match error {
+            CollabError::Corrupt { .. } => CollabError::Corrupt {
+                reason: format!("update blob missing or invalid at seq {seq}"),
+            },
+            other => other,
+        })?;
+        doc.apply(&bytes)?;
+    }
+    Ok(doc)
+}
+
+fn binary_blob_for_gate(conn: &Connection, sha: &str) -> Result<Vec<u8>, CollabError> {
+    let bytes: Vec<u8> = conn
+        .query_row(
+            "SELECT bytes FROM binary_blobs WHERE sha256 = ?1",
+            [sha],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(map_sql)?
+        .ok_or_else(|| CollabError::Corrupt {
+            reason: "referenced Y.Doc blob is missing".to_owned(),
+        })?;
+    if crate::hex_sha256(&bytes) != sha {
+        return Err(CollabError::Corrupt {
+            reason: "referenced Y.Doc blob failed integrity validation".to_owned(),
+        });
+    }
+    Ok(bytes)
 }
 
 pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Marker>, CollabError> {

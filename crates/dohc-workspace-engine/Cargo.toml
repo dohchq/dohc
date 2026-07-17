@@ -1,0 +1,36 @@
+[package]
+name = "dohc-workspace-engine"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+publish.workspace = true
+description = "R13 shadow-only workspace engine daemon composition and replay harness."
+
+[dependencies]
+dohc-engine-storage = { path = "../dohc-engine-storage" }
+dohc-engine-domain = { path = "../dohc-engine-domain" }
+dohc-engine-files = { path = "../dohc-engine-files" }
+dohc-engine-crypto = { path = "../dohc-engine-crypto" }
+dohc-engine-collab = { path = "../dohc-engine-collab" }
+dohc-engine-runtime = { path = "../dohc-engine-runtime" }
+dohc-engine-sync = { path = "../dohc-engine-sync" }
+dohc-engine-protocol = { path = "../dohc-engine-protocol" }
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = [
+  "io-std",
+  "io-util",
+  "macros",
+  "rt-multi-thread",
+  "sync",
+] }
+tokio-util = "0.7"
+
+[dev-dependencies]
+dohc-engine-testkit = { path = "../dohc-engine-testkit" }
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[lints]
+workspace = true
