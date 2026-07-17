@@ -272,30 +272,89 @@ pub fn record_local_update(
 
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
         let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
-        let base = load_for_replay_gate(tx, key)?;
-        crate::validate_replay_parity(&base, update)?;
-        // Idempotent dedup: an update already in this doc's log is a no-op.
-        if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
-            return Ok(AppendOutcome {
-                seq: existing,
-                deduped: true,
-                emit_outbound: false,
-            });
-        }
-        put_binary_blob(tx, update)?;
-        let seq = append_row(tx, key, &sha, None, now_ms)?;
-        Ok(AppendOutcome {
-            seq,
-            deduped: false,
-            // A genuinely-new local edit broadcasts only on a replicated lineage
-            // that has ALREADY claimed its base — a delta emitted before the base
-            // exists would reach peers without the seed they need to reconstruct.
-            // A local-only doc's .md is its channel.
-            emit_outbound: marker.regime == Regime::Replicated && marker.base_claimed,
-        })
+        append_local_update(tx, key, &marker, update, &sha, now_ms)
     })?;
     self_bound_log(store, key, &outcome, faults, now_ms)?;
     Ok(outcome)
+}
+
+/// Create a marker when needed and append a locally-produced update in one
+/// transaction. Validation, replay parity, blob storage, journal append, and
+/// first-marker creation therefore share one rollback boundary.
+pub fn record_local_update_creating_marker(
+    store: &mut EngineStore,
+    key: &DocKey,
+    content_kind: ContentKind,
+    regime: Regime,
+    update: &[u8],
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
+    let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
+        validate_update_bytes(update)?;
+        let marker = match query_marker(tx, key)? {
+            Some(marker) => {
+                if marker.content_kind != content_kind {
+                    return Err(CollabError::ContentKindMismatch);
+                }
+                marker
+            }
+            None => {
+                tx.execute(
+                    "INSERT INTO ydoc_docs \
+                     (workspace_id, version_id, object_id, content_kind, regime, \
+                      head_update_seq, head_snapshot_seq, base_claimed, updated_at_ms) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, 0, 0, 0, ?6)",
+                    rusqlite::params![
+                        key.workspace_id,
+                        key.version_id,
+                        key.object_id,
+                        content_kind.as_str(),
+                        regime.as_str(),
+                        now_ms,
+                    ],
+                )
+                .map_err(map_sql)?;
+                Marker {
+                    content_kind,
+                    regime,
+                    head_update_seq: 0,
+                    head_snapshot_seq: 0,
+                    base_claimed: false,
+                }
+            }
+        };
+        let sha = crate::hex_sha256(update);
+        append_local_update(tx, key, &marker, update, &sha, now_ms)
+    })?;
+    self_bound_log(store, key, &outcome, faults, now_ms)?;
+    Ok(outcome)
+}
+
+fn append_local_update(
+    conn: &Connection,
+    key: &DocKey,
+    marker: &Marker,
+    update: &[u8],
+    sha: &str,
+    now_ms: i64,
+) -> Result<AppendOutcome, CollabError> {
+    let base = load_for_replay_gate(conn, key)?;
+    crate::validate_replay_parity(&base, update)?;
+    if let Some(existing) = blob_seq_in_log(conn, key, sha)? {
+        return Ok(AppendOutcome {
+            seq: existing,
+            deduped: true,
+            emit_outbound: false,
+        });
+    }
+    put_binary_blob(conn, update)?;
+    let seq = append_row(conn, key, sha, None, now_ms)?;
+    Ok(AppendOutcome {
+        seq,
+        deduped: false,
+        emit_outbound: marker.regime == Regime::Replicated && marker.base_claimed,
+    })
 }
 
 /// After a genuinely-new append, fold the log if it has grown past the default

@@ -31,6 +31,7 @@ tokio-util = "0.7"
 [dev-dependencies]
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 rusqlite = { version = "0.37", features = ["bundled"] }
+yrs = "=0.27.3"
 
 [lints]
 workspace = true

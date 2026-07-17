@@ -8,8 +8,8 @@ use base64::Engine as _;
 use dohc_engine_collab::{CollabError, ContentKind, DocKey};
 use dohc_engine_domain::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
-    ConflictStatus, ResolveConflictKind, ResolveTextConflict, TextConflict, TextSnapshot,
-    WriteText,
+    ConflictStatus, DomainError, ResolveConflictKind, ResolveTextConflict, TextConflict,
+    TextSnapshot, WriteText,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -18,9 +18,9 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_runtime::{
     ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, NoFaults, RuntimeError,
-    SearchSurface, WorkspaceSupervisor,
+    SearchError, SearchSurface, WorkspaceSupervisor,
 };
-use dohc_engine_sync::ReplicationEnvelope;
+use dohc_engine_sync::{ReplicationEnvelope, SyncError};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
@@ -647,7 +647,7 @@ impl ConflictStateDto {
         };
         Ok(ConflictFileState {
             path: self.path,
-            snapshot: self.snapshot.map(SnapshotDto::into_domain),
+            snapshot: self.snapshot.map(SnapshotDto::into_domain).transpose()?,
             content_kind,
             metadata_summary: self.metadata_summary,
             metadata_correlation_id: self.metadata_correlation_id,
@@ -656,8 +656,15 @@ impl ConflictStateDto {
 }
 
 impl SnapshotDto {
-    fn into_domain(self) -> TextSnapshot {
-        TextSnapshot {
+    fn into_domain(self) -> Result<TextSnapshot, WireError> {
+        let actual = dohc_engine_storage::hex_sha256(self.text.as_bytes());
+        if self.blob_sha256 != actual {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "snapshot hash does not match text",
+            ));
+        }
+        Ok(TextSnapshot {
             workspace_id: self.workspace_id,
             version_id: self.version_id,
             object_id: self.object_id,
@@ -667,7 +674,7 @@ impl SnapshotDto {
             updated_at_ms: self.updated_at_ms,
             latest_moment_id: self.latest_moment_id,
             metadata_origin: self.metadata_origin,
-        }
+        })
     }
 }
 
@@ -806,13 +813,86 @@ fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::ActorUnavailable | RuntimeError::WorkerPanicked => {
             ErrorCode::WorkspaceUnavailable
         }
-        RuntimeError::Domain(_)
-        | RuntimeError::Collab(_)
-        | RuntimeError::Sync(_)
-        | RuntimeError::Search(_) => ErrorCode::InvalidParams,
+        RuntimeError::Domain(error) => map_domain_code(error),
+        RuntimeError::Collab(error) => map_collab_code(error),
+        RuntimeError::Sync(error) => map_sync_code(error),
+        RuntimeError::Search(error) => map_search_code(error),
         _ => ErrorCode::Internal,
     };
     wire(code, "workspace operation failed")
+}
+
+fn map_domain_code(error: DomainError) -> ErrorCode {
+    match error {
+        DomainError::Storage(_) | DomainError::StateCorrupt { .. } => ErrorCode::Internal,
+        DomainError::Crypto(error) => match error {
+            dohc_engine_crypto::CryptoError::InvalidIvLength
+            | dohc_engine_crypto::CryptoError::InvalidTagLength
+            | dohc_engine_crypto::CryptoError::PlaintextTooLarge
+            | dohc_engine_crypto::CryptoError::PlaintextNotUtf8
+            | dohc_engine_crypto::CryptoError::InvalidBase64 => ErrorCode::InvalidParams,
+            dohc_engine_crypto::CryptoError::DecryptFailed
+            | dohc_engine_crypto::CryptoError::InvalidKeyLength
+            | dohc_engine_crypto::CryptoError::KeyFileMalformed
+            | dohc_engine_crypto::CryptoError::EnvelopeUnwrapFailed => ErrorCode::Internal,
+        },
+        DomainError::WorkspaceNotFound
+        | DomainError::VersionNotFound
+        | DomainError::WorkspaceMismatch
+        | DomainError::VersionNameConflict
+        | DomainError::DuplicateMomentId
+        | DomainError::FileNotFound
+        | DomainError::TargetPathExists
+        | DomainError::ForkBaseNotFound
+        | DomainError::ConflictNotFound
+        | DomainError::ConflictStaleTarget
+        | DomainError::InvalidText { .. }
+        | DomainError::InvalidPath { .. }
+        | DomainError::NotSecretPath
+        | DomainError::InvalidInput { .. }
+        | DomainError::IdempotencyKeyReuseMismatch
+        | DomainError::SecretMomentNotFound
+        | DomainError::Chat { .. } => ErrorCode::InvalidParams,
+        _ => ErrorCode::Internal,
+    }
+}
+
+fn map_collab_code(error: CollabError) -> ErrorCode {
+    match error {
+        CollabError::Corrupt { .. } | CollabError::Storage(_) => ErrorCode::Internal,
+        CollabError::MalformedUpdate { .. }
+        | CollabError::ReplayParityViolation { .. }
+        | CollabError::EmptyUpdate
+        | CollabError::UpdateTooLarge { .. }
+        | CollabError::InvalidIdentifier { .. }
+        | CollabError::ContentKindMismatch
+        | CollabError::BaseAlreadyClaimed
+        | CollabError::LeaseHeld
+        | CollabError::NoMarker
+        | CollabError::UnsettledClose => ErrorCode::InvalidParams,
+    }
+}
+
+fn map_sync_code(error: SyncError) -> ErrorCode {
+    match error {
+        SyncError::Storage(_)
+        | SyncError::SequenceGap
+        | SyncError::CoordinateDiverged
+        | SyncError::FaultCrash => ErrorCode::Internal,
+        SyncError::InvalidInput { .. }
+        | SyncError::UnsupportedOperation
+        | SyncError::ShareBoundaryViolation
+        | SyncError::BlobInvalid => ErrorCode::InvalidParams,
+    }
+}
+
+fn map_search_code(error: SearchError) -> ErrorCode {
+    match error {
+        SearchError::Bounds(_) => ErrorCode::InvalidParams,
+        SearchError::Storage(_) | SearchError::Store(_) | SearchError::Corrupt(_) => {
+            ErrorCode::Internal
+        }
+    }
 }
 
 fn map_shadow_fence(_error: shadow_fence::ShadowFenceError) -> WireError {
@@ -834,4 +914,27 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_error_mapping_separates_corruption_from_bad_input() {
+        let corrupt = map_runtime(RuntimeError::Collab(CollabError::Corrupt {
+            reason: "test corrupt lineage".to_owned(),
+        }));
+        assert_eq!(corrupt.code, ErrorCode::Internal);
+
+        let storage =
+            dohc_engine_storage::StorageError::persist_public(rusqlite::Error::InvalidQuery);
+        let persisted = map_runtime(RuntimeError::Sync(SyncError::Storage(storage)));
+        assert_eq!(persisted.code, ErrorCode::Internal);
+
+        let invalid = map_runtime(RuntimeError::Domain(DomainError::InvalidInput {
+            reason: "test invalid input",
+        }));
+        assert_eq!(invalid.code, ErrorCode::InvalidParams);
+    }
 }

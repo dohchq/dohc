@@ -1,5 +1,5 @@
 use base64::Engine as _;
-use dohc_engine_collab::Ydoc;
+use dohc_engine_collab::{ContentKind, DocKey, Ydoc, load_persisted};
 use dohc_engine_domain::VersionedTextStore;
 use dohc_engine_protocol::{
     error::ErrorCode,
@@ -27,6 +27,26 @@ fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Va
 
 fn root_string(scratch: &ScratchDir) -> String {
     scratch.path().to_string_lossy().into_owned()
+}
+
+async fn open_shadow(
+    transport: &InProcessTransport<EngineService>,
+    scratch: &ScratchDir,
+    request_id: u64,
+) -> WorkspaceHandle {
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                request_id,
+                "workspace.open",
+                None,
+                json!({ "rootDir": root_string(scratch), "workspaceId": "ws-shadow" }),
+            ),
+        )
+        .await
+        .expect("workspace open");
+    serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
 }
 
 #[tokio::test]
@@ -183,6 +203,216 @@ async fn clone_marked_shadow_replay_composes_real_domains_end_to_end() {
         .expect("disk read")
         .expect("disk snapshot");
     assert_eq!(snapshot.text, "hello shadow replay");
+    let key = DocKey::new("ws-shadow", "main", "object-1").expect("doc key");
+    let persisted = load_persisted(&store, &key)
+        .expect("persisted Y.Doc load")
+        .expect("persisted Y.Doc lineage");
+    assert_eq!(
+        persisted.doc.project(ContentKind::Plaintext).markdown,
+        "benign"
+    );
+}
+
+#[tokio::test]
+async fn local_conflict_open_rejects_snapshot_hash_mismatch_without_persistence() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_shadow(&transport, &scratch, 1).await;
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                2,
+                "conflicts.open",
+                Some(handle.clone()),
+                json!({
+                    "conflict": {
+                        "id": "bad-hash-conflict",
+                        "workspaceId": "ws-shadow",
+                        "path": "doc.md",
+                        "targetVersionId": "main",
+                        "sourceVersionId": "peer",
+                        "createdAtMs": 100,
+                        "updatedAtMs": 100,
+                        "status": "open",
+                        "chosenFrom": "current",
+                        "metadata": { "origin": "merge" },
+                        "base": { "path": "doc.md", "contentKind": "text" },
+                        "current": {
+                            "path": "doc.md",
+                            "contentKind": "text",
+                            "snapshot": {
+                                "workspaceId": "ws-shadow",
+                                "versionId": "main",
+                                "objectId": "object-1",
+                                "path": "doc.md",
+                                "text": "trusted text",
+                                "blobSha256": "not-the-text-hash",
+                                "updatedAtMs": 100,
+                                "latestMomentId": "moment-1",
+                                "metadataOrigin": "merge"
+                            }
+                        },
+                        "incoming": { "path": "doc.md", "contentKind": "text" }
+                    }
+                }),
+            ),
+        )
+        .await
+        .expect_err("mismatched snapshot hash must fail");
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(3, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("workspace close");
+
+    let db_path = scratch.engine_db_path().expect("db path");
+    let store = EngineStore::open(&db_path, 101).expect("store reopen");
+    let counts = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row("SELECT COUNT(*) FROM blobs", [], |row| row.get::<_, i64>(0))?,
+                conn.query_row("SELECT COUNT(*) FROM conflicts", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+            ))
+        })
+        .expect("row counts");
+    assert_eq!(counts, (0, 0));
+}
+
+#[tokio::test]
+async fn first_parity_rejected_ydoc_apply_is_atomic_and_valid_retry_creates_lineage() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_shadow(&transport, &scratch, 1).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                2,
+                "versionedText.write",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "objectId": "object-parity",
+                    "path": "parity.md",
+                    "text": "seed",
+                    "momentId": "moment-parity",
+                    "metadataOrigin": "test",
+                    "nowMs": 100
+                }),
+            ),
+        )
+        .await
+        .expect("seed parent object");
+    let base = base64::engine::general_purpose::STANDARD
+        .decode("AQH07uzvDQAEAQlwbGFpblRleHQE8J+YgAA=")
+        .expect("surrogate base");
+    let bypass = base64::engine::general_purpose::STANDARD
+        .decode("AQH07uzvDQLE9O7s7w0A9O7s7w0BAVgA")
+        .expect("surrogate bypass");
+    let parity_rejected =
+        yrs::merge_updates_v1([base.as_slice(), bypass.as_slice()]).expect("merge parity probe");
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                3,
+                "ydoc.apply",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "objectId": "object-parity",
+                    "contentKind": "plaintext",
+                    "updateBase64": base64::engine::general_purpose::STANDARD.encode(parity_rejected),
+                    "nowMs": 101
+                }),
+            ),
+        )
+        .await
+        .expect_err("parity probe must fail");
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(4, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close after rejected apply");
+
+    let db_path = scratch.engine_db_path().expect("db path");
+    {
+        let store = EngineStore::open(&db_path, 102).expect("inspect rejected apply");
+        let counts = store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row("SELECT COUNT(*) FROM ydoc_docs", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?,
+                    conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?,
+                    conn.query_row("SELECT COUNT(*) FROM binary_blobs", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?,
+                ))
+            })
+            .expect("rejected row counts");
+        assert_eq!(counts, (0, 0, 0));
+    }
+
+    let retried_handle = open_shadow(&transport, &scratch, 5).await;
+    let valid_doc = Ydoc::wire();
+    let valid_update = valid_doc.plaintext_insert(0, "valid");
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                6,
+                "ydoc.apply",
+                Some(retried_handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "objectId": "object-parity",
+                    "contentKind": "plaintext",
+                    "updateBase64": base64::engine::general_purpose::STANDARD.encode(valid_update),
+                    "nowMs": 103
+                }),
+            ),
+        )
+        .await
+        .expect("valid apply after rejected first apply");
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(7, "workspace.close", Some(retried_handle), json!({})),
+        )
+        .await
+        .expect("close after valid apply");
+
+    let store = EngineStore::open(&db_path, 104).expect("inspect valid apply");
+    let counts = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row("SELECT COUNT(*) FROM ydoc_docs", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                conn.query_row("SELECT COUNT(*) FROM binary_blobs", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+            ))
+        })
+        .expect("valid row counts");
+    assert_eq!(counts, (1, 1, 1));
 }
 
 #[tokio::test]

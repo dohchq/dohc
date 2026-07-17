@@ -101,6 +101,11 @@ fn apply_open(
             reason: "conflict.open workspace does not match its envelope",
         });
     }
+    if payload.status != "open" || payload.resolution.is_some() {
+        return Err(SyncError::InvalidInput {
+            reason: "conflict.open must describe an unresolved conflict",
+        });
+    }
     let conflict = TextConflict {
         conflict_id: payload.id,
         workspace_id: payload.workspace_id,
@@ -109,13 +114,9 @@ fn apply_open(
         source_version_id: payload.source_version_id.clone(),
         created_at_ms: payload.created_at_ms,
         updated_at_ms: payload.updated_at_ms,
-        status: parse_status(&payload.status)?,
+        status: ConflictStatus::Open,
         chosen_from: parse_choice(&payload.chosen_from)?,
-        resolution: payload
-            .resolution
-            .as_deref()
-            .map(parse_resolution)
-            .transpose()?,
+        resolution: None,
         metadata: metadata(payload.metadata),
         base: side(
             payload.base,
@@ -167,7 +168,12 @@ fn side(
             .as_ref()
             .map(|value| value.origin.clone())
             .unwrap_or_else(|| "unknown".to_owned());
-        let text = payload.text.unwrap_or_default();
+        let text = match content_kind {
+            ConflictContentKind::Text => {
+                required(payload.text, "conflict text side content is missing")?
+            }
+            ConflictContentKind::Binary => payload.text.unwrap_or_default(),
+        };
         let blob_sha256 = match content_kind {
             ConflictContentKind::Text => {
                 let actual = dohc_engine_storage::hex_sha256(text.as_bytes());
@@ -241,6 +247,8 @@ struct ResolveTarget {
     conflict_id: String,
     metadata_origin: String,
     status: String,
+    chosen_from: String,
+    resolution: Option<String>,
     has_binary_side: bool,
 }
 
@@ -270,18 +278,25 @@ fn apply_resolve(
             reason: "binary conflict sides are not supported yet",
         });
     }
-    if target.status == "resolved" {
-        return Ok(ConflictApplyResult {
-            conflict_id: target.conflict_id,
-            inserted: None,
-            matched: true,
-        });
-    }
     let mut choice = parse_choice(&payload.chosen_from)?;
     let mut resolution = parse_resolution(&payload.resolution)?;
     if target.metadata_origin == "sync" {
         choice = mirror_choice(choice);
         resolution = mirror_resolution(resolution);
+    }
+    if target.status == "resolved" {
+        if target.chosen_from != choice_str(choice)
+            || target.resolution.as_deref() != Some(resolution_str(resolution))
+        {
+            return Err(SyncError::InvalidInput {
+                reason: "conflicting conflict resolution",
+            });
+        }
+        return Ok(ConflictApplyResult {
+            conflict_id: target.conflict_id,
+            inserted: None,
+            matched: true,
+        });
     }
     let changed = update_text_conflict_row(
         tx,
@@ -319,7 +334,7 @@ fn resolve_target(
     };
     let _ = payload.path.as_deref();
     tx.query_row(
-        "SELECT conflict_id, metadata_origin, status, \
+        "SELECT conflict_id, metadata_origin, status, chosen_from, resolution, \
          (base_content_kind = 'binary' OR current_content_kind = 'binary' OR \
           incoming_content_kind = 'binary') \
          FROM conflicts WHERE workspace_id = ?1 AND status = 'open' \
@@ -339,7 +354,7 @@ fn query_target_by_id(
     conflict_id: &str,
 ) -> Result<Option<ResolveTarget>, SyncError> {
     tx.query_row(
-        "SELECT conflict_id, metadata_origin, status, \
+        "SELECT conflict_id, metadata_origin, status, chosen_from, resolution, \
          (base_content_kind = 'binary' OR current_content_kind = 'binary' OR \
           incoming_content_kind = 'binary') \
          FROM conflicts WHERE workspace_id = ?1 AND conflict_id = ?2",
@@ -355,18 +370,10 @@ fn map_resolve_target(row: &rusqlite::Row<'_>) -> rusqlite::Result<ResolveTarget
         conflict_id: row.get(0)?,
         metadata_origin: row.get(1)?,
         status: row.get(2)?,
-        has_binary_side: row.get(3)?,
+        chosen_from: row.get(3)?,
+        resolution: row.get(4)?,
+        has_binary_side: row.get(5)?,
     })
-}
-
-fn parse_status(value: &str) -> Result<ConflictStatus, SyncError> {
-    match value {
-        "open" => Ok(ConflictStatus::Open),
-        "resolved" => Ok(ConflictStatus::Resolved),
-        _ => Err(SyncError::InvalidInput {
-            reason: "conflict status is invalid",
-        }),
-    }
 }
 
 fn parse_choice(value: &str) -> Result<ConflictChoice, SyncError> {
@@ -377,6 +384,22 @@ fn parse_choice(value: &str) -> Result<ConflictChoice, SyncError> {
         _ => Err(SyncError::InvalidInput {
             reason: "conflict choice is invalid",
         }),
+    }
+}
+
+fn choice_str(choice: ConflictChoice) -> &'static str {
+    match choice {
+        ConflictChoice::Current => "current",
+        ConflictChoice::Incoming => "incoming",
+        ConflictChoice::Merged => "merged",
+    }
+}
+
+fn resolution_str(resolution: ConflictResolution) -> &'static str {
+    match resolution {
+        ConflictResolution::KeptCurrent => "kept-current",
+        ConflictResolution::AppliedIncoming => "applied-incoming",
+        ConflictResolution::AppliedMerged => "applied-merged",
     }
 }
 
@@ -475,6 +498,20 @@ mod tests {
         })
     }
 
+    fn replication_counts(store: &EngineStore) -> (i64, i64, i64) {
+        store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row("SELECT COUNT(*) FROM conflicts", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM replication_log", [], |row| row.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM replication_peers", [], |row| {
+                        row.get(0)
+                    })?,
+                ))
+            })
+            .expect("counts")
+    }
+
     #[test]
     fn conflict_open_is_idempotent_across_distinct_replication_coordinates() {
         let (_scratch, mut store) = store();
@@ -552,6 +589,155 @@ mod tests {
     }
 
     #[test]
+    fn conflict_open_rejects_terminal_status_or_resolution_before_log_and_ack() {
+        for (case, status, resolution) in [
+            ("resolved-status", "resolved", None),
+            ("premature-resolution", "open", Some("kept-current")),
+        ] {
+            let (_scratch, mut store) = store();
+            let mut payload = open_payload(case, "merge", false);
+            payload["status"] = json!(status);
+            if let Some(resolution) = resolution {
+                payload["resolution"] = json!(resolution);
+            }
+            let error = apply_conflict_envelope(
+                &mut store,
+                &envelope("peer", 0, "conflict.open", payload),
+                &NoFaults,
+            )
+            .expect_err("terminal conflict.open must fail");
+            assert!(matches!(error, SyncError::InvalidInput { .. }), "{case}");
+            assert_eq!(replication_counts(&store), (0, 0, 0), "{case}");
+        }
+    }
+
+    #[test]
+    fn conflict_open_requires_text_for_an_existing_text_side() {
+        let (_scratch, mut store) = store();
+        let mut payload = open_payload("missing-text", "merge", false);
+        payload["current"] = json!({
+            "exists": true,
+            "path": "doc.md",
+            "objectId": "object-1",
+            "contentKind": "text",
+            "updatedAtMs": 2_000,
+            "latestMomentId": "moment-1",
+            "metadata": { "origin": "sync" }
+        });
+        let error = apply_conflict_envelope(
+            &mut store,
+            &envelope("peer", 0, "conflict.open", payload),
+            &NoFaults,
+        )
+        .expect_err("missing text must fail");
+        assert!(matches!(error, SyncError::InvalidInput { .. }));
+        assert_eq!(replication_counts(&store), (0, 0, 0));
+    }
+
+    #[test]
+    fn identical_conflict_resolve_at_distinct_coordinates_is_idempotent() {
+        let (_scratch, mut store) = store();
+        let open = envelope(
+            "peer-open",
+            0,
+            "conflict.open",
+            open_payload("idempotent-resolve", "merge", false),
+        );
+        apply_conflict_envelope(&mut store, &open, &NoFaults).expect("open");
+        let payload = json!({
+            "conflictId": "idempotent-resolve",
+            "status": "resolved",
+            "chosenFrom": "current",
+            "resolution": "kept-current",
+            "updatedAtMs": 3_000,
+            "targetVersionId": "main"
+        });
+        let first = apply_conflict_envelope(
+            &mut store,
+            &envelope("peer-a", 0, "conflict.resolve", payload.clone()),
+            &NoFaults,
+        )
+        .expect("first resolve");
+        let second = apply_conflict_envelope(
+            &mut store,
+            &envelope("peer-b", 0, "conflict.resolve", payload),
+            &NoFaults,
+        )
+        .expect("idempotent resolve");
+        assert!(matches!(
+            first,
+            ApplyOutcome::Applied(ConflictApplyResult { matched: true, .. })
+        ));
+        assert!(matches!(
+            second,
+            ApplyOutcome::Applied(ConflictApplyResult { matched: true, .. })
+        ));
+        let rows = VersionedTextStore::new(&mut store)
+            .list_text_conflicts("ws", Some("resolved"))
+            .expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].chosen_from, ConflictChoice::Current);
+        assert_eq!(rows[0].resolution, Some(ConflictResolution::KeptCurrent));
+    }
+
+    #[test]
+    fn conflicting_second_conflict_resolve_is_rejected_without_mutation() {
+        let (_scratch, mut store) = store();
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer-open",
+                0,
+                "conflict.open",
+                open_payload("divergent-resolve", "merge", false),
+            ),
+            &NoFaults,
+        )
+        .expect("open");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer-a",
+                0,
+                "conflict.resolve",
+                json!({
+                    "conflictId": "divergent-resolve",
+                    "status": "resolved",
+                    "chosenFrom": "current",
+                    "resolution": "kept-current",
+                    "updatedAtMs": 3_000
+                }),
+            ),
+            &NoFaults,
+        )
+        .expect("first resolve");
+        let error = apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer-b",
+                0,
+                "conflict.resolve",
+                json!({
+                    "conflictId": "divergent-resolve",
+                    "status": "resolved",
+                    "chosenFrom": "incoming",
+                    "resolution": "applied-incoming",
+                    "updatedAtMs": 4_000
+                }),
+            ),
+            &NoFaults,
+        )
+        .expect_err("different terminal resolution must fail");
+        assert!(matches!(error, SyncError::InvalidInput { .. }));
+        let rows = VersionedTextStore::new(&mut store)
+            .list_text_conflicts("ws", Some("resolved"))
+            .expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].chosen_from, ConflictChoice::Current);
+        assert_eq!(rows[0].resolution, Some(ConflictResolution::KeptCurrent));
+    }
+
+    #[test]
     fn conflict_open_with_binary_side_is_rejected_before_log_or_ack() {
         let (_scratch, mut store) = store();
         let binary = envelope(
@@ -563,21 +749,6 @@ mod tests {
         let error = apply_conflict_envelope(&mut store, &binary, &NoFaults)
             .expect_err("binary side must fail closed");
         assert!(matches!(error, SyncError::InvalidInput { .. }));
-        let counts = store
-            .read_with(|conn| {
-                Ok::<_, rusqlite::Error>((
-                    conn.query_row("SELECT COUNT(*) FROM conflicts", [], |row| {
-                        row.get::<_, i64>(0)
-                    })?,
-                    conn.query_row("SELECT COUNT(*) FROM replication_log", [], |row| {
-                        row.get::<_, i64>(0)
-                    })?,
-                    conn.query_row("SELECT COUNT(*) FROM replication_peers", [], |row| {
-                        row.get::<_, i64>(0)
-                    })?,
-                ))
-            })
-            .expect("counts");
-        assert_eq!(counts, (0, 0, 0));
+        assert_eq!(replication_counts(&store), (0, 0, 0));
     }
 }

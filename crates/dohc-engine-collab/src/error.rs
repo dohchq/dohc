@@ -34,6 +34,11 @@ pub enum CollabError {
     #[error("invalid identifier: {reason}")]
     InvalidIdentifier { reason: &'static str },
 
+    /// The caller tried to append through a projection kind different from the
+    /// kind that already owns this durable lineage.
+    #[error("Y.Doc content kind does not match the existing lineage")]
+    ContentKindMismatch,
+
     /// A replicated lineage already has its single base; a second base is
     /// rejected (base-once). The caller must resume the existing lineage.
     #[error("replicated lineage already has a base (base-once)")]
@@ -74,6 +79,7 @@ impl CollabError {
             CollabError::EmptyUpdate => "empty-update",
             CollabError::UpdateTooLarge { .. } => "update-too-large",
             CollabError::InvalidIdentifier { .. } => "invalid-identifier",
+            CollabError::ContentKindMismatch => "content-kind-mismatch",
             CollabError::BaseAlreadyClaimed => "base-already-claimed",
             CollabError::LeaseHeld => "lease-held",
             CollabError::NoMarker => "no-marker",

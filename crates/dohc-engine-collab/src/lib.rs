@@ -32,8 +32,8 @@ pub mod ydoc;
 
 pub use durable::{
     claim_base, close_session, ensure_marker, load_persisted, maybe_compact, read_marker,
-    record_local_update, settle, AppendOutcome, ClaimOutcome, CloseOutcome, CompactOutcome, Marker,
-    PersistedDoc, Regime, SettleOutcome,
+    record_local_update, record_local_update_creating_marker, settle, AppendOutcome, ClaimOutcome,
+    CloseOutcome, CompactOutcome, Marker, PersistedDoc, Regime, SettleOutcome,
 };
 pub use error::CollabError;
 pub use lease::{Lease, LeaseRegistry};

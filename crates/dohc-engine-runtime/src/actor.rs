@@ -977,21 +977,15 @@ fn ydoc_apply_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    match dohc_engine_collab::ensure_marker(
+    match dohc_engine_collab::record_local_update_creating_marker(
         store,
         key,
         content_kind,
         Regime::Replicated,
+        update,
         faults,
         now_ms,
     )? {
-        TxnOutcome::Committed(()) => {}
-        TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
-    }
-    if token.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
-    }
-    match dohc_engine_collab::record_local_update(store, key, update, faults, now_ms)? {
         TxnOutcome::Committed(outcome) => Ok(outcome),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
