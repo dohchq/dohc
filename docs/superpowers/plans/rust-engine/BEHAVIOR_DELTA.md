@@ -567,3 +567,12 @@ recoverable earlier snapshot nor `legacy_before_text`, TS removes the file as a
 first write. Rust returns `invalid-input` instead: it never reconstructs or
 deletes state whose preimage was not recorded, preserving the fail-closed
 history contract.
+
+## 12. R06 (compare/merge/conflicts) — accepted cosmetic delta
+
+### 12.1 DELIBERATE DIVERGENCE: `compare_version_files` path ordering
+
+Rust returns version-file diffs in byte order via `BTreeSet`/`BTreeMap`; TS sorts
+paths by UTF-16 code units. The orders differ only for paths mixing BMP and
+astral-plane code points, so this is an accepted cosmetic ordering delta with no
+data or classification difference.

@@ -407,6 +407,69 @@ fn delete_job_replays_after_remove_before_complete() {
 }
 
 #[test]
+fn delete_job_syncs_parent_dir_before_marking_complete() {
+    let sc = Scratch::new("delete-durable-order");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    let old = b"durably-deleted-content";
+    std::fs::write(sc.target("a.md"), old).expect("target");
+    let job = spec(
+        "j-delete-durable",
+        "a.md",
+        &hex_sha256(old),
+        Preimage::Present(hex_sha256(old)),
+        1,
+        10,
+    );
+    let sha = store.put_binary_blob(old).expect("blob");
+    assert_eq!(sha, job.content_sha256);
+    store
+        .write_with(&NoFaults, |tx| {
+            enqueue_delete_job(tx, &job)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("enqueue delete");
+
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterRenameBeforeComplete);
+    let first = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        DurabilityPolicy::per_os(),
+        &StdReplacer,
+        &NoBackoff,
+        20,
+        faults.as_ref(),
+    )
+    .expect("delete crash");
+    assert!(matches!(first[0].outcome, JobOutcome::Crashed(_)));
+    assert!(!sc.target("a.md").exists());
+    assert_eq!(store.pending_materialization_count().expect("pending"), 1);
+
+    drop(store);
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    let recovered = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        DurabilityPolicy::per_os(),
+        &StdReplacer,
+        &NoBackoff,
+        40,
+        &NoFaults,
+    )
+    .expect("replay");
+    assert_eq!(recovered[0].outcome, JobOutcome::AlreadyMaterialized);
+    assert!(!sc.target("a.md").exists());
+    assert_eq!(
+        store
+            .load_materialization_job("j-delete-durable")
+            .expect("load")
+            .expect("job")
+            .status,
+        JobStatus::Complete
+    );
+    assert_eq!(store.pending_materialization_count().expect("pending"), 0);
+}
+
+#[test]
 fn superseded_lower_generation_job_is_skipped() {
     // A newer generation is materialized at the path first; a later-arriving job
     // carrying an OLDER generation must not regress the path to older content.

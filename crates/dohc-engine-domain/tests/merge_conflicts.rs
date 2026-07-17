@@ -487,7 +487,34 @@ fn conflict_primitives_filter_order_and_insert_if_absent() {
 }
 
 #[test]
-fn resolve_conflicts_covers_apply_move_merge_keep_binary_and_stale_gate() {
+fn insert_text_conflict_rejects_binary_side() {
+    let (_scratch, mut store) = open();
+    let mut record = TextConflict {
+        conflict_id: "binary-gate".to_owned(),
+        workspace_id: WS.to_owned(),
+        path: "binary.bin".to_owned(),
+        target_version_id: "main".to_owned(),
+        source_version_id: "feat".to_owned(),
+        created_at_ms: 200,
+        updated_at_ms: 200,
+        status: ConflictStatus::Open,
+        chosen_from: ConflictChoice::Current,
+        resolution: None,
+        metadata: ConflictMetadata::origin("sync"),
+        base: ConflictFileState::text("binary.bin", None),
+        current: ConflictFileState::text("binary.bin", None),
+        incoming: ConflictFileState::text("binary.bin", None),
+    };
+    record.incoming.content_kind = ConflictContentKind::Binary;
+
+    let error = store
+        .write_with(&NO_FAULTS, |tx| insert_text_conflict_if_absent(tx, &record))
+        .expect_err("binary side must fail closed");
+    assert_eq!(error.code(), "invalid-input");
+}
+
+#[test]
+fn resolve_conflicts_covers_apply_move_merge_keep_and_stale_gate() {
     let (_scratch, mut store) = open();
     let paths = [
         "same.md",
@@ -495,7 +522,6 @@ fn resolve_conflicts_covers_apply_move_merge_keep_binary_and_stale_gate() {
         "occupied.md",
         "merged.md",
         "keep.md",
-        "binary.md",
         "stale.md",
     ];
     let mut vt = VersionedTextStore::new(&mut store);
@@ -559,10 +585,6 @@ fn resolve_conflicts_covers_apply_move_merge_keep_binary_and_stale_gate() {
         }
         if *path == "occupied.md" {
             record.incoming.path = "taken.md".to_owned();
-        }
-        if *path == "binary.md" {
-            record.base.snapshot = record.current.snapshot.clone();
-            record.base.content_kind = ConflictContentKind::Binary;
         }
         records.push(record);
     }
@@ -646,22 +668,6 @@ fn resolve_conflicts_covers_apply_move_merge_keep_binary_and_stale_gate() {
         "current-4"
     );
 
-    assert_eq!(
-        vt.resolve_text_conflict(
-            &resolve(
-                "resolve-5",
-                ResolveConflictKind::ApplyMerged {
-                    text: "no".to_owned(),
-                },
-                "binary",
-            ),
-            &NO_FAULTS,
-        )
-        .expect_err("binary side")
-        .code(),
-        "invalid-input"
-    );
-
     vt.write_text(
         &write("main", "stale.md", "newer-head", "r-stale-new", "ignored"),
         &NO_FAULTS,
@@ -669,7 +675,7 @@ fn resolve_conflicts_covers_apply_move_merge_keep_binary_and_stale_gate() {
     .expect("mutate after conflict record");
     assert_eq!(
         vt.resolve_text_conflict(
-            &resolve("resolve-6", ResolveConflictKind::ApplyIncoming, "stale"),
+            &resolve("resolve-5", ResolveConflictKind::ApplyIncoming, "stale"),
             &NO_FAULTS,
         )
         .expect_err("M-CONFLICT-CLOBBER head-match gate")

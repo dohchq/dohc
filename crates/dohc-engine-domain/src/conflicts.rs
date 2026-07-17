@@ -242,6 +242,13 @@ pub fn insert_text_conflict_if_absent(
     tx: &Transaction<'_>,
     conflict: &TextConflict,
 ) -> Result<bool, DomainError> {
+    // R10 binary mirroring must add a distinct storage and apply path first.
+    if [&conflict.base, &conflict.current, &conflict.incoming]
+        .iter()
+        .any(|side| side.content_kind == ConflictContentKind::Binary)
+    {
+        return Err(binary_conflicts_unsupported());
+    }
     let exists: Option<i64> = tx
         .query_row(
             "SELECT 1 FROM conflicts WHERE workspace_id = ?1 AND conflict_id = ?2",
@@ -393,6 +400,9 @@ impl VersionedTextStore<'_> {
                     (ConflictChoice::Current, ConflictResolution::KeptCurrent)
                 }
                 ResolveConflictKind::ApplyIncoming => {
+                    if conflict.incoming.content_kind == ConflictContentKind::Binary {
+                        return Err(binary_conflicts_unsupported());
+                    }
                     if let Some(incoming) = &conflict.incoming.snapshot {
                         let destination = conflict.incoming.path.clone();
                         if destination != conflict.path {
@@ -769,6 +779,10 @@ fn map_side(
     let snapshot = if exists == 0 {
         None
     } else {
+        // Never reinterpret a mirrored binary side through the text blob join.
+        if content_kind == ConflictContentKind::Binary {
+            return Err(binary_conflicts_unsupported());
+        }
         Some(TextSnapshot {
             workspace_id: workspace_id.to_owned(),
             version_id: version_id.to_owned(),
@@ -805,17 +819,13 @@ fn map_side(
 }
 
 fn row_ms(row: &rusqlite::Row<'_>, column: &str) -> Result<i64, DomainError> {
-    let value: f64 = row.get(column).map_err(DomainError::sql_corrupt)?;
-    if !value.is_finite()
-        || value.fract() != 0.0
-        || value < i64::MIN as f64
-        || value > i64::MAX as f64
-    {
-        return Err(DomainError::StateCorrupt {
-            reason: "conflict timestamp is not an integral i64",
-        });
+    row.get::<_, i64>(column).map_err(DomainError::sql_corrupt)
+}
+
+fn binary_conflicts_unsupported() -> DomainError {
+    DomainError::InvalidInput {
+        reason: "binary conflict sides are not supported yet",
     }
-    Ok(value as i64)
 }
 
 fn select_snapshot_by_path(

@@ -207,6 +207,7 @@ impl VersionedTextStore<'_> {
         input: &MergeTextFileFromVersion,
         faults: &dyn FaultInjector,
     ) -> Result<MergeTextFileResult, DomainError> {
+        // note: request-id replay is deferred until all four result variants can be reconstructed.
         validate_path(&input.path)?;
         let outcome = self.store.write_with(faults, |tx| {
             let compare_input = CompareTextFileVersions {

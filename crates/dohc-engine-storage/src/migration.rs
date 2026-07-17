@@ -1034,10 +1034,11 @@ CREATE TABLE share_view_cursors (
 /// The `id` of the R10 sync migration.
 pub(crate) const SYNC_MIGRATION_ID: &str = "v1-sync";
 
-/// Ordinal 7 (R06 compare/merge/conflicts shard). The conflict side triples
-/// retain TS's nullable metadata columns and text-default content kinds. The
-/// materialization operation column lets the already-durable pipeline express
-/// the delete half of merge/resolve without overloading a content hash.
+/// Ordinal 7 (R06 compare/merge/conflicts shard). Adds durable conflict objects
+/// plus the materialization operation needed by merge and resolution deletes.
+/// `STRICT` + `INTEGER` timestamps follow the R04 baseline convention; TS
+/// `REAL` affinity is internal because conflict rows are never cross-engine
+/// compared by affinity, matching the R08/R09/R11a/R12 precedent.
 const V1_CONFLICTS_DDL: &str = "\
 CREATE TABLE conflicts (
     workspace_id TEXT NOT NULL,
@@ -1045,8 +1046,8 @@ CREATE TABLE conflicts (
     path TEXT NOT NULL,
     target_version_id TEXT NOT NULL,
     source_version_id TEXT NOT NULL,
-    created_at_ms REAL NOT NULL,
-    updated_at_ms REAL NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
     status TEXT NOT NULL,
     chosen_from TEXT NOT NULL,
     resolution TEXT,
@@ -1058,7 +1059,7 @@ CREATE TABLE conflicts (
     base_object_id TEXT,
     base_content_kind TEXT DEFAULT 'text',
     base_blob_sha256 TEXT,
-    base_updated_at_ms REAL,
+    base_updated_at_ms INTEGER,
     base_latest_moment_id TEXT,
     base_metadata_origin TEXT,
     base_metadata_summary TEXT,
@@ -1068,7 +1069,7 @@ CREATE TABLE conflicts (
     current_object_id TEXT,
     current_content_kind TEXT DEFAULT 'text',
     current_blob_sha256 TEXT,
-    current_updated_at_ms REAL,
+    current_updated_at_ms INTEGER,
     current_latest_moment_id TEXT,
     current_metadata_origin TEXT,
     current_metadata_summary TEXT,
@@ -1078,7 +1079,7 @@ CREATE TABLE conflicts (
     incoming_object_id TEXT,
     incoming_content_kind TEXT DEFAULT 'text',
     incoming_blob_sha256 TEXT,
-    incoming_updated_at_ms REAL,
+    incoming_updated_at_ms INTEGER,
     incoming_latest_moment_id TEXT,
     incoming_metadata_origin TEXT,
     incoming_metadata_summary TEXT,
@@ -1088,7 +1089,7 @@ CREATE TABLE conflicts (
     FOREIGN KEY (base_blob_sha256) REFERENCES blobs(sha256),
     FOREIGN KEY (current_blob_sha256) REFERENCES blobs(sha256),
     FOREIGN KEY (incoming_blob_sha256) REFERENCES blobs(sha256)
-);
+) STRICT;
 CREATE INDEX idx_conflicts_workspace_status ON conflicts(workspace_id, status, created_at_ms, conflict_id);
 ALTER TABLE materialization_jobs ADD COLUMN operation TEXT NOT NULL DEFAULT 'write';
 ";
@@ -1617,6 +1618,24 @@ mod tests {
             )
             .expect("R06 objects");
         assert_eq!(objects, 2);
+        let strict: i64 = conn
+            .query_row(
+                "SELECT strict FROM pragma_table_list('conflicts') WHERE name = 'conflicts'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("strict conflicts table");
+        assert_eq!(strict, 1);
+        let integer_timestamps: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('conflicts') WHERE type = 'INTEGER' AND \
+                 name IN ('created_at_ms', 'updated_at_ms', 'base_updated_at_ms', \
+                 'current_updated_at_ms', 'incoming_updated_at_ms')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("integer conflict timestamps");
+        assert_eq!(integer_timestamps, 5);
         let operation_column: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM pragma_table_info('materialization_jobs') \

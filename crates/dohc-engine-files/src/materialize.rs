@@ -296,7 +296,7 @@ pub fn materialize_one(
     }
 
     if job.operation == MaterializationOperation::Delete {
-        return materialize_delete(store, &target, job, now_ms, faults);
+        return materialize_delete(store, &target, job, policy, now_ms, faults);
     }
 
     // Load the content blob (integrity-verified on read).
@@ -393,6 +393,7 @@ fn materialize_delete(
     store: &EngineStore,
     target: &Path,
     job: &MaterializationJob,
+    policy: DurabilityPolicy,
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<JobOutcome, MaterializeError> {
@@ -412,6 +413,8 @@ fn materialize_delete(
         return Ok(JobOutcome::Conflict);
     }
     std::fs::remove_file(target).map_err(|err| MaterializeError::io(target, &err))?;
+    // Make the unlink durable before marking the job complete.
+    sync_parent_dir(target.parent(), policy)?;
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterRenameBeforeComplete,
