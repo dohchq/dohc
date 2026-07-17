@@ -606,4 +606,59 @@ describe("YdocLiveAdapter", () => {
       },
     });
   });
+
+  it("rejects ill-formed external markdown before sending it to the engine", async () => {
+    const engine = seedPlaintextEngine("seed");
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+
+    await expect(
+      session.applyExternalMarkdownEdit("bad \ud800 markdown"),
+    ).rejects.toBeInstanceOf(IllFormedUtf16EditError);
+    expect(engine.requests.map((request) => request.method)).not.toContain(
+      YDOC_METHOD.applyExternalMarkdownEdit,
+    );
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("keeps request ids unique across sessions sharing one adapter", async () => {
+    const engine = new YdocLoopbackEngine();
+    for (const path of ["a.txt", "b.txt"]) {
+      engine.seedFile({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path,
+        markdown: "",
+        contentKind: "plaintext",
+      });
+    }
+    const adapter = new YdocLiveAdapter(engine);
+    const sessionA = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: "a.txt",
+      contentKind: "plaintext",
+    });
+    const sessionB = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: "b.txt",
+      contentKind: "plaintext",
+    });
+
+    const ids = engine.requests.map((request) => request.id);
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(sessionA.sessionId).not.toBe(sessionB.sessionId);
+
+    await sessionA.close({ settle: false });
+    await sessionB.close({ settle: false });
+    adapter.dispose();
+  });
 });

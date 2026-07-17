@@ -16,6 +16,12 @@ const DEFAULT_SETTLE_DEBOUNCE_MS = 800;
 
 export interface EngineYdocProviderSessionOptions {
   transport: EngineTransport;
+  // Share ONE adapter across every doc on a given transport so request ids stay
+  // unique per session generation (bot #3601684269). When omitted a private
+  // adapter is created and disposed with this session; a shared adapter is
+  // never disposed here. R13's framed transport should additionally own id
+  // allocation as the hard guarantee.
+  adapter?: YdocLiveAdapter;
   workspace: string;
   versionId: string;
   path: string;
@@ -46,7 +52,8 @@ export interface EngineYdocProviderSession {
 export async function openEngineYdocProviderSession(
   options: EngineYdocProviderSessionOptions,
 ): Promise<EngineYdocProviderSession> {
-  const adapter = new YdocLiveAdapter(options.transport);
+  const ownsAdapter = options.adapter === undefined;
+  const adapter = options.adapter ?? new YdocLiveAdapter(options.transport);
   let session: YdocAdapterSession;
   try {
     session = await adapter.openSession({
@@ -56,7 +63,7 @@ export async function openEngineYdocProviderSession(
       ...(options.contentKind ? { contentKind: options.contentKind } : {}),
     });
   } catch (error) {
-    adapter.dispose();
+    if (ownsAdapter) adapter.dispose();
     throw error;
   }
 
@@ -186,7 +193,7 @@ export async function openEngineYdocProviderSession(
         await runSettle(closeOptions?.summary ?? "session close");
       }
       await session.close({ settle: false });
-      adapter.dispose();
+      if (ownsAdapter) adapter.dispose();
       closeComplete = true;
     },
   };

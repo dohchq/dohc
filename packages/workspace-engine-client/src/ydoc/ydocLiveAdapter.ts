@@ -489,6 +489,15 @@ export class YdocAdapterSession {
     markdown: string,
   ): Promise<YdocApplyExternalMarkdownEditResult> {
     this.assertOpen();
+    // Guard the JSON/Rust boundary with the same well-formedness check local
+    // edits get: a lone surrogate cannot cross cleanly and would fail the
+    // transport instead of rejecting locally (bot #3601684258).
+    if (!isWellFormedUtf16(markdown)) throw new IllFormedUtf16EditError();
+    // Flush pending local journals first so the engine merges the external
+    // edit against the fully-recorded state, never a stale doc that a later
+    // in-flight recordUpdate then reorders behind it (bot #3601684273).
+    await this.recordChain;
+    this.assertOpen();
     const params: YdocApplyExternalMarkdownEditParams = {
       sessionId: this.sessionId,
       markdown,
