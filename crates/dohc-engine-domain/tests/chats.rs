@@ -41,6 +41,29 @@ fn start_thread(
         origin: None,
         body: body.to_owned(),
         now_ms: now,
+        request_id: None,
+    }
+}
+
+fn send_msg(
+    thread_id: &str,
+    message_id: &str,
+    parent: Option<&str>,
+    body: &str,
+    now: i64,
+) -> SendMessage {
+    SendMessage {
+        workspace_id: WS.to_owned(),
+        thread_id: thread_id.to_owned(),
+        message_id: message_id.to_owned(),
+        author_kind: ChatActorKind::Human,
+        author_display_name: "Ada".to_owned(),
+        author_user_id: Some("user-ada".to_owned()),
+        parent_message_id: parent.map(str::to_owned),
+        origin: None,
+        body: body.to_owned(),
+        now_ms: now,
+        request_id: None,
     }
 }
 
@@ -258,18 +281,7 @@ fn send_message_reply_parent_must_exist_in_thread() {
     // Unknown parent → message-not-found.
     let bad = chats
         .send_message(
-            &SendMessage {
-                workspace_id: WS.to_owned(),
-                thread_id: "t1".to_owned(),
-                message_id: "m1".to_owned(),
-                author_kind: ChatActorKind::Human,
-                author_display_name: "Ada".to_owned(),
-                author_user_id: Some("user-ada".to_owned()),
-                parent_message_id: Some("does-not-exist".to_owned()),
-                origin: None,
-                body: "reply".to_owned(),
-                now_ms: 21,
-            },
+            &send_msg("t1", "m1", Some("does-not-exist"), "reply", 21),
             &NO_FAULTS,
         )
         .unwrap_err();
@@ -277,21 +289,7 @@ fn send_message_reply_parent_must_exist_in_thread() {
 
     // Existing parent in the same thread → ok, order increments.
     let ok = chats
-        .send_message(
-            &SendMessage {
-                workspace_id: WS.to_owned(),
-                thread_id: "t1".to_owned(),
-                message_id: "m1".to_owned(),
-                author_kind: ChatActorKind::Human,
-                author_display_name: "Ada".to_owned(),
-                author_user_id: Some("user-ada".to_owned()),
-                parent_message_id: Some("m0".to_owned()),
-                origin: None,
-                body: "reply".to_owned(),
-                now_ms: 22,
-            },
-            &NO_FAULTS,
-        )
+        .send_message(&send_msg("t1", "m1", Some("m0"), "reply", 22), &NO_FAULTS)
         .expect("send");
     assert_eq!(ok.message_order, 1);
     assert_eq!(ok.parent_message_id, Some("m0".to_owned()));
@@ -315,18 +313,7 @@ fn list_messages_keyset_pagination_limit_minus_one_limit_plus_one() {
     for i in 1..=3 {
         chats
             .send_message(
-                &SendMessage {
-                    workspace_id: WS.to_owned(),
-                    thread_id: "t1".to_owned(),
-                    message_id: format!("m{i}"),
-                    author_kind: ChatActorKind::Human,
-                    author_display_name: "Ada".to_owned(),
-                    author_user_id: Some("user-ada".to_owned()),
-                    parent_message_id: None,
-                    origin: None,
-                    body: format!("msg {i}"),
-                    now_ms: 20 + i,
-                },
+                &send_msg("t1", &format!("m{i}"), None, &format!("msg {i}"), 20 + i),
                 &NO_FAULTS,
             )
             .expect("send");
@@ -369,21 +356,7 @@ fn mark_thread_read_cas_monotonic_and_over_count_repair() {
         )
         .expect("start");
     chats
-        .send_message(
-            &SendMessage {
-                workspace_id: WS.to_owned(),
-                thread_id: "t1".to_owned(),
-                message_id: "m1".to_owned(),
-                author_kind: ChatActorKind::Human,
-                author_display_name: "Ada".to_owned(),
-                author_user_id: Some("user-ada".to_owned()),
-                parent_message_id: None,
-                origin: None,
-                body: "second".to_owned(),
-                now_ms: 21,
-            },
-            &NO_FAULTS,
-        )
+        .send_message(&send_msg("t1", "m1", None, "second", 21), &NO_FAULTS)
         .expect("send");
 
     // Advance to 1 (revision 0 -> 1).
@@ -642,6 +615,267 @@ fn dispatch_claim_is_single_writer_idempotent() {
         })
         .expect("runs");
     assert_eq!(runs, 1);
+}
+
+#[test]
+fn dispatch_completes_then_next_trigger_is_claimable() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_agent_channel(WS, "agent-1", 10, &NO_FAULTS)
+        .expect("agent");
+    // Two triggers in two threads (a claim marks only same-thread pendings done).
+    chats
+        .start_channel_thread(
+            &start_thread("agent-1", "t1", "mA", "@agent A", ChatActorKind::Human, 20),
+            &NO_FAULTS,
+        )
+        .expect("t1");
+    chats
+        .start_channel_thread(
+            &start_thread("agent-1", "t2", "mB", "@agent B", ChatActorKind::Human, 21),
+            &NO_FAULTS,
+        )
+        .expect("t2");
+    chats
+        .enqueue_dispatch(WS, "mA", "t1", 22, &NO_FAULTS)
+        .expect("enq A");
+    chats
+        .enqueue_dispatch(WS, "mB", "t2", 23, &NO_FAULTS)
+        .expect("enq B");
+
+    let a = chats
+        .claim_next_pending(WS, "run-A", "agent", None, 24, &NO_FAULTS)
+        .expect("claim A")
+        .expect("some A");
+    assert_eq!(a.trigger_message_id, "mA");
+
+    // Before completion, B is NOT claimable (single-writer guard).
+    assert!(
+        chats
+            .claim_next_pending(WS, "run-B", "agent", None, 25, &NO_FAULTS)
+            .expect("blocked")
+            .is_none()
+    );
+
+    // Complete A → the running row leaves 'running'; B becomes claimable.
+    chats
+        .complete_dispatch("run-A", 0, 26, &NO_FAULTS)
+        .expect("complete A");
+    let b = chats
+        .claim_next_pending(WS, "run-B", "agent", None, 27, &NO_FAULTS)
+        .expect("claim B")
+        .expect("some B");
+    assert_eq!(b.trigger_message_id, "mB");
+
+    // Completing an already-done run is an idempotent no-op.
+    chats
+        .complete_dispatch("run-A", 0, 28, &NO_FAULTS)
+        .expect("idempotent complete");
+
+    // A's run record is ended with its ORIGINAL exit code timestamp (26), not
+    // the idempotent no-op's (28).
+    let ended: Option<i64> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT ended_at_ms FROM agent_run_records WHERE run_id = 'run-A'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .expect("run A ended");
+    assert_eq!(ended, Some(26));
+}
+
+#[test]
+fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    {
+        let mut store = open(&db, 1);
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_agent_channel(WS, "agent-1", 10, &NO_FAULTS)
+            .expect("agent");
+        chats
+            .start_channel_thread(
+                &start_thread("agent-1", "t1", "mA", "@agent", ChatActorKind::Human, 20),
+                &NO_FAULTS,
+            )
+            .expect("start");
+        chats
+            .enqueue_dispatch(WS, "mA", "t1", 21, &NO_FAULTS)
+            .expect("enqueue");
+        chats
+            .claim_next_pending(WS, "run-1", "agent", None, 22, &NO_FAULTS)
+            .expect("claim")
+            .expect("some");
+        // Simulated process death: the run never completes; store dropped.
+    }
+    // Reopen: the 'running' row survived the crash and wedges new claims.
+    let mut store = open(&db, 2);
+    let mut chats = LinkedChatStore::new(&mut store);
+    assert!(
+        chats
+            .claim_next_pending(WS, "run-2", "agent", None, 30, &NO_FAULTS)
+            .expect("still wedged")
+            .is_none(),
+        "a dead 'running' row blocks claims until reclaimed"
+    );
+    // Reclaim the crashed run → its trigger is requeued to pending.
+    let requeued = chats
+        .reclaim_running_dispatches(WS, 2, 31, &NO_FAULTS)
+        .expect("reclaim");
+    assert_eq!(requeued, vec!["mA".to_owned()]);
+    // A fresh worker can now claim the reclaimed trigger.
+    let fresh = chats
+        .claim_next_pending(WS, "run-3", "agent", None, 32, &NO_FAULTS)
+        .expect("fresh claim")
+        .expect("some");
+    assert_eq!(fresh.trigger_message_id, "mA");
+    assert_eq!(fresh.run_id, "run-3");
+
+    // The crashed run record is ended-with-failure.
+    let failed: Option<String> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT failure_reason FROM agent_run_records WHERE run_id = 'run-1'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .expect("run-1 row");
+    assert_eq!(failed, Some("reclaimed-crashed".to_owned()));
+}
+
+// ------------------------------------------------ exactly-once idempotency
+
+#[test]
+fn start_thread_after_commit_before_ack_retry_replays_exactly_once() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    {
+        let mut store = open(&db, 1);
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+            .expect("gen");
+    }
+    // Arm a crash AFTER commit, before ack — the write IS durable but surfaces
+    // as an error to the caller (who does not learn it succeeded).
+    {
+        let mut store = open(&db, 2);
+        let faults = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
+        let mut chats = LinkedChatStore::new(&mut store);
+        let mut input = start_thread("gen-1", "t1", "m0", "hello", ChatActorKind::Human, 20);
+        input.request_id = Some("req-1".to_owned());
+        let err = chats
+            .start_channel_thread(&input, faults.as_ref())
+            .unwrap_err();
+        assert_eq!(err.code(), "persist-failed");
+        assert!(faults.fired());
+    }
+    // Retry with the SAME ids + request_id: replays the recorded result exactly
+    // once (does NOT hit the message PK and fail a write that succeeded).
+    let mut store = open(&db, 3);
+    let mut chats = LinkedChatStore::new(&mut store);
+    let mut input = start_thread("gen-1", "t1", "m0", "hello", ChatActorKind::Human, 20);
+    input.request_id = Some("req-1".to_owned());
+    let (thread, message) = chats
+        .start_channel_thread(&input, &NO_FAULTS)
+        .expect("replay");
+    assert_eq!(thread.thread_id, "t1");
+    assert_eq!(message.message_id, "m0");
+    // A same-key retry with a DIFFERENT payload is a reuse mismatch.
+    let mut reused = start_thread("gen-1", "t1", "m0", "DIFFERENT", ChatActorKind::Human, 20);
+    reused.request_id = Some("req-1".to_owned());
+    assert_eq!(
+        chats
+            .start_channel_thread(&reused, &NO_FAULTS)
+            .unwrap_err()
+            .code(),
+        "idempotency-key-reuse-mismatch"
+    );
+    // Exactly one thread + message durably exist (no duplicate from the retry).
+    let counts: (i64, i64) = store
+        .read_with(|conn| {
+            let t: i64 = conn.query_row("SELECT COUNT(*) FROM chat_threads", [], |r| r.get(0))?;
+            let m: i64 = conn.query_row("SELECT COUNT(*) FROM chat_messages", [], |r| r.get(0))?;
+            Ok::<_, rusqlite::Error>((t, m))
+        })
+        .expect("counts");
+    assert_eq!(counts, (1, 1));
+}
+
+// ---------------------------------------------- write-side fail-closed CHECK
+
+#[test]
+fn author_kind_check_constraint_rejects_bogus_wire_value() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let store = open(&db, 1);
+    // A wrong-case / bogus author_kind (as a future R10 replication-apply might
+    // receive over the wire) is rejected AT WRITE by the CHECK, not stored to
+    // trip later on read.
+    let result = store.read_with(|conn| {
+        conn.execute(
+            "INSERT INTO chat_mentions \
+             (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms) \
+             VALUES ('ws-1', 't1', 'm1', 'ada', 'Agent', 1)",
+            [],
+        )
+    });
+    assert!(result.is_err(), "bogus author_kind must fail the CHECK");
+}
+
+// ------------------------------------------------ JS trimEnd body parity
+
+#[test]
+fn normalize_body_matches_js_trimend_including_zwnbsp() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("gen");
+    // A body ending in U+FEFF (ZWNBSP): JS `.trimEnd()` strips it; Rust
+    // `.trim_end()` would NOT. The stored body must match TS: "hi".
+    let (_t, m) = chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t1", "m0", "hi\u{FEFF}", ChatActorKind::Human, 20),
+            &NO_FAULTS,
+        )
+        .expect("start");
+    assert_eq!(m.body, "hi", "ZWNBSP trailing trimmed like JS trimEnd");
+}
+
+// ---------------------------------------------------------- bounded reads
+
+#[test]
+fn list_messages_huge_limit_is_bounded_no_overflow() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("gen");
+    chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Human, 20),
+            &NO_FAULTS,
+        )
+        .expect("start");
+    // i64::MAX must not overflow the probe (limit is clamped to MAX_MESSAGE_PAGE)
+    // and returns the small page without a cursor.
+    let page = chats
+        .list_messages(WS, "t1", i64::MAX, None)
+        .expect("huge limit");
+    assert_eq!(page.messages.len(), 1);
+    assert_eq!(page.next_after_message_order, None);
 }
 
 // ------------------------------------------------------ migration presence

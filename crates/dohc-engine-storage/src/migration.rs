@@ -497,10 +497,14 @@ pub(crate) const YDOC_MIGRATION_ID: &str = "v1-ydoc";
 /// The trailing block is the deferred-chat-parent repair (BEHAVIOR_DELTA §D2 /
 /// `engineDbSchema.ts:779-837`): it moves replicated replies whose parent has
 /// not arrived into `chat_pending_message_parents` and NULLs cross-thread/self
-/// parent links. On a fresh Rust store `chat_messages` is empty, so it is a
-/// no-op, but folding it into this ordinal-3 migration keys the one-shot to the
-/// `v1-chats` ledger row (checksum-gated), reproducing the exact repair
-/// semantics for any store handed from TS to Rust mid-cutover.
+/// parent links. Because this migration CREATEs `chat_messages` empty in the
+/// same transaction immediately before, the repair is ALWAYS a no-op on a Rust
+/// store (and a foreign/TS `engine.db` never reaches this runner — the v1-vs-v2
+/// fingerprint fence in `schema.rs` rejects it before any migration runs). It is
+/// folded in as a keyed, checksum-gated record of the exact TS repair SQL — the
+/// semantic contract R10 replicated-apply and any future TS→Rust importer must
+/// converge to — not a live data-rewrite path. Kept over dropping it so the
+/// repair semantics live in one auditable place next to the tables they touch.
 const V1_CHATS_DDL: &str = "\
 -- Channels + per-thread read cursors (WS-E). Durable rows key on channel_id;
 -- the slug UNIQUE index is a collision-safe lookup alias per workspace.
@@ -571,7 +575,7 @@ CREATE TABLE chat_messages (
     thread_id           TEXT    NOT NULL,
     message_order       INTEGER NOT NULL,
     message_id          TEXT    NOT NULL,
-    author_kind         TEXT    NOT NULL,
+    author_kind         TEXT    NOT NULL CHECK (author_kind IN ('human', 'agent')),
     author_display_name TEXT    NOT NULL,
     author_user_id      TEXT,
     parent_message_id   TEXT,
@@ -602,7 +606,7 @@ CREATE TABLE chat_reactions (
     message_id          TEXT    NOT NULL,
     emoji               TEXT    NOT NULL,
     author_id           TEXT    NOT NULL,
-    author_kind         TEXT    NOT NULL,
+    author_kind         TEXT    NOT NULL CHECK (author_kind IN ('human', 'agent')),
     author_display_name TEXT    NOT NULL,
     state               TEXT    NOT NULL CHECK (state IN ('added', 'removed')),
     at_ms               INTEGER NOT NULL,
@@ -673,7 +677,7 @@ CREATE TABLE chat_mentions (
     thread_id     TEXT    NOT NULL,
     message_id    TEXT    NOT NULL,
     handle        TEXT    NOT NULL,
-    author_kind   TEXT    NOT NULL,
+    author_kind   TEXT    NOT NULL CHECK (author_kind IN ('human', 'agent')),
     created_at_ms INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, message_id, handle)
 ) STRICT;

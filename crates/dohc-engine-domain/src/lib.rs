@@ -38,9 +38,9 @@ pub use chats::{
     ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind, ChatFeedItem, ChatFeedPage,
     ChatFollow, ChatMessage, ChatMessagePage, ChatThread, ChatThreadReadState, DispatchClaim,
     FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_NAME, GENERAL_CHANNEL_WIRE_ID,
-    LINKED_CHAT_PROJECTION_KIND, LinkedChatStore, MAX_MESSAGE_BODY_BYTES, SaveBookmark,
-    SendMessage, SetFollow, StartChannelThread, channel_slug_for_name, decode_feed_cursor,
-    encode_feed_cursor, linked_chat_projection_path,
+    LINKED_CHAT_PROJECTION_KIND, LinkedChatStore, MAX_MESSAGE_BODY_BYTES, MAX_MESSAGE_PAGE,
+    SaveBookmark, SendMessage, SetFollow, StartChannelThread, channel_slug_for_name,
+    decode_feed_cursor, encode_feed_cursor, linked_chat_projection_path,
 };
 pub use error::DomainError;
 pub use normalize::NormalizedState;

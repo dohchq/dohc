@@ -75,6 +75,15 @@ const MAX_FEED_CURSOR_MESSAGE_ID_CHARS: usize = 256;
 /// Feed page limit bounds (`listPersonalFeed`).
 const FEED_LIMIT_MAX: i64 = 100;
 const FEED_LIMIT_DEFAULT: i64 = 20;
+/// Hard upper bound on a single [`LinkedChatStore::list_messages`] page. A caller
+/// asking for more is clamped to this; the returned `next_after_message_order`
+/// cursor pages the rest. Keeps every read bounded (plan §Rust policy).
+pub const MAX_MESSAGE_PAGE: i64 = 500;
+/// Hard cap on the low-cardinality workspace lists (channels/threads/follows/
+/// bookmarks). These are per-workspace enumerations with no natural paging in the
+/// TS oracle; the cap bounds the returned `Vec` so a corrupt/huge store cannot
+/// materialize an unbounded allocation. Chosen well above realistic cardinality.
+const MAX_LIST_ROWS: i64 = 10_000;
 /// base32 lowercase (RFC 4648, no padding) alphabet (`linkedChatStore.ts:557`).
 const BASE32_LOWERCASE_ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
 
@@ -355,6 +364,10 @@ pub struct StartChannelThread {
     pub origin: Option<String>,
     pub body: String,
     pub now_ms: i64,
+    /// Optional idempotency key. When set, an after-commit-before-ack retry with
+    /// the same key + payload replays the recorded result exactly-once instead of
+    /// hitting the message PK and failing a write that actually succeeded.
+    pub request_id: Option<String>,
 }
 
 /// Inputs to [`LinkedChatStore::send_message`].
@@ -370,6 +383,8 @@ pub struct SendMessage {
     pub origin: Option<String>,
     pub body: String,
     pub now_ms: i64,
+    /// Optional idempotency key (see [`StartChannelThread::request_id`]).
+    pub request_id: Option<String>,
 }
 
 /// Inputs to [`LinkedChatStore::set_follow`].
@@ -543,6 +558,18 @@ pub fn encode_feed_cursor(value: &FeedCursorValue) -> String {
 /// Decode a personal-feed cursor, failing closed as `invalid-follow-target` on
 /// ANY decode/shape violation (`decodeFeedCursor`, matrix 4.8). Accepts exactly
 /// the strings the TS engine emits (unpadded url-safe base64 of the JSON body).
+///
+/// DELIBERATE DIVERGENCE (Rust is stricter, fail-closed, on NON-engine-minted
+/// cursors — recorded in BEHAVIOR_DELTA §10): (1) `createdAtMs` must be an
+/// integral i64 here, whereas TS accepts any finite JS number (our feed only
+/// ever EMITS integral coordinates, so a fractional/out-of-range value is never
+/// a cursor this engine minted); (2) the message-id length cap counts Unicode
+/// scalar values (`chars().count()`) rather than JS UTF-16 units, so an astral
+/// string near the 256 boundary can be rejected on one engine and accepted on
+/// the other. Engine-MINTED cursors round-trip byte-exact on both sides (pinned
+/// by the differential); the divergence only tightens acceptance of adversarial
+/// client input, which is the safe direction. R10/differential must treat this
+/// as intended, not a bug.
 pub fn decode_feed_cursor(cursor: &str) -> Result<FeedCursorValue, DomainError> {
     let invalid = || DomainError::chat("invalid-follow-target", "Feed cursor is invalid.");
     if cursor.is_empty() || cursor.len() > MAX_FEED_CURSOR_LEN {
@@ -654,7 +681,7 @@ fn normalize_author_user_id(value: Option<&str>) -> Result<Option<String>, Domai
 /// `normalizeBody`: CRLF/CR -> LF, trimEnd, non-empty, <= 64 KiB UTF-8.
 fn normalize_body(body: &str) -> Result<String, DomainError> {
     let lf = body.replace("\r\n", "\n").replace('\r', "\n");
-    let normalized = lf.trim_end().to_owned();
+    let normalized = lf.trim_end_matches(is_js_trim_ws).to_owned();
     if normalized.is_empty() || normalized.len() > MAX_MESSAGE_BODY_BYTES {
         return Err(DomainError::chat(
             "invalid-message-body",
@@ -662,6 +689,15 @@ fn normalize_body(body: &str) -> Result<String, DomainError> {
         ));
     }
     Ok(normalized)
+}
+
+/// The ECMAScript `String.prototype.trimEnd` whitespace set (WhiteSpace +
+/// LineTerminator), so a normalized body is byte-identical to the TS
+/// `normalizeBody`. It differs from Rust's `char::is_whitespace` (Unicode
+/// `White_Space`) at exactly two code points: JS trims U+FEFF (ZWNBSP) which is
+/// NOT `White_Space`, and JS does NOT trim U+0085 (NEL) which IS `White_Space`.
+fn is_js_trim_ws(c: char) -> bool {
+    c == '\u{FEFF}' || (c.is_whitespace() && c != '\u{0085}')
 }
 
 /// `normalizeMessageOrigin`: absent -> None; only "cli" is accepted.
@@ -889,11 +925,11 @@ impl<'a> LinkedChatStore<'a> {
                      FROM chat_channels ch WHERE ch.workspace_id = ?1 \
                        AND NOT EXISTS (SELECT 1 FROM chat_channel_placeholders p \
                          WHERE p.workspace_id = ch.workspace_id AND p.channel_id = ch.channel_id) \
-                     ORDER BY ch.created_at_ms, ch.channel_id",
+                     ORDER BY ch.created_at_ms, ch.channel_id LIMIT ?2",
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
-                .query_map(params![workspace_id], map_channel_row)
+                .query_map(params![workspace_id, MAX_LIST_ROWS], map_channel_row)
                 .map_err(DomainError::sql_corrupt)?;
             collect(rows)
         })
@@ -950,6 +986,34 @@ impl<'a> LinkedChatStore<'a> {
         let body = normalize_body(&input.body)?;
         let now = input.now_ms;
 
+        let payload_hash = hash_fields(&[
+            input.thread_id.as_bytes(),
+            input.message_id.as_bytes(),
+            input.channel_id.as_bytes(),
+            title.as_bytes(),
+            body.as_bytes(),
+            input.author_kind.as_str().as_bytes(),
+            display_name.as_bytes(),
+            author_user_id.as_deref().unwrap_or("").as_bytes(),
+            origin.as_deref().unwrap_or("").as_bytes(),
+        ]);
+        // Exactly-once pre-check (single-writer: authoritative). A committed
+        // retry replays the recorded thread+message instead of hitting the PK.
+        if let Some(request_id) = &input.request_id
+            && let Some(recorded) = self
+                .store
+                .read_with(|conn| lookup_request(conn, request_id))?
+        {
+            if recorded != payload_hash {
+                return Err(DomainError::IdempotencyKeyReuseMismatch);
+            }
+            return self.reconstruct_thread_message(
+                &input.workspace_id,
+                &input.thread_id,
+                &input.message_id,
+            );
+        }
+
         let input = input.clone();
         let title_c = title.clone();
         let body_c = body.clone();
@@ -989,6 +1053,7 @@ impl<'a> LinkedChatStore<'a> {
             }
             journal(tx, &input.thread_id, "chat.thread.create", now)?;
             journal(tx, &input.message_id, "chat.message.append", now)?;
+            record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
             let thread = ChatThread {
                 workspace_id: input.workspace_id.clone(),
                 thread_id: input.thread_id.clone(),
@@ -1054,6 +1119,27 @@ impl<'a> LinkedChatStore<'a> {
         let body = normalize_body(&input.body)?;
         let now = input.now_ms;
 
+        let payload_hash = hash_fields(&[
+            input.thread_id.as_bytes(),
+            input.message_id.as_bytes(),
+            body.as_bytes(),
+            input.author_kind.as_str().as_bytes(),
+            display_name.as_bytes(),
+            author_user_id.as_deref().unwrap_or("").as_bytes(),
+            parent.as_deref().unwrap_or("").as_bytes(),
+            origin.as_deref().unwrap_or("").as_bytes(),
+        ]);
+        if let Some(request_id) = &input.request_id
+            && let Some(recorded) = self
+                .store
+                .read_with(|conn| lookup_request(conn, request_id))?
+        {
+            if recorded != payload_hash {
+                return Err(DomainError::IdempotencyKeyReuseMismatch);
+            }
+            return self.reconstruct_message(&input.workspace_id, &input.message_id);
+        }
+
         let input = input.clone();
         let display_c = display_name.clone();
         let author_user_c = author_user_id.clone();
@@ -1098,6 +1184,7 @@ impl<'a> LinkedChatStore<'a> {
             )
             .map_err(DomainError::sql_persist)?;
             journal(tx, &input.message_id, "chat.message.append", now)?;
+            record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
             Ok::<_, DomainError>(ChatMessage {
                 workspace_id: input.workspace_id.clone(),
                 thread_id: input.thread_id.clone(),
@@ -1115,6 +1202,31 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
+    /// Replay a previously-committed `start_channel_thread` for an exactly-once
+    /// retry: reads the durable thread + message rows by their caller-supplied ids.
+    fn reconstruct_thread_message(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        message_id: &str,
+    ) -> Result<(ChatThread, ChatMessage), DomainError> {
+        self.store.read_with(|conn| {
+            let thread = require_thread(conn, workspace_id, thread_id)?;
+            let message = require_message(conn, workspace_id, message_id)?;
+            Ok((thread, message))
+        })
+    }
+
+    /// Replay a previously-committed `send_message` for an exactly-once retry.
+    fn reconstruct_message(
+        &self,
+        workspace_id: &str,
+        message_id: &str,
+    ) -> Result<ChatMessage, DomainError> {
+        self.store
+            .read_with(|conn| require_message(conn, workspace_id, message_id))
+    }
+
     /// List threads in the workspace, ordered by `(created_at_ms, thread_id)`.
     pub fn list_threads(&self, workspace_id: &str) -> Result<Vec<ChatThread>, DomainError> {
         self.store.read_with(|conn| {
@@ -1122,11 +1234,11 @@ impl<'a> LinkedChatStore<'a> {
                 .prepare_cached(
                     "SELECT workspace_id, thread_id, title, created_at_ms, updated_at_ms, \
                      channel_id, linked_object_id FROM chat_threads WHERE workspace_id = ?1 \
-                     ORDER BY created_at_ms, thread_id",
+                     ORDER BY created_at_ms, thread_id LIMIT ?2",
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
-                .query_map(params![workspace_id], map_thread_row)
+                .query_map(params![workspace_id, MAX_LIST_ROWS], map_thread_row)
                 .map_err(DomainError::sql_corrupt)?;
             collect(rows)
         })
@@ -1134,7 +1246,9 @@ impl<'a> LinkedChatStore<'a> {
 
     /// A keyset page of a thread's messages, oldest first, with a `limit + 1`
     /// probe cursor over `message_order` (`versions-list-moments` discipline
-    /// applied to chat). `after_message_order` continues a prior page.
+    /// applied to chat). `after_message_order` continues a prior page. `limit` is
+    /// clamped to [`MAX_MESSAGE_PAGE`] so a single call can never load an entire
+    /// channel; the cursor pages the rest.
     pub fn list_messages(
         &self,
         workspace_id: &str,
@@ -1148,6 +1262,7 @@ impl<'a> LinkedChatStore<'a> {
                 "limit must be positive",
             ));
         }
+        let limit = limit.min(MAX_MESSAGE_PAGE);
         self.store.read_with(|conn| {
             let probe = limit.saturating_add(1);
             let after = after_message_order.unwrap_or(-1);
@@ -1269,11 +1384,14 @@ impl<'a> LinkedChatStore<'a> {
                     "SELECT owner_user_id, target_kind, target_id, state, updated_at_ms, \
                      origin_id, origin_seq FROM chat_follows \
                      WHERE workspace_id = ?1 AND owner_user_id = ?2 AND state = 'following' \
-                     ORDER BY target_kind, target_id",
+                     ORDER BY target_kind, target_id LIMIT ?3",
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
-                .query_map(params![workspace_id, owner_user_id], map_follow_row)
+                .query_map(
+                    params![workspace_id, owner_user_id, MAX_LIST_ROWS],
+                    map_follow_row,
+                )
                 .map_err(DomainError::sql_corrupt)?;
             collect(rows)
         })
@@ -1537,11 +1655,14 @@ impl<'a> LinkedChatStore<'a> {
             let mut stmt = conn
                 .prepare_cached(&format!(
                     "{BOOKMARK_SELECT} WHERE b.workspace_id = ?1 AND b.owner_user_id = ?2 \
-                     ORDER BY b.updated_at_ms DESC, b.bookmark_id"
+                     ORDER BY b.updated_at_ms DESC, b.bookmark_id LIMIT ?3"
                 ))
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
-                .query_map(params![workspace_id, owner_user_id], map_bookmark_row)
+                .query_map(
+                    params![workspace_id, owner_user_id, MAX_LIST_ROWS],
+                    map_bookmark_row,
+                )
                 .map_err(DomainError::sql_corrupt)?;
             collect(rows)
         })
@@ -1721,6 +1842,204 @@ impl<'a> LinkedChatStore<'a> {
             }))
         })?;
         committed(outcome)
+    }
+
+    /// Complete a running dispatch (`completeRun`): the `running` ledger row →
+    /// `done` and its `agent_run_records` row gets `ended_at_ms`/`exit_code`.
+    /// This is what unblocks the workspace's single-writer claim guard so the
+    /// next pending trigger becomes claimable. Idempotent: a repeat on an already
+    /// `done` run is a no-op; any other terminal state is `run-state-mismatch`.
+    pub fn complete_dispatch(
+        &mut self,
+        run_id: &str,
+        exit_code: i64,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<(), DomainError> {
+        self.finish_dispatch(
+            run_id,
+            DispatchOutcomeKind::Done,
+            Some(exit_code),
+            None,
+            now_ms,
+            faults,
+        )
+    }
+
+    /// Fail a running dispatch (`failRun`): the `running` ledger row → `failed`
+    /// (recording `failure_reason`) and its run record gets
+    /// `ended_at_ms`/`exit_code`. Idempotent on an already-`failed` run.
+    pub fn fail_dispatch(
+        &mut self,
+        run_id: &str,
+        reason: &str,
+        exit_code: Option<i64>,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<(), DomainError> {
+        let reason = if reason.is_empty() { "failed" } else { reason };
+        self.finish_dispatch(
+            run_id,
+            DispatchOutcomeKind::Failed,
+            exit_code,
+            Some(reason),
+            now_ms,
+            faults,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_dispatch(
+        &mut self,
+        run_id: &str,
+        kind: DispatchOutcomeKind,
+        exit_code: Option<i64>,
+        reason: Option<&str>,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<(), DomainError> {
+        non_empty(run_id, "invalid-message-body", "run_id must not be empty")?;
+        let run = run_id.to_owned();
+        let reason = reason.map(str::to_owned);
+        let outcome = self.store.write_with(faults, |tx| {
+            let Some((ws, trigger, ended, ledger_state)) = dispatch_run_context(tx, &run)? else {
+                return Err(DomainError::chat(
+                    "run-not-found",
+                    "Agent run was not found.",
+                ));
+            };
+            if ended.is_some() {
+                // Idempotent replay iff the ledger already reached this terminal
+                // state; a mismatched terminal state fails closed.
+                if ledger_state.as_deref() == Some(kind.ledger_state()) {
+                    return Ok::<_, DomainError>(());
+                }
+                return Err(DomainError::chat(
+                    "run-state-mismatch",
+                    "Agent run already reached a different terminal state.",
+                ));
+            }
+            if ledger_state.as_deref() != Some("running") {
+                return Err(DomainError::StateCorrupt {
+                    reason: "un-ended run record has a non-running ledger row",
+                });
+            }
+            let run_changed = tx
+                .execute(
+                    "UPDATE agent_run_records SET ended_at_ms = ?2, exit_code = ?3, \
+                       failure_reason = COALESCE(?4, failure_reason) \
+                     WHERE run_id = ?1 AND ended_at_ms IS NULL",
+                    params![run, now_ms, exit_code, reason],
+                )
+                .map_err(DomainError::sql_persist)?;
+            let ledger_changed = tx
+                .execute(
+                    "UPDATE chat_dispatch_ledger SET state = ?4, failure_reason = ?5, \
+                       updated_at_ms = ?3 \
+                     WHERE workspace_id = ?1 AND trigger_message_id = ?2 \
+                       AND state = 'running' AND run_id = ?6",
+                    params![ws, trigger, now_ms, kind.ledger_state(), reason, run],
+                )
+                .map_err(DomainError::sql_persist)?;
+            if run_changed != 1 || ledger_changed != 1 {
+                return Err(DomainError::StateCorrupt {
+                    reason: "dispatch finish did not transition exactly one run+ledger row",
+                });
+            }
+            Ok(())
+        })?;
+        committed(outcome)
+    }
+
+    /// Reclaim crashed dispatches (the liveness reaper — a startup / recovery
+    /// sweep with `assertOpenRunsSane`'s intent). A `running` ledger row with no
+    /// live process (the run died with the crash) would otherwise wedge the
+    /// single-writer claim guard forever. For each such row this marks the run
+    /// record ended-with-failure, then requeues the trigger to `pending` (so a
+    /// fresh worker can claim it) when `attempt_count < max_attempts`, else leaves
+    /// it terminally `failed`. Returns the trigger ids requeued to `pending`.
+    ///
+    /// Because the engine is the single writer, ANY `running` row observed at
+    /// call time belongs to a process that is no longer executing (a live run
+    /// holds the writer and would not be calling reclaim); calling this on
+    /// startup is the safe, deterministic recovery point.
+    pub fn reclaim_running_dispatches(
+        &mut self,
+        workspace_id: &str,
+        max_attempts: i64,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<Vec<String>, DomainError> {
+        let ws = workspace_id.to_owned();
+        let outcome = self.store.write_with(faults, |tx| {
+            // Snapshot the running rows first (can't mutate while iterating).
+            let running: Vec<(String, i64, Option<String>)> = {
+                let mut stmt = tx
+                    .prepare(
+                        "SELECT trigger_message_id, attempt_count, run_id \
+                         FROM chat_dispatch_ledger \
+                         WHERE workspace_id = ?1 AND state = 'running' \
+                         ORDER BY updated_at_ms, trigger_message_id",
+                    )
+                    .map_err(DomainError::sql_corrupt)?;
+                let rows = stmt
+                    .query_map(params![ws], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                    .map_err(DomainError::sql_corrupt)?;
+                let mut out = Vec::new();
+                for row in rows {
+                    out.push(row.map_err(DomainError::sql_corrupt)?);
+                }
+                out
+            };
+            let mut requeued = Vec::new();
+            for (trigger, attempt_count, run_id) in running {
+                if let Some(run) = &run_id {
+                    tx.execute(
+                        "UPDATE agent_run_records SET ended_at_ms = ?2, exit_code = -1, \
+                           failure_reason = 'reclaimed-crashed' \
+                         WHERE run_id = ?1 AND ended_at_ms IS NULL",
+                        params![run, now_ms],
+                    )
+                    .map_err(DomainError::sql_persist)?;
+                }
+                if attempt_count < max_attempts {
+                    tx.execute(
+                        "UPDATE chat_dispatch_ledger SET state = 'pending', run_id = NULL, \
+                           failure_reason = NULL, updated_at_ms = ?3 \
+                         WHERE workspace_id = ?1 AND trigger_message_id = ?2 AND state = 'running'",
+                        params![ws, trigger, now_ms],
+                    )
+                    .map_err(DomainError::sql_persist)?;
+                    requeued.push(trigger);
+                } else {
+                    tx.execute(
+                        "UPDATE chat_dispatch_ledger SET state = 'failed', \
+                           failure_reason = 'reclaim-exhausted', updated_at_ms = ?3 \
+                         WHERE workspace_id = ?1 AND trigger_message_id = ?2 AND state = 'running'",
+                        params![ws, trigger, now_ms],
+                    )
+                    .map_err(DomainError::sql_persist)?;
+                }
+            }
+            Ok::<_, DomainError>(requeued)
+        })?;
+        committed(outcome)
+    }
+}
+
+/// A dispatch terminal outcome kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DispatchOutcomeKind {
+    Done,
+    Failed,
+}
+
+impl DispatchOutcomeKind {
+    fn ledger_state(self) -> &'static str {
+        match self {
+            DispatchOutcomeKind::Done => "done",
+            DispatchOutcomeKind::Failed => "failed",
+        }
     }
 }
 
@@ -2136,6 +2455,46 @@ fn require_bookmark(
     .ok_or_else(|| DomainError::chat("invalid-bookmark-target", "Bookmark was not found."))
 }
 
+fn require_message(
+    conn: &Connection,
+    workspace_id: &str,
+    message_id: &str,
+) -> Result<ChatMessage, DomainError> {
+    conn.query_row(
+        "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
+         author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms \
+         FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
+        params![workspace_id, message_id],
+        map_message_row,
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?
+    .transpose()?
+    .ok_or_else(|| DomainError::chat("message-not-found", "Chat message was not found."))
+}
+
+/// Resolve a run id to `(workspace_id, trigger_message_id, ended_at_ms,
+/// ledger_state)` by joining `agent_run_records` (run_id is globally unique) to
+/// its dispatch ledger row. `None` when the run id is unknown.
+type DispatchRunContext = (String, String, Option<i64>, Option<String>);
+
+fn dispatch_run_context(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Option<DispatchRunContext>, DomainError> {
+    conn.query_row(
+        "SELECT r.workspace_id, r.trigger_message_id, r.ended_at_ms, l.state \
+         FROM agent_run_records r \
+         LEFT JOIN chat_dispatch_ledger l \
+           ON l.workspace_id = r.workspace_id AND l.trigger_message_id = r.trigger_message_id \
+         WHERE r.run_id = ?1",
+        params![run_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)
+}
+
 fn journal(
     tx: &Transaction<'_>,
     doc_id: &str,
@@ -2148,6 +2507,56 @@ fn journal(
     )
     .map_err(DomainError::sql_persist)?;
     Ok(())
+}
+
+/// Look up a prior request's payload hash in the exactly-once ledger
+/// (`engine_requests`), mirroring the versioning domain's idempotency seam.
+fn lookup_request(conn: &Connection, request_id: &str) -> Result<Option<String>, DomainError> {
+    conn.query_row(
+        "SELECT payload_hash FROM engine_requests WHERE request_id = ?1",
+        params![request_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)
+}
+
+/// Record the idempotency-ledger row in the SAME transaction as the mutation, so
+/// a committed retry replays to the recorded result exactly-once. `result_seq`
+/// is unused by chat replays (the result is rebuilt from the durable rows by
+/// their caller-supplied ids), stored as 0.
+fn record_request(
+    tx: &Transaction<'_>,
+    request_id: Option<&str>,
+    payload_hash: &str,
+    now_ms: i64,
+) -> Result<(), DomainError> {
+    if let Some(request_id) = request_id {
+        tx.execute(
+            "INSERT INTO engine_requests (request_id, payload_hash, result_seq, committed_at) \
+             VALUES (?1, ?2, 0, ?3)",
+            params![request_id, payload_hash, now_ms],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
+    Ok(())
+}
+
+/// Deterministic fingerprint over NUL-separated fields (idempotency payloads),
+/// matching the versioning domain's `hash_fields`.
+fn hash_fields(fields: &[&[u8]]) -> String {
+    let mut hasher = Sha256::new();
+    for field in fields {
+        hasher.update(field);
+        hasher.update([0u8]);
+    }
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 // -------------------------------------------------------------------- mappers
