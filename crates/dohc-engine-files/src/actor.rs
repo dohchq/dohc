@@ -15,6 +15,7 @@
 
 use crate::bounds::ScanBounds;
 use crate::capture::CaptureApplyResult;
+use crate::diff::ScanManifest;
 use crate::error::FilesError;
 use crate::reconcile::{ReconcileController, ReconcilePlan, ReconcileRun, ScanGeneration};
 use crate::scan::{ScanOutcome, Scanner};
@@ -123,6 +124,23 @@ impl FilesActor {
     /// assertion catches on-runtime misuse (CAL-2 parity with the runtime
     /// actor's sync-context guard).
     pub fn spawn(root: PathBuf, bounds: ScanBounds) -> Result<Self, FilesError> {
+        Self::spawn_with_manifest(root, bounds, None)
+    }
+
+    /// Same as [`FilesActor::spawn`], but seeds the reconcile controller from
+    /// a manifest recovered from a prior process's committed state (R14
+    /// robustness: manifest rehydration across a daemon restart), instead of
+    /// [`ReconcileController::new`]'s empty baseline. `None` behaves exactly
+    /// like [`FilesActor::spawn`]. See
+    /// [`ReconcileController::rehydrated`] for why this still forces a full
+    /// reconcile before anything is trusted.
+    ///
+    /// **Must be called OFF the async runtime** — see [`FilesActor::spawn`].
+    pub fn spawn_with_manifest(
+        root: PathBuf,
+        bounds: ScanBounds,
+        rehydrated: Option<(ScanManifest, ScanGeneration)>,
+    ) -> Result<Self, FilesError> {
         debug_assert_off_runtime();
         let (tx, rx) = mpsc::channel::<Command>(CHANNEL_CAPACITY);
         // Reserve the dedicated Close slot up front (the channel is empty, so
@@ -136,7 +154,17 @@ impl FilesActor {
         let worker_overflow = Arc::clone(&pending_overflow);
         let worker = std::thread::Builder::new()
             .name("dohc-files-actor".to_owned())
-            .spawn(move || worker_main(root, bounds, rx, worker_state, worker_overflow, startup_tx))
+            .spawn(move || {
+                worker_main(
+                    root,
+                    bounds,
+                    rehydrated,
+                    rx,
+                    worker_state,
+                    worker_overflow,
+                    startup_tx,
+                )
+            })
             .map_err(|_| FilesError::PoolUnavailable {
                 reason: "could not spawn files actor worker thread",
             })?;
@@ -165,11 +193,21 @@ impl FilesActor {
     /// runtime worker is blocked and [`FilesActor::spawn`]'s off-runtime guard
     /// is respected.
     pub async fn spawn_async(root: PathBuf, bounds: ScanBounds) -> Result<Self, FilesError> {
+        Self::spawn_async_with_manifest(root, bounds, None).await
+    }
+
+    /// Async, rehydrated counterpart of [`FilesActor::spawn_with_manifest`] —
+    /// see that method and [`FilesActor::spawn_async`].
+    pub async fn spawn_async_with_manifest(
+        root: PathBuf,
+        bounds: ScanBounds,
+        rehydrated: Option<(ScanManifest, ScanGeneration)>,
+    ) -> Result<Self, FilesError> {
         let (tx, rx) = oneshot::channel();
         std::thread::Builder::new()
             .name("dohc-files-spawn".to_owned())
             .spawn(move || {
-                let _ = tx.send(FilesActor::spawn(root, bounds));
+                let _ = tx.send(FilesActor::spawn_with_manifest(root, bounds, rehydrated));
             })
             .map_err(|_| FilesError::PoolUnavailable {
                 reason: "could not spawn files actor startup thread",
@@ -362,6 +400,7 @@ fn debug_assert_off_runtime() {
 fn worker_main(
     root: PathBuf,
     bounds: ScanBounds,
+    rehydrated: Option<(ScanManifest, ScanGeneration)>,
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
     pending_overflow: Arc<AtomicBool>,
@@ -385,7 +424,10 @@ fn worker_main(
             return;
         }
     };
-    let mut controller = ReconcileController::new();
+    let mut controller = match rehydrated {
+        Some((manifest, generation)) => ReconcileController::rehydrated(manifest, generation),
+        None => ReconcileController::new(),
+    };
 
     state.store(LifecycleState::Ready.as_u8(), Ordering::Release);
     if startup_tx.send(Ok(())).is_err() {

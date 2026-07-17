@@ -9,8 +9,9 @@ mod common;
 use common::Scratch;
 use dohc_engine_files::{
     AbsenceProbe, CancellationToken, CaptureError, CaptureOp, CaptureSink, DEGRADED_RESCAN_BACKOFF,
-    IngestReason, ReconcileController, ReconcileRun, ScanBounds, ScanIoFaultInjector,
-    ScanIoOperation, Scanner, StubWatchSource, WatchEvent, apply_then_ack,
+    IngestReason, ManifestEntry, ReconcileController, ReconcileRun, ScanBounds,
+    ScanIoFaultInjector, ScanIoOperation, ScanManifest, Scanner, StubWatchSource, WatchEvent,
+    apply_then_ack,
 };
 use dohc_engine_storage::NoFaults;
 use std::io::ErrorKind;
@@ -555,4 +556,73 @@ fn retire_requires_final_lstat_confirm_and_toctou_reappearance_is_retained() {
     assert!(retire_paths(&raced_plan).is_empty());
     assert_eq!(raced_plan.unconfirmed_removed, ["race.md"]);
     assert!(raced_plan.degraded);
+}
+
+/// R14 robustness: manifest rehydration. A controller seeded from a prior
+/// generation's manifest (standing in for state recovered after a process
+/// restart) must (1) still force a full reconcile (`rehydrated` starts
+/// dirty, same as `new`), and (2) NOT re-report already-tracked, unchanged
+/// files as freshly `Added` -- only genuinely new/changed/removed paths
+/// should appear. An empty-manifest restart (the pre-R14 behavior) would
+/// mis-report every unchanged file as `Added`.
+#[test]
+fn rehydrated_manifest_reconciles_only_real_changes() {
+    let ws = Scratch::new();
+    let unchanged_bytes: &[u8] = b"same forever\n";
+    let stale_bytes: &[u8] = b"old content\n";
+    ws.write("unchanged.md", unchanged_bytes);
+    ws.write("about-to-change.md", stale_bytes);
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let token = CancellationToken::new();
+
+    // Establish what a live process's manifest would look like.
+    let mut live = ReconcileController::new();
+    let baseline = reconcile_and_apply(&mut live, &scanner, ws.path(), &token);
+    assert_eq!(
+        ingest_paths(&baseline, IngestReason::Added),
+        ["about-to-change.md", "unchanged.md"]
+    );
+    let recovered_generation = live.generation();
+
+    // Simulate a restart: a FRESH controller, but rehydrated from the prior
+    // manifest instead of ReconcileController::new()'s empty baseline.
+    let manifest = ScanManifest::from_entries([
+        (
+            "unchanged.md".to_owned(),
+            ManifestEntry {
+                size: unchanged_bytes.len() as u64,
+                sha256: dohc_engine_storage::hex_sha256(unchanged_bytes),
+            },
+        ),
+        (
+            "about-to-change.md".to_owned(),
+            ManifestEntry {
+                size: stale_bytes.len() as u64,
+                sha256: dohc_engine_storage::hex_sha256(stale_bytes),
+            },
+        ),
+    ]);
+    let mut rehydrated = ReconcileController::rehydrated(manifest, recovered_generation);
+    assert!(
+        rehydrated.is_dirty(),
+        "a rehydrated controller must still force one full reconcile after restart"
+    );
+    assert_eq!(rehydrated.tracked_len(), 2);
+
+    // Only one file actually changed while the process was "down".
+    ws.write("about-to-change.md", b"new content\n");
+
+    let plan = plan(
+        rehydrated
+            .reconcile(&scanner, ws.path(), &token)
+            .expect("post-restart reconcile"),
+    );
+    assert!(
+        ingest_paths(&plan, IngestReason::Added).is_empty(),
+        "rehydrated manifest must not re-report unchanged tracked files as newly Added"
+    );
+    assert_eq!(
+        ingest_paths(&plan, IngestReason::Changed),
+        ["about-to-change.md"]
+    );
 }

@@ -68,7 +68,7 @@ impl EngineService {
     async fn dispatch(&self, ctx: RequestContext, request: Request) -> Result<Response, WireError> {
         let id = request.id;
         let result = match request.method.as_str() {
-            "workspace.open" => self.workspace_open(request.params).await?,
+            "workspace.open" => self.workspace_open(&ctx, request.params).await?,
             "workspace.close" => self.workspace_close(request.workspace).await?,
             "versionedText.write" => {
                 self.versioned_text_write(&ctx, &request, request.params.clone())
@@ -108,9 +108,20 @@ impl EngineService {
         Ok(Response { id, result })
     }
 
-    async fn workspace_open(&self, params: Value) -> Result<Value, WireError> {
+    async fn workspace_open(
+        &self,
+        ctx: &RequestContext,
+        params: Value,
+    ) -> Result<Value, WireError> {
         let params: WorkspaceOpenParams = parse(params)?;
-        let _serial = self.open_lock.lock().await;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(wire(ErrorCode::Cancelled, "workspace open cancelled while queued"));
+            }
+            serial = self.open_lock.lock() => serial,
+        };
         let validated =
             shadow_fence::validate_shadow_root(PathBuf::from(&params.root_dir).as_path())
                 .map_err(map_shadow_fence)?;
@@ -927,6 +938,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn runtime_error_mapping_separates_corruption_from_bad_input() {
@@ -944,5 +956,35 @@ mod tests {
             reason: "test invalid input",
         }));
         assert_eq!(invalid.code, ErrorCode::InvalidParams);
+    }
+
+    #[tokio::test]
+    async fn cancelled_workspace_open_does_not_wait_for_open_lock() {
+        let service = Arc::new(EngineService::new());
+        let held = service.open_lock.lock().await;
+        let ctx = RequestContext::unbounded();
+        let cancel = ctx.cancel.clone();
+        let queued_service = Arc::clone(&service);
+        let queued = tokio::spawn(async move {
+            queued_service
+                .workspace_open(
+                    &ctx,
+                    json!({
+                        "rootDir": std::env::temp_dir().join("dohc-r14-cancelled-open"),
+                        "workspaceId": "cancelled-open"
+                    }),
+                )
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        cancel.cancel();
+        let result = tokio::time::timeout(Duration::from_millis(250), queued)
+            .await
+            .expect("cancelled open resolved promptly")
+            .expect("queued task completed")
+            .expect_err("cancelled queued open must fail");
+        assert_eq!(result.code, ErrorCode::Cancelled);
+        drop(held);
     }
 }

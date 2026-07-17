@@ -193,3 +193,49 @@ async fn continuous_event_stream_still_flushes_at_the_hard_deadline() {
         "continuous events did not flush within the hard-deadline bound"
     );
 }
+
+/// R14 robustness, end-to-end against the real backend: deleting the watched
+/// root out from under the watcher. Empirically (this repo's Windows
+/// evidence machine), the `notify` backend does NOT surface an error
+/// callback when the watched root itself disappears -- no error, no event,
+/// ever, again. Backend-error re-attach alone cannot catch this; the
+/// watcher's independent periodic root-health check is what must.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_watcher_marks_unavailable_after_the_watched_root_is_deleted() {
+    let ws = Scratch::new();
+    let actor =
+        dohc_engine_files::FilesActor::spawn_async(ws.path().to_path_buf(), ScanBounds::default())
+            .await
+            .expect("actor");
+    let handle = actor.handle();
+    let ready = NativeWatcher::start(
+        ws.path().to_path_buf(),
+        handle.clone(),
+        CancellationToken::new(),
+    )
+    .await
+    .expect("watch start");
+    let mut watcher = ready.watcher;
+    apply_and_ack(&handle, ready.initial_reconcile).await;
+    assert!(!watcher.is_degraded());
+    assert!(!watcher.is_unavailable());
+
+    std::fs::remove_dir_all(ws.path()).expect("delete the watched root out from under the watch");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if watcher.is_unavailable() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "watcher never surfaced unavailable after its root was deleted"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        watcher.is_degraded(),
+        "a genuinely lost watch must also be sticky-degraded"
+    );
+    watcher.stop().expect("stop");
+}
