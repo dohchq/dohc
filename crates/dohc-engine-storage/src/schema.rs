@@ -65,6 +65,31 @@ const REQUIRED_TABLES: &[&str] = &[
     "ydoc_docs",
     "ydoc_updates",
     "ydoc_snapshots",
+    // R09 chats-domain tables (migration ordinal 3). Unlike the TS engine's
+    // lazy-additive chat tables (missing = "no chats yet"), the Rust migration
+    // ledger always creates these on open, so their presence is a hard v2
+    // invariant here.
+    "chat_channels",
+    "chat_channel_wire_ids",
+    "chat_channel_placeholders",
+    "chat_thread_read_state",
+    "chat_threads",
+    "chat_messages",
+    "chat_reactions",
+    "chat_decisions",
+    "chat_attachments",
+    "chat_pending_message_parents",
+    "chat_agent_read_state",
+    "chat_mentions",
+    "chat_follows",
+    "chat_feed_read_state",
+    "chat_bookmarks",
+    "chat_bookmark_outbox",
+    "chat_dispatch_ledger",
+    "chat_dispatch_scan_cursor",
+    "agent_run_records",
+    "run_message_links",
+    "chat_dispatch_pause",
 ];
 
 /// How an existing file was classified by the fingerprint fence.

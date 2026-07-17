@@ -72,6 +72,19 @@ pub enum DomainError {
     /// A secret moment id was not found (restore/get on an unknown moment).
     #[error("protected history moment not found")]
     SecretMomentNotFound,
+
+    /// A chat-domain failure carrying the TS `LinkedChatStoreError` stable code
+    /// verbatim (`linkedChatStore.ts`). One variant keeps the large chat
+    /// code-space (`invalid-channel-name`, `channel-exists`, `message-not-found`,
+    /// `read-state-revision-mismatch`, `invalid-follow-target`,
+    /// `invalid-bookmark-target`, …) on the compatibility surface without a
+    /// per-code enum explosion; `code()` returns the embedded string so ported
+    /// tests that switch on `.code` stay byte-identical.
+    #[error("chat error [{code}]: {reason}")]
+    Chat {
+        code: &'static str,
+        reason: &'static str,
+    },
 }
 
 impl DomainError {
@@ -93,7 +106,13 @@ impl DomainError {
             // `invalid-text`, `invalid-input`, `unwrap-failed`.
             DomainError::Crypto(err) => err.code(),
             DomainError::SecretMomentNotFound => "moment-not-found",
+            DomainError::Chat { code, .. } => code,
         }
+    }
+
+    /// Construct a chat-domain error with a TS-parity stable code.
+    pub(crate) fn chat(code: &'static str, reason: &'static str) -> Self {
+        DomainError::Chat { code, reason }
     }
 
     /// Wrap a low-level `rusqlite` failure as a storage `state-corrupt` (read

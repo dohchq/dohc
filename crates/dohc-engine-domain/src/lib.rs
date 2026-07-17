@@ -26,12 +26,22 @@
 
 #![forbid(unsafe_code)]
 
+pub mod chats;
 pub mod error;
 pub mod normalize;
 pub mod records;
 pub mod secrets;
 pub mod store;
 
+pub use chats::{
+    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
+    ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind, ChatFeedItem, ChatFeedPage,
+    ChatFollow, ChatMessage, ChatMessagePage, ChatThread, ChatThreadReadState, DispatchClaim,
+    FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_NAME, GENERAL_CHANNEL_WIRE_ID,
+    LINKED_CHAT_PROJECTION_KIND, LinkedChatStore, MAX_MESSAGE_BODY_BYTES, SaveBookmark,
+    SendMessage, SetFollow, StartChannelThread, channel_slug_for_name, decode_feed_cursor,
+    encode_feed_cursor, linked_chat_projection_path,
+};
 pub use error::DomainError;
 pub use normalize::NormalizedState;
 pub use records::{
