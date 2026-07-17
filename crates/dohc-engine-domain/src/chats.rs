@@ -792,15 +792,10 @@ impl<'a> LinkedChatStore<'a> {
                     "A channel with that name already exists.",
                 ));
             }
-            insert_channel(
-                tx,
-                &ws,
-                &cid,
-                &name_c,
-                &slug_c,
-                ChatChannelKind::Channel,
-                now_ms,
-            )?;
+            // Persist the validated kind (`channel` or `dm`) — NOT hardcoded:
+            // DM privacy depends on the stored kind (`list_personal_feed`
+            // suppresses `c.kind = 'dm'`), so a requested DM must stay a DM.
+            insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, now_ms)?;
             // A locally created channel's wire identity is its own id.
             record_channel_wire_id(tx, &ws, &cid, &cid)?;
             journal(tx, &cid, "chat.channel.create", now_ms)?;
@@ -809,7 +804,7 @@ impl<'a> LinkedChatStore<'a> {
                 channel_id: cid.clone(),
                 name: name_c.clone(),
                 slug: slug_c.clone(),
-                kind: ChatChannelKind::Channel,
+                kind,
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
             })
@@ -935,14 +930,22 @@ impl<'a> LinkedChatStore<'a> {
         })
     }
 
-    /// Find a non-placeholder channel by slug (`findChannelBySlug`).
+    /// Find a non-placeholder channel by slug (`findChannelBySlug`). The input is
+    /// run through [`channel_slug_for_name`] first, so a display-name-like value
+    /// (`"Client ACME  Launch"`) resolves the channel stored under its derived
+    /// slug (`client-acme-launch`), matching the TS lookup. A value that derives
+    /// an empty slug matches nothing.
     pub fn find_channel_by_slug(
         &self,
         workspace_id: &str,
         slug: &str,
     ) -> Result<Option<ChatChannel>, DomainError> {
+        let slug = channel_slug_for_name(slug);
+        if slug.is_empty() {
+            return Ok(None);
+        }
         self.store.read_with(|conn| {
-            let found = channel_by_slug(conn, workspace_id, slug)?;
+            let found = channel_by_slug(conn, workspace_id, &slug)?;
             match found {
                 Some(ch) if !channel_is_placeholder(conn, workspace_id, &ch.channel_id)? => {
                     Ok(Some(ch))
@@ -1048,6 +1051,7 @@ impl<'a> LinkedChatStore<'a> {
                 ],
             )
             .map_err(DomainError::sql_persist)?;
+            mark_live_bookmarks_pending(tx, &input.workspace_id, &input.thread_id, now)?;
             if input.author_kind == ChatActorKind::Human {
                 advance_read_cursor(tx, &input.workspace_id, &input.thread_id, 1, now, None)?;
             }
@@ -1183,6 +1187,22 @@ impl<'a> LinkedChatStore<'a> {
                 params![input.workspace_id, input.thread_id, now],
             )
             .map_err(DomainError::sql_persist)?;
+            // Any active live bookmark on this thread must reproject after a new
+            // message (`markLiveBookmarksPending`), else the projection goes stale.
+            mark_live_bookmarks_pending(tx, &input.workspace_id, &input.thread_id, now)?;
+            // Single-user read-state rule: your own human reply is never unread —
+            // catch the cursor up to this message's sequence (`order + 1`). Agent
+            // replies are exactly what unread exists to surface, so they do not.
+            if input.author_kind == ChatActorKind::Human {
+                advance_read_cursor(
+                    tx,
+                    &input.workspace_id,
+                    &input.thread_id,
+                    order.saturating_add(1),
+                    now,
+                    None,
+                )?;
+            }
             journal(tx, &input.message_id, "chat.message.append", now)?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
             Ok::<_, DomainError>(ChatMessage {
@@ -1264,6 +1284,10 @@ impl<'a> LinkedChatStore<'a> {
         }
         let limit = limit.min(MAX_MESSAGE_PAGE);
         self.store.read_with(|conn| {
+            // Fail closed on an unknown thread (or one in another workspace) so a
+            // bad coordinate is not indistinguishable from an empty real thread —
+            // matching the write paths' `require_thread`.
+            require_thread(conn, workspace_id, thread_id)?;
             let probe = limit.saturating_add(1);
             let after = after_message_order.unwrap_or(-1);
             let mut stmt = conn
@@ -1421,6 +1445,17 @@ impl<'a> LinkedChatStore<'a> {
         let msg = last_seen_message_id.to_owned();
         let origin = origin_id.to_owned();
         let outcome = self.store.write_with(faults, |tx| {
+            // Receiver-private read state must not be advanced past a coordinate
+            // the owner cannot actually see: prove the (created_at_ms, message_id)
+            // names a currently-visible feed item under the SAME predicate before
+            // persisting (`markPersonalFeedSeen`), else a caller could mark
+            // arbitrary future/DM/unfollowed messages as seen.
+            if !feed_coordinate_visible(tx, &ws, &owner, last_seen_created_at_ms, &msg)? {
+                return Err(DomainError::chat(
+                    "invalid-follow-target",
+                    "Feed cursor is stale or no longer visible.",
+                ));
+            }
             tx.execute(
                 "INSERT INTO chat_feed_read_state \
                  (workspace_id, owner_user_id, last_seen_created_at_ms, last_seen_message_id, \
@@ -1546,12 +1581,15 @@ impl<'a> LinkedChatStore<'a> {
             "invalid-bookmark-target",
             "Bookmark id is required.",
         )?;
-        if input.destination_path.is_empty() {
-            return Err(DomainError::chat(
-                "invalid-path",
-                "Bookmark destination path is required.",
-            ));
-        }
+        // The destination is a user-write path a projection worker later
+        // materializes, so it must clear the path floor (no empty/absolute/
+        // backslash/traversal/`.dohc` targets) BEFORE it is persisted and queued
+        // (`normalizePathHint` → `validateUserWritePath`). Otherwise an unsafe
+        // path like `../outside.md` would ride into `chat_bookmarks`/outbox and
+        // break the materialization safety boundary.
+        crate::store::validate_path(&input.destination_path).map_err(|_| {
+            DomainError::chat("invalid-path", "Bookmark destination path is invalid.")
+        })?;
         let input = input.clone();
         let now = input.now_ms;
         let outcome = self.store.write_with(faults, |tx| {
@@ -2082,6 +2120,40 @@ WHERE m.workspace_id = ?1
 ORDER BY m.created_at_ms DESC, m.message_id DESC
 LIMIT ?6";
 
+/// Single-coordinate visibility probe: the personal-feed predicate pinned to one
+/// `(message_id ?3, created_at_ms ?4)` for owner `?2` in workspace `?1`
+/// (`markPersonalFeedSeen`'s visibility gate).
+const FEED_COORDINATE_VISIBLE_SQL: &str = "\
+SELECT 1
+FROM chat_messages m
+JOIN chat_threads t ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id
+LEFT JOIN chat_channels c ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id
+WHERE m.workspace_id = ?1 AND m.message_id = ?3 AND m.created_at_ms = ?4
+  AND (t.channel_id IS NULL OR c.kind <> 'dm')
+  AND (t.channel_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM chat_channel_placeholders placeholder
+    WHERE placeholder.workspace_id = t.workspace_id
+      AND placeholder.channel_id = t.channel_id))
+  AND (
+    EXISTS (SELECT 1 FROM chat_follows f WHERE f.workspace_id = m.workspace_id
+      AND f.owner_user_id = ?2 AND f.state = 'following'
+      AND f.target_kind = CASE m.author_kind WHEN 'agent' THEN 'agent' ELSE 'person' END
+      AND f.target_id = m.author_user_id)
+    OR EXISTS (SELECT 1 FROM chat_follows f WHERE f.workspace_id = m.workspace_id
+      AND f.owner_user_id = ?2 AND f.state = 'following'
+      AND f.target_kind = 'thread' AND f.target_id = m.thread_id)
+    OR (
+      m.message_id = (SELECT first.message_id FROM chat_messages first
+        WHERE first.workspace_id = m.workspace_id AND first.thread_id = m.thread_id
+        ORDER BY first.created_at_ms, first.message_id LIMIT 1)
+      AND EXISTS (SELECT 1 FROM chat_channel_wire_ids w
+        JOIN chat_follows f ON f.workspace_id = w.workspace_id
+          AND f.owner_user_id = ?2 AND f.state = 'following'
+          AND f.target_kind = 'channel' AND f.target_id = w.wire_id
+        WHERE w.workspace_id = t.workspace_id AND w.channel_id = t.channel_id))
+  )
+LIMIT 1";
+
 const BOOKMARK_SELECT: &str = "\
 SELECT b.bookmark_id, b.owner_user_id, b.target_kind, b.target_id, b.thread_id, b.message_id, \
        b.mode, b.destination_path, b.state, b.created_at_ms, b.updated_at_ms, \
@@ -2107,6 +2179,49 @@ fn collect<T>(
         out.push(row.map_err(DomainError::sql_corrupt)??);
     }
     Ok(out)
+}
+
+/// Requeue every ACTIVE `live` bookmark on a thread for reprojection after a new
+/// message (`markLiveBookmarksPending`), so a live projection never goes
+/// permanently stale. Bumps the generation-CAS token + resets `pending`.
+fn mark_live_bookmarks_pending(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    thread_id: &str,
+    now_ms: i64,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "UPDATE chat_bookmark_outbox \
+         SET generation = generation + 1, projection_state = 'pending', \
+             failure_reason = NULL, updated_at_ms = ?3 \
+         WHERE workspace_id = ?1 AND bookmark_id IN ( \
+           SELECT bookmark_id FROM chat_bookmarks \
+           WHERE workspace_id = ?1 AND thread_id = ?2 AND mode = 'live' AND state = 'active')",
+        params![workspace_id, thread_id, now_ms],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
+/// Whether a `(created_at_ms, message_id)` coordinate names a message currently
+/// visible to `owner_user_id` under the personal-feed predicate. Used to gate
+/// `mark_feed_seen` so receiver-private read state can't skip past unseen items.
+fn feed_coordinate_visible(
+    conn: &Connection,
+    workspace_id: &str,
+    owner_user_id: &str,
+    created_at_ms: i64,
+    message_id: &str,
+) -> Result<bool, DomainError> {
+    let found: Option<i64> = conn
+        .query_row(
+            FEED_COORDINATE_VISIBLE_SQL,
+            params![workspace_id, owner_user_id, message_id, created_at_ms],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(found.is_some())
 }
 
 fn insert_channel(

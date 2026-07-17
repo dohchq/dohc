@@ -348,16 +348,17 @@ fn mark_thread_read_cas_monotonic_and_over_count_repair() {
     chats
         .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
         .expect("gen");
-    // Agent author so the opening message does NOT auto-advance the cursor.
+    // Agent authors so neither message auto-advances the cursor (a human's own
+    // message catches the cursor up; agent messages are what unread surfaces).
     chats
         .start_channel_thread(
             &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Agent, 20),
             &NO_FAULTS,
         )
         .expect("start");
-    chats
-        .send_message(&send_msg("t1", "m1", None, "second", 21), &NO_FAULTS)
-        .expect("send");
+    let mut second = send_msg("t1", "m1", None, "second", 21);
+    second.author_kind = ChatActorKind::Agent;
+    chats.send_message(&second, &NO_FAULTS).expect("send");
 
     // Advance to 1 (revision 0 -> 1).
     let r1 = chats
@@ -536,7 +537,7 @@ fn bookmark_generation_cas_stale_worker_loses() {
         target_kind: BookmarkTargetKind::Thread,
         target_id: "t1".to_owned(),
         mode: BookmarkMode::Live,
-        destination_path: ".dohc/bm.md".to_owned(),
+        destination_path: "bookmarks/thread.md".to_owned(),
         now_ms: now,
     };
     let b1 = chats
@@ -876,6 +877,216 @@ fn list_messages_huge_limit_is_bounded_no_overflow() {
         .expect("huge limit");
     assert_eq!(page.messages.len(), 1);
     assert_eq!(page.next_after_message_order, None);
+}
+
+// -------------------------------------------- codex review round 2 fixes
+
+#[test]
+fn create_channel_preserves_requested_dm_kind() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    let ch = chats
+        .create_channel(WS, "dm-1", "Ada & Bee", ChatChannelKind::Dm, 10, &NO_FAULTS)
+        .expect("dm");
+    assert_eq!(
+        ch.kind,
+        ChatChannelKind::Dm,
+        "requested DM kind is persisted"
+    );
+    let listed = chats.list_channels(WS).expect("list");
+    assert_eq!(listed[0].kind, ChatChannelKind::Dm);
+}
+
+#[test]
+fn find_channel_by_slug_normalizes_display_name_input() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .create_channel(
+            WS,
+            "c1",
+            "Client ACME  Launch",
+            ChatChannelKind::Channel,
+            10,
+            &NO_FAULTS,
+        )
+        .expect("create");
+    // A display-name-like lookup resolves the stored slug (client-acme-launch).
+    let found = chats
+        .find_channel_by_slug(WS, "Client ACME  Launch")
+        .expect("find");
+    assert_eq!(found.map(|c| c.channel_id), Some("c1".to_owned()));
+}
+
+#[test]
+fn human_reply_advances_read_cursor_agent_reply_does_not() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("gen");
+    // Agent opening → cursor stays 0.
+    chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Agent, 20),
+            &NO_FAULTS,
+        )
+        .expect("start");
+    assert_eq!(
+        chats.read_state(WS, "t1").expect("rs0").last_read_sequence,
+        0
+    );
+    // Agent reply → cursor still 0 (unread is what agent messages surface).
+    let mut agent = send_msg("t1", "m1", None, "agent reply", 21);
+    agent.author_kind = ChatActorKind::Agent;
+    chats.send_message(&agent, &NO_FAULTS).expect("agent send");
+    assert_eq!(
+        chats.read_state(WS, "t1").expect("rs1").last_read_sequence,
+        0
+    );
+    // Human reply → cursor catches up to its own sequence (3 messages now → 3).
+    chats
+        .send_message(&send_msg("t1", "m2", None, "human reply", 22), &NO_FAULTS)
+        .expect("human send");
+    assert_eq!(
+        chats.read_state(WS, "t1").expect("rs2").last_read_sequence,
+        3
+    );
+}
+
+#[test]
+fn list_messages_unknown_thread_fails_closed() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let chats = LinkedChatStore::new(&mut store);
+    let err = chats.list_messages(WS, "nope", 10, None).unwrap_err();
+    assert_eq!(err.code(), "thread-not-found");
+}
+
+#[test]
+fn save_bookmark_rejects_unsafe_destination_path() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("gen");
+    chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Human, 20),
+            &NO_FAULTS,
+        )
+        .expect("start");
+    let unsafe_save = SaveBookmark {
+        workspace_id: WS.to_owned(),
+        bookmark_id: "bm-x".to_owned(),
+        owner_user_id: "owner".to_owned(),
+        target_kind: BookmarkTargetKind::Thread,
+        target_id: "t1".to_owned(),
+        mode: BookmarkMode::Live,
+        destination_path: "../outside.md".to_owned(),
+        now_ms: 30,
+    };
+    assert_eq!(
+        chats
+            .save_bookmark(&unsafe_save, &NO_FAULTS)
+            .unwrap_err()
+            .code(),
+        "invalid-path"
+    );
+}
+
+#[test]
+fn message_append_requeues_active_live_bookmark() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("gen");
+    chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Human, 20),
+            &NO_FAULTS,
+        )
+        .expect("start");
+    let bm = chats
+        .save_bookmark(
+            &SaveBookmark {
+                workspace_id: WS.to_owned(),
+                bookmark_id: "bm-1".to_owned(),
+                owner_user_id: "owner".to_owned(),
+                target_kind: BookmarkTargetKind::Thread,
+                target_id: "t1".to_owned(),
+                mode: BookmarkMode::Live,
+                destination_path: "bookmarks/t1.md".to_owned(),
+                now_ms: 30,
+            },
+            &NO_FAULTS,
+        )
+        .expect("save");
+    assert_eq!(bm.generation, 1);
+    // A later message on the thread bumps the live bookmark's generation so the
+    // projection reprojects (else it goes permanently stale).
+    chats
+        .send_message(&send_msg("t1", "m1", None, "more", 31), &NO_FAULTS)
+        .expect("send");
+    let after = chats.list_bookmarks(WS, "owner").expect("list");
+    assert_eq!(
+        after[0].generation, 2,
+        "live bookmark requeued after a message"
+    );
+    assert_eq!(after[0].projection_state, "pending");
+}
+
+#[test]
+fn mark_feed_seen_rejects_non_visible_coordinate() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("gen");
+    chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t1", "m0", "opening", ChatActorKind::Human, 100),
+            &NO_FAULTS,
+        )
+        .expect("start");
+    // owner follows nothing → m0 is NOT visible; marking it seen fails closed.
+    let err = chats
+        .mark_feed_seen(WS, "owner", 100, "m0", 200, "o", 1, &NO_FAULTS)
+        .unwrap_err();
+    assert_eq!(err.code(), "invalid-follow-target");
+    // After following the thread, the same coordinate is visible and accepted.
+    chats
+        .set_follow(
+            &SetFollow {
+                workspace_id: WS.to_owned(),
+                owner_user_id: "owner".to_owned(),
+                target_kind: FollowTargetKind::Thread,
+                target_id: "t1".to_owned(),
+                state: FollowState::Following,
+                at_ms: 150,
+                origin_id: "o".to_owned(),
+                origin_seq: 1,
+            },
+            &NO_FAULTS,
+        )
+        .expect("follow");
+    chats
+        .mark_feed_seen(WS, "owner", 100, "m0", 200, "o", 1, &NO_FAULTS)
+        .expect("now visible");
 }
 
 // ------------------------------------------------------ migration presence
