@@ -8,9 +8,40 @@ mod common;
 
 use common::Scratch;
 use dohc_engine_files::{
-    CancellationToken, CaptureOp, FilesActor, LifecycleState, ReconcileRun, ScanBounds, ScanOutcome,
+    CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesActor, FilesHandle, IngestReason,
+    LifecycleState, ReconcileRun, ScanBounds, ScanOutcome, apply_reconcile_plan,
 };
+use dohc_engine_storage::NoFaults;
 use std::time::Duration;
+
+struct AcceptAll;
+
+impl CaptureSink for AcceptAll {
+    fn ingest(
+        &mut self,
+        _path: &str,
+        _size: u64,
+        _sha256: &str,
+        _media_type: &str,
+        _reason: IngestReason,
+    ) -> Result<(), CaptureError> {
+        Ok(())
+    }
+
+    fn retire(&mut self, _path: &str) -> Result<(), CaptureError> {
+        Ok(())
+    }
+}
+
+async fn acknowledge(handle: &FilesHandle, run: &ReconcileRun) {
+    if let ReconcileRun::Completed(plan) = run {
+        let result = apply_reconcile_plan(plan, &mut AcceptAll, &NoFaults);
+        handle
+            .acknowledge_capture(plan.clone(), result)
+            .await
+            .expect("ack capture");
+    }
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actor_scans_through_the_async_loop() {
@@ -48,6 +79,11 @@ async fn actor_reconcile_advances_generation_and_reports_stats() {
         ReconcileRun::Completed(plan) => plan,
         other => panic!("expected Completed, got {other:?}"),
     };
+    let result = apply_reconcile_plan(&plan, &mut AcceptAll, &NoFaults);
+    handle
+        .acknowledge_capture(plan.clone(), result)
+        .await
+        .expect("ack");
     assert_eq!(plan.to_generation.0, 1);
     assert!(matches!(plan.ops.first(), Some(CaptureOp::Ingest { .. })));
 
@@ -69,10 +105,11 @@ async fn injected_overflow_marks_dirty_then_reconcile_converges() {
     let handle = actor.handle();
 
     // Establish a converged baseline.
-    let _ = handle
+    let baseline = handle
         .reconcile(CancellationToken::new())
         .await
         .expect("baseline");
+    acknowledge(&handle, &baseline).await;
     assert!(!handle.stats().await.expect("stats").dirty);
 
     // Inject a watcher-overflow signal (the stubbed event source) after an edit.
@@ -90,7 +127,8 @@ async fn injected_overflow_marks_dirty_then_reconcile_converges() {
         ReconcileRun::Completed(plan) => plan,
         other => panic!("expected Completed, got {other:?}"),
     };
-    assert!(plan.cleared_dirty);
+    acknowledge(&handle, &ReconcileRun::Completed(plan.clone())).await;
+    assert!(plan.prepared_from_dirty);
     assert!(!handle.stats().await.expect("stats").dirty);
 
     // Converged: a second dirty-driven reconcile is a no-op.
@@ -101,6 +139,34 @@ async fn injected_overflow_marks_dirty_then_reconcile_converges() {
             .expect("if-dirty"),
         ReconcileRun::Converged
     ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overflow_between_prepare_and_ack_is_not_cleared_by_the_older_receipt() {
+    let ws = Scratch::new();
+    ws.write("a.md", b"one");
+    let actor = FilesActor::spawn_async(ws.path().to_path_buf(), ScanBounds::default())
+        .await
+        .expect("spawn");
+    let handle = actor.handle();
+    let run = handle
+        .reconcile(CancellationToken::new())
+        .await
+        .expect("prepare");
+    let plan = match run {
+        ReconcileRun::Completed(plan) => plan,
+        other => panic!("expected plan, got {other:?}"),
+    };
+    let result = apply_reconcile_plan(&plan, &mut AcceptAll, &NoFaults);
+
+    // A real watcher callback can land while the downstream sink is applying.
+    // The ack command folds this newer epoch first and must not clear it.
+    handle.notify_overflow();
+    handle
+        .acknowledge_capture(plan, result)
+        .await
+        .expect("ack older plan");
+    assert!(handle.stats().await.expect("stats").dirty);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -125,6 +191,8 @@ async fn concurrent_cancel_leaves_a_consistent_actor_state() {
     };
     token.cancel();
     let outcome = run.await.expect("join").expect("reconcile");
+
+    acknowledge(&handle, &outcome).await;
 
     let stats = handle.stats().await.expect("stats");
     match outcome {
@@ -226,10 +294,11 @@ async fn overflow_is_never_lost_even_when_the_queue_is_saturated() {
     let handle = actor.handle();
 
     // Establish a converged baseline (dirty cleared).
-    let _ = handle
+    let baseline = handle
         .reconcile(CancellationToken::new())
         .await
         .expect("baseline");
+    acknowledge(&handle, &baseline).await;
     assert!(!handle.stats().await.expect("stats").dirty);
 
     // Wedge the worker with a long SCAN (not a reconcile — so nothing clears

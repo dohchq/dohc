@@ -70,6 +70,12 @@ pub enum DomainError {
     #[error("invalid path: {reason}")]
     InvalidPath { reason: &'static str },
 
+    /// A caller routed an ordinary/ignored path into the encrypted secret
+    /// store. The floor is fail-closed in both directions: plaintext storage
+    /// rejects secret paths, and secret storage rejects every non-secret path.
+    #[error("path is not secret-classified")]
+    NotSecretPath,
+
     /// A caller-supplied value failed validation (empty identifier, bad limit).
     #[error("invalid input: {reason}")]
     InvalidInput { reason: &'static str },
@@ -126,6 +132,7 @@ impl DomainError {
             DomainError::ConflictStaleTarget => "conflict-stale-target",
             DomainError::InvalidText { .. } => "invalid-text",
             DomainError::InvalidPath { .. } => "invalid-path",
+            DomainError::NotSecretPath => "not-secret-path",
             DomainError::InvalidInput { .. } => "invalid-input",
             DomainError::IdempotencyKeyReuseMismatch => "idempotency-key-reuse-mismatch",
             DomainError::StateCorrupt { .. } => "state-corrupt",

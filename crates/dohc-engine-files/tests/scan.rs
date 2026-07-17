@@ -7,8 +7,11 @@ mod common;
 
 use common::{Scratch, sha256_hex};
 use dohc_engine_files::{
-    CancellationToken, OverCapPolicy, ScanBounds, ScanListing, ScanOutcome, Scanner, SkipReason,
+    CancellationToken, OverCapPolicy, ScanBounds, ScanIoFaultInjector, ScanIoOperation,
+    ScanListing, ScanOutcome, Scanner, SkipReason,
 };
+use std::io::ErrorKind;
+use std::sync::Arc;
 
 fn scan(scanner: &Scanner, root: &std::path::Path) -> ScanListing {
     match scanner
@@ -269,4 +272,29 @@ fn invalid_root_is_typed() {
         .scan(&missing, &CancellationToken::new())
         .expect_err("missing root");
     assert_eq!(err.code(), "invalid-root");
+}
+
+struct DenyHash;
+
+impl ScanIoFaultInjector for DenyHash {
+    fn error_kind(&self, path: &str, operation: ScanIoOperation) -> Option<ErrorKind> {
+        (path == "locked.md" && operation == ScanIoOperation::Hash)
+            .then_some(ErrorKind::PermissionDenied)
+    }
+}
+
+#[test]
+fn permission_denied_file_is_reported_degraded_without_aborting_other_files() {
+    let ws = Scratch::new();
+    ws.write("locked.md", b"unreadable fixture");
+    ws.write("readable.md", b"still captured");
+    let scanner =
+        Scanner::new_with_io_faults(ScanBounds::default(), Arc::new(DenyHash)).expect("scanner");
+    let listing = scan(&scanner, ws.path());
+
+    assert_eq!(paths(&listing), ["readable.md"]);
+    assert_eq!(listing.failed.len(), 1);
+    assert_eq!(listing.failed[0].path, "locked.md");
+    assert_eq!(listing.failed[0].kind, ErrorKind::PermissionDenied);
+    assert!(listing.degraded());
 }

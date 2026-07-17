@@ -558,9 +558,35 @@ wall-clock heartbeat/lease (the single-writer invariant makes one unnecessary);
 if a future multi-worker model lands, a lease column would replace the
 "any-running-is-crashed" assumption.
 
-## 11. R05 (versioning residual) — deliberate rollback divergence
+## 11. R07 (dohc-engine-files watcher/reconcile/policy)
 
-### 11.1 DELIBERATE DIVERGENCE: `versions-rollback-text-file-mutation` fails closed on an unrecorded legacy preimage
+### 11.1 CORRECTION (2026-07-17): tolerant scan + confirmed-absence retire gate now matches the TS oracle
+
+**TS behavior.** Desktop capture tolerates a per-file/per-directory readability
+failure, reports the pass unsuccessful/degraded, and continues capturing every
+independent readable path. A previously tracked path is retired only after a
+direct `lstat` on that exact path confirms `ENOENT`/`ENOTDIR`; unreadable,
+locked, ancestor-obscured, or unexpectedly reappeared paths retain their
+last-known-good state. This is the false-delete defense for a default-on scan
+that may be incomplete.
+
+**Rust behavior (R07 correction toward parity).** `ScanListing::failed` now
+records a bounded path + io-kind set while structural bounds and the workspace
+root remain fail-closed. Diff retains a prior entry when its path or an ancestor
+failed, and reconcile additionally runs one final no-follow
+`symlink_metadata` probe before every apparent retire. Only confirmed absence
+emits `CaptureOp::Retire`; every other result is `unconfirmed_removed`, carried
+forward and surfaced through `ReconcilePlan::degraded`. This closes CAL-3's
+stricter-but-worse whole-pass abort gap; it is a CORRECTION to TS parity, not a
+new divergence. Regressions:
+`tests/scan.rs::permission_denied_file_is_reported_degraded_without_aborting_other_files`,
+`tests/reconcile.rs::unreadable_path_degrades_but_other_paths_capture_and_it_is_never_retired`,
+and
+`tests/reconcile.rs::retire_requires_final_lstat_confirm_and_toctou_reappearance_is_retained`.
+
+## 12. R05 (versioning residual) — deliberate rollback divergence
+
+### 12.1 DELIBERATE DIVERGENCE: `versions-rollback-text-file-mutation` fails closed on an unrecorded legacy preimage
 
 For a legacy-unset (`before_present = 0`) write mutation with neither a
 recoverable earlier snapshot nor `legacy_before_text`, TS removes the file as a

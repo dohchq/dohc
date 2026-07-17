@@ -70,6 +70,14 @@ impl ScanManifest {
         self.entries.get(path)
     }
 
+    pub(crate) fn insert(&mut self, path: String, entry: ManifestEntry) {
+        self.entries.insert(path, entry);
+    }
+
+    pub(crate) fn remove(&mut self, path: &str) {
+        self.entries.remove(path);
+    }
+
     /// Number of tracked entries.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -97,6 +105,11 @@ pub struct ScanDiff {
     /// is truly gone from disk (absent from BOTH files and skipped) is the only
     /// thing that reaches `removed`.
     pub retained_over_cap: Vec<String>,
+    /// Previously-tracked paths whose absence is not trustworthy because the
+    /// path itself, or an ancestor directory, failed during this scan. Like an
+    /// over-cap retain, reconcile carries the prior manifest entry forward and
+    /// never emits a destructive retire.
+    pub unconfirmed_removed: Vec<String>,
 }
 
 impl ScanDiff {
@@ -112,6 +125,7 @@ impl ScanDiff {
             && self.changed.is_empty()
             && self.removed.is_empty()
             && self.retained_over_cap.is_empty()
+            && self.unconfirmed_removed.is_empty()
     }
 }
 
@@ -176,8 +190,15 @@ where
         .map(|s| (s.path.as_str(), ()))
         .collect();
 
+    let failed_paths: Vec<&str> = current
+        .failed
+        .iter()
+        .map(|failed| failed.path.as_str())
+        .collect();
+
     let mut removed = Vec::new();
     let mut retained_over_cap = Vec::new();
+    let mut unconfirmed_removed = Vec::new();
     for path in prior.entries.keys() {
         if present.contains_key(path.as_str()) {
             continue; // classified unchanged/changed above
@@ -185,6 +206,16 @@ where
         if skipped_present.contains_key(path.as_str()) {
             // Still on disk, only now over the size cap → retain, never remove.
             retained_over_cap.push(path.clone());
+        } else if failed_paths.iter().any(|failed| {
+            failed.is_empty()
+                || path == failed
+                || path
+                    .strip_prefix(failed)
+                    .is_some_and(|remainder| remainder.starts_with('/'))
+        }) {
+            // A directory read failure taints every descendant; a file-level
+            // failure protects that exact path. Fail safe toward retention.
+            unconfirmed_removed.push(path.clone());
         } else {
             // Absent from disk entirely → removed.
             removed.push(path.clone());
@@ -198,11 +229,13 @@ where
     changed.sort_by(|a, b| a.path.cmp(&b.path));
     removed.sort();
     retained_over_cap.sort();
+    unconfirmed_removed.sort();
     Ok(ScanDiff {
         added,
         changed,
         removed,
         retained_over_cap,
+        unconfirmed_removed,
     })
 }
 
@@ -257,6 +290,7 @@ mod tests {
                 entry("added.md", 3, "hADD"),
             ],
             skipped: vec![],
+            failed: vec![],
         };
         let diff = diff_core(&prior, &current, is_unchanged, usize::MAX).expect("diff");
         assert_eq!(
@@ -287,6 +321,7 @@ mod tests {
         let current = ScanListing {
             files: vec![entry("same.md", 5, "hSAME"), entry("changed.md", 5, "hNEW")],
             skipped: vec![],
+            failed: vec![],
         };
 
         let golden = diff_core(&prior, &current, is_unchanged, usize::MAX).expect("diff");
@@ -319,6 +354,7 @@ mod tests {
         let current = ScanListing {
             files: vec![entry("a.md", 1, "h1"), entry("b.md", 1, "h2")],
             skipped: vec![],
+            failed: vec![],
         };
         let bounds = ScanBounds::builder().max_diff_entries(1).build();
         let err = diff_scans(&prior, &current, &bounds).unwrap_err();

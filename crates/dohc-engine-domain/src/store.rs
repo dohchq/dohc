@@ -128,7 +128,6 @@ impl<'a> VersionedTextStore<'a> {
         input: &WriteText,
         faults: &dyn FaultInjector,
     ) -> Result<WriteResult, DomainError> {
-        validate_write_input(input)?;
         let outcome = self
             .store
             .write_with(faults, |tx| write_text_in_tx(tx, input))?;
@@ -143,7 +142,6 @@ impl<'a> VersionedTextStore<'a> {
         input: &DeleteTextFile,
         faults: &dyn FaultInjector,
     ) -> Result<DeleteResult, DomainError> {
-        validate_delete_input(input)?;
         let outcome = self
             .store
             .write_with(faults, |tx| delete_text_in_tx(tx, input))?;
@@ -160,8 +158,10 @@ impl<'a> VersionedTextStore<'a> {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.version_id, "version_id")?;
         non_empty(&input.moment_id, "moment_id")?;
-        validate_path(&input.from_path)?;
-        validate_path(&input.to_path)?;
+        let mut normalized_input = input.clone();
+        normalized_input.from_path = validate_addressable_plaintext_path(&input.from_path)?;
+        normalized_input.to_path = validate_plaintext_storable_path(&input.to_path)?;
+        let input = &normalized_input;
         if input.from_path == input.to_path {
             return Err(DomainError::InvalidPath {
                 reason: "rename source and destination must differ",
@@ -285,7 +285,9 @@ impl<'a> VersionedTextStore<'a> {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.version_id, "version_id")?;
         non_empty(&input.mutation_moment_id, "moment_id")?;
-        validate_path(&input.path)?;
+        let mut normalized_input = input.clone();
+        normalized_input.path = validate_addressable_plaintext_path(&input.path)?;
+        let input = &normalized_input;
 
         let ws = &input.workspace_id;
         let prep = self.store.read_with(|conn| {
@@ -395,11 +397,12 @@ impl<'a> VersionedTextStore<'a> {
         version_id: &str,
         path: &str,
     ) -> Result<Option<TextSnapshot>, DomainError> {
+        let path = validate_addressable_plaintext_path(path)?;
         self.store.read_with(|conn| {
             if !version_exists(conn, workspace_id, version_id)? {
                 return Err(DomainError::VersionNotFound);
             }
-            let Some(object_id) = alias_object_id(conn, workspace_id, version_id, path)? else {
+            let Some(object_id) = alias_object_id(conn, workspace_id, version_id, &path)? else {
                 return Ok(None);
             };
             get_snapshot(conn, workspace_id, version_id, &object_id)
@@ -845,19 +848,38 @@ struct RecordedRequest {
 // Free helpers (SQL over a borrowed connection/transaction).
 // ============================================================================
 
-pub(crate) fn validate_write_input(input: &WriteText) -> Result<(), DomainError> {
+/// Validate a write and return the input with its path normalized through the
+/// R07 plaintext-storable path floor (a secret/ignored path is rejected here).
+/// Shared by direct writes and merge/resolve writes so plaintext never lands on
+/// a protected path via any route.
+fn normalized_write_input(input: &WriteText) -> Result<WriteText, DomainError> {
     non_empty(&input.workspace_id, "workspace_id")?;
     non_empty(&input.version_id, "version_id")?;
     non_empty(&input.moment_id, "moment_id")?;
-    validate_path(&input.path)?;
-    validate_text(&input.text)
+    let mut normalized = input.clone();
+    normalized.path = validate_plaintext_storable_path(&input.path)?;
+    validate_text(&normalized.text)?;
+    Ok(normalized)
+}
+
+pub(crate) fn validate_write_input(input: &WriteText) -> Result<(), DomainError> {
+    normalized_write_input(input).map(|_| ())
+}
+
+/// Validate a delete and return the input with its path normalized through the
+/// R07 addressable-plaintext floor (only an ignored path is rejected — an
+/// existing tracked or secret-shadowed file is still deletable).
+fn normalized_delete_input(input: &DeleteTextFile) -> Result<DeleteTextFile, DomainError> {
+    non_empty(&input.workspace_id, "workspace_id")?;
+    non_empty(&input.version_id, "version_id")?;
+    non_empty(&input.moment_id, "moment_id")?;
+    let mut normalized = input.clone();
+    normalized.path = validate_addressable_plaintext_path(&input.path)?;
+    Ok(normalized)
 }
 
 pub(crate) fn validate_delete_input(input: &DeleteTextFile) -> Result<(), DomainError> {
-    non_empty(&input.workspace_id, "workspace_id")?;
-    non_empty(&input.version_id, "version_id")?;
-    non_empty(&input.moment_id, "moment_id")?;
-    validate_path(&input.path)
+    normalized_delete_input(input).map(|_| ())
 }
 
 /// Apply an R05 text write inside a caller-owned compound transaction. R06
@@ -867,7 +889,8 @@ pub(crate) fn write_text_in_tx(
     tx: &Transaction<'_>,
     input: &WriteText,
 ) -> Result<WriteResult, DomainError> {
-    validate_write_input(input)?;
+    let normalized_input = normalized_write_input(input)?;
+    let input = &normalized_input;
     let ws = &input.workspace_id;
     if !version_exists(tx, ws, &input.version_id)? {
         return Err(DomainError::VersionNotFound);
@@ -1054,7 +1077,8 @@ pub(crate) fn delete_text_in_tx(
     tx: &Transaction<'_>,
     input: &DeleteTextFile,
 ) -> Result<DeleteResult, DomainError> {
-    validate_delete_input(input)?;
+    let normalized_input = normalized_delete_input(input)?;
+    let input = &normalized_input;
     let ws = &input.workspace_id;
     if !version_exists(tx, ws, &input.version_id)? {
         return Err(DomainError::VersionNotFound);
@@ -1191,6 +1215,41 @@ pub(crate) fn validate_path(path: &str) -> Result<(), DomainError> {
         });
     }
     Ok(())
+}
+
+/// Store-door guard for operations that introduce a plaintext alias. Only a
+/// tracked classification is eligible, and the returned key is canonical.
+fn validate_plaintext_storable_path(path: &str) -> Result<String, DomainError> {
+    use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
+
+    let (classification, normalized) = classify_engine_file_path_normalized(path);
+    if classification != PathClassification::Tracked {
+        return Err(DomainError::InvalidPath {
+            reason: "path is not eligible for plaintext storage",
+        });
+    }
+    validate_path(path)?;
+    normalized.ok_or(DomainError::InvalidPath {
+        reason: "tracked path is missing its normalized form",
+    })
+}
+
+/// Normalize a path used only to address an existing plaintext alias. Secret
+/// paths are allowed so an absent/secret lookup reports absence honestly;
+/// structurally invalid, reserved, and ignored paths remain rejected.
+fn validate_addressable_plaintext_path(path: &str) -> Result<String, DomainError> {
+    use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
+
+    let (classification, normalized) = classify_engine_file_path_normalized(path);
+    if classification == PathClassification::Ignored {
+        return Err(DomainError::InvalidPath {
+            reason: "path is not addressable plaintext content",
+        });
+    }
+    validate_path(path)?;
+    normalized.ok_or(DomainError::InvalidPath {
+        reason: "addressable path is missing its normalized form",
+    })
 }
 
 fn validate_text(text: &str) -> Result<(), DomainError> {

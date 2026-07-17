@@ -851,3 +851,83 @@ source of truth every orchestrator session loads first).
   off the same main and both claimed ordinal 5. R05 was clean first → merged at
   ordinal 5. **R10 must rebase onto this main and take ordinal 6** (its testkit
   migration_ledger_len assertion 6→7) before it can merge.
+
+- R10 replication/cursors/shares GATE PASSED (PR #166, squash-merged at
+  migration ordinal 6 after the R05/R10 ordinal-5 collision was serialized;
+  branch deleted; main migration ledger now len 7). New crate
+  `crates/dohc-engine-sync` (14 modules): ordered/idempotent compound-commit
+  apply, LWW convergence, share fail-closed, R10b relay-epoch boundary held,
+  R11a CRDT constraints preserved. Two-lens cell: Reviewer 2 (crash/migration/
+  CRDT) APPROVED — PROVED the Y.Doc-apply extraction equivalent (44 real
+  yjs-13.6.30 fixtures through old+new paths, state-vector AND plaintext
+  equality; the only OffsetKind::Utf16 site + durable.rs byte-unchanged) and
+  reproduced all 5 crash-reopen results. Reviewer 1 (share/apply) found a P0:
+  the SharedChannel receiver boundary failed OPEN when the channel selector
+  field was absent (and message/reaction/decision/attachment payloads never
+  carry one → the check was ALWAYS vacuous for them → probe-confirmed
+  cross-boundary chat leak). FIX: enforcement moved inside the write txn and
+  now requires a positive channel binding per op — channel.create/thread.create
+  must carry the granted wire id (absent → deny, no channelSlug placeholder
+  bypass); message/reaction/decision/attachment RESOLVE thread_id → channel_id
+  → wire_id in-store and require equality; mirrors filterChatOpForChannelShare.
+  Then a bot-finding triage round (my check-before-merge rule): 8 codex-bot
+  threads — 5 FIXED with TS-oracle citations + tests (apply.rs dedup-before-
+  mutation byte-compare fail-closed; relay.rs foreign-workspace pull rejection;
+  secret_apply.rs delete-tombstone anti-resurrection; feed-read ranking;
+  reserved agent-channel biconditional), 2 DISMISSED on the clean-reset/
+  schema_version=2 fence (no TS binary opens a Rust v2 DB; relay uses Postgres,
+  never engine.db — so Rust-only DDL can't break a shipping path; same
+  rationale as R08/R09/R11a timestamp columns), 1 DEFERRED to R13b with proof.
+  Codex re-review of the fixes posted nothing in an 8-min window; UNSTABLE was
+  solely CodeRabbit's rate-limit failure (non-substantive). green 2x.
+- **DECISION FLAG FOR ICE (freeze boundary, reversible):** R10 modified three
+  FROZEN TS-engine files — `packages/workspace-engine/src/{enginePathFloor,
+  linkedChatStore}.ts` and `services/sync-relay/src/shareFilter.ts` — but ONLY
+  as behavior-preserving EXTRACTIONS into a new shared `@dohc/security-contract`
+  package, leaving compatibility re-export shims behind (identical values +
+  logic; TS typecheck + the contract's vitest pass). Purpose: decouple the
+  relay from engine internals AND give the Rust differential fixture a shared
+  source-of-truth to validate the security floor against. This is in tension
+  with Ice's "don't touch the TS engine" instruction; accepted here because it
+  changes no behavior, is load-bearing for the cross-engine parity proof, and
+  reverts trivially (invert the dependency: contract package imports FROM the
+  unmodified engine). Bringing to Ice for review/veto; not blocking downstream.
+- R10b (relay-epoch-enforcement, deps R10 ✓) is now UNBLOCKED. R06
+  (compare/merge/conflicts, deps R05 ✓) and R07 (watcher/reconcile/pathfloor/
+  policy, deps CAL-3 ✓, R05 ✓ — carries the R05 rename-secret-floor OBLIG)
+  launched in PARALLEL from this main (which already includes R05+R10, so their
+  migration ordinals serialize cleanly after 6). R10's deferred
+  versions-replication-apply-conflict is blocked on R06's conflict-object
+  primitive — R06 unblocks it.
+
+- R07 watcher/reconcile/pathfloor/policy GATE PASSED (PR #169, squash-merged;
+  NO migration ordinal — files-side/in-memory, no collision with R06 ordinal 7;
+  branch deleted). Ported the notify-backed watcher, tolerant/degraded scan
+  (corrected CAL-3 whole-pass abort → BEHAVIOR_DELTA §11.1), the secret-path
+  floor classifier (policy.rs, platform-independent port of
+  @dohc/security-contract), two-phase apply-then-ack capture, files-side fault
+  seam. DISCHARGED the R05 rename-secret-floor OBLIGATION (rename to_path now
+  refused when secret-classified). Cell: Reviewer 1 (secret-floor) APPROVED via
+  a 30,672-path differential — 0 secret→tracked leaks, byte-parity with the TS
+  oracle, both gates fail-closed, deferred Check-B proven secret-floor-safe.
+  Reviewer 2 (capture/false-retire) proved apply-ack exactly-once crash-safety
+  + /-boundary-precise false-retire hold, found two P1s: (1) a STALE reconcile
+  plan's destructive ops reached the sink BEFORE the staleness guard →
+  CAL-3-class false-delete via the public API — FIXED (validate generation+epoch
+  before the sink loop + single-outstanding-plan invariant); (2) plaintext store
+  door rejected only Secret, letting reserved/ignored/traversal (DOHC~1 8.3
+  alias of .dohc, node_modules, .git, shared-with-me, %2e%2e) into plaintext
+  history — FIXED to accept only Tracked on the normalized path, matching TS
+  validateUserWritePath. HARD GATE fix: cargo-deny FAILed on notify's ISC/CC0-1.0
+  inotify deps (impl agent's first 'green' missed it) — added ISC + CC0-1.0 to
+  deny.toml allow, re-verified all five stages incl cargo-deny green 2x. P2s:
+  read-side win32 ADS-colon rejection (.env::$DATA latent secret-alias) closed;
+  degraded-retry thrash backoff added. Bot-finding round: 2 codex-bot
+  correctness bugs FIXED — hard-deadline drain (settle reset could postpone the
+  WATCH_HARD_DEADLINE indefinitely under an event storm) and file→dir
+  replacement never retired (StdAbsenceProbe made tri-state). Deferred to R14
+  (recorded on R14 row): watcher auto-reattach, startup deadlines +
+  force-reconcile-on-restart, manifest rehydration. green 2x.
+- R05 rename-secret-floor OBLIGATION: DISCHARGED by R07.
+- NOTE (fixed process slip): the first R07 integrator PR (#171) was branched off
+  a stale main and closed CONFLICTING; re-applied cleanly here. No content lost.

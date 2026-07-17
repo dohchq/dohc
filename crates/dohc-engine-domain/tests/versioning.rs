@@ -69,6 +69,121 @@ fn rollback(version: &str, path: &str, moment: &str) -> RollbackTextFileMutation
     }
 }
 
+#[test]
+fn write_text_directly_at_a_secret_path_is_refused_by_the_secret_floor() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let err = VersionedTextStore::new(&mut store)
+        .write_text(
+            &write("main", "secrets/.env.local", "TOKEN=plain", "m1", "o1", 2),
+            &NO_FAULTS,
+        )
+        .expect_err("secret path must not enter plaintext history");
+    assert_eq!(err.code(), "invalid-path");
+}
+
+#[test]
+fn rename_onto_secret_path_is_refused_by_the_secret_floor() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut versions = VersionedTextStore::new(&mut store);
+    versions
+        .write_text(
+            &write("main", "notes/a.md", "safe", "m1", "o1", 2),
+            &NO_FAULTS,
+        )
+        .expect("seed tracked text");
+    let err = versions
+        .rename_text_file(&rename("main", "notes/a.md", ".env", "m2", 3), &NO_FAULTS)
+        .expect_err("rename must not smuggle plaintext onto secret floor");
+    assert_eq!(err.code(), "invalid-path");
+    assert!(
+        versions
+            .read_text(WS, "main", "notes/a.md")
+            .expect("read")
+            .is_some()
+    );
+}
+
+#[test]
+fn plaintext_store_door_rejects_reserved_ignored_and_traversal_paths() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut versions = VersionedTextStore::new(&mut store);
+    let rejected = [
+        "DOHC~1/x.md",
+        "node_modules/p/i.md",
+        ".git/config.md",
+        "shared-with-me/a.md",
+        "%2e%2e/evil.md",
+    ];
+
+    for (index, path) in rejected.iter().enumerate() {
+        let err = versions
+            .write_text(
+                &write(
+                    "main",
+                    path,
+                    "unsafe",
+                    &format!("write-rejected-{index}"),
+                    &format!("object-rejected-{index}"),
+                    10 + index as i64,
+                ),
+                &NO_FAULTS,
+            )
+            .expect_err("ignored/reserved path must not enter plaintext history");
+        assert_eq!(err.code(), "invalid-path", "write path {path}");
+    }
+
+    let written = versions
+        .write_text(
+            &write("main", "./notes/a.md", "safe", "m-normalized", "o1", 30),
+            &NO_FAULTS,
+        )
+        .expect("normalized tracked write");
+    assert_eq!(written.snapshot.path, "notes/a.md");
+
+    for (index, path) in rejected.iter().enumerate() {
+        let err = versions
+            .rename_text_file(
+                &rename(
+                    "main",
+                    "./notes/a.md",
+                    path,
+                    &format!("rename-rejected-{index}"),
+                    40 + index as i64,
+                ),
+                &NO_FAULTS,
+            )
+            .expect_err("rename destination must pass the plaintext store door");
+        assert_eq!(err.code(), "invalid-path", "rename path {path}");
+    }
+
+    let read = versions
+        .read_text(WS, "main", "notes/a.md")
+        .expect("normalized read")
+        .expect("normalized alias present");
+    assert_eq!(read.text, "safe");
+    versions
+        .delete_text_file(
+            &delete("main", "notes/a.md", "m-delete-normalized", 60),
+            &NO_FAULTS,
+        )
+        .expect("differently-spelled normalized delete");
+    assert!(
+        versions
+            .read_text(WS, "main", "./notes/a.md")
+            .expect("normalized absent read")
+            .is_none()
+    );
+}
+
 // oracle: versioned write → read round-trip, durable across close/reopen.
 #[test]
 fn write_then_read_round_trip_survives_reopen() {

@@ -8,15 +8,65 @@ mod common;
 
 use common::Scratch;
 use dohc_engine_files::{
-    CancellationToken, CaptureOp, IngestReason, ReconcileController, ReconcileRun, ScanBounds,
-    Scanner, StubWatchSource, WatchEvent,
+    AbsenceProbe, CancellationToken, CaptureError, CaptureOp, CaptureSink, DEGRADED_RESCAN_BACKOFF,
+    IngestReason, ReconcileController, ReconcileRun, ScanBounds, ScanIoFaultInjector,
+    ScanIoOperation, Scanner, StubWatchSource, WatchEvent, apply_then_ack,
 };
+use dohc_engine_storage::NoFaults;
+use std::io::ErrorKind;
+use std::path::Path;
+use std::sync::Arc;
 
 fn plan(run: ReconcileRun) -> dohc_engine_files::ReconcilePlan {
     match run {
         ReconcileRun::Completed(plan) => plan,
         other => panic!("expected Completed, got {other:?}"),
     }
+}
+
+struct AcceptAll;
+
+impl CaptureSink for AcceptAll {
+    fn ingest(
+        &mut self,
+        _path: &str,
+        _size: u64,
+        _sha256: &str,
+        _media_type: &str,
+        _reason: IngestReason,
+    ) -> Result<(), CaptureError> {
+        Ok(())
+    }
+
+    fn retire(&mut self, _path: &str) -> Result<(), CaptureError> {
+        Ok(())
+    }
+}
+
+fn reconcile_and_apply(
+    ctrl: &mut ReconcileController,
+    scanner: &Scanner,
+    root: &Path,
+    token: &CancellationToken,
+) -> dohc_engine_files::ReconcilePlan {
+    let prepared = plan(ctrl.reconcile(scanner, root, token).expect("reconcile"));
+    apply_then_ack(ctrl, &prepared, &mut AcceptAll, &NoFaults).expect("apply/ack");
+    prepared
+}
+
+fn reconcile_if_dirty_and_apply(
+    ctrl: &mut ReconcileController,
+    scanner: &Scanner,
+    root: &Path,
+    token: &CancellationToken,
+) -> ReconcileRun {
+    let run = ctrl
+        .reconcile_if_dirty(scanner, root, token)
+        .expect("if-dirty");
+    if let ReconcileRun::Completed(prepared) = &run {
+        apply_then_ack(ctrl, prepared, &mut AcceptAll, &NoFaults).expect("apply/ack");
+    }
+    run
 }
 
 fn ingest_paths(plan: &dohc_engine_files::ReconcilePlan, want: IngestReason) -> Vec<&str> {
@@ -49,26 +99,19 @@ fn first_reconcile_ingests_everything_then_converges() {
     let token = CancellationToken::new();
 
     // Baseline: everything is "added".
-    let first = plan(
-        ctrl.reconcile(&scanner, ws.path(), &token)
-            .expect("reconcile"),
-    );
+    let first = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert_eq!(first.from_generation.0, 0);
     assert_eq!(first.to_generation.0, 1);
-    assert!(first.cleared_dirty);
+    assert!(first.prepared_from_dirty);
     assert_eq!(ingest_paths(&first, IngestReason::Added), ["a.md", "b.md"]);
 
     // Nothing changed on disk: a dirty-driven reconcile is a no-op...
     assert!(matches!(
-        ctrl.reconcile_if_dirty(&scanner, ws.path(), &token)
-            .expect("if-dirty"),
+        reconcile_if_dirty_and_apply(&mut ctrl, &scanner, ws.path(), &token),
         ReconcileRun::Converged
     ));
     // ...but a forced full reconcile produces an EMPTY plan (converged).
-    let second = plan(
-        ctrl.reconcile(&scanner, ws.path(), &token)
-            .expect("reconcile"),
-    );
+    let second = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert!(second.is_empty());
     assert_eq!(second.to_generation.0, 2);
 }
@@ -82,20 +125,14 @@ fn reconcile_classifies_added_changed_removed() {
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let mut ctrl = ReconcileController::new();
     let token = CancellationToken::new();
-    let _ = plan(
-        ctrl.reconcile(&scanner, ws.path(), &token)
-            .expect("baseline"),
-    );
+    let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
 
     // Mutate the tree: edit one, add one, remove one, keep one.
     ws.write("edit.md", b"after edit\n");
     ws.write("new.md", b"fresh\n");
     ws.remove("gone.md");
 
-    let p = plan(
-        ctrl.reconcile(&scanner, ws.path(), &token)
-            .expect("reconcile"),
-    );
+    let p = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert_eq!(ingest_paths(&p, IngestReason::Added), ["new.md"]);
     assert_eq!(ingest_paths(&p, IngestReason::Changed), ["edit.md"]);
     assert_eq!(retire_paths(&p), ["gone.md"]);
@@ -108,17 +145,11 @@ fn rename_looks_like_remove_plus_add() {
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let mut ctrl = ReconcileController::new();
     let token = CancellationToken::new();
-    let _ = plan(
-        ctrl.reconcile(&scanner, ws.path(), &token)
-            .expect("baseline"),
-    );
+    let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
 
     ws.rename("old-name.md", "new-name.md");
 
-    let p = plan(
-        ctrl.reconcile(&scanner, ws.path(), &token)
-            .expect("reconcile"),
-    );
+    let p = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     // A content-preserving rename is a retire(old) + ingest(new) at this layer.
     assert_eq!(ingest_paths(&p, IngestReason::Added), ["new-name.md"]);
     assert_eq!(retire_paths(&p), ["old-name.md"]);
@@ -150,10 +181,7 @@ fn cancellation_mid_scan_leaves_consistent_resumable_state() {
 
     // Resume with a live token: the work completes exactly as if the cancel
     // never happened — the baseline is established in full.
-    let resumed = plan(
-        ctrl.reconcile(&scanner, ws.path(), &CancellationToken::new())
-            .expect("resume"),
-    );
+    let resumed = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &CancellationToken::new());
     assert_eq!(ctrl.generation().0, 1);
     assert!(!ctrl.is_dirty());
     assert_eq!(
@@ -171,10 +199,7 @@ fn watcher_overflow_sets_dirty_and_full_rescan_converges() {
     let token = CancellationToken::new();
 
     // Establish a converged baseline.
-    let _ = plan(
-        ctrl.reconcile(&scanner, ws.path(), &token)
-            .expect("baseline"),
-    );
+    let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert!(!ctrl.is_dirty());
 
     // A change happens WHILE the watcher is uncertain: an external edit plus an
@@ -193,11 +218,13 @@ fn watcher_overflow_sets_dirty_and_full_rescan_converges() {
     assert!(marked && ctrl.is_dirty());
 
     // The dirty-driven full rescan converges disk and engine.
-    let converged = plan(
-        ctrl.reconcile_if_dirty(&scanner, ws.path(), &token)
-            .expect("if-dirty"),
-    );
-    assert!(converged.cleared_dirty);
+    let converged = plan(reconcile_if_dirty_and_apply(
+        &mut ctrl,
+        &scanner,
+        ws.path(),
+        &token,
+    ));
+    assert!(converged.prepared_from_dirty);
     assert_eq!(ingest_paths(&converged, IngestReason::Added), ["b.md"]);
     assert_eq!(ingest_paths(&converged, IngestReason::Changed), ["a.md"]);
     assert!(
@@ -207,8 +234,7 @@ fn watcher_overflow_sets_dirty_and_full_rescan_converges() {
 
     // A subsequent dirty-driven reconcile is a no-op (already converged).
     assert!(matches!(
-        ctrl.reconcile_if_dirty(&scanner, ws.path(), &token)
-            .expect("if-dirty"),
+        reconcile_if_dirty_and_apply(&mut ctrl, &scanner, ws.path(), &token),
         ReconcileRun::Converged
     ));
 }
@@ -221,10 +247,7 @@ fn overflow_during_cancelled_rescan_is_not_lost() {
     ws.write("a.md", b"one\n");
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let mut ctrl = ReconcileController::new();
-    let _ = plan(
-        ctrl.reconcile(&scanner, ws.path(), &CancellationToken::new())
-            .expect("baseline"),
-    );
+    let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &CancellationToken::new());
 
     ws.write("a.md", b"two\n");
     ctrl.mark_dirty();
@@ -243,10 +266,12 @@ fn overflow_during_cancelled_rescan_is_not_lost() {
     );
 
     // The next (live) rescan finally captures the change.
-    let p = plan(
-        ctrl.reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
-            .expect("if-dirty"),
-    );
+    let p = plan(reconcile_if_dirty_and_apply(
+        &mut ctrl,
+        &scanner,
+        ws.path(),
+        &CancellationToken::new(),
+    ));
     assert_eq!(ingest_paths(&p, IngestReason::Changed), ["a.md"]);
 }
 
@@ -266,19 +291,13 @@ fn size_cap_grow_retains_never_retires_the_false_delete_regression() {
     let mut ctrl = ReconcileController::new();
     let token = CancellationToken::new();
 
-    let base = plan(
-        ctrl.reconcile(&scanner, ws.path(), &token)
-            .expect("baseline"),
-    );
+    let base = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert_eq!(ingest_paths(&base, IngestReason::Added), ["doc.md"]);
     assert_eq!(ctrl.tracked_len(), 1);
 
     // Grow it past the cap.
     ws.write("doc.md", b"now this content is definitely over the cap\n");
-    let grown = plan(
-        ctrl.reconcile(&scanner, ws.path(), &token)
-            .expect("reconcile"),
-    );
+    let grown = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert!(
         retire_paths(&grown).is_empty(),
         "an over-cap-grow of a present file must NEVER be retired (the false-delete)"
@@ -295,10 +314,7 @@ fn size_cap_grow_retains_never_retires_the_false_delete_regression() {
 
     // Shrink back under the cap with new content → detected as a normal change.
     ws.write("doc.md", b"tiny\n");
-    let shrunk = plan(
-        ctrl.reconcile(&scanner, ws.path(), &token)
-            .expect("reconcile"),
-    );
+    let shrunk = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert_eq!(ingest_paths(&shrunk, IngestReason::Changed), ["doc.md"]);
     assert!(retire_paths(&shrunk).is_empty());
     assert!(shrunk.retained_over_cap.is_empty());
@@ -313,19 +329,35 @@ fn genuinely_deleted_over_cap_absent_file_is_still_removed() {
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let mut ctrl = ReconcileController::new();
     let token = CancellationToken::new();
-    let _ = plan(
-        ctrl.reconcile(&scanner, ws.path(), &token)
-            .expect("baseline"),
-    );
+    let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
 
     ws.remove("gone.md");
-    let p = plan(
-        ctrl.reconcile(&scanner, ws.path(), &token)
-            .expect("reconcile"),
-    );
+    let p = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert_eq!(retire_paths(&p), ["gone.md"]);
     assert!(p.retained_over_cap.is_empty());
     assert_eq!(ctrl.tracked_len(), 0);
+}
+
+#[test]
+fn tracked_file_replaced_by_directory_is_retired() {
+    let ws = Scratch::new();
+    ws.write("notes.md", b"tracked file");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    let token = CancellationToken::new();
+    reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    assert!(ctrl.tracks_path("notes.md"));
+
+    ws.remove("notes.md");
+    std::fs::create_dir(ws.path().join("notes.md")).expect("replace file with directory");
+
+    let replaced = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
+    assert_eq!(retire_paths(&replaced), ["notes.md"]);
+    assert!(replaced.unconfirmed_removed.is_empty());
+    assert!(
+        !ctrl.tracks_path("notes.md"),
+        "acknowledging the retire must stop tracking the former file"
+    );
 }
 
 #[test]
@@ -342,4 +374,185 @@ fn diff_bound_trips_when_change_set_too_large() {
         .reconcile(&scanner, ws.path(), &CancellationToken::new())
         .expect_err("diff too large");
     assert_eq!(err.code(), "diff-too-large");
+}
+
+struct PermissionDeniedAt {
+    path: &'static str,
+}
+
+impl ScanIoFaultInjector for PermissionDeniedAt {
+    fn error_kind(&self, path: &str, operation: ScanIoOperation) -> Option<ErrorKind> {
+        (path == self.path && operation == ScanIoOperation::Metadata)
+            .then_some(ErrorKind::PermissionDenied)
+    }
+}
+
+#[test]
+fn unreadable_path_degrades_but_other_paths_capture_and_it_is_never_retired() {
+    let ws = Scratch::new();
+    ws.write("locked.md", b"prior protected content");
+    ws.write("stable.md", b"stable");
+    let normal = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    reconcile_and_apply(&mut ctrl, &normal, ws.path(), &CancellationToken::new());
+    assert_eq!(ctrl.tracked_len(), 2);
+
+    ws.write("new.md", b"independent new content");
+    let degraded_scanner = Scanner::new_with_io_faults(
+        ScanBounds::default(),
+        Arc::new(PermissionDeniedAt { path: "locked.md" }),
+    )
+    .expect("faulted scanner");
+    ctrl.mark_dirty();
+    let prepared = plan(
+        ctrl.reconcile_if_dirty(&degraded_scanner, ws.path(), &CancellationToken::new())
+            .expect("tolerant reconcile"),
+    );
+    assert!(prepared.degraded);
+    assert_eq!(prepared.unconfirmed_removed, ["locked.md"]);
+    assert!(
+        retire_paths(&prepared).is_empty(),
+        "unreadable is never delete evidence"
+    );
+    assert_eq!(ingest_paths(&prepared, IngestReason::Added), ["new.md"]);
+    apply_then_ack(&mut ctrl, &prepared, &mut AcceptAll, &NoFaults).expect("apply safe paths");
+    assert_eq!(
+        ctrl.tracked_len(),
+        3,
+        "last-known-good locked entry is retained"
+    );
+    assert!(ctrl.is_dirty(), "degraded pass stays retryable");
+}
+
+#[test]
+fn persistently_degraded_path_stops_forcing_perpetual_rescans() {
+    let ws = Scratch::new();
+    ws.write("locked.md", b"last known good");
+    ws.write("stable.md", b"stable");
+    let normal = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    reconcile_and_apply(&mut ctrl, &normal, ws.path(), &CancellationToken::new());
+
+    ws.write("readable.md", b"captured despite degradation");
+    let degraded_scanner = Scanner::new_with_io_faults(
+        ScanBounds::default(),
+        Arc::new(PermissionDeniedAt { path: "locked.md" }),
+    )
+    .expect("faulted scanner");
+    ctrl.mark_dirty();
+
+    for pass in 0..DEGRADED_RESCAN_BACKOFF {
+        let prepared = plan(
+            ctrl.reconcile_if_dirty(&degraded_scanner, ws.path(), &CancellationToken::new())
+                .expect("degraded reconcile"),
+        );
+        assert!(prepared.degraded);
+        assert!(retire_paths(&prepared).is_empty());
+        if pass == 0 {
+            assert_eq!(
+                ingest_paths(&prepared, IngestReason::Added),
+                ["readable.md"]
+            );
+        }
+        apply_then_ack(&mut ctrl, &prepared, &mut AcceptAll, &NoFaults)
+            .expect("degraded apply/ack");
+    }
+
+    assert!(!ctrl.is_dirty(), "identical degradation must back off");
+    assert!(ctrl.tracks_path("locked.md"));
+    assert!(ctrl.tracks_path("readable.md"));
+    assert_eq!(ctrl.tracked_len(), 3);
+    assert_eq!(ctrl.quarantined_paths(), ["locked.md"]);
+    assert!(matches!(
+        ctrl.reconcile_if_dirty(&degraded_scanner, ws.path(), &CancellationToken::new())
+            .expect("quarantined converge"),
+        ReconcileRun::Converged
+    ));
+}
+
+struct ReappearedProbe;
+
+impl AbsenceProbe for ReappearedProbe {
+    fn confirms_absent(&self, _absolute_path: &Path) -> bool {
+        false
+    }
+}
+
+struct TransientUnreadableProbe;
+
+impl AbsenceProbe for TransientUnreadableProbe {
+    fn confirms_absent(&self, _absolute_path: &Path) -> bool {
+        false
+    }
+}
+
+#[test]
+fn transient_unreadable_removal_candidate_is_retained_not_retired() {
+    let ws = Scratch::new();
+    ws.write("locked.md", b"last known good");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut ctrl = ReconcileController::new();
+    reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &CancellationToken::new());
+    ws.remove("locked.md");
+
+    let prepared = plan(
+        ctrl.reconcile_with_absence_probe(
+            &scanner,
+            ws.path(),
+            &CancellationToken::new(),
+            &TransientUnreadableProbe,
+        )
+        .expect("indeterminate reconcile"),
+    );
+    assert!(retire_paths(&prepared).is_empty());
+    assert_eq!(prepared.unconfirmed_removed, ["locked.md"]);
+    assert!(prepared.degraded);
+    apply_then_ack(&mut ctrl, &prepared, &mut AcceptAll, &NoFaults)
+        .expect("ack retained candidate");
+    assert!(ctrl.tracks_path("locked.md"));
+}
+
+#[test]
+fn retire_requires_final_lstat_confirm_and_toctou_reappearance_is_retained() {
+    let ws = Scratch::new();
+    ws.write("gone.md", b"gone");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut confirmed = ReconcileController::new();
+    reconcile_and_apply(
+        &mut confirmed,
+        &scanner,
+        ws.path(),
+        &CancellationToken::new(),
+    );
+    ws.remove("gone.md");
+    let confirmed_plan = plan(
+        confirmed
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("confirmed reconcile"),
+    );
+    assert_eq!(retire_paths(&confirmed_plan), ["gone.md"]);
+
+    let ws_race = Scratch::new();
+    ws_race.write("race.md", b"prior");
+    let mut raced = ReconcileController::new();
+    reconcile_and_apply(
+        &mut raced,
+        &scanner,
+        ws_race.path(),
+        &CancellationToken::new(),
+    );
+    ws_race.remove("race.md");
+    let raced_plan = plan(
+        raced
+            .reconcile_with_absence_probe(
+                &scanner,
+                ws_race.path(),
+                &CancellationToken::new(),
+                &ReappearedProbe,
+            )
+            .expect("raced reconcile"),
+    );
+    assert!(retire_paths(&raced_plan).is_empty());
+    assert_eq!(raced_plan.unconfirmed_removed, ["race.md"]);
+    assert!(raced_plan.degraded);
 }

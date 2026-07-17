@@ -17,6 +17,10 @@ dohc-engine-storage = { path = "../dohc-engine-storage" }
 # key types. The secret domain store encrypts on write and decrypts only in the
 # single authorized materialization accessor; ciphertext-only reaches storage.
 dohc-engine-crypto = { path = "../dohc-engine-crypto" }
+# R07's cross-platform security classifier is the single path floor shared by
+# plaintext and secret-backed stores. Direction is domain -> files only; the
+# files crate remains independent of domain.
+dohc-engine-files = { path = "../dohc-engine-files" }
 # The domain composes its versioning SQL against the transaction/connection the
 # storage core hands it; it owns the version/moment semantics, storage owns the
 # connection, open ritual, txn boundary, and fault seam.

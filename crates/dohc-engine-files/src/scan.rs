@@ -6,15 +6,19 @@
 //! blow the call stack) and never follows a symlink: a symlinked directory is
 //! not descended and a symlink leaf is untracked (`lstat`, never `stat` —
 //! `LANGUAGE_SEMANTICS_MATRIX.md` 8.1, `PORTING.md` §10). A file that vanishes
-//! mid-walk is a benign race and is skipped (mirrors the tolerant TS/kernel
-//! scan); any other io error fails the scan closed.
+//! mid-walk is a benign race and is skipped. Other per-entry readability
+//! failures are bounded and reported in [`ScanListing::failed`] while the walk
+//! continues, matching the TS capture posture. The workspace root and all
+//! structural/resource bounds remain fail-closed.
 
 use crate::bounds::{OverCapPolicy, ScanBounds};
 use crate::error::FilesError;
 use crate::floor;
 use crate::hash::{HashInput, HashOutcome, HashPool, HashRun};
 use crate::media::media_type_for_path;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 use tokio_util::sync::CancellationToken;
 
@@ -47,12 +51,45 @@ pub struct SkippedPath {
     pub reason: SkipReason,
 }
 
+/// A path the scan could not inspect or hash. A failed directory path protects
+/// every prior manifest entry below it from retirement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedPath {
+    pub path: String,
+    pub kind: ErrorKind,
+}
+
+/// Injectable read seam for deterministic cross-platform unreadable-path
+/// tests. Production scanners have no injector and perform the real operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanIoOperation {
+    ReadDir,
+    FileType,
+    Metadata,
+    Hash,
+}
+
+/// Supplies a synthetic io error for a specific bounded scan unit.
+pub trait ScanIoFaultInjector: Send + Sync {
+    fn error_kind(&self, path: &str, operation: ScanIoOperation) -> Option<ErrorKind>;
+}
+
 /// A completed scan: the tracked files (sorted by path) plus the seen-but-
 /// skipped set (sorted by path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanListing {
     pub files: Vec<FileEntry>,
     pub skipped: Vec<SkippedPath>,
+    pub failed: Vec<FailedPath>,
+}
+
+impl ScanListing {
+    /// Whether the scan completed with one or more unreadable paths. Callers
+    /// surface this as a degraded capture outcome while still applying every
+    /// safe, independently-observed path.
+    pub fn degraded(&self) -> bool {
+        !self.failed.is_empty()
+    }
 }
 
 /// The outcome of a scan.
@@ -70,6 +107,7 @@ pub enum ScanOutcome {
 pub struct Scanner {
     bounds: ScanBounds,
     pool: HashPool,
+    io_faults: Option<Arc<dyn ScanIoFaultInjector>>,
 }
 
 impl Scanner {
@@ -80,7 +118,23 @@ impl Scanner {
             bounds.read_buffer_bytes(),
             bounds.max_file_bytes,
         )?;
-        Ok(Scanner { bounds, pool })
+        Ok(Scanner {
+            bounds,
+            pool,
+            io_faults: None,
+        })
+    }
+
+    /// Build a scanner with an injectable per-unit io-error seam. This exists
+    /// for the `env.permission-denied` oracle because reliable ACL denial is
+    /// not portable across the test hosts; production uses [`Scanner::new`].
+    pub fn new_with_io_faults(
+        bounds: ScanBounds,
+        io_faults: Arc<dyn ScanIoFaultInjector>,
+    ) -> Result<Self, FilesError> {
+        let mut scanner = Self::new(bounds)?;
+        scanner.io_faults = Some(io_faults);
+        Ok(scanner)
     }
 
     /// The bounds this scanner enforces.
@@ -98,13 +152,23 @@ impl Scanner {
         let root = canonical_dir(root)?;
         let candidates = match self.enumerate(&root, token)? {
             EnumOutcome::Cancelled => return Ok(ScanOutcome::Cancelled),
-            EnumOutcome::Completed { mut files, skipped } => {
+            EnumOutcome::Completed {
+                mut files,
+                skipped,
+                failed,
+            } => {
                 // Deterministic order: sort by path before hashing so result
                 // indices are stable regardless of readdir order.
                 files.sort_by(|a, b| a.rel.cmp(&b.rel));
                 let mut skipped = skipped;
                 skipped.sort_by(|a, b| a.path.cmp(&b.path));
-                Enumerated { files, skipped }
+                let mut failed = failed;
+                failed.sort_by(|a, b| a.path.cmp(&b.path));
+                Enumerated {
+                    files,
+                    skipped,
+                    failed,
+                }
             }
         };
 
@@ -126,9 +190,17 @@ impl Scanner {
         let Enumerated {
             files: candidate_files,
             mut skipped,
+            mut failed,
         } = candidates;
         let mut files = Vec::with_capacity(candidate_files.len());
         for (candidate, outcome) in candidate_files.into_iter().zip(outcomes) {
+            if let Some(kind) = self.injected(&candidate.rel, ScanIoOperation::Hash) {
+                failed.push(FailedPath {
+                    path: candidate.rel,
+                    kind,
+                });
+                continue;
+            }
             match outcome {
                 HashOutcome::Hashed { sha256, bytes } => files.push(FileEntry {
                     media_type: media_type_for_path(&candidate.rel),
@@ -157,7 +229,7 @@ impl Scanner {
                 }
                 HashOutcome::Cancelled => return Ok(ScanOutcome::Cancelled),
                 HashOutcome::Io { kind } => {
-                    return Err(FilesError::ScanIo {
+                    failed.push(FailedPath {
                         path: candidate.rel,
                         kind,
                     });
@@ -175,7 +247,12 @@ impl Scanner {
         // A stream-detected over-cap may have appended to `skipped` out of
         // order; restore the by-path sort.
         skipped.sort_by(|a, b| a.path.cmp(&b.path));
-        Ok(ScanOutcome::Completed(ScanListing { files, skipped }))
+        failed.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(ScanOutcome::Completed(ScanListing {
+            files,
+            skipped,
+            failed,
+        }))
     }
 
     /// Enumerate every tracked candidate under `root`, bounded and cancellable.
@@ -183,6 +260,7 @@ impl Scanner {
         let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
         let mut files: Vec<Candidate> = Vec::new();
         let mut skipped: Vec<SkippedPath> = Vec::new();
+        let mut failed: Vec<FailedPath> = Vec::new();
         // Total filesystem entries traversed (files + skipped + directories +
         // anything else iterated). Bounds the DFS working set so a
         // directory-heavy tree cannot grow the stack unbounded.
@@ -192,10 +270,37 @@ impl Scanner {
             if token.is_cancelled() {
                 return Ok(EnumOutcome::Cancelled);
             }
-            let read_dir = match std::fs::read_dir(&dir) {
-                Ok(rd) => rd,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(FilesError::scan_io(display(&dir), &err)),
+            let injected_read_dir = self.injected(&relative(root, &dir), ScanIoOperation::ReadDir);
+            let read_dir = match injected_read_dir {
+                Some(kind) if dir == root => {
+                    return Err(FilesError::ScanIo {
+                        path: display(&dir),
+                        kind,
+                    });
+                }
+                Some(kind) => {
+                    failed.push(FailedPath {
+                        path: relative(root, &dir),
+                        kind,
+                    });
+                    self.check_file_bound(files.len(), skipped.len(), failed.len())?;
+                    continue;
+                }
+                None => match std::fs::read_dir(&dir) {
+                    Ok(rd) => rd,
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(err) if dir == root => {
+                        return Err(FilesError::scan_io(display(&dir), &err));
+                    }
+                    Err(err) => {
+                        failed.push(FailedPath {
+                            path: relative(root, &dir),
+                            kind: err.kind(),
+                        });
+                        self.check_file_bound(files.len(), skipped.len(), failed.len())?;
+                        continue;
+                    }
+                },
             };
             for entry in read_dir {
                 // Between-unit cancellation: per directory entry.
@@ -213,13 +318,35 @@ impl Scanner {
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(err) => return Err(FilesError::scan_io(display(&dir), &err)),
+                    Err(err) => {
+                        failed.push(FailedPath {
+                            path: relative(root, &dir),
+                            kind: err.kind(),
+                        });
+                        self.check_file_bound(files.len(), skipped.len(), failed.len())?;
+                        continue;
+                    }
                 };
                 let path = entry.path();
-                let file_type = match entry.file_type() {
-                    Ok(ft) => ft,
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(err) => return Err(FilesError::scan_io(display(&path), &err)),
+                let rel = relative(root, &path);
+                let file_type = match self.injected(&rel, ScanIoOperation::FileType) {
+                    Some(kind) => {
+                        failed.push(FailedPath { path: rel, kind });
+                        self.check_file_bound(files.len(), skipped.len(), failed.len())?;
+                        continue;
+                    }
+                    None => match entry.file_type() {
+                        Ok(ft) => ft,
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(err) => {
+                            failed.push(FailedPath {
+                                path: rel,
+                                kind: err.kind(),
+                            });
+                            self.check_file_bound(files.len(), skipped.len(), failed.len())?;
+                            continue;
+                        }
+                    },
                 };
                 // Never follow a symlink: leaf untracked, symlinked dir not
                 // descended.
@@ -237,14 +364,27 @@ impl Scanner {
                 if !file_type.is_file() {
                     continue;
                 }
-                let rel = relative(root, &path);
                 if floor::is_excluded_file(&rel) {
                     continue;
                 }
-                let metadata = match entry.metadata() {
-                    Ok(md) => md,
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(err) => return Err(FilesError::scan_io(rel, &err)),
+                let metadata = match self.injected(&rel, ScanIoOperation::Metadata) {
+                    Some(kind) => {
+                        failed.push(FailedPath { path: rel, kind });
+                        self.check_file_bound(files.len(), skipped.len(), failed.len())?;
+                        continue;
+                    }
+                    None => match entry.metadata() {
+                        Ok(md) => md,
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(err) => {
+                            failed.push(FailedPath {
+                                path: rel,
+                                kind: err.kind(),
+                            });
+                            self.check_file_bound(files.len(), skipped.len(), failed.len())?;
+                            continue;
+                        }
+                    },
                 };
                 // A symlink race (entry became a link after file_type): skip.
                 if !metadata.is_file() {
@@ -262,11 +402,7 @@ impl Scanner {
                             // Over-cap skipped files count toward max_files too,
                             // so a tree of millions of over-cap files also fails
                             // closed instead of growing the skipped set.
-                            if skipped.len() > self.bounds.max_files {
-                                return Err(FilesError::TooManyFiles {
-                                    cap: self.bounds.max_files,
-                                });
-                            }
+                            self.check_file_bound(files.len(), skipped.len(), failed.len())?;
                             continue;
                         }
                         OverCapPolicy::Error => {
@@ -284,15 +420,35 @@ impl Scanner {
                     mtime_ms: mtime_ms(&metadata),
                 });
                 // Fail closed on the max-files bound — never truncate.
-                if files.len() > self.bounds.max_files {
-                    return Err(FilesError::TooManyFiles {
-                        cap: self.bounds.max_files,
-                    });
-                }
+                self.check_file_bound(files.len(), skipped.len(), failed.len())?;
             }
         }
 
-        Ok(EnumOutcome::Completed { files, skipped })
+        Ok(EnumOutcome::Completed {
+            files,
+            skipped,
+            failed,
+        })
+    }
+
+    fn injected(&self, path: &str, operation: ScanIoOperation) -> Option<ErrorKind> {
+        self.io_faults
+            .as_ref()
+            .and_then(|faults| faults.error_kind(path, operation))
+    }
+
+    fn check_file_bound(
+        &self,
+        files: usize,
+        skipped: usize,
+        failed: usize,
+    ) -> Result<(), FilesError> {
+        if files.saturating_add(skipped).saturating_add(failed) > self.bounds.max_files {
+            return Err(FilesError::TooManyFiles {
+                cap: self.bounds.max_files,
+            });
+        }
+        Ok(())
     }
 }
 
@@ -305,12 +461,14 @@ struct Candidate {
 struct Enumerated {
     files: Vec<Candidate>,
     skipped: Vec<SkippedPath>,
+    failed: Vec<FailedPath>,
 }
 
 enum EnumOutcome {
     Completed {
         files: Vec<Candidate>,
         skipped: Vec<SkippedPath>,
+        failed: Vec<FailedPath>,
     },
     Cancelled,
 }
