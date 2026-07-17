@@ -840,8 +840,8 @@ enum ForkPrep {
 }
 
 /// A prior request recovered from the idempotency ledger.
-struct RecordedRequest {
-    payload_hash: String,
+pub(crate) struct RecordedRequest {
+    pub(crate) payload_hash: String,
 }
 
 // ============================================================================
@@ -1979,7 +1979,7 @@ fn get_moment(
     row.transpose()
 }
 
-fn lookup_request(
+pub(crate) fn lookup_request(
     conn: &Connection,
     request_id: &str,
 ) -> Result<Option<RecordedRequest>, DomainError> {
@@ -1996,7 +1996,7 @@ fn lookup_request(
     .map_err(DomainError::sql_corrupt)
 }
 
-fn record_request(
+pub(crate) fn record_request(
     tx: &Connection,
     request_id: Option<&str>,
     payload_hash: &str,
@@ -2085,7 +2085,7 @@ pub fn text_blob_sha256(text: &str) -> String {
 }
 
 /// Deterministic fingerprint over NUL-separated fields (idempotency payloads).
-fn hash_fields(fields: &[&[u8]]) -> String {
+pub(crate) fn hash_fields(fields: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
     for field in fields {
         hasher.update(field);

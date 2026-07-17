@@ -91,8 +91,13 @@ impl EngineService {
                     .await?
             }
             "conflicts.resolve" => {
-                self.conflicts_resolve(&ctx, request.workspace, request.params)
-                    .await?
+                self.conflicts_resolve(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                    request.idempotency_key,
+                )
+                .await?
             }
             "search.query" => {
                 self.search_query(&ctx, request.workspace, request.params)
@@ -328,6 +333,7 @@ impl EngineService {
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
+        request_id: Option<String>,
     ) -> Result<Value, WireError> {
         let params: ConflictResolveParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
@@ -375,6 +381,7 @@ impl EngineService {
                     metadata_origin: local.metadata_origin,
                     author_json: local.author_json,
                     now_ms: local.now_ms.unwrap_or(now_ms()?),
+                    request_id,
                 },
                 Arc::new(NoFaults),
                 cancellation.token(),
@@ -768,7 +775,8 @@ fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value
             "status": "applied",
             "conflictId": result.conflict_id,
             "inserted": result.inserted,
-            "matched": result.matched
+            "matched": result.matched,
+            "deferred": result.deferred
         }),
         ApplyOutcome::Skipped => json!({ "replicated": true, "status": "skipped" }),
         ApplyOutcome::Crashed { committed } => json!({

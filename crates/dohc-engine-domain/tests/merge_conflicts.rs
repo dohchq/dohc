@@ -70,6 +70,12 @@ fn open() -> (ScratchDir, EngineStore) {
     (scratch, store)
 }
 
+fn moment_count(store: &EngineStore) -> i64 {
+    store
+        .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM moments", [], |row| row.get(0)))
+        .expect("moment count")
+}
+
 fn merge_input(path: &str, moment: &str, conflict: &str, object: &str) -> MergeTextFileFromVersion {
     MergeTextFileFromVersion {
         workspace_id: WS.to_owned(),
@@ -417,6 +423,7 @@ fn resolve(id: &str, kind: ResolveConflictKind, suffix: &str) -> ResolveTextConf
         metadata_origin: "agent".to_owned(),
         author_json: None,
         now_ms: 900,
+        request_id: None,
     }
 }
 
@@ -738,6 +745,96 @@ fn resolve_conflicts_covers_apply_move_merge_keep_and_stale_gate() {
         .code(),
         "conflict-stale-target"
     );
+}
+
+#[test]
+fn resolve_text_conflict_replays_idempotency_key_and_rejects_reuse_mismatch() {
+    let (_scratch, mut store) = open();
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(
+        &write("main", "idempotent.md", "base", "idem-base", "idem-object"),
+        &NO_FAULTS,
+    )
+    .expect("base");
+    fork(&mut vt);
+    vt.write_text(
+        &write(
+            "main",
+            "idempotent.md",
+            "current",
+            "idem-current",
+            "ignored",
+        ),
+        &NO_FAULTS,
+    )
+    .expect("current");
+    vt.write_text(
+        &write(
+            "feat",
+            "idempotent.md",
+            "incoming",
+            "idem-incoming",
+            "ignored",
+        ),
+        &NO_FAULTS,
+    )
+    .expect("incoming");
+    let current = vt
+        .read_text(WS, "main", "idempotent.md")
+        .expect("read current")
+        .expect("current snapshot");
+    let incoming = vt
+        .read_text(WS, "feat", "idempotent.md")
+        .expect("read incoming")
+        .expect("incoming snapshot");
+    drop(vt);
+    let record = conflict("idempotent-resolve", "idempotent.md", current, incoming);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            insert_text_conflict_if_absent(tx, &record)?;
+            Ok::<_, DomainError>(())
+        })
+        .expect("insert conflict");
+
+    let mut input = resolve(
+        "idempotent-resolve",
+        ResolveConflictKind::ApplyIncoming,
+        "idempotent",
+    );
+    input.request_id = Some("resolve-request-id".to_owned());
+    let first = VersionedTextStore::new(&mut store)
+        .resolve_text_conflict(&input, &NO_FAULTS)
+        .expect("first resolve");
+    assert!(first.write.is_some());
+    assert_eq!(first.conflict.status, ConflictStatus::Resolved);
+    let after_first = moment_count(&store);
+
+    let replay = VersionedTextStore::new(&mut store)
+        .resolve_text_conflict(&input, &NO_FAULTS)
+        .expect("idempotent replay");
+    assert!(replay.write.is_none());
+    assert!(replay.delete.is_none());
+    assert_eq!(replay.conflict, first.conflict);
+    assert_eq!(moment_count(&store), after_first);
+    assert_eq!(
+        VersionedTextStore::new(&mut store)
+            .read_text(WS, "main", "idempotent.md")
+            .expect("read resolved")
+            .expect("resolved snapshot")
+            .text,
+        "incoming"
+    );
+
+    let mut mismatched = input.clone();
+    mismatched.resolution = ResolveConflictKind::KeepCurrent;
+    assert_eq!(
+        VersionedTextStore::new(&mut store)
+            .resolve_text_conflict(&mismatched, &NO_FAULTS)
+            .expect_err("same key with different resolution must fail")
+            .code(),
+        "idempotency-key-reuse-mismatch"
+    );
+    assert_eq!(moment_count(&store), after_first);
 }
 
 #[test]
