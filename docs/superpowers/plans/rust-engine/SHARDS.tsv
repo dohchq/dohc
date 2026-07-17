@@ -18,8 +18,8 @@ CAL-2	versioned-write-read-history-restore	1	R04	crates/dohc-engine-domain/src/v
 CAL-3	scan-hash-reconcile-cancel	1	R03;GATE0	crates/dohc-engine-files/**	calibration	high	1	gate passed	codex/rust-engine-cal-3	153
 R05	identity-blobs-versions-moments-restore	2	R04	crates/dohc-engine-domain/src/{identity,blobs,moments,versions}*	ported	critical	1	planned	-	-
 R08	secrets	2	R04	crates/dohc-engine-crypto/**	ported	critical	1	gate passed	codex/rust-engine-r08	157
-R09	chats-readstate-dispatch	2	R04;REINV	crates/dohc-engine-domain/src/chats*;crates/dohc-engine-storage/src/chat_tables*;apps/desktop/src/agents/desktopAgentDispatchStore.ts	ported	high	2	planned	-	-
-R11a	ydoc-durable-cache	2	YRS-SPIKE;R04	crates/dohc-engine-collab/**	ported+spike-fuzz	critical	1	in progress	codex/rust-engine-r11a	-
+R09	chats-readstate-dispatch	2	R04;REINV	crates/dohc-engine-domain/src/chats*;crates/dohc-engine-storage/src/chat_tables*;apps/desktop/src/agents/desktopAgentDispatchStore.ts	ported	high	2	in progress	codex/rust-engine-r09	-
+R11a	ydoc-durable-cache	2	YRS-SPIKE;R04	crates/dohc-engine-collab/**	ported+spike-fuzz	critical	1	gate passed	codex/rust-engine-r11a	159
 R11b	ydoc-live-adapter	2	R03;GATE0	packages/workspace-engine-client/src/ydoc*	adapter suite	critical	1	planned	-	-
 R12	search	2	R04	crates/dohc-engine-runtime/src/search*	ported	high	2	planned	-	-
 R06	compare-merge-conflicts-materialization	3	R05	crates/dohc-engine-domain/src/{merge,conflicts}*;crates/dohc-engine-files/src/materialize*	ported	critical	1	planned	-	-
