@@ -1,18 +1,21 @@
 //! Replicated conflict.open/conflict.resolve application.
 //!
-//! Conflict content writes/deletes replicate independently as ordered moment
-//! operations. This path mirrors the durable conflict object's inline text
-//! sides on open and its resolution metadata on resolve. For independently
-//! minted sync conflicts, current/incoming are swapped between peers, so the
-//! choice and resolution are mirrored before the row is closed. Binary sides
-//! remain explicitly fail-closed until their binary_blobs-backed schema exists.
+//! Conflict content writes/deletes normally replicate as ordered moment
+//! operations. A keep-current resolution has no origin-side content moment,
+//! however, so a mirrored sync resolve applies its recorded resolved text in
+//! this same transaction before closing the row. For independently minted sync
+//! conflicts, current/incoming are swapped between peers. Binary sides remain
+//! explicitly fail-closed until their binary_blobs-backed schema exists.
 
 use dohc_engine_domain::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
-    ConflictRowUpdate, ConflictStatus, DomainError, TextConflict, TextSnapshot,
-    insert_text_conflict_if_absent, update_text_conflict_row,
+    ConflictRowUpdate, ConflictStatus, DeleteTextFile, DomainError, TextConflict, TextSnapshot,
+    WriteText, delete_text_in_tx, enqueue_delete, enqueue_write, file_states_equal,
+    insert_text_conflict_if_absent, live_state_matches_conflict_current, load_text_conflict_in_tx,
+    select_text_snapshot_by_path_in_tx, update_text_conflict_row, validate_delete_input,
+    validate_write_input, write_text_in_tx,
 };
-use dohc_engine_storage::{EngineStore, FaultInjector};
+use dohc_engine_storage::{EngineStore, FaultInjector, Preimage};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Deserialize;
 
@@ -241,6 +244,7 @@ struct ResolvePayload {
     path: Option<String>,
     current_latest_moment_id: Option<String>,
     incoming_latest_moment_id: Option<String>,
+    resolved_text: Option<String>,
 }
 
 struct ResolveTarget {
@@ -298,6 +302,9 @@ fn apply_resolve(
             matched: true,
         });
     }
+    if target.metadata_origin == "sync" {
+        apply_mirrored_content(tx, envelope, &target.conflict_id, resolution, &payload)?;
+    }
     let changed = update_text_conflict_row(
         tx,
         &envelope.workspace_id,
@@ -315,6 +322,123 @@ fn apply_resolve(
         inserted: None,
         matched: changed,
     })
+}
+
+fn apply_mirrored_content(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    conflict_id: &str,
+    resolution: ConflictResolution,
+    payload: &ResolvePayload,
+) -> Result<(), SyncError> {
+    if resolution == ConflictResolution::KeptCurrent {
+        return Ok(());
+    }
+    let conflict = load_text_conflict_in_tx(tx, &envelope.workspace_id, conflict_id)
+        .map_err(map_domain)?
+        .ok_or(SyncError::InvalidInput {
+            reason: "replicated conflict target disappeared",
+        })?;
+    let live = ConflictFileState::text(
+        conflict.path.clone(),
+        select_text_snapshot_by_path_in_tx(
+            tx,
+            &envelope.workspace_id,
+            &conflict.target_version_id,
+            &conflict.path,
+        )
+        .map_err(map_domain)?,
+    );
+    if !live_state_matches_conflict_current(&live, &conflict.current) {
+        return Err(SyncError::InvalidInput {
+            reason: "mirrored conflict no longer matches live content",
+        });
+    }
+
+    match resolution {
+        ConflictResolution::KeptCurrent => Ok(()),
+        ConflictResolution::AppliedIncoming => {
+            if conflict.incoming.path != conflict.path {
+                return Err(SyncError::InvalidInput {
+                    reason: "mirrored incoming conflict path diverged",
+                });
+            }
+            if file_states_equal(&conflict.current.snapshot, &conflict.incoming.snapshot) {
+                return Ok(());
+            }
+            match &conflict.incoming.snapshot {
+                Some(incoming) => {
+                    apply_mirrored_write(tx, envelope, &conflict, &incoming.text, "incoming")
+                }
+                None if conflict.current.snapshot.is_some() => {
+                    let input = DeleteTextFile {
+                        workspace_id: envelope.workspace_id.clone(),
+                        version_id: conflict.target_version_id.clone(),
+                        path: conflict.path.clone(),
+                        moment_id: mirrored_id(envelope, "delete"),
+                        metadata_origin: "sync".to_owned(),
+                        author_json: None,
+                        now_ms: envelope.recorded_at_ms,
+                    };
+                    validate_delete_input(&input).map_err(map_domain)?;
+                    let result = delete_text_in_tx(tx, &input).map_err(map_domain)?;
+                    enqueue_delete(tx, &result, "sync-resolve").map_err(map_domain)
+                }
+                None => Ok(()),
+            }
+        }
+        ConflictResolution::AppliedMerged => {
+            let text = payload
+                .resolved_text
+                .as_deref()
+                .ok_or(SyncError::InvalidInput {
+                    reason: "mirrored merged resolution is missing resolved text",
+                })?;
+            apply_mirrored_write(tx, envelope, &conflict, text, "merged")
+        }
+    }
+}
+
+fn apply_mirrored_write(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    conflict: &TextConflict,
+    text: &str,
+    id_kind: &str,
+) -> Result<(), SyncError> {
+    let input = WriteText {
+        workspace_id: envelope.workspace_id.clone(),
+        version_id: conflict.target_version_id.clone(),
+        object_id: mirrored_id(envelope, "object"),
+        path: conflict.path.clone(),
+        text: text.to_owned(),
+        moment_id: mirrored_id(envelope, id_kind),
+        metadata_origin: "sync".to_owned(),
+        author_json: None,
+        now_ms: envelope.recorded_at_ms,
+        request_id: None,
+    };
+    validate_write_input(&input).map_err(map_domain)?;
+    let result = write_text_in_tx(tx, &input).map_err(map_domain)?;
+    let preimage = conflict
+        .current
+        .snapshot
+        .as_ref()
+        .map_or(Preimage::Absent, |snapshot| {
+            Preimage::Present(snapshot.blob_sha256.clone())
+        });
+    enqueue_write(tx, &result, preimage, "sync-resolve").map_err(map_domain)
+}
+
+fn mirrored_id(envelope: &ReplicationEnvelope, kind: &str) -> String {
+    let seed = format!(
+        "{}:{}:{}:{kind}",
+        envelope.workspace_id, envelope.origin_id, envelope.origin_seq
+    );
+    format!(
+        "sync-conflict-{kind}-{}",
+        dohc_engine_storage::hex_sha256(seed.as_bytes())
+    )
 }
 
 fn resolve_target(
@@ -442,7 +566,7 @@ fn map_domain(error: DomainError) -> SyncError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dohc_engine_domain::{ConflictChoice, ConflictResolution, VersionedTextStore};
+    use dohc_engine_domain::{ConflictChoice, ConflictResolution, VersionedTextStore, WriteText};
     use dohc_engine_storage::NoFaults;
     use dohc_engine_testkit::ScratchDir;
     use serde_json::json;
@@ -498,6 +622,70 @@ mod tests {
         })
     }
 
+    fn mirrored_open_payload(id: &str, current: &str, incoming: &str) -> serde_json::Value {
+        let side = |text: &str, object_id: &str, moment_id: &str, updated_at_ms: i64| {
+            json!({
+                "exists": true,
+                "path": "doc.md",
+                "objectId": object_id,
+                "contentKind": "text",
+                "text": text,
+                "updatedAtMs": updated_at_ms,
+                "latestMomentId": moment_id,
+                "metadata": { "origin": "sync" }
+            })
+        };
+        json!({
+            "id": id,
+            "workspaceId": "ws",
+            "path": "doc.md",
+            "targetVersionId": "main",
+            "sourceVersionId": "peer",
+            "createdAtMs": 2_000,
+            "updatedAtMs": 2_000,
+            "base": { "exists": false, "path": "doc.md", "contentKind": "text" },
+            "current": side(current, "current-object", "current-moment", 1_500),
+            "incoming": side(incoming, "incoming-object", "incoming-moment", 1_900),
+            "status": "open",
+            "chosenFrom": "current",
+            "metadata": { "origin": "sync" }
+        })
+    }
+
+    fn seed_current(store: &mut EngineStore, text: &str) {
+        VersionedTextStore::new(store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "current-object".to_owned(),
+                    path: "doc.md".to_owned(),
+                    text: text.to_owned(),
+                    moment_id: "current-moment".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    author_json: None,
+                    now_ms: 1_500,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("seed current text");
+    }
+
+    fn read_text(store: &mut EngineStore) -> String {
+        VersionedTextStore::new(store)
+            .read_text("ws", "main", "doc.md")
+            .expect("read text")
+            .expect("snapshot")
+            .text
+    }
+
+    fn moment_count(store: &EngineStore) -> i64 {
+        store
+            .read_with(|conn| conn.query_row("SELECT COUNT(*) FROM moments", [], |row| row.get(0)))
+            .expect("moment count")
+    }
+
     fn replication_counts(store: &EngineStore) -> (i64, i64, i64) {
         store
             .read_with(|conn| {
@@ -550,13 +738,14 @@ mod tests {
     }
 
     #[test]
-    fn conflict_resolve_mirror_apply_converges_on_remote_side_choice() {
+    fn mirrored_keep_current_resolve_applies_incoming_content_on_receiver() {
         let (_scratch, mut store) = store();
+        seed_current(&mut store, "receiver current");
         let open = envelope(
             "peer",
             0,
             "conflict.open",
-            open_payload("sync-c", "sync", false),
+            mirrored_open_payload("sync-c", "receiver current", "origin current"),
         );
         apply_conflict_envelope(&mut store, &open, &NoFaults).expect("open");
         let resolve = envelope(
@@ -586,6 +775,88 @@ mod tests {
             rows[0].resolution,
             Some(ConflictResolution::AppliedIncoming)
         );
+        assert_eq!(read_text(&mut store), "origin current");
+    }
+
+    #[test]
+    fn mirrored_apply_merged_resolve_applies_resolved_content_on_receiver() {
+        let (_scratch, mut store) = store();
+        seed_current(&mut store, "receiver current");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                0,
+                "conflict.open",
+                mirrored_open_payload("merged-c", "receiver current", "origin current"),
+            ),
+            &NoFaults,
+        )
+        .expect("open");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                1,
+                "conflict.resolve",
+                json!({
+                    "conflictId": "merged-c",
+                    "status": "resolved",
+                    "chosenFrom": "merged",
+                    "resolution": "applied-merged",
+                    "resolvedText": "shared merged text",
+                    "updatedAtMs": 3_000,
+                    "targetVersionId": "main"
+                }),
+            ),
+            &NoFaults,
+        )
+        .expect("resolve");
+        assert_eq!(read_text(&mut store), "shared merged text");
+        let rows = VersionedTextStore::new(&mut store)
+            .list_text_conflicts("ws", Some("resolved"))
+            .expect("list");
+        assert_eq!(rows[0].resolution, Some(ConflictResolution::AppliedMerged));
+    }
+
+    #[test]
+    fn repeated_identical_mirrored_resolve_does_not_double_write_or_clobber() {
+        let (_scratch, mut store) = store();
+        seed_current(&mut store, "receiver current");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer-open",
+                0,
+                "conflict.open",
+                mirrored_open_payload("repeat-c", "receiver current", "origin current"),
+            ),
+            &NoFaults,
+        )
+        .expect("open");
+        let payload = json!({
+            "conflictId": "repeat-c",
+            "status": "resolved",
+            "chosenFrom": "current",
+            "resolution": "kept-current",
+            "updatedAtMs": 3_000,
+            "targetVersionId": "main"
+        });
+        apply_conflict_envelope(
+            &mut store,
+            &envelope("peer-a", 0, "conflict.resolve", payload.clone()),
+            &NoFaults,
+        )
+        .expect("first resolve");
+        let after_first = moment_count(&store);
+        apply_conflict_envelope(
+            &mut store,
+            &envelope("peer-b", 0, "conflict.resolve", payload),
+            &NoFaults,
+        )
+        .expect("identical resolve");
+        assert_eq!(moment_count(&store), after_first);
+        assert_eq!(read_text(&mut store), "origin current");
     }
 
     #[test]
@@ -750,5 +1021,57 @@ mod tests {
             .expect_err("binary side must fail closed");
         assert!(matches!(error, SyncError::InvalidInput { .. }));
         assert_eq!(replication_counts(&store), (0, 0, 0));
+    }
+
+    #[test]
+    fn mirrored_resolve_with_binary_side_fails_closed() {
+        let (_scratch, mut store) = store();
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                0,
+                "conflict.open",
+                open_payload("binary-resolve", "sync", false),
+            ),
+            &NoFaults,
+        )
+        .expect("open text conflict");
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE conflicts SET incoming_content_kind = 'binary' \
+                     WHERE workspace_id = 'ws' AND conflict_id = 'binary-resolve'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("mark binary side");
+        let error = apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                1,
+                "conflict.resolve",
+                json!({
+                    "conflictId": "binary-resolve",
+                    "status": "resolved",
+                    "chosenFrom": "current",
+                    "resolution": "kept-current",
+                    "updatedAtMs": 3_000,
+                    "targetVersionId": "main"
+                }),
+            ),
+            &NoFaults,
+        )
+        .expect_err("binary resolve must fail closed");
+        assert!(matches!(error, SyncError::InvalidInput { .. }));
+        let rows = VersionedTextStore::new(&mut store)
+            .list_text_conflicts("ws", Some("open"))
+            .expect("list open conflict");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, ConflictStatus::Open);
+        assert_eq!(replication_counts(&store), (1, 1, 1));
     }
 }

@@ -8,12 +8,12 @@
 //!
 //! The public `Update` API does not expose item origins in yrs 0.27.3, so this
 //! gate walks the v1 wire with yrs' own public `DecoderV1` primitives. It first
-//! lets `Update::decode_v1` validate the whole update, then records every clock
-//! strictly inside a multi-unit scalar from both the durable base and candidate
-//! string blocks. Candidate left/right origins and delete-range endpoints must
-//! not name those clocks. Finally the candidate is applied to a scratch clone;
-//! dependency-complete replay must integrate every clock claimed by the
-//! candidate. The live/durable document is never mutated.
+//! lets `Update::decode_v1` validate the whole update, then applies the candidate
+//! to a scratch clone with the durable base's parked updates restored. Every
+//! newly integrated edit boundary is checked against the full resulting scalar
+//! structure. Finally, dependency-complete replay must either integrate or park
+//! every clock claimed by the candidate. The live/durable document is never
+//! mutated.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -43,29 +43,33 @@ struct WireStructure {
 /// identically between Yjs' UTF-16 strings and yrs' Rust strings.
 pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), CollabError> {
     Ydoc::validate_update(candidate)?;
-    let base_bytes = base.encode_full_state();
-    let base_structure = scan_v1(&base_bytes)?;
-    let candidate_structure = scan_v1(candidate)?;
+    let base_full = base.encode_full_state();
+    let base_integrated_sv = base.encode_state_vector();
 
-    let mut unsafe_boundaries = base_structure.unsafe_boundaries;
-    unsafe_boundaries.extend(candidate_structure.unsafe_boundaries);
-    let unsafe_insertion = candidate_structure
+    let scratch = Ydoc::wire();
+    scratch.apply(&base_full)?;
+    if let Some(pending) = base.pending_update_v1() {
+        scratch.apply(&pending)?;
+    }
+    scratch.apply(candidate)?;
+
+    let delta = scratch.diff(&base_integrated_sv)?;
+    let delta_structure = scan_v1(&delta)?;
+    let scratch_full = scratch.encode_full_state();
+    let scratch_structure = scan_v1(&scratch_full)?;
+    let unsafe_boundary = delta_structure
         .insertion_boundaries
         .iter()
-        .any(|boundary| unsafe_boundaries.contains(boundary));
-    let unsafe_deletion = candidate_structure
-        .deletion_boundaries
-        .iter()
-        .any(|boundary| unsafe_boundaries.contains(boundary));
-    if unsafe_insertion || unsafe_deletion {
+        .chain(delta_structure.deletion_boundaries.iter())
+        .any(|boundary| scratch_structure.unsafe_boundaries.contains(boundary));
+    if unsafe_boundary {
+        // Rejecting the dependency apply leaves the divergent parked edit quarantined.
         return Err(CollabError::ReplayParityViolation {
             reason: "an edit boundary lands inside a multi-unit Unicode scalar".to_owned(),
         });
     }
 
-    let scratch = Ydoc::wire();
-    scratch.apply(&base_bytes)?;
-    scratch.apply(candidate)?;
+    let candidate_structure = scan_v1(candidate)?;
     let pending_ends = match scratch.pending_update_v1() {
         Some(bytes) => scan_v1(&bytes)?.claimed_clocks,
         None => BTreeMap::new(),

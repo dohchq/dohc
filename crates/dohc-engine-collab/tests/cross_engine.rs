@@ -356,6 +356,47 @@ fn replay_parity_gate_rejects_surrogate_probe_bypass1_before_journal() {
 }
 
 #[test]
+fn replay_parity_rejects_parked_interior_split_on_dependency_arrival() {
+    let fx = load_fixture("surrogateProbe");
+    let (mut ts, key) = setup_parity_store("parked-surrogate-split", Regime::Replicated);
+    let dependency = decode_b64(&fx.updates[0]);
+    let split = decode_b64(&fx.updates[1]);
+
+    apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "split-peer".to_owned(),
+            origin_seq: 1,
+            bytes: split,
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect("missing emoji dependency must park the split update");
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+
+    let error = apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "dependency-peer".to_owned(),
+            origin_seq: 1,
+            bytes: dependency,
+        },
+        &NoFaults,
+        1_002,
+    )
+    .expect_err("dependency arrival must reject the newly integrated split");
+    assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(persisted.doc.plaintext_string(), "");
+}
+
+#[test]
 fn replay_parity_rejects_overlap_slice_divergence_on_local_path() {
     let (mut ts, key) = setup_parity_store("overlap-slice-local", Regime::LocalOnly);
     let u1 = decode_hex(OVERLAP_U1_HEX);

@@ -48,8 +48,9 @@ pub use chats::{
 pub use conflicts::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
     ConflictRowUpdate, ConflictStatus, ResolveConflictKind, ResolveTextConflict,
-    ResolveTextConflictResult, TextConflict, insert_text_conflict_if_absent,
-    live_state_matches_conflict_current, update_text_conflict_row,
+    ResolveTextConflictResult, TextConflict, enqueue_delete, enqueue_write,
+    insert_text_conflict_if_absent, live_state_matches_conflict_current, load_text_conflict_in_tx,
+    select_text_snapshot_by_path_in_tx, update_text_conflict_row,
 };
 pub use error::DomainError;
 pub use merge::{
@@ -68,7 +69,10 @@ pub use secrets::{
     SecretDelete, SecretFileStat, SecretFileStore, SecretMomentRecord, SecretOp, SecretWrite,
     SecretWriteResult,
 };
-pub use store::{MAX_TEXT_BYTES, VersionedTextStore};
+pub use store::{
+    MAX_TEXT_BYTES, VersionedTextStore, delete_text_in_tx, validate_delete_input,
+    validate_write_input, write_text_in_tx,
+};
 
 // Re-export the storage surface a domain caller needs on the common path.
 pub use dohc_engine_storage::{EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome};
