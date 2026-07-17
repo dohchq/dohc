@@ -1038,3 +1038,216 @@ fn validate_replay_parity_for_test(seeded: &Ydoc, hostile: &[u8]) -> Result<(), 
     .expect("seed base into store");
     record_local_update(&mut ts.store, &key, hostile, &NoFaults, 1_002).map(|_| ())
 }
+
+// ---- cross-type redefinition (CodeRabbit gap: kind-change evades string-only
+// content-parity) --------------------------------------------------------------
+//
+// A hostile peer can re-encode an existing STRING clock `(client, clock)` as a
+// DIFFERENT content KIND — JSON, binary, embed, format, a Type, or deleted —
+// evading a string-only units comparison (no string units to compare) while
+// the scratch state vector still marks the clock covered (union-coverage
+// passes). yrs dedup-by-ID vs a from-scratch yjs peer can render it
+// divergently, the same threat model as the string-content residual. The gate
+// tracks a per-clock structural identity for ALL kinds, so a kind change at a
+// known live clock is rejected.
+
+/// A length-prefixed lib0 string (1-byte length is valid for the short test
+/// payloads here). Used to hand-build `read_string`/`read_json`/`read_key`
+/// fields in adversarial candidate wire bytes.
+fn lib0_string(s: &str) -> Vec<u8> {
+    let mut out = vec![s.len() as u8];
+    out.extend_from_slice(s.as_bytes());
+    out
+}
+
+/// Build a candidate v1 update that re-encodes the SAME `(client, clock=0)` as
+/// `base` (a `plaintext_insert(0, "a")` string block) but with a different
+/// content kind. Reuses `base`'s exact client/clock/parent header (so the
+/// candidate collides on the id) and swaps the info byte's content-ref nibble
+/// (`base` has no origin/parent-sub bits set, so the low nibble IS the kind and
+/// the high bits stay zero), then appends the kind's content payload and an
+/// empty delete set.
+fn redefine_string_clock_as(base: &[u8], content_ref: u8, content_payload: &[u8]) -> Vec<u8> {
+    let marker = b"plainText";
+    let marker_at = base
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .expect("plainText root marker present in base");
+    let info_at = marker_at - 3; // info, parent_info(0x01), strlen(0x09), name...
+    assert_eq!(
+        base[info_at], 0x04,
+        "base info byte is a no-origin String item"
+    );
+    assert_eq!(base[marker_at - 2], 0x01, "parent_info(true)");
+    assert_eq!(base[marker_at - 1], 0x09, "plainText length prefix");
+    let header_end = marker_at + marker.len();
+    let mut out = base[..header_end].to_vec();
+    out[info_at] = content_ref; // swap String -> content_ref (high bits stay 0)
+    out.extend_from_slice(content_payload);
+    out.push(0x00); // empty delete set
+    out
+}
+
+/// The six cross-type redefinition payloads the reviewer named, each claiming
+/// the base's string clock as a different content kind.
+fn cross_type_redefinition_cases() -> Vec<(&'static str, u8, Vec<u8>)> {
+    let deleted = vec![0x01u8]; // ContentDeleted: read_len = 1 (one tombstone clock)
+    let json = {
+        // ContentJSON decodes `read_len + 1` strings; read_len=0 → one JSON
+        // string → one clock (colliding with the base's clock 0).
+        let mut p = vec![0x00u8];
+        p.extend_from_slice(&lib0_string("\"b\""));
+        p
+    };
+    let binary = vec![0x01u8, b'b']; // ContentBinary: read_buf len=1, one byte
+    let embed = lib0_string("true"); // ContentEmbed: read_json = a JSON string
+    let format = {
+        // ContentFormat: read_key (string) + read_json (JSON string).
+        let mut p = lib0_string("b");
+        p.extend_from_slice(&lib0_string("true"));
+        p
+    };
+    let type_ref = vec![0x01u8]; // ContentType: TypeRef::Map (TYPE_REFS_MAP = 1)
+    vec![
+        ("deleted", 1, deleted),
+        ("json", 2, json),
+        ("binary", 3, binary),
+        ("embed", 5, embed),
+        ("format", 6, format),
+        ("type", 7, type_ref),
+    ]
+}
+
+#[test]
+fn replay_parity_rejects_cross_type_redefinition_on_both_paths() {
+    for (name, content_ref, payload) in cross_type_redefinition_cases() {
+        let producer = Ydoc::wire();
+        let base = producer.plaintext_insert(0, "a");
+        let candidate = redefine_string_clock_as(&base, content_ref, &payload);
+        let candidate_sha = dohc_engine_collab::hex_sha256(&candidate);
+
+        // Local path.
+        let (mut local, lkey) =
+            setup_parity_store(&format!("xtype-{name}-local"), Regime::LocalOnly);
+        record_local_update(&mut local.store, &lkey, &base, &NoFaults, 1_001)
+            .expect("string base accepted");
+        let err = record_local_update(&mut local.store, &lkey, &candidate, &NoFaults, 1_002)
+            .expect_err(&format!("{name} local must reject the kind change"));
+        assert!(
+            matches!(err, CollabError::ReplayParityViolation { .. }),
+            "{name} local: {err:?}"
+        );
+        assert_eq!(count(&local.store, "ydoc_updates", &lkey), 1);
+        assert!(
+            local
+                .store
+                .get_binary_blob(&candidate_sha)
+                .expect("blob lookup")
+                .is_none(),
+            "{name} local: rejected redefinition must not reach the blob store"
+        );
+
+        // Remote path.
+        let (mut remote, rkey) =
+            setup_parity_store(&format!("xtype-{name}-remote"), Regime::Replicated);
+        apply_remote_update(
+            &mut remote.store,
+            &rkey,
+            &RemoteUpdate {
+                origin_id: "peer".to_owned(),
+                origin_seq: 1,
+                bytes: base.clone(),
+            },
+            &NoFaults,
+            1_001,
+        )
+        .expect("remote string base accepted");
+        let rerr = apply_remote_update(
+            &mut remote.store,
+            &rkey,
+            &RemoteUpdate {
+                origin_id: "peer".to_owned(),
+                origin_seq: 2,
+                bytes: candidate.clone(),
+            },
+            &NoFaults,
+            1_002,
+        )
+        .expect_err(&format!("{name} remote must reject the kind change"));
+        assert!(
+            matches!(rerr, CollabError::ReplayParityViolation { .. }),
+            "{name} remote: {rerr:?}"
+        );
+        assert_eq!(count(&remote.store, "ydoc_updates", &rkey), 1);
+        assert!(
+            remote
+                .store
+                .get_binary_blob(&candidate_sha)
+                .expect("blob lookup")
+                .is_none(),
+            "{name} remote: rejected redefinition must not reach the blob store"
+        );
+    }
+}
+
+#[test]
+fn replay_parity_accepts_same_kind_same_payload_resend_for_each_content_kind() {
+    // Positive control / no-false-positive: a full-state RESEND that re-encodes
+    // an existing clock with the SAME kind + SAME payload must ACCEPT. Build a
+    // single-item doc of each non-string content kind directly on an empty
+    // lineage (the item lands at clock 0), then resend the identical bytes; the
+    // gate must accept (the second record dedups). Covers a doc that
+    // legitimately contains embed / format content, plus binary and type.
+    for (name, content_ref, payload) in cross_type_redefinition_cases() {
+        // `deleted` is a lone tombstone, not a meaningful "content" doc.
+        // `json` (legacy ContentJSON) cannot round-trip durably in yrs 0.27.3:
+        // its encoder writes `write_len(N)` + N strings but its decoder reads
+        // `read_len` + N+1 strings, so a re-encoded JSON lineage is not
+        // re-decodable — no honest doc ever carries it (yjs replaced it with
+        // ContentAny). It stays covered by the REJECTION test above.
+        if name == "deleted" || name == "json" {
+            continue;
+        }
+        // A no-origin, named-root single item of this kind at (client, 0).
+        let producer = Ydoc::wire();
+        let string_base = producer.plaintext_insert(0, "a");
+        let doc_update = redefine_string_clock_as(&string_base, content_ref, &payload);
+
+        let (mut ts, key) = setup_parity_store(&format!("resend-{name}"), Regime::LocalOnly);
+        let first = record_local_update(&mut ts.store, &key, &doc_update, &NoFaults, 1_001)
+            .unwrap_or_else(|e| panic!("{name} base must be accepted, got: {e:?}"));
+        assert!(
+            matches!(first, TxnOutcome::Committed(ref a) if !a.deduped),
+            "{name} base committed"
+        );
+        let resend = record_local_update(&mut ts.store, &key, &doc_update, &NoFaults, 1_002)
+            .unwrap_or_else(|e| panic!("{name} same-kind same-payload resend must accept: {e:?}"));
+        assert!(
+            matches!(resend, TxnOutcome::Committed(ref a) if a.deduped),
+            "{name} resend dedups (no false positive)"
+        );
+        assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+    }
+}
+
+#[test]
+fn replay_parity_accepts_embed_resend_with_reordered_map_keys() {
+    // The make-or-break false-positive boundary for the payload fingerprint: a
+    // legitimate resend can re-encode an embed's map value with a DIFFERENT key
+    // order (yrs `Any::Map` is HashMap-backed — constraint 2). The canonical
+    // fingerprint sorts nested keys, so `{"a":1,"b":2}` and `{"b":2,"a":1}` are
+    // the SAME payload and the resend must ACCEPT. (A raw-byte fingerprint would
+    // false-reject this.)
+    let producer = Ydoc::wire();
+    let string_base = producer.plaintext_insert(0, "a");
+    let base = redefine_string_clock_as(&string_base, 5, &lib0_string("{\"a\":1,\"b\":2}"));
+    let reordered = redefine_string_clock_as(&string_base, 5, &lib0_string("{\"b\":2,\"a\":1}"));
+
+    let (mut ts, key) = setup_parity_store("embed-reordered-map", Regime::LocalOnly);
+    record_local_update(&mut ts.store, &key, &base, &NoFaults, 1_001).expect("embed base accepted");
+    let outcome = record_local_update(&mut ts.store, &key, &reordered, &NoFaults, 1_002)
+        .expect("a same-map different-key-order embed resend must not be false-rejected");
+    // Same logical embed, re-encoded: the gate accepts. Whether yrs dedups the
+    // reordered bytes or journals them, it must NOT be a parity violation.
+    assert!(matches!(outcome, TxnOutcome::Committed(_)));
+}

@@ -556,7 +556,7 @@ fn diffs_json<D>(diffs: Vec<yrs::types::text::Diff<D>>) -> Value {
     Value::Array(items)
 }
 
-fn any_to_json(any: &Any) -> Value {
+pub(crate) fn any_to_json(any: &Any) -> Value {
     match any {
         Any::Null | Any::Undefined => Value::Null,
         Any::Bool(b) => json!(b),

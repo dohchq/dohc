@@ -61,9 +61,42 @@ use yrs::block::{
 use yrs::encoding::read::Read;
 use yrs::types::TypeRef;
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
-use yrs::{ClientID, IdSet, Options, Update};
+use yrs::updates::encoder::Encode;
+use yrs::{Any, ClientID, IdSet, Options, Update};
 
 use crate::{CollabError, Ydoc};
+
+/// The structural identity of one clock's content, for the content-parity
+/// check. Two wires that both hold LIVE (rendering) content at the same
+/// `(client, clock)` must present the identical identity; a hostile re-encode
+/// that changes the KIND or the PAYLOAD at an already-known clock is rejected.
+/// No honest peer ever redefines a clock it (or its dependency) has already
+/// used, so a mismatch can only be hostile/corrupt input.
+#[derive(Clone, PartialEq, Eq)]
+enum ClockIdentity {
+    /// A single UTF-16 code unit of a live `String` content block — the
+    /// original surrogate/FFFD-adjacent risk class, kept as the string case of
+    /// the general check.
+    StringUnit(u16),
+    /// A live non-string content item, by structural kind tag (the content-ref
+    /// number) plus a canonical, order-independent payload fingerprint (hex
+    /// sha-256). A different kind never compares equal (the tag differs); a
+    /// same-kind different-payload item never compares equal (the fingerprint
+    /// differs). Covers JSON, binary, embed, format, type, doc, and any.
+    Typed { kind: u8, payload: String },
+    /// A `ContentDeleted` tombstone item — renders nothing. NOT a live
+    /// identity: a clock that is a tombstone on the ESTABLISHED side "renders
+    /// neither way," so a resend that references it must not be false-rejected
+    /// (the reviewer's compacted/GC'd-tombstone note).
+    Tombstone,
+}
+
+impl ClockIdentity {
+    /// Whether this identity is live, rendering content (not a tombstone).
+    fn is_live(&self) -> bool {
+        !matches!(self, ClockIdentity::Tombstone)
+    }
+}
 
 #[derive(Default)]
 struct WireStructure {
@@ -71,11 +104,12 @@ struct WireStructure {
     insertion_boundaries: Vec<ID>,
     deletion_boundaries: Vec<ID>,
     claimed_clocks: BTreeMap<ClientID, u32>,
-    /// Every UTF-16 code unit a `String` content block in this wire claims, by
-    /// `(client, clock)`. Populated only for text content (constraint 3's
-    /// surrogate/FFFD-adjacent risk class) — the content-parity check compares
-    /// these across wires at overlapping clocks.
-    content_units: BTreeMap<ClientID, BTreeMap<u32, u16>>,
+    /// The structural identity every content block in this wire claims, by
+    /// `(client, clock)`. Covers ALL content kinds (string, JSON, binary,
+    /// embed, format, type, doc, any) plus `ContentDeleted` tombstones — the
+    /// content-parity check compares these across wires at overlapping clocks
+    /// so a candidate cannot redefine an already-known clock's kind or payload.
+    identities: BTreeMap<ClientID, BTreeMap<u32, ClockIdentity>>,
 }
 
 #[cfg(test)]
@@ -123,20 +157,22 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<(), Col
         None => WireStructure::default(),
     };
 
-    // (1) Content parity: a candidate that re-encodes a clock the base or a
-    // still-parked update already claims MUST carry identical content. yrs
-    // dedups a re-encoded id by silently keeping its first-seen item; a
-    // from-scratch Yjs peer replaying the same lineage can resolve the
-    // conflicting redefinition differently. No honest peer ever redefines a
-    // `(client, clock)` it (or its dependency) has already used, so this can
-    // only reject a hostile/corrupt input.
-    if content_parity_conflict(
-        &candidate_structure.content_units,
-        &base_structure.content_units,
-    ) || content_parity_conflict(
-        &candidate_structure.content_units,
-        &pending_structure.content_units,
-    ) {
+    // (1) Content parity (ALL content kinds, not just strings): a candidate
+    // that re-encodes a clock the base or a still-parked update already holds
+    // as LIVE content MUST present the identical structural identity — same
+    // KIND and same canonical PAYLOAD. yrs dedups a re-encoded id by silently
+    // keeping its first-seen item; a from-scratch Yjs peer replaying the same
+    // lineage can resolve the conflicting redefinition differently, whether it
+    // changes a string's units OR swaps the content kind entirely (string ->
+    // JSON / binary / embed / format / type / deleted, etc.). No honest peer
+    // ever redefines a `(client, clock)` it (or its dependency) has already
+    // used, so this can only reject a hostile/corrupt input.
+    if content_parity_conflict(&candidate_structure.identities, &base_structure.identities)
+        || content_parity_conflict(
+            &candidate_structure.identities,
+            &pending_structure.identities,
+        )
+    {
         return Err(CollabError::ReplayParityViolation {
             reason: "a candidate re-encodes an already-known clock with different content"
                 .to_owned(),
@@ -222,26 +258,58 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<(), Col
     Ok(())
 }
 
-/// True when `left` and `right` claim different UTF-16 units at the same
-/// `(client, clock)` — a hostile/corrupt redefinition of an id one side
-/// already owns.
+/// True when `candidate` redefines a clock the ESTABLISHED side (`base` or a
+/// still-parked update) already holds as LIVE content, with a different
+/// identity (kind or payload). Asymmetric on purpose: only a clock that is
+/// LIVE on the established side is compared. A clock the established side holds
+/// as a tombstone (`ContentDeleted`) "renders neither way," so a resend that
+/// references or re-encodes it is never false-rejected (the reviewer's
+/// compacted/GC'd-tombstone note); a clock the established side never claims is
+/// new and untouched here. No honest peer ever redefines an already-used
+/// clock's kind or payload, so a match here can only be hostile/corrupt input.
 fn content_parity_conflict(
-    left: &BTreeMap<ClientID, BTreeMap<u32, u16>>,
-    right: &BTreeMap<ClientID, BTreeMap<u32, u16>>,
+    candidate: &BTreeMap<ClientID, BTreeMap<u32, ClockIdentity>>,
+    established: &BTreeMap<ClientID, BTreeMap<u32, ClockIdentity>>,
 ) -> bool {
-    for (client, units) in left {
-        let Some(known) = right.get(client) else {
+    for (client, known) in established {
+        let Some(claimed) = candidate.get(client) else {
             continue;
         };
-        for (clock, unit) in units {
-            if let Some(existing) = known.get(clock) {
-                if existing != unit {
+        for (clock, established_identity) in known {
+            if !established_identity.is_live() {
+                continue; // tombstone on the established side: renders neither way
+            }
+            if let Some(candidate_identity) = claimed.get(clock) {
+                if candidate_identity != established_identity {
                     return true;
                 }
             }
         }
     }
     false
+}
+
+/// A canonical, order-independent fingerprint of a JSON-ish `Any` value: the
+/// sorted-key serde projection (`any_to_json` sorts every nested map via
+/// `BTreeMap` — constraint 2) serialized and hashed. Two encodings of the same
+/// logical value fingerprint identically even if yrs re-encoded a map's keys in
+/// a different order, so a legitimate full-state resend is never false-flagged.
+fn any_payload(value: &Any) -> String {
+    let canonical = serde_json::to_vec(&crate::ydoc::any_to_json(value)).unwrap_or_default();
+    crate::hex_sha256(&canonical)
+}
+
+fn record_identity(
+    structure: &mut WireStructure,
+    client: ClientID,
+    clock: u32,
+    identity: ClockIdentity,
+) {
+    structure
+        .identities
+        .entry(client)
+        .or_default()
+        .insert(clock, identity);
 }
 
 fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
@@ -351,16 +419,48 @@ fn scan_content(
     structure: &mut WireStructure,
 ) -> Result<u32, CollabError> {
     match content_ref {
-        BLOCK_ITEM_DELETED_REF_NUMBER => decoder.read_len().map_err(parity_decode_error),
-        BLOCK_ITEM_JSON_REF_NUMBER => {
+        BLOCK_ITEM_DELETED_REF_NUMBER => {
+            // A deleted-content item: `len` tombstone clocks (render nothing).
             let len = decoder.read_len().map_err(parity_decode_error)?;
-            for _ in 0..len {
-                let _ = decoder.read_string().map_err(parity_decode_error)?;
+            for i in 0..len {
+                let clock = id.clock.checked_add(i).ok_or_else(parity_clock_overflow)?;
+                record_identity(structure, id.client, clock, ClockIdentity::Tombstone);
             }
             Ok(len)
         }
+        BLOCK_ITEM_JSON_REF_NUMBER => {
+            // `ContentJson` decodes `read_len() + 1` pre-serialized JSON strings
+            // (yrs loops `while remaining >= 0`), one clock each; the item
+            // length is that string count. The stored string IS the canonical
+            // form (yjs stores ContentJSON serialized).
+            let count = decoder.read_len().map_err(parity_decode_error)?;
+            let strings = count.checked_add(1).ok_or_else(parity_clock_overflow)?;
+            for i in 0..strings {
+                let text = decoder.read_string().map_err(parity_decode_error)?;
+                let clock = id.clock.checked_add(i).ok_or_else(parity_clock_overflow)?;
+                record_identity(
+                    structure,
+                    id.client,
+                    clock,
+                    ClockIdentity::Typed {
+                        kind: content_ref,
+                        payload: crate::hex_sha256(text.as_bytes()),
+                    },
+                );
+            }
+            Ok(strings)
+        }
         BLOCK_ITEM_BINARY_REF_NUMBER => {
-            let _ = decoder.read_buf().map_err(parity_decode_error)?;
+            let bytes = decoder.read_buf().map_err(parity_decode_error)?;
+            record_identity(
+                structure,
+                id.client,
+                id.clock,
+                ClockIdentity::Typed {
+                    kind: content_ref,
+                    payload: crate::hex_sha256(bytes),
+                },
+            );
             Ok(1)
         }
         BLOCK_ITEM_STRING_REF_NUMBER => {
@@ -375,11 +475,12 @@ fn scan_content(
                         .checked_add(offset)
                         .and_then(|value| value.checked_add(interior as u32))
                         .ok_or_else(parity_clock_overflow)?;
-                    structure
-                        .content_units
-                        .entry(id.client)
-                        .or_default()
-                        .insert(clock, *unit);
+                    record_identity(
+                        structure,
+                        id.client,
+                        clock,
+                        ClockIdentity::StringUnit(*unit),
+                    );
                     if interior > 0 {
                         structure
                             .unsafe_boundaries
@@ -393,27 +494,82 @@ fn scan_content(
             Ok(offset)
         }
         BLOCK_ITEM_EMBED_REF_NUMBER => {
-            let _ = decoder.read_json().map_err(parity_decode_error)?;
+            let value = decoder.read_json().map_err(parity_decode_error)?;
+            record_identity(
+                structure,
+                id.client,
+                id.clock,
+                ClockIdentity::Typed {
+                    kind: content_ref,
+                    payload: any_payload(&value),
+                },
+            );
             Ok(1)
         }
         BLOCK_ITEM_FORMAT_REF_NUMBER => {
-            let _ = decoder.read_key().map_err(parity_decode_error)?;
-            let _ = decoder.read_json().map_err(parity_decode_error)?;
+            let key = decoder.read_key().map_err(parity_decode_error)?;
+            let value = decoder.read_json().map_err(parity_decode_error)?;
+            // Canonicalize (key, value) together: key bytes, a NUL separator
+            // (keys cannot contain NUL), then the order-independent Any payload.
+            let mut canonical = key.as_bytes().to_vec();
+            canonical.push(0);
+            canonical.extend_from_slice(
+                serde_json::to_vec(&crate::ydoc::any_to_json(&value))
+                    .unwrap_or_default()
+                    .as_slice(),
+            );
+            record_identity(
+                structure,
+                id.client,
+                id.clock,
+                ClockIdentity::Typed {
+                    kind: content_ref,
+                    payload: crate::hex_sha256(&canonical),
+                },
+            );
             Ok(1)
         }
         BLOCK_ITEM_TYPE_REF_NUMBER => {
-            let _ = TypeRef::decode(decoder).map_err(parity_decode_error)?;
+            let type_ref = TypeRef::decode(decoder).map_err(parity_decode_error)?;
+            record_identity(
+                structure,
+                id.client,
+                id.clock,
+                ClockIdentity::Typed {
+                    kind: content_ref,
+                    payload: crate::hex_sha256(&type_ref.encode_v1()),
+                },
+            );
             Ok(1)
         }
         BLOCK_ITEM_ANY_REF_NUMBER => {
             let len = decoder.read_len().map_err(parity_decode_error)?;
-            for _ in 0..len {
-                let _ = decoder.read_any().map_err(parity_decode_error)?;
+            for i in 0..len {
+                let value = decoder.read_any().map_err(parity_decode_error)?;
+                let clock = id.clock.checked_add(i).ok_or_else(parity_clock_overflow)?;
+                record_identity(
+                    structure,
+                    id.client,
+                    clock,
+                    ClockIdentity::Typed {
+                        kind: content_ref,
+                        payload: any_payload(&value),
+                    },
+                );
             }
             Ok(len)
         }
         BLOCK_ITEM_DOC_REF_NUMBER => {
-            let _ = Options::decode(decoder).map_err(parity_decode_error)?;
+            let options = Options::decode(decoder).map_err(parity_decode_error)?;
+            record_identity(
+                structure,
+                id.client,
+                id.clock,
+                ClockIdentity::Typed {
+                    kind: content_ref,
+                    payload: crate::hex_sha256(&options.encode_v1()),
+                },
+            );
             Ok(1)
         }
         _ => Err(CollabError::ReplayParityViolation {
