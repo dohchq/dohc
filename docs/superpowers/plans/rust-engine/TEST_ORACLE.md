@@ -506,6 +506,7 @@ to `secrets-materialize-secret-file`.
 | 30 | `session.during-drain` | crash while `ready → draining` with queued commands ⇒ restart: acked work durable, unacked work idempotently retryable, no queue leak. | **G** (v1 analog: process-global maps, untestable by design) | 1+2 |
 | 31 | `session.before-close-release` | crash between logical close and resource release ⇒ reopen works; `resources` compare returns to baseline. | C — the teardown sweep exists precisely because v1 leaks (`closeTrackedEngineDbHandlesForTest`, `engineDbSchema.ts:48-82`); Rust replaces the registry with `Drop` and this point proves it. | 1 |
 | 32 | `watch.overflow` | injected native-watcher overflow ⇒ dirty generation + bounded full rescan until disk and engine converge; coalescing never drops the only evidence of a change. | **G** — `workspaceWatcher.ts` has **no dedicated test at all** (`INVENTORY_NOTES.md`, desktop cluster). | 1 |
+| 36 | `capture.after-op-apply-before-ack` | one idempotent per-path capture transaction committed, reconcile manifest not yet acknowledged ⇒ restart may reapply as a content-equality/absent-tip no-op; no lost capture and no duplicate user-visible moment. The filesystem-side seam uses the one shared `dohc-engine-storage::FaultPoint` registry. | **G** — R07 two-phase apply/ack regression. | 1 |
 
 ### 3.9 backup / reset (cutover machinery, `dohc-engine-storage::backup` + R15)
 

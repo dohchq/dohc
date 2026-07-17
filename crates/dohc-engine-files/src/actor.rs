@@ -14,8 +14,9 @@
 //! release), tearing the hash pool down with it.
 
 use crate::bounds::ScanBounds;
+use crate::capture::CaptureApplyResult;
 use crate::error::FilesError;
-use crate::reconcile::{ReconcileController, ReconcileRun, ScanGeneration};
+use crate::reconcile::{ReconcileController, ReconcilePlan, ReconcileRun, ScanGeneration};
 use crate::scan::{ScanOutcome, Scanner};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -90,6 +91,11 @@ enum Command {
     Stats {
         reply: oneshot::Sender<FilesStats>,
     },
+    AcknowledgeCapture {
+        plan: ReconcilePlan,
+        result: CaptureApplyResult,
+        reply: oneshot::Sender<Result<(), FilesError>>,
+    },
     Close,
 }
 
@@ -101,7 +107,7 @@ pub struct FilesActor {
     /// A sticky watcher-overflow flag, set by [`FilesHandle::notify_overflow`]
     /// INDEPENDENT of the command channel so a dirty mark can NEVER be lost to
     /// backpressure. The worker folds it into the controller at the top of each
-    /// command, before any dirty-clearing reconcile runs.
+    /// command, before any dirty-clearing capture acknowledgement runs.
     pending_overflow: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
@@ -239,8 +245,8 @@ impl FilesHandle {
         reply_rx.await.map_err(|_| FilesError::ActorUnavailable)?
     }
 
-    /// Reconcile: full scan + diff against the last committed generation +
-    /// commit the plan. Cancellable at between-unit boundaries.
+    /// Prepare a full scan + diff against the last acknowledged generation.
+    /// Cancellable at between-unit boundaries; capture/ack is separate.
     pub async fn reconcile(&self, token: CancellationToken) -> Result<ReconcileRun, FilesError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
@@ -267,7 +273,7 @@ impl FilesHandle {
     /// Sets a sticky dirty flag INDEPENDENT of the command channel, so the mark
     /// can NEVER be lost to backpressure (unlike a `try_send`, which drops on a
     /// full queue). The worker folds the flag into the controller at the top of
-    /// each command, before any dirty-clearing reconcile, so the forced full
+    /// each command, before any dirty-clearing capture acknowledgement, so the forced full
     /// rescan is guaranteed. Infallible and non-blocking.
     pub fn notify_overflow(&self) {
         self.pending_overflow.store(true, Ordering::Release);
@@ -283,11 +289,35 @@ impl FilesHandle {
         reply_rx.await.map_err(|_| FilesError::ActorUnavailable)
     }
 
+    /// Serialize a completed apply receipt back through the actor. Only the
+    /// receipt's successful paths advance; a stale plan is refused. A crashed
+    /// receipt must never be acknowledged.
+    pub async fn acknowledge_capture(
+        &self,
+        plan: ReconcilePlan,
+        result: CaptureApplyResult,
+    ) -> Result<(), FilesError> {
+        if !result.completed() {
+            return Err(FilesError::StaleReconcilePlan);
+        }
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::AcknowledgeCapture {
+                plan,
+                result,
+                reply,
+            })
+            .await
+            .map_err(|_| FilesError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| FilesError::ActorUnavailable)?
+    }
+
     /// Reconcile under a deadline. The whole operation — including waiting for
     /// queue space — is bounded by `deadline`; on expiry the shared `token` is
     /// cancelled (stopping the scan at its next between-unit boundary) and
     /// [`FilesError::DeadlineExceeded`] is returned. A reconcile that already
-    /// committed before the deadline stays committed (exactly-once advance).
+    /// prepared before the deadline is returned, but no generation advances
+    /// until its capture receipt is acknowledged.
     pub async fn reconcile_with_deadline(
         &self,
         token: CancellationToken,
@@ -367,7 +397,7 @@ fn worker_main(
         // Fold any sticky watcher-overflow signal into the controller BEFORE
         // handling this command, so a dirty mark set during the previous
         // (possibly long) command is never lost — and, critically, is applied
-        // before any dirty-clearing reconcile in THIS command runs. An overflow
+        // before any dirty-clearing capture acknowledgement in THIS command runs. An overflow
         // that arrives DURING a reconcile's scan re-sets the flag and is folded
         // at the next command, so a change is never dropped.
         if pending_overflow.swap(false, Ordering::AcqRel) {
@@ -392,6 +422,17 @@ fn worker_main(
                     max_hash_concurrency: gauge.max_concurrent(),
                     hashed: gauge.hashed(),
                 });
+            }
+            Command::AcknowledgeCapture {
+                plan,
+                result,
+                reply,
+            } => {
+                let _ = reply.send(controller.acknowledge_capture(
+                    &plan,
+                    &result.applied_paths,
+                    &result.failed_applies,
+                ));
             }
             Command::Close => {
                 state.store(LifecycleState::Draining.as_u8(), Ordering::Release);

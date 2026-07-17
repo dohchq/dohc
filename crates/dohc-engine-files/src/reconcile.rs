@@ -4,25 +4,27 @@
 //! The plan is the CAL-3 deliverable; actual materialization/capture into the
 //! domain is a thin downstream call (a later shard). Two invariants live here:
 //!
-//! - **Cancellation leaves consistent, resumable state.** A reconcile runs a
-//!   full scan, and only on a COMPLETED scan does it advance the generation,
-//!   replace the manifest, and clear dirty. If the scan is cancelled mid-way,
-//!   nothing is committed: the generation and manifest are untouched and the
-//!   dirty flag stays set, so the next reconcile completes the work. There is
-//!   no partial capture — the plan is produced atomically or not at all.
+//! - **Prepare, apply, then acknowledge.** A reconcile only prepares a bounded
+//!   plan. [`crate::capture`] applies its operations one at a time, then calls
+//!   the controller acknowledgement with successful paths. The generation and
+//!   manifest never advance past a failed/unapplied path.
+//! - **Cancellation leaves consistent, resumable state.** A cancelled scan
+//!   produces no plan, so generation, manifest, and dirty remain untouched.
 //! - **Dirty coalesces but never drops a change.** A watcher overflow (or any
 //!   uncertainty) sets the single dirty flag; many events coalesce to one
-//!   pending rescan, but the flag is cleared ONLY by a completed reconcile, so
+//!   pending rescan, but the flag is cleared ONLY by a completed apply/ack, so
 //!   evidence of a change is never lost (`plan §Workspace actor model`).
 
 use crate::diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
 use crate::error::FilesError;
 use crate::scan::{ScanOutcome, Scanner};
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
 /// A monotonically increasing scan generation. Generation 0 is the pre-scan
-/// baseline; each completed reconcile increments it.
+/// baseline; each completed apply/ack increments it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct ScanGeneration(pub u64);
 
@@ -77,8 +79,19 @@ pub struct ReconcilePlan {
     /// their last-known-good content (`BEHAVIOR_DELTA.md` CAL-3). Surfaced for
     /// R07 materialization so it can leave these files untouched.
     pub retained_over_cap: Vec<String>,
-    /// Whether this reconcile cleared a pending dirty generation.
-    pub cleared_dirty: bool,
+    /// Missing paths retained because a scan failure or final lstat result did
+    /// not prove absence. Their prior manifest entries remain last-known-good.
+    pub unconfirmed_removed: Vec<String>,
+    /// The pass saw one or more readability failures or an unconfirmed retire.
+    /// Callers mirror TS `onCaptureOutcome({ok:false})` while still applying
+    /// every independent safe operation.
+    pub degraded: bool,
+    /// Whether the plan was prepared because a dirty generation was pending.
+    pub prepared_from_dirty: bool,
+    /// Dirty epoch observed when this plan was prepared. An overflow arriving
+    /// before acknowledgement increments the controller epoch, preventing this
+    /// older receipt from clearing newer evidence.
+    pub dirty_epoch: u64,
 }
 
 impl ReconcilePlan {
@@ -88,7 +101,9 @@ impl ReconcilePlan {
         diff: ScanDiff,
         from_generation: ScanGeneration,
         to_generation: ScanGeneration,
-        cleared_dirty: bool,
+        prepared_from_dirty: bool,
+        dirty_epoch: u64,
+        degraded: bool,
     ) -> Self {
         let mut ops: Vec<CaptureOp> = Vec::with_capacity(diff.len());
         for file in diff.added {
@@ -118,7 +133,10 @@ impl ReconcilePlan {
             to_generation,
             ops,
             retained_over_cap: diff.retained_over_cap,
-            cleared_dirty,
+            unconfirmed_removed: diff.unconfirmed_removed,
+            degraded,
+            prepared_from_dirty,
+            dirty_epoch,
         }
     }
 
@@ -137,8 +155,8 @@ impl ReconcilePlan {
 /// The outcome of a reconcile.
 #[derive(Debug)]
 pub enum ReconcileRun {
-    /// The scan completed; the plan is committed (generation advanced, manifest
-    /// replaced, dirty cleared).
+    /// The scan completed and produced a prepared plan. No generation or
+    /// manifest state advances until capture applies and acknowledges it.
     Completed(ReconcilePlan),
     /// The scan was cancelled mid-way. NOTHING was committed: the generation
     /// and manifest are unchanged and the dirty flag is preserved, so the next
@@ -149,6 +167,31 @@ pub enum ReconcileRun {
     Converged,
 }
 
+/// Final destructive-retire guard. Production uses `symlink_metadata` (lstat,
+/// never stat); the trait makes the TOCTOU-surprising-success branch directly
+/// testable on every platform.
+pub trait AbsenceProbe: Send + Sync {
+    /// True only when the exact path's absence was confirmed.
+    fn confirms_absent(&self, absolute_path: &Path) -> bool;
+}
+
+/// Production confirmed-absence probe.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StdAbsenceProbe;
+
+impl AbsenceProbe for StdAbsenceProbe {
+    fn confirms_absent(&self, absolute_path: &Path) -> bool {
+        match std::fs::symlink_metadata(absolute_path) {
+            Err(err) if matches!(err.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory) => {
+                true
+            }
+            // Success means the path reappeared; any other error means the
+            // engine cannot prove absence. Both retain rather than delete.
+            Ok(_) | Err(_) => false,
+        }
+    }
+}
+
 /// Owns the reconcile state: the last committed manifest, the current scan
 /// generation, and the dirty flag. This is the actor-native home of the
 /// watcher/reconcile generation (`plan §Workspace actor model`).
@@ -157,6 +200,7 @@ pub struct ReconcileController {
     manifest: ScanManifest,
     generation: ScanGeneration,
     dirty: bool,
+    dirty_epoch: u64,
 }
 
 impl Default for ReconcileController {
@@ -173,6 +217,7 @@ impl ReconcileController {
             manifest: ScanManifest::empty(),
             generation: ScanGeneration::default(),
             dirty: true,
+            dirty_epoch: 1,
         }
     }
 
@@ -193,18 +238,31 @@ impl ReconcileController {
 
     /// Mark the generation dirty — a watcher overflow / uncertainty signal.
     /// Coalesces: repeated calls collapse to one pending rescan. Never drops
-    /// evidence of a change: the flag is cleared only by a completed reconcile.
+    /// evidence of a change: the flag is cleared only by a completed apply/ack.
     pub fn mark_dirty(&mut self) {
         self.dirty = true;
+        self.dirty_epoch = self.dirty_epoch.saturating_add(1);
     }
 
-    /// Run a full reconcile: scan `root`, diff against the last committed
-    /// manifest, and (on completion) commit the new generation.
+    /// Prepare a full reconcile: scan `root` and diff against the last
+    /// acknowledged manifest. This method does not commit the generation.
     pub fn reconcile(
         &mut self,
         scanner: &Scanner,
         root: &Path,
         token: &CancellationToken,
+    ) -> Result<ReconcileRun, FilesError> {
+        self.reconcile_with_absence_probe(scanner, root, token, &StdAbsenceProbe)
+    }
+
+    /// Prepare a reconcile with an injectable final lstat seam. This remains
+    /// bounded to one probe per apparent removal candidate.
+    pub fn reconcile_with_absence_probe(
+        &mut self,
+        scanner: &Scanner,
+        root: &Path,
+        token: &CancellationToken,
+        absence_probe: &dyn AbsenceProbe,
     ) -> Result<ReconcileRun, FilesError> {
         let listing = match scanner.scan(root, token)? {
             // Cancelled mid-scan: commit nothing. Dirty and generation stay put
@@ -213,46 +271,41 @@ impl ReconcileController {
             ScanOutcome::Completed(listing) => listing,
         };
 
-        let diff = diff_scans(&self.manifest, &listing, scanner.bounds())?;
+        let scan_degraded = listing.degraded();
+        let mut diff = diff_scans(&self.manifest, &listing, scanner.bounds())?;
 
-        // COMMIT POINT: everything below is the atomic advance. The diff is
-        // already fully materialized in memory (bounded), so there is no
-        // cancellation window here that could tear the transition.
-        let from = self.generation;
-        let to = from.next();
-        let cleared_dirty = self.dirty;
-
-        // Build the next manifest from the tracked files, then CARRY FORWARD the
-        // last-known-good entries for over-cap-but-present files so they stay
-        // tracked (never dropped, never retired) — the P1 size-cap-grow
-        // false-delete fix (`BEHAVIOR_DELTA.md` CAL-3).
-        let mut entries: Vec<(String, ManifestEntry)> = listing
-            .files
-            .iter()
-            .map(|f| {
-                (
-                    f.path.clone(),
-                    ManifestEntry {
-                        size: f.size,
-                        sha256: f.sha256.clone(),
-                    },
-                )
-            })
-            .collect();
-        for path in &diff.retained_over_cap {
-            if let Some(prior_entry) = self.manifest.get(path) {
-                entries.push((path.clone(), prior_entry.clone()));
+        // False-delete defense, second layer: even a clean scan's apparent
+        // removals get one final lstat. Only ENOENT/ENOTDIR confirms retirement;
+        // surprising success (TOCTOU reappearance), permission denial, locks,
+        // and every other result retain last-known-good state.
+        let mut confirmed_removed = Vec::with_capacity(diff.removed.len());
+        let mut lstat_unconfirmed = Vec::new();
+        for path in diff.removed.drain(..) {
+            let confirmed = absolute_path(root, &path)
+                .is_some_and(|absolute| absence_probe.confirms_absent(&absolute));
+            if confirmed {
+                confirmed_removed.push(path);
+            } else {
+                lstat_unconfirmed.push(path);
             }
         }
-        self.manifest = ScanManifest::from_entries(entries);
-        self.generation = to;
-        self.dirty = false;
+        diff.removed = confirmed_removed;
+        diff.unconfirmed_removed.extend(lstat_unconfirmed);
+        diff.unconfirmed_removed.sort();
+        diff.unconfirmed_removed.dedup();
+        let degraded = scan_degraded || !diff.unconfirmed_removed.is_empty();
 
+        let from = self.generation;
+        let to = from.next();
+        let prepared_from_dirty = self.dirty;
+        let dirty_epoch = self.dirty_epoch;
         Ok(ReconcileRun::Completed(ReconcilePlan::from_diff(
             diff,
             from,
             to,
-            cleared_dirty,
+            prepared_from_dirty,
+            dirty_epoch,
+            degraded,
         )))
     }
 
@@ -269,4 +322,59 @@ impl ReconcileController {
         }
         self.reconcile(scanner, root, token)
     }
+
+    /// Advance the manifest only for successfully applied paths. Called by the
+    /// capture module after the sink phase; stale receipts fail closed.
+    pub(crate) fn acknowledge_capture(
+        &mut self,
+        plan: &ReconcilePlan,
+        applied_paths: &[String],
+        failed_applies: &[String],
+    ) -> Result<(), FilesError> {
+        if plan.from_generation != self.generation || plan.to_generation != self.generation.next() {
+            return Err(FilesError::StaleReconcilePlan);
+        }
+        let applied: BTreeSet<&str> = applied_paths.iter().map(String::as_str).collect();
+        let mut next = self.manifest.clone();
+        for op in &plan.ops {
+            if !applied.contains(op.path()) {
+                continue;
+            }
+            match op {
+                CaptureOp::Ingest {
+                    path, size, sha256, ..
+                } => next.insert(
+                    path.clone(),
+                    ManifestEntry {
+                        size: *size,
+                        sha256: sha256.clone(),
+                    },
+                ),
+                CaptureOp::Retire { path } => next.remove(path),
+            }
+        }
+        self.manifest = next;
+        self.generation = plan.to_generation;
+        // A degraded scan or failed apply stays dirty so the next pass retries
+        // instead of treating an incomplete observation/application as settled.
+        self.dirty =
+            self.dirty_epoch != plan.dirty_epoch || plan.degraded || !failed_applies.is_empty();
+        Ok(())
+    }
+}
+
+fn absolute_path(root: &Path, relative: &str) -> Option<PathBuf> {
+    let mut out = root.to_path_buf();
+    for segment in relative.split('/') {
+        let mut components = Path::new(segment).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+        {
+            // A malformed/prefixed manifest path can never authorize a probe
+            // outside the root. Fail safe toward retention.
+            return None;
+        }
+        out.push(segment);
+    }
+    Some(out)
 }

@@ -34,9 +34,11 @@ mod common;
 
 use common::Scratch;
 use dohc_engine_files::{
-    CancellationToken, CaptureOp, IngestReason, ManifestEntry, ReconcileController, ReconcileRun,
-    ScanBounds, ScanListing, ScanManifest, ScanOutcome, Scanner, diff_scans,
+    CancellationToken, CaptureError, CaptureOp, CaptureSink, IngestReason, ManifestEntry,
+    PathClassification, ReconcileController, ReconcileRun, ScanBounds, ScanListing, ScanManifest,
+    ScanOutcome, Scanner, apply_then_ack, classify_engine_file_path, diff_scans,
 };
+use dohc_engine_storage::NoFaults;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -336,6 +338,25 @@ enum NormOp {
     },
 }
 
+struct AcceptAll;
+
+impl CaptureSink for AcceptAll {
+    fn ingest(
+        &mut self,
+        _path: &str,
+        _size: u64,
+        _sha256: &str,
+        _media_type: &str,
+        _reason: IngestReason,
+    ) -> Result<(), CaptureError> {
+        Ok(())
+    }
+
+    fn retire(&mut self, _path: &str) -> Result<(), CaptureError> {
+        Ok(())
+    }
+}
+
 fn normalize_plan(plan: &dohc_engine_files::ReconcilePlan) -> Vec<NormOp> {
     plan.ops
         .iter()
@@ -415,6 +436,7 @@ fn extended_trace_covers_all_divergence_prone_paths() {
             },
         ]
     );
+    apply_then_ack(&mut ctrl, &base, &mut AcceptAll, &NoFaults).expect("baseline apply/ack");
 
     // --- checkpoint 3: added + changed + removed + rename in one pass --------
     // (keep the edit under the 8-byte cap so it stays a "changed", not an
@@ -472,4 +494,21 @@ fn extended_trace_covers_all_divergence_prone_paths() {
     );
     assert_eq!(delta.from_generation.0, 1);
     assert_eq!(delta.to_generation.0, 2);
+}
+
+#[test]
+fn policy_classifier_matches_the_ts_secret_floor_fixture() {
+    let cases = [
+        ("notes/today.md", PathClassification::Tracked),
+        (".env", PathClassification::Secret),
+        ("config/.env.production", PathClassification::Secret),
+        ("secrets%252eenv", PathClassification::Secret),
+        ("secret.env ", PathClassification::Secret),
+        (".dohc/engine/engine.db", PathClassification::Ignored),
+        ("notes/DOHC~1/x.md", PathClassification::Ignored),
+        ("../escape.md", PathClassification::Ignored),
+    ];
+    for (path, expected) in cases {
+        assert_eq!(classify_engine_file_path(path), expected, "{path}");
+    }
 }

@@ -131,7 +131,7 @@ impl<'a> VersionedTextStore<'a> {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.version_id, "version_id")?;
         non_empty(&input.moment_id, "moment_id")?;
-        validate_path(&input.path)?;
+        validate_plaintext_storable_path(&input.path)?;
         validate_text(&input.text)?;
 
         // `object_id` is part of the durable result for a first write, so it is
@@ -366,6 +366,8 @@ impl<'a> VersionedTextStore<'a> {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.version_id, "version_id")?;
         non_empty(&input.moment_id, "moment_id")?;
+        // TS parity: delete addresses an existing alias and does not introduce
+        // a new plaintext path, so it intentionally keeps the plain path gate.
         validate_path(&input.path)?;
 
         let ws = &input.workspace_id;
@@ -464,7 +466,10 @@ impl<'a> VersionedTextStore<'a> {
         non_empty(&input.version_id, "version_id")?;
         non_empty(&input.moment_id, "moment_id")?;
         validate_path(&input.from_path)?;
-        validate_path(&input.to_path)?;
+        // A rename destination introduces a path just like a write. R07 closes
+        // the carried R05 obligation by routing it through the secret floor;
+        // the source remains on plain validation exactly like the TS store.
+        validate_plaintext_storable_path(&input.to_path)?;
         if input.from_path == input.to_path {
             return Err(DomainError::InvalidPath {
                 reason: "rename source and destination must differ",
@@ -588,6 +593,8 @@ impl<'a> VersionedTextStore<'a> {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.version_id, "version_id")?;
         non_empty(&input.mutation_moment_id, "moment_id")?;
+        // TS parity: rollback addresses a prior durable mutation and never
+        // passes through normalizePlaintextStorablePath.
         validate_path(&input.path)?;
 
         let ws = &input.workspace_id;
@@ -1217,6 +1224,22 @@ pub(crate) fn validate_path(path: &str) -> Result<(), DomainError> {
     if path == ".dohc" || path.starts_with(".dohc/") {
         return Err(DomainError::InvalidPath {
             reason: "path must not target the reserved .dohc directory",
+        });
+    }
+    Ok(())
+}
+
+/// Store-door guard for operations that can introduce a plaintext alias. The
+/// domain's legacy structural validation stays first for stable error behavior;
+/// R07's platform-independent classifier then prevents secret content from
+/// entering plaintext snapshots or moments.
+fn validate_plaintext_storable_path(path: &str) -> Result<(), DomainError> {
+    validate_path(path)?;
+    if dohc_engine_files::policy::classify_engine_file_path(path)
+        == dohc_engine_files::policy::PathClassification::Secret
+    {
+        return Err(DomainError::InvalidPath {
+            reason: "secret-classified path cannot be stored as plaintext; secret-backed files go through the secret file store",
         });
     }
     Ok(())

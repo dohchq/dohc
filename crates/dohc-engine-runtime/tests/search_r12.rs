@@ -180,9 +180,33 @@ fn secret_ignored_and_hidden_paths_never_appear() {
     let db = scratch.engine_db_path().expect("db");
     let mut store = open(&db, 1);
 
-    // A secret .env, a normally-tracked file, and a visibility-hidden file, all
-    // containing the same needle. Only the tracked one may surface.
-    write_file(&mut store, "obj-env", "config/app.env", "SECRET=needle", 10);
+    // R07 closes the store door before search sees a row at all: plaintext
+    // versioning refuses a secret .env. Then seed a normally-tracked file and a
+    // visibility-hidden file with the same needle; only tracked may surface.
+    {
+        let mut versions = VersionedTextStore::new(&mut store);
+        versions
+            .ensure_main_version(WS, V, 10, &NO_FAULTS)
+            .expect("ensure version");
+        let err = versions
+            .write_text(
+                &WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: V.to_owned(),
+                    object_id: "obj-env".to_owned(),
+                    path: "config/app.env".to_owned(),
+                    text: "SECRET=needle".to_owned(),
+                    moment_id: "m-obj-env-10".to_owned(),
+                    metadata_origin: "test".to_owned(),
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+                &NO_FAULTS,
+            )
+            .expect_err("secret path must not enter plaintext snapshots");
+        assert_eq!(err.code(), "invalid-path");
+    }
     write_file(&mut store, "obj-ok", "notes/plan.md", "public needle", 11);
     write_file(
         &mut store,
@@ -216,8 +240,8 @@ fn secret_ignored_and_hidden_paths_never_appear() {
         "hidden file must never appear"
     );
 
-    // A direct `.env` write is never in the raw FTS table either (defense in
-    // depth: not merely filtered at read time, never indexed).
+    // The refused `.env` is never in the raw FTS table either: the defense is
+    // at the domain store door, not merely filtered at query time.
     let env_indexed: i64 = store
         .read_with(|conn| {
             conn.query_row(

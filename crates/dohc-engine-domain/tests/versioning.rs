@@ -69,6 +69,46 @@ fn rollback(version: &str, path: &str, moment: &str) -> RollbackTextFileMutation
     }
 }
 
+#[test]
+fn write_text_directly_at_a_secret_path_is_refused_by_the_secret_floor() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let err = VersionedTextStore::new(&mut store)
+        .write_text(
+            &write("main", "secrets/.env.local", "TOKEN=plain", "m1", "o1", 2),
+            &NO_FAULTS,
+        )
+        .expect_err("secret path must not enter plaintext history");
+    assert_eq!(err.code(), "invalid-path");
+}
+
+#[test]
+fn rename_onto_secret_path_is_refused_by_the_secret_floor() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut versions = VersionedTextStore::new(&mut store);
+    versions
+        .write_text(
+            &write("main", "notes/a.md", "safe", "m1", "o1", 2),
+            &NO_FAULTS,
+        )
+        .expect("seed tracked text");
+    let err = versions
+        .rename_text_file(&rename("main", "notes/a.md", ".env", "m2", 3), &NO_FAULTS)
+        .expect_err("rename must not smuggle plaintext onto secret floor");
+    assert_eq!(err.code(), "invalid-path");
+    assert!(
+        versions
+            .read_text(WS, "main", "notes/a.md")
+            .expect("read")
+            .is_some()
+    );
+}
+
 // oracle: versioned write → read round-trip, durable across close/reopen.
 #[test]
 fn write_then_read_round_trip_survives_reopen() {

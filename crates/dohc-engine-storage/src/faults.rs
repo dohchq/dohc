@@ -68,6 +68,15 @@ pub enum FaultPoint {
     /// write, no duplicate). `materialize.after-rename-before-complete`.
     MaterializeAfterRenameBeforeComplete,
 
+    // ---- capture apply/ack (TEST_ORACLE §3.8 point 36) -------------------
+    // This position lives on the filesystem/capture side
+    // (`dohc-engine-files`) but the registry is shared here so the engine and
+    // testkit still have exactly ONE `FaultPoint` enum.
+    /// One capture op reached its idempotent domain sink, but the reconcile
+    /// manifest has not acknowledged that path. Restart retries safely.
+    /// `capture.after-op-apply-before-ack`.
+    CaptureAfterOpApplyBeforeAck,
+
     // ---- search index rebuild (R12) ---------------------------------------
     /// Inside `ensure_search_index_for_version`'s SAVEPOINT, after the chat FTS
     /// wipe and before the rebuild inserts complete. A crash here MUST roll the
@@ -117,6 +126,7 @@ impl FaultPoint {
             FaultPoint::MaterializeAfterRenameBeforeComplete => {
                 "materialize.after-rename-before-complete"
             }
+            FaultPoint::CaptureAfterOpApplyBeforeAck => "capture.after-op-apply-before-ack",
             FaultPoint::SearchIndexMidRebuild => "search.mid-rebuild",
             FaultPoint::SyncDuringJournalTxn => "sync.during-journal-txn",
             FaultPoint::SyncBeforeApplyCommit => "sync.before-apply-commit",

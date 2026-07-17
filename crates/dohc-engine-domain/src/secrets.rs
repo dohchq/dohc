@@ -21,9 +21,11 @@
 //!   the plaintext is produced only at execution time by the secret-aware
 //!   materializer (`materialize_secret_file`) and lives only on disk.
 //!
-//! Path CLASSIFICATION (deciding which paths are secret) is the R07 path floor's
-//! job; this store validates a path is safe + workspace-relative and treats
-//! routed paths as secret. The `not-secret-path` floor gate lands with R07.
+//! R07's platform-independent path floor is enforced at every caller-supplied
+//! path entry point. The gate fails closed in BOTH directions: this encrypted
+//! store refuses ordinary paths (`not-secret-path`), while the plaintext store
+//! refuses secret-classified paths. Replication/apply callers cannot bypass the
+//! same store-door rule by choosing a different host platform.
 //!
 //! **Delete is a tombstone, not a crypto-shred (documented decision).** Deleting
 //! a secret removes the `secret_files` tip, but the prior WRITE moment in
@@ -191,7 +193,7 @@ impl<'a> SecretFileStore<'a> {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.version_id, "version_id")?;
         non_empty(&input.moment_id, "moment_id")?;
-        validate_path(&input.path)?;
+        validate_secret_path(&input.path)?;
         validate_text(&input.text)?;
         validate_origin(&input.metadata_origin)?;
 
@@ -282,7 +284,7 @@ impl<'a> SecretFileStore<'a> {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.version_id, "version_id")?;
         non_empty(&input.moment_id, "moment_id")?;
-        validate_path(&input.path)?;
+        validate_secret_path(&input.path)?;
         validate_origin(&input.metadata_origin)?;
 
         let ws = &input.workspace_id;
@@ -350,7 +352,7 @@ impl<'a> SecretFileStore<'a> {
         version_id: &str,
         path: &str,
     ) -> Result<Option<SecretPlaintext>, DomainError> {
-        validate_path(path)?;
+        validate_secret_path(path)?;
         let key = self.key;
         self.store.read_with(|conn| {
             require_version(conn, workspace_id, version_id)?;
@@ -586,6 +588,20 @@ fn non_empty(value: &str, field: &'static str) -> Result<(), DomainError> {
     } else {
         Ok(())
     }
+}
+
+/// Fail-closed secret-store routing gate, mirroring TS `normalizeSecretPath`.
+/// Structural validation runs first; a safe path that is not classified
+/// secret gets the dedicated compatibility error rather than being hidden in
+/// encrypted storage where normal history/search would no longer see it.
+fn validate_secret_path(path: &str) -> Result<(), DomainError> {
+    validate_path(path)?;
+    if dohc_engine_files::policy::classify_engine_file_path(path)
+        != dohc_engine_files::policy::PathClassification::Secret
+    {
+        return Err(DomainError::NotSecretPath);
+    }
+    Ok(())
 }
 
 fn validate_text(text: &str) -> Result<(), DomainError> {
