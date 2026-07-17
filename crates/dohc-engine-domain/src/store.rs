@@ -643,6 +643,11 @@ impl<'a> VersionedTextStore<'a> {
             )
             .map_err(DomainError::sql_persist)?;
             tx.execute(
+                "DELETE FROM engine_requests WHERE result_seq = ?1",
+                params![prep.moment.moment_order],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.execute(
                 "DELETE FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 \
                  AND path = ?3 AND object_id = ?4",
                 params![ws, input.version_id, input.path, prep.moment.object_id],
@@ -1690,6 +1695,18 @@ fn rollback_moment_has_dependents(
     if snapshot_reference.is_some() {
         return Ok(true);
     }
+    let fork_base_reference: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM fork_base_snapshots WHERE workspace_id = ?1 \
+             AND latest_moment_id = ?2 LIMIT 1",
+            params![workspace_id, moment.moment_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    if fork_base_reference.is_some() {
+        return Ok(true);
+    }
     let moment_reference: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM moments WHERE workspace_id = ?1 AND moment_id <> ?2 \
@@ -1701,6 +1718,19 @@ fn rollback_moment_has_dependents(
         .optional()
         .map_err(DomainError::sql_corrupt)?;
     if moment_reference.is_some() {
+        return Ok(true);
+    }
+    // Fail closed if a concrete preimage has no resolved producer link.
+    let unresolved_reference: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM moments WHERE workspace_id = ?1 AND object_id = ?2 \
+             AND before_present = 2 AND before_latest_moment_id IS NULL LIMIT 1",
+            params![workspace_id, moment.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    if unresolved_reference.is_some() {
         return Ok(true);
     }
 
@@ -1719,18 +1749,24 @@ fn rollback_moment_has_dependents(
         versions.insert(version.version_id.clone(), version);
     }
 
-    let mut moment_orders = HashMap::new();
+    let fork_moment_ids: HashSet<&str> = versions
+        .values()
+        .filter_map(|version| version.fork_moment_id.as_deref())
+        .collect();
+    let mut moment_orders = HashMap::with_capacity(fork_moment_ids.len());
     let mut order_stmt = conn
-        .prepare_cached("SELECT moment_id, moment_order FROM moments WHERE workspace_id = ?1")
+        .prepare_cached(
+            "SELECT moment_order FROM moments WHERE workspace_id = ?1 AND moment_id = ?2",
+        )
         .map_err(DomainError::sql_corrupt)?;
-    let order_rows = order_stmt
-        .query_map(params![workspace_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })
-        .map_err(DomainError::sql_corrupt)?;
-    for row in order_rows {
-        let (moment_id, moment_order) = row.map_err(DomainError::sql_corrupt)?;
-        moment_orders.insert(moment_id, moment_order);
+    for moment_id in fork_moment_ids {
+        let moment_order = order_stmt
+            .query_row(params![workspace_id, moment_id], |row| row.get(0))
+            .optional()
+            .map_err(DomainError::sql_corrupt)?;
+        if let Some(moment_order) = moment_order {
+            moment_orders.insert(moment_id.to_owned(), moment_order);
+        }
     }
 
     let mut object_moments = Vec::new();

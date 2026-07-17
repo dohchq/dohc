@@ -239,6 +239,48 @@ fn deduped_write_returns_original_not_later_state() {
     );
 }
 
+#[test]
+fn rollback_clears_idempotency_ledger_so_stale_retry_does_not_replay() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+
+    let mut first = write("main", "a.md", "one", "m1", "o1", 10);
+    first.request_id = Some("req-1".to_owned());
+    let mut second = write("main", "a.md", "two", "m2", "o1", 20);
+    second.request_id = Some("req-2".to_owned());
+    {
+        let mut vt = VersionedTextStore::new(&mut store);
+        vt.write_text(&first, &NO_FAULTS).expect("first");
+        vt.write_text(&second, &NO_FAULTS).expect("second");
+        vt.rollback_text_file_mutation(&rollback("main", "a.md", "m2"), &NO_FAULTS)
+            .expect("rollback second");
+    }
+
+    let rolled_back_request_count: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM engine_requests WHERE request_id = 'req-2'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("ledger count");
+    assert_eq!(rolled_back_request_count, 0);
+
+    let mut vt = VersionedTextStore::new(&mut store);
+    let first_replay = vt.write_text(&first, &NO_FAULTS).expect("first replay");
+    assert!(first_replay.deduped);
+    assert_eq!(first_replay.snapshot.text, "one");
+    assert_eq!(first_replay.moment.moment_id, "m1");
+
+    let second_retry = vt.write_text(&second, &NO_FAULTS).expect("second retry");
+    assert!(!second_retry.deduped);
+    assert_eq!(second_retry.snapshot.text, "two");
+    assert_eq!(second_retry.moment.moment_id, "m2");
+}
+
 // oracle: a reserved / absolute / traversal path is rejected.
 #[test]
 fn unsafe_paths_are_rejected() {
@@ -957,6 +999,80 @@ fn rollback_rejects_moment_referenced_by_child_preimage_pointer() {
     assert_eq!(
         vt.rollback_text_file_mutation(&rollback("main", "a.md", "m1"), &NO_FAULTS)
             .expect_err("preimage dependent")
+            .code(),
+        "invalid-input"
+    );
+}
+
+#[test]
+fn rollback_rejects_migrated_null_link_dependent() {
+    let fidelity = ScratchDir::new().expect("fidelity scratch");
+    let fidelity_db = fidelity.engine_db_path().expect("fidelity db");
+    let mut fidelity_store = EngineStore::open(&fidelity_db, 1).expect("fidelity open");
+    bootstrap(&mut fidelity_store);
+    {
+        let mut vt = VersionedTextStore::new(&mut fidelity_store);
+        vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+            .expect("fidelity main write");
+        vt.create_named_version(
+            &CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: "feat".to_owned(),
+                name: "feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 20,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("fidelity fork");
+        let child = vt
+            .write_text(&write("feat", "a.md", "two", "m2", "o1", 30), &NO_FAULTS)
+            .expect("fidelity child write");
+        assert_eq!(child.moment.before_latest_moment_id.as_deref(), Some("m1"));
+        vt.rollback_text_file_mutation(&rollback("feat", "a.md", "m2"), &NO_FAULTS)
+            .expect("child rollback with intact link");
+        let restored = vt.read_text(WS, "feat", "a.md").unwrap().unwrap();
+        assert_eq!(restored.text, "one");
+        assert_eq!(restored.latest_moment_id, "m1");
+    }
+
+    let reject = ScratchDir::new().expect("reject scratch");
+    let reject_db = reject.engine_db_path().expect("reject db");
+    let mut reject_store = EngineStore::open(&reject_db, 1).expect("reject open");
+    bootstrap(&mut reject_store);
+    {
+        let mut vt = VersionedTextStore::new(&mut reject_store);
+        vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+            .expect("main write");
+        vt.create_named_version(
+            &CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: "feat".to_owned(),
+                name: "feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 20,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("fork");
+        vt.write_text(&write("feat", "a.md", "two", "m2", "o1", 30), &NO_FAULTS)
+            .expect("child write");
+    }
+    reject_store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE moments SET before_latest_moment_id = NULL \
+                 WHERE workspace_id = ?1 AND moment_id = 'm2'",
+                [WS],
+            )
+        })
+        .expect("clear migrated link");
+    let mut vt = VersionedTextStore::new(&mut reject_store);
+    assert_eq!(
+        vt.rollback_text_file_mutation(&rollback("main", "a.md", "m1"), &NO_FAULTS)
+            .expect_err("unresolved dependent")
             .code(),
         "invalid-input"
     );

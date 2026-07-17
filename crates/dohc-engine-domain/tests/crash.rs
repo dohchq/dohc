@@ -6,7 +6,8 @@
 //! `EngineStore::write_with`.
 
 use dohc_engine_domain::{
-    CreateNamedVersion, NoFaults, RollbackTextFileMutation, VersionedTextStore, WriteText,
+    CreateNamedVersion, DeleteTextFile, NoFaults, RenameTextFile, RollbackTextFileMutation,
+    VersionedTextStore, WriteText,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -78,6 +79,31 @@ fn rollback_input() -> RollbackTextFileMutation {
         path: "a.md".to_owned(),
         mutation_moment_id: "m2".to_owned(),
         legacy_before_text: None,
+    }
+}
+
+fn delete_input() -> DeleteTextFile {
+    DeleteTextFile {
+        workspace_id: WS.to_owned(),
+        version_id: "main".to_owned(),
+        path: "a.md".to_owned(),
+        moment_id: "m2".to_owned(),
+        metadata_origin: "user".to_owned(),
+        author_json: None,
+        now_ms: 20,
+    }
+}
+
+fn rename_input() -> RenameTextFile {
+    RenameTextFile {
+        workspace_id: WS.to_owned(),
+        version_id: "main".to_owned(),
+        from_path: "a.md".to_owned(),
+        to_path: "b.md".to_owned(),
+        moment_id: "m2".to_owned(),
+        metadata_origin: "user".to_owned(),
+        author_json: None,
+        now_ms: 20,
     }
 }
 
@@ -254,4 +280,103 @@ fn rollback_crash_after_commit_is_durable() {
     assert_eq!(restored.text, "base");
     assert_eq!(restored.latest_moment_id, "m1");
     assert!(vt.get_moment(WS, "m2").expect("moment").is_none());
+}
+
+#[test]
+fn delete_crash_before_persist_leaves_file_intact() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_main_with_file(&db);
+
+    {
+        let mut store = EngineStore::open(&db, 2).expect("reopen");
+        let mut vt = VersionedTextStore::new(&mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
+        let err = vt
+            .delete_text_file(&delete_input(), faults.as_ref())
+            .expect_err("crash before persist");
+        assert_eq!(err.code(), "persist-failed");
+    }
+
+    let mut store = EngineStore::open(&db, 3).expect("reopen after crash");
+    let vt = VersionedTextStore::new(&mut store);
+    assert_eq!(
+        vt.read_text(WS, "main", "a.md").unwrap().unwrap().text,
+        "base"
+    );
+    assert!(vt.get_moment(WS, "m2").expect("moment").is_none());
+}
+
+#[test]
+fn delete_crash_after_commit_is_durable() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_main_with_file(&db);
+
+    {
+        let mut store = EngineStore::open(&db, 2).expect("reopen");
+        let mut vt = VersionedTextStore::new(&mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
+        let err = vt
+            .delete_text_file(&delete_input(), faults.as_ref())
+            .expect_err("crash after commit");
+        assert_eq!(err.code(), "persist-failed");
+    }
+
+    let mut store = EngineStore::open(&db, 3).expect("reopen after crash");
+    let vt = VersionedTextStore::new(&mut store);
+    assert!(vt.read_text(WS, "main", "a.md").unwrap().is_none());
+    assert!(vt.get_moment(WS, "m2").expect("moment").is_some());
+}
+
+#[test]
+fn rename_crash_before_persist_leaves_source_intact() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_main_with_file(&db);
+
+    {
+        let mut store = EngineStore::open(&db, 2).expect("reopen");
+        let mut vt = VersionedTextStore::new(&mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
+        let err = vt
+            .rename_text_file(&rename_input(), faults.as_ref())
+            .expect_err("crash before persist");
+        assert_eq!(err.code(), "persist-failed");
+    }
+
+    let mut store = EngineStore::open(&db, 3).expect("reopen after crash");
+    let vt = VersionedTextStore::new(&mut store);
+    assert_eq!(
+        vt.read_text(WS, "main", "a.md").unwrap().unwrap().text,
+        "base"
+    );
+    assert!(vt.read_text(WS, "main", "b.md").unwrap().is_none());
+    assert!(vt.get_moment(WS, "m2").expect("moment").is_none());
+}
+
+#[test]
+fn rename_crash_after_commit_is_durable() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_main_with_file(&db);
+
+    {
+        let mut store = EngineStore::open(&db, 2).expect("reopen");
+        let mut vt = VersionedTextStore::new(&mut store);
+        let faults = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
+        let err = vt
+            .rename_text_file(&rename_input(), faults.as_ref())
+            .expect_err("crash after commit");
+        assert_eq!(err.code(), "persist-failed");
+    }
+
+    let mut store = EngineStore::open(&db, 3).expect("reopen after crash");
+    let vt = VersionedTextStore::new(&mut store);
+    assert!(vt.read_text(WS, "main", "a.md").unwrap().is_none());
+    assert_eq!(
+        vt.read_text(WS, "main", "b.md").unwrap().unwrap().text,
+        "base"
+    );
+    assert!(vt.get_moment(WS, "m2").expect("moment").is_some());
 }
