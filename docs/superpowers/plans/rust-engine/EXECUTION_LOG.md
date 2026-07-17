@@ -719,3 +719,33 @@ source of truth every orchestrator session loads first).
     fmt=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS
     cargo-deny=PASS. collab `--features fault-injection`: 6 cross_engine + 16
     durable_regimes = 22 PASS.
+
+## 2026-07-17 — R11a merged (Y.Doc durable layer) · R09 next (chats)
+
+- R11a #159 MERGED: dohc-engine-collab — durable Y.Doc cache/snapshots/
+  compaction/leases + ydoc.update replication + settle. All 5 binding yrs
+  constraints enforced with load-bearing probes. Cross-engine convergence
+  NON-TAUTOLOGICAL (51 fixtures regenerated from real Node yjs 13.6.30,
+  byte-identical expectations). Compaction convergence-neutral even
+  out-of-order+missing-dep. Migration ordinal 2 (v1-ydoc). Review caught:
+  P1 local→shared destroyed the replicated lineage (claim_base DO NOTHING
+  left regime local-only → close pruned the base — hits individual-first
+  "share later"; fixed DO UPDATE regime='replicated'); + 2 coderabbit
+  Critical (inconsistent multi-read in load_persisted; prune-without-settle
+  data loss → UnsettledClose guard); + settle clock-fragility (durable
+  settle_seq counter); + broadcast-before-base-claimed; + control-byte
+  DocKey injection. All fixed, 22 tests green. The SOLE ABORT CRITERION is
+  now fully realized in durable Rust.
+  R11b (TS live adapter) carries forward: isWellFormed() is a HARD boundary
+  requirement (yrs diverges from yjs on surrogate split); richdoc markdown
+  byte-parity; the emit_outbound replication-bus seam; cross-compaction
+  per-peer applied cursor.
+- OPERATIONAL NOTE: an integrator worktree-cleanup pattern removed an
+  active reviewer's worktree mid-run (no harm — findings were cached).
+  Rule reinforced: scope cleanup to the exact worktree a COMPLETED agent
+  names; never a glob that can catch a running reviewer.
+- R09 opens (migration ordinal 3, chat tables): the chats domain — threads/
+  channels/messages, reactions/decisions/attachments/mentions/read-state,
+  follows/personal-feed/bookmarks (PR #136 surface), dispatch ledger +
+  agent-run records. Byte-compatible with the TS chat schema (base64url
+  cursors, generation-CAS bookmarks, deferred-parent repair). Full cell.
