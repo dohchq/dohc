@@ -473,6 +473,67 @@ fn assert_delete_boundary_rejected(tag: &str, base_hex: &str, candidate_hex: &st
     );
 }
 
+/// Parked-delete-in-dependency-scalar sub-case: a delete-only update can
+/// target a `(client, clock)` range the receiver has NEVER seen (it carries
+/// no struct blocks at all, just a delete-set entry) — yrs tracks this as its
+/// own internal "dangling" delete-set entry, which is invisible to
+/// `has_missing_updates()`/`pending_update_v1()` (those track missing ITEM
+/// structs, not missing delete targets). When the dependency (the item the
+/// delete actually targets) arrives later and turns out to be a multi-unit
+/// scalar whose interior the delete range lands on, yrs silently drops the
+/// WHOLE scalar (proven below: without the fix the converged text is empty
+/// instead of a partial-surrogate remainder) while a from-scratch Yjs peer
+/// would diverge (constraint 3's U+FFFD sanitization). Mirrors
+/// `replay_parity_rejects_parked_interior_split_on_dependency_arrival` (the
+/// insert-side sibling of this fix) — parking is a replicated-lineage
+/// concept, so this is remote-path only.
+#[test]
+fn replay_parity_rejects_parked_delete_in_dependency_scalar_on_dependency_arrival() {
+    let (mut ts, key) = setup_parity_store("parked-delete-dependency", Regime::Replicated);
+    let producer = Ydoc::wire();
+    let dependency = producer.plaintext_insert(0, "\u{1F600}"); // 😀, 2-unit scalar
+    let delete = producer.plaintext_delete(0, 1); // targets only the first UTF-16 unit
+
+    let parked = apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "delete-peer".to_owned(),
+            origin_seq: 1,
+            bytes: delete,
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect(
+        "a delete referencing an as-yet-unknown target must be accepted (nothing to reject yet)",
+    );
+    assert!(matches!(
+        parked,
+        TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })
+    ));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+
+    let error = apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "dependency-peer".to_owned(),
+            origin_seq: 1,
+            bytes: dependency,
+        },
+        &NoFaults,
+        1_002,
+    )
+    .expect_err("the dependency's arrival must reject once it reveals the interior split");
+    assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(persisted.doc.plaintext_string(), "");
+}
+
 #[test]
 fn replay_parity_rejects_delete_high_surrogate_on_both_paths() {
     assert_delete_boundary_rejected(
@@ -872,4 +933,108 @@ fn nested_frontmatter_keys_are_sorted_deterministically() {
         a < b && b < d && d < g,
         "nested keys not sorted in projection:\n{markdown}"
     );
+}
+
+// ---- inductive content-parity sweep (residual class: hostile re-encode) ----
+//
+// The reviewer's residual: a peer re-encodes an already-known `(client,
+// clock)` with DIFFERENT content — WITHOUT a clock shortfall (the
+// candidate-clock-coverage check sees full coverage) and WITHOUT an interior-
+// scalar edit boundary named on the wire (the structural boundary pass sees
+// nothing). No honest peer ever redefines a clock it has already used, so
+// this corpus is adversarial-construction-only: for many base texts (plain
+// ASCII, ASCII interleaved with multi-unit emoji, accented Latin), corrupt
+// EVERY ASCII byte of the SAME wire update's string payload to a different
+// ASCII byte and drive it back through the gate as a "candidate" claiming the
+// identical (client, clock) range as the already-integrated base. Each must
+// be rejected; none may panic.
+
+/// Locate the string payload of a `plaintext_insert(0, text)` delta: the
+/// fixed `plainText` root-name marker, a 1-byte length prefix (valid for the
+/// short ASCII/emoji test strings used here, all under 128 UTF-8 bytes), then
+/// the payload itself.
+fn plaintext_payload_range(update: &[u8]) -> std::ops::Range<usize> {
+    let marker = b"plainText";
+    let marker_at = update
+        .windows(marker.len())
+        .position(|w| w == marker)
+        .expect("plainText root marker present");
+    let len_at = marker_at + marker.len();
+    let payload_len = update[len_at] as usize;
+    let start = len_at + 1;
+    start..start + payload_len
+}
+
+#[test]
+fn replay_parity_rejects_content_redefinition_sweep() {
+    let bases = [
+        "hello",
+        "a\u{1F600}b",          // ascii + one 2-unit emoji + ascii
+        "x\u{1F600}\u{1F601}y", // ascii + two 2-unit emoji + ascii
+        "cafe over there",
+        "\u{1F600}mid\u{1F601}",
+    ];
+    let mut cases = 0usize;
+    for text in bases {
+        let producer = Ydoc::wire();
+        let base_update = producer.plaintext_insert(0, text);
+        let payload = plaintext_payload_range(&base_update);
+
+        let seeded = Ydoc::wire();
+        seeded.apply(&base_update).expect("seed base");
+
+        for i in payload.clone() {
+            let original = base_update[i];
+            if !original.is_ascii() {
+                continue; // only flip whole ASCII bytes — keeps the patched
+                          // payload valid UTF-8 without reshaping multi-byte
+                          // sequences elsewhere in the string.
+            }
+            let replacement = if original == b'z' { b'y' } else { b'z' };
+            let mut hostile = base_update.clone();
+            hostile[i] = replacement;
+            assert!(
+                std::str::from_utf8(&hostile[payload.clone()]).is_ok(),
+                "patch must stay valid UTF-8: text={text:?} offset={i}"
+            );
+
+            let error = validate_replay_parity_for_test(&seeded, &hostile).expect_err(&format!(
+                "content redefinition must be rejected: text={text:?} offset={i}"
+            ));
+            assert!(
+                matches!(error, CollabError::ReplayParityViolation { .. }),
+                "text={text:?} offset={i}: {error:?}"
+            );
+            cases += 1;
+        }
+    }
+    assert!(cases >= 20, "expected a broad hostile sweep, got {cases}");
+    eprintln!("content-parity sweep: {cases} hostile redefinitions rejected, 0 panics");
+}
+
+/// The gate is not re-exported at the crate root (it is reached through the
+/// durable append paths); drive it the same way `append_local_update` does —
+/// through a store, so the exact production call path is exercised.
+fn validate_replay_parity_for_test(seeded: &Ydoc, hostile: &[u8]) -> Result<(), CollabError> {
+    let mut ts = fresh_store("content-parity-sweep");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    dohc_engine_collab::ensure_marker(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        Regime::LocalOnly,
+        &NoFaults,
+        1_000,
+    )
+    .expect("marker");
+    record_local_update(
+        &mut ts.store,
+        &key,
+        &seeded.encode_full_state(),
+        &NoFaults,
+        1_001,
+    )
+    .expect("seed base into store");
+    record_local_update(&mut ts.store, &key, hostile, &NoFaults, 1_002).map(|_| ())
 }
