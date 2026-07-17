@@ -1164,3 +1164,55 @@ source of truth every orchestrator session loads first).
   R15-REHEARSE, R15 cutover (ICE checkpoint: cutover scope + dogfood reset +
   member-share-reset semantics), R16 legacy deletion. R13b-rest (desktop adapter
   remaining surfaces) also pending.
+
+- **GATE-COMPLETE (ydoc replay-parity gate completion) GATE PASSED (PR #182,
+  squash-merged; no migration).** THE cutover-gating CRDT-safety milestone. The
+  gate now rejects the full divergence surface — string surrogate-split,
+  overlap-slice/coverage, mid-pair delete/insert boundaries, AND cross-type +
+  same-kind-different-payload redefinitions (a per-clock ClockIdentity:
+  StringUnit / Typed{kind,sorted-key-canonical-fingerprint} / Tombstone, with a
+  delete-set distinguisher so honest delete+GC+resync is NOT false-rejected) —
+  and root-causes the yrs internal unwinds (eliminated the scratch.diff store.rs
+  path + rejects zero-length blocks; catch_unwind demoted to backstop). Also
+  fixed a latent yrs ContentJson decode off-by-one (scan reads count+1).
+  Authoritatively verified by the gate reviewer against its inductive
+  differential on BOTH the original and a FRESH independent 3000-seq/37k-update
+  corpus: 0 genuine divergences, 0 escaping panics, 0 internal unwinds, all 13
+  residual seeds reject, cross-type LIVE redefinitions reject, AND 0 honest
+  false positives (the delete+GC+resend regression that spiked to 17%/33% was
+  closed and re-verified to 0/0). The tracked pre-cutover content-parity
+  completion obligation is DISCHARGED; R15 dep GATE-COMPLETE satisfied.
+- R14 robustness-closure GATE PASSED (PR #183, squash-merged; new `file-id` dep,
+  lockfile consistent, cargo-deny green). Discharged the 6 deferred hardening
+  items (R13 daemon-liveness: cancellable admission, halt-on-writer-failure,
+  drain-before-close; R07 watcher: auto-reattach+WatcherUnavailable, startup
+  deadline, manifest rehydration) + a proptest fuzz harness (framing/ydoc/
+  replication/secret-apply) + a soak smoke test. Two-lens cell: found + fixed
+  3 P1s — a watcher root delete+recreate silently-missed-changes hole (fixed via
+  file-id root-identity compare + reattach), a transport read-ERROR path that
+  skipped drain/close (R13 abandoned-workspaces bug surviving on the error path;
+  fixed to fall through the drain/close tail), and an unbounded request JoinSet
+  (fixed with per-iteration reap) — plus a droppable-reattach-signal codex P1
+  (sticky AtomicBool) and fuzz hygiene (real assertions, secret_apply family).
+- **NEW CUTOVER-GATING OBLIGATION — YRS-ABORT-SAFETY (new SHARDS row, on R15's
+  dep list):** R14's fuzzing CONFIRMED (reviewer-reproduced) that yrs 0.27.3
+  `Update::decode_v1` HARD-ABORTS the process (uncatchable UB, 0xc0000409
+  STATUS_STACK_BUFFER_OVERRUN "invalid value for char"; a non-unwinding panic
+  that `catch_unwind` does NOT catch — INCLUDING the gate's own AssertUnwindSafe)
+  on malformed bytes, and in RELEASE builds the debug precondition check compiles
+  out → SILENT UB / memory corruption. Reachable on untrusted input via TWO
+  unguarded paths: hostile-peer replication (apply_remote_update→validate_update
+  _bytes→decode_v1) and a malformed local ydoc.apply (reachable today against a
+  shadow workspace). REQUIRED before any live/remote Y.Doc ingestion: a
+  byte-level well-formedness pre-validator before EVERY decode_v1 site, OR a yrs
+  upgrade/upstream fix. Acceptance = R14's #[ignore]d 41-byte `known_crash_
+  witness_yrs_char_decode_ub` + the ydoc fuzz family. R15 now deps
+  YRS-ABORT-SAFETY.
+- **WAVE 5 (robustness) — R14 + GATE-COMPLETE DONE.** Remaining tracked
+  obligations before/around cutover: YRS-ABORT-SAFETY (cutover-gating),
+  gate-perf redesign (load_for_replay_gate cached/incremental — GATE-COMPLETE
+  removed 2 of 3 O(doc) ops), R14-deferred (WatcherUnavailable production wiring,
+  open-after-close race, full soak runner), R10-CONFLICT-COMPLETE,
+  BINCONFLICT, R13b-rest, member-share-reset semantics (ICE). Remaining path to
+  cutover: GATE6 (deps R14 ✓, R10b ✓, R15-REHEARSE), R15-REHEARSE (deps R13, R14
+  ✓), then R15 cutover (ICE checkpoint), R16.
