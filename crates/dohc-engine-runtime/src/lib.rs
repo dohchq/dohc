@@ -27,11 +27,13 @@
 pub mod actor;
 pub mod error;
 pub mod identity;
+pub mod search;
 pub mod supervisor;
 
 pub use actor::{ActorHandle, LifecycleState, StoreSnapshot, UnitsOutcome, WorkspaceActor};
 pub use error::RuntimeError;
 pub use identity::EngineDbIdentity;
+pub use search::{SearchCandidate, SearchError, SearchResult, SearchSurface};
 pub use supervisor::WorkspaceSupervisor;
 
 // Re-export the storage surface callers need so a downstream host depends on

@@ -18,6 +18,16 @@ dohc-engine-storage = { path = "../dohc-engine-storage" }
 # forbid(unsafe_code).
 file-id = "0.2"
 thiserror = "2"
+# R12 search composes its FTS/policy SQL against the connection the storage core
+# hands it (via read_with/write_with), same seam the versioning/chat domains use.
+# `bundled` already compiles SQLite with FTS5 + the trigram tokenizer
+# (libsqlite3-sys 0.35 build.rs: -DSQLITE_ENABLE_FTS5; bundle 3.50.2) — no extra
+# feature needed. Same version the storage/domain crates content-address with.
+rusqlite = { version = "0.37", features = ["bundled"] }
+# Real TOML parsing for the .dohc/*.toml search policy files (a different
+# conformance profile from the TS `smol-toml`, corpus-pinned per
+# LANGUAGE_SEMANTICS_MATRIX.md 6.5). Parser only; shape validation is ours.
+toml = "0.9"
 # The async command loop. The writer connection still lives on ONE dedicated
 # blocking OS thread (never on the runtime); commands flow over tokio::sync
 # channels and the worker receives them via `blocking_recv`.
@@ -34,6 +44,14 @@ tokio = { version = "1", features = [
   "time",
   "macros",
 ] }
+# Scratch workspaces + realistic file/chat fixtures for the search traces. The
+# domain crate creates versions/snapshots + chat threads/messages exactly as the
+# product would, so the FTS index is fed non-tautological data. Depending on the
+# testkit also unifies the storage `fault-injection` feature ON for `cargo test`,
+# arming the crash-injection at the index-commit boundary.
+dohc-engine-domain = { path = "../dohc-engine-domain" }
+dohc-engine-testkit = { path = "../dohc-engine-testkit" }
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]

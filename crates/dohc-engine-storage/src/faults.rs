@@ -67,6 +67,14 @@ pub enum FaultPoint {
     /// is idempotent (preimage hash now matches the new content; no second
     /// write, no duplicate). `materialize.after-rename-before-complete`.
     MaterializeAfterRenameBeforeComplete,
+
+    // ---- search index rebuild (R12) ---------------------------------------
+    /// Inside `ensure_search_index_for_version`'s SAVEPOINT, after the chat FTS
+    /// wipe and before the rebuild inserts complete. A crash here MUST roll the
+    /// whole rebuild back (no torn/partial FTS generation, no state row), even
+    /// when the caller ran the ensure on an autocommit (read-only-borrow)
+    /// connection — the savepoint is what makes that hold. `search.mid-rebuild`.
+    SearchIndexMidRebuild,
 }
 
 impl FaultPoint {
@@ -90,6 +98,7 @@ impl FaultPoint {
             FaultPoint::MaterializeAfterRenameBeforeComplete => {
                 "materialize.after-rename-before-complete"
             }
+            FaultPoint::SearchIndexMidRebuild => "search.mid-rebuild",
         }
     }
 }
