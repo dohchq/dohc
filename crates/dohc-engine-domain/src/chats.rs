@@ -508,7 +508,7 @@ fn normalize_projection_field(field: &str, value: &str) -> Result<String, Domain
 }
 
 /// The control-char class shared by the projection/heading/channel validators
-/// (`PROJECTION_FIELD_CONTROL_CHAR = /[ -]/u`).
+/// (`PROJECTION_FIELD_CONTROL_CHAR = /[\x00-\x1f\x7f]/u`).
 fn has_projection_control_char(value: &str) -> bool {
     value
         .chars()
