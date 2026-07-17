@@ -749,3 +749,29 @@ source of truth every orchestrator session loads first).
   follows/personal-feed/bookmarks (PR #136 surface), dispatch ledger +
   agent-run records. Byte-compatible with the TS chat schema (base64url
   cursors, generation-CAS bookmarks, deferred-parent repair). Full cell.
+
+## 2026-07-17 — R09 merged (chats) · R12 next (search)
+
+- R09 #161 MERGED: chats domain (21 tables, migration ordinal 3) —
+  channels/threads/messages/reactions/decisions/mentions/read-state,
+  follows/feed/bookmarks(gen-CAS), dispatch ledger (single-writer replacing
+  the deleted desktop raw connection). Cross-engine parity BYTE-VERIFIED vs
+  real Node (NFC projection paths, base64url cursors, slugs). Review caught:
+  P1 dispatch liveness (claim-only, no completion/reclaim → wedged; fixed
+  complete/fail/reclaim state machine + startup reaper); P1 DM-kind-dropped
+  (codex); exactly-once replay via engine_requests; author_kind CHECK;
+  normalize_body JS-trimEnd parity (U+FEFF); list bounds; + a pre-existing
+  collab test-flake (unique_dir pid+nanos collision) fixed. 29 tests green.
+- PROCESS NOTE: chats.rs shipped with 3 LITERAL control bytes (0x00/0x1f/
+  0x7f) pasted into a regex doc-comment → git flagged the file BINARY → bot
+  diffs didn't render → lighter bot review (the 2 local adversarial
+  reviewers, reading full content, carried the substantive review). Caught
+  by verify-before-merge byte inspection; fixed (escaped) pre-merge. LESSON:
+  spot-check for git-binary-flagged source on every shard; "compiles+tests
+  pass" does not catch unreviewable/binary source.
+- Wave 2 status: R08 secrets ✓, R11a ydoc ✓, R09 chats ✓ (the 3 biggest
+  domains). Remaining: R12 search, R05 identity/restore completion.
+- R12 opens (migration ordinal 4, search FTS tables): FTS index over files
+  + chat messages, policy-filtered visibility (fail-CLOSED per the hotfix
+  posture), read-your-writes read-generation snapshot. Byte/behavior parity
+  with the TS search where it exists.
