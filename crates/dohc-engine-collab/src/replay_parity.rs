@@ -110,6 +110,24 @@ struct WireStructure {
     /// content-parity check compares these across wires at overlapping clocks
     /// so a candidate cannot redefine an already-known clock's kind or payload.
     identities: BTreeMap<ClientID, BTreeMap<u32, ClockIdentity>>,
+    /// The wire's own delete-set as `(client, [start, end))` half-open clock
+    /// ranges. A `ContentDeleted` item whose clock IS in this set is a
+    /// legitimate delete/GC (the deletion the peer performed); a bare
+    /// `ContentDeleted` NOT covered here is a hostile redefinition.
+    deleted_ranges: BTreeMap<ClientID, Vec<(u32, u32)>>,
+}
+
+impl WireStructure {
+    /// Whether this wire's own delete-set covers `(client, clock)` — i.e. the
+    /// wire genuinely deletes that clock (a real delete/GC), as opposed to
+    /// merely re-encoding it.
+    fn delete_set_covers(&self, client: ClientID, clock: u32) -> bool {
+        self.deleted_ranges.get(&client).is_some_and(|ranges| {
+            ranges
+                .iter()
+                .any(|&(start, end)| start <= clock && clock < end)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -160,18 +178,20 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<(), Col
     // (1) Content parity (ALL content kinds, not just strings): a candidate
     // that re-encodes a clock the base or a still-parked update already holds
     // as LIVE content MUST present the identical structural identity — same
-    // KIND and same canonical PAYLOAD. yrs dedups a re-encoded id by silently
-    // keeping its first-seen item; a from-scratch Yjs peer replaying the same
-    // lineage can resolve the conflicting redefinition differently, whether it
-    // changes a string's units OR swaps the content kind entirely (string ->
-    // JSON / binary / embed / format / type / deleted, etc.). No honest peer
-    // ever redefines a `(client, clock)` it (or its dependency) has already
-    // used, so this can only reject a hostile/corrupt input.
-    if content_parity_conflict(&candidate_structure.identities, &base_structure.identities)
-        || content_parity_conflict(
-            &candidate_structure.identities,
-            &pending_structure.identities,
-        )
+    // KIND and same canonical PAYLOAD — UNLESS it is genuinely deleting that
+    // clock. yrs dedups a re-encoded id by silently keeping its first-seen
+    // item; a from-scratch Yjs peer replaying the same lineage can resolve a
+    // conflicting LIVE redefinition differently, whether it changes a string's
+    // units OR swaps the content kind entirely (string -> JSON / binary /
+    // embed / format / type). A candidate that instead tombstones a base-live
+    // clock (`ContentDeleted`) is a legitimate delete/GC when it carries that
+    // clock in its OWN delete-set — the normal reconnect/resync full-state
+    // resend does exactly this — and only a BARE `ContentDeleted` (not in the
+    // candidate's delete-set) is a hostile redefinition. No honest peer ever
+    // redefines a `(client, clock)` it has already used as LIVE content, so
+    // this can only reject a hostile/corrupt input.
+    if content_parity_conflict(&candidate_structure, &base_structure.identities)
+        || content_parity_conflict(&candidate_structure, &pending_structure.identities)
     {
         return Err(CollabError::ReplayParityViolation {
             reason: "a candidate re-encodes an already-known clock with different content"
@@ -259,31 +279,46 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<(), Col
 }
 
 /// True when `candidate` redefines a clock the ESTABLISHED side (`base` or a
-/// still-parked update) already holds as LIVE content, with a different
-/// identity (kind or payload). Asymmetric on purpose: only a clock that is
-/// LIVE on the established side is compared. A clock the established side holds
-/// as a tombstone (`ContentDeleted`) "renders neither way," so a resend that
-/// references or re-encodes it is never false-rejected (the reviewer's
-/// compacted/GC'd-tombstone note); a clock the established side never claims is
-/// new and untouched here. No honest peer ever redefines an already-used
-/// clock's kind or payload, so a match here can only be hostile/corrupt input.
+/// still-parked update) already holds as LIVE content, in a way that would
+/// diverge yjs<->yrs. Asymmetric on purpose: only a clock that is LIVE on the
+/// established side is compared. A clock the established side holds as a
+/// tombstone (`ContentDeleted`) "renders neither way," so a resend that
+/// references or re-encodes it is never false-rejected; a clock the established
+/// side never claims is new and untouched here.
+///
+/// At a base-live clock the candidate also claims, three cases:
+///   - the candidate presents the IDENTICAL identity — a clean resend, fine;
+///   - the candidate tombstones the clock (`ContentDeleted`) AND covers it in
+///     its OWN delete-set — a legitimate delete/GC (the normal reconnect
+///     full-state resend carries a deleted clock this way), fine;
+///   - otherwise the candidate presents a DIFFERENT LIVE identity (string
+///     units or a different kind/payload) OR a BARE `ContentDeleted` not in
+///     its delete-set — a hostile redefinition, rejected. No honest peer ever
+///     redefines an already-used clock's live content without deleting it.
 fn content_parity_conflict(
-    candidate: &BTreeMap<ClientID, BTreeMap<u32, ClockIdentity>>,
+    candidate: &WireStructure,
     established: &BTreeMap<ClientID, BTreeMap<u32, ClockIdentity>>,
 ) -> bool {
     for (client, known) in established {
-        let Some(claimed) = candidate.get(client) else {
+        let Some(claimed) = candidate.identities.get(client) else {
             continue;
         };
         for (clock, established_identity) in known {
             if !established_identity.is_live() {
                 continue; // tombstone on the established side: renders neither way
             }
-            if let Some(candidate_identity) = claimed.get(clock) {
-                if candidate_identity != established_identity {
-                    return true;
-                }
+            let Some(candidate_identity) = claimed.get(clock) else {
+                continue;
+            };
+            if candidate_identity == established_identity {
+                continue; // identical live content: a clean resend
             }
+            if matches!(candidate_identity, ClockIdentity::Tombstone)
+                && candidate.delete_set_covers(*client, *clock)
+            {
+                continue; // a genuine delete/GC of this clock, not a redefinition
+            }
+            return true;
         }
     }
     false
@@ -355,6 +390,7 @@ fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
     }
     let deletes = IdSet::decode(&mut decoder).map_err(parity_decode_error)?;
     for (client, ranges) in deletes.iter() {
+        let coverage = structure.deleted_ranges.entry(*client).or_default();
         for range in ranges {
             structure
                 .deletion_boundaries
@@ -362,6 +398,8 @@ fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
             structure
                 .deletion_boundaries
                 .push(ID::new(*client, range.end));
+            // yrs delete-set ranges are half-open `start..end` (Rust `Range`).
+            coverage.push((range.start, range.end));
         }
     }
     if !decoder

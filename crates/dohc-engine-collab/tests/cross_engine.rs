@@ -1251,3 +1251,121 @@ fn replay_parity_accepts_embed_resend_with_reordered_map_keys() {
     // reordered bytes or journals them, it must NOT be a parity violation.
     assert!(matches!(outcome, TxnOutcome::Committed(_)));
 }
+
+// ---- honest delete+GC+resend must ACCEPT (regression guard) -----------------
+//
+// The reviewer's honest-corpus differential found a cutover-blocking false
+// positive: after a delete+GC, a normal reconnect/resync full-state RESEND
+// carries the deleted clock as `ContentDeleted` while the durable base still
+// holds it as a live `String`. Recording the deleted clock's identity as a
+// `Tombstone` made the gate flag established-live-vs-candidate-tombstone as a
+// hostile redefinition and reject the WHOLE resend — dropping every insert
+// bundled in it and keeping deleted content, diverging from honest peers.
+//
+// The distinguisher: a legitimate delete/GC carries the clock in the
+// candidate's OWN delete-set; a hostile bare `ContentDeleted` has an empty
+// delete-set. Only the latter is rejected.
+
+#[test]
+fn replay_parity_accepts_honest_delete_gc_resend() {
+    // Minimal repro: insert "abc" -> delete "b" + GC (yrs GC is on by default)
+    // -> full-state resend (carries clock 1 as ContentDeleted, covered by its
+    // own delete-set). The resend must ACCEPT and the durable doc converge to
+    // "ac" (NOT be rejected and stuck at "abc").
+    let (mut ts, key) = setup_parity_store("honest-delete-gc-resend", Regime::LocalOnly);
+    let producer = Ydoc::wire();
+    let insert = producer.plaintext_insert(0, "abc");
+    record_local_update(&mut ts.store, &key, &insert, &NoFaults, 1_001).expect("insert abc");
+
+    let _delete = producer.plaintext_delete(1, 1); // producer: "ac", clock 1 deleted+GC'd
+    assert_eq!(producer.plaintext_string(), "ac");
+    let resend = producer.encode_full_state();
+
+    let outcome = record_local_update(&mut ts.store, &key, &resend, &NoFaults, 1_002)
+        .expect("an honest delete+GC full-state resend must NOT be rejected");
+    assert!(matches!(outcome, TxnOutcome::Committed(_)));
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(
+        persisted.doc.plaintext_string(),
+        "ac",
+        "durable must converge to the deleted-content result, not stay at 'abc'"
+    );
+}
+
+#[test]
+fn replay_parity_accepts_honest_delete_gc_resend_on_remote_path() {
+    let (mut ts, key) = setup_parity_store("honest-delete-gc-resend-remote", Regime::Replicated);
+    let producer = Ydoc::wire();
+    let insert = producer.plaintext_insert(0, "abc");
+    apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "peer".to_owned(),
+            origin_seq: 1,
+            bytes: insert,
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect("remote insert abc");
+    let _delete = producer.plaintext_delete(1, 1);
+    let resend = producer.encode_full_state();
+    apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "peer".to_owned(),
+            origin_seq: 2,
+            bytes: resend,
+        },
+        &NoFaults,
+        1_002,
+    )
+    .expect("an honest delete+GC full-state resend must NOT be rejected on the remote path");
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(persisted.doc.plaintext_string(), "ac");
+}
+
+#[test]
+fn replay_parity_accepts_delete_delta_landing_deleted_content() {
+    // The plain delete path (a delete-set-only update, no resend) still lands
+    // "ac" — deletes are never redefinitions and must always apply.
+    let (mut ts, key) = setup_parity_store("delete-delta", Regime::LocalOnly);
+    let producer = Ydoc::wire();
+    let insert = producer.plaintext_insert(0, "abc");
+    record_local_update(&mut ts.store, &key, &insert, &NoFaults, 1_001).expect("insert abc");
+    let delete = producer.plaintext_delete(1, 1);
+    record_local_update(&mut ts.store, &key, &delete, &NoFaults, 1_002).expect("delete b delta");
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(persisted.doc.plaintext_string(), "ac");
+}
+
+#[test]
+fn replay_parity_accepts_gc_disabled_resend_retaining_deleted_content() {
+    // A resend from a GC-disabled peer retains the deleted clock as LIVE
+    // `String` content (still in the delete-set). `merge_updates` re-merges the
+    // wire updates without a doc, so no GC runs — the merged update carries
+    // clock 1 as live "b" AND deletes it. The candidate's clock-1 identity
+    // equals the base's (live "b"), so it's a clean resend and must ACCEPT.
+    let (mut ts, key) = setup_parity_store("gc-disabled-resend", Regime::LocalOnly);
+    let producer = Ydoc::wire();
+    let insert = producer.plaintext_insert(0, "abc");
+    let delete = producer.plaintext_delete(1, 1);
+    record_local_update(&mut ts.store, &key, &insert, &NoFaults, 1_001).expect("insert abc");
+    let gc_off_resend =
+        dohc_engine_collab::merge_updates(&[insert, delete]).expect("merge without GC");
+    let outcome = record_local_update(&mut ts.store, &key, &gc_off_resend, &NoFaults, 1_002)
+        .expect("a GC-disabled resend retaining deleted content must accept");
+    assert!(matches!(outcome, TxnOutcome::Committed(_)));
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(persisted.doc.plaintext_string(), "ac");
+}
