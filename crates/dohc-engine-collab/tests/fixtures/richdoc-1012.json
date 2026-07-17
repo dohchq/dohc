@@ -1,0 +1,54 @@
+{
+ "seed": 1012,
+ "contentKind": "richdoc",
+ "updates": [
+  "AQGEnYWgBgAoAQtmcm9udG1hdHRlcgV0aXRsZQF3CeaXpeacrOiqngA=",
+  "AQGEnYWgBgEoAQtmcm9udG1hdHRlcgVjb3VudAF9NgA=",
+  "AQeEnYWgBgIHAQRib2R5AwlwYXJhZ3JhcGgHAISdhaAGAgYGAISdhaAGAwRib2xkBHRydWWGhJ2FoAYEBml0YWxpYwR0cnVlhISdhaAGBQ9saW5lCmNvbnRuYcOvdmWGhJ2FoAYTBGJvbGQEbnVsbIaEnYWgBhQGaXRhbGljBG51bGwA",
+  "AQWEnYWgBhaHhJ2FoAYCAwlwYXJhZ3JhcGgHAISdhaAGFgYGAISdhaAGFwRib2xkBHRydWWEhJ2FoAYYDHdvcmxkWsO8cmljaIaEnYWgBiMEYm9sZARudWxsAA==",
+  "AQeEnYWgBiWHhJ2FoAYWAwlwYXJhZ3JhcGgHAISdhaAGJQYGAISdhaAGJgRib2xkBHRydWWGhJ2FoAYnBml0YWxpYwR0cnVlhISdhaAGKBFaw7xyaWNo2YXYsdit2KjYp4aEnYWgBjMEYm9sZARudWxshoSdhaAGNAZpdGFsaWMEbnVsbAA=",
+  "AQGEnYWgBjbEhJ2FoAYEhJ2FoAYFAVgA"
+ ],
+ "mergedUpdateB64": "ARaEnYWgBgAoAQtmcm9udG1hdHRlcgV0aXRsZQF3CeaXpeacrOiqnigBC2Zyb250bWF0dGVyBWNvdW50AX02BwEEYm9keQMJcGFyYWdyYXBoBwCEnYWgBgIGBgCEnYWgBgMEYm9sZAR0cnVlhoSdhaAGBAZpdGFsaWMEdHJ1ZYSEnYWgBgUPbGluZQpjb250bmHDr3ZlhoSdhaAGEwRib2xkBG51bGyGhJ2FoAYUBml0YWxpYwRudWxsh4SdhaAGAgMJcGFyYWdyYXBoBwCEnYWgBhYGBgCEnYWgBhcEYm9sZAR0cnVlhISdhaAGGAx3b3JsZFrDvHJpY2iGhJ2FoAYjBGJvbGQEbnVsbIeEnYWgBhYDCXBhcmFncmFwaAcAhJ2FoAYlBgYAhJ2FoAYmBGJvbGQEdHJ1ZYaEnYWgBicGaXRhbGljBHRydWWEhJ2FoAYoEVrDvHJpY2jZhdix2K3YqNinhoSdhaAGMwRib2xkBG51bGyGhJ2FoAY0Bml0YWxpYwRudWxsxISdhaAGBISdhaAGBQFYAA==",
+ "stateVectorB64": "AYSdhaAGNw==",
+ "expected": {
+  "frontmatter": {
+   "title": "日本語",
+   "count": 54
+  },
+  "paragraphs": [
+   {
+    "runs": [
+     {
+      "text": "X",
+      "bold": true,
+      "italic": false
+     },
+     {
+      "text": "line\ncontnaïve",
+      "bold": true,
+      "italic": true
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "worldZürich",
+      "bold": true,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "Zürichمرحبا",
+      "bold": true,
+      "italic": true
+     }
+    ]
+   }
+  ]
+ }
+}

@@ -1,0 +1,18 @@
+{
+ "seed": 24,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQHtlK76AQAEAQlwbGFpblRleHQJ5pel5pys6KqeAA==",
+  "AQHtlK76AQNE7ZSu+gEAA2HMgQA=",
+  "AAHtlK76AQIAAQQB",
+  "AQHtlK76AQWE7ZSu+gECB1rDvHJpY2gB7ZSu+gECAAEEAQ==",
+  "AQHtlK76AQvE7ZSu+gEC7ZSu+gEFBXdvcmxkAe2UrvoBAgABBAE=",
+  "AQHtlK76ARDE7ZSu+gEG7ZSu+gEHCPCfmIDwn46JAe2UrvoBAgABBAE=",
+  "AQHtlK76ARTE7ZSu+gEJ7ZSu+gEKA2HMgQHtlK76AQIAAQQB"
+ ],
+ "mergedUpdateB64": "AQbtlK76AQAEAQlwbGFpblRleHQJ5pel5pys6KqeRO2UrvoBAANhzIGE7ZSu+gECB1rDvHJpY2jE7ZSu+gEC7ZSu+gEFBXdvcmxkxO2UrvoBBu2UrvoBBwjwn5iA8J+OicTtlK76AQntlK76AQoDYcyBAe2UrvoBAgABBAE=",
+ "stateVectorB64": "Ae2UrvoBFg==",
+ "expected": {
+  "text": "a本語worldZü😀🎉ricáh"
+ }
+}

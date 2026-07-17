@@ -1,0 +1,54 @@
+# R11a Y.Doc durable cache — the Rust-owned durable Y.Doc update log, snapshots,
+# compaction, leases, replication of `ydoc.update` ops, and the settle pipeline.
+#
+# PINNED INTEROP PAIR (audited together by the yrs spike; a lone upgrade of
+# either side can silently reopen interop divergence — re-run the spike + the
+# cross-engine fixtures before bumping):
+#   yjs 13.6.30  (pnpm-lock.yaml)  <->  yrs 0.27.3 (below, matching yrs-spike)
+[package]
+name = "dohc-engine-collab"
+version.workspace = true
+# edition 2021 / rust 1.82 match the yrs-spike baseline this crate's CRDT core is
+# proven against (the workspace centralizes edition 2024 for its other members;
+# the yrs 0.27.3 interop reference is pinned to 2021 and this crate stays lockstep
+# with it).
+edition = "2021"
+rust-version = "1.82"
+publish.workspace = true
+description = "R11a durable Y.Doc layer: the content-addressed durable update log, folded snapshots, convergence-neutral compaction, per-doc leases, base-once replicated lineage, idempotent/echo-suppressed ydoc.update replication apply, and the settle→markdown projection materialized through R04's job pipeline. Two regimes (local-only prunable cache vs replicated never-prune durable lineage). Dormant; not wired into the product."
+
+[features]
+# Passthrough of the storage crate's crash-injection seam so the durable
+# append / settle-commit crash-recovery tests can arm the shared storage fault
+# points under `-p dohc-engine-collab --features fault-injection`. Under
+# `cargo test --workspace` the testkit enables it via feature unification.
+fault-injection = ["dohc-engine-storage/fault-injection"]
+
+[dependencies]
+# The durable store (single writer, migration ledger with the R11a ydoc tables,
+# content-addressed binary_blobs, the R04 materialization-job pipeline).
+dohc-engine-storage = { path = "../dohc-engine-storage" }
+# The ydoc SQL runs against the store's connection/transaction through its
+# read_with/write_with seams. Pinned to storage's exact rusqlite so the shared
+# Connection/Transaction types unify (the `bundled` SQLite comes from storage
+# via feature unification; this crate declares no features of its own).
+rusqlite = "0.37"
+# The CRDT. Pinned to the exact spike version; every wire-facing Doc is built
+# with OffsetKind::Utf16 (binding constraint 1).
+yrs = "=0.27.3"
+# Content-addressing of markdown projections and provenance state vectors, and
+# the canonical-content fingerprint used by the convergence checks.
+sha2 = "0.10"
+thiserror = "2"
+# Canonical content JSON (the semantic convergence surface shared with yjs, and
+# the frontmatter projection).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# Decoding the base64 real-yjs fixture blobs in the cross-engine tests.
+base64 = "0.22"
+
+# Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
+[lints]
+workspace = true

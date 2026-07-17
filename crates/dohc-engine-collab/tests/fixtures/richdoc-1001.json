@@ -1,0 +1,44 @@
+{
+ "seed": 1001,
+ "contentKind": "richdoc",
+ "updates": [
+  "AQHIzrzWDAAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BXdvcmxkAA==",
+  "AQHIzrzWDAEoAQtmcm9udG1hdHRlcgVjb3VudAF9GgA=",
+  "AQPIzrzWDAIHAQRib2R5AwlwYXJhZ3JhcGgHAMjOvNYMAgYEAMjOvNYMAw3ml6XmnKzoqp4JdGFiAA==",
+  "AQfIzrzWDAuHyM681gwCAwlwYXJhZ3JhcGgHAMjOvNYMCwYGAMjOvNYMDARib2xkBHRydWWGyM681gwNBml0YWxpYwR0cnVlhMjOvNYMDg9uYcOvdmVsaW5lCmNvbnSGyM681gwcBGJvbGQEbnVsbIbIzrzWDB0GaXRhbGljBG51bGwA",
+  "AQPIzrzWDB9GyM681gwEBGJvbGQEdHJ1ZcTIzrzWDB/IzrzWDAQBWMbIzrzWDCDIzrzWDAQEYm9sZARudWxsAA=="
+ ],
+ "mergedUpdateB64": "AQ/IzrzWDAAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BXdvcmxkKAELZnJvbnRtYXR0ZXIFY291bnQBfRoHAQRib2R5AwlwYXJhZ3JhcGgHAMjOvNYMAgYEAMjOvNYMAw3ml6XmnKzoqp4JdGFih8jOvNYMAgMJcGFyYWdyYXBoBwDIzrzWDAsGBgDIzrzWDAwEYm9sZAR0cnVlhsjOvNYMDQZpdGFsaWMEdHJ1ZYTIzrzWDA4PbmHDr3ZlbGluZQpjb250hsjOvNYMHARib2xkBG51bGyGyM681gwdBml0YWxpYwRudWxsRsjOvNYMBARib2xkBHRydWXEyM681gwfyM681gwEAVjGyM681gwgyM681gwEBGJvbGQEbnVsbAA=",
+ "stateVectorB64": "AcjOvNYMIg==",
+ "expected": {
+  "frontmatter": {
+   "title": "world",
+   "count": 26
+  },
+  "paragraphs": [
+   {
+    "runs": [
+     {
+      "text": "X",
+      "bold": true,
+      "italic": false
+     },
+     {
+      "text": "日本語\ttab",
+      "bold": false,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "naïveline\ncont",
+      "bold": true,
+      "italic": true
+     }
+    ]
+   }
+  ]
+ }
+}

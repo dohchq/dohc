@@ -1,0 +1,16 @@
+{
+ "seed": 8,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQH9ouyBAQAEAQlwbGFpblRleHQJ5pel5pys6KqeAA==",
+  "AQH9ouyBAQPE/aLsgQEB/aLsgQECBAl0YWIA",
+  "AQH9ouyBAQfE/aLsgQEG/aLsgQECBWNhZsOpAA==",
+  "AQH9ouyBAQtE/aLsgQEAA2HMgQA=",
+  "AAH9ouyBAQEFAQ=="
+ ],
+ "mergedUpdateB64": "AQT9ouyBAQAEAQlwbGFpblRleHQJ5pel5pys6KqexP2i7IEBAf2i7IEBAgQJdGFixP2i7IEBBv2i7IEBAgVjYWbDqUT9ouyBAQADYcyBAf2i7IEBAQUB",
+ "stateVectorB64": "Af2i7IEBDQ==",
+ "expected": {
+  "text": "á日本\ttbcafé語"
+ }
+}

@@ -1,0 +1,74 @@
+{
+ "seed": 1006,
+ "contentKind": "richdoc",
+ "updates": [
+  "AQGmkrT0AgAoAQtmcm9udG1hdHRlcgV0aXRsZQF3CPCfmIDwn46JAA==",
+  "AQGmkrT0AgEoAQtmcm9udG1hdHRlcgVjb3VudAF9FgA=",
+  "AQWmkrT0AgIHAQRib2R5AwlwYXJhZ3JhcGgHAKaStPQCAgYGAKaStPQCAwZpdGFsaWMEdHJ1ZYSmkrT0AgQS8J2UmPCdlKvwnZSmbmHDr3ZlhqaStPQCDwZpdGFsaWMEbnVsbAA=",
+  "AQemkrT0AhGHppK09AICAwlwYXJhZ3JhcGgHAKaStPQCEQYGAKaStPQCEgRib2xkBHRydWWGppK09AITBml0YWxpYwR0cnVlhKaStPQCFBLwn5iA8J+OidmF2LHYrdio2KeGppK09AIdBGJvbGQEbnVsbIamkrT0Ah4GaXRhbGljBG51bGwA",
+  "AQOmkrT0AiCHppK09AIRAwlwYXJhZ3JhcGgHAKaStPQCIAYEAKaStPQCIQtuYcOvdmV3b3JsZAA=",
+  "AQWmkrT0AiyHppK09AIgAwlwYXJhZ3JhcGgHAKaStPQCLAYGAKaStPQCLQZpdGFsaWMEdHJ1ZYSmkrT0Ai4JCXRhYndvcmxkhqaStPQCNwZpdGFsaWMEbnVsbAA=",
+  "AQOmkrT0AjmHppK09AIsAwlwYXJhZ3JhcGgHAKaStPQCOQYEAKaStPQCOg/wnZSY8J2Uq/CdlKZhzIEA",
+  "AQOmkrT0AkNGppK09AIEBGJvbGQEdHJ1ZcSmkrT0AkOmkrT0AgQBWMamkrT0AkSmkrT0AgQEYm9sZARudWxsAA=="
+ ],
+ "mergedUpdateB64": "ARymkrT0AgAoAQtmcm9udG1hdHRlcgV0aXRsZQF3CPCfmIDwn46JKAELZnJvbnRtYXR0ZXIFY291bnQBfRYHAQRib2R5AwlwYXJhZ3JhcGgHAKaStPQCAgYGAKaStPQCAwZpdGFsaWMEdHJ1ZYSmkrT0AgQS8J2UmPCdlKvwnZSmbmHDr3ZlhqaStPQCDwZpdGFsaWMEbnVsbIemkrT0AgIDCXBhcmFncmFwaAcAppK09AIRBgYAppK09AISBGJvbGQEdHJ1ZYamkrT0AhMGaXRhbGljBHRydWWEppK09AIUEvCfmIDwn46J2YXYsdit2KjYp4amkrT0Ah0EYm9sZARudWxshqaStPQCHgZpdGFsaWMEbnVsbIemkrT0AhEDCXBhcmFncmFwaAcAppK09AIgBgQAppK09AIhC25hw692ZXdvcmxkh6aStPQCIAMJcGFyYWdyYXBoBwCmkrT0AiwGBgCmkrT0Ai0GaXRhbGljBHRydWWEppK09AIuCQl0YWJ3b3JsZIamkrT0AjcGaXRhbGljBG51bGyHppK09AIsAwlwYXJhZ3JhcGgHAKaStPQCOQYEAKaStPQCOg/wnZSY8J2Uq/CdlKZhzIFGppK09AIEBGJvbGQEdHJ1ZcSmkrT0AkOmkrT0AgQBWMamkrT0AkSmkrT0AgQEYm9sZARudWxsAA==",
+ "stateVectorB64": "AaaStPQCRg==",
+ "expected": {
+  "frontmatter": {
+   "title": "😀🎉",
+   "count": 22
+  },
+  "paragraphs": [
+   {
+    "runs": [
+     {
+      "text": "X",
+      "bold": true,
+      "italic": false
+     },
+     {
+      "text": "𝔘𝔫𝔦naïve",
+      "bold": false,
+      "italic": true
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "😀🎉مرحبا",
+      "bold": true,
+      "italic": true
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "naïveworld",
+      "bold": false,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "\ttabworld",
+      "bold": false,
+      "italic": true
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "𝔘𝔫𝔦á",
+      "bold": false,
+      "italic": false
+     }
+    ]
+   }
+  ]
+ }
+}

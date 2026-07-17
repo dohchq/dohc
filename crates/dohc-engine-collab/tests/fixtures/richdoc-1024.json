@@ -1,0 +1,74 @@
+{
+ "seed": 1024,
+ "contentKind": "richdoc",
+ "updates": [
+  "AQGu0YvyCAAoAQtmcm9udG1hdHRlcgV0aXRsZQF3CPCfmIDwn46JAA==",
+  "AQGu0YvyCAEoAQtmcm9udG1hdHRlcgVjb3VudAF9HAA=",
+  "AQeu0YvyCAIHAQRib2R5AwlwYXJhZ3JhcGgHAK7Ri/IIAgYGAK7Ri/IIAwRib2xkBHRydWWGrtGL8ggEBml0YWxpYwR0cnVlhK7Ri/IIBQ/wn5iA8J+OiVrDvHJpY2iGrtGL8ggPBGJvbGQEbnVsbIau0YvyCBAGaXRhbGljBG51bGwA",
+  "AQWu0YvyCBKHrtGL8ggCAwlwYXJhZ3JhcGgHAK7Ri/IIEgYGAK7Ri/IIEwRib2xkBHRydWWErtGL8ggUDlrDvHJpY2haw7xyaWNohq7Ri/IIIARib2xkBG51bGwA",
+  "AQOu0YvyCCKHrtGL8ggSAwlwYXJhZ3JhcGgHAK7Ri/IIIgYEAK7Ri/IIIwtoZWxsbyBjYWbDqQA=",
+  "AQeu0YvyCC6HrtGL8ggiAwlwYXJhZ3JhcGgHAK7Ri/IILgYGAK7Ri/IILwRib2xkBHRydWWGrtGL8ggwBml0YWxpYwR0cnVlhK7Ri/IIMRLZhdix2K3YqNin8J+YgPCfjomGrtGL8gg6BGJvbGQEbnVsbIau0YvyCDsGaXRhbGljBG51bGwA",
+  "AQOu0YvyCD2HrtGL8gguAwlwYXJhZ3JhcGgHAK7Ri/IIPQYEAK7Ri/IIPgl3b3JsZAl0YWIA",
+  "AQGu0YvyCEjErtGL8ggErtGL8ggFAVgA"
+ ],
+ "mergedUpdateB64": "ARyu0YvyCAAoAQtmcm9udG1hdHRlcgV0aXRsZQF3CPCfmIDwn46JKAELZnJvbnRtYXR0ZXIFY291bnQBfRwHAQRib2R5AwlwYXJhZ3JhcGgHAK7Ri/IIAgYGAK7Ri/IIAwRib2xkBHRydWWGrtGL8ggEBml0YWxpYwR0cnVlhK7Ri/IIBQ/wn5iA8J+OiVrDvHJpY2iGrtGL8ggPBGJvbGQEbnVsbIau0YvyCBAGaXRhbGljBG51bGyHrtGL8ggCAwlwYXJhZ3JhcGgHAK7Ri/IIEgYGAK7Ri/IIEwRib2xkBHRydWWErtGL8ggUDlrDvHJpY2haw7xyaWNohq7Ri/IIIARib2xkBG51bGyHrtGL8ggSAwlwYXJhZ3JhcGgHAK7Ri/IIIgYEAK7Ri/IIIwtoZWxsbyBjYWbDqYeu0YvyCCIDCXBhcmFncmFwaAcArtGL8gguBgYArtGL8ggvBGJvbGQEdHJ1ZYau0YvyCDAGaXRhbGljBHRydWWErtGL8ggxEtmF2LHYrdio2Kfwn5iA8J+OiYau0YvyCDoEYm9sZARudWxshq7Ri/IIOwZpdGFsaWMEbnVsbIeu0YvyCC4DCXBhcmFncmFwaAcArtGL8gg9BgQArtGL8gg+CXdvcmxkCXRhYsSu0YvyCASu0YvyCAUBWAA=",
+ "stateVectorB64": "Aa7Ri/IISQ==",
+ "expected": {
+  "frontmatter": {
+   "title": "😀🎉",
+   "count": 28
+  },
+  "paragraphs": [
+   {
+    "runs": [
+     {
+      "text": "X",
+      "bold": true,
+      "italic": false
+     },
+     {
+      "text": "😀🎉Zürich",
+      "bold": true,
+      "italic": true
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "ZürichZürich",
+      "bold": true,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "hello café",
+      "bold": false,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "مرحبا😀🎉",
+      "bold": true,
+      "italic": true
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "world\ttab",
+      "bold": false,
+      "italic": false
+     }
+    ]
+   }
+  ]
+ }
+}

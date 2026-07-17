@@ -1,0 +1,22 @@
+{
+ "seed": 20,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQGkkdt0AAQBCXBsYWluVGV4dAQJdGFiAA==",
+  "AAGkkdt0AQEB",
+  "AQGkkdt0BMSkkdt0AqSR23QDBm5hw692ZQGkkdt0AQEB",
+  "AQGkkdt0CYSkkdt0AwVjYWbDqQGkkdt0AQEB",
+  "AAGkkdt0AgEBBQI=",
+  "AAGkkdt0AgECBAQ=",
+  "AQGkkdt0DcSkkdt0B6SR23QICeaXpeacrOiqngGkkdt0AgECBAQ=",
+  "AAGkkdt0AwECBAQOAg==",
+  "AQGkkdt0EISkkdt0DAZuYcOvdmUBpJHbdAMBAgQEDgI=",
+  "AQGkkdt0FcSkkdt0A6SR23QJBWNhZsOpAaSR23QDAQIEBA4C",
+  "AQGkkdt0GcSkkdt0A6SR23QVBWNhZsOpAaSR23QDAQIEBA4C"
+ ],
+ "mergedUpdateB64": "AQekkdt0AAQBCXBsYWluVGV4dAQJdGFixKSR23QCpJHbdAMGbmHDr3ZlhKSR23QDBWNhZsOpxKSR23QHpJHbdAgJ5pel5pys6KqehKSR23QMBm5hw692ZcSkkdt0A6SR23QJBWNhZsOpxKSR23QDpJHbdBUFY2Fmw6kBpJHbdAMBAgQEDgI=",
+ "stateVectorB64": "AaSR23Qd",
+ "expected": {
+  "text": "\t日ebcafécafécafénaïve"
+ }
+}

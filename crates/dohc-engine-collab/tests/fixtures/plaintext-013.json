@@ -1,0 +1,20 @@
+{
+ "seed": 13,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQG42qaNDgAEAQlwbGFpblRleHQGaGVsbG8gAA==",
+  "AAG42qaNDgEAAQ==",
+  "AAG42qaNDgIAAQIC",
+  "AQG42qaNDgaEuNqmjQ4FBAl0YWIBuNqmjQ4CAAECAg==",
+  "AQG42qaNDgrEuNqmjQ4EuNqmjQ4FBXdvcmxkAbjapo0OAgABAgI=",
+  "AQG42qaNDg/EuNqmjQ4LuNqmjQ4MA2HMgQG42qaNDgIAAQIC",
+  "AQG42qaNDhHEuNqmjQ4DuNqmjQ4EBAl0YWIBuNqmjQ4CAAECAg==",
+  "AQG42qaNDhXEuNqmjQ4NuNqmjQ4OCPCfmIDwn46JAbjapo0OAgABAgI=",
+  "AAG42qaNDgQAAQICBQEOAQ=="
+ ],
+ "mergedUpdateB64": "AQa42qaNDgAEAQlwbGFpblRleHQGaGVsbG8ghLjapo0OBQQJdGFixLjapo0OBLjapo0OBQV3b3JsZMS42qaNDgu42qaNDgwDYcyBxLjapo0OA7japo0OBAQJdGFixLjapo0ODbjapo0ODgjwn5iA8J+OiQG42qaNDgQAAQICBQEOAQ==",
+ "stateVectorB64": "Abjapo0OGQ==",
+ "expected": {
+  "text": "e\ttabowoárl😀🎉\ttab"
+ }
+}

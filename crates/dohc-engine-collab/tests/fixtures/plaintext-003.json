@@ -1,0 +1,22 @@
+{
+ "seed": 3,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQHn4P+RAgAEAQlwbGFpblRleHQK2YXYsdit2KjYpwA=",
+  "AAHn4P+RAgEDAQ==",
+  "AQHn4P+RAgVE5+D/kQIACeaXpeacrOiqngHn4P+RAgEDAQ==",
+  "AQHn4P+RAgjE5+D/kQIF5+D/kQIGBXdvcmxkAefg/5ECAQMB",
+  "AQHn4P+RAg3E5+D/kQIM5+D/kQIGB1rDvHJpY2gB5+D/kQIBAwE=",
+  "AQHn4P+RAhPE5+D/kQIM5+D/kQINCWxpbmUKY29udAHn4P+RAgEDAQ==",
+  "AAHn4P+RAgIDAQ8C",
+  "AQHn4P+RAhzE5+D/kQIa5+D/kQIbBmhlbGxvIAHn4P+RAgIDAQ8C",
+  "AQHn4P+RAiLE5+D/kQIV5+D/kQIWDPCdlJjwnZSr8J2UpgHn4P+RAgIDAQ8C",
+  "AQHn4P+RAijE5+D/kQIX5+D/kQIYCWxpbmUKY29udAHn4P+RAgIDAQ8C",
+  "AAHn4P+RAgMDAQ8CKQM="
+ ],
+ "mergedUpdateB64": "AQjn4P+RAgAEAQlwbGFpblRleHQK2YXYsdit2KjYp0Tn4P+RAgAJ5pel5pys6KqexOfg/5ECBefg/5ECBgV3b3JsZMTn4P+RAgzn4P+RAgYHWsO8cmljaMTn4P+RAgzn4P+RAg0JbGluZQpjb250xOfg/5ECGufg/5ECGwZoZWxsbyDE5+D/kQIV5+D/kQIWDPCdlJjwnZSr8J2UpsTn4P+RAhfn4P+RAhgJbGluZQpjb250Aefg/5ECAwMBDwIpAw==",
+ "stateVectorB64": "Aefg/5ECMQ==",
+ "expected": {
+  "text": "日worldlin𝔘𝔫𝔦e\nl\ncontconhello tZüch本語مرحا"
+ }
+}

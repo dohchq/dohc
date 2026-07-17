@@ -1,0 +1,92 @@
+//! Per-document leases: opening a durable Y.Doc obtains an exclusive lease so a
+//! second open of the same lineage is refused rather than forking two writers
+//! into it (mirrors the TS driver's `globalLiveYDocReservations`). The store's
+//! single owned connection already enforces one writer per `engine.db`; the
+//! lease adds the finer-grained per-lineage exclusion the co-editing lifecycle
+//! needs, and releases DETERMINISTICALLY on `Drop` (never stranded "live" on a
+//! panic or an early return during a failed open).
+
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
+
+use crate::error::CollabError;
+use crate::DocKey;
+
+/// An in-process registry of held document leases. Cheap to clone (shares the
+/// held set); pass one clone per actor that opens sessions.
+#[derive(Clone, Default)]
+pub struct LeaseRegistry {
+    held: Arc<Mutex<HashSet<DocKey>>>,
+}
+
+impl LeaseRegistry {
+    /// A fresh empty registry.
+    pub fn new() -> Self {
+        LeaseRegistry::default()
+    }
+
+    /// Acquire an exclusive lease for `key`. Fails with [`CollabError::LeaseHeld`]
+    /// if another live lease for the same lineage is outstanding.
+    pub fn acquire(&self, key: &DocKey) -> Result<Lease, CollabError> {
+        let mut held = self.held.lock().map_err(|_| CollabError::Corrupt {
+            reason: "lease registry mutex poisoned".to_string(),
+        })?;
+        if !held.insert(key.clone()) {
+            return Err(CollabError::LeaseHeld);
+        }
+        Ok(Lease {
+            held: self.held.clone(),
+            key: key.clone(),
+            released: false,
+        })
+    }
+
+    /// Whether a lease for `key` is currently held.
+    pub fn is_held(&self, key: &DocKey) -> bool {
+        self.held
+            .lock()
+            .map(|held| held.contains(key))
+            .unwrap_or(false)
+    }
+}
+
+/// An RAII lease guard. Dropping it releases the lease deterministically.
+pub struct Lease {
+    held: Arc<Mutex<HashSet<DocKey>>>,
+    key: DocKey,
+    released: bool,
+}
+
+impl Lease {
+    /// The leased document key.
+    pub fn key(&self) -> &DocKey {
+        &self.key
+    }
+
+    /// Release the lease early (idempotent; `Drop` also releases).
+    pub fn release(mut self) {
+        self.release_inner();
+    }
+
+    fn release_inner(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        if let Ok(mut held) = self.held.lock() {
+            held.remove(&self.key);
+        }
+    }
+}
+
+impl Drop for Lease {
+    fn drop(&mut self) {
+        self.release_inner();
+    }
+}
+
+impl std::fmt::Debug for Lease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lease").field("key", &self.key).finish()
+    }
+}

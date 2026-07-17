@@ -627,3 +627,42 @@ source of truth every orchestrator session loads first).
   provenance, yjs non-atomic applyUpdate). Respects the local-only-cache vs
   replicated-durable-lineage regime distinction. R11b (TS live adapter) is
   separate/later.
+
+## 2026-07-17 — R11a landed (Y.Doc durable cache — dohc-engine-collab)
+
+- New crate `dohc-engine-collab` added to the workspace members; migration
+  APPEND ordinal 2 (`v1-ydoc`: `ydoc_docs` / `ydoc_updates` / `ydoc_snapshots`,
+  content-addressed into `binary_blobs`) added to BASELINE_MIGRATIONS +
+  REQUIRED_TABLES. Two ordinal-count assertions bumped (storage migration
+  tests → probe ordinal 3; testkit `close_reopen_mutate_cycle` ledger 2→3).
+- TWO REGIMES kept distinct in a durable `regime` column: local-only (prunable
+  fast-resume cache, pruned to bare marker on close) vs replicated (base-once
+  durable lineage, compacted-not-pruned on close so peers bootstrap).
+- Behaviours: durable update append (bounded/validated/content-addressed/
+  dedup-idempotent), convergence-neutral snapshot+compaction, per-doc leases
+  (RAII, deterministic Drop), base-once claim (atomic re-check), idempotent +
+  echo-suppressed ydoc.update replication apply, settle→markdown projection
+  with provenance materialized via R04's job pipeline (deterministic job id,
+  exactly-once).
+- All 5 binding yrs constraints enforced in code (see ydoc.rs module docs).
+- Cross-engine (non-tautological) regression: `tests/fixtures/gen-fixtures.mjs`
+  emits REAL yjs 13.6.30 lineages + yjs-computed expectations (48 seeded
+  fixtures: 24 plaintext incl. CJK/emoji/RTL/astral + 24 richdoc incl. marks,
+  + offset/surrogate/nested probes). The durable append→reconstruct pipeline
+  converges on the yjs expectation for every fixture; compaction is
+  convergence-neutral; the offset probe pins OffsetKind::Utf16 as load-bearing;
+  the surrogate probe pins the isWellFormed() boundary as load-bearing (yrs
+  diverges from yjs on a surrogate split — R11b must validate/reject at the
+  boundary before journaling).
+- Crash/exactly-once via the shared storage fault seam (append + settle,
+  before-persist rollback + after-commit-before-ack kill→reopen→exactly-once).
+- EVIDENCE (run-rust-checks, native Windows):
+  - 2026-07-17T00:52:35.592Z | run-rust-checks | win32/x64 | PASS |
+    fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS
+    test --workspace=PASS cargo-deny=PASS cargo-audit=SKIP
+  - `cargo test -p dohc-engine-collab --features fault-injection`: 6
+    cross_engine + 11 durable_regimes (incl. 3 crash-recovery) = 17 PASS.
+    (The 3 crash tests need the crate's `fault-injection` feature, which is not
+    in the `--workspace` unification set; they run under `--features
+    fault-injection` / `--all-features`, and clippy `--all-features` compiles
+    them in the gate above.)

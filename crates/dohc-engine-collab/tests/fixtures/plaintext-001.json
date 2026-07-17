@@ -1,0 +1,21 @@
+{
+ "seed": 1,
+ "contentKind": "plaintext",
+ "updates": [
+  "AQGmq6vVDgAEAQlwbGFpblRleHQDYcyBAA==",
+  "AQGmq6vVDgKEpqur1Q4BDPCdlJjwnZSr8J2UpgA=",
+  "AAGmq6vVDgECBA==",
+  "AQGmq6vVDgjEpqur1Q4Apqur1Q4BDPCdlJjwnZSr8J2UpgGmq6vVDgECBA==",
+  "AQGmq6vVDg7Epqur1Q4Lpqur1Q4MBXdvcmxkAaarq9UOAQIE",
+  "AQGmq6vVDhPEpqur1Q4Jpqur1Q4KBXdvcmxkAaarq9UOAQIE",
+  "AQGmq6vVDhjEpqur1Q4Apqur1Q4ICPCfmIDwn46JAaarq9UOAQIE",
+  "AQGmq6vVDhzEpqur1Q4Tpqur1Q4UBWNhZsOpAaarq9UOAQIE",
+  "AAGmq6vVDgMCBBQBHwE=",
+  "AQGmq6vVDiDEpqur1Q4cpqur1Q4dBWNhZsOpAaarq9UOAwIEFAEfAQ=="
+ ],
+ "mergedUpdateB64": "AQimq6vVDgAEAQlwbGFpblRleHQDYcyBhKarq9UOAQzwnZSY8J2Uq/CdlKbEpqur1Q4Apqur1Q4BDPCdlJjwnZSr8J2UpsSmq6vVDgumq6vVDgwFd29ybGTEpqur1Q4Jpqur1Q4KBXdvcmxkxKarq9UOAKarq9UOCAjwn5iA8J+OicSmq6vVDhOmq6vVDhQFY2Fmw6nEpqur1Q4cpqur1Q4dBWNhZsOpAaarq9UOAwIEFAEfAQ==",
+ "stateVectorB64": "Aaarq9UOJA==",
+ "expected": {
+  "text": "a😀🎉𝔘wccaféafrld𝔫world𝔦́𝔦"
+ }
+}

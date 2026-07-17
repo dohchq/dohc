@@ -248,6 +248,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dohc-engine-collab"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "dohc-engine-storage",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "yrs",
+]
+
+[[package]]
 name = "dohc-engine-crypto"
 version = "0.1.0"
 dependencies = [

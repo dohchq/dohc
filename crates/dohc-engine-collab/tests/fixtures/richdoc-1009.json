@@ -1,0 +1,49 @@
+{
+ "seed": 1009,
+ "contentKind": "richdoc",
+ "updates": [
+  "AQGPj6+RCwAoAQtmcm9udG1hdHRlcgV0aXRsZQF3CWxpbmUKY29udAA=",
+  "AQGPj6+RCwEoAQtmcm9udG1hdHRlcgVjb3VudAF9PgA=",
+  "AQWPj6+RCwIHAQRib2R5AwlwYXJhZ3JhcGgHAI+Pr5ELAgYGAI+Pr5ELAwRib2xkBHRydWWEj4+vkQsEE9mF2LHYrdio2KdsaW5lCmNvbnSGj4+vkQsSBGJvbGQEbnVsbAA=",
+  "AQWPj6+RCxSHj4+vkQsCAwlwYXJhZ3JhcGgHAI+Pr5ELFAYGAI+Pr5ELFQRib2xkBHRydWWEj4+vkQsWDvCfmIDwn46JaGVsbG8gho+Pr5ELIARib2xkBG51bGwA",
+  "AQePj6+RCyKHj4+vkQsUAwlwYXJhZ3JhcGgHAI+Pr5ELIgYGAI+Pr5ELIwRib2xkBHRydWWGj4+vkQskBml0YWxpYwR0cnVlhI+Pr5ELJQ5jYWbDqWxpbmUKY29udIaPj6+RCzIEYm9sZARudWxsho+Pr5ELMwZpdGFsaWMEbnVsbAA=",
+  "AQGPj6+RCzXEj4+vkQsEj4+vkQsFAVgA"
+ ],
+ "mergedUpdateB64": "ARSPj6+RCwAoAQtmcm9udG1hdHRlcgV0aXRsZQF3CWxpbmUKY29udCgBC2Zyb250bWF0dGVyBWNvdW50AX0+BwEEYm9keQMJcGFyYWdyYXBoBwCPj6+RCwIGBgCPj6+RCwMEYm9sZAR0cnVlhI+Pr5ELBBPZhdix2K3YqNinbGluZQpjb250ho+Pr5ELEgRib2xkBG51bGyHj4+vkQsCAwlwYXJhZ3JhcGgHAI+Pr5ELFAYGAI+Pr5ELFQRib2xkBHRydWWEj4+vkQsWDvCfmIDwn46JaGVsbG8gho+Pr5ELIARib2xkBG51bGyHj4+vkQsUAwlwYXJhZ3JhcGgHAI+Pr5ELIgYGAI+Pr5ELIwRib2xkBHRydWWGj4+vkQskBml0YWxpYwR0cnVlhI+Pr5ELJQ5jYWbDqWxpbmUKY29udIaPj6+RCzIEYm9sZARudWxsho+Pr5ELMwZpdGFsaWMEbnVsbMSPj6+RCwSPj6+RCwUBWAA=",
+ "stateVectorB64": "AY+Pr5ELNg==",
+ "expected": {
+  "frontmatter": {
+   "title": "line\ncont",
+   "count": 62
+  },
+  "paragraphs": [
+   {
+    "runs": [
+     {
+      "text": "Xمرحباline\ncont",
+      "bold": true,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "😀🎉hello ",
+      "bold": true,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "caféline\ncont",
+      "bold": true,
+      "italic": true
+     }
+    ]
+   }
+  ]
+ }
+}
