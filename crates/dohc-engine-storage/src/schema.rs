@@ -54,6 +54,8 @@ const REQUIRED_TABLES: &[&str] = &[
     "snapshots",
     "fork_base_snapshots",
     "moments",
+    // R06 conflict-object tables (migration ordinal 7).
+    "conflicts",
     // R04 durability tables.
     "binary_blobs",
     "materialization_jobs",

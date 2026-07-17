@@ -1,0 +1,745 @@
+#![allow(
+    clippy::drop_non_drop,
+    reason = "explicit drops end mutable EngineStore fixture borrows between test phases"
+)]
+
+use dohc_engine_domain::{
+    CompareTextFileVersions, ComparisonStatus, ConflictChoice, ConflictContentKind,
+    ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus, CreateNamedVersion,
+    DeleteTextFile, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
+    MergeUnchangedReason, NoFaults, ResolveConflictKind, ResolveTextConflict, TextConflict,
+    VersionFileChangeStatus, VersionedTextStore, WriteText, insert_text_conflict_if_absent,
+};
+use dohc_engine_files::{DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs};
+use dohc_engine_storage::{EngineStore, FaultPoint, JobStatus, MaterializationOperation, Preimage};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+
+const WS: &str = "ws-r06";
+const NO_FAULTS: NoFaults = NoFaults;
+
+fn write(version: &str, path: &str, text: &str, moment: &str, object: &str) -> WriteText {
+    WriteText {
+        workspace_id: WS.to_owned(),
+        version_id: version.to_owned(),
+        object_id: object.to_owned(),
+        path: path.to_owned(),
+        text: text.to_owned(),
+        moment_id: moment.to_owned(),
+        metadata_origin: "user".to_owned(),
+        author_json: None,
+        now_ms: 100,
+        request_id: None,
+    }
+}
+
+fn delete(version: &str, path: &str, moment: &str) -> DeleteTextFile {
+    DeleteTextFile {
+        workspace_id: WS.to_owned(),
+        version_id: version.to_owned(),
+        path: path.to_owned(),
+        moment_id: moment.to_owned(),
+        metadata_origin: "user".to_owned(),
+        author_json: None,
+        now_ms: 110,
+    }
+}
+
+fn fork(vt: &mut VersionedTextStore<'_>) {
+    vt.create_named_version(
+        &CreateNamedVersion {
+            workspace_id: WS.to_owned(),
+            new_version_id: "feat".to_owned(),
+            name: "feature".to_owned(),
+            from_version_id: "main".to_owned(),
+            now_ms: 50,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    )
+    .expect("fork");
+}
+
+fn open() -> (ScratchDir, EngineStore) {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WS, "main", 1, &NO_FAULTS)
+        .expect("main");
+    (scratch, store)
+}
+
+fn merge_input(path: &str, moment: &str, conflict: &str, object: &str) -> MergeTextFileFromVersion {
+    MergeTextFileFromVersion {
+        workspace_id: WS.to_owned(),
+        target_version_id: "main".to_owned(),
+        source_version_id: "feat".to_owned(),
+        path: path.to_owned(),
+        object_id: object.to_owned(),
+        moment_id: moment.to_owned(),
+        conflict_id: conflict.to_owned(),
+        metadata_origin: "agent".to_owned(),
+        author_json: None,
+        now_ms: 500,
+    }
+}
+
+#[test]
+fn compare_requires_named_durable_fork_base_and_classifies_all_statuses() {
+    let (_scratch, mut store) = open();
+    let mut vt = VersionedTextStore::new(&mut store);
+    for (index, path) in ["same.md", "incoming.md", "current.md", "diverged.md"]
+        .iter()
+        .enumerate()
+    {
+        vt.write_text(
+            &write(
+                "main",
+                path,
+                "base",
+                &format!("base-{index}"),
+                &format!("o-{index}"),
+            ),
+            &NO_FAULTS,
+        )
+        .expect("base write");
+    }
+    fork(&mut vt);
+    vt.write_text(
+        &write("feat", "incoming.md", "incoming", "mi", "ignored"),
+        &NO_FAULTS,
+    )
+    .expect("incoming");
+    vt.write_text(
+        &write("main", "current.md", "current", "mc", "ignored"),
+        &NO_FAULTS,
+    )
+    .expect("current");
+    vt.write_text(
+        &write("main", "diverged.md", "current", "mdc", "ignored"),
+        &NO_FAULTS,
+    )
+    .expect("div current");
+    vt.write_text(
+        &write("feat", "diverged.md", "incoming", "mdi", "ignored"),
+        &NO_FAULTS,
+    )
+    .expect("div incoming");
+
+    let compare = |path: &str| {
+        vt.compare_text_file_versions(&CompareTextFileVersions {
+            workspace_id: WS.to_owned(),
+            target_version_id: "main".to_owned(),
+            source_version_id: "feat".to_owned(),
+            path: path.to_owned(),
+        })
+        .expect("compare")
+        .status
+    };
+    assert_eq!(compare("same.md"), ComparisonStatus::Same);
+    assert_eq!(compare("incoming.md"), ComparisonStatus::IncomingChanged);
+    assert_eq!(compare("current.md"), ComparisonStatus::CurrentChanged);
+    assert_eq!(compare("diverged.md"), ComparisonStatus::Diverged);
+
+    let err = vt
+        .compare_text_file_versions(&CompareTextFileVersions {
+            workspace_id: WS.to_owned(),
+            target_version_id: "feat".to_owned(),
+            source_version_id: "main".to_owned(),
+            path: "same.md".to_owned(),
+        })
+        .expect_err("main is not a named fork");
+    assert_eq!(err.code(), "fork-base-not-found");
+
+    drop(vt);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "DELETE FROM fork_base_snapshots WHERE workspace_id = ?1 AND version_id = 'feat'",
+                [WS],
+            )
+            .map_err(|_| DomainError::StateCorrupt {
+                reason: "test fixture mutation failed",
+            })?;
+            Ok::<_, DomainError>(())
+        })
+        .expect("delete durable bases");
+    let vt = VersionedTextStore::new(&mut store);
+    let err = vt
+        .compare_text_file_versions(&CompareTextFileVersions {
+            workspace_id: WS.to_owned(),
+            target_version_id: "main".to_owned(),
+            source_version_id: "feat".to_owned(),
+            path: "same.md".to_owned(),
+        })
+        .expect_err("durable rows required");
+    assert_eq!(err.code(), "fork-base-not-found");
+}
+
+#[test]
+fn merge_decision_tree_writes_deletes_merges_and_opens_conflict() {
+    let (_scratch, mut store) = open();
+    let mut vt = VersionedTextStore::new(&mut store);
+    let bases = [
+        ("same.md", "same"),
+        ("source-unchanged.md", "base"),
+        ("ff-write.md", "base"),
+        ("ff-delete.md", "base"),
+        ("auto.md", "a\nb\nc"),
+        ("conflict.md", "a\nb"),
+    ];
+    for (index, (path, text)) in bases.iter().enumerate() {
+        vt.write_text(
+            &write(
+                "main",
+                path,
+                text,
+                &format!("b-{index}"),
+                &format!("ob-{index}"),
+            ),
+            &NO_FAULTS,
+        )
+        .expect("base");
+    }
+    fork(&mut vt);
+    vt.write_text(
+        &write("main", "source-unchanged.md", "local", "m-su", "ignored"),
+        &NO_FAULTS,
+    )
+    .expect("source unchanged setup");
+    vt.write_text(
+        &write("feat", "ff-write.md", "incoming", "m-fw", "ignored"),
+        &NO_FAULTS,
+    )
+    .expect("ff write setup");
+    vt.delete_text_file(&delete("feat", "ff-delete.md", "m-fd"), &NO_FAULTS)
+        .expect("ff delete setup");
+    vt.write_text(
+        &write("main", "auto.md", "A\nb\nc", "m-ac", "ignored"),
+        &NO_FAULTS,
+    )
+    .expect("auto current");
+    vt.write_text(
+        &write("feat", "auto.md", "a\nb\nC", "m-ai", "ignored"),
+        &NO_FAULTS,
+    )
+    .expect("auto incoming");
+    vt.write_text(
+        &write("main", "conflict.md", "local\nb", "m-cc", "ignored"),
+        &NO_FAULTS,
+    )
+    .expect("conflict current");
+    vt.write_text(
+        &write("feat", "conflict.md", "remote\nb", "m-ci", "ignored"),
+        &NO_FAULTS,
+    )
+    .expect("conflict incoming");
+
+    assert!(matches!(
+        vt.merge_text_file_from_version(
+            &merge_input("same.md", "merge-same", "c-same", "new-same"),
+            &NO_FAULTS,
+        )
+        .expect("same"),
+        MergeTextFileResult::Unchanged {
+            reason: MergeUnchangedReason::AlreadySame,
+            ..
+        }
+    ));
+    assert!(matches!(
+        vt.merge_text_file_from_version(
+            &merge_input("source-unchanged.md", "merge-su", "c-su", "new-su"),
+            &NO_FAULTS,
+        )
+        .expect("source unchanged"),
+        MergeTextFileResult::Unchanged {
+            reason: MergeUnchangedReason::SourceUnchanged,
+            ..
+        }
+    ));
+    let ff = vt
+        .merge_text_file_from_version(
+            &merge_input("ff-write.md", "merge-fw", "c-fw", "new-fw"),
+            &NO_FAULTS,
+        )
+        .expect("ff write");
+    assert!(matches!(ff, MergeTextFileResult::Write { .. }));
+    assert_eq!(
+        vt.read_text(WS, "main", "ff-write.md")
+            .expect("read")
+            .expect("present")
+            .text,
+        "incoming"
+    );
+    assert!(matches!(
+        vt.merge_text_file_from_version(
+            &merge_input("ff-delete.md", "merge-fd", "c-fd", "new-fd"),
+            &NO_FAULTS,
+        )
+        .expect("ff delete"),
+        MergeTextFileResult::Delete { .. }
+    ));
+    assert!(
+        vt.read_text(WS, "main", "ff-delete.md")
+            .expect("read")
+            .is_none()
+    );
+    assert!(matches!(
+        vt.merge_text_file_from_version(
+            &merge_input("auto.md", "merge-auto", "c-auto", "new-auto"),
+            &NO_FAULTS,
+        )
+        .expect("auto"),
+        MergeTextFileResult::Write { .. }
+    ));
+    assert_eq!(
+        vt.read_text(WS, "main", "auto.md")
+            .expect("read")
+            .expect("present")
+            .text,
+        "A\nb\nC"
+    );
+    assert!(matches!(
+        vt.merge_text_file_from_version(
+            &merge_input("conflict.md", "merge-conflict", "c-open", "new-conflict"),
+            &NO_FAULTS,
+        )
+        .expect("conflict"),
+        MergeTextFileResult::Conflict { .. }
+    ));
+    assert_eq!(
+        vt.list_text_conflicts(WS, Some("open"))
+            .expect("list")
+            .len(),
+        1
+    );
+
+    drop(vt);
+    let write_job = store
+        .load_materialization_job("merge-mat_merge-fw")
+        .expect("job")
+        .expect("write job");
+    assert_eq!(write_job.operation, MaterializationOperation::Write);
+    assert!(matches!(write_job.preimage, Preimage::Present(_)));
+    let delete_job = store
+        .load_materialization_job("merge-mat_merge-fd")
+        .expect("job")
+        .expect("delete job");
+    assert_eq!(delete_job.operation, MaterializationOperation::Delete);
+}
+
+#[test]
+fn compare_version_files_classifies_omits_identical_and_sorts() {
+    let (_scratch, mut store) = open();
+    let mut vt = VersionedTextStore::new(&mut store);
+    for (index, (path, text)) in [
+        ("z-delete.md", "z"),
+        ("m-mod.md", "old"),
+        ("same.md", "same"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        vt.write_text(
+            &write(
+                "main",
+                path,
+                text,
+                &format!("v-{index}"),
+                &format!("vo-{index}"),
+            ),
+            &NO_FAULTS,
+        )
+        .expect("base");
+    }
+    fork(&mut vt);
+    vt.delete_text_file(&delete("feat", "z-delete.md", "v-del"), &NO_FAULTS)
+        .expect("delete");
+    vt.write_text(
+        &write("feat", "m-mod.md", "new", "v-mod", "ignored"),
+        &NO_FAULTS,
+    )
+    .expect("modify");
+    vt.write_text(
+        &write("feat", "a-add.md", "add", "v-add", "vo-add"),
+        &NO_FAULTS,
+    )
+    .expect("add");
+
+    let changes = vt
+        .compare_version_files(WS, "feat", "main")
+        .expect("compare versions");
+    assert_eq!(
+        changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-add.md", "m-mod.md", "z-delete.md"]
+    );
+    assert_eq!(changes[0].status, VersionFileChangeStatus::Added);
+    assert_eq!(changes[1].status, VersionFileChangeStatus::Modified);
+    assert_eq!(changes[2].status, VersionFileChangeStatus::Deleted);
+}
+
+fn conflict(
+    id: &str,
+    path: &str,
+    current: dohc_engine_domain::TextSnapshot,
+    incoming: dohc_engine_domain::TextSnapshot,
+) -> TextConflict {
+    TextConflict {
+        conflict_id: id.to_owned(),
+        workspace_id: WS.to_owned(),
+        path: path.to_owned(),
+        target_version_id: "main".to_owned(),
+        source_version_id: "feat".to_owned(),
+        created_at_ms: 200,
+        updated_at_ms: 200,
+        status: ConflictStatus::Open,
+        chosen_from: ConflictChoice::Current,
+        resolution: None,
+        metadata: ConflictMetadata::origin("agent"),
+        base: ConflictFileState::text(path, None),
+        current: ConflictFileState::text(path, Some(current)),
+        incoming: ConflictFileState::text(path, Some(incoming)),
+    }
+}
+
+fn resolve(id: &str, kind: ResolveConflictKind, suffix: &str) -> ResolveTextConflict {
+    ResolveTextConflict {
+        workspace_id: WS.to_owned(),
+        conflict_id: id.to_owned(),
+        resolution: kind,
+        object_id: format!("resolved-object-{suffix}"),
+        write_moment_id: format!("resolve-write-{suffix}"),
+        delete_moment_id: format!("resolve-delete-{suffix}"),
+        metadata_origin: "agent".to_owned(),
+        author_json: None,
+        now_ms: 900,
+    }
+}
+
+#[test]
+fn conflict_primitives_filter_order_and_insert_if_absent() {
+    let (_scratch, mut store) = open();
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(
+        &write("main", "a.md", "base", "cp-base", "cp-o"),
+        &NO_FAULTS,
+    )
+    .expect("base");
+    fork(&mut vt);
+    let current = vt
+        .read_text(WS, "main", "a.md")
+        .expect("read")
+        .expect("current");
+    let incoming = vt
+        .read_text(WS, "feat", "a.md")
+        .expect("read")
+        .expect("incoming");
+    drop(vt);
+
+    let mut later = conflict("later", "a.md", current.clone(), incoming.clone());
+    later.created_at_ms = 20;
+    let mut second = conflict("b", "a.md", current.clone(), incoming.clone());
+    second.created_at_ms = 10;
+    let mut first = conflict("a", "a.md", current, incoming);
+    first.created_at_ms = 10;
+    first.status = ConflictStatus::Resolved;
+    first.resolution = Some(ConflictResolution::KeptCurrent);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            assert!(insert_text_conflict_if_absent(tx, &later)?);
+            assert!(!insert_text_conflict_if_absent(tx, &later)?);
+            assert!(insert_text_conflict_if_absent(tx, &second)?);
+            assert!(insert_text_conflict_if_absent(tx, &first)?);
+            Ok::<_, DomainError>(())
+        })
+        .expect("insert conflicts");
+
+    let vt = VersionedTextStore::new(&mut store);
+    assert_eq!(
+        vt.list_text_conflicts(WS, None)
+            .expect("all")
+            .iter()
+            .map(|item| item.conflict_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "b", "later"]
+    );
+    assert_eq!(
+        vt.list_text_conflicts(WS, Some("open"))
+            .expect("open")
+            .len(),
+        2
+    );
+    assert_eq!(
+        vt.list_text_conflicts(WS, Some("resolved"))
+            .expect("resolved")
+            .len(),
+        1
+    );
+    assert_eq!(
+        vt.list_text_conflicts(WS, Some("bogus"))
+            .expect_err("bad filter")
+            .code(),
+        "invalid-input"
+    );
+}
+
+#[test]
+fn resolve_conflicts_covers_apply_move_merge_keep_binary_and_stale_gate() {
+    let (_scratch, mut store) = open();
+    let paths = [
+        "same.md",
+        "move.md",
+        "occupied.md",
+        "merged.md",
+        "keep.md",
+        "binary.md",
+        "stale.md",
+    ];
+    let mut vt = VersionedTextStore::new(&mut store);
+    for (index, path) in paths.iter().enumerate() {
+        vt.write_text(
+            &write(
+                "main",
+                path,
+                "base",
+                &format!("r-base-{index}"),
+                &format!("r-o-{index}"),
+            ),
+            &NO_FAULTS,
+        )
+        .expect("base");
+    }
+    fork(&mut vt);
+    for (index, path) in paths.iter().enumerate() {
+        vt.write_text(
+            &write(
+                "main",
+                path,
+                &format!("current-{index}"),
+                &format!("r-current-{index}"),
+                "ignored",
+            ),
+            &NO_FAULTS,
+        )
+        .expect("current");
+        vt.write_text(
+            &write(
+                "feat",
+                path,
+                &format!("incoming-{index}"),
+                &format!("r-incoming-{index}"),
+                "ignored",
+            ),
+            &NO_FAULTS,
+        )
+        .expect("incoming");
+    }
+    vt.write_text(
+        &write("main", "taken.md", "occupied", "r-taken", "r-taken-o"),
+        &NO_FAULTS,
+    )
+    .expect("occupied destination");
+
+    let mut records = Vec::new();
+    for (index, path) in paths.iter().enumerate() {
+        let current = vt
+            .read_text(WS, "main", path)
+            .expect("read")
+            .expect("current");
+        let incoming = vt
+            .read_text(WS, "feat", path)
+            .expect("read")
+            .expect("incoming");
+        let mut record = conflict(&format!("resolve-{index}"), path, current, incoming);
+        if *path == "move.md" {
+            record.incoming.path = "moved.md".to_owned();
+        }
+        if *path == "occupied.md" {
+            record.incoming.path = "taken.md".to_owned();
+        }
+        if *path == "binary.md" {
+            record.base.snapshot = record.current.snapshot.clone();
+            record.base.content_kind = ConflictContentKind::Binary;
+        }
+        records.push(record);
+    }
+    drop(vt);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            for record in &records {
+                insert_text_conflict_if_absent(tx, record)?;
+            }
+            Ok::<_, DomainError>(())
+        })
+        .expect("seed conflicts");
+
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.resolve_text_conflict(
+        &resolve("resolve-0", ResolveConflictKind::ApplyIncoming, "same"),
+        &NO_FAULTS,
+    )
+    .expect("apply incoming same path");
+    assert_eq!(
+        vt.read_text(WS, "main", "same.md")
+            .expect("read")
+            .expect("present")
+            .text,
+        "incoming-0"
+    );
+
+    vt.resolve_text_conflict(
+        &resolve("resolve-1", ResolveConflictKind::ApplyIncoming, "move"),
+        &NO_FAULTS,
+    )
+    .expect("apply divergent move");
+    assert!(vt.read_text(WS, "main", "move.md").expect("old").is_none());
+    assert_eq!(
+        vt.read_text(WS, "main", "moved.md")
+            .expect("new")
+            .expect("present")
+            .text,
+        "incoming-1"
+    );
+
+    assert_eq!(
+        vt.resolve_text_conflict(
+            &resolve("resolve-2", ResolveConflictKind::ApplyIncoming, "occupied"),
+            &NO_FAULTS,
+        )
+        .expect_err("occupied destination")
+        .code(),
+        "target-path-exists"
+    );
+
+    vt.resolve_text_conflict(
+        &resolve(
+            "resolve-3",
+            ResolveConflictKind::ApplyMerged {
+                text: "combined".to_owned(),
+            },
+            "merged",
+        ),
+        &NO_FAULTS,
+    )
+    .expect("apply merged");
+    assert_eq!(
+        vt.read_text(WS, "main", "merged.md")
+            .expect("read")
+            .expect("present")
+            .text,
+        "combined"
+    );
+
+    let keep = resolve("resolve-4", ResolveConflictKind::KeepCurrent, "keep");
+    vt.resolve_text_conflict(&keep, &NO_FAULTS)
+        .expect("keep current");
+    vt.resolve_text_conflict(&keep, &NO_FAULTS)
+        .expect("TS parity: keep-current re-resolve is not status-idempotent");
+    assert_eq!(
+        vt.read_text(WS, "main", "keep.md")
+            .expect("read")
+            .expect("present")
+            .text,
+        "current-4"
+    );
+
+    assert_eq!(
+        vt.resolve_text_conflict(
+            &resolve(
+                "resolve-5",
+                ResolveConflictKind::ApplyMerged {
+                    text: "no".to_owned(),
+                },
+                "binary",
+            ),
+            &NO_FAULTS,
+        )
+        .expect_err("binary side")
+        .code(),
+        "invalid-input"
+    );
+
+    vt.write_text(
+        &write("main", "stale.md", "newer-head", "r-stale-new", "ignored"),
+        &NO_FAULTS,
+    )
+    .expect("mutate after conflict record");
+    assert_eq!(
+        vt.resolve_text_conflict(
+            &resolve("resolve-6", ResolveConflictKind::ApplyIncoming, "stale"),
+            &NO_FAULTS,
+        )
+        .expect_err("M-CONFLICT-CLOBBER head-match gate")
+        .code(),
+        "conflict-stale-target"
+    );
+}
+
+#[test]
+fn merge_job_crash_then_external_edit_is_preserved_on_recovery() {
+    let (scratch, mut store) = open();
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(
+        &write("main", "a.md", "base", "mat-base", "mat-o"),
+        &NO_FAULTS,
+    )
+    .expect("base");
+    fork(&mut vt);
+    vt.write_text(
+        &write("feat", "a.md", "merged-content", "mat-incoming", "ignored"),
+        &NO_FAULTS,
+    )
+    .expect("incoming");
+    vt.merge_text_file_from_version(
+        &merge_input("a.md", "mat-merge", "mat-conflict", "mat-new"),
+        &NO_FAULTS,
+    )
+    .expect("merge");
+    drop(vt);
+
+    let target = scratch.join("a.md");
+    std::fs::write(&target, "base").expect("materialized preimage");
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeBeforePreimageRevalidate);
+    let first = run_pending_jobs(
+        &store,
+        scratch.path(),
+        DurabilityPolicy::per_os(),
+        &StdReplacer,
+        &NoBackoff,
+        600,
+        faults.as_ref(),
+    )
+    .expect("crash run");
+    assert!(matches!(first[0].outcome, JobOutcome::Crashed(_)));
+    std::fs::write(&target, "external-newer").expect("external editor");
+
+    drop(store);
+    let db = scratch.engine_db_path().expect("db");
+    let store = EngineStore::open(&db, 700).expect("reopen");
+    let recovered = run_pending_jobs(
+        &store,
+        scratch.path(),
+        DurabilityPolicy::per_os(),
+        &StdReplacer,
+        &NoBackoff,
+        800,
+        &NO_FAULTS,
+    )
+    .expect("recover");
+    assert_eq!(recovered[0].outcome, JobOutcome::Conflict);
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("target"),
+        "external-newer"
+    );
+    assert_eq!(
+        store
+            .load_materialization_job("merge-mat_mat-merge")
+            .expect("job")
+            .expect("present")
+            .status,
+        JobStatus::Conflict
+    );
+}

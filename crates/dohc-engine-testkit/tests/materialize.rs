@@ -11,7 +11,7 @@ use dohc_engine_files::{
 };
 use dohc_engine_storage::{
     EngineStore, FaultPoint, JobStatus, MaterializationJobSpec, NoFaults, Preimage, StorageError,
-    enqueue_job, hex_sha256,
+    enqueue_delete_job, enqueue_job, hex_sha256,
 };
 use dohc_engine_testkit::ScriptedFaults;
 use std::path::{Path, PathBuf};
@@ -349,6 +349,61 @@ fn external_newer_content_is_preserved_not_clobbered() {
             .status,
         JobStatus::Conflict
     );
+}
+
+#[test]
+fn delete_job_replays_after_remove_before_complete() {
+    let sc = Scratch::new("delete-replay");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    let old = b"old-known-content";
+    std::fs::write(sc.target("a.md"), old).expect("target");
+    let job = spec(
+        "j-delete",
+        "a.md",
+        &hex_sha256(old),
+        Preimage::Present(hex_sha256(old)),
+        1,
+        10,
+    );
+    let sha = store.put_binary_blob(old).expect("blob");
+    assert_eq!(sha, job.content_sha256);
+    store
+        .write_with(&NoFaults, |tx| {
+            enqueue_delete_job(tx, &job)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("enqueue delete");
+
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterRenameBeforeComplete);
+    let first = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        20,
+        faults.as_ref(),
+    )
+    .expect("delete crash");
+    assert!(matches!(first[0].outcome, JobOutcome::Crashed(_)));
+    assert!(!sc.target("a.md").exists());
+    assert_eq!(store.pending_materialization_count().expect("pending"), 1);
+
+    drop(store);
+    let store = EngineStore::open(&sc.db(), 30).expect("reopen");
+    let recovered = run_pending_jobs(
+        &store,
+        sc.workspace(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        40,
+        &NoFaults,
+    )
+    .expect("replay");
+    assert_eq!(recovered[0].outcome, JobOutcome::AlreadyMaterialized);
+    assert!(!sc.target("a.md").exists());
+    assert_eq!(store.pending_materialization_count().expect("pending"), 0);
 }
 
 #[test]

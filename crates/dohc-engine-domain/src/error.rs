@@ -49,6 +49,19 @@ pub enum DomainError {
     #[error("target path already exists")]
     TargetPathExists,
 
+    /// The source version is not a named fork of the target, or its durable
+    /// fork-base snapshot set is missing.
+    #[error("durable fork base not found")]
+    ForkBaseNotFound,
+
+    /// The requested conflict row does not exist in this workspace.
+    #[error("text conflict not found")]
+    ConflictNotFound,
+
+    /// The live target no longer exactly matches the conflict's recorded head.
+    #[error("text conflict target is stale")]
+    ConflictStaleTarget,
+
     /// The text payload failed validation (over the byte cap).
     #[error("invalid text: {reason}")]
     InvalidText { reason: &'static str },
@@ -108,6 +121,9 @@ impl DomainError {
             DomainError::DuplicateMomentId => "duplicate-moment-id",
             DomainError::FileNotFound => "file-not-found",
             DomainError::TargetPathExists => "target-path-exists",
+            DomainError::ForkBaseNotFound => "fork-base-not-found",
+            DomainError::ConflictNotFound => "conflict-not-found",
+            DomainError::ConflictStaleTarget => "conflict-stale-target",
             DomainError::InvalidText { .. } => "invalid-text",
             DomainError::InvalidPath { .. } => "invalid-path",
             DomainError::InvalidInput { .. } => "invalid-input",
