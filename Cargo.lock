@@ -324,8 +324,10 @@ dependencies = [
 name = "dohc-engine-runtime"
 version = "0.1.0"
 dependencies = [
+ "dohc-engine-collab",
  "dohc-engine-domain",
  "dohc-engine-storage",
+ "dohc-engine-sync",
  "dohc-engine-testkit",
  "file-id",
  "rusqlite",
@@ -371,6 +373,29 @@ dependencies = [
  "dohc-engine-storage",
  "rusqlite",
  "tokio",
+]
+
+[[package]]
+name = "dohc-workspace-engine"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "dohc-engine-collab",
+ "dohc-engine-crypto",
+ "dohc-engine-domain",
+ "dohc-engine-files",
+ "dohc-engine-protocol",
+ "dohc-engine-runtime",
+ "dohc-engine-storage",
+ "dohc-engine-sync",
+ "dohc-engine-testkit",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "yrs",
 ]
 
 [[package]]
@@ -1206,6 +1231,7 @@ version = "1.52.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "317fafbbe3f02fc663dad00ea6186197de963cd4190e86a26d8d0fae095539af"
 dependencies = [
+ "bytes",
  "pin-project-lite",
  "tokio-macros",
 ]

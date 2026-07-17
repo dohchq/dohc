@@ -28,9 +28,19 @@
 
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
-use dohc_engine_storage::{
-    CompoundWrite, Document, EngineStore, FaultInjector, StorageError, WriteOutcome,
+use crate::search::{SearchResult, search_workspace};
+use dohc_engine_collab::{AppendOutcome, ContentKind, DocKey, Regime};
+use dohc_engine_domain::{
+    ResolveTextConflict, ResolveTextConflictResult, TextConflict, TextSnapshot, VersionedTextStore,
+    WriteResult, WriteText, insert_text_conflict_if_absent,
 };
+use dohc_engine_storage::{
+    CompoundWrite, Document, EngineStore, FaultInjector, StorageError, TxnOutcome, WriteOutcome,
+};
+use dohc_engine_sync::{
+    ApplyOutcome, ConflictApplyResult, ReplicationEnvelope, apply_conflict_envelope,
+};
+use rusqlite::params;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -120,6 +130,10 @@ enum Command {
     Snapshot {
         reply: oneshot::Sender<Result<StoreSnapshot, StorageError>>,
     },
+    BindShadowClone {
+        token: String,
+        reply: oneshot::Sender<Result<bool, StorageError>>,
+    },
     /// A long operation: a sequence of bounded units (one compound write each,
     /// one transaction each). The worker checks `token` BEFORE each unit and
     /// stops cooperatively at that between-unit boundary.
@@ -128,6 +142,62 @@ enum Command {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<UnitsOutcome, StorageError>>,
+    },
+    VersionedTextWrite {
+        input: WriteText,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<WriteResult, RuntimeError>>,
+    },
+    VersionedTextRead {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Option<TextSnapshot>, RuntimeError>>,
+    },
+    YdocApply {
+        key: DocKey,
+        content_kind: ContentKind,
+        update: Vec<u8>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<AppendOutcome, RuntimeError>>,
+    },
+    ConflictList {
+        workspace_id: String,
+        status: Option<String>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Vec<TextConflict>, RuntimeError>>,
+    },
+    ConflictOpen {
+        conflict: Box<TextConflict>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<bool, RuntimeError>>,
+    },
+    ConflictResolve {
+        input: ResolveTextConflict,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<ResolveTextConflictResult, RuntimeError>>,
+    },
+    ConflictApplyReplicated {
+        envelope: ReplicationEnvelope,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<ApplyOutcome<ConflictApplyResult>, RuntimeError>>,
+    },
+    Search {
+        root_dir: PathBuf,
+        workspace_id: String,
+        version_id: String,
+        query: String,
+        limit: Option<i64>,
+        now_ms: i64,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Vec<SearchResult>, RuntimeError>>,
     },
     /// Break the loop and release the connection. Carries no reply: the caller
     /// joins the worker, and the join is the completion signal (so `close`
@@ -406,6 +476,193 @@ impl ActorHandle {
             .map_err(RuntimeError::Storage)
     }
 
+    /// Stamp a fresh shadow database or verify an existing shadow binding on
+    /// the actor-owned connection before the workspace can accept writes.
+    pub async fn bind_shadow_clone(&self, token: String) -> Result<bool, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::BindShadowClone { token, reply })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?
+            .map_err(RuntimeError::Storage)
+    }
+
+    /// Execute a versioned-text write on the actor's single writer thread.
+    pub async fn versioned_text_write(
+        &self,
+        input: WriteText,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<WriteResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedTextWrite {
+                input,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Read one versioned text snapshot on the actor-owned connection.
+    pub async fn versioned_text_read(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        token: CancellationToken,
+    ) -> Result<Option<TextSnapshot>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedTextRead {
+                workspace_id,
+                version_id,
+                path,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Validate and append one local Y.Doc update. Marker creation and append
+    /// are separate bounded transactions with a cancellation point between.
+    pub async fn ydoc_apply(
+        &self,
+        key: DocKey,
+        content_kind: ContentKind,
+        update: Vec<u8>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<AppendOutcome, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocApply {
+                key,
+                content_kind,
+                update,
+                now_ms,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn conflict_list(
+        &self,
+        workspace_id: String,
+        status: Option<String>,
+        token: CancellationToken,
+    ) -> Result<Vec<TextConflict>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ConflictList {
+                workspace_id,
+                status,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn conflict_open(
+        &self,
+        conflict: TextConflict,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<bool, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ConflictOpen {
+                conflict: Box::new(conflict),
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn conflict_resolve(
+        &self,
+        input: ResolveTextConflict,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<ResolveTextConflictResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ConflictResolve {
+                input,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn conflict_apply_replicated(
+        &self,
+        envelope: ReplicationEnvelope,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<ApplyOutcome<ConflictApplyResult>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ConflictApplyReplicated {
+                envelope,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn search(
+        &self,
+        root_dir: PathBuf,
+        workspace_id: String,
+        version_id: String,
+        query: String,
+        limit: Option<i64>,
+        now_ms: i64,
+        token: CancellationToken,
+    ) -> Result<Vec<SearchResult>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::Search {
+                root_dir,
+                workspace_id,
+                version_id,
+                query,
+                limit,
+                now_ms,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Run a long operation as a sequence of bounded units, cancellable at each
     /// between-unit boundary via `token`. Returns how many units committed.
     ///
@@ -552,6 +809,9 @@ fn worker_main(
             Command::Snapshot { reply } => {
                 let _ = reply.send(snapshot(&store));
             }
+            Command::BindShadowClone { token, reply } => {
+                let _ = reply.send(store.bind_shadow_clone_token(&token));
+            }
             Command::RunUnits {
                 units,
                 faults,
@@ -559,6 +819,135 @@ fn worker_main(
                 reply,
             } => {
                 let outcome = run_units(&mut store, units, faults.as_ref(), &token);
+                let _ = reply.send(outcome);
+            }
+            Command::VersionedTextWrite {
+                input,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome =
+                    versioned_text_write_on_store(&mut store, &input, faults.as_ref(), &token);
+                let _ = reply.send(outcome);
+            }
+            Command::VersionedTextRead {
+                workspace_id,
+                version_id,
+                path,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    VersionedTextStore::new(&mut store)
+                        .read_text(&workspace_id, &version_id, &path)
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::YdocApply {
+                key,
+                content_kind,
+                update,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = ydoc_apply_on_store(
+                    &mut store,
+                    &key,
+                    content_kind,
+                    &update,
+                    now_ms,
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::ConflictList {
+                workspace_id,
+                status,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    VersionedTextStore::new(&mut store)
+                        .list_text_conflicts(&workspace_id, status.as_deref())
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::ConflictOpen {
+                conflict,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome =
+                    conflict_open_on_store(&mut store, &conflict, faults.as_ref(), &token);
+                let _ = reply.send(outcome);
+            }
+            Command::ConflictResolve {
+                input,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    VersionedTextStore::new(&mut store)
+                        .resolve_text_conflict(&input, faults.as_ref())
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::ConflictApplyReplicated {
+                envelope,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    apply_conflict_envelope(&mut store, &envelope, faults.as_ref())
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::Search {
+                root_dir,
+                workspace_id,
+                version_id,
+                query,
+                limit,
+                now_ms,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    store
+                        .read_with(|conn| {
+                            search_workspace(
+                                conn,
+                                &root_dir,
+                                &workspace_id,
+                                &version_id,
+                                &query,
+                                limit,
+                                now_ms,
+                            )
+                        })
+                        .map_err(RuntimeError::from)
+                };
                 let _ = reply.send(outcome);
             }
             Command::Close => {
@@ -574,6 +963,84 @@ fn worker_main(
     // publishes Closed as it falls out of scope (same ordering the guard
     // guarantees on a panic unwind).
     drop(store);
+}
+
+fn ydoc_apply_on_store(
+    store: &mut EngineStore,
+    key: &DocKey,
+    content_kind: ContentKind,
+    update: &[u8],
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<AppendOutcome, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    match dohc_engine_collab::record_local_update_creating_marker(
+        store,
+        key,
+        content_kind,
+        Regime::Replicated,
+        update,
+        faults,
+        now_ms,
+    )? {
+        TxnOutcome::Committed(outcome) => Ok(outcome),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn versioned_text_write_on_store(
+    store: &mut EngineStore,
+    input: &WriteText,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<WriteResult, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    VersionedTextStore::new(store).ensure_main_version(
+        &input.workspace_id,
+        &input.version_id,
+        input.now_ms,
+        faults,
+    )?;
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    VersionedTextStore::new(store)
+        .write_text(input, faults)
+        .map_err(RuntimeError::from)
+}
+
+fn conflict_open_on_store(
+    store: &mut EngineStore,
+    conflict: &TextConflict,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<bool, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let outcome = store.write_with(faults, |tx| {
+        let inserted = insert_text_conflict_if_absent(tx, conflict)?;
+        if inserted {
+            tx.execute(
+                "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
+                 VALUES (?1, 'conflict.open', ?2)",
+                params![conflict.conflict_id, conflict.created_at_ms],
+            )
+            .map_err(|error| {
+                dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
+            })?;
+        }
+        Ok::<_, dohc_engine_domain::DomainError>(inserted)
+    })?;
+    match outcome {
+        TxnOutcome::Committed(inserted) => Ok(inserted),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
 }
 
 /// Execute a run of bounded units, checking `token` BETWEEN units. Each unit is

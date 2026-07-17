@@ -20,6 +20,22 @@ pub enum RuntimeError {
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
 
+    /// A versioning/conflict-domain operation failed on the actor-owned store.
+    #[error("domain error: {0}")]
+    Domain(#[from] dohc_engine_domain::DomainError),
+
+    /// A durable Y.Doc operation failed on the actor-owned store.
+    #[error("collaboration error: {0}")]
+    Collab(#[from] dohc_engine_collab::CollabError),
+
+    /// A replicated operation failed on the actor-owned store.
+    #[error("synchronization error: {0}")]
+    Sync(#[from] dohc_engine_sync::SyncError),
+
+    /// An index-backed search failed on the actor-owned connection.
+    #[error("search error: {0}")]
+    Search(#[from] crate::search::SearchError),
+
     /// The actor's worker thread could not be spawned.
     #[error("could not spawn actor worker thread")]
     ThreadSpawn(#[source] std::io::Error),
@@ -45,6 +61,14 @@ pub enum RuntimeError {
     /// stays durable (exactly-once ack — `PORTING.md` §12).
     #[error("request deadline elapsed")]
     DeadlineExceeded,
+
+    /// Cooperative cancellation won between bounded units.
+    #[error("request cancelled")]
+    Cancelled,
+
+    /// A fault-injected domain transaction crashed before acknowledgement.
+    #[error("operation crashed before acknowledgement")]
+    OperationCrashed,
 }
 
 impl RuntimeError {
@@ -53,11 +77,17 @@ impl RuntimeError {
         match self {
             RuntimeError::Identity { .. } => "identity-unresolved",
             RuntimeError::Storage(err) => err.code(),
+            RuntimeError::Domain(err) => err.code(),
+            RuntimeError::Collab(err) => err.code(),
+            RuntimeError::Sync(err) => err.code(),
+            RuntimeError::Search(err) => err.code(),
             RuntimeError::ThreadSpawn(_) => "thread-spawn-failed",
             RuntimeError::ActorUnavailable => "actor-unavailable",
             RuntimeError::Overloaded => "overloaded",
             RuntimeError::WorkerPanicked => "worker-panicked",
             RuntimeError::DeadlineExceeded => "deadline-exceeded",
+            RuntimeError::Cancelled => "cancelled",
+            RuntimeError::OperationCrashed => "operation-crashed",
         }
     }
 }

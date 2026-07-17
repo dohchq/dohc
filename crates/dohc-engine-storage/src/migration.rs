@@ -1097,6 +1097,15 @@ ALTER TABLE materialization_jobs ADD COLUMN operation TEXT NOT NULL DEFAULT 'wri
 /// The `id` of the R06 conflict-object migration.
 pub(crate) const CONFLICTS_MIGRATION_ID: &str = "v1-conflicts";
 
+const V1_SHADOW_CLONE_DDL: &str = "
+CREATE TABLE shadow_clone (
+    rowid_guard INTEGER NOT NULL PRIMARY KEY CHECK (rowid_guard = 1),
+    token TEXT NOT NULL
+) STRICT;
+";
+
+pub(crate) const SHADOW_CLONE_MIGRATION_ID: &str = "v1-shadow-clone";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1154,6 +1163,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: CONFLICTS_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_CONFLICTS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 8,
+        id: SHADOW_CLONE_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SHADOW_CLONE_DDL,
         sets_user_version: None,
     },
 ];
@@ -1463,11 +1479,11 @@ mod tests {
     // waiting for a real future schema change.
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     fn two_migrations() -> Vec<Migration> {
-        // The frozen list now ends at ordinal 7 (R06 conflicts), so a synthetic
-        // probe appends at ordinal 8.
+        // The frozen list now ends at ordinal 8 (shadow clone), so a synthetic
+        // probe appends at ordinal 9.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 8,
+            ordinal: 9,
             id: "r04-probe",
             kind: MigrationKind::Transactional,
             sql: M2_SQL,
@@ -1605,9 +1621,9 @@ mod tests {
             .expect("pre-R06 table probe");
         assert!(before.is_none());
 
-        let outcome =
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("apply R06");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("apply R06 and shadow fence");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 2 });
         let objects: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_schema WHERE \
@@ -1650,7 +1666,7 @@ mod tests {
                 row.get(0)
             })
             .expect("ledger");
-        assert_eq!(ledger, 8);
+        assert_eq!(ledger, 9);
     }
 
     #[test]
@@ -1729,10 +1745,11 @@ mod tests {
         // fired before the secrets migration (ordinal 1), so resume applies the
         // secrets migration (1), the Y.Doc migration (2), the chats migration
         // (3), the search migration (4), the moment-link migration (5), the
-        // sync migration (6), conflicts migration (7), AND the probe (8).
+        // sync migration (6), conflicts migration (7), shadow-clone migration
+        // (8), AND the probe (9).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 8 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 9 });
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -1829,7 +1846,7 @@ mod tests {
         }
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 8,
+            ordinal: 9,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
@@ -1847,7 +1864,7 @@ mod tests {
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();
         changed.push(Migration {
-            ordinal: 8,
+            ordinal: 9,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
@@ -1867,7 +1884,7 @@ mod tests {
         // baseline first (transactional), then a non-transactional idempotent step.
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 8,
+            ordinal: 9,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",

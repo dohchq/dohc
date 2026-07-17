@@ -3,8 +3,8 @@
 use crate::error::DomainError;
 use crate::records::{DeleteResult, DeleteTextFile, TextSnapshot, WriteResult, WriteText};
 use crate::store::{
-    VersionedTextStore, delete_text_in_tx, validate_delete_input, validate_write_input,
-    write_text_in_tx,
+    VersionedTextStore, delete_text_in_tx, hash_fields, lookup_request, record_request,
+    validate_delete_input, validate_write_input, write_text_in_tx,
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
@@ -204,6 +204,7 @@ pub struct ResolveTextConflict {
     pub metadata_origin: String,
     pub author_json: Option<String>,
     pub now_ms: i64,
+    pub request_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -394,10 +395,39 @@ impl VersionedTextStore<'_> {
     ) -> Result<ResolveTextConflictResult, DomainError> {
         validate_path_like_id(&input.workspace_id, "workspace_id")?;
         validate_path_like_id(&input.conflict_id, "conflict_id")?;
+        let (resolution_kind, merged_text) = match &input.resolution {
+            ResolveConflictKind::KeepCurrent => ("keep-current", ""),
+            ResolveConflictKind::ApplyIncoming => ("apply-incoming", ""),
+            ResolveConflictKind::ApplyMerged { text } => ("apply-merged", text.as_str()),
+        };
+        let payload_hash = hash_fields(&[
+            input.workspace_id.as_bytes(),
+            input.conflict_id.as_bytes(),
+            resolution_kind.as_bytes(),
+            merged_text.as_bytes(),
+            input.write_moment_id.as_bytes(),
+            input.delete_moment_id.as_bytes(),
+        ]);
         let outcome = self.store.write_with(faults, |tx| {
-            let mut conflict = load_conflict(tx, &input.workspace_id, &input.conflict_id)?
-                .ok_or(DomainError::ConflictNotFound)?;
-            let live_snapshot = select_snapshot_by_path(
+            if let Some(request_id) = &input.request_id
+                && let Some(recorded) = lookup_request(tx, request_id)?
+            {
+                if recorded.payload_hash != payload_hash {
+                    return Err(DomainError::IdempotencyKeyReuseMismatch);
+                }
+                let conflict =
+                    load_text_conflict_in_tx(tx, &input.workspace_id, &input.conflict_id)?
+                        .ok_or(DomainError::ConflictNotFound)?;
+                return Ok(ResolveTextConflictResult {
+                    conflict,
+                    write: None,
+                    delete: None,
+                });
+            }
+            let mut conflict =
+                load_text_conflict_in_tx(tx, &input.workspace_id, &input.conflict_id)?
+                    .ok_or(DomainError::ConflictNotFound)?;
+            let live_snapshot = select_text_snapshot_by_path_in_tx(
                 tx,
                 &conflict.workspace_id,
                 &conflict.target_version_id,
@@ -421,7 +451,7 @@ impl VersionedTextStore<'_> {
                     if let Some(incoming) = &conflict.incoming.snapshot {
                         let destination = conflict.incoming.path.clone();
                         if destination != conflict.path {
-                            if select_snapshot_by_path(
+                            if select_text_snapshot_by_path_in_tx(
                                 tx,
                                 &conflict.workspace_id,
                                 &conflict.target_version_id,
@@ -527,6 +557,13 @@ impl VersionedTextStore<'_> {
                 params![conflict.conflict_id, input.now_ms],
             )
             .map_err(DomainError::sql_persist)?;
+            record_request(
+                tx,
+                input.request_id.as_deref(),
+                &payload_hash,
+                0,
+                input.now_ms,
+            )?;
             conflict.status = update.status;
             conflict.chosen_from = update.chosen_from;
             conflict.resolution = update.resolution;
@@ -541,7 +578,8 @@ impl VersionedTextStore<'_> {
     }
 }
 
-pub(crate) fn enqueue_write(
+#[doc(hidden)]
+pub fn enqueue_write(
     tx: &Transaction<'_>,
     result: &WriteResult,
     preimage: Preimage,
@@ -562,7 +600,8 @@ pub(crate) fn enqueue_write(
     Ok(())
 }
 
-pub(crate) fn enqueue_delete(
+#[doc(hidden)]
+pub fn enqueue_delete(
     tx: &Transaction<'_>,
     result: &DeleteResult,
     prefix: &str,
@@ -706,7 +745,8 @@ fn list_conflicts(
     Ok(out)
 }
 
-fn load_conflict(
+#[doc(hidden)]
+pub fn load_text_conflict_in_tx(
     conn: &Connection,
     workspace_id: &str,
     conflict_id: &str,
@@ -843,7 +883,8 @@ fn binary_conflicts_unsupported() -> DomainError {
     }
 }
 
-fn select_snapshot_by_path(
+#[doc(hidden)]
+pub fn select_text_snapshot_by_path_in_tx(
     conn: &Connection,
     workspace_id: &str,
     version_id: &str,

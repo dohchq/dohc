@@ -840,8 +840,8 @@ enum ForkPrep {
 }
 
 /// A prior request recovered from the idempotency ledger.
-struct RecordedRequest {
-    payload_hash: String,
+pub(crate) struct RecordedRequest {
+    pub(crate) payload_hash: String,
 }
 
 // ============================================================================
@@ -862,7 +862,8 @@ fn normalized_write_input(input: &WriteText) -> Result<WriteText, DomainError> {
     Ok(normalized)
 }
 
-pub(crate) fn validate_write_input(input: &WriteText) -> Result<(), DomainError> {
+#[doc(hidden)]
+pub fn validate_write_input(input: &WriteText) -> Result<(), DomainError> {
     normalized_write_input(input).map(|_| ())
 }
 
@@ -878,14 +879,16 @@ fn normalized_delete_input(input: &DeleteTextFile) -> Result<DeleteTextFile, Dom
     Ok(normalized)
 }
 
-pub(crate) fn validate_delete_input(input: &DeleteTextFile) -> Result<(), DomainError> {
+#[doc(hidden)]
+pub fn validate_delete_input(input: &DeleteTextFile) -> Result<(), DomainError> {
     normalized_delete_input(input).map(|_| ())
 }
 
 /// Apply an R05 text write inside a caller-owned compound transaction. R06
 /// uses this seam so the canonical mutation, conflict transition, and durable
 /// materialization intent commit together rather than becoming three writes.
-pub(crate) fn write_text_in_tx(
+#[doc(hidden)]
+pub fn write_text_in_tx(
     tx: &Transaction<'_>,
     input: &WriteText,
 ) -> Result<WriteResult, DomainError> {
@@ -1073,7 +1076,8 @@ fn reconstruct_write(conn: &Connection, input: &WriteText) -> Result<WriteResult
 }
 
 /// Apply an R05 text delete inside a caller-owned compound transaction.
-pub(crate) fn delete_text_in_tx(
+#[doc(hidden)]
+pub fn delete_text_in_tx(
     tx: &Transaction<'_>,
     input: &DeleteTextFile,
 ) -> Result<DeleteResult, DomainError> {
@@ -1975,7 +1979,7 @@ fn get_moment(
     row.transpose()
 }
 
-fn lookup_request(
+pub(crate) fn lookup_request(
     conn: &Connection,
     request_id: &str,
 ) -> Result<Option<RecordedRequest>, DomainError> {
@@ -1992,7 +1996,7 @@ fn lookup_request(
     .map_err(DomainError::sql_corrupt)
 }
 
-fn record_request(
+pub(crate) fn record_request(
     tx: &Connection,
     request_id: Option<&str>,
     payload_hash: &str,
@@ -2081,7 +2085,7 @@ pub fn text_blob_sha256(text: &str) -> String {
 }
 
 /// Deterministic fingerprint over NUL-separated fields (idempotency payloads).
-fn hash_fields(fields: &[&[u8]]) -> String {
+pub(crate) fn hash_fields(fields: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
     for field in fields {
         hasher.update(field);

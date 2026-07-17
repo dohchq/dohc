@@ -13,9 +13,40 @@ mod common;
 
 use common::*;
 use dohc_engine_collab::{
-    load_persisted, maybe_compact, record_local_update, ydoc::OffsetMode, ContentKind, Regime, Ydoc,
+    apply_remote_update, load_persisted, maybe_compact, record_local_update, ydoc::OffsetMode,
+    CollabError, CompactOutcome, ContentKind, Regime, RemoteUpdate, ReplicationApplyOutcome, Ydoc,
 };
 use dohc_engine_storage::{NoFaults, TxnOutcome};
+
+const OVERLAP_U1_HEX: &str = "01010c00040109706c61696e546578740461efbfbd00";
+const OVERLAP_U2_HEX: &str = "01010c00040109706c61696e546578740561f09f988000";
+
+fn decode_hex(encoded: &str) -> Vec<u8> {
+    encoded
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let pair = std::str::from_utf8(pair).expect("hex utf8");
+            u8::from_str_radix(pair, 16).expect("hex byte")
+        })
+        .collect()
+}
+
+fn setup_parity_store(tag: &str, regime: Regime) -> (TempStore, dohc_engine_collab::DocKey) {
+    let mut ts = fresh_store(tag);
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    dohc_engine_collab::ensure_marker(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        regime,
+        &NoFaults,
+        1_000,
+    )
+    .expect("marker");
+    (ts, key)
+}
 
 fn content_kind(fx: &Fixture) -> ContentKind {
     ContentKind::parse(&fx.content_kind)
@@ -289,6 +320,531 @@ fn surrogate_split_diverges_proving_wellformed_boundary_is_load_bearing() {
         "a surrogate-split must diverge — the boundary must reject it (constraint 3)"
     );
     eprintln!("surrogate probe: rust={rust_units:?} diverges from yjs={yjs_units:?}");
+}
+
+#[test]
+fn replay_parity_gate_rejects_surrogate_probe_bypass1_before_journal() {
+    let fx = load_fixture("surrogateProbe");
+    let mut ts = fresh_store("surrogate-parity-gate");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    dohc_engine_collab::ensure_marker(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        Regime::LocalOnly,
+        &NoFaults,
+        1_000,
+    )
+    .expect("marker");
+    let base = decode_b64(&fx.updates[0]);
+    record_local_update(&mut ts.store, &key, &base, &NoFaults, 1_001).expect("base");
+
+    let bypass = decode_b64(&fx.updates[1]);
+    let bypass_sha = dohc_engine_collab::hex_sha256(&bypass);
+    let error = record_local_update(&mut ts.store, &key, &bypass, &NoFaults, 1_002)
+        .expect_err("surrogate split must fail closed");
+    assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+    assert!(
+        ts.store
+            .get_binary_blob(&bypass_sha)
+            .expect("blob lookup")
+            .is_none(),
+        "rejected update must not reach the blob store"
+    );
+}
+
+#[test]
+fn replay_parity_rejects_parked_interior_split_on_dependency_arrival() {
+    let fx = load_fixture("surrogateProbe");
+    let (mut ts, key) = setup_parity_store("parked-surrogate-split", Regime::Replicated);
+    let dependency = decode_b64(&fx.updates[0]);
+    let split = decode_b64(&fx.updates[1]);
+
+    apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "split-peer".to_owned(),
+            origin_seq: 1,
+            bytes: split,
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect("missing emoji dependency must park the split update");
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+
+    let error = apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "dependency-peer".to_owned(),
+            origin_seq: 1,
+            bytes: dependency,
+        },
+        &NoFaults,
+        1_002,
+    )
+    .expect_err("dependency arrival must reject the newly integrated split");
+    assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(persisted.doc.plaintext_string(), "");
+}
+
+// yjs-format base + delete-set candidate lineages whose delete endpoint lands
+// inside a multi-unit scalar (mid-pair). yrs drops the whole scalar; yjs keeps a
+// U+FFFD, so the two diverge and the gate must reject the delete.
+// - delete-high: base "😀X" (client 5), delete [0,1) → removes the emoji's first
+//   UTF-16 unit; endpoint clock 1 is the emoji interior.
+// - delete-end:  base "A😀" (client 5), delete [0,2) → removes A + the emoji's
+//   first unit; endpoint clock 2 is the emoji interior.
+const DELETE_HIGH_BASE_HEX: &str = "01010500040109706c61696e5465787405f09f98805800";
+const DELETE_HIGH_CANDIDATE_HEX: &str = "000105010001";
+const DELETE_END_BASE_HEX: &str = "01010500040109706c61696e546578740541f09f988000";
+const DELETE_END_CANDIDATE_HEX: &str = "000105010002";
+
+fn assert_delete_boundary_rejected(tag: &str, base_hex: &str, candidate_hex: &str) {
+    let base = decode_hex(base_hex);
+    let candidate = decode_hex(candidate_hex);
+    let candidate_sha = dohc_engine_collab::hex_sha256(&candidate);
+
+    // Local path.
+    let (mut local, lkey) = setup_parity_store(&format!("{tag}-local"), Regime::LocalOnly);
+    record_local_update(&mut local.store, &lkey, &base, &NoFaults, 1_001).expect("local base");
+    let error = record_local_update(&mut local.store, &lkey, &candidate, &NoFaults, 1_002)
+        .expect_err("mid-pair delete must fail closed on the local path");
+    assert!(
+        matches!(error, CollabError::ReplayParityViolation { .. }),
+        "{tag} local: {error:?}"
+    );
+    assert_eq!(count(&local.store, "ydoc_updates", &lkey), 1);
+    assert!(
+        local
+            .store
+            .get_binary_blob(&candidate_sha)
+            .expect("blob lookup")
+            .is_none(),
+        "{tag} local: rejected delete must not reach the blob store"
+    );
+
+    // Remote path.
+    let (mut remote, rkey) = setup_parity_store(&format!("{tag}-remote"), Regime::Replicated);
+    apply_remote_update(
+        &mut remote.store,
+        &rkey,
+        &RemoteUpdate {
+            origin_id: "peer".to_owned(),
+            origin_seq: 1,
+            bytes: base.clone(),
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect("remote base");
+    let error = apply_remote_update(
+        &mut remote.store,
+        &rkey,
+        &RemoteUpdate {
+            origin_id: "peer".to_owned(),
+            origin_seq: 2,
+            bytes: candidate.clone(),
+        },
+        &NoFaults,
+        1_002,
+    )
+    .expect_err("mid-pair delete must fail closed on the remote path");
+    assert!(
+        matches!(error, CollabError::ReplayParityViolation { .. }),
+        "{tag} remote: {error:?}"
+    );
+    assert_eq!(count(&remote.store, "ydoc_updates", &rkey), 1);
+    assert!(
+        remote
+            .store
+            .get_binary_blob(&candidate_sha)
+            .expect("blob lookup")
+            .is_none(),
+        "{tag} remote: rejected delete must not reach the blob store"
+    );
+}
+
+#[test]
+fn replay_parity_rejects_delete_high_surrogate_on_both_paths() {
+    assert_delete_boundary_rejected(
+        "delete-high",
+        DELETE_HIGH_BASE_HEX,
+        DELETE_HIGH_CANDIDATE_HEX,
+    );
+}
+
+#[test]
+fn replay_parity_rejects_delete_end_mid_pair_on_both_paths() {
+    assert_delete_boundary_rejected("delete-end", DELETE_END_BASE_HEX, DELETE_END_CANDIDATE_HEX);
+}
+
+#[test]
+fn replay_parity_stays_fail_closed_on_multi_unit_pending_diff_inputs() {
+    // Multi-code-point grapheme content (a regional-indicator flag pair) exercises
+    // the restored-pending / diff machinery. The follow-up edit is at a valid
+    // code-point boundary, so the gate must COMPLETE (never let an internal
+    // library unwind escape) — accepting or rejecting, but returning normally.
+    let (mut ts, key) = setup_parity_store("flag-pending-diff", Regime::Replicated);
+    let producer = Ydoc::wire();
+    let base = producer.plaintext_insert(0, "\u{1F1FA}\u{1F1F3}Z ");
+    apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "peer".to_owned(),
+            origin_seq: 1,
+            bytes: base,
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect("flag base");
+    let follow = producer.plaintext_insert(2, "x");
+    let outcome = apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "peer".to_owned(),
+            origin_seq: 2,
+            bytes: follow,
+        },
+        &NoFaults,
+        1_002,
+    );
+    assert!(
+        matches!(
+            outcome,
+            Ok(_)
+                | Err(CollabError::ReplayParityViolation { .. })
+                | Err(CollabError::MalformedUpdate { .. })
+        ),
+        "gate must complete without an escaping unwind: {outcome:?}"
+    );
+}
+
+#[test]
+fn replay_parity_rejects_overlap_slice_divergence_on_local_path() {
+    let (mut ts, key) = setup_parity_store("overlap-slice-local", Regime::LocalOnly);
+    let u1 = decode_hex(OVERLAP_U1_HEX);
+    record_local_update(&mut ts.store, &key, &u1, &NoFaults, 1_001)
+        .expect("clean U+FFFD base must be accepted");
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+
+    let u2 = decode_hex(OVERLAP_U2_HEX);
+    let u2_sha = dohc_engine_collab::hex_sha256(&u2);
+    let error = record_local_update(&mut ts.store, &key, &u2, &NoFaults, 1_002)
+        .expect_err("overlap slice must fail closed");
+    assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+    assert!(
+        ts.store
+            .get_binary_blob(&u2_sha)
+            .expect("blob lookup")
+            .is_none(),
+        "rejected overlap update must not reach the blob store"
+    );
+}
+
+#[test]
+fn replay_parity_rejects_overlap_slice_divergence_on_remote_path() {
+    let (mut ts, key) = setup_parity_store("overlap-slice-remote", Regime::Replicated);
+    let u1 = decode_hex(OVERLAP_U1_HEX);
+    apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "peer-overlap".to_owned(),
+            origin_seq: 1,
+            bytes: u1,
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect("clean U+FFFD base must be accepted");
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+
+    let u2 = decode_hex(OVERLAP_U2_HEX);
+    let u2_sha = dohc_engine_collab::hex_sha256(&u2);
+    let error = apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "peer-overlap".to_owned(),
+            origin_seq: 2,
+            bytes: u2,
+        },
+        &NoFaults,
+        1_002,
+    )
+    .expect_err("remote overlap slice must fail closed");
+    assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+    assert!(
+        ts.store
+            .get_binary_blob(&u2_sha)
+            .expect("blob lookup")
+            .is_none(),
+        "rejected remote overlap update must not reach the blob store"
+    );
+}
+
+#[test]
+fn replay_parity_rejects_mixed_parked_and_discarded_clocks_on_both_paths() {
+    let origin_a = Ydoc::wire();
+    let dependency = origin_a.plaintext_insert(0, "a");
+    let origin_b = Ydoc::wire();
+    origin_b.apply(&dependency).expect("seed dependent peer");
+    let dependent = origin_b.plaintext_insert(1, "b");
+    let overlap = decode_hex(OVERLAP_U2_HEX);
+    let mixed = dohc_engine_collab::merge_updates(&[overlap, dependent])
+        .expect("merge discarded and missing-dependency blocks");
+    let mixed_sha = dohc_engine_collab::hex_sha256(&mixed);
+
+    let (mut local, local_key) = setup_parity_store("mixed-parity-local", Regime::LocalOnly);
+    let overlap_base = decode_hex(OVERLAP_U1_HEX);
+    record_local_update(
+        &mut local.store,
+        &local_key,
+        &overlap_base,
+        &NoFaults,
+        1_001,
+    )
+    .expect("overlap base");
+    let local_error = record_local_update(&mut local.store, &local_key, &mixed, &NoFaults, 1_002)
+        .expect_err("mixed local candidate must fail closed");
+    assert!(matches!(
+        local_error,
+        CollabError::ReplayParityViolation { .. }
+    ));
+    assert_eq!(count(&local.store, "ydoc_updates", &local_key), 1);
+    assert!(
+        local
+            .store
+            .get_binary_blob(&mixed_sha)
+            .expect("local blob lookup")
+            .is_none(),
+        "rejected mixed candidate must not reach the local blob store"
+    );
+
+    let (mut remote, remote_key) = setup_parity_store("mixed-parity-remote", Regime::Replicated);
+    apply_remote_update(
+        &mut remote.store,
+        &remote_key,
+        &RemoteUpdate {
+            origin_id: "peer-overlap".to_owned(),
+            origin_seq: 1,
+            bytes: overlap_base,
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect("remote overlap base");
+    let remote_error = apply_remote_update(
+        &mut remote.store,
+        &remote_key,
+        &RemoteUpdate {
+            origin_id: "peer-mixed".to_owned(),
+            origin_seq: 1,
+            bytes: mixed,
+        },
+        &NoFaults,
+        1_002,
+    )
+    .expect_err("mixed remote candidate must fail closed");
+    assert!(matches!(
+        remote_error,
+        CollabError::ReplayParityViolation { .. }
+    ));
+    assert_eq!(count(&remote.store, "ydoc_updates", &remote_key), 1);
+    assert!(
+        remote
+            .store
+            .get_binary_blob(&mixed_sha)
+            .expect("remote blob lookup")
+            .is_none(),
+        "rejected mixed candidate must not reach the remote blob store"
+    );
+}
+
+#[test]
+fn replay_parity_accepts_clean_resend_and_sequential_append() {
+    let (mut ts, key) = setup_parity_store("valid-resend-append", Regime::LocalOnly);
+    let producer = Ydoc::wire();
+    let first = producer.plaintext_insert(0, "a");
+    let first_outcome =
+        record_local_update(&mut ts.store, &key, &first, &NoFaults, 1_001).expect("first insert");
+    assert!(matches!(
+        first_outcome,
+        TxnOutcome::Committed(ref append) if !append.deduped
+    ));
+
+    let resend = record_local_update(&mut ts.store, &key, &first, &NoFaults, 1_002)
+        .expect("clean-boundary resend");
+    assert!(matches!(
+        resend,
+        TxnOutcome::Committed(ref append) if append.deduped
+    ));
+
+    let second = producer.plaintext_insert(1, "b");
+    let append = record_local_update(&mut ts.store, &key, &second, &NoFaults, 1_003)
+        .expect("sequential append");
+    assert!(matches!(
+        append,
+        TxnOutcome::Committed(ref append) if !append.deduped
+    ));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 2);
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(persisted.doc.plaintext_string(), "ab");
+}
+
+#[test]
+fn replay_parity_accepts_skip_gap_merge_when_gap_is_present() {
+    let (mut ts, key) = setup_parity_store("valid-skip-gap", Regime::LocalOnly);
+    let producer = Ydoc::wire();
+    let first = producer.plaintext_insert(0, "a");
+    let gap = producer.plaintext_insert(1, "b");
+    let last = producer.plaintext_insert(2, "c");
+    record_local_update(&mut ts.store, &key, &first, &NoFaults, 1_001).expect("first");
+    record_local_update(&mut ts.store, &key, &gap, &NoFaults, 1_002).expect("gap dependency");
+
+    let skip_gap = dohc_engine_collab::merge_updates(&[first, last]).expect("skip-gap merge");
+    let outcome = record_local_update(&mut ts.store, &key, &skip_gap, &NoFaults, 1_003)
+        .expect("skip-gap update with an integrated gap must be accepted");
+    assert!(matches!(
+        outcome,
+        TxnOutcome::Committed(ref append) if !append.deduped
+    ));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 3);
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(persisted.doc.plaintext_string(), "abc");
+}
+
+#[test]
+fn replay_parity_parks_cross_origin_missing_dependency_then_converges() {
+    let (mut ts, key) = setup_parity_store("missing-dependency", Regime::Replicated);
+    let origin_a = Ydoc::wire();
+    let dependency = origin_a.plaintext_insert(0, "a");
+    let origin_b = Ydoc::wire();
+    origin_b.apply(&dependency).expect("seed dependent peer");
+    let dependent = origin_b.plaintext_insert(1, "b");
+
+    let parked = apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "origin-b".to_owned(),
+            origin_seq: 1,
+            bytes: dependent,
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect("missing cross-origin dependency must be parked");
+    assert!(matches!(
+        parked,
+        TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })
+    ));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+
+    let resolved = apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "origin-a".to_owned(),
+            origin_seq: 1,
+            bytes: dependency,
+        },
+        &NoFaults,
+        1_002,
+    )
+    .expect("dependency arrival must resolve the parked update");
+    assert!(matches!(
+        resolved,
+        TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. })
+    ));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 2);
+    let persisted = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(persisted.doc.plaintext_string(), "ab");
+}
+
+#[test]
+fn compaction_preserves_parked_updates_until_dependency_arrives() {
+    let (mut ts, key) = setup_parity_store("parked-compaction", Regime::Replicated);
+    let origin_a = Ydoc::wire();
+    let dependency = origin_a.plaintext_insert(0, "a");
+    let origin_b = Ydoc::wire();
+    origin_b.apply(&dependency).expect("seed dependent peer");
+    let dependent = origin_b.plaintext_insert(1, "b");
+
+    apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "origin-b".to_owned(),
+            origin_seq: 1,
+            bytes: dependent,
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect("missing dependency must park");
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+
+    let skipped = maybe_compact(&mut ts.store, &key, 0, &NoFaults, 1_002)
+        .expect("forced compaction must inspect parked state");
+    assert!(matches!(
+        skipped,
+        TxnOutcome::Committed(CompactOutcome::Skipped { pending: 1 })
+    ));
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 1);
+    assert_eq!(count(&ts.store, "ydoc_snapshots", &key), 0);
+
+    apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "origin-a".to_owned(),
+            origin_seq: 1,
+            bytes: dependency,
+        },
+        &NoFaults,
+        1_003,
+    )
+    .expect("dependency arrival must resolve the parked update");
+    assert_eq!(count(&ts.store, "ydoc_updates", &key), 2);
+    let resolved = load_persisted(&ts.store, &key)
+        .expect("load")
+        .expect("marker");
+    assert_eq!(resolved.doc.plaintext_string(), "ab");
+
+    let compacted = maybe_compact(&mut ts.store, &key, 0, &NoFaults, 1_004)
+        .expect("resolved lineage may compact");
+    assert!(matches!(
+        compacted,
+        TxnOutcome::Committed(CompactOutcome::Compacted {
+            pruned_updates: 2,
+            ..
+        })
+    ));
+    let reconstructed = load_persisted(&ts.store, &key)
+        .expect("load compacted")
+        .expect("marker");
+    assert_eq!(reconstructed.doc.plaintext_string(), "ab");
 }
 
 #[test]

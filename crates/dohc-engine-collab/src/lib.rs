@@ -26,16 +26,18 @@ pub mod durable;
 pub mod error;
 pub mod lease;
 pub mod limits;
+pub mod replay_parity;
 pub mod replication;
 pub mod ydoc;
 
 pub use durable::{
     claim_base, close_session, ensure_marker, load_persisted, maybe_compact, read_marker,
-    record_local_update, settle, AppendOutcome, ClaimOutcome, CloseOutcome, CompactOutcome, Marker,
-    PersistedDoc, Regime, SettleOutcome,
+    record_local_update, record_local_update_creating_marker, settle, AppendOutcome, ClaimOutcome,
+    CloseOutcome, CompactOutcome, Marker, PersistedDoc, Regime, SettleOutcome,
 };
 pub use error::CollabError;
 pub use lease::{Lease, LeaseRegistry};
+pub use replay_parity::validate_replay_parity;
 pub use replication::{
     apply_remote_update, apply_remote_update_in_transaction, RemoteUpdate, ReplicationApplyOutcome,
     UpdateOrigin,
