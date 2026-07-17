@@ -53,6 +53,49 @@ fn write(
 }
 
 #[test]
+fn secret_write_and_delete_refuse_non_secret_paths() {
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    let mut secrets = SecretFileStore::new(&mut store, &key);
+
+    let write_err = secrets
+        .write_secret_file(
+            &SecretWrite {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: "notes/ordinary.md".to_owned(),
+                text: "not a secret route".to_owned(),
+                moment_id: "sm-non-secret-write".to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                now_ms: 10,
+            },
+            &NO_FAULTS,
+        )
+        .expect_err("ordinary path must not enter the secret store");
+    assert_eq!(write_err.code(), "not-secret-path");
+
+    let delete_err = secrets
+        .delete_secret_file(
+            &dohc_engine_domain::SecretDelete {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: "notes/ordinary.md".to_owned(),
+                moment_id: "sm-non-secret-delete".to_owned(),
+                metadata_origin: "api".to_owned(),
+                now_ms: 11,
+            },
+            &NO_FAULTS,
+        )
+        .expect_err("ordinary path delete must fail at the store door");
+    assert_eq!(delete_err.code(), "not-secret-path");
+}
+
+#[test]
 fn secret_write_debug_redacts_cleartext() {
     // The one secret-bearing input type must never spill plaintext through
     // Debug (tracing, format!, panic messages, error context).

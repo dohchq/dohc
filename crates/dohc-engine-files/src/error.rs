@@ -34,9 +34,9 @@ pub enum FilesError {
     #[error("scan diff exceeded the max-diff-entries bound of {cap}")]
     DiffTooLarge { cap: usize },
 
-    /// A directory or file could not be read for a reason other than a benign
-    /// mid-scan vanish (which is skipped). Surfaces the offending path and the
-    /// io error kind, never content.
+    /// The top-level workspace root could not be enumerated. Per-entry and
+    /// nested-directory readability failures are tolerant and appear in
+    /// [`crate::scan::ScanListing::failed`]; the root remains fail-closed.
     #[error("workspace scan failed at {path}: {kind:?}")]
     ScanIo {
         path: String,
@@ -66,6 +66,16 @@ pub enum FilesError {
     /// listing is committed.
     #[error("request deadline elapsed")]
     DeadlineExceeded,
+
+    /// An apply receipt targeted a generation other than the controller's
+    /// current prepared transition. Refuse it rather than advancing a stale
+    /// manifest over newer scan state.
+    #[error("capture acknowledgement targets a stale reconcile plan")]
+    StaleReconcilePlan,
+
+    /// The native watcher could not be created, attached, or joined.
+    #[error("native workspace watcher is unavailable: {reason}")]
+    WatcherUnavailable { reason: &'static str },
 }
 
 impl FilesError {
@@ -90,6 +100,8 @@ impl FilesError {
             FilesError::ActorUnavailable => "actor-unavailable",
             FilesError::Overloaded => "overloaded",
             FilesError::DeadlineExceeded => "deadline-exceeded",
+            FilesError::StaleReconcilePlan => "stale-reconcile-plan",
+            FilesError::WatcherUnavailable { .. } => "watcher-unavailable",
         }
     }
 }

@@ -29,6 +29,10 @@ tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
 # Cooperative cancellation tree (PORTING.md §12): checked BETWEEN bounded
 # units (per-file / per-batch), never inside a hash of a single file's stream.
 tokio-util = "0.7"
+# Native workspace notifications. The watcher owns `RecommendedWatcher` on a
+# dedicated thread and reduces every settled burst to the actor's sticky dirty
+# signal; no notify callback ever runs the scan or actor command loop.
+notify = "8"
 
 [dev-dependencies]
 # The differential harness parses the shared workspace-kernel golden fixtures
@@ -39,6 +43,7 @@ serde_json = "1"
 # loop). Also recomputes expected hashes via a second code path (non-tautology).
 sha2 = "0.10"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"] }
+dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).
 [lints]

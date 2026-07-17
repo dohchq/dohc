@@ -32,18 +32,23 @@
 
 pub mod actor;
 pub mod bounds;
+pub mod capture;
 pub mod diff;
 pub mod error;
 pub mod floor;
 pub mod hash;
 pub mod materialize;
 pub mod media;
+pub mod policy;
 pub mod reconcile;
 pub mod scan;
 pub mod watch;
 
 pub use actor::{FilesActor, FilesHandle, FilesStats, LifecycleState};
 pub use bounds::{OverCapPolicy, ScanBounds, ScanBoundsBuilder};
+pub use capture::{
+    CaptureApplyResult, CaptureError, CaptureSink, apply_reconcile_plan, apply_then_ack,
+};
 pub use diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
 pub use error::FilesError;
 pub use hash::{HashOutcome, HashPool, PoolGauge};
@@ -51,11 +56,22 @@ pub use materialize::{
     AtomicReplacer, DurabilityPolicy, JobOutcome, JobResult, MaterializeError, NoBackoff,
     ReplaceBackoff, StdBackoff, StdReplacer, backoff_delay, materialize_one, run_pending_jobs,
 };
-pub use reconcile::{
-    CaptureOp, IngestReason, ReconcileController, ReconcilePlan, ReconcileRun, ScanGeneration,
+pub use policy::{
+    PathClassification, classify_engine_file_path, classify_engine_file_path_for_read,
+    classify_engine_file_path_normalized,
 };
-pub use scan::{FileEntry, ScanListing, ScanOutcome, Scanner, SkipReason, SkippedPath};
-pub use watch::{StubWatchSource, WatchEvent, apply_event};
+pub use reconcile::{
+    AbsenceProbe, CaptureOp, DEGRADED_RESCAN_BACKOFF, IngestReason, MAX_QUARANTINED_PATHS,
+    ReconcileController, ReconcilePlan, ReconcileRun, ScanGeneration, StdAbsenceProbe,
+};
+pub use scan::{
+    FailedPath, FileEntry, ScanIoFaultInjector, ScanIoOperation, ScanListing, ScanOutcome, Scanner,
+    SkipReason, SkippedPath,
+};
+pub use watch::{
+    NativeWatcher, StubWatchSource, WATCH_EVENT_QUEUE_CAPACITY, WATCH_HARD_DEADLINE, WATCH_SETTLE,
+    WatchEvent, WatchStart, apply_event,
+};
 
 // The cancellation primitive the actor loop consumes, re-exported so a caller
 // drives cancellation through one crate (mirrors `dohc-engine-runtime`).
