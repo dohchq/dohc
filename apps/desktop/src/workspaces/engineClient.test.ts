@@ -1,8 +1,10 @@
 import { Buffer } from "node:buffer";
+import { Duplex, PassThrough } from "node:stream";
 import type { Envelope, Request } from "@dohc/workspace-engine-client";
 import { describe, expect, it, vi } from "vitest";
 import {
   EngineClient,
+  DuplexEngineClientConnection,
   EngineFrameError,
   EngineRequestError,
   FrameDecoder,
@@ -18,6 +20,40 @@ const LIMITS = {
   maxBatchLen: 64,
   maxJsonDepth: 32,
 };
+
+function helloAck(
+  limits: typeof LIMITS = LIMITS,
+): Extract<Envelope, { type: "helloAck" }> {
+  return {
+    type: "helloAck",
+    protocolVersion: 1,
+    sessionGeneration: 7,
+    capabilities: ["core"],
+    limits,
+  };
+}
+
+function event(seq = 1): Extract<Envelope, { type: "event" }> {
+  return {
+    type: "event",
+    seq,
+    sessionGeneration: 7,
+    name: "workspace.changed",
+    payload: { paths: ["note.md"] },
+  };
+}
+
+function envelopeFrame(
+  envelope: Envelope,
+  maxFrameBytes = LIMITS.maxFrameBytes,
+): Buffer {
+  return encodeFrame(
+    1,
+    0,
+    Buffer.from(JSON.stringify(envelope), "utf8"),
+    maxFrameBytes,
+  );
+}
 
 class FakePeerConnection implements EngineClientConnection {
   readonly received: Envelope[] = [];
@@ -39,12 +75,7 @@ class FakePeerConnection implements EngineClientConnection {
   }
 
   send(envelope: Envelope, chunkSize = Number.POSITIVE_INFINITY): void {
-    const frame = encodeFrame(
-      1,
-      0,
-      Buffer.from(JSON.stringify(envelope), "utf8"),
-      LIMITS.maxFrameBytes,
-    );
+    const frame = envelopeFrame(envelope);
     for (let offset = 0; offset < frame.byteLength; offset += chunkSize) {
       const chunk = frame.subarray(offset, Math.min(frame.byteLength, offset + chunkSize));
       for (const handler of [...this.dataHandlers]) handler(chunk);
@@ -56,13 +87,7 @@ class FakePeerConnection implements EngineClientConnection {
   }
 
   acknowledge(): void {
-    this.send({
-      type: "helloAck",
-      protocolVersion: 1,
-      sessionGeneration: 7,
-      capabilities: ["core"],
-      limits: LIMITS,
-    });
+    this.send(helloAck());
   }
 
   closeFromPeer(): void {
@@ -116,6 +141,33 @@ function client(peer: FakePeerConnection): EngineClient {
 
 function request(id: number, method: string): Request {
   return { id, method, params: { method } };
+}
+
+function realStreamClient(connectTimeoutMs = 5_000): {
+  transport: EngineClient;
+  readable: PassThrough;
+} {
+  const readable = new PassThrough();
+  const writable = new PassThrough();
+  writable.resume();
+  const duplex = Duplex.from({ readable, writable });
+  return {
+    transport: new EngineClient(
+      new DuplexEngineClientConnection(duplex),
+      {
+        authToken: "parent-secret",
+        protocolVersion: 1,
+        capabilities: ["core"],
+        connectTimeoutMs,
+        maxFrameBytes: LIMITS.maxFrameBytes,
+      },
+    ),
+    readable,
+  };
+}
+
+function nextImmediate(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 describe("R03 frame codec", () => {
@@ -184,6 +236,38 @@ describe("R03 frame codec", () => {
 });
 
 describe("EngineClient", () => {
+  it("keeps real Duplex.from teardown errors from reaching uncaughtException", async () => {
+    const uncaught: unknown[] = [];
+    const onUncaught = (error: unknown): void => {
+      uncaught.push(error);
+    };
+    process.on("uncaughtException", onUncaught);
+
+    try {
+      const explicit = realStreamClient();
+      explicit.readable.write(envelopeFrame(helloAck()));
+      await explicit.transport.ready();
+      explicit.transport.dispose();
+      await nextImmediate();
+
+      const timeout = realStreamClient(1);
+      await expect(timeout.transport.ready()).rejects.toMatchObject({
+        code: "connect-timeout",
+      });
+      await nextImmediate();
+
+      const exited = realStreamClient();
+      exited.readable.write(envelopeFrame(helloAck()));
+      await exited.transport.ready();
+      exited.transport.notifyProcessExit(17, null);
+      await nextImmediate();
+
+      expect(uncaught).toEqual([]);
+    } finally {
+      process.off("uncaughtException", onUncaught);
+    }
+  });
+
   it("sends hello first and rejects requests until helloAck unblocks it", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);
@@ -275,6 +359,173 @@ describe("EngineClient", () => {
     expect(first).toHaveBeenCalledTimes(1);
     expect(second).toHaveBeenCalledTimes(2);
     transport.close();
+  });
+
+  it("does not resurrect or dispatch after a pre-ready error in the same chunk", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    const onEvent = vi.fn();
+    transport.onEvent(onEvent);
+    peer.sendRaw(
+      Buffer.concat([
+        envelopeFrame({
+          type: "error",
+          error: {
+            code: "AUTH_FAILED",
+            message: "bad token",
+            retry: "no",
+          },
+        }),
+        envelopeFrame(helloAck()),
+        envelopeFrame(event()),
+      ]),
+    );
+
+    await expect(transport.ready()).rejects.toMatchObject({
+      code: "handshake-failed",
+    });
+    expect(onEvent).not.toHaveBeenCalled();
+    await expect(transport.sendRequest(request(1, "after.failure"))).rejects.toMatchObject(
+      { code: "closed" },
+    );
+  });
+
+  it("does not dispatch after a ready connection error in the same chunk", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const onEvent = vi.fn();
+    transport.onEvent(onEvent);
+    const pending = transport.sendRequest(request(2, "interrupted"));
+
+    peer.sendRaw(
+      Buffer.concat([
+        envelopeFrame({
+          type: "error",
+          error: {
+            code: "INTERNAL",
+            message: "connection failed",
+            retry: "no",
+          },
+        }),
+        envelopeFrame(helloAck()),
+        envelopeFrame(event()),
+      ]),
+    );
+
+    await expect(pending).rejects.toMatchObject({ code: "wire-error" });
+    expect(onEvent).not.toHaveBeenCalled();
+  });
+
+  it("unwraps a bounded response and event batch in order", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    let wireId = 0;
+    peer.onEnvelope = (envelope) => {
+      if (envelope.type === "request") wireId = envelope.id;
+    };
+    const onEvent = vi.fn();
+    transport.onEvent(onEvent);
+    const operation = transport.sendRequest(request(81, "batched"));
+
+    peer.send({
+      type: "batch",
+      envelopes: [
+        { type: "response", id: wireId, result: "done" },
+        event(2),
+      ],
+    });
+
+    await expect(operation).resolves.toEqual({ id: 81, result: "done" });
+    expect(onEvent).toHaveBeenCalledOnce();
+    expect(onEvent).toHaveBeenCalledWith(event(2));
+    transport.close();
+  });
+
+  it("terminally rejects batches over maxBatchLen", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(82, "pending"));
+    const envelopes = Array.from(
+      { length: LIMITS.maxBatchLen + 1 },
+      (_, index): Envelope => event(index + 1),
+    );
+
+    peer.send({ type: "batch", envelopes });
+
+    await expect(pending).rejects.toMatchObject({ code: "protocol-error" });
+    await expect(transport.sendRequest(request(83, "after.batch"))).rejects.toMatchObject(
+      { code: "closed" },
+    );
+  });
+
+  it("terminally rejects nested batches", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(84, "pending"));
+
+    peer.send({
+      type: "batch",
+      envelopes: [{ type: "batch", envelopes: [] }],
+    });
+
+    await expect(pending).rejects.toMatchObject({ code: "protocol-error" });
+    await expect(transport.sendRequest(request(85, "after.batch"))).rejects.toMatchObject(
+      { code: "closed" },
+    );
+  });
+
+  it("rejects helloAck frame limits below the negotiation floor", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.send(
+      helloAck({
+        ...LIMITS,
+        maxFrameBytes: 64 * 1024 - 1,
+      }),
+    );
+
+    await expect(transport.ready()).rejects.toMatchObject({
+      code: "handshake-failed",
+    });
+    await expect(transport.sendRequest(request(86, "after.ack"))).rejects.toMatchObject(
+      { code: "closed" },
+    );
+  });
+
+  it("rejects an over-limit control frame co-chunked after helloAck", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    const onEvent = vi.fn();
+    transport.onEvent(onEvent);
+    const ack = helloAck({
+      ...LIMITS,
+      maxFrameBytes: 64 * 1024,
+    });
+    const oversizedEvent: Envelope = {
+      ...event(),
+      payload: { padding: "x".repeat(64 * 1024) },
+    };
+
+    peer.sendRaw(
+      Buffer.concat([
+        envelopeFrame(ack),
+        envelopeFrame(oversizedEvent),
+      ]),
+    );
+
+    await expect(transport.ready()).resolves.toBe(transport);
+    expect(onEvent).not.toHaveBeenCalled();
+    await expect(transport.sendRequest(request(87, "after.frame"))).rejects.toMatchObject(
+      { code: "closed" },
+    );
   });
 
   it("rejects in-flight work when the peer closes or the client is disposed", async () => {

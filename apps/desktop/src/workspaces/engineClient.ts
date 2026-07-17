@@ -18,6 +18,8 @@ const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
 const FRAME_HEADER_BYTES = 12;
 const MAX_U32 = 0xffff_ffff;
 const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
+// Leaves headroom for handshake and small control envelopes.
+const MIN_NEGOTIABLE_MAX_FRAME_BYTES = 64 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 export const ENGINE_AUTH_TOKEN_ENV = "DOHC_ENGINE_AUTH_TOKEN";
 
@@ -448,7 +450,10 @@ export class EngineClient implements EngineTransport {
 
   private readonly handleData = (chunk: Buffer | Uint8Array): void => {
     try {
-      for (const frame of this.decoder.push(chunk)) this.receiveFrame(frame);
+      for (const frame of this.decoder.push(chunk)) {
+        if (this.closed) break;
+        this.receiveFrame(frame);
+      }
     } catch (cause) {
       this.fail(
         new EngineClientError("protocol-error", "Engine frame decoding failed.", {
@@ -475,6 +480,12 @@ export class EngineClient implements EngineTransport {
   };
 
   private receiveFrame(frame: Frame): void {
+    if (this.readyState && frame.payload.length > this.maxFrameBytes) {
+      throw new EngineClientError(
+        "protocol-error",
+        `Control frame payload is ${frame.payload.length} bytes; negotiated maximum is ${this.maxFrameBytes}.`,
+      );
+    }
     let parsed: unknown;
     try {
       parsed = JSON.parse(this.textDecoder.decode(frame.payload));
@@ -499,6 +510,7 @@ export class EngineClient implements EngineTransport {
   }
 
   private receiveEnvelope(envelope: Envelope): void {
+    if (this.closed) return;
     if (!this.readyState) {
       if (envelope.type === "error") {
         this.fail(
@@ -537,6 +549,30 @@ export class EngineClient implements EngineTransport {
           }
         }
         return;
+      case "batch": {
+        const maxBatchLen = this.helloAck?.limits.maxBatchLen;
+        if (
+          maxBatchLen === undefined ||
+          envelope.envelopes.length > maxBatchLen
+        ) {
+          throw new EngineClientError(
+            "protocol-error",
+            `Inbound batch length ${envelope.envelopes.length} exceeds the negotiated maximum ${maxBatchLen ?? "unknown"}.`,
+          );
+        }
+        if (envelope.envelopes.some((nested) => nested.type === "batch")) {
+          throw new EngineClientError(
+            "protocol-error",
+            "Inbound batches must not contain nested batches.",
+          );
+        }
+        // Batches are bounded, non-nesting, and unwrapped in order.
+        for (const nested of envelope.envelopes) {
+          if (this.closed) break;
+          this.receiveEnvelope(nested);
+        }
+        return;
+      }
       default:
         throw new EngineClientError(
           "protocol-error",
@@ -546,6 +582,7 @@ export class EngineClient implements EngineTransport {
   }
 
   private acceptHelloAck(envelope: HelloAckEnvelope): void {
+    if (this.closed) return;
     if (envelope.protocolVersion !== this.connectOptions.protocolVersion) {
       this.fail(
         new EngineClientError(
@@ -557,7 +594,7 @@ export class EngineClient implements EngineTransport {
     }
     if (
       !Number.isSafeInteger(envelope.limits.maxFrameBytes) ||
-      envelope.limits.maxFrameBytes < 0 ||
+      envelope.limits.maxFrameBytes < MIN_NEGOTIABLE_MAX_FRAME_BYTES ||
       envelope.limits.maxFrameBytes > MAX_U32
     ) {
       this.fail(
@@ -654,8 +691,11 @@ export class EngineClient implements EngineTransport {
   }
 }
 
-class DuplexEngineClientConnection implements EngineClientConnection {
-  constructor(private readonly duplex: Duplex) {}
+export class DuplexEngineClientConnection implements EngineClientConnection {
+  constructor(private readonly duplex: Duplex) {
+    // Keep late destroy errors from becoming uncaught exceptions.
+    this.duplex.on("error", () => undefined);
+  }
 
   write(buffer: Buffer): boolean {
     return this.duplex.write(buffer);
