@@ -2,6 +2,8 @@ use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Deserialize;
 
+use dohc_engine_domain::{AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, channel_slug_for_name};
+
 use crate::journal::{ack_tx, crashes, read_ack_tx};
 use crate::{ReplicationEnvelope, SyncError};
 
@@ -31,6 +33,25 @@ pub fn apply_envelope_with<T>(
     let result = store.write_with(faults, |tx| {
         let acked = read_ack_tx(tx, &envelope.workspace_id, &envelope.origin_id)?;
         if envelope.origin_seq <= acked {
+            // A redelivered coordinate at or below the ack. It must byte-match
+            // the row already journaled; a divergent replay (same coordinate,
+            // different payload/kind) is a misbehaving origin and fails closed
+            // rather than silently advancing the cursor over the divergence —
+            // the same check the acked+1 redelivery path below makes.
+            let existing: Option<(String, String, i64)> = tx
+                .query_row(
+                    "SELECT op_kind, payload_json, recorded_at_ms FROM replication_log \
+                     WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
+                    params![envelope.workspace_id, envelope.origin_id, envelope.origin_seq],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(SyncError::corrupt)?;
+            if let Some(row) = existing
+                && row != (envelope.op_kind.clone(), payload_json.clone(), envelope.recorded_at_ms)
+            {
+                return Err(SyncError::CoordinateDiverged);
+            }
             return Ok(Admission::Skipped);
         }
         let expected = acked.checked_add(1).ok_or(SyncError::CoordinateDiverged)?;
@@ -229,6 +250,23 @@ fn apply_channel(
     if !matches!(payload.kind.as_str(), "channel" | "dm" | "agent") {
         return Err(SyncError::InvalidInput {
             reason: "chat channel kind is invalid",
+        });
+    }
+    // Reserved agent-channel invariant (linkedChatStore.ts replicated apply):
+    // the agent kind, the reserved "My agent" name, and its canonical slug all
+    // hold IFF the op carries the reserved agent wire id — so a remote op can
+    // neither mint a rogue agent-dispatch channel under a non-agent wire nor
+    // squat the reserved name/slug on an ordinary channel.
+    let carries_agent_wire = payload.wire_id.as_deref() == Some(AGENT_CHANNEL_WIRE_ID);
+    let canonical_agent_slug = channel_slug_for_name(AGENT_CHANNEL_NAME);
+    if (payload.kind == "agent") != carries_agent_wire
+        || (payload.slug == canonical_agent_slug) != carries_agent_wire
+        || (payload.name == AGENT_CHANNEL_NAME) != carries_agent_wire
+        || (carries_agent_wire
+            && (payload.name != AGENT_CHANNEL_NAME || payload.slug != canonical_agent_slug))
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "reserved agent-channel invariant violated",
         });
     }
     let wire_id = payload
@@ -581,8 +619,8 @@ fn apply_feed_read(
          ON CONFLICT(workspace_id,owner_user_id) DO UPDATE SET \
            last_seen_created_at_ms=excluded.last_seen_created_at_ms,last_seen_message_id=excluded.last_seen_message_id,
            updated_at_ms=excluded.updated_at_ms,origin_id=excluded.origin_id,origin_seq=excluded.origin_seq \
-         WHERE (excluded.updated_at_ms, excluded.origin_id, excluded.origin_seq) > \
-               (updated_at_ms, origin_id, origin_seq)",
+         WHERE (excluded.last_seen_created_at_ms, excluded.last_seen_message_id, excluded.updated_at_ms, excluded.origin_id, excluded.origin_seq) > \
+               (last_seen_created_at_ms, last_seen_message_id, updated_at_ms, origin_id, origin_seq)",
         params![op.workspace_id,p.owner_user_id,p.last_seen_created_at_ms,p.last_seen_message_id,p.at_ms,op.origin_id,op.origin_seq],
     )
     .map_err(SyncError::persist)?;

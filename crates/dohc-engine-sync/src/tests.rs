@@ -1,5 +1,6 @@
 use std::sync::Mutex;
 
+use dohc_engine_domain::{AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, channel_slug_for_name};
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 use rusqlite::params;
@@ -676,4 +677,264 @@ fn seeded_relay_fault_model_converges_without_double_apply() {
     assert_eq!(expected, normalized(&reopened));
     drop(reopened);
     drop(scratch_a);
+}
+
+// -------------------------------------------------------------------- round 2
+// Regression coverage for the Codex-bot review findings triaged in round 2.
+
+/// #6 (apply dedup ordering): a redelivered coordinate at or below the ack with
+/// a DIVERGENT payload must fail closed (never silently skip, never mutate).
+#[test]
+fn redelivered_divergent_coordinate_at_acked_seq_is_rejected() {
+    let (_scratch, _path, mut engine) = store();
+    let first = envelope(
+        "peer",
+        0,
+        "chat.channel.create",
+        json!({"channelId":"c1","name":"First","slug":"first","kind":"channel","createdAtMs":1}),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &first, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    // Same coordinate (origin peer, seq 0), different payload — a tamper/replay.
+    let divergent = envelope(
+        "peer",
+        0,
+        "chat.channel.create",
+        json!({"channelId":"c1","name":"Tampered","slug":"first","kind":"channel","createdAtMs":1}),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &divergent, &NoFaults),
+        Err(SyncError::CoordinateDiverged)
+    ));
+    // The original row is untouched — no partial mutation from the replay.
+    let name: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT name FROM chat_channels WHERE workspace_id='ws' AND channel_id='c1'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("channel name");
+    assert_eq!(name, "First");
+    // An EXACT redelivery is still an idempotent skip (not a divergence).
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &first, &NoFaults),
+        Ok(ApplyOutcome::Skipped)
+    ));
+}
+
+/// #2 (relay pull workspace gating): a pulled op targeting a foreign workspace
+/// must be rejected before apply, and the fetch cursor must not advance.
+#[test]
+fn pull_rejects_op_for_foreign_workspace() {
+    let (_scratch, _path, mut engine) = store();
+    seed_identity(&mut engine);
+    let foreign = ReplicationEnvelope {
+        workspace_id: "other".to_owned(),
+        origin_id: "peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "chat.channel.create".to_owned(),
+        payload: json!({"channelId":"c1","name":"X","slug":"x","kind":"channel","createdAtMs":1}),
+        recorded_at_ms: 2_000,
+    };
+    let fake = FakeRelay {
+        pushes: Mutex::new(0),
+        pull: Mutex::new(Some(PullResponse {
+            ops: vec![foreign],
+            next_cursor: "cursor-1".to_owned(),
+        })),
+    };
+    let client = RelaySyncClient::new(fake);
+    assert!(matches!(
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults),
+        Err(RelayError::InvalidResponse)
+    ));
+    // Fail closed: the cursor was never persisted, so the pass is retryable.
+    assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
+}
+
+/// #4 (secret tombstone): once a delete wins, a later delivery of an OLDER put
+/// must NOT resurrect the deleted secret (rank against tombstones, not the
+/// materialized secret_files tip).
+#[test]
+fn secret_delete_tombstone_blocks_older_put_resurrection() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let (_scratch, _path, mut engine) = store();
+    let cipher_a: &[u8] = b"ciphertext-A-payload";
+    let cipher_b: &[u8] = b"ciphertext-B-different-payload";
+    let sha_a = dohc_engine_storage::hex_sha256(cipher_a);
+    let sha_b = dohc_engine_storage::hex_sha256(cipher_b);
+    // Prereqs: the target version must exist and the ciphertext blobs must be
+    // hydrated (apply_put reads binary_blobs and checks the hash/length).
+    let seeded = engine
+        .write_with(&NoFaults, |tx| -> Result<(), SyncError> {
+            tx.execute(
+                "INSERT OR IGNORE INTO versioned_workspaces (workspace_id, main_version_id) VALUES ('ws','v1')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO versions (workspace_id, version_id, kind, name, created_at_ms) VALUES ('ws','v1','main','Main',1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            dohc_engine_storage::put_binary_blob(tx, cipher_a).map_err(SyncError::from)?;
+            dohc_engine_storage::put_binary_blob(tx, cipher_b).map_err(SyncError::from)?;
+            Ok(())
+        })
+        .expect("seed secret prereqs");
+    assert_eq!(seeded, TxnOutcome::Committed(()));
+
+    let iv = STANDARD.encode([0u8; 12]);
+    let tag = STANDARD.encode([0u8; 16]);
+    let put = |seq: i64, at: i64, sha: &str, len: i64| ReplicationEnvelope {
+        workspace_id: "ws".to_owned(),
+        origin_id: "peer".to_owned(),
+        origin_seq: seq,
+        op_kind: "secret.file.put".to_owned(),
+        payload: json!({
+            "versionId":"v1","path":"app/.env","metadata":{"origin":"sync"},
+            "ivBase64": iv, "authTagBase64": tag, "ciphertextSha256": sha, "byteLength": len
+        }),
+        recorded_at_ms: at,
+    };
+    // put @10 wins over an empty tip.
+    assert!(matches!(
+        apply_secret_envelope(
+            &mut engine,
+            &put(0, 10, &sha_a, cipher_a.len() as i64),
+            &NoFaults
+        ),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    // delete @20 wins and removes the materialized secret_files row.
+    let delete = ReplicationEnvelope {
+        workspace_id: "ws".to_owned(),
+        origin_id: "peer".to_owned(),
+        origin_seq: 1,
+        op_kind: "secret.file.delete".to_owned(),
+        payload: json!({"versionId":"v1","path":"app/.env","metadata":{"origin":"sync"}}),
+        recorded_at_ms: 20,
+    };
+    assert!(matches!(
+        apply_secret_envelope(&mut engine, &delete, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    // A late delivery of an OLDER put (@5) must NOT resurrect the secret.
+    assert!(matches!(
+        apply_secret_envelope(
+            &mut engine,
+            &put(2, 5, &sha_b, cipher_b.len() as i64),
+            &NoFaults
+        ),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    let materialized: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM secret_files WHERE workspace_id='ws' AND version_id='v1' AND path='app/.env'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("secret_files count");
+    assert_eq!(
+        materialized, 0,
+        "delete tombstone must block the older-put resurrection"
+    );
+}
+
+/// #5b (feed-read ranking): a delayed OLDER read receipt with a NEWER wall clock
+/// must not move the read cursor backwards.
+#[test]
+fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
+    let (_scratch, _path, mut engine) = store();
+    let ahead = envelope(
+        "peer",
+        0,
+        "chat.feed.read.set",
+        json!({"ownerUserId":"u","lastSeenCreatedAtMs":100,"lastSeenMessageId":"m2","atMs":10}),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &ahead, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    // Older read position (50 < 100) but a newer clock (20 > 10).
+    let behind = envelope(
+        "peer",
+        1,
+        "chat.feed.read.set",
+        json!({"ownerUserId":"u","lastSeenCreatedAtMs":50,"lastSeenMessageId":"m1","atMs":20}),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &behind, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    let last_seen: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT last_seen_created_at_ms FROM chat_feed_read_state WHERE workspace_id='ws' AND owner_user_id='u'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("feed read state");
+    assert_eq!(
+        last_seen, 100,
+        "a newer-clock older read must not move the cursor back"
+    );
+}
+
+/// #5c (reserved agent-channel): the agent kind/name/slug hold IFF the reserved
+/// agent wire id is present; malformed shapes are rejected, a correct one applies.
+#[test]
+fn reserved_agent_channel_shapes_rejected() {
+    let (_scratch, _path, mut engine) = store();
+    // kind=agent but a non-agent wire id -> rejected.
+    let rogue_agent = envelope(
+        "peer",
+        0,
+        "chat.channel.create",
+        json!({"channelId":"c1","name":"My agent","slug":"my-agent","kind":"agent","createdAtMs":1,"wireId":"wire-not-agent"}),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &rogue_agent, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    // A normal channel squatting the reserved name -> rejected (seq 0 still free;
+    // the rejected op rolled back without advancing the ack).
+    let name_squat = envelope(
+        "peer",
+        0,
+        "chat.channel.create",
+        json!({"channelId":"c2","name":"My agent","slug":"reserved-name","kind":"channel","createdAtMs":1}),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &name_squat, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    // The canonical agent channel (agent kind + reserved wire id + reserved
+    // name + canonical slug) applies.
+    let canonical = envelope(
+        "peer",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId":"c-agent","name": AGENT_CHANNEL_NAME,
+            "slug": channel_slug_for_name(AGENT_CHANNEL_NAME),
+            "kind":"agent","createdAtMs":1,"wireId": AGENT_CHANNEL_WIRE_ID
+        }),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &canonical, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
 }

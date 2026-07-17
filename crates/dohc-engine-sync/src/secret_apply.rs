@@ -225,17 +225,30 @@ fn remote_wins(
     path: &str,
     after: Option<(&str, &str, &str, i64)>,
 ) -> Result<bool, SyncError> {
-    let current: Option<(i64, i64, String, String, String)> = tx
+    // Rank against the latest `secret_moments` row for the path — delete
+    // TOMBSTONES INCLUDED — never the materialized `secret_files` tip, which is
+    // gone after a winning delete and would let a later older put resurrect a
+    // deleted secret. Deterministic content rank
+    // (recorded_at_ms, after_present, ciphertext, iv, tag), mirroring
+    // secretFileStore.ts. The incoming moment is already in the table, so
+    // `incoming >= latest` materializes iff incoming is the winner (>= keeps a
+    // byte-identical redelivery idempotent).
+    let latest: Option<(i64, i64, String, String, String)> = tx
         .query_row(
-            "SELECT m.recorded_at_ms,m.after_present,COALESCE(m.after_ciphertext_base64,''),COALESCE(m.after_iv_base64,''),COALESCE(m.after_auth_tag_base64,'') \
-             FROM secret_files f JOIN secret_moments m ON m.workspace_id=f.workspace_id AND m.moment_id=f.latest_moment_id \
-             WHERE f.workspace_id=?1 AND f.version_id=?2 AND f.path=?3",
+            "SELECT recorded_at_ms,after_present,COALESCE(after_ciphertext_base64,''),COALESCE(after_iv_base64,''),COALESCE(after_auth_tag_base64,'') \
+             FROM secret_moments \
+             WHERE workspace_id=?1 AND version_id=?2 AND path=?3 \
+             ORDER BY recorded_at_ms DESC, after_present DESC, \
+               COALESCE(after_ciphertext_base64,'') DESC, \
+               COALESCE(after_iv_base64,'') DESC, \
+               COALESCE(after_auth_tag_base64,'') DESC \
+             LIMIT 1",
             params![op.workspace_id, version_id, path],
             |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
         )
         .optional()
         .map_err(SyncError::corrupt)?;
-    let Some(current) = current else {
+    let Some(latest) = latest else {
         return Ok(true);
     };
     let incoming = match after {
@@ -243,11 +256,11 @@ fn remote_wins(
         None => (op.recorded_at_ms, 0_i64, "", "", ""),
     };
     Ok(incoming
-        > (
-            current.0,
-            current.1,
-            current.2.as_str(),
-            current.3.as_str(),
-            current.4.as_str(),
+        >= (
+            latest.0,
+            latest.1,
+            latest.2.as_str(),
+            latest.3.as_str(),
+            latest.4.as_str(),
         ))
 }

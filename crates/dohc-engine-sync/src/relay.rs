@@ -275,6 +275,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut applied = 0_usize;
         let mut skipped = 0_usize;
         for op in &response.ops {
+            // Workspace scoping: a buggy/compromised transport must never make a
+            // pull for workspace A apply an op targeting workspace B (which would
+            // mutate B and then advance A's cursor). Fail closed before applying;
+            // the cursor is not persisted, so the pass is safely retryable.
+            if op.workspace_id != workspace_id {
+                return Err(RelayError::InvalidResponse);
+            }
             match apply_chat_envelope(store, op, faults).map_err(local)? {
                 ApplyOutcome::Applied(()) => {
                     applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?
