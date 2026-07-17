@@ -16,12 +16,14 @@
 
 use crate::error::DomainError;
 use crate::records::{
-    CreateNamedVersion, ListMomentsQuery, MomentOp, MomentPage, MomentRecord, TextSnapshot,
+    CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord, ListMomentsQuery, MomentOp,
+    MomentPage, MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation, TextSnapshot,
     VersionKind, VersionRecord, WriteResult, WriteText,
 };
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 
 /// Maximum text-file size accepted by [`VersionedTextStore::write_text`], in
 /// UTF-8 bytes. Mirrors the TS engine's 10 MB text cap
@@ -88,6 +90,30 @@ impl<'a> VersionedTextStore<'a> {
             })
         })?;
         committed(outcome)
+    }
+
+    /// Return the workspace's main version without bootstrapping it. A workspace
+    /// with no `versioned_workspaces` row returns `None`
+    /// (`versions-get-main-version`).
+    pub fn get_main_version(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<VersionRecord>, DomainError> {
+        non_empty(workspace_id, "workspace_id")?;
+        self.store.read_with(|conn| {
+            let row = conn
+                .query_row(
+                    "SELECT v.workspace_id, v.version_id, v.kind, v.name, v.created_at_ms, \
+                     v.fork_version_id, v.fork_moment_id FROM versioned_workspaces w \
+                     JOIN versions v ON v.workspace_id = w.workspace_id \
+                       AND v.version_id = w.main_version_id WHERE w.workspace_id = ?1",
+                    params![workspace_id],
+                    map_version_row,
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            row.transpose()
+        })
     }
 
     // --------------------------------------------------------------------- writes
@@ -172,6 +198,7 @@ impl<'a> VersionedTextStore<'a> {
         let object_id = existing_object.unwrap_or_else(|| input.object_id.clone());
         let blob = text_blob_sha256(&input.text);
         let before_blob = before.as_ref().map(|s| s.blob_sha256.clone());
+        let before_latest_moment_id = before.as_ref().map(|s| s.latest_moment_id.clone());
 
         let outcome = self.store.write_with(faults, |tx| {
             let moment_order = next_moment_order(tx)?;
@@ -201,8 +228,9 @@ impl<'a> VersionedTextStore<'a> {
                 "INSERT INTO moments \
                  (workspace_id, moment_order, moment_id, version_id, object_id, path, \
                   recorded_at_ms, operation, after_blob_sha256, before_present, \
-                  before_blob_sha256, metadata_origin, author_json, sync_record_only) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'write', ?8, ?9, ?10, ?11, ?12, NULL)",
+                   before_blob_sha256, before_latest_moment_id, metadata_origin, author_json, \
+                   sync_record_only) \
+                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'write', ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
                 params![
                     ws,
                     moment_order,
@@ -212,8 +240,9 @@ impl<'a> VersionedTextStore<'a> {
                     input.path,
                     input.now_ms,
                     blob,
-                    before.is_some() as i64,
+                    if before.is_some() { 2 } else { 1 },
                     before_blob,
+                    before_latest_moment_id,
                     input.metadata_origin,
                     input.author_json,
                 ],
@@ -280,6 +309,7 @@ impl<'a> VersionedTextStore<'a> {
                     after_blob_sha256: blob.clone(),
                     before_present: before.is_some(),
                     before_blob_sha256: before_blob.clone(),
+                    before_latest_moment_id: before_latest_moment_id.clone(),
                     metadata_origin: input.metadata_origin.clone(),
                     author_json: input.author_json.clone(),
                     sync_record_only: false,
@@ -323,6 +353,338 @@ impl<'a> VersionedTextStore<'a> {
                 deduped: true,
             })
         })
+    }
+
+    /// Delete a materialized text file from one version, preserving other
+    /// versions of the same object and appending a `delete` moment
+    /// (`versions-delete-text-file`).
+    pub fn delete_text_file(
+        &mut self,
+        input: &DeleteTextFile,
+        faults: &dyn FaultInjector,
+    ) -> Result<DeleteResult, DomainError> {
+        non_empty(&input.workspace_id, "workspace_id")?;
+        non_empty(&input.version_id, "version_id")?;
+        non_empty(&input.moment_id, "moment_id")?;
+        validate_path(&input.path)?;
+
+        let ws = &input.workspace_id;
+        let (object, before) = self.store.read_with(|conn| {
+            if !version_exists(conn, ws, &input.version_id)? {
+                return Err(DomainError::VersionNotFound);
+            }
+            let object_id = alias_object_id(conn, ws, &input.version_id, &input.path)?
+                .ok_or(DomainError::FileNotFound)?;
+            let before = get_snapshot(conn, ws, &input.version_id, &object_id)?
+                .ok_or(DomainError::FileNotFound)?;
+            if moment_exists(conn, ws, &input.moment_id)? {
+                return Err(DomainError::DuplicateMomentId);
+            }
+            let object =
+                get_file_object(conn, ws, &object_id)?.ok_or(DomainError::StateCorrupt {
+                    reason: "snapshot points at a missing object",
+                })?;
+            Ok((object, before))
+        })?;
+
+        let outcome = self.store.write_with(faults, |tx| {
+            let moment_order = next_moment_order(tx)?;
+            tx.execute(
+                "INSERT INTO moments \
+                 (workspace_id, moment_order, moment_id, version_id, object_id, path, \
+                  recorded_at_ms, operation, after_blob_sha256, before_present, \
+                  before_blob_sha256, before_latest_moment_id, metadata_origin, author_json, \
+                  sync_record_only) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'delete', ?8, 2, ?8, ?9, ?10, ?11, NULL)",
+                params![
+                    ws,
+                    moment_order,
+                    input.moment_id,
+                    input.version_id,
+                    before.object_id,
+                    input.path,
+                    input.now_ms,
+                    before.blob_sha256,
+                    before.latest_moment_id,
+                    input.metadata_origin,
+                    input.author_json,
+                ],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.execute(
+                "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
+                 VALUES (?1, 'moment.append', ?2)",
+                params![before.object_id, input.now_ms],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.execute(
+                "DELETE FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 \
+                 AND path = ?3 AND object_id = ?4",
+                params![ws, input.version_id, input.path, before.object_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.execute(
+                "DELETE FROM snapshots WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![ws, input.version_id, before.object_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+
+            Ok::<_, DomainError>(DeleteResult {
+                object: object.clone(),
+                before: before.clone(),
+                moment: MomentRecord {
+                    moment_order,
+                    moment_id: input.moment_id.clone(),
+                    version_id: input.version_id.clone(),
+                    object_id: before.object_id.clone(),
+                    path: input.path.clone(),
+                    recorded_at_ms: input.now_ms,
+                    operation: MomentOp::Delete,
+                    after_blob_sha256: before.blob_sha256.clone(),
+                    before_present: true,
+                    before_blob_sha256: Some(before.blob_sha256.clone()),
+                    before_latest_moment_id: Some(before.latest_moment_id.clone()),
+                    metadata_origin: input.metadata_origin.clone(),
+                    author_json: input.author_json.clone(),
+                    sync_record_only: false,
+                },
+            })
+        })?;
+        committed(outcome)
+    }
+
+    /// Move a text file's version-local alias without changing its object or
+    /// content, appending a `rename` moment (`versions-rename-text-file`).
+    pub fn rename_text_file(
+        &mut self,
+        input: &RenameTextFile,
+        faults: &dyn FaultInjector,
+    ) -> Result<RenameResult, DomainError> {
+        non_empty(&input.workspace_id, "workspace_id")?;
+        non_empty(&input.version_id, "version_id")?;
+        non_empty(&input.moment_id, "moment_id")?;
+        validate_path(&input.from_path)?;
+        validate_path(&input.to_path)?;
+        if input.from_path == input.to_path {
+            return Err(DomainError::InvalidPath {
+                reason: "rename source and destination must differ",
+            });
+        }
+
+        let ws = &input.workspace_id;
+        let (object, before) = self.store.read_with(|conn| {
+            if !version_exists(conn, ws, &input.version_id)? {
+                return Err(DomainError::VersionNotFound);
+            }
+            let object_id = alias_object_id(conn, ws, &input.version_id, &input.from_path)?
+                .ok_or(DomainError::FileNotFound)?;
+            let before = get_snapshot(conn, ws, &input.version_id, &object_id)?
+                .ok_or(DomainError::FileNotFound)?;
+            if let Some(target_object_id) =
+                alias_object_id(conn, ws, &input.version_id, &input.to_path)?
+                && target_object_id != object_id
+            {
+                return Err(DomainError::TargetPathExists);
+            }
+            if moment_exists(conn, ws, &input.moment_id)? {
+                return Err(DomainError::DuplicateMomentId);
+            }
+            let object =
+                get_file_object(conn, ws, &object_id)?.ok_or(DomainError::StateCorrupt {
+                    reason: "snapshot points at a missing object",
+                })?;
+            Ok((object, before))
+        })?;
+
+        let after = TextSnapshot {
+            workspace_id: ws.clone(),
+            version_id: input.version_id.clone(),
+            object_id: before.object_id.clone(),
+            path: input.to_path.clone(),
+            text: before.text.clone(),
+            blob_sha256: before.blob_sha256.clone(),
+            updated_at_ms: input.now_ms,
+            latest_moment_id: input.moment_id.clone(),
+            metadata_origin: input.metadata_origin.clone(),
+        };
+        let outcome = self.store.write_with(faults, |tx| {
+            let moment_order = next_moment_order(tx)?;
+            tx.execute(
+                "INSERT INTO moments \
+                 (workspace_id, moment_order, moment_id, version_id, object_id, path, \
+                  recorded_at_ms, operation, after_blob_sha256, before_present, \
+                  before_blob_sha256, before_latest_moment_id, metadata_origin, author_json, \
+                  sync_record_only) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'rename', ?8, 2, ?8, ?9, ?10, ?11, NULL)",
+                params![
+                    ws,
+                    moment_order,
+                    input.moment_id,
+                    input.version_id,
+                    before.object_id,
+                    input.to_path,
+                    input.now_ms,
+                    before.blob_sha256,
+                    before.latest_moment_id,
+                    input.metadata_origin,
+                    input.author_json,
+                ],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.execute(
+                "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
+                 VALUES (?1, 'moment.append', ?2)",
+                params![before.object_id, input.now_ms],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.execute(
+                "DELETE FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 \
+                 AND path = ?3 AND object_id = ?4",
+                params![ws, input.version_id, input.from_path, before.object_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.execute(
+                "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
+                 VALUES (?1, ?2, ?3, ?4) ON CONFLICT(workspace_id, version_id, path) \
+                 DO UPDATE SET object_id = excluded.object_id",
+                params![ws, input.version_id, input.to_path, before.object_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+            upsert_snapshot(tx, &after)?;
+
+            Ok::<_, DomainError>(RenameResult {
+                object: object.clone(),
+                before: before.clone(),
+                after: after.clone(),
+                moment: MomentRecord {
+                    moment_order,
+                    moment_id: input.moment_id.clone(),
+                    version_id: input.version_id.clone(),
+                    object_id: before.object_id.clone(),
+                    path: input.to_path.clone(),
+                    recorded_at_ms: input.now_ms,
+                    operation: MomentOp::Rename,
+                    after_blob_sha256: before.blob_sha256.clone(),
+                    before_present: true,
+                    before_blob_sha256: Some(before.blob_sha256.clone()),
+                    before_latest_moment_id: Some(before.latest_moment_id.clone()),
+                    metadata_origin: input.metadata_origin.clone(),
+                    author_json: input.author_json.clone(),
+                    sync_record_only: false,
+                },
+            })
+        })?;
+        committed(outcome)
+    }
+
+    /// Remove one latest local mutation and restore its recorded preimage.
+    /// This is local-only history surgery and deliberately does not journal a
+    /// replication operation (`versions-rollback-text-file-mutation`).
+    pub fn rollback_text_file_mutation(
+        &mut self,
+        input: &RollbackTextFileMutation,
+        faults: &dyn FaultInjector,
+    ) -> Result<(), DomainError> {
+        non_empty(&input.workspace_id, "workspace_id")?;
+        non_empty(&input.version_id, "version_id")?;
+        non_empty(&input.mutation_moment_id, "moment_id")?;
+        validate_path(&input.path)?;
+
+        let ws = &input.workspace_id;
+        let prep = self.store.read_with(|conn| {
+            if !version_exists(conn, ws, &input.version_id)? {
+                return Err(DomainError::VersionNotFound);
+            }
+            let moment = get_moment(conn, ws, &input.mutation_moment_id)?
+                .filter(|m| m.version_id == input.version_id && m.path == input.path)
+                .ok_or(DomainError::FileNotFound)?;
+            if moment.sync_record_only {
+                return Err(DomainError::InvalidInput {
+                    reason: "sync record-only moments cannot be rolled back",
+                });
+            }
+
+            let before_state = moment_before_state(conn, ws, &input.mutation_moment_id)?;
+            let before = resolve_rollback_before(conn, input, &moment, before_state)?;
+            if let Some(before) = &before {
+                if before.version_id != input.version_id
+                    || before.object_id != moment.object_id
+                    || (before.path != input.path && moment.operation != MomentOp::Rename)
+                {
+                    return Err(DomainError::InvalidInput {
+                        reason: "rollback snapshot does not match the target file",
+                    });
+                }
+            }
+            if later_materialized_object_moment_exists(conn, ws, &moment)? {
+                return Err(DomainError::InvalidInput {
+                    reason: "mutation moment is not the latest mutation for the object",
+                });
+            }
+            if rollback_moment_has_dependents(conn, ws, &moment)? {
+                return Err(DomainError::InvalidInput {
+                    reason: "mutation moment has dependent versions",
+                });
+            }
+            if let Some(before) = &before
+                && let Some(target_object_id) =
+                    alias_object_id(conn, ws, &input.version_id, &before.path)?
+                && target_object_id != before.object_id
+            {
+                return Err(DomainError::TargetPathExists);
+            }
+            Ok(RollbackPrep { moment, before })
+        })?;
+
+        let outcome = self.store.write_with(faults, |tx| {
+            tx.execute(
+                "DELETE FROM moments WHERE workspace_id = ?1 AND moment_id = ?2",
+                params![ws, input.mutation_moment_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.execute(
+                "DELETE FROM engine_requests WHERE result_seq = ?1",
+                params![prep.moment.moment_order],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.execute(
+                "DELETE FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 \
+                 AND path = ?3 AND object_id = ?4",
+                params![ws, input.version_id, input.path, prep.moment.object_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.execute(
+                "DELETE FROM snapshots WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![ws, input.version_id, prep.moment.object_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+
+            if let Some(before) = &prep.before {
+                tx.execute(
+                    "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
+                    params![before.blob_sha256, before.text.len() as i64, before.text],
+                )
+                .map_err(DomainError::sql_persist)?;
+                tx.execute(
+                    "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
+                     VALUES (?1, ?2, ?3, ?4) ON CONFLICT(workspace_id, version_id, path) \
+                     DO UPDATE SET object_id = excluded.object_id",
+                    params![ws, input.version_id, before.path, before.object_id],
+                )
+                .map_err(DomainError::sql_persist)?;
+                upsert_snapshot(tx, before)?;
+            }
+
+            if !object_has_references(tx, ws, &prep.moment.object_id)? {
+                tx.execute(
+                    "DELETE FROM file_objects WHERE workspace_id = ?1 AND object_id = ?2",
+                    params![ws, prep.moment.object_id],
+                )
+                .map_err(DomainError::sql_persist)?;
+            }
+            Ok::<_, DomainError>(())
+        })?;
+        committed(outcome)
     }
 
     // -------------------------------------------------------------------- reads
@@ -403,7 +765,8 @@ impl<'a> VersionedTextStore<'a> {
             let mut sql = String::from(
                 "SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
                  operation, after_blob_sha256, before_present, before_blob_sha256, \
-                 metadata_origin, author_json, sync_record_only FROM moments WHERE workspace_id = ?1",
+                 before_latest_moment_id, metadata_origin, author_json, sync_record_only \
+                 FROM moments WHERE workspace_id = ?1",
             );
             let mut binds: Vec<Box<dyn rusqlite::ToSql>> =
                 vec![Box::new(query.workspace_id.clone())];
@@ -757,6 +1120,31 @@ struct WriteApply {
     before: Option<TextSnapshot>,
 }
 
+struct RollbackPrep {
+    moment: MomentRecord,
+    before: Option<TextSnapshot>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MomentBeforeState {
+    LegacyUnset,
+    Absent,
+    Present,
+}
+
+impl MomentBeforeState {
+    fn from_db(value: i64) -> Result<Self, DomainError> {
+        match value {
+            0 => Ok(MomentBeforeState::LegacyUnset),
+            1 => Ok(MomentBeforeState::Absent),
+            2 => Ok(MomentBeforeState::Present),
+            _ => Err(DomainError::StateCorrupt {
+                reason: "unknown moment before-present state",
+            }),
+        }
+    }
+}
+
 /// Pre-transaction decision for a fork.
 enum ForkPrep {
     Deduped,
@@ -916,6 +1304,27 @@ fn object_exists(
     Ok(found.is_some())
 }
 
+fn get_file_object(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<Option<FileObjectRecord>, DomainError> {
+    conn.query_row(
+        "SELECT workspace_id, object_id, created_at_ms FROM file_objects \
+         WHERE workspace_id = ?1 AND object_id = ?2",
+        params![workspace_id, object_id],
+        |row| {
+            Ok(FileObjectRecord {
+                workspace_id: row.get(0)?,
+                object_id: row.get(1)?,
+                created_at_ms: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)
+}
+
 fn blob_text(conn: &Connection, sha256: &str) -> Result<Option<String>, DomainError> {
     conn.query_row(
         "SELECT text FROM blobs WHERE sha256 = ?1",
@@ -1029,6 +1438,477 @@ fn get_snapshot(
     .map_err(DomainError::sql_corrupt)
 }
 
+fn upsert_snapshot(conn: &Connection, snapshot: &TextSnapshot) -> Result<(), DomainError> {
+    conn.execute(
+        "INSERT INTO snapshots \
+         (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
+          latest_moment_id, metadata_origin) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+         ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET \
+          path = excluded.path, blob_sha256 = excluded.blob_sha256, \
+          updated_at_ms = excluded.updated_at_ms, latest_moment_id = excluded.latest_moment_id, \
+          metadata_origin = excluded.metadata_origin",
+        params![
+            snapshot.workspace_id,
+            snapshot.version_id,
+            snapshot.object_id,
+            snapshot.path,
+            snapshot.blob_sha256,
+            snapshot.updated_at_ms,
+            snapshot.latest_moment_id,
+            snapshot.metadata_origin,
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
+fn select_moment_by_order(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    max_order: i64,
+) -> Result<Option<MomentRecord>, DomainError> {
+    let row = conn
+        .query_row(
+            "SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
+             operation, after_blob_sha256, before_present, before_blob_sha256, \
+             before_latest_moment_id, metadata_origin, author_json, sync_record_only \
+             FROM moments WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+               AND moment_order <= ?4 AND (sync_record_only IS NULL OR sync_record_only = 0) \
+             ORDER BY moment_order DESC LIMIT 1",
+            params![workspace_id, version_id, object_id, max_order],
+            map_moment_row,
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    row.transpose()
+}
+
+fn inherited_object_moment(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    seen: &mut HashSet<String>,
+) -> Result<Option<MomentRecord>, DomainError> {
+    if !seen.insert(version_id.to_owned()) {
+        return Err(DomainError::StateCorrupt {
+            reason: "version fork lineage contains a cycle",
+        });
+    }
+    let version =
+        get_version(conn, workspace_id, version_id)?.ok_or(DomainError::StateCorrupt {
+            reason: "fork lineage points at a missing version",
+        })?;
+    let Some(parent_id) = version.fork_version_id else {
+        return Ok(None);
+    };
+    let fork_order = match version.fork_moment_id {
+        Some(moment_id) => conn
+            .query_row(
+                "SELECT moment_order FROM moments WHERE workspace_id = ?1 AND moment_id = ?2",
+                params![workspace_id, moment_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DomainError::sql_corrupt)?
+            .ok_or(DomainError::StateCorrupt {
+                reason: "fork lineage points at a missing moment",
+            })?,
+        None => -1,
+    };
+    if let Some(moment) =
+        select_moment_by_order(conn, workspace_id, &parent_id, object_id, fork_order)?
+    {
+        return Ok(Some(moment));
+    }
+    inherited_object_moment(conn, workspace_id, &parent_id, object_id, seen)
+}
+
+fn resolve_rollback_before(
+    conn: &Connection,
+    input: &RollbackTextFileMutation,
+    moment: &MomentRecord,
+    before_state: MomentBeforeState,
+) -> Result<Option<TextSnapshot>, DomainError> {
+    if before_state == MomentBeforeState::Present {
+        let before_blob_sha256 =
+            moment
+                .before_blob_sha256
+                .clone()
+                .ok_or(DomainError::StateCorrupt {
+                    reason: "moment preimage is missing its blob",
+                })?;
+        let producer = match &moment.before_latest_moment_id {
+            Some(before_latest_moment_id) => {
+                get_moment(conn, &input.workspace_id, before_latest_moment_id)?.ok_or(
+                    DomainError::StateCorrupt {
+                        reason: "moment preimage producer is missing",
+                    },
+                )?
+            }
+            None => previous_object_moment_for_rollback(conn, input, moment)?.ok_or(
+                DomainError::StateCorrupt {
+                    reason: "moment preimage is missing its producer",
+                },
+            )?,
+        };
+        if producer.object_id != moment.object_id {
+            return Err(DomainError::StateCorrupt {
+                reason: "moment preimage producer belongs to another object",
+            });
+        }
+        let text = blob_text(conn, &before_blob_sha256)?.ok_or(DomainError::StateCorrupt {
+            reason: "moment preimage blob is missing",
+        })?;
+        return Ok(Some(TextSnapshot {
+            workspace_id: input.workspace_id.clone(),
+            version_id: input.version_id.clone(),
+            object_id: moment.object_id.clone(),
+            path: producer.path,
+            text,
+            blob_sha256: before_blob_sha256,
+            updated_at_ms: producer.recorded_at_ms,
+            latest_moment_id: producer.moment_id,
+            metadata_origin: producer.metadata_origin,
+        }));
+    }
+    if before_state == MomentBeforeState::Absent {
+        return Ok(None);
+    }
+
+    let previous = previous_object_moment_for_rollback(conn, input, moment)?;
+
+    if let Some(legacy_before_text) = &input.legacy_before_text {
+        validate_text(legacy_before_text)?;
+        let previous = previous
+            .filter(|candidate| candidate.operation != MomentOp::Delete)
+            .ok_or(DomainError::InvalidInput {
+                reason: "legacy mutation has no earlier snapshot to restore",
+            })?;
+        let path = if moment.operation == MomentOp::Rename {
+            previous.path.clone()
+        } else {
+            input.path.clone()
+        };
+        return Ok(Some(TextSnapshot {
+            workspace_id: input.workspace_id.clone(),
+            version_id: input.version_id.clone(),
+            object_id: moment.object_id.clone(),
+            path,
+            text: legacy_before_text.clone(),
+            blob_sha256: text_blob_sha256(legacy_before_text),
+            updated_at_ms: previous.recorded_at_ms,
+            latest_moment_id: previous.moment_id,
+            metadata_origin: previous.metadata_origin,
+        }));
+    }
+    Err(DomainError::InvalidInput {
+        reason: "legacy mutation is missing a rollback preimage",
+    })
+}
+
+fn previous_object_moment_for_rollback(
+    conn: &Connection,
+    input: &RollbackTextFileMutation,
+    moment: &MomentRecord,
+) -> Result<Option<MomentRecord>, DomainError> {
+    let previous = select_moment_by_order(
+        conn,
+        &input.workspace_id,
+        &input.version_id,
+        &moment.object_id,
+        moment.moment_order.saturating_sub(1),
+    )?;
+    let previous = match previous {
+        Some(previous) => Some(previous),
+        None => inherited_object_moment(
+            conn,
+            &input.workspace_id,
+            &input.version_id,
+            &moment.object_id,
+            &mut HashSet::new(),
+        )?,
+    };
+    Ok(previous)
+}
+
+fn moment_before_state(
+    conn: &Connection,
+    workspace_id: &str,
+    moment_id: &str,
+) -> Result<MomentBeforeState, DomainError> {
+    let value: i64 = conn
+        .query_row(
+            "SELECT before_present FROM moments WHERE workspace_id = ?1 AND moment_id = ?2",
+            params![workspace_id, moment_id],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    MomentBeforeState::from_db(value)
+}
+
+fn later_materialized_object_moment_exists(
+    conn: &Connection,
+    workspace_id: &str,
+    moment: &MomentRecord,
+) -> Result<bool, DomainError> {
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM moments WHERE workspace_id = ?1 AND version_id = ?2 \
+             AND object_id = ?3 AND moment_order > ?4 \
+             AND (sync_record_only IS NULL OR sync_record_only = 0) LIMIT 1",
+            params![
+                workspace_id,
+                moment.version_id,
+                moment.object_id,
+                moment.moment_order
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(found.is_some())
+}
+
+struct ObjectMomentDependency {
+    version_id: String,
+    moment_order: i64,
+    before_present: bool,
+}
+
+fn rollback_moment_has_dependents(
+    conn: &Connection,
+    workspace_id: &str,
+    moment: &MomentRecord,
+) -> Result<bool, DomainError> {
+    let snapshot_reference: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM snapshots WHERE workspace_id = ?1 AND version_id <> ?2 \
+             AND latest_moment_id = ?3 LIMIT 1",
+            params![workspace_id, moment.version_id, moment.moment_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    if snapshot_reference.is_some() {
+        return Ok(true);
+    }
+    let fork_base_reference: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM fork_base_snapshots WHERE workspace_id = ?1 \
+             AND latest_moment_id = ?2 LIMIT 1",
+            params![workspace_id, moment.moment_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    if fork_base_reference.is_some() {
+        return Ok(true);
+    }
+    let moment_reference: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM moments WHERE workspace_id = ?1 AND moment_id <> ?2 \
+             AND object_id = ?3 AND before_latest_moment_id = ?2 \
+             AND (sync_record_only IS NULL OR sync_record_only = 0) LIMIT 1",
+            params![workspace_id, moment.moment_id, moment.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    if moment_reference.is_some() {
+        return Ok(true);
+    }
+    // Fail closed if a concrete preimage has no resolved producer link.
+    let unresolved_reference: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM moments WHERE workspace_id = ?1 AND object_id = ?2 \
+             AND before_present = 2 AND before_latest_moment_id IS NULL LIMIT 1",
+            params![workspace_id, moment.object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    if unresolved_reference.is_some() {
+        return Ok(true);
+    }
+
+    let mut versions = HashMap::new();
+    let mut version_stmt = conn
+        .prepare_cached(
+            "SELECT workspace_id, version_id, kind, name, created_at_ms, fork_version_id, \
+             fork_moment_id FROM versions WHERE workspace_id = ?1",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let version_rows = version_stmt
+        .query_map(params![workspace_id], map_version_row)
+        .map_err(DomainError::sql_corrupt)?;
+    for row in version_rows {
+        let version = row.map_err(DomainError::sql_corrupt)??;
+        versions.insert(version.version_id.clone(), version);
+    }
+
+    let fork_moment_ids: HashSet<&str> = versions
+        .values()
+        .filter_map(|version| version.fork_moment_id.as_deref())
+        .collect();
+    let mut moment_orders = HashMap::with_capacity(fork_moment_ids.len());
+    let mut order_stmt = conn
+        .prepare_cached(
+            "SELECT moment_order FROM moments WHERE workspace_id = ?1 AND moment_id = ?2",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    for moment_id in fork_moment_ids {
+        let moment_order = order_stmt
+            .query_row(params![workspace_id, moment_id], |row| row.get(0))
+            .optional()
+            .map_err(DomainError::sql_corrupt)?;
+        if let Some(moment_order) = moment_order {
+            moment_orders.insert(moment_id.to_owned(), moment_order);
+        }
+    }
+
+    let mut object_moments = Vec::new();
+    let mut object_stmt = conn
+        .prepare_cached(
+            "SELECT version_id, moment_order, before_present FROM moments \
+             WHERE workspace_id = ?1 AND object_id = ?2 \
+               AND (sync_record_only IS NULL OR sync_record_only = 0) ORDER BY moment_order",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let object_rows = object_stmt
+        .query_map(params![workspace_id, moment.object_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(DomainError::sql_corrupt)?;
+    for row in object_rows {
+        let (version_id, moment_order, before_present) = row.map_err(DomainError::sql_corrupt)?;
+        object_moments.push(ObjectMomentDependency {
+            version_id,
+            moment_order,
+            before_present: MomentBeforeState::from_db(before_present)?
+                == MomentBeforeState::Present,
+        });
+    }
+
+    for version in versions.values() {
+        if version.version_id == moment.version_id {
+            continue;
+        }
+        let Some(fork_order) =
+            fork_order_from_version(version, &versions, &moment_orders, &moment.version_id)
+        else {
+            continue;
+        };
+        if fork_order >= moment.moment_order
+            && (fork_order == moment.moment_order
+                || !lineage_has_independent_object_mutation(
+                    &version.version_id,
+                    fork_order,
+                    &moment.version_id,
+                    &versions,
+                    &moment_orders,
+                    &object_moments,
+                ))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn fork_order_from_version(
+    version: &VersionRecord,
+    versions: &HashMap<String, VersionRecord>,
+    moment_orders: &HashMap<String, i64>,
+    target_version_id: &str,
+) -> Option<i64> {
+    let mut cursor = Some(version);
+    let mut seen = HashSet::new();
+    while let Some(version) = cursor {
+        let parent_id = version.fork_version_id.as_deref()?;
+        if !seen.insert(version.version_id.as_str()) {
+            return None;
+        }
+        if parent_id == target_version_id {
+            return version
+                .fork_moment_id
+                .as_ref()
+                .and_then(|id| moment_orders.get(id).copied());
+        }
+        cursor = versions.get(parent_id);
+    }
+    None
+}
+
+fn lineage_has_independent_object_mutation(
+    candidate_version_id: &str,
+    after_order: i64,
+    target_version_id: &str,
+    versions: &HashMap<String, VersionRecord>,
+    moment_orders: &HashMap<String, i64>,
+    object_moments: &[ObjectMomentDependency],
+) -> bool {
+    let mut cursor = versions.get(candidate_version_id);
+    let mut at_or_before_order = i64::MAX;
+    let mut seen = HashSet::new();
+    while let Some(version) = cursor {
+        if !seen.insert(version.version_id.as_str()) {
+            return false;
+        }
+        // TS value 2 is a concrete preimage (reachable for R05 update/delete/
+        // rename); Rust's bool represents it as `true`. Rust intentionally
+        // collapses TS legacy-unset (0) and explicit-absent (1) to `false`;
+        // this dependency check only needs the concrete-preimage distinction.
+        if object_moments.iter().any(|candidate| {
+            candidate.version_id == version.version_id
+                && candidate.moment_order > after_order
+                && candidate.moment_order <= at_or_before_order
+                && candidate.before_present
+        }) {
+            return true;
+        }
+        let Some(parent_id) = version.fork_version_id.as_deref() else {
+            return false;
+        };
+        if parent_id == target_version_id {
+            return false;
+        }
+        at_or_before_order = version
+            .fork_moment_id
+            .as_ref()
+            .and_then(|id| moment_orders.get(id).copied())
+            .unwrap_or(-1);
+        cursor = versions.get(parent_id);
+    }
+    false
+}
+
+fn object_has_references(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<bool, DomainError> {
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT 1 WHERE \
+             EXISTS (SELECT 1 FROM path_aliases WHERE workspace_id = ?1 AND object_id = ?2) OR \
+             EXISTS (SELECT 1 FROM snapshots WHERE workspace_id = ?1 AND object_id = ?2) OR \
+             EXISTS (SELECT 1 FROM fork_base_snapshots WHERE workspace_id = ?1 AND object_id = ?2) OR \
+             EXISTS (SELECT 1 FROM moments WHERE workspace_id = ?1 AND object_id = ?2) LIMIT 1",
+            params![workspace_id, object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(found.is_some())
+}
+
 fn get_version(
     conn: &Connection,
     workspace_id: &str,
@@ -1054,8 +1934,9 @@ fn get_moment(
     let row = conn
         .query_row(
             "SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
-             operation, after_blob_sha256, before_present, before_blob_sha256, metadata_origin, \
-             author_json, sync_record_only FROM moments WHERE workspace_id = ?1 AND moment_id = ?2",
+             operation, after_blob_sha256, before_present, before_blob_sha256, \
+             before_latest_moment_id, metadata_origin, author_json, sync_record_only \
+             FROM moments WHERE workspace_id = ?1 AND moment_id = ?2",
             params![workspace_id, moment_id],
             map_moment_row,
         )
@@ -1132,27 +2013,32 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
     let recorded_at_ms: i64 = row.get(5)?;
     let op_str: String = row.get(6)?;
     let after_blob_sha256: String = row.get(7)?;
-    let before_present: i64 = row.get(8)?;
+    let before_present_raw: i64 = row.get(8)?;
     let before_blob_sha256: Option<String> = row.get(9)?;
-    let metadata_origin: String = row.get(10)?;
-    let author_json: Option<String> = row.get(11)?;
-    let sync_record_only: Option<i64> = row.get(12)?;
-    Ok(MomentOp::from_db(&op_str).map(|operation| MomentRecord {
-        moment_order,
-        moment_id,
-        version_id,
-        object_id,
-        path,
-        recorded_at_ms,
-        operation,
-        after_blob_sha256,
-        before_present: before_present != 0,
-        before_blob_sha256,
-        metadata_origin,
-        author_json,
-        // A record-only marker is a non-NULL, NON-ZERO value; NULL or 0 both
-        // mean 'materialized' (PORTING.md §1, matching the aligned fork SQL).
-        sync_record_only: matches!(sync_record_only, Some(v) if v != 0),
+    let before_latest_moment_id: Option<String> = row.get(10)?;
+    let metadata_origin: String = row.get(11)?;
+    let author_json: Option<String> = row.get(12)?;
+    let sync_record_only: Option<i64> = row.get(13)?;
+    Ok(MomentOp::from_db(&op_str).and_then(|operation| {
+        let before_state = MomentBeforeState::from_db(before_present_raw)?;
+        Ok(MomentRecord {
+            moment_order,
+            moment_id,
+            version_id,
+            object_id,
+            path,
+            recorded_at_ms,
+            operation,
+            after_blob_sha256,
+            before_present: before_state == MomentBeforeState::Present,
+            before_blob_sha256,
+            before_latest_moment_id,
+            metadata_origin,
+            author_json,
+            // A record-only marker is a non-NULL, NON-ZERO value; NULL or 0 both
+            // mean 'materialized' (PORTING.md §1, matching the aligned fork SQL).
+            sync_record_only: matches!(sync_record_only, Some(v) if v != 0),
+        })
     }))
 }
 

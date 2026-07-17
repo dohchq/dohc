@@ -917,6 +917,41 @@ CREATE TABLE engine_search_index_state (
 /// The `id` of the R12 search migration.
 pub(crate) const SEARCH_MIGRATION_ID: &str = "v1-search";
 
+/// Ordinal 5 (R05 versioning residual). Adds the durable pointer from a moment
+/// to the moment that produced its concrete rollback preimage.
+const V1_MOMENT_BEFORE_LINK_DDL: &str = "\
+ALTER TABLE moments ADD COLUMN before_latest_moment_id TEXT;
+-- Rust originally encoded no-preimage/concrete-preimage as 0/1. Normalize to
+-- the TS tri-state: 0 legacy-unset, 1 explicit-absent, 2 concrete-preimage.
+UPDATE moments SET before_present = before_present + 1 WHERE before_present IN (0, 1);
+-- Resolve concrete preimages produced by an earlier materialized moment in the
+-- same version.
+UPDATE moments AS m
+SET before_latest_moment_id = (
+    SELECT prev.moment_id FROM moments AS prev
+    WHERE prev.workspace_id = m.workspace_id
+      AND prev.version_id  = m.version_id
+      AND prev.object_id   = m.object_id
+      AND prev.moment_order < m.moment_order
+      AND (prev.sync_record_only IS NULL OR prev.sync_record_only = 0)
+    ORDER BY prev.moment_order DESC
+    LIMIT 1
+)
+WHERE m.before_present = 2 AND m.before_latest_moment_id IS NULL;
+-- Resolve the remaining first-write-after-fork preimages from the frozen base.
+UPDATE moments AS m
+SET before_latest_moment_id = (
+    SELECT fb.latest_moment_id FROM fork_base_snapshots AS fb
+    WHERE fb.workspace_id = m.workspace_id
+      AND fb.version_id   = m.version_id
+      AND fb.object_id    = m.object_id
+)
+WHERE m.before_present = 2 AND m.before_latest_moment_id IS NULL;
+";
+
+/// The `id` of the R05 moment-preimage-link migration.
+pub(crate) const MOMENT_BEFORE_LINK_MIGRATION_ID: &str = "v1-moment-before-link";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -953,6 +988,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: SEARCH_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_SEARCH_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 5,
+        id: MOMENT_BEFORE_LINK_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_MOMENT_BEFORE_LINK_DDL,
         sets_user_version: None,
     },
 ];
@@ -1262,11 +1304,11 @@ mod tests {
     // waiting for a real future schema change.
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     fn two_migrations() -> Vec<Migration> {
-        // The frozen list now ends at ordinal 4 (R12 search), so a synthetic
-        // probe appends at ordinal 5.
+        // The frozen list now ends at ordinal 5 (R05 moment preimage links), so
+        // a synthetic probe appends at ordinal 6.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 5,
+            ordinal: 6,
             id: "r04-probe",
             kind: MigrationKind::Transactional,
             sql: M2_SQL,
@@ -1304,6 +1346,85 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM engine_ownership", [], |r| r.get(0))
             .expect("own");
         assert_eq!(owns, 1);
+    }
+
+    #[test]
+    fn moment_before_link_backfill_resolves_like_fresh() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_500);
+        let mut conn = open_bare(&path);
+
+        let pre_r05 = BASELINE_MIGRATIONS[..5].to_vec();
+        run_migrations(&mut conn, &pre_r05, &ctx, &NoFaults).expect("pre-R05 migrations");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
+             VALUES ('ws', 'main');
+             INSERT INTO versions \
+             (workspace_id, version_id, kind, name, created_at_ms, fork_version_id, fork_moment_id) \
+             VALUES ('ws', 'main', 'main', 'main', 1, NULL, NULL);
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+             VALUES ('ws', 'o1', 1);
+             INSERT INTO blobs (sha256, byte_length, text) VALUES
+             ('b1', 3, 'one'), ('b2', 3, 'two'), ('b3', 5, 'three');
+             INSERT INTO moments \
+             (workspace_id, moment_order, moment_id, version_id, object_id, path, \
+              recorded_at_ms, operation, after_blob_sha256, before_present, \
+              before_blob_sha256, metadata_origin, author_json, sync_record_only) \
+             VALUES ('ws', 1, 'm1', 'main', 'o1', 'a.md', 10, 'write', 'b1', 0, \
+                     NULL, 'user', NULL, NULL);
+             INSERT INTO versions \
+             (workspace_id, version_id, kind, name, created_at_ms, fork_version_id, fork_moment_id) \
+             VALUES ('ws', 'feat', 'named', 'feature', 20, 'main', 'm1');
+             INSERT INTO fork_base_snapshots \
+             (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
+              latest_moment_id, metadata_origin) \
+             VALUES ('ws', 'feat', 'o1', 'a.md', 'b1', 10, 'm1', 'user');
+             INSERT INTO moments \
+             (workspace_id, moment_order, moment_id, version_id, object_id, path, \
+              recorded_at_ms, operation, after_blob_sha256, before_present, \
+              before_blob_sha256, metadata_origin, author_json, sync_record_only) \
+             VALUES ('ws', 2, 'm2', 'feat', 'o1', 'a.md', 30, 'write', 'b2', 1, \
+                     'b1', 'user', NULL, NULL),
+                    ('ws', 3, 'm3', 'main', 'o1', 'a.md', 40, 'write', 'b3', 1, \
+                     'b1', 'user', NULL, NULL);
+             INSERT INTO path_aliases (workspace_id, version_id, path, object_id) VALUES
+             ('ws', 'main', 'a.md', 'o1'), ('ws', 'feat', 'a.md', 'o1');
+             INSERT INTO snapshots \
+             (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
+              latest_moment_id, metadata_origin) VALUES
+             ('ws', 'main', 'o1', 'a.md', 'b3', 40, 'm3', 'user'),
+             ('ws', 'feat', 'o1', 'a.md', 'b2', 30, 'm2', 'user');",
+        )
+        .expect("seed pre-R05 version history");
+
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("resume through R05");
+
+        let m1: (i64, Option<String>) = conn
+            .query_row(
+                "SELECT before_present, before_latest_moment_id FROM moments WHERE moment_id = 'm1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("m1");
+        let m2: (i64, Option<String>) = conn
+            .query_row(
+                "SELECT before_present, before_latest_moment_id FROM moments WHERE moment_id = 'm2'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("m2");
+        let m3: (i64, Option<String>) = conn
+            .query_row(
+                "SELECT before_present, before_latest_moment_id FROM moments WHERE moment_id = 'm3'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("m3");
+        assert_eq!(m1, (1, None));
+        assert_eq!(m2, (2, Some("m1".to_owned())));
+        assert_eq!(m3, (2, Some("m1".to_owned())));
     }
 
     #[test]
@@ -1381,10 +1502,11 @@ mod tests {
         // Resume: baseline is skipped (idempotent); the between-steps crash
         // fired before the secrets migration (ordinal 1), so resume applies the
         // secrets migration (1), the Y.Doc migration (2), the chats migration
-        // (3), the search migration (4), AND the probe (5).
+        // (3), the search migration (4), the moment-link migration (5), AND
+        // the probe (6).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 5 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 6 });
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -1481,7 +1603,7 @@ mod tests {
         }
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 5,
+            ordinal: 6,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
@@ -1499,7 +1621,7 @@ mod tests {
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();
         changed.push(Migration {
-            ordinal: 5,
+            ordinal: 6,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
@@ -1519,7 +1641,7 @@ mod tests {
         // baseline first (transactional), then a non-transactional idempotent step.
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 5,
+            ordinal: 6,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",

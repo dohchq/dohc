@@ -1,8 +1,9 @@
 //! dohc engine domain — CAL-2 calibration slice.
 //!
 //! The versioning domain: stable object identity, versioned text write/read,
-//! moment history with keyset pagination, named-version fork, and restore
-//! (set-active-version), built ON the CAL-1 storage core
+//! moment history with keyset pagination, text delete/rename/rollback,
+//! named-version fork, and restore (set-active-version), built ON the CAL-1
+//! storage core
 //! (`dohc-engine-storage`) rather than around it. Storage owns the connection,
 //! the open ritual, the single-transaction boundary, and the crash-injection
 //! fault seam; this crate owns what a version, a moment, a fork, and a restore
@@ -45,7 +46,8 @@ pub use chats::{
 pub use error::DomainError;
 pub use normalize::NormalizedState;
 pub use records::{
-    CreateNamedVersion, ListMomentsQuery, MomentOp, MomentPage, MomentRecord, TextSnapshot,
+    CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord, ListMomentsQuery, MomentOp,
+    MomentPage, MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation, TextSnapshot,
     VersionKind, VersionRecord, WriteResult, WriteText,
 };
 pub use secrets::{
