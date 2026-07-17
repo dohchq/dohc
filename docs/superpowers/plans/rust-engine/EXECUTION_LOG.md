@@ -775,3 +775,38 @@ source of truth every orchestrator session loads first).
   + chat messages, policy-filtered visibility (fail-CLOSED per the hotfix
   posture), read-your-writes read-generation snapshot. Byte/behavior parity
   with the TS search where it exists.
+
+- R12 search GATE PASSED (PR #163, squash-merged; branch deleted). Two-lens
+  adversarial cell: Reviewer 1 (no-leak) APPROVED via its own leak_probe
+  (hidden/secret/.dohc content never written to the FTS table; secrets
+  architecturally excluded; fail-closed; chat-scoped). Reviewer 2
+  (crash/bounds) found a P1 the security lens could not see: the shard's
+  atomic-rebuild guarantee only held under `write_with`, but `search_workspace`
+  runs via `read_with` (autocommit), so a first-search-of-unindexed-version
+  crash left a torn FTS index the granular reader then served. FIX: the whole
+  rebuild (FTS wipes + inserts + state row) now runs in its OWN `SAVEPOINT`,
+  atomic + crash-safe on ANY connection incl. autocommit; regression
+  `read_with_rebuild_is_atomic_across_mid_rebuild_crash` proves it (new
+  `search.mid-rebuild` fault point). Plus P2s fixed: orphan chat thread now
+  SKIPS (was: hard-error → disabled ALL search workspace-wide); durable
+  `file_policy_degraded` marker so a stable broken files.toml is a cheap
+  early-return (was: re-indexed chat FTS every query); quadratic chat preview
+  → group-once; preview offsets made explicit UTF-8 bytes (+astral test);
+  over-long query fails closed. 0 unaddressed bot P0/P1; sources scanned
+  clean of control bytes; run-rust-checks green 3×.
+- **WAVE 2 COMPLETE**: R04 storage core + CAL-1/2/3 + R08 secrets + R11a ydoc
+  + R09 chats + R12 search all on main, each cross-engine-verified by the
+  2-reviewer cell. 8 engine crates on main. Review cell has now caught 12+
+  P1/Critical bugs (second-writer fork, fence mutation, fork-provenance
+  corruption, 2 false-deletes, plaintext-in-logs leak, lineage-destroying
+  regime bug, dispatch deadlock, torn-index-on-crash) + 3 latent bugs in the
+  shipping TS product — every one before a downstream consumer.
+- Wave 2 tail + Wave 3 open, ready-now frontier launched in PARALLEL (disjoint
+  path ownership, worktree-isolated codex impl agents):
+  - **R05** (deps R04 ✓): COMPLETION shard — CAL-2 landed versions/moments/
+    history/fork/restore and R04 landed blobs/identity, so R05 closes only the
+    residual (identity hardening, restore edge cases, moments/binary
+    completeness) against the inventory cluster. Unblocks R06, R07.
+  - **R10** (deps R04 ✓, R09 ✓): replication/cursors/shares engine substrate
+    (ordered-apply, read-your-writes, share-scoping fail-closed). Holds the
+    R10b relay-epoch boundary. Unblocks R10b.
