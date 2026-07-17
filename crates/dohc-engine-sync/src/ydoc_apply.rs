@@ -1,5 +1,8 @@
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
-use dohc_engine_collab::{DocKey, RemoteUpdate, apply_remote_update_in_transaction, maybe_compact};
+use dohc_engine_collab::{
+    DocKey, RemoteUpdate, ReplicationApplyOutcome, apply_remote_update_in_transaction,
+    maybe_compact,
+};
 use dohc_engine_storage::{EngineStore, FaultInjector};
 use rusqlite::OptionalExtension;
 use serde::Deserialize;
@@ -69,10 +72,12 @@ pub fn apply_ydoc_envelope(
             SyncError::InvalidInput {
                 reason: "ydoc.update could not be applied",
             }
-        })?;
-        Ok(())
+        })
     })?;
-    if matches!(outcome, ApplyOutcome::Applied(())) {
+    if matches!(
+        outcome,
+        ApplyOutcome::Applied(ReplicationApplyOutcome::Applied { .. })
+    ) {
         maybe_compact(
             store,
             &key,
@@ -84,5 +89,9 @@ pub fn apply_ydoc_envelope(
             reason: "ydoc.update compaction failed",
         })?;
     }
-    Ok(outcome)
+    Ok(match outcome {
+        ApplyOutcome::Applied(_) => ApplyOutcome::Applied(()),
+        ApplyOutcome::Skipped => ApplyOutcome::Skipped,
+        ApplyOutcome::Crashed { committed } => ApplyOutcome::Crashed { committed },
+    })
 }

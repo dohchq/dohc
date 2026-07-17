@@ -216,6 +216,212 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
     ));
 }
 
+#[test]
+fn shared_channel_channel_create_without_wire_id_is_rejected() {
+    let (_scratch, _path, mut engine) = store();
+    let boundary = ShareBoundary {
+        share_id: "share-channel".to_owned(),
+        surface: ShareSurface::SharedChannel,
+        channel_wire_id: Some("wire-allowed".to_owned()),
+        path_prefix: None,
+    };
+    let op = envelope(
+        "missing-wire",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "c-allow",
+            "name": "Allowed",
+            "slug": "allowed",
+            "kind": "channel",
+            "createdAtMs": 1
+        }),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &boundary, &op, &NoFaults),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
+}
+
+#[test]
+fn shared_channel_cross_channel_thread_and_message_are_rejected() {
+    let (_scratch, _path, mut engine) = store();
+    let other = ShareBoundary {
+        share_id: "share-other".to_owned(),
+        surface: ShareSurface::SharedChannel,
+        channel_wire_id: Some("wire-other".to_owned()),
+        path_prefix: None,
+    };
+    let channel = envelope(
+        "cross-channel",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "c-other",
+            "name": "Other",
+            "slug": "other",
+            "kind": "channel",
+            "createdAtMs": 1,
+            "wireId": "wire-other"
+        }),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &other, &channel, &NoFaults),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    let thread = envelope(
+        "cross-channel",
+        1,
+        "chat.thread.create",
+        json!({
+            "threadId": "t-other",
+            "title": "Other thread",
+            "createdAtMs": 2,
+            "channelWireId": "wire-other"
+        }),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &other, &thread, &NoFaults),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+
+    let allowed = ShareBoundary {
+        share_id: "share-allowed".to_owned(),
+        surface: ShareSurface::SharedChannel,
+        channel_wire_id: Some("wire-allowed".to_owned()),
+        path_prefix: None,
+    };
+    let foreign_thread = envelope(
+        "cross-channel",
+        2,
+        "chat.thread.create",
+        json!({
+            "threadId": "t-foreign",
+            "title": "Foreign thread",
+            "createdAtMs": 3,
+            "channelWireId": "wire-other"
+        }),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &allowed, &foreign_thread, &NoFaults),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
+    let foreign_message = envelope(
+        "cross-channel",
+        2,
+        "chat.message.append",
+        json!({
+            "messageId": "m-other",
+            "threadId": "t-other",
+            "authorKind": "human",
+            "authorDisplayName": "User",
+            "body": "Outside the grant",
+            "createdAtMs": 4
+        }),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &allowed, &foreign_message, &NoFaults),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
+}
+
+#[test]
+fn shared_channel_correctly_scoped_ops_apply() {
+    let (_scratch, _path, mut engine) = store();
+    let boundary = ShareBoundary {
+        share_id: "share-allowed".to_owned(),
+        surface: ShareSurface::SharedChannel,
+        channel_wire_id: Some("wire-allowed".to_owned()),
+        path_prefix: None,
+    };
+    let channel = envelope(
+        "allowed-channel",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "c-allow",
+            "name": "Allowed",
+            "slug": "allowed",
+            "kind": "channel",
+            "createdAtMs": 1,
+            "wireId": "wire-allowed"
+        }),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &boundary, &channel, &NoFaults),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    let thread = envelope(
+        "allowed-channel",
+        1,
+        "chat.thread.create",
+        json!({
+            "threadId": "t-allow",
+            "title": "Allowed thread",
+            "createdAtMs": 2,
+            "channelWireId": "wire-allowed"
+        }),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &boundary, &thread, &NoFaults),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    let message = envelope(
+        "allowed-channel",
+        2,
+        "chat.message.append",
+        json!({
+            "messageId": "m-allow",
+            "threadId": "t-allow",
+            "authorKind": "human",
+            "authorDisplayName": "User",
+            "body": "Inside the grant",
+            "createdAtMs": 3
+        }),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &boundary, &message, &NoFaults),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+}
+
+#[test]
+fn share_view_secondary_path_out_of_boundary_is_rejected() {
+    let (_scratch, _path, mut engine) = store();
+    let boundary = ShareBoundary {
+        share_id: "share-view".to_owned(),
+        surface: ShareSurface::ShareView,
+        channel_wire_id: None,
+        path_prefix: Some("shared/docs".to_owned()),
+    };
+    let crossing = envelope(
+        "view-paths",
+        0,
+        "moment.append",
+        json!({
+            "path": "shared/docs/a.md",
+            "payloadAfterPath": "outside/b.md"
+        }),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &boundary, &crossing, &NoFaults),
+        Err(SyncError::ShareBoundaryViolation)
+    ));
+    let inside = envelope(
+        "view-paths",
+        0,
+        "moment.append",
+        json!({
+            "path": "shared/docs/a.md",
+            "payloadAfterPath": "shared/docs/b.md"
+        }),
+    );
+    assert!(matches!(
+        apply_shared_envelope(&mut engine, &boundary, &inside, &NoFaults),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+}
+
 #[derive(Default)]
 struct FakeRelay {
     pushes: Mutex<usize>,
