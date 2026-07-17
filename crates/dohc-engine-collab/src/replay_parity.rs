@@ -8,12 +8,21 @@
 //!
 //! The public `Update` API does not expose item origins in yrs 0.27.3, so this
 //! gate walks the v1 wire with yrs' own public `DecoderV1` primitives. It first
-//! lets `Update::decode_v1` validate the whole update, then applies the candidate
-//! to a scratch clone with the durable base's parked updates restored. Every
-//! newly integrated edit boundary is checked against the full resulting scalar
-//! structure. Finally, dependency-complete replay must either integrate or park
-//! every clock claimed by the candidate. The live/durable document is never
-//! mutated.
+//! lets `Update::decode_v1` validate the whole update, then:
+//!  - checks candidate DELETE endpoints against the `base ∪ candidate` scalar
+//!    structure (BEFORE the delete removes the scalar — a post-delete scan no
+//!    longer contains it);
+//!  - applies the candidate to a scratch clone with the durable base's parked
+//!    updates restored, and checks every newly integrated INSERT boundary
+//!    against the full resulting scalar structure (so a parked insert is caught
+//!    at the moment its dependency integrates);
+//!  - requires dependency-complete replay to either integrate or park every
+//!    clock the candidate claims.
+//!
+//! The live/durable document is never mutated. Because this runs inside
+//! `store.write_with`, the whole computation is wrapped in `catch_unwind` so any
+//! internal library unwind becomes a fail-closed rejection instead of poisoning
+//! the caller's transaction (mirrors the hash worker's containment).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -39,12 +48,62 @@ struct WireStructure {
     claimed_clocks: BTreeMap<ClientID, u32>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only seam: forces the gate's wrapped computation to unwind so the
+    /// `catch_unwind` fail-closed containment can be exercised deterministically.
+    static PANIC_INJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Reject a valid v1 update whose structural edit boundaries cannot replay
 /// identically between Yjs' UTF-16 strings and yrs' Rust strings.
+///
+/// The whole computation is contained by `catch_unwind`: yrs can unwind on some
+/// malformed inputs, and this gate runs inside `store.write_with`, so an escaping
+/// unwind would poison the caller's transaction/mutex and take the workspace
+/// actor down. A contained unwind is mapped to a fail-closed rejection. The
+/// scratch doc is local and dropped on unwind; `base`/`candidate` are read-only
+/// and the durable store is untouched here, so returning `Err` rolls the caller's
+/// transaction back cleanly.
 pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), CollabError> {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        validate_replay_parity_inner(base, candidate)
+    }));
+    match outcome {
+        Ok(result) => result,
+        Err(_) => Err(CollabError::ReplayParityViolation {
+            reason: "replay validation failed to complete; rejected fail-closed".to_owned(),
+        }),
+    }
+}
+
+fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<(), CollabError> {
+    #[cfg(test)]
+    if PANIC_INJECT.with(std::cell::Cell::get) {
+        panic!("injected replay-gate unwind for fail-closed test");
+    }
     Ydoc::validate_update(candidate)?;
     let base_full = base.encode_full_state();
+    let base_structure = scan_v1(&base_full)?;
+    let candidate_structure = scan_v1(candidate)?;
     let base_integrated_sv = base.encode_state_vector();
+
+    // (1) DELETE boundaries: a candidate delete endpoint landing on a multi-unit
+    // scalar's interior clock replays differently between engines. Deletes MUST
+    // be checked against the base ∪ candidate structure computed BEFORE the
+    // delete, because deleting one unit removes the whole scalar from the
+    // post-delete document (so a post-delete scan no longer contains it).
+    let mut pre_delete_unsafe = base_structure.unsafe_boundaries.clone();
+    pre_delete_unsafe.extend(candidate_structure.unsafe_boundaries.iter().copied());
+    if candidate_structure
+        .deletion_boundaries
+        .iter()
+        .any(|boundary| pre_delete_unsafe.contains(boundary))
+    {
+        return Err(CollabError::ReplayParityViolation {
+            reason: "a delete endpoint lands inside a multi-unit Unicode scalar".to_owned(),
+        });
+    }
 
     let scratch = Ydoc::wire();
     scratch.apply(&base_full)?;
@@ -53,23 +112,28 @@ pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), Colla
     }
     scratch.apply(candidate)?;
 
+    // (2) INSERT boundaries: validate-on-integration over the newly-integrated
+    // delta against the full integrated scalar structure. This catches an
+    // immediately-integrated insert AND a previously-parked insert at the moment
+    // its dependency integrates. Rejecting that apply quarantines the divergent
+    // parked edit. (Deletes are handled by (1) — a post-delete scan no longer
+    // sees the removed scalar, so the delta's deletion boundaries are not used.)
     let delta = scratch.diff(&base_integrated_sv)?;
     let delta_structure = scan_v1(&delta)?;
-    let scratch_full = scratch.encode_full_state();
-    let scratch_structure = scan_v1(&scratch_full)?;
-    let unsafe_boundary = delta_structure
+    let scratch_structure = scan_v1(&scratch.encode_full_state())?;
+    if delta_structure
         .insertion_boundaries
         .iter()
-        .chain(delta_structure.deletion_boundaries.iter())
-        .any(|boundary| scratch_structure.unsafe_boundaries.contains(boundary));
-    if unsafe_boundary {
-        // Rejecting the dependency apply leaves the divergent parked edit quarantined.
+        .any(|boundary| scratch_structure.unsafe_boundaries.contains(boundary))
+    {
         return Err(CollabError::ReplayParityViolation {
-            reason: "an edit boundary lands inside a multi-unit Unicode scalar".to_owned(),
+            reason: "an insert boundary lands inside a multi-unit Unicode scalar".to_owned(),
         });
     }
 
-    let candidate_structure = scan_v1(candidate)?;
+    // (3) Union-coverage (discard) check: every clock the candidate claims must be
+    // integrated OR parked pending; a clock covered by neither is wire data yrs
+    // silently discarded.
     let pending_ends = match scratch.pending_update_v1() {
         Some(bytes) => scan_v1(&bytes)?.claimed_clocks,
         None => BTreeMap::new(),
@@ -258,5 +322,37 @@ fn parity_decode_error(error: yrs::encoding::read::Error) -> CollabError {
 fn parity_clock_overflow() -> CollabError {
     CollabError::ReplayParityViolation {
         reason: "a structural update clock overflowed".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An internal unwind during replay validation (which can originate inside
+    /// yrs on some malformed inputs) must be contained and mapped to a
+    /// fail-closed rejection — never allowed to escape into the caller's
+    /// write transaction. Verified deterministically via the test-only inject
+    /// seam so the containment holds regardless of which yrs path unwinds.
+    #[test]
+    fn contains_internal_unwind_as_fail_closed_rejection() {
+        let base = Ydoc::wire();
+        let producer = Ydoc::wire();
+        let candidate = producer.plaintext_insert(0, "hello");
+
+        // Sanity: without injection the gate returns normally (accepts).
+        assert!(validate_replay_parity(&base, &candidate).is_ok());
+
+        PANIC_INJECT.with(|cell| cell.set(true));
+        let escaped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            validate_replay_parity(&base, &candidate)
+        }));
+        PANIC_INJECT.with(|cell| cell.set(false));
+
+        let inner = escaped.expect("the gate must contain the unwind, not let it escape");
+        assert!(
+            matches!(inner, Err(CollabError::ReplayParityViolation { .. })),
+            "a contained unwind must become a fail-closed rejection"
+        );
     }
 }

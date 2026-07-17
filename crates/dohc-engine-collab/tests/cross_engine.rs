@@ -396,6 +396,141 @@ fn replay_parity_rejects_parked_interior_split_on_dependency_arrival() {
     assert_eq!(persisted.doc.plaintext_string(), "");
 }
 
+// yjs-format base + delete-set candidate lineages whose delete endpoint lands
+// inside a multi-unit scalar (mid-pair). yrs drops the whole scalar; yjs keeps a
+// U+FFFD, so the two diverge and the gate must reject the delete.
+// - delete-high: base "😀X" (client 5), delete [0,1) → removes the emoji's first
+//   UTF-16 unit; endpoint clock 1 is the emoji interior.
+// - delete-end:  base "A😀" (client 5), delete [0,2) → removes A + the emoji's
+//   first unit; endpoint clock 2 is the emoji interior.
+const DELETE_HIGH_BASE_HEX: &str = "01010500040109706c61696e5465787405f09f98805800";
+const DELETE_HIGH_CANDIDATE_HEX: &str = "000105010001";
+const DELETE_END_BASE_HEX: &str = "01010500040109706c61696e546578740541f09f988000";
+const DELETE_END_CANDIDATE_HEX: &str = "000105010002";
+
+fn assert_delete_boundary_rejected(tag: &str, base_hex: &str, candidate_hex: &str) {
+    let base = decode_hex(base_hex);
+    let candidate = decode_hex(candidate_hex);
+    let candidate_sha = dohc_engine_collab::hex_sha256(&candidate);
+
+    // Local path.
+    let (mut local, lkey) = setup_parity_store(&format!("{tag}-local"), Regime::LocalOnly);
+    record_local_update(&mut local.store, &lkey, &base, &NoFaults, 1_001).expect("local base");
+    let error = record_local_update(&mut local.store, &lkey, &candidate, &NoFaults, 1_002)
+        .expect_err("mid-pair delete must fail closed on the local path");
+    assert!(
+        matches!(error, CollabError::ReplayParityViolation { .. }),
+        "{tag} local: {error:?}"
+    );
+    assert_eq!(count(&local.store, "ydoc_updates", &lkey), 1);
+    assert!(
+        local
+            .store
+            .get_binary_blob(&candidate_sha)
+            .expect("blob lookup")
+            .is_none(),
+        "{tag} local: rejected delete must not reach the blob store"
+    );
+
+    // Remote path.
+    let (mut remote, rkey) = setup_parity_store(&format!("{tag}-remote"), Regime::Replicated);
+    apply_remote_update(
+        &mut remote.store,
+        &rkey,
+        &RemoteUpdate {
+            origin_id: "peer".to_owned(),
+            origin_seq: 1,
+            bytes: base.clone(),
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect("remote base");
+    let error = apply_remote_update(
+        &mut remote.store,
+        &rkey,
+        &RemoteUpdate {
+            origin_id: "peer".to_owned(),
+            origin_seq: 2,
+            bytes: candidate.clone(),
+        },
+        &NoFaults,
+        1_002,
+    )
+    .expect_err("mid-pair delete must fail closed on the remote path");
+    assert!(
+        matches!(error, CollabError::ReplayParityViolation { .. }),
+        "{tag} remote: {error:?}"
+    );
+    assert_eq!(count(&remote.store, "ydoc_updates", &rkey), 1);
+    assert!(
+        remote
+            .store
+            .get_binary_blob(&candidate_sha)
+            .expect("blob lookup")
+            .is_none(),
+        "{tag} remote: rejected delete must not reach the blob store"
+    );
+}
+
+#[test]
+fn replay_parity_rejects_delete_high_surrogate_on_both_paths() {
+    assert_delete_boundary_rejected(
+        "delete-high",
+        DELETE_HIGH_BASE_HEX,
+        DELETE_HIGH_CANDIDATE_HEX,
+    );
+}
+
+#[test]
+fn replay_parity_rejects_delete_end_mid_pair_on_both_paths() {
+    assert_delete_boundary_rejected("delete-end", DELETE_END_BASE_HEX, DELETE_END_CANDIDATE_HEX);
+}
+
+#[test]
+fn replay_parity_stays_fail_closed_on_multi_unit_pending_diff_inputs() {
+    // Multi-code-point grapheme content (a regional-indicator flag pair) exercises
+    // the restored-pending / diff machinery. The follow-up edit is at a valid
+    // code-point boundary, so the gate must COMPLETE (never let an internal
+    // library unwind escape) — accepting or rejecting, but returning normally.
+    let (mut ts, key) = setup_parity_store("flag-pending-diff", Regime::Replicated);
+    let producer = Ydoc::wire();
+    let base = producer.plaintext_insert(0, "\u{1F1FA}\u{1F1F3}Z ");
+    apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "peer".to_owned(),
+            origin_seq: 1,
+            bytes: base,
+        },
+        &NoFaults,
+        1_001,
+    )
+    .expect("flag base");
+    let follow = producer.plaintext_insert(2, "x");
+    let outcome = apply_remote_update(
+        &mut ts.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "peer".to_owned(),
+            origin_seq: 2,
+            bytes: follow,
+        },
+        &NoFaults,
+        1_002,
+    );
+    assert!(
+        matches!(
+            outcome,
+            Ok(_)
+                | Err(CollabError::ReplayParityViolation { .. })
+                | Err(CollabError::MalformedUpdate { .. })
+        ),
+        "gate must complete without an escaping unwind: {outcome:?}"
+    );
+}
+
 #[test]
 fn replay_parity_rejects_overlap_slice_divergence_on_local_path() {
     let (mut ts, key) = setup_parity_store("overlap-slice-local", Regime::LocalOnly);
