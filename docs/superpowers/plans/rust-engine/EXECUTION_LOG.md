@@ -1064,3 +1064,38 @@ source of truth every orchestrator session loads first).
      ConflictContentKind::Binary fail-closed).
 - **WAVE 3 nearly complete**: R10 ✓, R06 ✓, R07 ✓, R10b ✓, R11b ✓ merged. Only
   R13b (dormant desktop adapter) remains before R13 composition.
+
+- R13b dormant desktop adapter CORE GATE PASSED (PR #178, squash-merged; branch
+  deleted). Landed strictly DORMANT: the desktop engine-client (DOP1 frame codec
+  + R11b EngineTransport over R03), a default-OFF flag (`DOHC_RUST_ENGINE_ADAPTER`,
+  read by no live code), and the Rust ydoc provider entry — plus inert optional
+  seams on relaySyncEngine/workspaceActivity/workspaceEngineCapture. Two-lens
+  cell: Reviewer 1 (dormancy) APPROVED — proved (grep coverage + per-edited-file
+  inertness + no import-time side effects + new dep tree-shaken out of the bundle
+  + pre-existing failures reproduced identically on origin/main: 20/20 same split,
+  +15 net-new passing) that the shipping desktop product is behaviorally
+  unchanged. Reviewer 2 (frame codec) proved the codec CORE solid (byte-exact
+  reassembly at every split; 4GiB rejected from the header; sticky poison;
+  correct correlation/handshake/events) but found lifecycle bugs: (P0) fail()
+  detached the connection 'error' handler before destroy(), so Duplex.from(child)
+  .destroy()'s AbortError would hit uncaughtException → Electron-main crash on
+  EVERY teardown (the no-op FakePeerConnection masked it) — FIXED with a permanent
+  no-op error listener + a REAL-stream teardown regression test; (P1) receiveEnvelope
+  /acceptHelloAck didn't check this.closed, so a helloAck co-chunked after fail()
+  resurrected readyState and delivered events to subscribers — FIXED with closed
+  guards + frame-loop break; plus P2s: inbound `batch` now UNWRAPPED (bounded by
+  maxBatchLen), maxFrameBytes floor (64 KiB) rejected at handshake, limit-clamp
+  co-chunk race closed. 18 engineClient tests. Dormancy preserved throughout.
+- R13b DEFERRED surfaces (tracked as new row R13b-rest, dormant, land with/before
+  R13): main.ts wiring, cli/**, packages/mcp/**, the workspace surfaces
+  (sharedView/sharedChannels/shareMounts/workspaceFiles/workspaceSearch/
+  workspaceGraph), BlobChunk streaming. The real Rust sidecar binary + the
+  engine-side replay-parity gate are R13.
+- **WAVE 3 COMPLETE.** All engine domains (storage, versioning, files/watcher,
+  secrets, ydoc, chats, search, replication, merge/conflicts) + the TS/services
+  adapter layer (relay epoch enforcement, TS ydoc adapter, dormant desktop
+  adapter core) are on main, each cross-engine-verified by the 2-reviewer cell.
+  Next: R13 daemon composition + shadow replay (all deps satisfied) — must
+  discharge the engine-side ydoc replay-parity gate + R10 conflict-apply binary
+  + compose the real sidecar the R13b adapter talks to. Then R14 robustness,
+  GATE6, R15-REHEARSE, R15 cutover (ICE checkpoint), R16.
