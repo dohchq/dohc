@@ -16,15 +16,15 @@ R04	storage-core	1	R02;R03;GATE0;REINV	crates/dohc-engine-storage/**	ported stor
 CAL-1	ws-open-close-txn-restart	1	R04	crates/dohc-engine-runtime/src/session*	calibration	high	1	gate passed	-	149
 CAL-2	versioned-write-read-history-restore	1	R04	crates/dohc-engine-domain/src/versions*	calibration	high	1	gate passed	codex/rust-engine-cal-2	151
 CAL-3	scan-hash-reconcile-cancel	1	R03;GATE0	crates/dohc-engine-files/**	calibration	high	1	gate passed	codex/rust-engine-cal-3	153
-R05	identity-blobs-versions-moments-restore	2	R04	crates/dohc-engine-domain/src/{identity,blobs,moments,versions}*	ported	critical	1	planned	-	-
+R05	identity-blobs-versions-moments-restore	2	R04	crates/dohc-engine-domain/src/{identity,blobs,moments,versions}*	ported	critical	1	gate passed	-	165
 R08	secrets	2	R04	crates/dohc-engine-crypto/**	ported	critical	1	gate passed	codex/rust-engine-r08	157
 R09	chats-readstate-dispatch	2	R04;REINV	crates/dohc-engine-domain/src/chats*;crates/dohc-engine-storage/src/chat_tables*;apps/desktop/src/agents/desktopAgentDispatchStore.ts	ported	high	2	gate passed	codex/rust-engine-r09	161
 R11a	ydoc-durable-cache	2	YRS-SPIKE;R04	crates/dohc-engine-collab/**	ported+spike-fuzz	critical	1	gate passed	codex/rust-engine-r11a	159
 R11b	ydoc-live-adapter	2	R03;GATE0	packages/workspace-engine-client/src/ydoc*	adapter suite	critical	1	planned	-	-
-R12	search	2	R04	crates/dohc-engine-runtime/src/search*	ported	high	2	in progress	codex/rust-engine-r12	-
+R12	search	2	R04	crates/dohc-engine-runtime/src/search*	ported	high	2	gate passed	-	163
 R06	compare-merge-conflicts-materialization	3	R05	crates/dohc-engine-domain/src/{merge,conflicts}*;crates/dohc-engine-files/src/materialize*	ported	critical	1	planned	-	-
-R07	watcher-reconcile-pathfloor-policy	3	CAL-3;R05	crates/dohc-engine-files/src/{watch,policy}*	ported	critical	1	planned	-	-
-R10	replication-cursors-shares	3	R04;R09	crates/dohc-engine-sync/**;packages/security-contract/**	ported+fault-model	critical	1	planned	-	-
+R07	watcher-reconcile-pathfloor-policy	3	CAL-3;R05	crates/dohc-engine-files/src/{watch,policy}*	ported+OBLIG:gate-R05-rename-dest-through-secret-floor	critical	1	planned	-	-
+R10	replication-cursors-shares	3	R04;R09	crates/dohc-engine-sync/**;packages/security-contract/**	ported+fault-model	critical	1	in progress	codex/rust-engine-r10	-
 R10b	relay-epoch-enforcement	3	R10	services/sync-relay/**	relay fault-model suite	critical	1	planned	-	-
 R13b	desktop-adapter-dormant	3	R03;GATE0	apps/desktop/src/workspaces/engineClient*;apps/desktop/src/main.ts;apps/desktop/src/workspaces/workspaceEngineCapture.ts;apps/desktop/src/workspaces/workspaceActivity.ts;apps/desktop/src/workspaces/relaySyncEngine.ts;apps/desktop/src/cli/**;packages/mcp/**;apps/desktop/src/workspaces/{sharedView,sharedChannels,shareMounts,workspaceFiles,workspaceSearch,workspaceGraph}*;apps/desktop/src/collab/ydocEngineProviderSession*	adapter E2E	critical	1	planned	-	-
 R13	daemon-composition-shadow-replay	4	R05;R06;R07;R08;R09;R10;R11a;R11b;R12;R13b	crates/dohc-workspace-engine/**	replay	critical	1	planned	-	-

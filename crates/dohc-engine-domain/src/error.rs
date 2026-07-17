@@ -40,6 +40,15 @@ pub enum DomainError {
     #[error("moment id already exists in this workspace")]
     DuplicateMomentId,
 
+    /// The requested text path (or rollback mutation at that path) does not
+    /// exist in the named version.
+    #[error("text file not found")]
+    FileNotFound,
+
+    /// A rename/rollback restore path is already occupied by another object.
+    #[error("target path already exists")]
+    TargetPathExists,
+
     /// The text payload failed validation (over the byte cap).
     #[error("invalid text: {reason}")]
     InvalidText { reason: &'static str },
@@ -97,6 +106,8 @@ impl DomainError {
             DomainError::WorkspaceMismatch => "workspace-mismatch",
             DomainError::VersionNameConflict => "version-name-conflict",
             DomainError::DuplicateMomentId => "duplicate-moment-id",
+            DomainError::FileNotFound => "file-not-found",
+            DomainError::TargetPathExists => "target-path-exists",
             DomainError::InvalidText { .. } => "invalid-text",
             DomainError::InvalidPath { .. } => "invalid-path",
             DomainError::InvalidInput { .. } => "invalid-input",

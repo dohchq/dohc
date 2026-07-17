@@ -90,6 +90,14 @@ pub struct TextSnapshot {
     pub metadata_origin: String,
 }
 
+/// Stable file-object identity, independent of any version-local path alias.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileObjectRecord {
+    pub workspace_id: String,
+    pub object_id: String,
+    pub created_at_ms: i64,
+}
+
 /// A history moment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MomentRecord {
@@ -101,8 +109,13 @@ pub struct MomentRecord {
     pub recorded_at_ms: i64,
     pub operation: MomentOp,
     pub after_blob_sha256: String,
+    /// `true` when a concrete rollback preimage was recorded. This represents
+    /// TS `before_present = 2`; `false` covers both no preimage and legacy-unset.
     pub before_present: bool,
     pub before_blob_sha256: Option<String>,
+    /// The moment that produced the concrete `before` snapshot, or `None` when
+    /// this mutation had no preimage (a first write / legacy row).
+    pub before_latest_moment_id: Option<String>,
     pub metadata_origin: String,
     pub author_json: Option<String>,
     /// A non-NULL marker in the DB → a peer-divergence record, excluded from
@@ -156,6 +169,41 @@ pub struct WriteText {
     pub request_id: Option<String>,
 }
 
+/// Inputs to [`crate::VersionedTextStore::delete_text_file`].
+#[derive(Debug, Clone)]
+pub struct DeleteTextFile {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub path: String,
+    pub moment_id: String,
+    pub metadata_origin: String,
+    pub author_json: Option<String>,
+    pub now_ms: i64,
+}
+
+/// Inputs to [`crate::VersionedTextStore::rename_text_file`].
+#[derive(Debug, Clone)]
+pub struct RenameTextFile {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub from_path: String,
+    pub to_path: String,
+    pub moment_id: String,
+    pub metadata_origin: String,
+    pub author_json: Option<String>,
+    pub now_ms: i64,
+}
+
+/// Inputs to [`crate::VersionedTextStore::rollback_text_file_mutation`].
+#[derive(Debug, Clone)]
+pub struct RollbackTextFileMutation {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub path: String,
+    pub mutation_moment_id: String,
+    pub legacy_before_text: Option<String>,
+}
+
 /// Inputs to [`crate::VersionedTextStore::create_named_version`].
 #[derive(Debug, Clone)]
 pub struct CreateNamedVersion {
@@ -175,4 +223,21 @@ pub struct WriteResult {
     pub moment: MomentRecord,
     /// True when the write replayed a previously-recorded request (exactly-once).
     pub deduped: bool,
+}
+
+/// The result of a successful [`crate::VersionedTextStore::delete_text_file`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteResult {
+    pub object: FileObjectRecord,
+    pub before: TextSnapshot,
+    pub moment: MomentRecord,
+}
+
+/// The result of a successful [`crate::VersionedTextStore::rename_text_file`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameResult {
+    pub object: FileObjectRecord,
+    pub before: TextSnapshot,
+    pub after: TextSnapshot,
+    pub moment: MomentRecord,
 }

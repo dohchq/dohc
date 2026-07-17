@@ -775,3 +775,79 @@ source of truth every orchestrator session loads first).
   + chat messages, policy-filtered visibility (fail-CLOSED per the hotfix
   posture), read-your-writes read-generation snapshot. Byte/behavior parity
   with the TS search where it exists.
+
+- R12 search GATE PASSED (PR #163, squash-merged; branch deleted). Two-lens
+  adversarial cell: Reviewer 1 (no-leak) APPROVED via its own leak_probe
+  (hidden/secret/.dohc content never written to the FTS table; secrets
+  architecturally excluded; fail-closed; chat-scoped). Reviewer 2
+  (crash/bounds) found a P1 the security lens could not see: the shard's
+  atomic-rebuild guarantee only held under `write_with`, but `search_workspace`
+  runs via `read_with` (autocommit), so a first-search-of-unindexed-version
+  crash left a torn FTS index the granular reader then served. FIX: the whole
+  rebuild (FTS wipes + inserts + state row) now runs in its OWN `SAVEPOINT`,
+  atomic + crash-safe on ANY connection incl. autocommit; regression
+  `read_with_rebuild_is_atomic_across_mid_rebuild_crash` proves it (new
+  `search.mid-rebuild` fault point). Plus P2s fixed: orphan chat thread now
+  SKIPS (was: hard-error → disabled ALL search workspace-wide); durable
+  `file_policy_degraded` marker so a stable broken files.toml is a cheap
+  early-return (was: re-indexed chat FTS every query); quadratic chat preview
+  → group-once; preview offsets made explicit UTF-8 bytes (+astral test);
+  over-long query fails closed. 0 unaddressed bot P0/P1; sources scanned
+  clean of control bytes; run-rust-checks green 3×.
+- **WAVE 2 COMPLETE**: R04 storage core + CAL-1/2/3 + R08 secrets + R11a ydoc
+  + R09 chats + R12 search all on main, each cross-engine-verified by the
+  2-reviewer cell. 8 engine crates on main. Review cell has now caught 12+
+  P1/Critical bugs (second-writer fork, fence mutation, fork-provenance
+  corruption, 2 false-deletes, plaintext-in-logs leak, lineage-destroying
+  regime bug, dispatch deadlock, torn-index-on-crash) + 3 latent bugs in the
+  shipping TS product — every one before a downstream consumer.
+- Wave 2 tail + Wave 3 open, ready-now frontier launched in PARALLEL (disjoint
+  path ownership, worktree-isolated codex impl agents):
+  - **R05** (deps R04 ✓): COMPLETION shard — CAL-2 landed versions/moments/
+    history/fork/restore and R04 landed blobs/identity, so R05 closes only the
+    residual (identity hardening, restore edge cases, moments/binary
+    completeness) against the inventory cluster. Unblocks R06, R07.
+  - **R10** (deps R04 ✓, R09 ✓): replication/cursors/shares engine substrate
+    (ordered-apply, read-your-writes, share-scoping fail-closed). Holds the
+    R10b relay-epoch boundary. Unblocks R10b.
+
+- R05 versioning-completion GATE PASSED (PR #165, squash-merged at migration
+  ordinal 5; branch deleted; main migration ledger now len 6). COMPLETION
+  shard: CAL-2 had landed versions/moments/history/fork/restore and R04
+  blobs/identity; R05 closed the residual — `get_main_version`,
+  `delete_text_file`, `rename_text_file`, and the `rollback_text_file_mutation`
+  undo primitive. Two-lens adversarial cell (fork-lineage + migration/crash)
+  INDEPENDENTLY CONVERGED on one P1: on a store migrated from pre-R05, ordinal 5
+  backfilled `before_latest_moment_id` as NULL, blinding the rollback
+  dependents-guard → rolling back a parent moment a child fork's preimage
+  depends on was wrongly allowed → dangling `fork_base_snapshots` ref + the
+  child wedged with StateCorrupt. FIX (proven fresh-parity): ordinal-5 migration
+  now BACKFILLS the producer link via two correlated UPDATEs — same-version
+  predecessor, then fork-inherited producer read directly from
+  `fork_base_snapshots.latest_moment_id` (which `create_named_version` freezes
+  from the parent's already-resolved snapshot, so it is transitively correct
+  across multi-level forks with no recursive CTE). Defense-in-depth guards
+  (fork_base_snapshots reference + fail-closed on any residual NULL-link
+  concrete-preimage row) make any backfill miss degrade to a REFUSED rollback,
+  never corruption. Plus P2s: idempotency-ledger row cleared in the rollback txn
+  (stale exactly-once retry no longer replays a foreign write); dependents scan
+  bounded to the <=N fork-point orders (was O(total history)). Legacy-unset
+  write-rollback parity divergence recorded in BEHAVIOR_DELTA.md §11.1
+  (Rust stricter, deliberate). delete/rename crash-fault coverage added
+  (before-persist + after-commit, reopen-verified). 7 new tests. green 2x;
+  control-byte clean.
+- **DEFERRAL → R07 OBLIGATION (tracked):** `rename_text_file`'s destination is
+  validated by the generic path validator but NOT the secret-path floor (TS
+  parity for `versions-rename-text-file` reruns the destination secret-floor).
+  The Rust secret-path floor is R07's to build; the codex bot (P1) and reviewer
+  1 both flagged it. Deferral is SAFE, not a gate-weakening: the Rust engine is
+  dormant (not canonical until the R15 cutover), the TS engine keeps its floor
+  while canonical, and R07 lands before cutover. Recorded on the R07 SHARDS row
+  as `OBLIG:gate-R05-rename-dest-through-secret-floor` — R07 MUST cover the R05
+  rename entry point (and the pre-existing write entry points) before it can
+  gate-pass. Also carried: FTS-row cleanup on delete/rollback → R13/R13b
+  composition (R12 layering; write_text has the same posture).
+- Merge serialization (ordinal collision): R05 and R10 were built in parallel
+  off the same main and both claimed ordinal 5. R05 was clean first → merged at
+  ordinal 5. **R10 must rebase onto this main and take ordinal 6** (its testkit
+  migration_ledger_len assertion 6→7) before it can merge.

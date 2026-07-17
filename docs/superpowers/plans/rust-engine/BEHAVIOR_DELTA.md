@@ -557,3 +557,13 @@ requeued to `pending` when `attempt_count < max_attempts` (bounded retry, TS
 wall-clock heartbeat/lease (the single-writer invariant makes one unnecessary);
 if a future multi-worker model lands, a lease column would replace the
 "any-running-is-crashed" assumption.
+
+## 11. R05 (versioning residual) — deliberate rollback divergence
+
+### 11.1 DELIBERATE DIVERGENCE: `versions-rollback-text-file-mutation` fails closed on an unrecorded legacy preimage
+
+For a legacy-unset (`before_present = 0`) write mutation with neither a
+recoverable earlier snapshot nor `legacy_before_text`, TS removes the file as a
+first write. Rust returns `invalid-input` instead: it never reconstructs or
+deletes state whose preimage was not recorded, preserving the fail-closed
+history contract.

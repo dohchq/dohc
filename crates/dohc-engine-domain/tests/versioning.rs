@@ -4,7 +4,8 @@
 //! both sides, and close/reopen/mutate durability.
 
 use dohc_engine_domain::{
-    CreateNamedVersion, ListMomentsQuery, NoFaults, VersionKind, VersionedTextStore, WriteText,
+    CreateNamedVersion, DeleteTextFile, ListMomentsQuery, MomentOp, NoFaults, RenameTextFile,
+    RollbackTextFileMutation, VersionKind, VersionedTextStore, WriteText,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
@@ -31,6 +32,41 @@ fn bootstrap(store: &mut EngineStore) {
     VersionedTextStore::new(store)
         .ensure_main_version(WS, "main", 1, &NO_FAULTS)
         .expect("ensure main");
+}
+
+fn delete(version: &str, path: &str, moment: &str, now: i64) -> DeleteTextFile {
+    DeleteTextFile {
+        workspace_id: WS.to_owned(),
+        version_id: version.to_owned(),
+        path: path.to_owned(),
+        moment_id: moment.to_owned(),
+        metadata_origin: "user".to_owned(),
+        author_json: None,
+        now_ms: now,
+    }
+}
+
+fn rename(version: &str, from: &str, to: &str, moment: &str, now: i64) -> RenameTextFile {
+    RenameTextFile {
+        workspace_id: WS.to_owned(),
+        version_id: version.to_owned(),
+        from_path: from.to_owned(),
+        to_path: to.to_owned(),
+        moment_id: moment.to_owned(),
+        metadata_origin: "user".to_owned(),
+        author_json: None,
+        now_ms: now,
+    }
+}
+
+fn rollback(version: &str, path: &str, moment: &str) -> RollbackTextFileMutation {
+    RollbackTextFileMutation {
+        workspace_id: WS.to_owned(),
+        version_id: version.to_owned(),
+        path: path.to_owned(),
+        mutation_moment_id: moment.to_owned(),
+        legacy_before_text: None,
+    }
 }
 
 // oracle: versioned write → read round-trip, durable across close/reopen.
@@ -201,6 +237,48 @@ fn deduped_write_returns_original_not_later_state() {
         vt.read_text(WS, "main", "a.md").unwrap().unwrap().text,
         "second"
     );
+}
+
+#[test]
+fn rollback_clears_idempotency_ledger_so_stale_retry_does_not_replay() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+
+    let mut first = write("main", "a.md", "one", "m1", "o1", 10);
+    first.request_id = Some("req-1".to_owned());
+    let mut second = write("main", "a.md", "two", "m2", "o1", 20);
+    second.request_id = Some("req-2".to_owned());
+    {
+        let mut vt = VersionedTextStore::new(&mut store);
+        vt.write_text(&first, &NO_FAULTS).expect("first");
+        vt.write_text(&second, &NO_FAULTS).expect("second");
+        vt.rollback_text_file_mutation(&rollback("main", "a.md", "m2"), &NO_FAULTS)
+            .expect("rollback second");
+    }
+
+    let rolled_back_request_count: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM engine_requests WHERE request_id = 'req-2'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("ledger count");
+    assert_eq!(rolled_back_request_count, 0);
+
+    let mut vt = VersionedTextStore::new(&mut store);
+    let first_replay = vt.write_text(&first, &NO_FAULTS).expect("first replay");
+    assert!(first_replay.deduped);
+    assert_eq!(first_replay.snapshot.text, "one");
+    assert_eq!(first_replay.moment.moment_id, "m1");
+
+    let second_retry = vt.write_text(&second, &NO_FAULTS).expect("second retry");
+    assert!(!second_retry.deduped);
+    assert_eq!(second_retry.snapshot.text, "two");
+    assert_eq!(second_retry.moment.moment_id, "m2");
 }
 
 // oracle: a reserved / absolute / traversal path is rejected.
@@ -544,4 +622,581 @@ fn ensure_main_version_is_idempotent() {
         .expect("again");
     assert_eq!(a, b);
     assert_eq!(vt.list_versions(WS).expect("list").len(), 1);
+}
+
+// oracle: versions-get-main-version is read-only: absent before bootstrap and
+// byte-identical to ensure-main's record afterward.
+#[test]
+fn get_main_version_returns_none_then_the_ensured_main() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    let mut vt = VersionedTextStore::new(&mut store);
+    assert_eq!(vt.get_main_version(WS).expect("get before"), None);
+    let ensured = vt
+        .ensure_main_version(WS, "main", 1, &NO_FAULTS)
+        .expect("ensure");
+    assert_eq!(vt.get_main_version(WS).expect("get after"), Some(ensured));
+}
+
+// oracle: versions-delete-text-file appends a delete moment and removes only
+// the current version's alias/snapshot.
+#[test]
+fn delete_text_file_records_moment_and_removes_current_snapshot() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    let written = vt
+        .write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("write");
+    let deleted = vt
+        .delete_text_file(&delete("main", "a.md", "m2", 20), &NO_FAULTS)
+        .expect("delete");
+    assert_eq!(deleted.object.object_id, "o1");
+    assert_eq!(deleted.before, written.snapshot);
+    assert_eq!(deleted.moment.operation, MomentOp::Delete);
+    assert!(deleted.moment.before_present);
+    assert_eq!(
+        deleted.moment.before_latest_moment_id.as_deref(),
+        Some("m1")
+    );
+    assert_eq!(
+        vt.get_moment(WS, "m2").expect("moment"),
+        Some(deleted.moment)
+    );
+    assert!(vt.read_text(WS, "main", "a.md").expect("read").is_none());
+    assert!(vt.list_snapshots(WS, "main").expect("snapshots").is_empty());
+}
+
+// oracle: versions-delete-text-file rejects a caller-supplied duplicate moment
+// id before changing the file.
+#[test]
+fn delete_text_file_rejects_duplicate_moment_id() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("write");
+    let err = vt
+        .delete_text_file(&delete("main", "a.md", "m1", 20), &NO_FAULTS)
+        .expect_err("duplicate");
+    assert_eq!(err.code(), "duplicate-moment-id");
+    assert_eq!(
+        vt.read_text(WS, "main", "a.md").unwrap().unwrap().text,
+        "one"
+    );
+}
+
+// oracle: versions-delete-text-file reports file-not-found for an absent path.
+#[test]
+fn delete_text_file_reports_file_not_found() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    assert_eq!(
+        vt.delete_text_file(&delete("main", "missing.md", "m1", 10), &NO_FAULTS)
+            .expect_err("missing")
+            .code(),
+        "file-not-found"
+    );
+}
+
+// oracle: versions-delete-text-file is version-local; a sibling fork keeps the
+// shared object's inherited snapshot.
+#[test]
+fn delete_text_file_does_not_affect_sibling_fork() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("write");
+    vt.create_named_version(
+        &CreateNamedVersion {
+            workspace_id: WS.to_owned(),
+            new_version_id: "feat".to_owned(),
+            name: "feature".to_owned(),
+            from_version_id: "main".to_owned(),
+            now_ms: 20,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    )
+    .expect("fork");
+    vt.delete_text_file(&delete("main", "a.md", "m2", 30), &NO_FAULTS)
+        .expect("delete");
+    assert!(vt.read_text(WS, "main", "a.md").unwrap().is_none());
+    let sibling = vt.read_text(WS, "feat", "a.md").unwrap().unwrap();
+    assert_eq!(sibling.object_id, "o1");
+    assert_eq!(sibling.text, "one");
+}
+
+// oracle: versions-rename-text-file preserves object/content, moves the alias,
+// and appends a rename moment whose preimage points at the prior head.
+#[test]
+fn rename_text_file_moves_alias_and_preserves_identity() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("write");
+    let renamed = vt
+        .rename_text_file(&rename("main", "a.md", "b.md", "m2", 20), &NO_FAULTS)
+        .expect("rename");
+    assert_eq!(renamed.object.object_id, "o1");
+    assert_eq!(renamed.moment.operation, MomentOp::Rename);
+    assert_eq!(
+        renamed.moment.before_latest_moment_id.as_deref(),
+        Some("m1")
+    );
+    assert_eq!(
+        vt.get_moment(WS, "m2").expect("moment"),
+        Some(renamed.moment)
+    );
+    assert!(vt.read_text(WS, "main", "a.md").unwrap().is_none());
+    let after = vt.read_text(WS, "main", "b.md").unwrap().unwrap();
+    assert_eq!(after.object_id, "o1");
+    assert_eq!(after.text, "one");
+}
+
+// oracle: versions-rename-text-file rejects identical source/destination.
+#[test]
+fn rename_text_file_rejects_same_path() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("write");
+    assert_eq!(
+        vt.rename_text_file(&rename("main", "a.md", "a.md", "m2", 20), &NO_FAULTS)
+            .expect_err("same path")
+            .code(),
+        "invalid-path"
+    );
+}
+
+// oracle: versions-rename-text-file reports file-not-found for a missing source.
+#[test]
+fn rename_text_file_reports_missing_source() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    assert_eq!(
+        vt.rename_text_file(&rename("main", "missing.md", "b.md", "m1", 10), &NO_FAULTS,)
+            .expect_err("missing")
+            .code(),
+        "file-not-found"
+    );
+}
+
+// oracle: versions-rename-text-file refuses to replace a different target object.
+#[test]
+fn rename_text_file_rejects_occupied_destination() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("write a");
+    vt.write_text(&write("main", "b.md", "two", "m2", "o2", 20), &NO_FAULTS)
+        .expect("write b");
+    assert_eq!(
+        vt.rename_text_file(&rename("main", "a.md", "b.md", "m3", 30), &NO_FAULTS)
+            .expect_err("occupied")
+            .code(),
+        "target-path-exists"
+    );
+}
+
+// oracle: versions-rollback-text-file-mutation removes a first write without a
+// replacement moment and garbage-collects its now-unreferenced file object.
+#[test]
+fn rollback_first_write_removes_file_and_garbage_collects_object() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    {
+        let mut vt = VersionedTextStore::new(&mut store);
+        vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+            .expect("write");
+        vt.rollback_text_file_mutation(&rollback("main", "a.md", "m1"), &NO_FAULTS)
+            .expect("rollback");
+        assert!(vt.read_text(WS, "main", "a.md").unwrap().is_none());
+        assert!(vt.get_moment(WS, "m1").unwrap().is_none());
+    }
+    let count: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM file_objects WHERE workspace_id = ?1 AND object_id = 'o1'",
+                [WS],
+                |row| row.get(0),
+            )
+        })
+        .expect("count");
+    assert_eq!(count, 0);
+}
+
+// oracle: versions-rollback-text-file-mutation restores an overwrite's exact
+// prior snapshot and removes the mutation moment.
+#[test]
+fn rollback_overwrite_restores_prior_text() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("first");
+    vt.write_text(&write("main", "a.md", "two", "m2", "o1", 20), &NO_FAULTS)
+        .expect("second");
+    vt.rollback_text_file_mutation(&rollback("main", "a.md", "m2"), &NO_FAULTS)
+        .expect("rollback");
+    let restored = vt.read_text(WS, "main", "a.md").unwrap().unwrap();
+    assert_eq!(restored.text, "one");
+    assert_eq!(restored.latest_moment_id, "m1");
+}
+
+// oracle: versions-rollback-text-file-mutation restores the source alias of a rename.
+#[test]
+fn rollback_rename_restores_original_path() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("write");
+    vt.rename_text_file(&rename("main", "a.md", "b.md", "m2", 20), &NO_FAULTS)
+        .expect("rename");
+    vt.rollback_text_file_mutation(&rollback("main", "b.md", "m2"), &NO_FAULTS)
+        .expect("rollback");
+    assert!(vt.read_text(WS, "main", "b.md").unwrap().is_none());
+    assert_eq!(
+        vt.read_text(WS, "main", "a.md").unwrap().unwrap().text,
+        "one"
+    );
+}
+
+// oracle: versions-rollback-text-file-mutation restores deleted content.
+#[test]
+fn rollback_delete_restores_deleted_content() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("write");
+    vt.delete_text_file(&delete("main", "a.md", "m2", 20), &NO_FAULTS)
+        .expect("delete");
+    vt.rollback_text_file_mutation(&rollback("main", "a.md", "m2"), &NO_FAULTS)
+        .expect("rollback");
+    assert_eq!(
+        vt.read_text(WS, "main", "a.md").unwrap().unwrap().text,
+        "one"
+    );
+}
+
+// oracle: versions-rollback-text-file-mutation refuses a non-tip object mutation.
+#[test]
+fn rollback_rejects_non_latest_mutation() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("first");
+    vt.write_text(&write("main", "a.md", "two", "m2", "o1", 20), &NO_FAULTS)
+        .expect("second");
+    assert_eq!(
+        vt.rollback_text_file_mutation(&rollback("main", "a.md", "m1"), &NO_FAULTS)
+            .expect_err("not latest")
+            .code(),
+        "invalid-input"
+    );
+}
+
+// oracle: versions-rollback-text-file-mutation refuses the exact fork-point
+// moment because the child snapshot directly depends on it.
+#[test]
+fn rollback_rejects_moment_used_as_fork_point_preimage() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("write");
+    vt.create_named_version(
+        &CreateNamedVersion {
+            workspace_id: WS.to_owned(),
+            new_version_id: "feat".to_owned(),
+            name: "feature".to_owned(),
+            from_version_id: "main".to_owned(),
+            now_ms: 20,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    )
+    .expect("fork");
+    assert_eq!(
+        vt.rollback_text_file_mutation(&rollback("main", "a.md", "m1"), &NO_FAULTS)
+            .expect_err("dependent")
+            .code(),
+        "invalid-input"
+    );
+}
+
+// oracle: versions-rollback-text-file-mutation follows before_latest_moment_id;
+// a child rewrite keeps its inherited producer moment alive even after the
+// child's snapshot head advances.
+#[test]
+fn rollback_rejects_moment_referenced_by_child_preimage_pointer() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("write shared");
+    vt.write_text(
+        &write("main", "marker.md", "marker", "m2", "marker", 20),
+        &NO_FAULTS,
+    )
+    .expect("fork marker");
+    vt.create_named_version(
+        &CreateNamedVersion {
+            workspace_id: WS.to_owned(),
+            new_version_id: "feat".to_owned(),
+            name: "feature".to_owned(),
+            from_version_id: "main".to_owned(),
+            now_ms: 30,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    )
+    .expect("fork");
+    let child = vt
+        .write_text(&write("feat", "a.md", "two", "m3", "o1", 40), &NO_FAULTS)
+        .expect("child rewrite");
+    assert_eq!(child.moment.before_latest_moment_id.as_deref(), Some("m1"));
+    assert_eq!(
+        vt.rollback_text_file_mutation(&rollback("main", "a.md", "m1"), &NO_FAULTS)
+            .expect_err("preimage dependent")
+            .code(),
+        "invalid-input"
+    );
+}
+
+#[test]
+fn rollback_rejects_migrated_null_link_dependent() {
+    let fidelity = ScratchDir::new().expect("fidelity scratch");
+    let fidelity_db = fidelity.engine_db_path().expect("fidelity db");
+    let mut fidelity_store = EngineStore::open(&fidelity_db, 1).expect("fidelity open");
+    bootstrap(&mut fidelity_store);
+    {
+        let mut vt = VersionedTextStore::new(&mut fidelity_store);
+        vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+            .expect("fidelity main write");
+        vt.create_named_version(
+            &CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: "feat".to_owned(),
+                name: "feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 20,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("fidelity fork");
+        let child = vt
+            .write_text(&write("feat", "a.md", "two", "m2", "o1", 30), &NO_FAULTS)
+            .expect("fidelity child write");
+        assert_eq!(child.moment.before_latest_moment_id.as_deref(), Some("m1"));
+        vt.rollback_text_file_mutation(&rollback("feat", "a.md", "m2"), &NO_FAULTS)
+            .expect("child rollback with intact link");
+        let restored = vt.read_text(WS, "feat", "a.md").unwrap().unwrap();
+        assert_eq!(restored.text, "one");
+        assert_eq!(restored.latest_moment_id, "m1");
+    }
+
+    let reject = ScratchDir::new().expect("reject scratch");
+    let reject_db = reject.engine_db_path().expect("reject db");
+    let mut reject_store = EngineStore::open(&reject_db, 1).expect("reject open");
+    bootstrap(&mut reject_store);
+    {
+        let mut vt = VersionedTextStore::new(&mut reject_store);
+        vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+            .expect("main write");
+        vt.create_named_version(
+            &CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: "feat".to_owned(),
+                name: "feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 20,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("fork");
+        vt.write_text(&write("feat", "a.md", "two", "m2", "o1", 30), &NO_FAULTS)
+            .expect("child write");
+    }
+    reject_store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE moments SET before_latest_moment_id = NULL \
+                 WHERE workspace_id = ?1 AND moment_id = 'm2'",
+                [WS],
+            )
+        })
+        .expect("clear migrated link");
+    let mut vt = VersionedTextStore::new(&mut reject_store);
+    assert_eq!(
+        vt.rollback_text_file_mutation(&rollback("main", "a.md", "m1"), &NO_FAULTS)
+            .expect_err("unresolved dependent")
+            .code(),
+        "invalid-input"
+    );
+}
+
+// oracle: versions-rollback-text-file-mutation never rewrites local state from
+// a sync_record_only peer-divergence row.
+#[test]
+fn rollback_rejects_sync_record_only_moment() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let blob = {
+        let mut vt = VersionedTextStore::new(&mut store);
+        vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+            .expect("write")
+            .snapshot
+            .blob_sha256
+    };
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO moments (workspace_id, moment_order, moment_id, version_id, object_id, \
+                 path, recorded_at_ms, operation, after_blob_sha256, before_present, \
+                 before_blob_sha256, before_latest_moment_id, metadata_origin, author_json, \
+                 sync_record_only) VALUES (?1, 2, 'peer', 'main', 'o1', 'a.md', 20, 'write', \
+                 ?2, 2, ?2, 'm1', 'sync', NULL, 1)",
+                rusqlite::params![WS, blob],
+            )
+        })
+        .expect("insert peer moment");
+    let mut vt = VersionedTextStore::new(&mut store);
+    assert_eq!(
+        vt.rollback_text_file_mutation(&rollback("main", "a.md", "peer"), &NO_FAULTS)
+            .expect_err("record only")
+            .code(),
+        "invalid-input"
+    );
+}
+
+// oracle: versions-rollback-text-file-mutation refuses a rename rollback when
+// its source path has since been occupied by a different object.
+#[test]
+fn rollback_rejects_occupied_restore_path() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("write");
+    vt.rename_text_file(&rename("main", "a.md", "b.md", "m2", 20), &NO_FAULTS)
+        .expect("rename");
+    vt.write_text(&write("main", "a.md", "other", "m3", "o2", 30), &NO_FAULTS)
+        .expect("occupy source");
+    assert_eq!(
+        vt.rollback_text_file_mutation(&rollback("main", "b.md", "m2"), &NO_FAULTS)
+            .expect_err("occupied")
+            .code(),
+        "target-path-exists"
+    );
+}
+
+// oracle: versions-rollback-text-file-mutation reconstructs a legacy missing
+// preimage from the earlier moment plus caller-supplied legacy text.
+#[test]
+fn rollback_legacy_moment_uses_supplied_before_text() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    {
+        let mut vt = VersionedTextStore::new(&mut store);
+        vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+            .expect("first");
+        vt.write_text(&write("main", "a.md", "two", "m2", "o1", 20), &NO_FAULTS)
+            .expect("second");
+    }
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE moments SET before_present = 0, before_blob_sha256 = NULL, \
+                 before_latest_moment_id = NULL WHERE workspace_id = ?1 AND moment_id = 'm2'",
+                [WS],
+            )
+        })
+        .expect("legacy update");
+    let mut input = rollback("main", "a.md", "m2");
+    input.legacy_before_text = Some("one".to_owned());
+    let mut vt = VersionedTextStore::new(&mut store);
+    vt.rollback_text_file_mutation(&input, &NO_FAULTS)
+        .expect("legacy rollback");
+    let restored = vt.read_text(WS, "main", "a.md").unwrap().unwrap();
+    assert_eq!(restored.text, "one");
+    assert_eq!(restored.latest_moment_id, "m1");
+}
+
+// oracle: versions-rollback-text-file-mutation fails closed for a legacy-unset
+// first mutation because no prior snapshot or caller text can reconstruct it.
+#[test]
+fn rollback_legacy_moment_without_preimage_or_text_is_rejected() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    {
+        let mut vt = VersionedTextStore::new(&mut store);
+        vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+            .expect("write");
+    }
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE moments SET before_present = 0 WHERE workspace_id = ?1 AND moment_id = 'm1'",
+                [WS],
+            )
+        })
+        .expect("legacy update");
+    let mut vt = VersionedTextStore::new(&mut store);
+    assert_eq!(
+        vt.rollback_text_file_mutation(&rollback("main", "a.md", "m1"), &NO_FAULTS)
+            .expect_err("missing legacy preimage")
+            .code(),
+        "invalid-input"
+    );
 }
