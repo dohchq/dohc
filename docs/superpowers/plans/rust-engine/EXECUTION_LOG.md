@@ -899,3 +899,35 @@ source of truth every orchestrator session loads first).
   migration ordinals serialize cleanly after 6). R10's deferred
   versions-replication-apply-conflict is blocked on R06's conflict-object
   primitive — R06 unblocks it.
+
+- R07 watcher/reconcile/pathfloor/policy GATE PASSED (PR #169, squash-merged;
+  NO migration ordinal — files-side/in-memory, no collision with R06 ordinal 7;
+  branch deleted). Ported the notify-backed watcher, tolerant/degraded scan
+  (corrected CAL-3 whole-pass abort → BEHAVIOR_DELTA §11.1), the secret-path
+  floor classifier (policy.rs, platform-independent port of
+  @dohc/security-contract), two-phase apply-then-ack capture, files-side fault
+  seam. DISCHARGED the R05 rename-secret-floor OBLIGATION (rename to_path now
+  refused when secret-classified). Cell: Reviewer 1 (secret-floor) APPROVED via
+  a 30,672-path differential — 0 secret→tracked leaks, byte-parity with the TS
+  oracle, both gates fail-closed, deferred Check-B proven secret-floor-safe.
+  Reviewer 2 (capture/false-retire) proved apply-ack exactly-once crash-safety
+  + /-boundary-precise false-retire hold, found two P1s: (1) a STALE reconcile
+  plan's destructive ops reached the sink BEFORE the staleness guard →
+  CAL-3-class false-delete via the public API — FIXED (validate generation+epoch
+  before the sink loop + single-outstanding-plan invariant); (2) plaintext store
+  door rejected only Secret, letting reserved/ignored/traversal (DOHC~1 8.3
+  alias of .dohc, node_modules, .git, shared-with-me, %2e%2e) into plaintext
+  history — FIXED to accept only Tracked on the normalized path, matching TS
+  validateUserWritePath. HARD GATE fix: cargo-deny FAILed on notify's ISC/CC0-1.0
+  inotify deps (impl agent's first 'green' missed it) — added ISC + CC0-1.0 to
+  deny.toml allow, re-verified all five stages incl cargo-deny green 2x. P2s:
+  read-side win32 ADS-colon rejection (.env::$DATA latent secret-alias) closed;
+  degraded-retry thrash backoff added. Bot-finding round: 2 codex-bot
+  correctness bugs FIXED — hard-deadline drain (settle reset could postpone the
+  WATCH_HARD_DEADLINE indefinitely under an event storm) and file→dir
+  replacement never retired (StdAbsenceProbe made tri-state). Deferred to R14
+  (recorded on R14 row): watcher auto-reattach, startup deadlines +
+  force-reconcile-on-restart, manifest rehydration. green 2x.
+- R05 rename-secret-floor OBLIGATION: DISCHARGED by R07.
+- NOTE (fixed process slip): the first R07 integrator PR (#171) was branched off
+  a stale main and closed CONFLICTING; re-applied cleanly here. No content lost.
