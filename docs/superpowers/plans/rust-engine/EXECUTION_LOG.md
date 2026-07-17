@@ -978,3 +978,47 @@ source of truth every orchestrator session loads first).
   deps R03;GATE0 ✓), R13b (dormant desktop adapter, deps R03;GATE0 ✓) — the
   TS/services-side adapter shards. Then R13 composition (deps all), R14
   robustness, GATE6, R15-REHEARSE, R15 cutover (USER checkpoint), R16.
+
+- R10b relay-epoch-enforcement GATE PASSED (PR #174, squash-merged; no engine
+  migration — TS relay service; branch deleted). Server-side epoch/stream-
+  identity rejection at the sync-relay push/pull/claim endpoints + a new
+  owner-only epoch-rotation route + durable supersession table, mirroring R10's
+  first-write-wins-then-immutable model. Two-lens cell BOTH APPROVE-WITH-FIXES
+  (no P0): Reviewer 1 (enforcement soundness) proved no cross-principal bypass /
+  impersonation / replay / privilege-escalation (6 probes) and gave the reasoned
+  verdict that the opt-in field-omission bypass was OWNER-ONLY self-harm (P2, the
+  owner already has full write authority over their own bucket; epoch/stream are
+  replication coordinates, not authz). Reviewer 2 (no-false-reject/durability)
+  proved restart durability, crash-mid-rotation atomicity, migration-forward, and
+  no-false-reject (100 pushes + 20 rotations), and found the key P1: a never-
+  superseded (typically NEWER) epoch was misreported as `epoch_superseded` →
+  a fresh-reset client told to discard its own data (data loss). Fix batch:
+  distinct 409 `identity_not_recognized` for unknown/newer coords vs
+  `epoch_superseded` only for proven-superseded (P1); enforcement now MANDATORY
+  once an identity is established (`identity_required` — closes the owner-only
+  bypass, free since honest clients always send identity); claim only on a
+  SUCCESSFUL request + GET is read-only (was: a rejected push / bare GET stamped
+  identity); full (epoch,stream) supersession keying so rotate-back can't
+  resurrect + injected clock; SELECT-before-write-lock on the hot pull path;
+  idempotent rotation retry (200 {rotated:false}); identity-enforce routed
+  through appendLogBatch's guard for atomicity. Plus two in-scope codex-bot
+  findings: **F8 epoch_log_floor** — a fresh client pulling since=0 under a new
+  epoch would otherwise replay pre-rotation ops (resurrection-via-sync the plan
+  warns of, i.e. epoch enforcement would be trivially bypassable); rotation sets
+  floor=MAX(relay_seq) and identity-bearing pulls clamp to it. F9 512-byte
+  identity caps + supersession quota. 216/216 tests. R10b unblocks the GATE6
+  path.
+- **OBLIGATION → R15 reset workflow (ICE DECISION):** member `share-log` appends
+  remain un-epoch-gated (documented in-code as the deliberate R10b boundary —
+  members are authorized share participants under the namespaced
+  `share:<id>:<origin>` origin + fail-closed share filter, NOT the owner's
+  workspace replicas). Open product/security question for the reset/cutover
+  workflow: should an owner's epoch rotation (device reset) SEVER a live
+  read-write share member's sync, or may the member keep appending? Recorded as
+  an OBLIG on the R15 row; needs Ice's semantics call when the reset workflow is
+  designed.
+- Wave-3 adapter progress: R10b ✓ merged. R11b (TS ydoc adapter, #175) in
+  adversarial fix round (2 P0 caught: an observer-throw that permanently wedged
+  the Y.Doc, and an isWellFormed check structurally unable to catch surrogate-
+  split lineages that diverge yjs↔yrs per R11a's pinned cross_engine.rs). R13b
+  (dormant desktop adapter) queued behind R11b.
