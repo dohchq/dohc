@@ -931,3 +931,50 @@ source of truth every orchestrator session loads first).
 - R05 rename-secret-floor OBLIGATION: DISCHARGED by R07.
 - NOTE (fixed process slip): the first R07 integrator PR (#171) was branched off
   a stale main and closed CONFLICTING; re-applied cleanly here. No content lost.
+
+- R06 compare/merge/conflicts/materialization GATE PASSED (PR #170,
+  squash-merged at migration ordinal 7 `v1-conflicts`; ledger now 8; branch
+  deleted). Built three-way compare/merge (verbatim mergeMarkdown.ts port), the
+  reusable conflict-object primitive R10 will consume (insert-if-absent,
+  live-head-match gate, update-row), and closed the materialization-enqueue gap
+  for merge/resolve writes+deletes through R04's &Transaction choke point.
+  Two-lens cell BOTH APPROVED (no P0/P1): Reviewer 1 (merge/conflict) ran a
+  5,533-triple TS-vs-Rust merge differential (0 mismatches) + 7/7 clobber probes
+  refused; Reviewer 2 (materialize/migration) proved the ordinal-6→7 forward
+  migrate on a populated materialization_jobs table (a queued pre-R06 write can
+  never be misread as a delete) + materialize_delete crash-safety. Fix batch
+  (all P2, pre-merge because 2 were freeze-timing): materialize_delete now
+  sync_parent_dir before mark-complete (durability, was resurrection-on-crash);
+  conflicts table converted REAL→INTEGER + STRICT matching R08/R09/R11a/R12;
+  ConflictContentKind::Binary made explicitly fail-closed. Codex-bot triage:
+  the 'persist side blobs' P2 was a real TS-parity divergence FIXED (TS calls
+  putBlob per text side; the primitive only copied the sha → would FK-fail for
+  R10's replicated conflict.open) — important for R10 consumption; the
+  empty-base-fork 'P1' was correctly kept as FAITHFUL TS PARITY (identical
+  fork-base-not-found guard in TS — no divergence without cause; integrator
+  ruling: keep parity). green 2x.
+- Merge-order note: R06 branched before R07 (#169) merged, so #170 went
+  CONFLICTING. Resolved by merging main — the SEMANTICALLY tricky conflict was
+  in store.rs write_text/delete_text_file: R07 added its secret-floor
+  enforcement INLINE there, while R06 had refactored those bodies into shared
+  write_text_in_tx/delete_text_in_tx helpers that merge/resolve reuse. A naive
+  union would have SILENTLY DROPPED R07's floor (re-opening the plaintext-door
+  P1); instead R07's floor was threaded into the shared helpers, so it now
+  covers direct writes AND merge/resolve writes (strictly better). Verified:
+  merge.rs/conflicts.rs write+delete sites all route through the floor-checked
+  helpers; R07's floor tests + R06's 8 merge tests all pass. No ordinal
+  collision (R07 consumed none; R06 stays ordinal 7). ledger 8. cargo-deny PASS
+  (R07's ISC/CC0-1.0). green 2x.
+- **FOLLOWUP OBLIGATION (tracked on R10 row):** R10's deferred
+  versions-replication-apply-conflict-open/-resolve is now UNBLOCKED (R06's
+  conflict primitive exists). When implemented it MUST handle binary conflict
+  sides — R06 gated ConflictContentKind::Binary fail-closed, and the side FKs
+  pin to the text blobs table, so binary mirror-apply needs the schema/primitive
+  extended (R06 rev1 finding). Schedule as a small R10-conflict-apply follow-up
+  or fold into R13 composition.
+- **WAVE-3 DOMAIN COMPLETE**: R10 (replication) + R06 (merge/conflicts) + R07
+  (watcher/pathfloor) all merged. All engine domains + calibration on main.
+  Remaining Wave 3: R10b (relay epoch, deps R10 ✓), R11b (TS live Y.Doc adapter,
+  deps R03;GATE0 ✓), R13b (dormant desktop adapter, deps R03;GATE0 ✓) — the
+  TS/services-side adapter shards. Then R13 composition (deps all), R14
+  robustness, GATE6, R15-REHEARSE, R15 cutover (USER checkpoint), R16.
