@@ -27,6 +27,30 @@ pub enum Preimage {
     Present(String),
 }
 
+/// Filesystem operation represented by a durable materialization job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterializationOperation {
+    Write,
+    Delete,
+}
+
+impl MaterializationOperation {
+    fn as_str(self) -> &'static str {
+        match self {
+            MaterializationOperation::Write => "write",
+            MaterializationOperation::Delete => "delete",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "write" => Some(MaterializationOperation::Write),
+            "delete" => Some(MaterializationOperation::Delete),
+            _ => None,
+        }
+    }
+}
+
 /// The status of a materialization job. Only [`JobStatus::Pending`] is replayed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobStatus {
@@ -77,6 +101,7 @@ pub struct MaterializationJob {
     pub job_id: String,
     pub target_path: String,
     pub content_sha256: String,
+    pub operation: MaterializationOperation,
     pub preimage: Preimage,
     pub target_generation: i64,
     pub status: JobStatus,
@@ -93,6 +118,23 @@ pub fn enqueue_job(
     tx: &Transaction<'_>,
     spec: &MaterializationJobSpec,
 ) -> Result<(), StorageError> {
+    enqueue_operation(tx, spec, MaterializationOperation::Write)
+}
+
+/// Enqueue an explicit delete. Kept separate from [`enqueue_job`] so existing
+/// write-producing domains cannot accidentally change operation semantics.
+pub fn enqueue_delete_job(
+    tx: &Transaction<'_>,
+    spec: &MaterializationJobSpec,
+) -> Result<(), StorageError> {
+    enqueue_operation(tx, spec, MaterializationOperation::Delete)
+}
+
+fn enqueue_operation(
+    tx: &Transaction<'_>,
+    spec: &MaterializationJobSpec,
+    operation: MaterializationOperation,
+) -> Result<(), StorageError> {
     let (present, preimage_sha): (i64, Option<&str>) = match &spec.preimage {
         Preimage::Absent => (0, None),
         Preimage::Present(sha) => (1, Some(sha.as_str())),
@@ -100,8 +142,8 @@ pub fn enqueue_job(
     tx.execute(
         "INSERT INTO materialization_jobs \
          (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
-          target_generation, status, created_at_ms, completed_at_ms) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, NULL)",
+          target_generation, status, created_at_ms, completed_at_ms, operation) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, NULL, ?8)",
         rusqlite::params![
             spec.job_id,
             spec.target_path,
@@ -110,6 +152,7 @@ pub fn enqueue_job(
             preimage_sha,
             spec.target_generation,
             spec.now_ms,
+            operation.as_str(),
         ],
     )
     .map_err(StorageError::persist)?;
@@ -126,10 +169,22 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<MaterializationJob> {
     };
     let status_raw: String = row.get(6)?;
     let status = JobStatus::parse(&status_raw).unwrap_or(JobStatus::Conflict);
+    let operation_raw: String = row.get(8)?;
+    let operation = MaterializationOperation::parse(&operation_raw).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            8,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unknown materialization operation",
+            )),
+        )
+    })?;
     Ok(MaterializationJob {
         job_id: row.get(0)?,
         target_path: row.get(1)?,
         content_sha256: row.get(2)?,
+        operation,
         preimage,
         target_generation: row.get(5)?,
         status,
@@ -138,7 +193,7 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<MaterializationJob> {
 }
 
 const JOB_COLUMNS: &str = "job_id, target_path, content_sha256, preimage_present, \
-     preimage_sha256, target_generation, status, created_at_ms";
+     preimage_sha256, target_generation, status, created_at_ms, operation";
 
 /// Every pending job, oldest first (then by id for determinism). The set the
 /// filesystem pipeline replays at startup and executes on enqueue.

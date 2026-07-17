@@ -21,7 +21,7 @@ use crate::records::{
     VersionKind, VersionRecord, WriteResult, WriteText,
 };
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 
@@ -33,7 +33,7 @@ pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 /// The versioning domain bound to one workspace store. Cheap to construct per
 /// call; holds only a mutable borrow of the writer.
 pub struct VersionedTextStore<'a> {
-    store: &'a mut EngineStore,
+    pub(crate) store: &'a mut EngineStore,
 }
 
 impl<'a> VersionedTextStore<'a> {
@@ -128,233 +128,10 @@ impl<'a> VersionedTextStore<'a> {
         input: &WriteText,
         faults: &dyn FaultInjector,
     ) -> Result<WriteResult, DomainError> {
-        non_empty(&input.workspace_id, "workspace_id")?;
-        non_empty(&input.version_id, "version_id")?;
-        non_empty(&input.moment_id, "moment_id")?;
-        let mut normalized_input = input.clone();
-        normalized_input.path = validate_plaintext_storable_path(&input.path)?;
-        let input = &normalized_input;
-        validate_text(&input.text)?;
-
-        // `object_id` is part of the durable result for a first write, so it is
-        // in the idempotency payload: a retry with a different generated id is a
-        // reuse-mismatch, not a silent replay.
-        let payload_hash = hash_fields(&[
-            input.version_id.as_bytes(),
-            input.path.as_bytes(),
-            input.text.as_bytes(),
-            input.moment_id.as_bytes(),
-            input.object_id.as_bytes(),
-        ]);
-
-        // Pre-transaction validation + idempotency (single-writer: authoritative).
-        let ws = &input.workspace_id;
-        let prep = self.store.read_with(|conn| {
-            if !version_exists(conn, ws, &input.version_id)? {
-                return Err(DomainError::VersionNotFound);
-            }
-            if let Some(request_id) = &input.request_id
-                && let Some(recorded) = lookup_request(conn, request_id)?
-            {
-                if recorded.payload_hash != payload_hash {
-                    return Err(DomainError::IdempotencyKeyReuseMismatch);
-                }
-                return Ok(WritePrep::Deduped);
-            }
-            if moment_exists(conn, ws, &input.moment_id)? {
-                return Err(DomainError::DuplicateMomentId);
-            }
-            let existing_object = alias_object_id(conn, ws, &input.version_id, &input.path)?;
-            let before = match &existing_object {
-                Some(object_id) => get_snapshot(conn, ws, &input.version_id, object_id)?,
-                None => {
-                    // New path → mint a NEW object. The supplied id must be
-                    // non-empty and not already bound; otherwise the snapshot
-                    // upsert (keyed by object_id) would silently clobber another
-                    // file's state. Fail closed instead.
-                    if input.object_id.is_empty() {
-                        return Err(DomainError::InvalidInput {
-                            reason: "object_id must not be empty for a new path",
-                        });
-                    }
-                    if object_exists(conn, ws, &input.object_id)? {
-                        return Err(DomainError::InvalidInput {
-                            reason: "object_id is already bound to another object",
-                        });
-                    }
-                    None
-                }
-            };
-            Ok(WritePrep::Apply(Box::new(WriteApply {
-                existing_object,
-                before,
-            })))
-        })?;
-
-        let (existing_object, before) = match prep {
-            WritePrep::Deduped => return self.reconstruct_write(input),
-            WritePrep::Apply(apply) => (apply.existing_object, apply.before),
-        };
-
-        let is_new_object = existing_object.is_none();
-        let object_id = existing_object.unwrap_or_else(|| input.object_id.clone());
-        let blob = text_blob_sha256(&input.text);
-        let before_blob = before.as_ref().map(|s| s.blob_sha256.clone());
-        let before_latest_moment_id = before.as_ref().map(|s| s.latest_moment_id.clone());
-
-        let outcome = self.store.write_with(faults, |tx| {
-            let moment_order = next_moment_order(tx)?;
-            if is_new_object {
-                // Plain INSERT (not OR IGNORE): a collision here — after the
-                // pre-check — must roll the whole write back, never reuse an
-                // existing object.
-                tx.execute(
-                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
-                     VALUES (?1, ?2, ?3)",
-                    params![ws, object_id, input.now_ms],
-                )
-                .map_err(DomainError::sql_persist)?;
-            }
-            tx.execute(
-                "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-                params![blob, input.text.len() as i64, input.text],
-            )
-            .map_err(DomainError::sql_persist)?;
-            tx.execute(
-                "INSERT OR IGNORE INTO path_aliases (workspace_id, version_id, path, object_id) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![ws, input.version_id, input.path, object_id],
-            )
-            .map_err(DomainError::sql_persist)?;
-            tx.execute(
-                "INSERT INTO moments \
-                 (workspace_id, moment_order, moment_id, version_id, object_id, path, \
-                  recorded_at_ms, operation, after_blob_sha256, before_present, \
-                   before_blob_sha256, before_latest_moment_id, metadata_origin, author_json, \
-                   sync_record_only) \
-                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'write', ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
-                params![
-                    ws,
-                    moment_order,
-                    input.moment_id,
-                    input.version_id,
-                    object_id,
-                    input.path,
-                    input.now_ms,
-                    blob,
-                    if before.is_some() { 2 } else { 1 },
-                    before_blob,
-                    before_latest_moment_id,
-                    input.metadata_origin,
-                    input.author_json,
-                ],
-            )
-            .map_err(DomainError::sql_persist)?;
-            tx.execute(
-                "INSERT INTO snapshots \
-                 (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
-                  latest_moment_id, metadata_origin) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
-                 ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET \
-                  path = excluded.path, blob_sha256 = excluded.blob_sha256, \
-                  updated_at_ms = excluded.updated_at_ms, \
-                  latest_moment_id = excluded.latest_moment_id, \
-                  metadata_origin = excluded.metadata_origin",
-                params![
-                    ws,
-                    input.version_id,
-                    object_id,
-                    input.path,
-                    blob,
-                    input.now_ms,
-                    input.moment_id,
-                    input.metadata_origin,
-                ],
-            )
-            .map_err(DomainError::sql_persist)?;
-            // Compound-commit invariant: the replication journal entry rides the
-            // same transaction (PORTING.md §9).
-            tx.execute(
-                "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-                 VALUES (?1, 'moment.append', ?2)",
-                params![object_id, input.now_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
-            record_request(
-                tx,
-                input.request_id.as_deref(),
-                &payload_hash,
-                moment_order,
-                input.now_ms,
-            )?;
-
-            Ok::<_, DomainError>(WriteResult {
-                snapshot: TextSnapshot {
-                    workspace_id: ws.clone(),
-                    version_id: input.version_id.clone(),
-                    object_id: object_id.clone(),
-                    path: input.path.clone(),
-                    text: input.text.clone(),
-                    blob_sha256: blob.clone(),
-                    updated_at_ms: input.now_ms,
-                    latest_moment_id: input.moment_id.clone(),
-                    metadata_origin: input.metadata_origin.clone(),
-                },
-                moment: MomentRecord {
-                    moment_order,
-                    moment_id: input.moment_id.clone(),
-                    version_id: input.version_id.clone(),
-                    object_id: object_id.clone(),
-                    path: input.path.clone(),
-                    recorded_at_ms: input.now_ms,
-                    operation: MomentOp::Write,
-                    after_blob_sha256: blob.clone(),
-                    before_present: before.is_some(),
-                    before_blob_sha256: before_blob.clone(),
-                    before_latest_moment_id: before_latest_moment_id.clone(),
-                    metadata_origin: input.metadata_origin.clone(),
-                    author_json: input.author_json.clone(),
-                    sync_record_only: false,
-                },
-                deduped: false,
-            })
-        })?;
+        let outcome = self
+            .store
+            .write_with(faults, |tx| write_text_in_tx(tx, input))?;
         committed(outcome)
-    }
-
-    /// Reconstruct the result of a previously-committed write for an
-    /// exactly-once replay. Rebuilds the snapshot from the RECORDED moment's
-    /// after-blob, NOT the live snapshot: if a later write updated the same
-    /// path, its text/latest-moment must never leak into a timed-out client's
-    /// replay (the exactly-once contract).
-    fn reconstruct_write(&self, input: &WriteText) -> Result<WriteResult, DomainError> {
-        let ws = &input.workspace_id;
-        self.store.read_with(|conn| {
-            let moment =
-                get_moment(conn, ws, &input.moment_id)?.ok_or(DomainError::StateCorrupt {
-                    reason: "deduped write has no moment",
-                })?;
-            let text =
-                blob_text(conn, &moment.after_blob_sha256)?.ok_or(DomainError::StateCorrupt {
-                    reason: "deduped write moment blob missing",
-                })?;
-            let snapshot = TextSnapshot {
-                workspace_id: ws.clone(),
-                version_id: moment.version_id.clone(),
-                object_id: moment.object_id.clone(),
-                path: moment.path.clone(),
-                text,
-                blob_sha256: moment.after_blob_sha256.clone(),
-                updated_at_ms: moment.recorded_at_ms,
-                latest_moment_id: moment.moment_id.clone(),
-                metadata_origin: moment.metadata_origin.clone(),
-            };
-            Ok(WriteResult {
-                snapshot,
-                moment,
-                deduped: true,
-            })
-        })
     }
 
     /// Delete a materialized text file from one version, preserving other
@@ -365,95 +142,9 @@ impl<'a> VersionedTextStore<'a> {
         input: &DeleteTextFile,
         faults: &dyn FaultInjector,
     ) -> Result<DeleteResult, DomainError> {
-        non_empty(&input.workspace_id, "workspace_id")?;
-        non_empty(&input.version_id, "version_id")?;
-        non_empty(&input.moment_id, "moment_id")?;
-        let mut normalized_input = input.clone();
-        normalized_input.path = validate_addressable_plaintext_path(&input.path)?;
-        let input = &normalized_input;
-
-        let ws = &input.workspace_id;
-        let (object, before) = self.store.read_with(|conn| {
-            if !version_exists(conn, ws, &input.version_id)? {
-                return Err(DomainError::VersionNotFound);
-            }
-            let object_id = alias_object_id(conn, ws, &input.version_id, &input.path)?
-                .ok_or(DomainError::FileNotFound)?;
-            let before = get_snapshot(conn, ws, &input.version_id, &object_id)?
-                .ok_or(DomainError::FileNotFound)?;
-            if moment_exists(conn, ws, &input.moment_id)? {
-                return Err(DomainError::DuplicateMomentId);
-            }
-            let object =
-                get_file_object(conn, ws, &object_id)?.ok_or(DomainError::StateCorrupt {
-                    reason: "snapshot points at a missing object",
-                })?;
-            Ok((object, before))
-        })?;
-
-        let outcome = self.store.write_with(faults, |tx| {
-            let moment_order = next_moment_order(tx)?;
-            tx.execute(
-                "INSERT INTO moments \
-                 (workspace_id, moment_order, moment_id, version_id, object_id, path, \
-                  recorded_at_ms, operation, after_blob_sha256, before_present, \
-                  before_blob_sha256, before_latest_moment_id, metadata_origin, author_json, \
-                  sync_record_only) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'delete', ?8, 2, ?8, ?9, ?10, ?11, NULL)",
-                params![
-                    ws,
-                    moment_order,
-                    input.moment_id,
-                    input.version_id,
-                    before.object_id,
-                    input.path,
-                    input.now_ms,
-                    before.blob_sha256,
-                    before.latest_moment_id,
-                    input.metadata_origin,
-                    input.author_json,
-                ],
-            )
-            .map_err(DomainError::sql_persist)?;
-            tx.execute(
-                "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-                 VALUES (?1, 'moment.append', ?2)",
-                params![before.object_id, input.now_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
-            tx.execute(
-                "DELETE FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 \
-                 AND path = ?3 AND object_id = ?4",
-                params![ws, input.version_id, input.path, before.object_id],
-            )
-            .map_err(DomainError::sql_persist)?;
-            tx.execute(
-                "DELETE FROM snapshots WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                params![ws, input.version_id, before.object_id],
-            )
-            .map_err(DomainError::sql_persist)?;
-
-            Ok::<_, DomainError>(DeleteResult {
-                object: object.clone(),
-                before: before.clone(),
-                moment: MomentRecord {
-                    moment_order,
-                    moment_id: input.moment_id.clone(),
-                    version_id: input.version_id.clone(),
-                    object_id: before.object_id.clone(),
-                    path: input.path.clone(),
-                    recorded_at_ms: input.now_ms,
-                    operation: MomentOp::Delete,
-                    after_blob_sha256: before.blob_sha256.clone(),
-                    before_present: true,
-                    before_blob_sha256: Some(before.blob_sha256.clone()),
-                    before_latest_moment_id: Some(before.latest_moment_id.clone()),
-                    metadata_origin: input.metadata_origin.clone(),
-                    author_json: input.author_json.clone(),
-                    sync_record_only: false,
-                },
-            })
-        })?;
+        let outcome = self
+            .store
+            .write_with(faults, |tx| delete_text_in_tx(tx, input))?;
         committed(outcome)
     }
 
@@ -1117,18 +808,6 @@ impl<'a> VersionedTextStore<'a> {
     }
 }
 
-/// Pre-transaction decision for a write. The apply payload is boxed so the two
-/// variants stay similarly sized.
-enum WritePrep {
-    Deduped,
-    Apply(Box<WriteApply>),
-}
-
-struct WriteApply {
-    existing_object: Option<String>,
-    before: Option<TextSnapshot>,
-}
-
 struct RollbackPrep {
     moment: MomentRecord,
     before: Option<TextSnapshot>,
@@ -1168,6 +847,313 @@ struct RecordedRequest {
 // ============================================================================
 // Free helpers (SQL over a borrowed connection/transaction).
 // ============================================================================
+
+/// Validate a write and return the input with its path normalized through the
+/// R07 plaintext-storable path floor (a secret/ignored path is rejected here).
+/// Shared by direct writes and merge/resolve writes so plaintext never lands on
+/// a protected path via any route.
+fn normalized_write_input(input: &WriteText) -> Result<WriteText, DomainError> {
+    non_empty(&input.workspace_id, "workspace_id")?;
+    non_empty(&input.version_id, "version_id")?;
+    non_empty(&input.moment_id, "moment_id")?;
+    let mut normalized = input.clone();
+    normalized.path = validate_plaintext_storable_path(&input.path)?;
+    validate_text(&normalized.text)?;
+    Ok(normalized)
+}
+
+pub(crate) fn validate_write_input(input: &WriteText) -> Result<(), DomainError> {
+    normalized_write_input(input).map(|_| ())
+}
+
+/// Validate a delete and return the input with its path normalized through the
+/// R07 addressable-plaintext floor (only an ignored path is rejected — an
+/// existing tracked or secret-shadowed file is still deletable).
+fn normalized_delete_input(input: &DeleteTextFile) -> Result<DeleteTextFile, DomainError> {
+    non_empty(&input.workspace_id, "workspace_id")?;
+    non_empty(&input.version_id, "version_id")?;
+    non_empty(&input.moment_id, "moment_id")?;
+    let mut normalized = input.clone();
+    normalized.path = validate_addressable_plaintext_path(&input.path)?;
+    Ok(normalized)
+}
+
+pub(crate) fn validate_delete_input(input: &DeleteTextFile) -> Result<(), DomainError> {
+    normalized_delete_input(input).map(|_| ())
+}
+
+/// Apply an R05 text write inside a caller-owned compound transaction. R06
+/// uses this seam so the canonical mutation, conflict transition, and durable
+/// materialization intent commit together rather than becoming three writes.
+pub(crate) fn write_text_in_tx(
+    tx: &Transaction<'_>,
+    input: &WriteText,
+) -> Result<WriteResult, DomainError> {
+    let normalized_input = normalized_write_input(input)?;
+    let input = &normalized_input;
+    let ws = &input.workspace_id;
+    if !version_exists(tx, ws, &input.version_id)? {
+        return Err(DomainError::VersionNotFound);
+    }
+
+    let payload_hash = hash_fields(&[
+        input.version_id.as_bytes(),
+        input.path.as_bytes(),
+        input.text.as_bytes(),
+        input.moment_id.as_bytes(),
+        input.object_id.as_bytes(),
+    ]);
+    if let Some(request_id) = &input.request_id
+        && let Some(recorded) = lookup_request(tx, request_id)?
+    {
+        if recorded.payload_hash != payload_hash {
+            return Err(DomainError::IdempotencyKeyReuseMismatch);
+        }
+        return reconstruct_write(tx, input);
+    }
+    if moment_exists(tx, ws, &input.moment_id)? {
+        return Err(DomainError::DuplicateMomentId);
+    }
+
+    let existing_object = alias_object_id(tx, ws, &input.version_id, &input.path)?;
+    let before = match &existing_object {
+        Some(object_id) => get_snapshot(tx, ws, &input.version_id, object_id)?,
+        None => {
+            if input.object_id.is_empty() {
+                return Err(DomainError::InvalidInput {
+                    reason: "object_id must not be empty for a new path",
+                });
+            }
+            if object_exists(tx, ws, &input.object_id)? {
+                return Err(DomainError::InvalidInput {
+                    reason: "object_id is already bound to another object",
+                });
+            }
+            None
+        }
+    };
+    let is_new_object = existing_object.is_none();
+    let object_id = existing_object.unwrap_or_else(|| input.object_id.clone());
+    let blob = text_blob_sha256(&input.text);
+    let before_blob = before.as_ref().map(|s| s.blob_sha256.clone());
+    let before_latest_moment_id = before.as_ref().map(|s| s.latest_moment_id.clone());
+    let moment_order = next_moment_order(tx)?;
+
+    if is_new_object {
+        tx.execute(
+            "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES (?1, ?2, ?3)",
+            params![ws, object_id, input.now_ms],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
+    tx.execute(
+        "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
+        params![blob, input.text.len() as i64, input.text],
+    )
+    .map_err(DomainError::sql_persist)?;
+    tx.execute(
+        "INSERT OR IGNORE INTO path_aliases (workspace_id, version_id, path, object_id) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![ws, input.version_id, input.path, object_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+    tx.execute(
+        "INSERT INTO moments \
+         (workspace_id, moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
+          operation, after_blob_sha256, before_present, before_blob_sha256, \
+          before_latest_moment_id, metadata_origin, author_json, sync_record_only) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'write', ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
+        params![
+            ws,
+            moment_order,
+            input.moment_id,
+            input.version_id,
+            object_id,
+            input.path,
+            input.now_ms,
+            blob,
+            if before.is_some() { 2 } else { 1 },
+            before_blob,
+            before_latest_moment_id,
+            input.metadata_origin,
+            input.author_json,
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    tx.execute(
+        "INSERT INTO snapshots \
+         (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
+          latest_moment_id, metadata_origin) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+         ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET \
+          path = excluded.path, blob_sha256 = excluded.blob_sha256, \
+          updated_at_ms = excluded.updated_at_ms, latest_moment_id = excluded.latest_moment_id, \
+          metadata_origin = excluded.metadata_origin",
+        params![
+            ws,
+            input.version_id,
+            object_id,
+            input.path,
+            blob,
+            input.now_ms,
+            input.moment_id,
+            input.metadata_origin,
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    tx.execute(
+        "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
+         VALUES (?1, 'moment.append', ?2)",
+        params![object_id, input.now_ms],
+    )
+    .map_err(DomainError::sql_persist)?;
+    record_request(
+        tx,
+        input.request_id.as_deref(),
+        &payload_hash,
+        moment_order,
+        input.now_ms,
+    )?;
+
+    Ok(WriteResult {
+        snapshot: TextSnapshot {
+            workspace_id: ws.clone(),
+            version_id: input.version_id.clone(),
+            object_id: object_id.clone(),
+            path: input.path.clone(),
+            text: input.text.clone(),
+            blob_sha256: blob.clone(),
+            updated_at_ms: input.now_ms,
+            latest_moment_id: input.moment_id.clone(),
+            metadata_origin: input.metadata_origin.clone(),
+        },
+        moment: MomentRecord {
+            moment_order,
+            moment_id: input.moment_id.clone(),
+            version_id: input.version_id.clone(),
+            object_id,
+            path: input.path.clone(),
+            recorded_at_ms: input.now_ms,
+            operation: MomentOp::Write,
+            after_blob_sha256: blob,
+            before_present: before.is_some(),
+            before_blob_sha256: before_blob,
+            before_latest_moment_id,
+            metadata_origin: input.metadata_origin.clone(),
+            author_json: input.author_json.clone(),
+            sync_record_only: false,
+        },
+        deduped: false,
+    })
+}
+
+fn reconstruct_write(conn: &Connection, input: &WriteText) -> Result<WriteResult, DomainError> {
+    let moment = get_moment(conn, &input.workspace_id, &input.moment_id)?.ok_or(
+        DomainError::StateCorrupt {
+            reason: "deduped write has no moment",
+        },
+    )?;
+    let text = blob_text(conn, &moment.after_blob_sha256)?.ok_or(DomainError::StateCorrupt {
+        reason: "deduped write moment blob missing",
+    })?;
+    Ok(WriteResult {
+        snapshot: TextSnapshot {
+            workspace_id: input.workspace_id.clone(),
+            version_id: moment.version_id.clone(),
+            object_id: moment.object_id.clone(),
+            path: moment.path.clone(),
+            text,
+            blob_sha256: moment.after_blob_sha256.clone(),
+            updated_at_ms: moment.recorded_at_ms,
+            latest_moment_id: moment.moment_id.clone(),
+            metadata_origin: moment.metadata_origin.clone(),
+        },
+        moment,
+        deduped: true,
+    })
+}
+
+/// Apply an R05 text delete inside a caller-owned compound transaction.
+pub(crate) fn delete_text_in_tx(
+    tx: &Transaction<'_>,
+    input: &DeleteTextFile,
+) -> Result<DeleteResult, DomainError> {
+    let normalized_input = normalized_delete_input(input)?;
+    let input = &normalized_input;
+    let ws = &input.workspace_id;
+    if !version_exists(tx, ws, &input.version_id)? {
+        return Err(DomainError::VersionNotFound);
+    }
+    let object_id = alias_object_id(tx, ws, &input.version_id, &input.path)?
+        .ok_or(DomainError::FileNotFound)?;
+    let before =
+        get_snapshot(tx, ws, &input.version_id, &object_id)?.ok_or(DomainError::FileNotFound)?;
+    if moment_exists(tx, ws, &input.moment_id)? {
+        return Err(DomainError::DuplicateMomentId);
+    }
+    let object = get_file_object(tx, ws, &object_id)?.ok_or(DomainError::StateCorrupt {
+        reason: "snapshot points at a missing object",
+    })?;
+    let moment_order = next_moment_order(tx)?;
+    tx.execute(
+        "INSERT INTO moments \
+         (workspace_id, moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
+          operation, after_blob_sha256, before_present, before_blob_sha256, \
+          before_latest_moment_id, metadata_origin, author_json, sync_record_only) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'delete', ?8, 2, ?8, ?9, ?10, ?11, NULL)",
+        params![
+            ws,
+            moment_order,
+            input.moment_id,
+            input.version_id,
+            before.object_id,
+            input.path,
+            input.now_ms,
+            before.blob_sha256,
+            before.latest_moment_id,
+            input.metadata_origin,
+            input.author_json,
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    tx.execute(
+        "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
+         VALUES (?1, 'moment.append', ?2)",
+        params![before.object_id, input.now_ms],
+    )
+    .map_err(DomainError::sql_persist)?;
+    tx.execute(
+        "DELETE FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 \
+         AND path = ?3 AND object_id = ?4",
+        params![ws, input.version_id, input.path, before.object_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+    tx.execute(
+        "DELETE FROM snapshots WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+        params![ws, input.version_id, before.object_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+
+    Ok(DeleteResult {
+        object,
+        before: before.clone(),
+        moment: MomentRecord {
+            moment_order,
+            moment_id: input.moment_id.clone(),
+            version_id: input.version_id.clone(),
+            object_id: before.object_id.clone(),
+            path: input.path.clone(),
+            recorded_at_ms: input.now_ms,
+            operation: MomentOp::Delete,
+            after_blob_sha256: before.blob_sha256.clone(),
+            before_present: true,
+            before_blob_sha256: Some(before.blob_sha256.clone()),
+            before_latest_moment_id: Some(before.latest_moment_id.clone()),
+            metadata_origin: input.metadata_origin.clone(),
+            author_json: input.author_json.clone(),
+            sync_record_only: false,
+        },
+    })
+}
 
 fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
     match outcome {

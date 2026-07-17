@@ -28,7 +28,9 @@
 #![forbid(unsafe_code)]
 
 pub mod chats;
+pub mod conflicts;
 pub mod error;
+pub mod merge;
 pub mod normalize;
 pub mod records;
 pub mod secrets;
@@ -43,7 +45,19 @@ pub use chats::{
     SaveBookmark, SendMessage, SetFollow, StartChannelThread, channel_slug_for_name,
     decode_feed_cursor, encode_feed_cursor, linked_chat_projection_path,
 };
+pub use conflicts::{
+    ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
+    ConflictRowUpdate, ConflictStatus, ResolveConflictKind, ResolveTextConflict,
+    ResolveTextConflictResult, TextConflict, insert_text_conflict_if_absent,
+    live_state_matches_conflict_current, update_text_conflict_row,
+};
 pub use error::DomainError;
+pub use merge::{
+    CompareTextFileVersions, ComparisonStatus, MAX_MERGE_LINES, MarkdownMergeResult,
+    MergeTextFileFromVersion, MergeTextFileResult, MergeUnchangedReason, VersionFileChange,
+    VersionFileChangeStatus, VersionedTextComparison, comparison_status, file_states_equal,
+    merge_markdown,
+};
 pub use normalize::NormalizedState;
 pub use records::{
     CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord, ListMomentsQuery, MomentOp,

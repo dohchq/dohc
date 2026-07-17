@@ -342,7 +342,19 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // The migration ledger recorded the frozen list: the v2 baseline row, the
     // R08 secrets migration (ordinal 1), the R11a Y.Doc migration (ordinal 2),
     // the R09 chats migration (ordinal 3), the R12 search migration (ordinal 4),
-    // the R05 moment-preimage-link migration (ordinal 5), and the R10 sync
-    // migration (ordinal 6).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 7);
+    // the R05 moment-preimage-link migration (ordinal 5), the R10 sync
+    // migration (ordinal 6), and the R06 conflicts migration (ordinal 7).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 8);
+    let conflict_objects = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE \
+                 (type = 'table' AND name = 'conflicts') OR \
+                 (type = 'index' AND name = 'idx_conflicts_workspace_status')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("fresh conflicts table and index");
+    assert_eq!(conflict_objects, 2);
 }

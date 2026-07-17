@@ -1034,6 +1034,69 @@ CREATE TABLE share_view_cursors (
 /// The `id` of the R10 sync migration.
 pub(crate) const SYNC_MIGRATION_ID: &str = "v1-sync";
 
+/// Ordinal 7 (R06 compare/merge/conflicts shard). Adds durable conflict objects
+/// plus the materialization operation needed by merge and resolution deletes.
+/// `STRICT` + `INTEGER` timestamps follow the R04 baseline convention; TS
+/// `REAL` affinity is internal because conflict rows are never cross-engine
+/// compared by affinity, matching the R08/R09/R11a/R12 precedent.
+const V1_CONFLICTS_DDL: &str = "\
+CREATE TABLE conflicts (
+    workspace_id TEXT NOT NULL,
+    conflict_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    target_version_id TEXT NOT NULL,
+    source_version_id TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    chosen_from TEXT NOT NULL,
+    resolution TEXT,
+    metadata_origin TEXT NOT NULL,
+    metadata_summary TEXT,
+    metadata_correlation_id TEXT,
+    base_exists INTEGER NOT NULL,
+    base_path TEXT NOT NULL,
+    base_object_id TEXT,
+    base_content_kind TEXT DEFAULT 'text',
+    base_blob_sha256 TEXT,
+    base_updated_at_ms INTEGER,
+    base_latest_moment_id TEXT,
+    base_metadata_origin TEXT,
+    base_metadata_summary TEXT,
+    base_metadata_correlation_id TEXT,
+    current_exists INTEGER NOT NULL,
+    current_path TEXT NOT NULL,
+    current_object_id TEXT,
+    current_content_kind TEXT DEFAULT 'text',
+    current_blob_sha256 TEXT,
+    current_updated_at_ms INTEGER,
+    current_latest_moment_id TEXT,
+    current_metadata_origin TEXT,
+    current_metadata_summary TEXT,
+    current_metadata_correlation_id TEXT,
+    incoming_exists INTEGER NOT NULL,
+    incoming_path TEXT NOT NULL,
+    incoming_object_id TEXT,
+    incoming_content_kind TEXT DEFAULT 'text',
+    incoming_blob_sha256 TEXT,
+    incoming_updated_at_ms INTEGER,
+    incoming_latest_moment_id TEXT,
+    incoming_metadata_origin TEXT,
+    incoming_metadata_summary TEXT,
+    incoming_metadata_correlation_id TEXT,
+    PRIMARY KEY (workspace_id, conflict_id),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (base_blob_sha256) REFERENCES blobs(sha256),
+    FOREIGN KEY (current_blob_sha256) REFERENCES blobs(sha256),
+    FOREIGN KEY (incoming_blob_sha256) REFERENCES blobs(sha256)
+) STRICT;
+CREATE INDEX idx_conflicts_workspace_status ON conflicts(workspace_id, status, created_at_ms, conflict_id);
+ALTER TABLE materialization_jobs ADD COLUMN operation TEXT NOT NULL DEFAULT 'write';
+";
+
+/// The `id` of the R06 conflict-object migration.
+pub(crate) const CONFLICTS_MIGRATION_ID: &str = "v1-conflicts";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1084,6 +1147,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: SYNC_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_SYNC_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 7,
+        id: CONFLICTS_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_CONFLICTS_DDL,
         sets_user_version: None,
     },
 ];
@@ -1393,11 +1463,11 @@ mod tests {
     // waiting for a real future schema change.
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     fn two_migrations() -> Vec<Migration> {
-        // The frozen list now ends at ordinal 6 (R10 sync, after R05's ordinal-5
-        // moment preimage links), so a synthetic probe appends at ordinal 7.
+        // The frozen list now ends at ordinal 7 (R06 conflicts), so a synthetic
+        // probe appends at ordinal 8.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 7,
+            ordinal: 8,
             id: "r04-probe",
             kind: MigrationKind::Transactional,
             sql: M2_SQL,
@@ -1517,6 +1587,73 @@ mod tests {
     }
 
     #[test]
+    fn r06_conflicts_migration_upgrades_existing_store_and_creates_index() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_750);
+        let mut conn = open_bare(&path);
+
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..7], &ctx, &NoFaults)
+            .expect("pre-R06 migrations");
+        let before: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'conflicts'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("pre-R06 table probe");
+        assert!(before.is_none());
+
+        let outcome =
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("apply R06");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+        let objects: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE \
+                 (type = 'table' AND name = 'conflicts') OR \
+                 (type = 'index' AND name = 'idx_conflicts_workspace_status')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("R06 objects");
+        assert_eq!(objects, 2);
+        let strict: i64 = conn
+            .query_row(
+                "SELECT strict FROM pragma_table_list('conflicts') WHERE name = 'conflicts'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("strict conflicts table");
+        assert_eq!(strict, 1);
+        let integer_timestamps: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('conflicts') WHERE type = 'INTEGER' AND \
+                 name IN ('created_at_ms', 'updated_at_ms', 'base_updated_at_ms', \
+                 'current_updated_at_ms', 'incoming_updated_at_ms')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("integer conflict timestamps");
+        assert_eq!(integer_timestamps, 5);
+        let operation_column: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('materialization_jobs') \
+                 WHERE name = 'operation' AND dflt_value = '''write'''",
+                [],
+                |row| row.get(0),
+            )
+            .expect("operation column");
+        assert_eq!(operation_column, 1);
+        let ledger: i64 = conn
+            .query_row("SELECT COUNT(*) FROM engine_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("ledger");
+        assert_eq!(ledger, 8);
+    }
+
+    #[test]
     fn crash_before_ledger_commit_rolls_back_and_reopen_recovers() {
         let dir = tempdir();
         let path = dir.join("engine.db");
@@ -1592,10 +1729,10 @@ mod tests {
         // fired before the secrets migration (ordinal 1), so resume applies the
         // secrets migration (1), the Y.Doc migration (2), the chats migration
         // (3), the search migration (4), the moment-link migration (5), the
-        // sync migration (6), AND the probe (7).
+        // sync migration (6), conflicts migration (7), AND the probe (8).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 7 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 8 });
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -1692,7 +1829,7 @@ mod tests {
         }
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 7,
+            ordinal: 8,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
@@ -1710,7 +1847,7 @@ mod tests {
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();
         changed.push(Migration {
-            ordinal: 7,
+            ordinal: 8,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
@@ -1730,7 +1867,7 @@ mod tests {
         // baseline first (transactional), then a non-transactional idempotent step.
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 7,
+            ordinal: 8,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",

@@ -56,6 +56,7 @@ pub use limits::{
     MAX_MATERIALIZE_BYTES, MAX_REPLACE_ATTEMPTS,
 };
 pub use materialize::{
-    JobStatus, MaterializationJob, MaterializationJobSpec, Preimage, enqueue_job,
+    JobStatus, MaterializationJob, MaterializationJobSpec, MaterializationOperation, Preimage,
+    enqueue_delete_job, enqueue_job,
 };
 pub use store::{CompoundWrite, Document, EngineStore, TxnOutcome, WriteOutcome};

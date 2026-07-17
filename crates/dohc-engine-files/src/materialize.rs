@@ -32,7 +32,8 @@
 
 use crate::floor::is_excluded_file;
 use dohc_engine_storage::{
-    EngineStore, FaultInjector, FaultPoint, MaterializationJob, Preimage, StorageError, hex_sha256,
+    EngineStore, FaultInjector, FaultPoint, MaterializationJob, MaterializationOperation, Preimage,
+    StorageError, hex_sha256,
 };
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -294,6 +295,10 @@ pub fn materialize_one(
         return Ok(JobOutcome::Superseded);
     }
 
+    if job.operation == MaterializationOperation::Delete {
+        return materialize_delete(store, &target, job, policy, now_ms, faults);
+    }
+
     // Load the content blob (integrity-verified on read).
     let content = store.get_binary_blob(&job.content_sha256)?.ok_or_else(|| {
         MaterializeError::MissingBlob {
@@ -376,6 +381,41 @@ pub fn materialize_one(
         // Renamed but not marked complete. Startup replay: the target now equals
         // the desired content, so step 1 short-circuits and marks complete —
         // exactly-once, no second write.
+        return Ok(JobOutcome::Crashed(
+            FaultPoint::MaterializeAfterRenameBeforeComplete,
+        ));
+    }
+    store.mark_materialization_complete(&job.job_id, now_ms)?;
+    Ok(JobOutcome::Completed)
+}
+
+fn materialize_delete(
+    store: &EngineStore,
+    target: &Path,
+    job: &MaterializationJob,
+    policy: DurabilityPolicy,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<JobOutcome, MaterializeError> {
+    let current = read_current_no_follow(target)?;
+    if matches!(current, CurrentTarget::Absent) {
+        store.mark_materialization_complete(&job.job_id, now_ms)?;
+        return Ok(JobOutcome::AlreadyMaterialized);
+    }
+    if should_crash(faults, FaultPoint::MaterializeBeforePreimageRevalidate) {
+        return Ok(JobOutcome::Crashed(
+            FaultPoint::MaterializeBeforePreimageRevalidate,
+        ));
+    }
+    let current_now = read_current_no_follow(target)?;
+    if !preimage_matches(&job.preimage, &current_now) {
+        store.mark_materialization_conflict(&job.job_id, now_ms)?;
+        return Ok(JobOutcome::Conflict);
+    }
+    std::fs::remove_file(target).map_err(|err| MaterializeError::io(target, &err))?;
+    // Make the unlink durable before marking the job complete.
+    sync_parent_dir(target.parent(), policy)?;
+    if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterRenameBeforeComplete,
         ));
