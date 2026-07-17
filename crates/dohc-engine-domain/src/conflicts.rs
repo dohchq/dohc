@@ -260,6 +260,21 @@ pub fn insert_text_conflict_if_absent(
     if exists.is_some() {
         return Ok(false);
     }
+    // Mirror TS `insertConflictFileState`: persist each existing text side's blob
+    // so the row's blob FKs hold on a peer that has not yet materialized them.
+    for side in [&conflict.base, &conflict.current, &conflict.incoming] {
+        if let Some(snapshot) = &side.snapshot {
+            tx.execute(
+                "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
+                params![
+                    snapshot.blob_sha256,
+                    snapshot.text.len() as i64,
+                    snapshot.text
+                ],
+            )
+            .map_err(DomainError::sql_persist)?;
+        }
+    }
     let base = side_bindings(&conflict.base);
     let current = side_bindings(&conflict.current);
     let incoming = side_bindings(&conflict.incoming);

@@ -8,7 +8,8 @@ use dohc_engine_domain::{
     ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus, CreateNamedVersion,
     DeleteTextFile, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
     MergeUnchangedReason, NoFaults, ResolveConflictKind, ResolveTextConflict, TextConflict,
-    VersionFileChangeStatus, VersionedTextStore, WriteText, insert_text_conflict_if_absent,
+    TextSnapshot, VersionFileChangeStatus, VersionedTextStore, WriteText,
+    insert_text_conflict_if_absent, store::text_blob_sha256,
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs};
 use dohc_engine_storage::{EngineStore, FaultPoint, JobStatus, MaterializationOperation, Preimage};
@@ -511,6 +512,61 @@ fn insert_text_conflict_rejects_binary_side() {
         .write_with(&NO_FAULTS, |tx| insert_text_conflict_if_absent(tx, &record))
         .expect_err("binary side must fail closed");
     assert_eq!(error.code(), "invalid-input");
+}
+
+#[test]
+fn insert_text_conflict_persists_side_blobs_for_replicated_conflict() {
+    // Mirror an R10 peer receiving a conflict.open whose side text blobs it has
+    // never materialized: the blob FKs must hold because the insert persists them
+    // (matching TS insertConflictFileState's putBlob), not rely on prior writes.
+    let (_scratch, mut store) = open();
+    let incoming_text = "incoming-from-peer";
+    let side = TextSnapshot {
+        workspace_id: WS.to_owned(),
+        version_id: "feat".to_owned(),
+        object_id: "o-peer".to_owned(),
+        path: "peer.md".to_owned(),
+        text: incoming_text.to_owned(),
+        blob_sha256: text_blob_sha256(incoming_text),
+        updated_at_ms: 10,
+        latest_moment_id: "m-peer".to_owned(),
+        metadata_origin: "sync".to_owned(),
+    };
+    let record = TextConflict {
+        conflict_id: "replicated".to_owned(),
+        workspace_id: WS.to_owned(),
+        path: "peer.md".to_owned(),
+        target_version_id: "main".to_owned(),
+        source_version_id: "feat".to_owned(),
+        created_at_ms: 200,
+        updated_at_ms: 200,
+        status: ConflictStatus::Open,
+        chosen_from: ConflictChoice::Current,
+        resolution: None,
+        metadata: ConflictMetadata::origin("sync"),
+        base: ConflictFileState::text("peer.md", None),
+        current: ConflictFileState::text("peer.md", None),
+        incoming: ConflictFileState::text("peer.md", Some(side)),
+    };
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            assert!(insert_text_conflict_if_absent(tx, &record)?);
+            Ok::<_, DomainError>(())
+        })
+        .expect("insert with unmaterialized side blob");
+
+    let vt = VersionedTextStore::new(&mut store);
+    let conflicts = vt.list_text_conflicts(WS, None).expect("list");
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(
+        conflicts[0]
+            .incoming
+            .snapshot
+            .as_ref()
+            .expect("incoming side")
+            .text,
+        incoming_text
+    );
 }
 
 #[test]
