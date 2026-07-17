@@ -839,6 +839,74 @@ WHERE child.parent_message_id IS NOT NULL
 /// The `id` of the R09 chats-domain migration.
 pub(crate) const CHATS_MIGRATION_ID: &str = "v1-chats";
 
+/// Ordinal 4 (R12 search shard, appended via the migration-append capability
+/// contract). Adds the full-text search surface — two FTS5 virtual tables over
+/// file text and chat-message text, plus the durable per-version index-state
+/// marker — whose logical shapes match the TS engine's `engine_search_files_fts`
+/// / `engine_search_chat_messages_fts` / `engine_search_index_state`
+/// (`engineDbSchema.ts` `ENGINE_SEARCH_INDEX_DDL`).
+///
+/// **FTS5 config is pinned byte-for-byte to the TS oracle**: the column list
+/// (UNINDEXED metadata columns + one indexed `text` column) and
+/// `tokenize='trigram'` (no options) are reproduced verbatim so the trigram
+/// prefilter and the `rowid`-ordered candidate stream behave identically on
+/// both engines. FTS5 + the trigram tokenizer are compiled into the bundled
+/// SQLite unconditionally (`libsqlite3-sys` 0.35 `build.rs` sets
+/// `-DSQLITE_ENABLE_FTS5`; the trigram tokenizer ships since SQLite 3.34 and the
+/// bundle is 3.50.2) — no extra `rusqlite` feature is required, and the
+/// migration's own `quick_check` gate proves the CREATE VIRTUAL TABLE succeeded
+/// on THIS build before the ledger row is written. A build lacking FTS5 would
+/// fail this migration closed rather than silently ship a searchless store.
+///
+/// `engine_search_index_state.indexed_at_ms` is `INTEGER` here where TS uses
+/// `REAL`; the value is an engine-internal repair marker (never cross-engine
+/// compared), so the affinity follows the R04/R08/R11a/R09 `INTEGER`-timestamp
+/// convention. Unlike the TS engine's lazy-additive search tables (created on
+/// open, absent = "no search yet"), the Rust migration ledger always creates
+/// them, so their presence is a hard v2 invariant enforced in `schema.rs`.
+const V1_SEARCH_DDL: &str = "\
+-- File-text FTS index. One row per (workspace, version, object) currently
+-- searchable text file; UNINDEXED metadata columns are stored-but-not-tokenized
+-- so a policy re-check and dedup can read them back without a join. A regular
+-- (non-external-content) FTS5 table, so ordinary DELETE ... WHERE on the
+-- UNINDEXED keys removes a row. Trigram tokenizer, no options — matches TS.
+CREATE VIRTUAL TABLE engine_search_files_fts USING fts5(
+    workspace_id UNINDEXED,
+    version_id UNINDEXED,
+    object_id UNINDEXED,
+    path UNINDEXED,
+    text,
+    tokenize='trigram'
+);
+
+-- Chat-message FTS index. One row per (workspace, thread, message); the
+-- per-thread header row uses the sentinel message id '__thread__'. Chat is not
+-- versioned, so rows are workspace-scoped (no version_id column).
+CREATE VIRTUAL TABLE engine_search_chat_messages_fts USING fts5(
+    workspace_id UNINDEXED,
+    thread_id UNINDEXED,
+    message_id UNINDEXED,
+    text,
+    tokenize='trigram'
+);
+
+-- Durable per-version index generation. A committed row for (workspace,
+-- version) names a fully-built file index generation; its ABSENCE forces
+-- ensure_search_index_for_version to (re)build. A degraded-file-policy window
+-- deliberately leaves this unset so fixing the policy triggers a full rebuild
+-- (the fail-closed freeze-not-drop model). Committed in the SAME transaction as
+-- the FTS rows it certifies, so a query never observes a torn mid-index state.
+CREATE TABLE engine_search_index_state (
+    workspace_id  TEXT    NOT NULL,
+    version_id    TEXT    NOT NULL,
+    indexed_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, version_id)
+) STRICT;
+";
+
+/// The `id` of the R12 search migration.
+pub(crate) const SEARCH_MIGRATION_ID: &str = "v1-search";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -868,6 +936,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: CHATS_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_CHATS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 4,
+        id: SEARCH_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SEARCH_DDL,
         sets_user_version: None,
     },
 ];
@@ -1177,11 +1252,11 @@ mod tests {
     // waiting for a real future schema change.
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     fn two_migrations() -> Vec<Migration> {
-        // The frozen list now ends at ordinal 3 (R09 chats), so a synthetic
-        // probe appends at ordinal 4.
+        // The frozen list now ends at ordinal 4 (R12 search), so a synthetic
+        // probe appends at ordinal 5.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 4,
+            ordinal: 5,
             id: "r04-probe",
             kind: MigrationKind::Transactional,
             sql: M2_SQL,
@@ -1296,10 +1371,10 @@ mod tests {
         // Resume: baseline is skipped (idempotent); the between-steps crash
         // fired before the secrets migration (ordinal 1), so resume applies the
         // secrets migration (1), the Y.Doc migration (2), the chats migration
-        // (3), AND the probe (4).
+        // (3), the search migration (4), AND the probe (5).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 4 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 5 });
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -1396,7 +1471,7 @@ mod tests {
         }
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 4,
+            ordinal: 5,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
@@ -1414,7 +1489,7 @@ mod tests {
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();
         changed.push(Migration {
-            ordinal: 4,
+            ordinal: 5,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
@@ -1434,7 +1509,7 @@ mod tests {
         // baseline first (transactional), then a non-transactional idempotent step.
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 4,
+            ordinal: 5,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",

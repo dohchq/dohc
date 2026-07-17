@@ -90,6 +90,15 @@ const REQUIRED_TABLES: &[&str] = &[
     "agent_run_records",
     "run_message_links",
     "chat_dispatch_pause",
+    // R12 search tables (migration ordinal 4). The two FTS5 virtual tables show
+    // up in sqlite_schema with type='table', so the same presence probe applies;
+    // like the chats tables above, the Rust ledger always creates them, so
+    // absence is state-corrupt (not the TS engine's lazy-additive "no search
+    // yet"). Their internal FTS5 shadow tables are not listed — only the
+    // caller-facing tables are invariants.
+    "engine_search_files_fts",
+    "engine_search_chat_messages_fts",
+    "engine_search_index_state",
 ];
 
 /// How an existing file was classified by the fingerprint fence.
