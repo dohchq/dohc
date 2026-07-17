@@ -51,6 +51,7 @@ type SyncRelayRoute =
   | { route: "blob"; workspaceId: string; sha256: string }
   | { route: "blob-have"; workspaceId: string }
   | { route: "gc"; workspaceId: string }
+  | { route: "epoch"; workspaceId: string }
   | { route: "keys"; workspaceId: string }
   | { route: "log"; workspaceId: string }
   | { route: "shares-create"; workspaceId: string }
@@ -87,6 +88,8 @@ const MAX_ORIGIN_ID_CHARS = 256;
 const MAX_OP_KIND_CHARS = 128;
 const MAX_EMAIL_CHARS = 320;
 const MAX_SHARE_ID_CHARS = 128;
+const MAX_EPOCH_CHARS = 512;
+const MAX_STREAM_IDENTITY_CHARS = 512;
 
 export function createSyncRelayHandler({
   storage,
@@ -265,6 +268,7 @@ export function createSyncRelayHandler({
           createdAtMs: nowMs(),
         });
         if (result === "not-owner") throw notFound();
+        enforceWorkspaceIdentity(storage, workspaceId, parseOptionalWorkspaceIdentity(input));
         return jsonResponse({ ok: true, workspaceId, created: result === "created" });
       }
 
@@ -535,6 +539,30 @@ export function createSyncRelayHandler({
         );
       }
 
+      if (route.route === "epoch" && request.method === "POST") {
+        const input = await readJsonObject(request);
+        const replicationEpoch = parseString(
+          input.replicationEpoch,
+          "replicationEpoch",
+          MAX_EPOCH_CHARS,
+        );
+        const streamIdentity = parseString(
+          input.streamIdentity,
+          "streamIdentity",
+          MAX_STREAM_IDENTITY_CHARS,
+        );
+        const result = storage.rotateWorkspaceIdentity({
+          workspaceId: route.workspaceId,
+          ownerUserId: actor.userId,
+          replicationEpoch,
+          streamIdentity,
+        });
+        if (result === "not-owner") throw notFound();
+        if (result === "unchanged") throw epochUnchanged();
+        return jsonResponse({ ok: true, replicationEpoch, streamIdentity });
+      }
+      if (route.route === "epoch") throw methodNotAllowed();
+
       if (route.route === "gc" && request.method === "POST") {
         const result = await storage.collectUnreferencedBlobs(route.workspaceId, {
           nowMs: nowMs(),
@@ -753,6 +781,11 @@ export function createSyncRelayHandler({
 
       if (route.route === "log" && request.method === "POST") {
         const input = await readJsonObject(request);
+        enforceWorkspaceIdentity(
+          storage,
+          route.workspaceId,
+          parseOptionalWorkspaceIdentity(input),
+        );
         const originId = parseString(input.originId, "originId", MAX_ORIGIN_ID_CHARS);
         if (!Array.isArray(input.ops)) throw badRequest("ops must be an array");
         if (input.ops.length > MAX_OPS_PER_REQUEST) throw badRequest("too many ops");
@@ -781,6 +814,11 @@ export function createSyncRelayHandler({
 
       if (route.route === "log" && request.method === "GET") {
         const url = new URL(request.url);
+        enforceWorkspaceIdentity(
+          storage,
+          route.workspaceId,
+          parseOptionalWorkspaceIdentityQuery(url.searchParams),
+        );
         const since = parseCursor(url.searchParams.get("since"));
         const limit = parseLimit(url.searchParams.get("limit"));
         const page = storage.fetchLogPage({
@@ -843,6 +881,9 @@ function parseRoute(request: Request): SyncRelayRoute {
   }
   if (parts.length === 3 && parts[2] === "log") {
     return { route: "log", workspaceId };
+  }
+  if (parts.length === 3 && parts[2] === "epoch") {
+    return { route: "epoch", workspaceId };
   }
   if (parts.length === 3 && parts[2] === "presence") {
     return { route: "presence", workspaceId };
@@ -915,6 +956,66 @@ function parseString(value: unknown, name: string, maxChars: number): string {
     throw badRequest(`${name} must not contain control characters`);
   }
   return value;
+}
+
+interface OptionalWorkspaceIdentity {
+  replicationEpoch: string;
+  streamIdentity: string;
+}
+
+function parseOptionalWorkspaceIdentity(
+  input: Record<string, unknown>,
+): OptionalWorkspaceIdentity | null {
+  return parseOptionalWorkspaceIdentityValues(
+    input.replicationEpoch,
+    input.streamIdentity,
+  );
+}
+
+function parseOptionalWorkspaceIdentityQuery(
+  searchParams: URLSearchParams,
+): OptionalWorkspaceIdentity | null {
+  return parseOptionalWorkspaceIdentityValues(
+    searchParams.has("replicationEpoch")
+      ? searchParams.get("replicationEpoch")
+      : undefined,
+    searchParams.has("streamIdentity") ? searchParams.get("streamIdentity") : undefined,
+  );
+}
+
+function parseOptionalWorkspaceIdentityValues(
+  replicationEpochValue: unknown,
+  streamIdentityValue: unknown,
+): OptionalWorkspaceIdentity | null {
+  const hasReplicationEpoch = replicationEpochValue !== undefined;
+  const hasStreamIdentity = streamIdentityValue !== undefined;
+  if (!hasReplicationEpoch && !hasStreamIdentity) return null;
+  if (hasReplicationEpoch !== hasStreamIdentity) {
+    throw badRequest("replicationEpoch and streamIdentity must be supplied together");
+  }
+  return {
+    replicationEpoch: parseString(
+      replicationEpochValue,
+      "replicationEpoch",
+      MAX_EPOCH_CHARS,
+    ),
+    streamIdentity: parseString(
+      streamIdentityValue,
+      "streamIdentity",
+      MAX_STREAM_IDENTITY_CHARS,
+    ),
+  };
+}
+
+function enforceWorkspaceIdentity(
+  storage: SyncRelayStorage,
+  workspaceId: string,
+  identity: OptionalWorkspaceIdentity | null,
+): void {
+  if (identity === null) return;
+  const result = storage.claimWorkspaceIdentity({ workspaceId, ...identity });
+  if (result === "epoch-superseded") throw epochSuperseded();
+  if (result === "stream-mismatch") throw streamIdentityMismatch();
 }
 
 function parseLogOp(value: unknown): SyncRelayLogInput {
@@ -1182,6 +1283,18 @@ class HttpError extends Error {
 
 function badRequest(message: string): HttpError {
   return new HttpError(400, "bad_request", message);
+}
+
+function epochSuperseded(): HttpError {
+  return new HttpError(409, "epoch_superseded", "replication epoch has been superseded");
+}
+
+function streamIdentityMismatch(): HttpError {
+  return new HttpError(409, "stream_identity_mismatch", "stream identity does not match");
+}
+
+function epochUnchanged(): HttpError {
+  return new HttpError(409, "epoch_unchanged", "workspace identity is unchanged");
 }
 
 function selfShare(): HttpError {

@@ -86,6 +86,26 @@ function op(originSeq: number, payload: Record<string, unknown> = { n: originSeq
   return { originSeq, opKind: "opaque.test", payload, recordedAtMs: 1000 + originSeq };
 }
 
+const EPOCH_1 = "epoch-1";
+const STREAM_1 = "stream-1";
+const EPOCH_2 = "epoch-2";
+const STREAM_2 = "stream-2";
+
+function withIdentity(
+  body: Record<string, unknown>,
+  replicationEpoch = EPOCH_1,
+  streamIdentity = STREAM_1,
+): Record<string, unknown> {
+  return { ...body, replicationEpoch, streamIdentity };
+}
+
+function identityQuery(
+  replicationEpoch = EPOCH_1,
+  streamIdentity = STREAM_1,
+): string {
+  return `replicationEpoch=${encodeURIComponent(replicationEpoch)}&streamIdentity=${encodeURIComponent(streamIdentity)}`;
+}
+
 function keyEnvelopeJson(saltBase64: string): string {
   return JSON.stringify({
     format: "dohc-key-envelope-v1",
@@ -124,6 +144,7 @@ describe("sync relay handler", () => {
       request(null, "/sync/workspace-a/blobs/have", jsonBody({ sha256s: [blobSha] })),
       request(null, "/sync/workspace-a/keys", { method: "GET" }),
       request(null, "/sync/workspace-a/keys", { method: "PUT", body: "{}" }),
+      request(null, "/sync/workspace-a/epoch", jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 })),
       request(null, "/sync/workspace-a/log", jsonBody({ originId: "origin-a", ops: [op(0)] })),
       request(null, "/sync/workspace-a/log?since=0", { method: "GET" }),
     ];
@@ -154,6 +175,7 @@ describe("sync relay handler", () => {
       (ws: string) => request("intruder", `/sync/${ws}/blobs/have`, jsonBody({ sha256s: [blobSha] })),
       (ws: string) => request("intruder", `/sync/${ws}/keys`, { method: "GET" }),
       (ws: string) => request("intruder", `/sync/${ws}/keys`, { method: "PUT", body: "{}" }),
+      (ws: string) => request("intruder", `/sync/${ws}/epoch`, jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 })),
       (ws: string) => request("intruder", `/sync/${ws}/log`, jsonBody({ originId: "origin-b", ops: [op(0)] })),
       (ws: string) => request("intruder", `/sync/${ws}/log?since=0`, { method: "GET" }),
     ];
@@ -859,6 +881,443 @@ describe("sync relay handler", () => {
     // The original envelope is intact (the rejected rotation changed nothing).
     const current = await h(request("a", "/sync/workspace-a/keys", { method: "GET" }));
     expect(await current.text()).toBe(first);
+  });
+});
+
+describe("sync relay epoch and stream identity enforcement", () => {
+  it("first identity-bearing push claims the workspace identity and matching pushes keep it", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    expect(storage.getWorkspaceIdentity("workspace-a")).toBeNull();
+
+    const first = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody(withIdentity({ originId: "origin-a", ops: [op(0)] })),
+      ),
+    );
+    expect(first.status).toBe(200);
+    expect(await json(first)).toMatchObject({ inserted: 1, skipped: 0 });
+    expect(storage.getWorkspaceIdentity("workspace-a")).toEqual({
+      replicationEpoch: EPOCH_1,
+      streamIdentity: STREAM_1,
+    });
+
+    const second = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody(withIdentity({ originId: "origin-a", ops: [op(1)] })),
+      ),
+    );
+    expect(second.status).toBe(200);
+    expect(await json(second)).toMatchObject({ inserted: 1, skipped: 0 });
+    expect(storage.getWorkspaceIdentity("workspace-a")).toEqual({
+      replicationEpoch: EPOCH_1,
+      streamIdentity: STREAM_1,
+    });
+  });
+
+  it("rejects superseded epoch pushes and pulls while the rotated epoch remains usable", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/log",
+            jsonBody(withIdentity({ originId: "origin-a", ops: [op(0)] })),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const rotated = await h(
+      request(
+        "a",
+        "/sync/workspace-a/epoch",
+        jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 }),
+      ),
+    );
+    expect(rotated.status).toBe(200);
+    expect(await json(rotated)).toMatchObject({
+      replicationEpoch: EPOCH_2,
+      streamIdentity: STREAM_2,
+    });
+
+    const stalePush = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody(withIdentity({ originId: "origin-a", ops: [op(1)] })),
+      ),
+    );
+    expect(stalePush.status).toBe(409);
+    expect(await json(stalePush)).toMatchObject({ code: "epoch_superseded" });
+    const stalePull = await h(
+      request("a", `/sync/workspace-a/log?since=0&${identityQuery()}`, { method: "GET" }),
+    );
+    expect(stalePull.status).toBe(409);
+    expect(await json(stalePull)).toMatchObject({ code: "epoch_superseded" });
+
+    const currentPush = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody(
+          withIdentity({ originId: "origin-a", ops: [op(1)] }, EPOCH_2, STREAM_2),
+        ),
+      ),
+    );
+    expect(currentPush.status).toBe(200);
+    const currentPull = await h(
+      request(
+        "a",
+        `/sync/workspace-a/log?since=0&${identityQuery(EPOCH_2, STREAM_2)}`,
+        { method: "GET" },
+      ),
+    );
+    expect(currentPull.status).toBe(200);
+    expect((await json(currentPull)).ops).toHaveLength(2);
+  });
+
+  it("rejects push and pull stream mismatches without corrupting the active identity", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/log",
+            jsonBody(withIdentity({ originId: "origin-a", ops: [op(0)] })),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const wrongPush = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody(withIdentity({ originId: "origin-a", ops: [op(1)] }, EPOCH_1, "wrong-stream")),
+      ),
+    );
+    expect(wrongPush.status).toBe(409);
+    expect(await json(wrongPush)).toMatchObject({ code: "stream_identity_mismatch" });
+    const wrongPull = await h(
+      request(
+        "a",
+        `/sync/workspace-a/log?since=0&${identityQuery(EPOCH_1, "wrong-stream")}`,
+        { method: "GET" },
+      ),
+    );
+    expect(wrongPull.status).toBe(409);
+    expect(await json(wrongPull)).toMatchObject({ code: "stream_identity_mismatch" });
+
+    const legitimate = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody(withIdentity({ originId: "origin-a", ops: [op(1)] })),
+      ),
+    );
+    expect(legitimate.status).toBe(200);
+    expect(storage.getWorkspaceIdentity("workspace-a")).toEqual({
+      replicationEpoch: EPOCH_1,
+      streamIdentity: STREAM_1,
+    });
+  });
+
+  it("rejects an old cursor when it is presented with superseded epoch credentials", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/log",
+            jsonBody(withIdentity({ originId: "origin-a", ops: [op(0)] })),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    const oldPage = await json(
+      await h(
+        request("a", `/sync/workspace-a/log?since=0&${identityQuery()}`, { method: "GET" }),
+      ),
+    );
+    expect(oldPage.nextCursor).toBe(1);
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/epoch",
+            jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const staleCursor = await h(
+      request(
+        "a",
+        `/sync/workspace-a/log?since=${String(oldPage.nextCursor)}&${identityQuery()}`,
+        { method: "GET" },
+      ),
+    );
+    expect(staleCursor.status).toBe(409);
+    expect(await json(staleCursor)).toMatchObject({ code: "epoch_superseded" });
+  });
+
+  it("hides epoch rotation from non-owners and rejects a no-op rotation", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/log",
+            jsonBody(withIdentity({ originId: "origin-a", ops: [] })),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const nonOwner = await h(
+      request(
+        "intruder",
+        "/sync/workspace-a/epoch",
+        jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 }),
+      ),
+    );
+    const absent = await h(
+      request(
+        "intruder",
+        "/sync/workspace-absent/epoch",
+        jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 }),
+      ),
+    );
+    expect(nonOwner.status).toBe(404);
+    expect(await nonOwner.text()).toBe(await absent.text());
+
+    const unchanged = await h(
+      request(
+        "a",
+        "/sync/workspace-a/epoch",
+        jsonBody({ replicationEpoch: EPOCH_1, streamIdentity: STREAM_1 }),
+      ),
+    );
+    expect(unchanged.status).toBe(409);
+    expect(await json(unchanged)).toMatchObject({ code: "epoch_unchanged" });
+  });
+
+  it("rejects partial identities on push, pull, and workspace claim", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const partials: Array<Record<string, unknown>> = [
+      { replicationEpoch: EPOCH_1 },
+      { streamIdentity: STREAM_1 },
+    ];
+    for (const partial of partials) {
+      const push = await h(
+        request(
+          "a",
+          "/sync/workspace-a/log",
+          jsonBody({ originId: "origin-a", ops: [op(0)], ...partial }),
+        ),
+      );
+      expect(push.status).toBe(400);
+
+      const [name, value] = Object.entries(partial)[0]!;
+      const pull = await h(
+        request(
+          "a",
+          `/sync/workspace-a/log?since=0&${name}=${encodeURIComponent(String(value))}`,
+          { method: "GET" },
+        ),
+      );
+      expect(pull.status).toBe(400);
+
+      const claim = await h(
+        request(
+          "a",
+          "/sync/workspaces",
+          jsonBody({ workspaceId: "workspace-a", ...partial }),
+        ),
+      );
+      expect(claim.status).toBe(400);
+    }
+    expect(storage.getWorkspaceIdentity("workspace-a")).toBeNull();
+  });
+
+  it("keeps legacy push and pull identity-free after the workspace identity rotates", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/log",
+            jsonBody(withIdentity({ originId: "identity-origin", ops: [] })),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await h(
+          request(
+            "a",
+            "/sync/workspace-a/epoch",
+            jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 }),
+          ),
+        )
+      ).status,
+    ).toBe(200);
+
+    const legacyPush = await h(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody({ originId: "legacy-origin", ops: [op(0)] }),
+      ),
+    );
+    expect(legacyPush.status).toBe(200);
+    expect(await json(legacyPush)).toMatchObject({ inserted: 1, skipped: 0 });
+    const legacyPull = await h(
+      request("a", "/sync/workspace-a/log?since=0", { method: "GET" }),
+    );
+    expect(legacyPull.status).toBe(200);
+    expect((await json(legacyPull)).ops).toHaveLength(1);
+    expect(storage.getWorkspaceIdentity("workspace-a")).toEqual({
+      replicationEpoch: EPOCH_2,
+      streamIdentity: STREAM_2,
+    });
+  });
+
+  it("preserves dedup, reorder recovery, and partition isolation under a valid identity", async () => {
+    const storage = await testStorage();
+    const h = handler(storage);
+    await createWorkspace(h);
+    const push = (originId: string, ops: ReturnType<typeof op>[]) =>
+      h(
+        request(
+          "a",
+          "/sync/workspace-a/log",
+          jsonBody(withIdentity({ originId, ops })),
+        ),
+      );
+
+    expect((await push("origin-a", [op(0), op(1)])).status).toBe(200);
+    const duplicate = await push("origin-a", [op(0), op(1)]);
+    expect(duplicate.status).toBe(200);
+    expect(await json(duplicate)).toMatchObject({ inserted: 0, skipped: 2 });
+
+    const reorderedHigh = await push("origin-b", [op(1, { origin: "b", n: 1 })]);
+    expect(reorderedHigh.status).toBe(409);
+    expect((await push("origin-b", [op(0, { origin: "b", n: 0 })])).status).toBe(200);
+    expect((await push("origin-b", [op(1, { origin: "b", n: 1 })])).status).toBe(200);
+
+    // origin-partitioned never reaches the relay; another origin continues
+    // independently and is accepted under the same workspace identity.
+    expect((await push("origin-connected", [op(0, { connected: true })])).status).toBe(200);
+    const pulled = await h(
+      request("a", `/sync/workspace-a/log?since=0&${identityQuery()}`, { method: "GET" }),
+    );
+    expect(pulled.status).toBe(200);
+    const rows = (await json(pulled)).ops as Array<{ originId: string; originSeq: number }>;
+    expect(rows.map((row) => [row.originId, row.originSeq])).toEqual([
+      ["origin-a", 0],
+      ["origin-a", 1],
+      ["origin-b", 0],
+      ["origin-b", 1],
+      ["origin-connected", 0],
+    ]);
+    expect(rows.some((row) => row.originId === "origin-partitioned")).toBe(false);
+  });
+
+  it("persists active and superseded identities across a relay restart", async () => {
+    const root = await tempRoot("epoch-restart");
+    const dbPath = join(root, "relay.sqlite");
+    const firstStorage = openSyncRelayStorage(dbPath);
+    try {
+      const firstHandler = handler(firstStorage);
+      await createWorkspace(firstHandler);
+      expect(
+        (
+          await firstHandler(
+            request(
+              "a",
+              "/sync/workspace-a/log",
+              jsonBody(withIdentity({ originId: "origin-a", ops: [] })),
+            ),
+          )
+        ).status,
+      ).toBe(200);
+      expect(
+        (
+          await firstHandler(
+            request(
+              "a",
+              "/sync/workspace-a/epoch",
+              jsonBody({ replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 }),
+            ),
+          )
+        ).status,
+      ).toBe(200);
+      const staleBeforeRestart = await firstHandler(
+        request(
+          "a",
+          "/sync/workspace-a/log",
+          jsonBody(withIdentity({ originId: "origin-a", ops: [op(0)] })),
+        ),
+      );
+      expect(staleBeforeRestart.status).toBe(409);
+      expect(await json(staleBeforeRestart)).toMatchObject({ code: "epoch_superseded" });
+    } finally {
+      firstStorage.close();
+    }
+
+    const reopenedStorage = openSyncRelayStorage(dbPath);
+    storages.push(reopenedStorage);
+    const reopenedHandler = handler(reopenedStorage);
+    expect(reopenedStorage.getWorkspaceIdentity("workspace-a")).toEqual({
+      replicationEpoch: EPOCH_2,
+      streamIdentity: STREAM_2,
+    });
+    const staleAfterRestart = await reopenedHandler(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody(withIdentity({ originId: "origin-a", ops: [op(0)] })),
+      ),
+    );
+    expect(staleAfterRestart.status).toBe(409);
+    expect(await json(staleAfterRestart)).toMatchObject({ code: "epoch_superseded" });
+    const currentAfterRestart = await reopenedHandler(
+      request(
+        "a",
+        "/sync/workspace-a/log",
+        jsonBody(
+          withIdentity({ originId: "origin-a", ops: [op(0)] }, EPOCH_2, STREAM_2),
+        ),
+      ),
+    );
+    expect(currentAfterRestart.status).toBe(200);
   });
 });
 

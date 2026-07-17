@@ -68,6 +68,19 @@ export interface SyncRelayShareRow {
   revokedAtMs: number | null;
 }
 
+export interface WorkspaceSyncIdentity {
+  replicationEpoch: string;
+  streamIdentity: string;
+}
+
+export type ClaimWorkspaceIdentityResult =
+  | "claimed"
+  | "matched"
+  | "epoch-superseded"
+  | "stream-mismatch";
+
+export type RotateWorkspaceIdentityResult = "rotated" | "not-owner" | "unchanged";
+
 export interface SyncRelayStorage {
   close(): void;
   claimWorkspace(input: {
@@ -75,6 +88,18 @@ export interface SyncRelayStorage {
     ownerUserId: string;
     createdAtMs: number;
   }): "created" | "owned" | "not-owner";
+  getWorkspaceIdentity(workspaceId: string): WorkspaceSyncIdentity | null;
+  claimWorkspaceIdentity(input: {
+    workspaceId: string;
+    replicationEpoch: string;
+    streamIdentity: string;
+  }): ClaimWorkspaceIdentityResult;
+  rotateWorkspaceIdentity(input: {
+    workspaceId: string;
+    ownerUserId: string;
+    replicationEpoch: string;
+    streamIdentity: string;
+  }): RotateWorkspaceIdentityResult;
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean;
   putBlob(input: {
     workspaceId: string;
@@ -214,7 +239,22 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       CREATE TABLE IF NOT EXISTS sync_relay_workspaces (
         workspace_id TEXT PRIMARY KEY,
         owner_user_id TEXT NOT NULL,
-        created_at_ms INTEGER NOT NULL
+        created_at_ms INTEGER NOT NULL,
+        replication_epoch TEXT,
+        stream_identity TEXT
+      );
+
+      -- Every epoch that stops being active remains durable here. This makes
+      -- stale pre-reset credentials permanently identifiable after rotation.
+      CREATE TABLE IF NOT EXISTS sync_relay_epoch_supersessions (
+        workspace_id TEXT NOT NULL,
+        replication_epoch TEXT NOT NULL,
+        stream_identity TEXT NOT NULL,
+        superseded_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (workspace_id, replication_epoch),
+        FOREIGN KEY (workspace_id)
+          REFERENCES sync_relay_workspaces(workspace_id)
+          ON DELETE CASCADE
       );
 
       CREATE TABLE IF NOT EXISTS sync_relay_log (
@@ -327,6 +367,19 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         "ALTER TABLE sync_relay_blobs ADD COLUMN created_at_ms INTEGER NOT NULL DEFAULT 0",
       );
     }
+    // R10b lazy additive migration: existing relay databases predate sync
+    // identity. Both columns stay nullable so legacy workspaces remain unset
+    // until the first identity-bearing request claims them.
+    const workspaceColumns = db
+      .prepare("PRAGMA table_info(sync_relay_workspaces)")
+      .all()
+      .map((row) => String(row.name));
+    if (!workspaceColumns.includes("replication_epoch")) {
+      db.exec("ALTER TABLE sync_relay_workspaces ADD COLUMN replication_epoch TEXT");
+    }
+    if (!workspaceColumns.includes("stream_identity")) {
+      db.exec("ALTER TABLE sync_relay_workspaces ADD COLUMN stream_identity TEXT");
+    }
     db.exec("COMMIT");
   } catch (error) {
     try {
@@ -411,6 +464,156 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         .run(input.workspaceId, input.ownerUserId, Math.trunc(input.createdAtMs));
       this.db.exec("COMMIT");
       return "created";
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
+  getWorkspaceIdentity(workspaceId: string): WorkspaceSyncIdentity | null {
+    const row = this.db
+      .prepare(
+        `SELECT replication_epoch, stream_identity
+         FROM sync_relay_workspaces
+         WHERE workspace_id = ?`,
+      )
+      .get(workspaceId);
+    if (row === undefined) return null;
+    const replicationEpoch = row.replication_epoch;
+    const streamIdentity = row.stream_identity;
+    if (replicationEpoch == null && streamIdentity == null) return null;
+    if (typeof replicationEpoch !== "string" || typeof streamIdentity !== "string") {
+      throw new Error("sync relay workspace identity is partially populated");
+    }
+    return { replicationEpoch, streamIdentity };
+  }
+
+  claimWorkspaceIdentity(input: {
+    workspaceId: string;
+    replicationEpoch: string;
+    streamIdentity: string;
+  }): ClaimWorkspaceIdentityResult {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT replication_epoch, stream_identity
+           FROM sync_relay_workspaces
+           WHERE workspace_id = ?`,
+        )
+        .get(input.workspaceId);
+      if (row === undefined) {
+        throw new Error("cannot claim identity for an absent workspace");
+      }
+      const replicationEpoch = row.replication_epoch;
+      const streamIdentity = row.stream_identity;
+      if (replicationEpoch == null && streamIdentity == null) {
+        this.db
+          .prepare(
+            `UPDATE sync_relay_workspaces
+             SET replication_epoch = ?, stream_identity = ?
+             WHERE workspace_id = ?`,
+          )
+          .run(input.replicationEpoch, input.streamIdentity, input.workspaceId);
+        this.db.exec("COMMIT");
+        return "claimed";
+      }
+      if (typeof replicationEpoch !== "string" || typeof streamIdentity !== "string") {
+        throw new Error("sync relay workspace identity is partially populated");
+      }
+      if (
+        replicationEpoch === input.replicationEpoch &&
+        streamIdentity === input.streamIdentity
+      ) {
+        this.db.exec("COMMIT");
+        return "matched";
+      }
+      const wasSuperseded =
+        this.db
+          .prepare(
+            `SELECT 1 AS ok
+             FROM sync_relay_epoch_supersessions
+             WHERE workspace_id = ? AND replication_epoch = ?`,
+          )
+          .get(input.workspaceId, input.replicationEpoch) !== undefined;
+      if (wasSuperseded) {
+        this.db.exec("COMMIT");
+        return "epoch-superseded";
+      }
+      if (replicationEpoch !== input.replicationEpoch) {
+        this.db.exec("COMMIT");
+        return "epoch-superseded";
+      }
+      this.db.exec("COMMIT");
+      return "stream-mismatch";
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw error;
+    }
+  }
+
+  rotateWorkspaceIdentity(input: {
+    workspaceId: string;
+    ownerUserId: string;
+    replicationEpoch: string;
+    streamIdentity: string;
+  }): RotateWorkspaceIdentityResult {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT owner_user_id, replication_epoch, stream_identity
+           FROM sync_relay_workspaces
+           WHERE workspace_id = ?`,
+        )
+        .get(input.workspaceId);
+      if (row === undefined || row.owner_user_id !== input.ownerUserId) {
+        this.db.exec("COMMIT");
+        return "not-owner";
+      }
+      const replicationEpoch = row.replication_epoch;
+      const streamIdentity = row.stream_identity;
+      if (replicationEpoch == null && streamIdentity != null) {
+        throw new Error("sync relay workspace identity is partially populated");
+      }
+      if (replicationEpoch != null && typeof replicationEpoch !== "string") {
+        throw new Error("sync relay workspace identity has an invalid epoch");
+      }
+      if (streamIdentity == null && replicationEpoch != null) {
+        throw new Error("sync relay workspace identity is partially populated");
+      }
+      if (streamIdentity != null && typeof streamIdentity !== "string") {
+        throw new Error("sync relay workspace identity has an invalid stream");
+      }
+      if (
+        replicationEpoch === input.replicationEpoch &&
+        streamIdentity === input.streamIdentity
+      ) {
+        this.db.exec("COMMIT");
+        return "unchanged";
+      }
+      if (typeof replicationEpoch === "string" && typeof streamIdentity === "string") {
+        this.db
+          .prepare(
+            `INSERT OR IGNORE INTO sync_relay_epoch_supersessions (
+              workspace_id, replication_epoch, stream_identity, superseded_at_ms
+            ) VALUES (?, ?, ?, ?)`,
+          )
+          .run(input.workspaceId, replicationEpoch, streamIdentity, Date.now());
+      }
+      this.db
+        .prepare(
+          `UPDATE sync_relay_workspaces
+           SET replication_epoch = ?, stream_identity = ?
+           WHERE workspace_id = ?`,
+        )
+        .run(input.replicationEpoch, input.streamIdentity, input.workspaceId);
+      this.db.exec("COMMIT");
+      return "rotated";
     } catch (error) {
       try {
         this.db.exec("ROLLBACK");
