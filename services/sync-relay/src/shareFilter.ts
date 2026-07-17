@@ -1,4 +1,4 @@
-import { classifyEngineFilePath } from "@dohc/workspace-engine/enginePathFloor";
+import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { validateUserWritePath } from "@dohc/workspace-core";
 
 // PR 18 share grants: the server-side filter that decides which replicated

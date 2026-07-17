@@ -32,6 +32,7 @@ members = [
     "crates/dohc-engine-testkit",
     "crates/dohc-engine-crypto",
     "crates/dohc-engine-collab",
+    "crates/dohc-engine-sync",
     "crates/yrs-spike",
 ]
 exclude = [

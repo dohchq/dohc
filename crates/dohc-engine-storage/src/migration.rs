@@ -952,6 +952,88 @@ WHERE m.before_present = 2 AND m.before_latest_moment_id IS NULL;
 /// The `id` of the R05 moment-preimage-link migration.
 pub(crate) const MOMENT_BEFORE_LINK_MIGRATION_ID: &str = "v1-moment-before-link";
 
+/// Ordinal 6 (R10). R10's durable replication substrate. Cursor advancement is
+/// deliberately separate from imported-op application: `replication_log` plus
+/// `replication_peers` commit with the domain mutation, while relay/share
+/// cursors advance only after downstream materialization succeeds. Appended
+/// strictly after R05's ordinal-5 `v1-moment-before-link`.
+const V1_SYNC_DDL: &str = "\
+CREATE TABLE sync_identity (
+    workspace_id       TEXT    NOT NULL PRIMARY KEY,
+    origin_id          TEXT    NOT NULL,
+    replication_epoch  TEXT    NOT NULL,
+    stream_identity    TEXT    NOT NULL,
+    created_at_ms      INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE replication_log (
+    workspace_id   TEXT    NOT NULL,
+    origin_id      TEXT    NOT NULL,
+    origin_seq     INTEGER NOT NULL CHECK (origin_seq >= 0),
+    op_kind        TEXT    NOT NULL,
+    payload_json   TEXT    NOT NULL,
+    recorded_at_ms INTEGER NOT NULL,
+    imported       INTEGER NOT NULL CHECK (imported IN (0, 1)),
+    PRIMARY KEY (workspace_id, origin_id, origin_seq)
+) STRICT;
+CREATE INDEX idx_replication_log_order
+    ON replication_log(workspace_id, recorded_at_ms, origin_id, origin_seq);
+
+CREATE TABLE replication_peers (
+    workspace_id TEXT    NOT NULL,
+    origin_id    TEXT    NOT NULL,
+    acked_seq    INTEGER NOT NULL CHECK (acked_seq >= -1),
+    PRIMARY KEY (workspace_id, origin_id)
+) STRICT;
+
+CREATE TABLE sync_relay_cursors (
+    workspace_id       TEXT NOT NULL PRIMARY KEY,
+    cursor             TEXT NOT NULL,
+    replication_epoch  TEXT NOT NULL,
+    stream_identity    TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE sync_relay_push_state (
+    workspace_id TEXT    NOT NULL,
+    origin_id    TEXT    NOT NULL,
+    pushed_seq   INTEGER NOT NULL CHECK (pushed_seq >= -1),
+    PRIMARY KEY (workspace_id, origin_id)
+) STRICT;
+
+CREATE TABLE shared_channel_cursors (
+    workspace_id TEXT NOT NULL,
+    share_id     TEXT NOT NULL,
+    cursor       TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, share_id)
+) STRICT;
+
+CREATE TABLE shared_channel_peers (
+    workspace_id       TEXT    NOT NULL,
+    share_id           TEXT    NOT NULL,
+    origin_id          TEXT    NOT NULL,
+    applied_origin_seq INTEGER NOT NULL CHECK (applied_origin_seq >= -1),
+    dense_seq          INTEGER NOT NULL CHECK (dense_seq >= -1),
+    PRIMARY KEY (workspace_id, share_id, origin_id)
+) STRICT;
+
+CREATE TABLE shared_channel_push_state (
+    workspace_id TEXT    NOT NULL,
+    share_id     TEXT    NOT NULL,
+    pushed_seq   INTEGER NOT NULL CHECK (pushed_seq >= -1),
+    PRIMARY KEY (workspace_id, share_id)
+) STRICT;
+
+CREATE TABLE share_view_cursors (
+    workspace_id TEXT NOT NULL,
+    share_id     TEXT NOT NULL,
+    cursor       TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, share_id)
+) STRICT;
+";
+
+/// The `id` of the R10 sync migration.
+pub(crate) const SYNC_MIGRATION_ID: &str = "v1-sync";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -995,6 +1077,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: MOMENT_BEFORE_LINK_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_MOMENT_BEFORE_LINK_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 6,
+        id: SYNC_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SYNC_DDL,
         sets_user_version: None,
     },
 ];
@@ -1304,11 +1393,11 @@ mod tests {
     // waiting for a real future schema change.
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     fn two_migrations() -> Vec<Migration> {
-        // The frozen list now ends at ordinal 5 (R05 moment preimage links), so
-        // a synthetic probe appends at ordinal 6.
+        // The frozen list now ends at ordinal 6 (R10 sync, after R05's ordinal-5
+        // moment preimage links), so a synthetic probe appends at ordinal 7.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 6,
+            ordinal: 7,
             id: "r04-probe",
             kind: MigrationKind::Transactional,
             sql: M2_SQL,
@@ -1502,11 +1591,11 @@ mod tests {
         // Resume: baseline is skipped (idempotent); the between-steps crash
         // fired before the secrets migration (ordinal 1), so resume applies the
         // secrets migration (1), the Y.Doc migration (2), the chats migration
-        // (3), the search migration (4), the moment-link migration (5), AND
-        // the probe (6).
+        // (3), the search migration (4), the moment-link migration (5), the
+        // sync migration (6), AND the probe (7).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 6 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 7 });
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -1603,7 +1692,7 @@ mod tests {
         }
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 6,
+            ordinal: 7,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
@@ -1621,7 +1710,7 @@ mod tests {
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();
         changed.push(Migration {
-            ordinal: 6,
+            ordinal: 7,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
@@ -1641,7 +1730,7 @@ mod tests {
         // baseline first (transactional), then a non-transactional idempotent step.
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 6,
+            ordinal: 7,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",

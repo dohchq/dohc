@@ -415,6 +415,25 @@ importers:
         specifier: ^2.1.9
         version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)
 
+  packages/security-contract:
+    dependencies:
+      '@dohc/workspace-contracts':
+        specifier: workspace:*
+        version: link:../workspace-contracts
+      '@dohc/workspace-core':
+        specifier: workspace:*
+        version: link:../workspace-core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.19.19
+        version: 22.19.19
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.9
+        version: 2.1.9(@edge-runtime/vm@4.0.4)(@types/node@22.19.19)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)
+
   packages/workspace-core:
     dependencies:
       '@dohc/workspace-contracts':
@@ -433,6 +452,9 @@ importers:
 
   packages/workspace-engine:
     dependencies:
+      '@dohc/security-contract':
+        specifier: workspace:*
+        version: link:../security-contract
       '@dohc/workspace-contracts':
         specifier: workspace:*
         version: link:../workspace-contracts
@@ -600,6 +622,9 @@ importers:
 
   services/sync-relay:
     dependencies:
+      '@dohc/security-contract':
+        specifier: workspace:*
+        version: link:../../packages/security-contract
       '@dohc/workspace-auth':
         specifier: workspace:*
         version: link:../../packages/workspace-auth
