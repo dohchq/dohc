@@ -432,6 +432,11 @@ export interface WorkspaceEngineCaptureOptions {
   // never read the slot — only physically observed watcher batches carry an
   // author.
   activeAgentRun?: () => ActiveAgentRun | null;
+  // Dormant R13b composition slot. Accepted for future construction-time
+  // wiring but intentionally never read by any capture or Y.Doc path here.
+  rustEngineAdapter?: {
+    transport: import("@dohc/workspace-engine-client").EngineTransport;
+  };
 }
 
 export interface EngineDiskWriter {

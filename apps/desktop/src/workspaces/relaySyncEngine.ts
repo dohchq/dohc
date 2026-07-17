@@ -49,6 +49,10 @@ export interface CloudSyncEngineOptions {
   // work such as live chat bookmarks must be prompt, but is ancillary: a
   // failure is logged and contained so it cannot put relay sync into backoff.
   afterSuccessfulPull?: () => Promise<void>;
+  // Dormant R13b shadow hook. No shipping caller supplies it; when the later
+  // adapter wiring does, it runs only after the pull is fully durable and can
+  // never put relay sync into backoff.
+  onRustEngineAdapterPull?: () => Promise<void>;
   debounceMs?: number;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
@@ -199,6 +203,16 @@ export function createRelaySyncEngine(options: CloudSyncEngineOptions): CloudSyn
         await options.afterSuccessfulPull();
       } catch (error) {
         console.error(`[desktop] post-pull work failed for ${options.rootDir}:`, error);
+      }
+    }
+    if (options.onRustEngineAdapterPull) {
+      try {
+        await options.onRustEngineAdapterPull();
+      } catch (error) {
+        console.error(
+          `[desktop] Rust engine adapter post-pull failed for ${options.rootDir}:`,
+          error,
+        );
       }
     }
     // Shared channels ride the same cadence but never gate the pass: chat

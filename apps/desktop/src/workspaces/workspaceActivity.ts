@@ -60,6 +60,13 @@ export interface WorkspaceActivityOptions {
     workspace: CreatedWorkspace,
     hooks: WorkspaceCaptureHooks,
   ) => Promise<WorkspaceEngineCapture | null> | WorkspaceEngineCapture | null;
+  // Dormant R13b shadow observer. No shipping caller supplies it; a later
+  // composition PR may use it to mirror successfully recorded activity into
+  // the Rust adapter without affecting the live watcher/capture pipeline.
+  onRustEngineShadowActivity?: (activity: {
+    workspaceId: string;
+    rootPath: string;
+  }) => void | Promise<void>;
 }
 
 export interface WorkspaceCaptureHooks {
@@ -188,6 +195,26 @@ export function createWorkspaceActivity(
           // Every settled local batch queues a (debounced) cloud push.
           entry.engine?.queueSync();
           notify();
+          if (options.onRustEngineShadowActivity) {
+            try {
+              void Promise.resolve(
+                options.onRustEngineShadowActivity({
+                  workspaceId: workspace.workspaceId,
+                  rootPath: workspace.rootPath,
+                }),
+              ).catch((error: unknown) => {
+                console.error(
+                  `[desktop] Rust engine shadow activity failed for ${workspace.rootPath}:`,
+                  error,
+                );
+              });
+            } catch (error) {
+              console.error(
+                `[desktop] Rust engine shadow activity failed for ${workspace.rootPath}:`,
+                error,
+              );
+            }
+          }
         },
       });
       // Don't report the workspace open until the watcher's initial scan is
