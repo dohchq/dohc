@@ -20,14 +20,14 @@ R05	identity-blobs-versions-moments-restore	2	R04	crates/dohc-engine-domain/src/
 R08	secrets	2	R04	crates/dohc-engine-crypto/**	ported	critical	1	gate passed	codex/rust-engine-r08	157
 R09	chats-readstate-dispatch	2	R04;REINV	crates/dohc-engine-domain/src/chats*;crates/dohc-engine-storage/src/chat_tables*;apps/desktop/src/agents/desktopAgentDispatchStore.ts	ported	high	2	gate passed	codex/rust-engine-r09	161
 R11a	ydoc-durable-cache	2	YRS-SPIKE;R04	crates/dohc-engine-collab/**	ported+spike-fuzz	critical	1	gate passed	codex/rust-engine-r11a	159
-R11b	ydoc-live-adapter	2	R03;GATE0	packages/workspace-engine-client/src/ydoc*	adapter suite	critical	1	planned	-	-
+R11b	ydoc-live-adapter	2	R03;GATE0	packages/workspace-engine-client/src/ydoc*	adapter suite	critical	1	gate passed	-	175
 R12	search	2	R04	crates/dohc-engine-runtime/src/search*	ported	high	2	gate passed	-	163
 R06	compare-merge-conflicts-materialization	3	R05	crates/dohc-engine-domain/src/{merge,conflicts}*;crates/dohc-engine-files/src/materialize*	ported	critical	1	gate passed	-	170
 R07	watcher-reconcile-pathfloor-policy	3	CAL-3;R05	crates/dohc-engine-files/src/{watch,policy}*	ported+OBLIG-DISCHARGED:R05-rename-secret-floor	critical	1	gate passed	-	169
 R10	replication-cursors-shares	3	R04;R09	crates/dohc-engine-sync/**;packages/security-contract/**	ported+fault-model+FOLLOWUP:R10-conflict-apply(consumes-R06-primitive,MUST-handle-binary-sides)	critical	1	gate passed	-	166
 R10b	relay-epoch-enforcement	3	R10	services/sync-relay/**	relay fault-model suite	critical	1	gate passed	-	174
 R13b	desktop-adapter-dormant	3	R03;GATE0	apps/desktop/src/workspaces/engineClient*;apps/desktop/src/main.ts;apps/desktop/src/workspaces/workspaceEngineCapture.ts;apps/desktop/src/workspaces/workspaceActivity.ts;apps/desktop/src/workspaces/relaySyncEngine.ts;apps/desktop/src/cli/**;packages/mcp/**;apps/desktop/src/workspaces/{sharedView,sharedChannels,shareMounts,workspaceFiles,workspaceSearch,workspaceGraph}*;apps/desktop/src/collab/ydocEngineProviderSession*	adapter E2E	critical	1	planned	-	-
-R13	daemon-composition-shadow-replay	4	R05;R06;R07;R08;R09;R10;R11a;R11b;R12;R13b	crates/dohc-workspace-engine/**	replay	critical	1	planned	-	-
+R13	daemon-composition-shadow-replay	4	R05;R06;R07;R08;R09;R10;R11a;R11b;R12;R13b	crates/dohc-workspace-engine/**	replay+OBLIG:engine-side-ydoc-replay-parity-gate(REQUIRED-before-live-editing);R10-conflict-apply-binary	critical	1	planned	-	-
 R14	robustness-closure	5	R13	fuzz/**;soak configs	fuzz+soak+OBLIG:R07-watcher-reattach,startup-deadlines,manifest-rehydration	high	1	planned	-	-
 GATE6	gate-release-candidate	5	R14;R10b;R15-REHEARSE	-	-	-	-	planned	-	-
 R15-REHEARSE	cutover-rehearsal-tier	5	R13;R14	crates/dohc-workspace-engine/src/cutover_rehearse*	rehearsal-on-clones	critical	1	planned	-	-

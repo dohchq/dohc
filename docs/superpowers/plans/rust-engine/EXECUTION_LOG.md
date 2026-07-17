@@ -1022,3 +1022,45 @@ source of truth every orchestrator session loads first).
   the Y.Doc, and an isWellFormed check structurally unable to catch surrogate-
   split lineages that diverge yjs↔yrs per R11a's pinned cross_engine.rs). R13b
   (dormant desktop adapter) queued behind R11b.
+
+- R11b TS live Y.Doc adapter GATE PASSED (PR #175, squash-merged; DORMANT — new
+  package @dohc/workspace-engine-client, no existing shipped file touched except
+  the required pnpm-lock.yaml; branch deleted). The client-side adapter
+  connecting live Yjs editing to the Rust Y.Doc engine over the R03 protocol,
+  honoring all 5 yrs-spike constraints. Two-lens cell + a P0-fix RE-VERIFY — the
+  deepest review of the program because this is the CRDT-safety boundary all
+  durable-document integrity rides on at cutover. Found + fixed 2 P0s: (P0-1) an
+  IllFormedUtf16EditError thrown from INSIDE the yjs update observer permanently
+  wedged _transactionCleanups → all later edits silently never journaled →
+  fixed to reject-and-quarantine, never throwing in the observer (throw moved to
+  runLocalMutation after the txn); (P0-2) the isWellFormed check scanned the
+  post-transaction string, but yjs sanitizes a surrogate-split to well-formed
+  U+FFFD while the WIRE LINEAGE still diverges yjs↔yrs (proven vs R11a's pinned
+  cross_engine.rs:264: yrs "😀X" vs yjs "�X�") → fixed with pre-transaction
+  structured-edit detection (lone-surrogate + pair-split index) + an opaque
+  before/after backstop. The re-verify (reviewer who found P0-2 re-attacked the
+  fix) caught a surviving MASKED-split bypass: the backstop's aggregate-U+FFFD-
+  count heuristic missed a split masked behind offsetting U+FFFD deletions in the
+  same txn (confirmed vs the real yrs engine) → fixed with EXACT deleted-U+FFFD
+  accounting via a gc:false tombstone-retaining Y.Doc clone (reject any net-new
+  U+FFFD regardless of offsetting deletes; verified no over-rejection). Also
+  fixed: ingress bypasses (non-schema roots + Y.Text attrs/embeds now covered),
+  lost-update silent fork (now surfaces via onSessionError + settle fails closed;
+  Event.seq gap → resync-needed), lockfile (frozen-lockfile CI install; the
+  desktop-release/docs workflows DO run on packages/** PRs — 'skip GitHub CI'
+  was only the Rust matrix), + P2s (loopback validate/reject, feature-detected
+  isWellFormed, event-decode error channel, recordUpdate idempotencyKey). 21
+  tests. Converging-prefix + offset fidelity PROVEN to hold throughout.
+- **HARD R13 OBLIGATIONS (recorded on the R13 row):**
+  1. **engine-side yjs↔yrs replay-parity gate — REQUIRED before any live editing.**
+     R11a's Ydoc::apply (crates/dohc-engine-collab/src/ydoc.rs:169-179) accepts
+     any decodable update with NO divergence gate today. The R11b TS backstop is
+     exact for the maskable class but CANNOT reconstruct arbitrary opaque splits;
+     the general guarantee MUST be an engine-side replay-parity/divergence gate
+     at R13 before the encoded editor path journals, else a crafted opaque split
+     corrupts the durable doc silently at cutover. Regression fixture ready
+     (reviewer's bypass1_probe.rs pattern). This is the real CRDT-safety backstop.
+  2. R10-conflict-apply must handle binary conflict sides (from R06; R06 gated
+     ConflictContentKind::Binary fail-closed).
+- **WAVE 3 nearly complete**: R10 ✓, R06 ✓, R07 ✓, R10b ✓, R11b ✓ merged. Only
+  R13b (dormant desktop adapter) remains before R13 composition.
