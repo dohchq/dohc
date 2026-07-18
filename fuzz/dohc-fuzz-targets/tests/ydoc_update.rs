@@ -77,6 +77,34 @@ fn known_crash_witness_yrs_char_decode_ub() {
     assert!(Ydoc::validate_update(&bytes).is_err());
 }
 
+/// Deterministic regression witness for the `ContentDeleted` decode OOM the
+/// YRS-ABORT-SAFETY hotfix closes. A `ContentDeleted` item declares its span as
+/// a single wire varint (up to `u32::MAX`) that yrs stores as one count; the
+/// pre-validator (`replay_parity::scan_v1`, run first by `Ydoc::apply`) used to
+/// materialize one tombstone identity PER CLOCK, so this ~15-byte update drove
+/// ~4.29 billion `BTreeMap` inserts — an unbounded-memory blow-up reachable from
+/// untrusted peer bytes. It must now return (accept or reject) in constant
+/// memory, near-instantly, and the process must survive to make this assertion.
+#[test]
+fn deleted_content_huge_len_does_not_exhaust_memory() {
+    let bytes: Vec<u8> = vec![
+        0x01, // clients_len
+        0x01, // blocks_len
+        0x09, // client
+        0x00, // clock
+        0x01, // info: ContentDeleted, no origins
+        0x01, // parent_info: named root follows
+        0x01, b'r', // root name "r"
+        0xff, 0xff, 0xff, 0xff, 0x0f, // ContentDeleted len = u32::MAX (varint)
+        0x00, // empty delete set
+    ];
+    let doc = Ydoc::wire();
+    // The only forbidden outcome is an out-of-memory abort; the accept/reject
+    // verdict is immaterial, mere completion is the property under test.
+    let _ = doc.apply(&bytes);
+    let _ = Ydoc::validate_update(&bytes);
+}
+
 /// Seed-corpus sanity: a real, valid update from the doc's own edit surface
 /// applies cleanly and round-trips. Safe -- exercises only well-formed,
 /// self-produced update bytes, never adversarial ones.
@@ -156,7 +184,11 @@ fn emit_any(out: &mut Vec<u8>, script: &[u8], pos: &mut usize, depth: usize) {
             out.push(122); // BigInt(i64)
             out.extend_from_slice(&next_u64(script, pos).to_le_bytes());
         }
-        6 => out.push(if next_u64(script, pos) & 1 == 0 { 121 } else { 120 }), // Bool
+        6 => out.push(if next_u64(script, pos) & 1 == 0 {
+            121
+        } else {
+            120
+        }), // Bool
         7 => {
             out.push(119); // String -- length-prefixed raw bytes (maybe invalid UTF-8)
             let len = (script.get(*pos).copied().unwrap_or(0) % 6) as usize;

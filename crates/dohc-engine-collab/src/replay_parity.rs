@@ -104,18 +104,6 @@ enum ClockIdentity {
     /// same-kind different-payload item never compares equal (the fingerprint
     /// differs). Covers JSON, binary, embed, format, type, doc, and any.
     Typed { kind: u8, payload: String },
-    /// A `ContentDeleted` tombstone item — renders nothing. NOT a live
-    /// identity: a clock that is a tombstone on the ESTABLISHED side "renders
-    /// neither way," so a resend that references it must not be false-rejected
-    /// (the reviewer's compacted/GC'd-tombstone note).
-    Tombstone,
-}
-
-impl ClockIdentity {
-    /// Whether this identity is live, rendering content (not a tombstone).
-    fn is_live(&self) -> bool {
-        !matches!(self, ClockIdentity::Tombstone)
-    }
 }
 
 #[derive(Default)]
@@ -124,12 +112,23 @@ struct WireStructure {
     insertion_boundaries: Vec<ID>,
     deletion_boundaries: Vec<ID>,
     claimed_clocks: BTreeMap<ClientID, u32>,
-    /// The structural identity every content block in this wire claims, by
-    /// `(client, clock)`. Covers ALL content kinds (string, JSON, binary,
-    /// embed, format, type, doc, any) plus `ContentDeleted` tombstones — the
-    /// content-parity check compares these across wires at overlapping clocks
-    /// so a candidate cannot redefine an already-known clock's kind or payload.
+    /// The structural identity every LIVE content block in this wire claims, by
+    /// `(client, clock)`. Covers all live content kinds (string, JSON, binary,
+    /// embed, format, type, doc, any) — the content-parity check compares these
+    /// across wires at overlapping clocks so a candidate cannot redefine an
+    /// already-known clock's kind or payload. `ContentDeleted` tombstones are
+    /// NOT stored here: a single `ContentDeleted` item can span up to `u32::MAX`
+    /// clocks in a few wire bytes, so materializing one identity per clock is an
+    /// unbounded, attacker-controlled allocation on the untrusted decode path.
+    /// They are tracked as O(1) ranges in [`WireStructure::tombstone_ranges`].
     identities: BTreeMap<ClientID, BTreeMap<u32, ClockIdentity>>,
+    /// Half-open `[start, end)` clock ranges this wire tombstones via a
+    /// `ContentDeleted` item, recorded as O(1) ranges (never one entry per
+    /// clock). The content-parity check queries membership here — only for the
+    /// bounded set of clocks the ESTABLISHED side already holds as live — rather
+    /// than materializing every tombstoned clock, which a hostile peer could
+    /// drive to `u32::MAX` in a handful of wire bytes.
+    tombstone_ranges: BTreeMap<ClientID, Vec<(u32, u32)>>,
     /// The wire's own delete-set as `(client, [start, end))` half-open clock
     /// ranges. A `ContentDeleted` item whose clock IS in this set is a
     /// legitimate delete/GC (the deletion the peer performed); a bare
@@ -143,6 +142,17 @@ impl WireStructure {
     /// merely re-encoding it.
     fn delete_set_covers(&self, client: ClientID, clock: u32) -> bool {
         self.deleted_ranges.get(&client).is_some_and(|ranges| {
+            ranges
+                .iter()
+                .any(|&(start, end)| start <= clock && clock < end)
+        })
+    }
+
+    /// Whether this wire tombstones `(client, clock)` via a `ContentDeleted`
+    /// item — the range-based replacement for a per-clock `Tombstone` identity
+    /// lookup (see [`WireStructure::tombstone_ranges`]).
+    fn tombstone_covers(&self, client: ClientID, clock: u32) -> bool {
+        self.tombstone_ranges.get(&client).is_some_and(|ranges| {
             ranges
                 .iter()
                 .any(|&(start, end)| start <= clock && clock < end)
@@ -326,25 +336,31 @@ fn content_parity_conflict(
     established: &BTreeMap<ClientID, BTreeMap<u32, ClockIdentity>>,
 ) -> bool {
     for (client, known) in established {
-        let Some(claimed) = candidate.identities.get(client) else {
-            continue;
-        };
+        // Every identity the established side stores is LIVE content
+        // (tombstones live in `tombstone_ranges`, not here), so each entry is a
+        // clock a conflicting candidate could diverge.
         for (clock, established_identity) in known {
-            if !established_identity.is_live() {
-                continue; // tombstone on the established side: renders neither way
-            }
-            let Some(candidate_identity) = claimed.get(clock) else {
-                continue;
-            };
-            if candidate_identity == established_identity {
-                continue; // identical live content: a clean resend
-            }
-            if matches!(candidate_identity, ClockIdentity::Tombstone)
-                && candidate.delete_set_covers(*client, *clock)
+            // A candidate LIVE identity at the same clock must match exactly.
+            if let Some(candidate_identity) =
+                candidate.identities.get(client).and_then(|m| m.get(clock))
             {
-                continue; // a genuine delete/GC of this clock, not a redefinition
+                if candidate_identity == established_identity {
+                    continue; // identical live content: a clean resend
+                }
+                return true; // a different live kind/payload: hostile redefinition
             }
-            return true;
+            // No candidate LIVE identity here. If the candidate instead
+            // TOMBSTONES this clock, that is a legitimate delete/GC only when
+            // its own delete-set also covers it (the normal reconnect
+            // full-state resend carries a deleted clock this way); a BARE
+            // tombstone not in the delete-set is a hostile redefinition.
+            if candidate.tombstone_covers(*client, *clock) {
+                if candidate.delete_set_covers(*client, *clock) {
+                    continue; // a genuine delete/GC of this clock, not a redefinition
+                }
+                return true;
+            }
+            // The candidate does not claim this clock at all: nothing to compare.
         }
     }
     false
@@ -847,11 +863,23 @@ fn scan_content(
     match content_ref {
         BLOCK_ITEM_DELETED_REF_NUMBER => {
             // A deleted-content item: `len` tombstone clocks (render nothing).
+            // `len` is an attacker-controlled wire varint up to `u32::MAX`, and
+            // yrs stores the whole item as that single count (O(1)); recording
+            // one `Tombstone` identity per clock here would be an unbounded
+            // allocation a hostile peer could trigger with ~10 wire bytes (an
+            // out-of-memory DoS on this untrusted pre-validator). Track the
+            // half-open `[clock, clock + len)` range instead — the parity check
+            // queries membership rather than materializing every clock.
             let len = decoder.read_len().map_err(parity_decode_error)?;
-            for i in 0..len {
-                let clock = id.clock.checked_add(i).ok_or_else(parity_clock_overflow)?;
-                record_identity(structure, id.client, clock, ClockIdentity::Tombstone);
-            }
+            let end = id
+                .clock
+                .checked_add(len)
+                .ok_or_else(parity_clock_overflow)?;
+            structure
+                .tombstone_ranges
+                .entry(id.client)
+                .or_default()
+                .push((id.clock, end));
             Ok(len)
         }
         BLOCK_ITEM_JSON_REF_NUMBER => {
@@ -1262,8 +1290,7 @@ mod tests {
         };
         // Options A: empty map. Options B: a map with one bool entry.
         let a = scan_v1(&with_opts(&[0x76, 0x00])).expect("A valid");
-        let b = scan_v1(&with_opts(&[0x76, 0x01, 0x02, b'g', b'c', 0x78]))
-            .expect("B valid");
+        let b = scan_v1(&with_opts(&[0x76, 0x01, 0x02, b'g', b'c', 0x78])).expect("B valid");
         let ida = &a.identities[&ClientID::new(9)][&0];
         let idb = &b.identities[&ClientID::new(9)][&0];
         assert!(ida == idb, "same-guid subdocs must fingerprint identically");
@@ -1299,6 +1326,36 @@ mod tests {
         ];
         let error = scan_err(&bytes);
         assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    }
+
+    /// A `ContentDeleted` block legitimately spans up to `u32::MAX` tombstone
+    /// clocks in a handful of wire bytes (yrs stores the whole item as a single
+    /// count, O(1)). The pre-validator MUST record it as one range, NOT one
+    /// identity per clock: a hostile peer could otherwise set the length to
+    /// `u32::MAX` in ~10 bytes and drive `scan_v1` into ~4.29 billion `BTreeMap`
+    /// inserts — a multi-gigabyte out-of-memory blow-up on the untrusted decode
+    /// path (the regression this hotfix closes). This scan must complete
+    /// near-instantly, accept the structurally-valid block, and record exactly
+    /// one tombstone range.
+    #[test]
+    fn deleted_content_with_huge_len_scans_in_constant_memory() {
+        let bytes: Vec<u8> = vec![
+            0x01, // clients_len
+            0x01, // blocks_len
+            0x09, // client
+            0x00, // clock
+            0x01, // info: BLOCK_ITEM_DELETED_REF_NUMBER, no origins
+            0x01, // parent_info: named root follows
+            0x01, b'r', // root name "r"
+            0xff, 0xff, 0xff, 0xff, 0x0f, // ContentDeleted len = u32::MAX (varint)
+            0x00, // empty delete set
+        ];
+        let structure =
+            scan_v1(&bytes).expect("a huge ContentDeleted length must scan, not exhaust memory");
+        let ranges = &structure.tombstone_ranges[&ClientID::new(9)];
+        assert_eq!(ranges, &vec![(0u32, u32::MAX)]);
+        // Recorded as a single range, never materialized per clock.
+        assert!(structure.identities.is_empty());
     }
 
     /// A `ContentAny` block (content-ref 8) whose `Any` payload is a chain of
