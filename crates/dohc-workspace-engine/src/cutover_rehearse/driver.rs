@@ -1,5 +1,6 @@
 use super::backup::{
-    create_restore_tested_backup, ensure_outside_root, fingerprint_backup, verify_recorded_backup,
+    create_restore_tested_backup, ensure_outside_root, fingerprint_backup,
+    verify_protected_snapshots, verify_recorded_backup,
 };
 use super::faults::{FaultAction, FaultInjector, FaultPoint};
 use super::fence::{validate_rehearsal_root, verify_live_clone_binding};
@@ -8,11 +9,15 @@ use super::inventory::{load_inventory, load_or_record, scan};
 use super::state::{self, RehearsalState, StableState, StateRecord};
 use super::{Paths, RehearsalError};
 use dohc_engine_storage::EngineStore;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const SETTLE_READ_BUFFER_BYTES: usize = 64 * 1024;
+const ROOT_LOCK_ATTEMPTS: usize = 6;
+
+use super::ROOT_LOCK_FILE;
 
 pub struct RehearsalConfig<'a> {
     pub root: &'a Path,
@@ -39,20 +44,25 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
     ensure_outside_root(&paths.root, config.recovery_dir)?;
     let recovery_dir = canonical_recovery_dir(config.recovery_dir)?;
 
+    // One rehearsal per root at a time: an advisory cross-process lock held
+    // from before the first state read until this function returns.
+    let _root_lock = acquire_root_lock(&paths)?;
+
     let mut record = state::initialize(&paths.root)?;
 
     loop {
         match record.current {
             RehearsalState::Complete => {
                 // A persisted Complete is only trusted once the artifacts it
-                // implies — the recorded backups and the retained old store —
-                // are re-proven on disk.
+                // implies — the recorded backups, the retained old store, and
+                // the bound fresh live store — are re-proven on disk.
                 verify_recorded_backup(&recovery_dir, record.backup.as_ref())?;
                 if !moved_aside_db_present(&paths) {
                     return Err(RehearsalError::Io {
                         code: "complete-retained-store-missing",
                     });
                 }
+                verify_live_clone_binding(&paths.db, &validated.shadow_token)?;
                 return Ok(RehearsalOutcome::Complete(record));
             }
             RehearsalState::Failed { .. } => return Ok(RehearsalOutcome::Failed(record)),
@@ -117,16 +127,23 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
                 }
             }
             RehearsalState::Initialized => {
-                let capture = load_inventory(&paths.root).and_then(|expected| {
-                    let actual = scan(&paths.root)?;
-                    if actual == expected {
-                        Ok(())
-                    } else {
-                        Err(RehearsalError::Io {
-                            code: "capture-inventory-mismatch",
-                        })
-                    }
-                });
+                // Precondition (refusal): the fresh live store must still
+                // exist and prove its clone binding — the user-file inventory
+                // below skips `.dohc`, so a missing/replaced store would
+                // otherwise be invisible on resume.
+                verify_live_clone_binding(&paths.db, &validated.shadow_token)?;
+                let capture = load_inventory(&paths.root)
+                    .and_then(|expected| {
+                        let actual = scan(&paths.root)?;
+                        if actual == expected {
+                            Ok(())
+                        } else {
+                            Err(RehearsalError::Io {
+                                code: "capture-inventory-mismatch",
+                            })
+                        }
+                    })
+                    .and_then(|()| verify_protected_snapshots(&paths, &recovery_dir));
                 if let Err(error) = capture {
                     return fail(&paths.root, &record, failure_code(&error));
                 }
@@ -154,6 +171,42 @@ fn canonical_recovery_dir(recovery_dir: &Path) -> Result<PathBuf, RehearsalError
         .map_err(|e| RehearsalError::io("recovery-dir-canonicalize", e))
 }
 
+/// Advisory single-writer guard: the OS releases the lock when the file
+/// handle drops (function return, panic, or process death alike).
+struct RootLock {
+    _file: File,
+}
+
+fn acquire_root_lock(paths: &Paths) -> Result<RootLock, RehearsalError> {
+    std::fs::create_dir_all(&paths.engine)
+        .map_err(|e| RehearsalError::io("rehearsal-lock-dir", e))?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(paths.engine.join(ROOT_LOCK_FILE))
+        .map_err(|e| RehearsalError::io("rehearsal-lock-open", e))?;
+    for attempt in 0..ROOT_LOCK_ATTEMPTS {
+        // fs4 rather than std's `File::try_lock`: same OS lock, but available
+        // at the workspace MSRV (std stabilized it in 1.89).
+        match fs4::FileExt::try_lock(&file) {
+            Ok(()) => return Ok(RootLock { _file: file }),
+            Err(fs4::TryLockError::Error(error)) => {
+                return Err(RehearsalError::io("rehearsal-lock", error));
+            }
+            Err(fs4::TryLockError::WouldBlock) => {
+                if attempt + 1 < ROOT_LOCK_ATTEMPTS {
+                    std::thread::sleep(Duration::from_millis(10_u64 << attempt));
+                }
+            }
+        }
+    }
+    Err(RehearsalError::Io {
+        code: "rehearsal-lock-contended",
+    })
+}
+
 fn failure_code(error: &RehearsalError) -> &'static str {
     match error {
         RehearsalError::Fence(_) => "fence-refused",
@@ -168,15 +221,19 @@ fn settle_fixture_tree(root: &Path) -> Result<(), RehearsalError> {
     // The real Y.Doc force-settle and projection-freshness proof run in the
     // TypeScript desktop app before this Rust rehearsal. R15-REHEARSE only
     // verifies that its clone fixture tree is readable and contains no aliases.
-    settle_directory(root)
+    let lock = root.join(".dohc").join("engine").join(ROOT_LOCK_FILE);
+    settle_directory(root, &lock)
 }
 
-fn settle_directory(directory: &Path) -> Result<(), RehearsalError> {
+fn settle_directory(directory: &Path, lock: &Path) -> Result<(), RehearsalError> {
     let entries =
         std::fs::read_dir(directory).map_err(|e| RehearsalError::io("settle-enumerate", e))?;
     for entry in entries {
         let entry = entry.map_err(|e| RehearsalError::io("settle-entry", e))?;
         let path = entry.path();
+        if path == *lock {
+            continue;
+        }
         let metadata = std::fs::symlink_metadata(&path)
             .map_err(|e| RehearsalError::io("settle-metadata", e))?;
         if metadata.file_type().is_symlink() {
@@ -185,7 +242,7 @@ fn settle_directory(directory: &Path) -> Result<(), RehearsalError> {
             });
         }
         if metadata.is_dir() {
-            settle_directory(&path)?;
+            settle_directory(&path, lock)?;
         } else if metadata.is_file() {
             if super::metadata_is_hard_linked(&metadata) {
                 return Err(RehearsalError::Io {
@@ -220,14 +277,19 @@ fn initialize_fresh_store(
     shadow_token: &str,
     now_ms: i64,
 ) -> Result<(), RehearsalError> {
+    // The retained moved-aside store is the proof that MovedAside really
+    // happened. Without it (forged marker, lost sibling) nothing may be
+    // created or opened — `EngineStore::open` would fabricate a fresh db.
+    if !moved_aside_db_present(paths) {
+        return Err(RehearsalError::Io {
+            code: "initialize-retained-store-missing",
+        });
+    }
     let mut store = EngineStore::open(&paths.db, now_ms)?;
-    let fresh = store.was_freshly_created();
-    let bound = store.bind_shadow_clone_token(shadow_token)?;
-    // An EXISTING bound store is acceptable only as the crash window between
-    // a completed initialize and its marker — proven by the retained
-    // moved-aside store. Any other pre-existing db (e.g. a forged MovedAside
-    // marker over a live store) is refused.
-    if !bound || (!fresh && !moved_aside_db_present(paths)) {
+    // A fresh store is bound here; an EXISTING store is acceptable only when
+    // already bound to this clone (the crash window between a completed
+    // initialize and its marker).
+    if !store.bind_shadow_clone_token(shadow_token)? {
         return Err(RehearsalError::Io {
             code: "initialize-not-fresh",
         });

@@ -138,53 +138,151 @@ pub(crate) fn create_restore_tested_backup(
     ensure_outside_root(&paths.root, recovery_dir)?;
     create_private_dir_all(recovery_dir)?;
 
-    let db_valid = load_valid_backup(recovery_dir, DB_BACKUP_STEM)?.is_some();
-    if db_valid {
-        // A pre-existing DB backup is only reusable if the copy itself proves
-        // it came from THIS clone — its own shadow_clone binding must match.
-        verify_reused_backup_binding(
-            &recovery_dir.join(format!("{DB_BACKUP_STEM}.db")),
-            shadow_token,
-        )?;
-    }
-    let directory_valid = load_valid_directory_backup(recovery_dir)?.is_some();
-    if db_valid && directory_valid {
-        return Ok(());
-    }
-    if directory_valid || recovery_dir.join(DIRECTORY_MANIFEST_NAME).exists() {
-        return Err(RehearsalError::Io {
-            code: "prior-directory-backup-inconsistent",
-        });
+    // A pre-existing DB backup at this stem is never adopted OR overwritten
+    // unless the copy itself proves — via its own shadow_clone binding — that
+    // it came from THIS clone.
+    if let Some(existing) = load_valid_backup(recovery_dir, DB_BACKUP_STEM)? {
+        verify_reused_backup_binding(&existing.backup_path, shadow_token)?;
     }
 
-    if !db_valid {
-        ensure_no_pending_migrations(&paths.db, recovery_dir, now_ms)?;
-        let store = EngineStore::open(&paths.db, now_ms)?;
-        let adapter = StorageFaultAdapter { faults };
-        match create_verified_backup(
-            &store,
-            recovery_dir,
-            DB_BACKUP_STEM,
-            "cutover-rehearsal",
-            now_ms,
-            &RealFreeSpace,
-            &adapter,
-        )? {
-            BackupOutcome::Verified(_) => {}
-            BackupOutcome::Crashed { .. } => {
-                return Err(RehearsalError::Io {
-                    code: "database-backup-crashed",
-                });
-            }
+    // The DB backup is ALWAYS rebuilt from the current live source (the
+    // staged same-stem republish never destroys the prior valid copy until
+    // the new one verifies), so the recorded restore point can never be a
+    // stale first-pass artifact.
+    ensure_no_pending_migrations(&paths.db, recovery_dir, now_ms)?;
+    let store = EngineStore::open(&paths.db, now_ms)?;
+    let adapter = StorageFaultAdapter { faults };
+    match create_verified_backup(
+        &store,
+        recovery_dir,
+        DB_BACKUP_STEM,
+        "cutover-rehearsal",
+        now_ms,
+        &RealFreeSpace,
+        &adapter,
+    )? {
+        BackupOutcome::Verified(_) => {}
+        BackupOutcome::Crashed { .. } => {
+            return Err(RehearsalError::Io {
+                code: "database-backup-crashed",
+            });
         }
     }
+    drop(store);
 
-    create_directory_backup(paths, recovery_dir, faults)
+    // A pre-existing directory backup is reusable only when every backed-up
+    // file still hashes identically to its CURRENT live source; a stale one
+    // must never be recorded as this run's restore point.
+    match load_valid_directory_backup(recovery_dir)? {
+        Some(manifest) => {
+            if directory_backup_matches_live(paths, &manifest)? {
+                Ok(())
+            } else {
+                Err(RehearsalError::Io {
+                    code: "prior-directory-backup-stale",
+                })
+            }
+        }
+        None => {
+            if recovery_dir.join(DIRECTORY_MANIFEST_NAME).exists() {
+                return Err(RehearsalError::Io {
+                    code: "prior-directory-backup-inconsistent",
+                });
+            }
+            create_directory_backup(paths, recovery_dir, faults)
+        }
+    }
+}
+
+/// Whether a validated directory-backup manifest still describes exactly the
+/// current live source set, byte for byte.
+fn directory_backup_matches_live(
+    paths: &Paths,
+    manifest: &DirectoryBackupManifest,
+) -> Result<bool, RehearsalError> {
+    let sources = collect_directory_sources(paths)?;
+    if sources.len() != manifest.files.len() {
+        return Ok(false);
+    }
+    let mut declared: Vec<&DirectoryBackupEntry> = manifest.files.iter().collect();
+    declared.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    for ((relative, source), entry) in sources.iter().zip(declared) {
+        if *relative != entry.relative_path {
+            return Ok(false);
+        }
+        let (hash, bytes) = hash_file(source)?;
+        if hash != entry.sha256 || bytes != entry.size_bytes {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The sorted (relative-path, source-path) set the directory backup protects:
+/// the engine dir (minus the live triplet) plus the optional `.dohc` sibling
+/// snapshots.
+fn collect_directory_sources(paths: &Paths) -> Result<Vec<(String, PathBuf)>, RehearsalError> {
+    let mut sources = Vec::new();
+    collect_engine_files(&paths.engine, &paths.engine, &mut sources)?;
+    for sibling in SIBLING_SNAPSHOTS {
+        let source = paths.root.join(".dohc").join(sibling);
+        let metadata = match std::fs::symlink_metadata(&source) {
+            Ok(metadata) => metadata,
+            // The sibling snapshots are optional workspace files; absent means
+            // there is nothing to protect, not a broken fixture.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(RehearsalError::io("snapshot-metadata", error)),
+        };
+        if !metadata.file_type().is_file() || super::metadata_is_hard_linked(&metadata) {
+            return Err(RehearsalError::Io {
+                code: "snapshot-not-regular",
+            });
+        }
+        sources.push((format!("dohc/{sibling}"), source));
+    }
+    sources.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(sources)
+}
+
+/// The capture gate re-verifies the protected `.dohc` sibling snapshots
+/// against the recorded backup: a snapshot that drifted (or vanished) after
+/// the backup was taken must fail the rehearsal, not silently leave a stale
+/// restore point behind a Complete marker.
+pub(crate) fn verify_protected_snapshots(
+    paths: &Paths,
+    recovery_dir: &Path,
+) -> Result<(), RehearsalError> {
+    let manifest = load_valid_directory_backup(recovery_dir)?.ok_or(RehearsalError::Io {
+        code: "backup-directory-not-valid",
+    })?;
+    for entry in &manifest.files {
+        let Some(name) = entry.relative_path.strip_prefix("dohc/") else {
+            continue;
+        };
+        let live = paths.root.join(".dohc").join(name);
+        let (hash, bytes) = match hash_file(&live) {
+            Ok(hashed) => hashed,
+            Err(_) => {
+                return Err(RehearsalError::Io {
+                    code: "capture-snapshot-missing",
+                });
+            }
+        };
+        if hash != entry.sha256 || bytes != entry.size_bytes {
+            return Err(RehearsalError::Io {
+                code: "capture-snapshot-drifted",
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The recovery dir holds a full copy of the workspace database, so it must be
-/// private. Unix: 0700 (created and tightened). Windows: the profile-inherited
-/// default ACL is already owner-scoped and accepted as-is.
+/// private. Unix: 0700 (created and tightened). Windows: a hardened owner-only
+/// DACL needs Win32 calls that require `unsafe` (forbidden by this crate), so
+/// the profile-inherited owner ACL is accepted — the rehearsal runs on a
+/// trusted local machine against a fixture clone, and true DACL hardening is
+/// deferred to the real `--cutover` tier.
 pub(crate) fn create_private_dir_all(dir: &Path) -> Result<(), RehearsalError> {
     #[cfg(unix)]
     {
@@ -397,25 +495,7 @@ fn create_directory_backup(
     }
     std::fs::create_dir(&staging)
         .map_err(|e| RehearsalError::io("directory-backup-staging-create", e))?;
-    let mut sources = Vec::new();
-    collect_engine_files(&paths.engine, &paths.engine, &mut sources)?;
-    for sibling in SIBLING_SNAPSHOTS {
-        let source = paths.root.join(".dohc").join(sibling);
-        let metadata = match std::fs::symlink_metadata(&source) {
-            Ok(metadata) => metadata,
-            // The sibling snapshots are optional workspace files; absent means
-            // there is nothing to protect, not a broken fixture.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(RehearsalError::io("snapshot-metadata", error)),
-        };
-        if !metadata.file_type().is_file() || super::metadata_is_hard_linked(&metadata) {
-            return Err(RehearsalError::Io {
-                code: "snapshot-not-regular",
-            });
-        }
-        sources.push((format!("dohc/{sibling}"), source));
-    }
-    sources.sort_by(|left, right| left.0.cmp(&right.0));
+    let sources = collect_directory_sources(paths)?;
     let mut entries = Vec::with_capacity(sources.len());
     for (relative, source) in sources {
         if faults.poll(FaultPoint::BackupDuringDirectoryCopy) == FaultAction::Crash {
@@ -445,6 +525,10 @@ fn create_directory_backup(
         verified: true,
         files: entries,
     };
+    // Every directory entry in the staged tree must be durable BEFORE the
+    // publish rename can be recorded; otherwise a power loss could keep the
+    // manifest while dropping the files it describes.
+    fsync_tree(&staging)?;
     std::fs::rename(&staging, &published)
         .map_err(|e| RehearsalError::io("directory-backup-publish", e))?;
     write_manifest_atomic(&recovery_dir.join(DIRECTORY_MANIFEST_NAME), &manifest)?;
@@ -486,8 +570,11 @@ fn collect_engine_files(
                 .map_err(|_| RehearsalError::State)?;
             // The whole live triplet is excluded: the vacuumed DB backup is the
             // complete database state, and a copied WAL/SHM restored beside it
-            // would be replayed by SQLite into silent corruption.
-            if DB_TRIPLET.iter().any(|name| relative == Path::new(name)) {
+            // would be replayed by SQLite into silent corruption. The held
+            // advisory lock file is runtime-only state, not workspace content.
+            if DB_TRIPLET.iter().any(|name| relative == Path::new(name))
+                || relative == Path::new(super::ROOT_LOCK_FILE)
+            {
                 continue;
             }
             let text = relative.to_str().ok_or(RehearsalError::Io {
@@ -578,6 +665,24 @@ fn write_manifest_atomic(
         .map_err(|e| RehearsalError::io("directory-manifest-publish", e))?;
     if let Some(parent) = path.parent() {
         super::fsync_dir(parent)?;
+    }
+    Ok(())
+}
+
+/// Recursively fsync every directory in `directory`'s tree (deepest last is
+/// unnecessary — each dir entry set only needs its own sync).
+fn fsync_tree(directory: &Path) -> Result<(), RehearsalError> {
+    super::fsync_dir(directory)?;
+    let entries =
+        std::fs::read_dir(directory).map_err(|e| RehearsalError::io("backup-sync-enumerate", e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| RehearsalError::io("backup-sync-entry", e))?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|e| RehearsalError::io("backup-sync-metadata", e))?;
+        if metadata.is_dir() {
+            fsync_tree(&path)?;
+        }
     }
     Ok(())
 }

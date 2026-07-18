@@ -57,6 +57,11 @@ impl Paths {
     }
 }
 
+/// The per-root advisory lock file. Held exclusively for a whole rehearsal
+/// invocation, so every traversal must SKIP it — reading a locked range fails
+/// on Windows, and its bytes are never part of the workspace.
+pub(crate) const ROOT_LOCK_FILE: &str = "CUTOVER_REHEARSAL_LOCK";
+
 /// Make a just-published rename durable by syncing its directory. Windows std
 /// cannot open directory handles; NTFS metadata durability is accepted there.
 pub(crate) fn fsync_dir(dir: &std::path::Path) -> Result<(), RehearsalError> {
@@ -74,8 +79,12 @@ pub(crate) fn fsync_dir(dir: &std::path::Path) -> Result<(), RehearsalError> {
 }
 
 /// Hard links alias content reachable outside the tree being walked. The link
-/// count is only exposed by stable std on Unix; on Windows the check is
-/// unavailable and hard links stay a documented limitation.
+/// count is only exposed by stable std on Unix; on Windows the file-identity
+/// query needs Win32 calls that require `unsafe` (forbidden by this crate),
+/// and failing closed would reject EVERY Windows file and break the shard —
+/// so Windows hard links pass undetected: acceptable for a trusted local
+/// fixture rehearsal, with real identity checks deferred to the `--cutover`
+/// tier.
 pub(crate) fn metadata_is_hard_linked(metadata: &std::fs::Metadata) -> bool {
     #[cfg(unix)]
     {

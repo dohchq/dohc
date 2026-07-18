@@ -44,6 +44,24 @@ pub(crate) fn acquire_copy_hash_close(
     let mut held = Vec::new();
     for name in DB_TRIPLET {
         let source = paths.engine.join(name);
+        // Validate the path BEFORE opening: a sidecar replaced by a
+        // FIFO/device would block a plain open forever instead of failing.
+        match std::fs::symlink_metadata(&source) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(RehearsalError::io("triplet-source-metadata", error)),
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                    return Err(RehearsalError::Io {
+                        code: "triplet-source-not-regular",
+                    });
+                }
+                if super::metadata_is_hard_linked(&metadata) {
+                    return Err(RehearsalError::Io {
+                        code: "triplet-source-hardlink-refused",
+                    });
+                }
+            }
+        }
         match open_exclusive(&source) {
             Ok(file) => held.push((name, source, file)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -84,19 +102,41 @@ pub(crate) fn swap_and_verify(
     verified: &VerifiedTriplet,
 ) -> Result<PathBuf, RehearsalError> {
     // A triplet file that exists now but was not captured by Phase A appeared
-    // after the proof — nothing has been moved yet, so refuse outright.
+    // after the proof — nothing has been moved yet, so refuse outright. Only
+    // a definite NotFound counts as absent; any other metadata error must
+    // fail closed rather than let an unverified sidecar ride along.
     for name in DB_TRIPLET {
-        if !verified.entries.iter().any(|entry| entry.name == name)
-            && std::fs::symlink_metadata(paths.engine.join(name)).is_ok()
-        {
-            return Err(RehearsalError::Io {
-                code: "triplet-unverified-sidecar",
-            });
+        if verified.entries.iter().any(|entry| entry.name == name) {
+            continue;
+        }
+        match std::fs::symlink_metadata(paths.engine.join(name)) {
+            Ok(_) => {
+                return Err(RehearsalError::Io {
+                    code: "triplet-unverified-sidecar",
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(RehearsalError::io("triplet-sidecar-metadata", error)),
         }
     }
 
     let moved = paths.engine.join(MOVED_ASIDE_DIR);
-    std::fs::create_dir(&moved).map_err(|e| RehearsalError::io("moved-aside-create", e))?;
+    match std::fs::create_dir(&moved) {
+        Ok(()) => {}
+        // An EMPTY leftover dir is the crash window right after create_dir —
+        // nothing was moved, so reuse it. A non-empty one is a real partial
+        // move and stays a refusal.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let mut entries = std::fs::read_dir(&moved)
+                .map_err(|e| RehearsalError::io("moved-aside-inspect", e))?;
+            if entries.next().is_some() {
+                return Err(RehearsalError::Io {
+                    code: "moved-aside-not-clean",
+                });
+            }
+        }
+        Err(error) => return Err(RehearsalError::io("moved-aside-create", error)),
+    }
     for entry in &verified.entries {
         let destination = moved.join(entry.name);
         if let Err(error) = rename_with_retry(&entry.source, &destination) {
@@ -108,8 +148,13 @@ pub(crate) fn swap_and_verify(
     }
 
     // EVERY verification failure — including an IO error while inspecting the
-    // moved bytes — must route through the rollback, never bypass it.
-    if let Err(error) = verify_moved_entries(&moved, verified) {
+    // moved bytes — must route through the rollback, never bypass it. The
+    // parent-dir fsyncs make the renames durable BEFORE the MovedAside state
+    // is recorded, so a power loss cannot persist the marker without the move.
+    if let Err(error) = verify_moved_entries(&moved, verified)
+        .and_then(|()| super::fsync_dir(&paths.engine))
+        .and_then(|()| super::fsync_dir(&moved))
+    {
         return Err(fail_swap(verified, error));
     }
     Ok(moved)
@@ -166,10 +211,12 @@ fn open_exclusive(path: &Path) -> std::io::Result<File> {
     // blocking forever. The real `--cutover` tier must add a SQLite-level
     // exclusive gate; flock cannot stop a live SQLite writer.
     for attempt in 0..SWAP_ATTEMPTS {
-        match file.try_lock() {
+        // fs4 rather than std's `File::try_lock`: same OS lock, but available
+        // at the workspace MSRV (std stabilized it in 1.89).
+        match fs4::FileExt::try_lock(&file) {
             Ok(()) => return Ok(file),
-            Err(std::fs::TryLockError::Error(error)) => return Err(error),
-            Err(std::fs::TryLockError::WouldBlock) => {
+            Err(fs4::TryLockError::Error(error)) => return Err(error),
+            Err(fs4::TryLockError::WouldBlock) => {
                 if attempt + 1 < SWAP_ATTEMPTS {
                     std::thread::sleep(Duration::from_millis(10_u64 << attempt));
                 }
