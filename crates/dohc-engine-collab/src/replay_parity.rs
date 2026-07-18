@@ -350,14 +350,75 @@ fn content_parity_conflict(
     false
 }
 
-/// A canonical, order-independent fingerprint of a JSON-ish `Any` value: the
-/// sorted-key serde projection (`any_to_json` sorts every nested map via
-/// `BTreeMap` — constraint 2) serialized and hashed. Two encodings of the same
-/// logical value fingerprint identically even if yrs re-encoded a map's keys in
-/// a different order, so a legitimate full-state resend is never false-flagged.
+/// A canonical, order-independent fingerprint of an `Any` value: the tagged,
+/// length-delimited encoding ([`append_canonical_any`]) hashed. Map keys are
+/// sorted (constraint 2), so two encodings of the same logical value fingerprint
+/// identically even if yrs re-encoded a map's keys in a different order — a
+/// legitimate full-state resend is never false-flagged.
+///
+/// NOT `any_to_json`: that projection is LOSSY for the content-parity check —
+/// it collapses `Any::BigInt(1)`/`Any::Number(1.0)`, `Any::Null`/`Any::Undefined`,
+/// and `Any::Buffer(b)`/`Any::Map({"__bytes__": b})` to the same JSON, so a
+/// hostile re-encode swapping one of those variants at an already-known clock
+/// would hash identically and slip past the parity check. The tagged encoding
+/// gives every variant a distinct tag byte, so no two distinct `Any` wire values
+/// share a fingerprint.
 fn any_payload(value: &Any) -> String {
-    let canonical = serde_json::to_vec(&crate::ydoc::any_to_json(value)).unwrap_or_default();
+    let mut canonical = Vec::new();
+    append_canonical_any(&mut canonical, value);
     crate::hex_sha256(&canonical)
+}
+
+/// Append a tagged, length-delimited, variant-preserving canonical encoding of
+/// `value` to `out`. Every `Any` variant gets a distinct leading tag byte;
+/// scalars carry their raw bits, byte/string fields a length prefix, and
+/// collections a count prefix with map keys sorted for order-independence.
+/// Recurses only over an `Any` tree already depth-bounded by [`safe_read_any`]
+/// ([`MAX_ANY_DEPTH`]), so it cannot overflow the stack.
+fn append_canonical_any(out: &mut Vec<u8>, value: &Any) {
+    match value {
+        Any::Undefined => out.push(0),
+        Any::Null => out.push(1),
+        Any::Bool(false) => out.push(2),
+        Any::Bool(true) => out.push(3),
+        Any::Number(n) => {
+            out.push(4);
+            out.extend_from_slice(&n.to_bits().to_be_bytes());
+        }
+        Any::BigInt(i) => {
+            out.push(5);
+            out.extend_from_slice(&i.to_be_bytes());
+        }
+        Any::String(s) => {
+            out.push(6);
+            out.extend_from_slice(&(s.len() as u64).to_be_bytes());
+            out.extend_from_slice(s.as_bytes());
+        }
+        Any::Buffer(b) => {
+            out.push(7);
+            out.extend_from_slice(&(b.len() as u64).to_be_bytes());
+            out.extend_from_slice(b);
+        }
+        Any::Array(items) => {
+            out.push(8);
+            out.extend_from_slice(&(items.len() as u64).to_be_bytes());
+            for item in items.iter() {
+                append_canonical_any(out, item);
+            }
+        }
+        Any::Map(map) => {
+            out.push(9);
+            out.extend_from_slice(&(map.len() as u64).to_be_bytes());
+            // Order-independent: sort by key so re-encoded key orders match.
+            let mut sorted: Vec<(&String, &Any)> = map.iter().collect();
+            sorted.sort_by(|a, b| a.0.cmp(b.0));
+            for (k, v) in sorted {
+                out.extend_from_slice(&(k.len() as u64).to_be_bytes());
+                out.extend_from_slice(k.as_bytes());
+                append_canonical_any(out, v);
+            }
+        }
+    }
 }
 
 fn record_identity(
@@ -578,14 +639,10 @@ fn safe_read_type_ref_fingerprint(decoder: &mut DecoderV1<'_>) -> Result<Vec<u8>
 /// (see [`safe_read_string`]).
 fn safe_read_options_fingerprint(decoder: &mut DecoderV1<'_>) -> Result<Vec<u8>, CollabError> {
     let guid = safe_read_string(decoder)?;
-    let mut canonical = guid.as_bytes().to_vec();
-    canonical.push(0);
+    let mut canonical = (guid.len() as u64).to_be_bytes().to_vec();
+    canonical.extend_from_slice(guid.as_bytes());
     let opts = safe_read_any(decoder, 0)?;
-    canonical.extend_from_slice(
-        serde_json::to_vec(&crate::ydoc::any_to_json(&opts))
-            .unwrap_or_default()
-            .as_slice(),
-    );
+    append_canonical_any(&mut canonical, &opts);
     Ok(canonical)
 }
 
@@ -836,15 +893,11 @@ fn scan_content(
         BLOCK_ITEM_FORMAT_REF_NUMBER => {
             let key = safe_read_string(decoder)?.to_owned();
             let value = safe_read_json(decoder)?;
-            // Canonicalize (key, value) together: key bytes, a NUL separator
-            // (keys cannot contain NUL), then the order-independent Any payload.
-            let mut canonical = key.as_bytes().to_vec();
-            canonical.push(0);
-            canonical.extend_from_slice(
-                serde_json::to_vec(&crate::ydoc::any_to_json(&value))
-                    .unwrap_or_default()
-                    .as_slice(),
-            );
+            // Canonicalize (key, value) together: a length-prefixed key, then
+            // the tagged, variant-preserving Any payload.
+            let mut canonical = (key.len() as u64).to_be_bytes().to_vec();
+            canonical.extend_from_slice(key.as_bytes());
+            append_canonical_any(&mut canonical, &value);
             record_identity(
                 structure,
                 id.client,
@@ -1195,6 +1248,48 @@ mod tests {
         bytes.push(0x00); // empty delete set
         let structure = scan_v1(&bytes).expect("4-deep Any nesting must be accepted");
         assert_eq!(structure.claimed_clocks.len(), 1);
+    }
+
+    /// The canonical `Any` fingerprint must preserve every variant distinction
+    /// that `any_to_json` collapses — otherwise a hostile re-encode swapping,
+    /// e.g., `BigInt(1)` for `Number(1.0)` at an already-known clock would hash
+    /// identically and slip past the content-parity check. Each pair below is
+    /// two DISTINCT wire values that `any_to_json` maps to the same JSON.
+    #[test]
+    fn canonical_any_distinguishes_variants_json_collapses() {
+        use std::sync::Arc;
+        let pairs: [(Any, Any); 3] = [
+            // BigInt(1) vs Number(1.0): serde JSON is `1` for both.
+            (Any::BigInt(1), Any::Number(1.0)),
+            // Null vs Undefined: serde JSON is `null` for both.
+            (Any::Null, Any::Undefined),
+            // Buffer(b) vs a Map carrying a "__bytes__" key: `any_to_json`
+            // renders Buffer AS that very map shape.
+            (
+                Any::Buffer(Arc::from(vec![1u8, 2, 3].into_boxed_slice())),
+                Any::Map(Arc::new(HashMap::from([(
+                    "__bytes__".to_owned(),
+                    Any::String(Arc::from("AQID")),
+                )]))),
+            ),
+        ];
+        for (a, b) in pairs {
+            assert_ne!(
+                any_payload(&a),
+                any_payload(&b),
+                "distinct Any wire values must not share a fingerprint"
+            );
+        }
+        // And the SAME value fingerprints stably (map key order independent).
+        let m1 = Any::Map(Arc::new(HashMap::from([
+            ("a".to_owned(), Any::BigInt(1)),
+            ("b".to_owned(), Any::Bool(true)),
+        ])));
+        let m2 = Any::Map(Arc::new(HashMap::from([
+            ("b".to_owned(), Any::Bool(true)),
+            ("a".to_owned(), Any::BigInt(1)),
+        ])));
+        assert_eq!(any_payload(&m1), any_payload(&m2));
     }
 
     /// The 53-bit bound is exact: the LARGEST honest client identifier
