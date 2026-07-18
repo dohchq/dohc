@@ -378,13 +378,17 @@ impl<'a> VersionedTextStore<'a> {
             // against THIS write's bytes makes a text/delete/rename rollback
             // provably unable to touch an unrelated job that merely shares the
             // moment id. For a genuine binary write:
-            //   * job still PENDING  → cancel it; the bytes never reached disk, so
-            //     disk already holds the pre-write state the rollback restores.
-            //   * job COMPLETE/CONFLICT → the bytes are (or an external edit is)
-            //     on disk; enqueue a compensating job that restores disk to the
-            //     rolled-back-to state (delete for a first write, else the previous
-            //     content). Preimage-guarded on the written bytes so an external
-            //     edit is preserved, never clobbered.
+            // Restore disk to the rolled-back-to state UNCONDITIONALLY for a
+            // genuine binary write, then cancel a still-pending job:
+            //   * a PENDING job does NOT prove disk is clean — the materializer
+            //     can crash AFTER the atomic rename lands but BEFORE marking the
+            //     job complete (`MaterializeAfterRenameBeforeComplete`), leaving
+            //     the written bytes ON DISK with a still-pending job. So always
+            //     enqueue the compensating restore (delete for a first write, else
+            //     the previous content); it is a harmless preimage-guarded no-op
+            //     if the bytes never actually reached disk.
+            //   * additionally cancel a still-pending original job so it can never
+            //     race the compensator and re-materialize the rolled-back bytes.
             if prep.moment.operation == MomentOp::Write
                 && prep.moment.after_content_kind == "binary"
                 && let Some(written_moment_sha) = prep.moment.after_binary_sha256.as_deref()
@@ -403,21 +407,20 @@ impl<'a> VersionedTextStore<'a> {
                 if let Some((status, generation, written_sha256)) = job
                     && written_sha256.as_str() == written_moment_sha
                 {
+                    enqueue_binary_rollback_restore(
+                        tx,
+                        input,
+                        &prep.before,
+                        generation,
+                        &written_sha256,
+                        prep.moment.recorded_at_ms,
+                    )?;
                     if status == "pending" {
                         tx.execute(
                             "DELETE FROM materialization_jobs WHERE job_id = ?1",
                             params![input.mutation_moment_id],
                         )
                         .map_err(DomainError::sql_persist)?;
-                    } else {
-                        enqueue_binary_rollback_restore(
-                            tx,
-                            input,
-                            &prep.before,
-                            generation,
-                            &written_sha256,
-                            prep.moment.recorded_at_ms,
-                        )?;
                     }
                 }
             }
@@ -1443,7 +1446,7 @@ fn name_taken(conn: &Connection, workspace_id: &str, name: &str) -> Result<bool,
     Ok(found.is_some())
 }
 
-fn moment_exists(
+pub(crate) fn moment_exists(
     conn: &Connection,
     workspace_id: &str,
     moment_id: &str,

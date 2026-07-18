@@ -10,9 +10,10 @@ use dohc_engine_domain::{
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs};
 use dohc_engine_storage::{
-    MaterializationJobSpec, Preimage, StorageError, enqueue_job, hex_sha256, put_binary_blob,
+    FaultPoint, MaterializationJobSpec, Preimage, StorageError, enqueue_job, hex_sha256,
+    put_binary_blob,
 };
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 use rusqlite::params;
 
 const WS: &str = "binhead-rev2";
@@ -288,18 +289,28 @@ fn rollback_first_binary_write_removes_file_and_object() {
         )
         .expect("rollback first binary write");
 
-    // M1: the rolled-back mutation's materialization job must be cancelled, so
-    // there is nothing pending to drain.
-    let pending: i64 = store
+    // M1: the rolled-back mutation's ORIGINAL job must be cancelled so it can
+    // never re-materialize the rolled-back bytes. A compensating restore job is
+    // enqueued unconditionally (a harmless no-op here, since the bytes never
+    // reached disk in this pending-no-drain case).
+    let (orig, restore): (i64, i64) = store
         .read_with(|conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM materialization_jobs WHERE status = 'pending'",
+            let o: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs WHERE job_id = 'bin-job'",
                 [],
                 |r| r.get(0),
-            )
+            )?;
+            let r: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs \
+                 WHERE job_id = 'rollback-restore_bin-job' AND status = 'pending'",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((o, r))
         })
-        .expect("pending job count");
-    assert_eq!(pending, 0, "the rolled-back binary job must be cancelled");
+        .expect("job counts");
+    assert_eq!(orig, 0, "the original binary job must be cancelled");
+    assert_eq!(restore, 1, "a compensating restore job must be enqueued");
 
     // DISK-STATE proof: draining the materializer must NOT resurrect the file.
     run_pending_jobs(
@@ -602,5 +613,99 @@ fn text_rollback_does_not_touch_a_materialization_job_with_the_same_id() {
     assert_eq!(
         target, "unrelated.bin",
         "the unrelated job must be untouched"
+    );
+}
+
+/// Finding A (crash-consistency): a PENDING materialization job does NOT prove
+/// the bytes never reached disk — the materializer can crash AFTER the atomic
+/// rename lands but BEFORE marking the job complete
+/// (`MaterializeAfterRenameBeforeComplete`), leaving the written bytes on disk
+/// with a still-pending job. Rolling that write back must reconcile DISK anyway:
+/// the compensating delete runs even though the original job was only pending.
+#[test]
+fn rollback_of_pending_binary_write_with_bytes_on_disk_cleans_disk() {
+    let (scratch, mut store) = open();
+    write_binary(
+        &mut store,
+        "obj-doc",
+        "doc.md",
+        b"\x00crash binary\xff",
+        "bin-job",
+        10,
+    );
+
+    // Crash AFTER the rename lands but BEFORE marking complete: bytes ON DISK,
+    // job stays PENDING.
+    let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterRenameBeforeComplete);
+    let results = run_pending_jobs(
+        &store,
+        scratch.path(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        20,
+        faults.as_ref(),
+    )
+    .expect("drain with post-rename crash");
+    assert!(
+        matches!(
+            results.last().map(|r| r.outcome),
+            Some(JobOutcome::Crashed(
+                FaultPoint::MaterializeAfterRenameBeforeComplete
+            ))
+        ),
+        "the materializer must crash after the rename, before completing"
+    );
+    assert!(
+        scratch.path().join("doc.md").exists(),
+        "bytes must be on disk after the post-rename crash"
+    );
+    let pending: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs \
+                 WHERE job_id = 'bin-job' AND status = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .expect("pending count");
+    assert_eq!(pending, 1, "the crashed job must remain pending");
+
+    // Roll back — must reconcile disk even though the job was only pending.
+    VersionedTextStore::new(&mut store)
+        .rollback_text_file_mutation(
+            &RollbackTextFileMutation {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: "doc.md".to_owned(),
+                mutation_moment_id: "bin-job".to_owned(),
+                legacy_before_text: None,
+            },
+            &NoFaults,
+        )
+        .expect("rollback pending-but-on-disk binary write");
+
+    // Drain the compensating delete → disk cleaned to match the absent DB head.
+    run_pending_jobs(
+        &store,
+        scratch.path(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        30,
+        &NoFaults,
+    )
+    .expect("drain compensating delete");
+    assert!(
+        !scratch.path().join("doc.md").exists(),
+        "M1 crash window: disk must be cleaned to match the rolled-back absent head"
+    );
+    assert!(
+        VersionedTextStore::new(&mut store)
+            .read_text(WS, "main", "doc.md")
+            .expect("read")
+            .is_none(),
+        "the DB head must be absent after rollback"
     );
 }

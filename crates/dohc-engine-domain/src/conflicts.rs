@@ -3,8 +3,9 @@
 use crate::error::DomainError;
 use crate::records::{DeleteResult, DeleteTextFile, TextSnapshot, WriteResult, WriteText};
 use crate::store::{
-    VersionedTextStore, delete_text_in_tx, hash_fields, lookup_request, next_moment_order,
-    record_request, validate_delete_input, validate_path, validate_write_input, write_text_in_tx,
+    VersionedTextStore, delete_text_in_tx, hash_fields, lookup_request, moment_exists,
+    next_moment_order, record_request, validate_delete_input, validate_path, validate_write_input,
+    write_text_in_tx,
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
@@ -796,6 +797,16 @@ pub fn write_binary_file_in_tx(
         .map_err(DomainError::sql_corrupt)?;
     if version_exists.is_none() {
         return Err(DomainError::VersionNotFound);
+    }
+    // The moment id (== job_id) must be unique. Precheck and return a VALIDATION
+    // error (`DuplicateMomentId`) rather than letting the `INSERT INTO moments`
+    // hit the UNIQUE constraint and surface as `Storage(PersistFailed)`. On the
+    // mirrored-resolve path a Storage error is treated as FATAL by
+    // `apply_within_savepoint` (retries forever), whereas a validation rejection
+    // acks-and-defers — mirroring `write_text_in_tx`, which prechecks the same
+    // way so a colliding id never poison-pills replication.
+    if moment_exists(tx, &input.workspace_id, &input.job_id)? {
+        return Err(DomainError::DuplicateMomentId);
     }
 
     let existing_object: Option<String> = tx
