@@ -10,14 +10,14 @@
 use dohc_engine_domain::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
     ConflictRowUpdate, ConflictStatus, DeleteTextFile, DomainError, TextConflict, TextSnapshot,
-    WriteText, delete_text_in_tx, enqueue_delete, enqueue_write, file_states_equal,
-    insert_text_conflict_if_absent, live_state_matches_conflict_current, load_text_conflict_in_tx,
-    select_text_snapshot_by_path_in_tx, update_text_conflict_row, validate_delete_input,
-    validate_write_input, write_text_in_tx,
+    WriteBinaryFile, WriteText, delete_text_in_tx, enqueue_delete, enqueue_write,
+    file_states_equal, insert_text_conflict_if_absent, live_state_matches_conflict_current,
+    load_text_conflict_in_tx, select_text_snapshot_by_path_in_tx, update_text_conflict_row,
+    validate_delete_input, validate_write_input, write_binary_file_in_tx, write_text_in_tx,
 };
 use dohc_engine_storage::{EngineStore, FaultInjector, Preimage};
 use rusqlite::{OptionalExtension, Transaction, params};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with};
 
@@ -28,7 +28,35 @@ pub struct ConflictApplyResult {
     pub conflict_id: String,
     pub inserted: Option<bool>,
     pub matched: bool,
-    pub deferred: bool,
+    pub pending_resolve: Option<PendingResolve>,
+}
+
+impl ConflictApplyResult {
+    /// Backward-compatible boolean view of the structured pending surface.
+    pub fn deferred(&self) -> bool {
+        self.pending_resolve.is_some()
+    }
+}
+
+/// A replicated resolution that was acknowledged but deliberately not
+/// applied. It remains available for a later human/review layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingResolve {
+    pub remote_conflict_id: String,
+    pub local_conflict_id: Option<String>,
+    pub path: Option<String>,
+    pub reason: PendingResolveReason,
+}
+
+/// The four fail-closed reasons supported by mirrored conflict application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PendingResolveReason {
+    PathChange,
+    Merged,
+    StaleHead,
+    BinaryUnhydrated,
 }
 
 pub fn apply_conflict_envelope(
@@ -143,7 +171,7 @@ fn apply_open(
         conflict_id: conflict.conflict_id,
         inserted: Some(inserted),
         matched: true,
-        deferred: false,
+        pending_resolve: None,
     })
 }
 
@@ -255,6 +283,7 @@ struct ResolvePayload {
 
 struct ResolveTarget {
     conflict_id: String,
+    path: String,
     metadata_origin: String,
     status: String,
     chosen_from: String,
@@ -265,7 +294,7 @@ struct ResolveTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MirroredOutcome {
     Applied,
-    Deferred,
+    Deferred(PendingResolveReason),
 }
 
 fn apply_resolve(
@@ -287,17 +316,9 @@ fn apply_resolve(
             conflict_id: payload.conflict_id,
             inserted: None,
             matched: false,
-            deferred: false,
+            pending_resolve: None,
         });
     };
-    if target.has_binary_side {
-        return Ok(ConflictApplyResult {
-            conflict_id: target.conflict_id,
-            inserted: None,
-            matched: false,
-            deferred: true,
-        });
-    }
     let mut choice = parse_choice(&payload.chosen_from)?;
     let mut resolution = parse_resolution(&payload.resolution)?;
     if target.metadata_origin == "sync" {
@@ -309,28 +330,44 @@ fn apply_resolve(
             || target.resolution.as_deref() != Some(resolution_str(resolution))
         {
             return Ok(ConflictApplyResult {
-                conflict_id: target.conflict_id,
+                conflict_id: target.conflict_id.clone(),
                 inserted: None,
                 matched: false,
-                deferred: true,
+                pending_resolve: Some(pending_resolve(
+                    &payload,
+                    &target,
+                    PendingResolveReason::StaleHead,
+                )),
             });
         }
         return Ok(ConflictApplyResult {
             conflict_id: target.conflict_id,
             inserted: None,
             matched: true,
-            deferred: false,
+            pending_resolve: None,
+        });
+    }
+    if target.has_binary_side && target.metadata_origin != "sync" {
+        return Ok(ConflictApplyResult {
+            conflict_id: target.conflict_id.clone(),
+            inserted: None,
+            matched: false,
+            pending_resolve: Some(pending_resolve(
+                &payload,
+                &target,
+                PendingResolveReason::BinaryUnhydrated,
+            )),
         });
     }
     if target.metadata_origin == "sync" {
         match apply_mirrored_content(tx, envelope, &target.conflict_id, resolution)? {
             MirroredOutcome::Applied => {}
-            MirroredOutcome::Deferred => {
+            MirroredOutcome::Deferred(reason) => {
                 return Ok(ConflictApplyResult {
-                    conflict_id: target.conflict_id,
+                    conflict_id: target.conflict_id.clone(),
                     inserted: None,
                     matched: false,
-                    deferred: true,
+                    pending_resolve: Some(pending_resolve(&payload, &target, reason)),
                 });
             }
         }
@@ -351,8 +388,21 @@ fn apply_resolve(
         conflict_id: target.conflict_id,
         inserted: None,
         matched: changed,
-        deferred: false,
+        pending_resolve: None,
     })
+}
+
+fn pending_resolve(
+    payload: &ResolvePayload,
+    target: &ResolveTarget,
+    reason: PendingResolveReason,
+) -> PendingResolve {
+    PendingResolve {
+        remote_conflict_id: payload.conflict_id.clone(),
+        local_conflict_id: Some(target.conflict_id.clone()),
+        path: Some(target.path.clone()),
+        reason,
+    }
 }
 
 fn apply_mirrored_content(
@@ -369,28 +419,39 @@ fn apply_mirrored_content(
         .ok_or(SyncError::InvalidInput {
             reason: "replicated conflict target disappeared",
         })?;
-    let live = ConflictFileState::text(
-        conflict.path.clone(),
-        select_text_snapshot_by_path_in_tx(
-            tx,
-            &envelope.workspace_id,
-            &conflict.target_version_id,
-            &conflict.path,
-        )
-        .map_err(map_domain)?,
-    );
+    if resolution == ConflictResolution::AppliedIncoming && conflict.incoming.path != conflict.path
+    {
+        return Ok(MirroredOutcome::Deferred(PendingResolveReason::PathChange));
+    }
+    let live = match conflict.current.content_kind {
+        ConflictContentKind::Text => ConflictFileState::text(
+            conflict.path.clone(),
+            select_text_snapshot_by_path_in_tx(
+                tx,
+                &envelope.workspace_id,
+                &conflict.target_version_id,
+                &conflict.path,
+            )
+            .map_err(map_domain)?,
+        ),
+        // The current Rust version-domain tables do not expose a binary
+        // snapshot head. Refuse to guess that state is still live.
+        ConflictContentKind::Binary => {
+            return Ok(MirroredOutcome::Deferred(PendingResolveReason::StaleHead));
+        }
+    };
     if !live_state_matches_conflict_current(&live, &conflict.current) {
-        return Ok(MirroredOutcome::Deferred);
+        return Ok(MirroredOutcome::Deferred(PendingResolveReason::StaleHead));
     }
 
     match resolution {
         ConflictResolution::KeptCurrent => Ok(MirroredOutcome::Applied),
         ConflictResolution::AppliedIncoming => {
-            if conflict.incoming.path != conflict.path {
-                return Ok(MirroredOutcome::Deferred);
-            }
-            if file_states_equal(&conflict.current.snapshot, &conflict.incoming.snapshot) {
+            if conflict_file_states_equal(&conflict.current, &conflict.incoming) {
                 return Ok(MirroredOutcome::Applied);
+            }
+            if conflict.incoming.content_kind == ConflictContentKind::Binary {
+                return apply_mirrored_binary_write(tx, envelope, &conflict);
             }
             match &conflict.incoming.snapshot {
                 Some(incoming) => {
@@ -415,8 +476,72 @@ fn apply_mirrored_content(
                 None => Ok(MirroredOutcome::Applied),
             }
         }
-        ConflictResolution::AppliedMerged => Ok(MirroredOutcome::Deferred),
+        ConflictResolution::AppliedMerged => {
+            Ok(MirroredOutcome::Deferred(PendingResolveReason::Merged))
+        }
     }
+}
+
+fn conflict_file_states_equal(left: &ConflictFileState, right: &ConflictFileState) -> bool {
+    if left.path != right.path || left.content_kind != right.content_kind {
+        return false;
+    }
+    match left.content_kind {
+        ConflictContentKind::Text => file_states_equal(&left.snapshot, &right.snapshot),
+        ConflictContentKind::Binary => left.binary_sha256 == right.binary_sha256,
+    }
+}
+
+fn apply_mirrored_binary_write(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    conflict: &TextConflict,
+) -> Result<MirroredOutcome, SyncError> {
+    let Some(sha256) = conflict.incoming.binary_sha256.as_deref() else {
+        return Ok(MirroredOutcome::Deferred(
+            PendingResolveReason::BinaryUnhydrated,
+        ));
+    };
+    match dohc_engine_storage::get_binary_blob(tx, sha256) {
+        Ok(Some(_)) => {}
+        Ok(None) | Err(_) => {
+            return Ok(MirroredOutcome::Deferred(
+                PendingResolveReason::BinaryUnhydrated,
+            ));
+        }
+    }
+    let preimage = conflict
+        .current
+        .snapshot
+        .as_ref()
+        .map_or(Preimage::Absent, |snapshot| {
+            Preimage::Present(snapshot.blob_sha256.clone())
+        });
+    tx.execute_batch("SAVEPOINT mirrored_binary_write")
+        .map_err(SyncError::persist)?;
+    let write = write_binary_file_in_tx(
+        tx,
+        &WriteBinaryFile {
+            workspace_id: envelope.workspace_id.clone(),
+            version_id: conflict.target_version_id.clone(),
+            object_id: mirrored_id(envelope, "object"),
+            path: conflict.path.clone(),
+            binary_sha256: sha256.to_owned(),
+            job_id: mirrored_id(envelope, "binary-materialize"),
+            preimage,
+            now_ms: envelope.recorded_at_ms,
+        },
+    );
+    if write.is_err() {
+        tx.execute_batch("ROLLBACK TO mirrored_binary_write; RELEASE mirrored_binary_write")
+            .map_err(SyncError::persist)?;
+        return Ok(MirroredOutcome::Deferred(
+            PendingResolveReason::BinaryUnhydrated,
+        ));
+    }
+    tx.execute_batch("RELEASE mirrored_binary_write")
+        .map_err(SyncError::persist)?;
+    Ok(MirroredOutcome::Applied)
 }
 
 fn apply_mirrored_write(
@@ -478,7 +603,7 @@ fn resolve_target(
     };
     let _ = payload.path.as_deref();
     tx.query_row(
-        "SELECT conflict_id, metadata_origin, status, chosen_from, resolution, \
+        "SELECT conflict_id, path, metadata_origin, status, chosen_from, resolution, \
          (base_content_kind = 'binary' OR current_content_kind = 'binary' OR \
           incoming_content_kind = 'binary') \
          FROM conflicts WHERE workspace_id = ?1 AND status = 'open' \
@@ -498,7 +623,7 @@ fn query_target_by_id(
     conflict_id: &str,
 ) -> Result<Option<ResolveTarget>, SyncError> {
     tx.query_row(
-        "SELECT conflict_id, metadata_origin, status, chosen_from, resolution, \
+        "SELECT conflict_id, path, metadata_origin, status, chosen_from, resolution, \
          (base_content_kind = 'binary' OR current_content_kind = 'binary' OR \
           incoming_content_kind = 'binary') \
          FROM conflicts WHERE workspace_id = ?1 AND conflict_id = ?2",
@@ -512,11 +637,12 @@ fn query_target_by_id(
 fn map_resolve_target(row: &rusqlite::Row<'_>) -> rusqlite::Result<ResolveTarget> {
     Ok(ResolveTarget {
         conflict_id: row.get(0)?,
-        metadata_origin: row.get(1)?,
-        status: row.get(2)?,
-        chosen_from: row.get(3)?,
-        resolution: row.get(4)?,
-        has_binary_side: row.get(5)?,
+        path: row.get(1)?,
+        metadata_origin: row.get(2)?,
+        status: row.get(3)?,
+        chosen_from: row.get(4)?,
+        resolution: row.get(5)?,
+        has_binary_side: row.get(6)?,
     })
 }
 
@@ -706,6 +832,16 @@ mod tests {
             .expect("moment count")
     }
 
+    fn materialization_job_count(store: &EngineStore) -> i64 {
+        store
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM materialization_jobs", [], |row| {
+                    row.get(0)
+                })
+            })
+            .expect("materialization job count")
+    }
+
     fn replication_counts(store: &EngineStore) -> (i64, i64, i64) {
         store
             .read_with(|conn| {
@@ -734,6 +870,59 @@ mod tests {
                 Ok::<_, rusqlite::Error>(())
             })
             .expect("open conflict row");
+    }
+
+    fn assert_resolved_conflict(store: &EngineStore, conflict_id: &str) {
+        store
+            .read_with(|conn| {
+                let (status, resolution): (String, Option<String>) = conn.query_row(
+                    "SELECT status, resolution FROM conflicts \
+                     WHERE workspace_id = 'ws' AND conflict_id = ?1",
+                    params![conflict_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                assert_eq!(status, "resolved");
+                assert_eq!(resolution.as_deref(), Some("applied-incoming"));
+                Ok::<_, rusqlite::Error>(())
+            })
+            .expect("resolved conflict row");
+    }
+
+    fn assert_binary_file_staged(store: &EngineStore, sha256: &str) {
+        store
+            .read_with(|conn| {
+                let object_id: String = conn.query_row(
+                    "SELECT object_id FROM path_aliases \
+                     WHERE workspace_id = 'ws' AND version_id = 'main' AND path = 'doc.md'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                let object_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM file_objects \
+                     WHERE workspace_id = 'ws' AND object_id = ?1",
+                    [&object_id],
+                    |row| row.get(0),
+                )?;
+                let (job_sha, status, operation): (String, String, String) = conn.query_row(
+                    "SELECT content_sha256, status, operation FROM materialization_jobs \
+                     WHERE target_path = 'doc.md' ORDER BY target_generation DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?;
+                let snapshot_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots \
+                     WHERE workspace_id = 'ws' AND version_id = 'main' AND object_id = ?1",
+                    [&object_id],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(object_count, 1);
+                assert_eq!(job_sha, sha256);
+                assert_eq!(status, "pending");
+                assert_eq!(operation, "write");
+                assert_eq!(snapshot_count, 0, "the superseded text head must be gone");
+                Ok::<_, rusqlite::Error>(())
+            })
+            .expect("binary file object and materialization intent");
     }
 
     fn assert_replication_advanced(
@@ -786,7 +975,7 @@ mod tests {
                 conflict_id: "c1".to_owned(),
                 inserted: Some(true),
                 matched: true,
-                deferred: false,
+                pending_resolve: None,
             })
         );
         assert_eq!(
@@ -795,7 +984,7 @@ mod tests {
                 conflict_id: "c1".to_owned(),
                 inserted: Some(false),
                 matched: true,
-                deferred: false,
+                pending_resolve: None,
             })
         );
         let rows = VersionedTextStore::new(&mut store)
@@ -879,14 +1068,20 @@ mod tests {
         )
         .expect("deferred resolve");
 
-        assert!(matches!(
+        assert_eq!(
             outcome,
             ApplyOutcome::Applied(ConflictApplyResult {
+                conflict_id: "path-change-c".to_owned(),
+                inserted: None,
                 matched: false,
-                deferred: true,
-                ..
+                pending_resolve: Some(PendingResolve {
+                    remote_conflict_id: "path-change-c".to_owned(),
+                    local_conflict_id: Some("path-change-c".to_owned()),
+                    path: Some("doc.md".to_owned()),
+                    reason: PendingResolveReason::PathChange,
+                }),
             })
-        ));
+        );
         assert_eq!(read_text(&mut store), "receiver current");
         assert_eq!(moment_count(&store), before_moments);
         assert_open_conflict(&store, "path-change-c");
@@ -927,14 +1122,20 @@ mod tests {
             &NoFaults,
         )
         .expect("deferred resolve");
-        assert!(matches!(
+        assert_eq!(
             outcome,
             ApplyOutcome::Applied(ConflictApplyResult {
+                conflict_id: "merged-c".to_owned(),
+                inserted: None,
                 matched: false,
-                deferred: true,
-                ..
+                pending_resolve: Some(PendingResolve {
+                    remote_conflict_id: "merged-c".to_owned(),
+                    local_conflict_id: Some("merged-c".to_owned()),
+                    path: Some("doc.md".to_owned()),
+                    reason: PendingResolveReason::Merged,
+                }),
             })
-        ));
+        );
         assert_eq!(read_text(&mut store), "receiver current");
         assert_eq!(moment_count(&store), before_moments);
         assert_open_conflict(&store, "merged-c");
@@ -994,14 +1195,20 @@ mod tests {
         )
         .expect("deferred resolve");
 
-        assert!(matches!(
+        assert_eq!(
             outcome,
             ApplyOutcome::Applied(ConflictApplyResult {
+                conflict_id: "stale-c".to_owned(),
+                inserted: None,
                 matched: false,
-                deferred: true,
-                ..
+                pending_resolve: Some(PendingResolve {
+                    remote_conflict_id: "stale-c".to_owned(),
+                    local_conflict_id: Some("stale-c".to_owned()),
+                    path: Some("doc.md".to_owned()),
+                    reason: PendingResolveReason::StaleHead,
+                }),
             })
-        ));
+        );
         assert_eq!(read_text(&mut store), "newer live head");
         assert_eq!(moment_count(&store), before_moments);
         assert_open_conflict(&store, "stale-c");
@@ -1188,14 +1395,18 @@ mod tests {
             &NoFaults,
         )
         .expect("different terminal resolution is deferred");
-        assert!(matches!(
-            outcome,
-            ApplyOutcome::Applied(ConflictApplyResult {
-                matched: false,
-                deferred: true,
-                ..
-            })
-        ));
+        let ApplyOutcome::Applied(result) = outcome else {
+            panic!("replicated resolution must be applied to the ack ledger");
+        };
+        assert!(!result.matched);
+        assert!(result.deferred());
+        assert_eq!(
+            result
+                .pending_resolve
+                .as_ref()
+                .map(|pending| pending.reason),
+            Some(PendingResolveReason::StaleHead)
+        );
         let rows = VersionedTextStore::new(&mut store)
             .list_text_conflicts("ws", Some("resolved"))
             .expect("list");
@@ -1259,8 +1470,10 @@ mod tests {
     }
 
     #[test]
-    fn mirrored_binary_side_resolve_is_acked_and_deferred() {
+    fn mirrored_hydrated_binary_side_resolve_is_applied_and_acked() {
         let (_scratch, mut store) = store();
+        let binary_bytes = b"\x00resolved binary\xff";
+        let binary_sha = dohc_engine_storage::hex_sha256(binary_bytes);
         seed_current(&mut store, "receiver current");
         apply_conflict_envelope(
             &mut store,
@@ -1275,16 +1488,105 @@ mod tests {
         .expect("open text conflict");
         store
             .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::conflicts::hydrate_binary_conflict_blob(
+                    tx,
+                    &binary_sha,
+                    binary_bytes,
+                )
+                .map_err(map_domain)?;
                 tx.execute(
-                    "UPDATE conflicts SET incoming_content_kind = 'binary' \
+                    "UPDATE conflicts SET incoming_content_kind = 'binary', \
+                     incoming_blob_sha256 = NULL, incoming_binary_sha256 = ?1 \
                      WHERE workspace_id = 'ws' AND conflict_id = 'binary-resolve'",
-                    [],
+                    [&binary_sha],
                 )
                 .map_err(SyncError::persist)?;
                 Ok::<_, SyncError>(())
             })
-            .expect("mark binary side");
+            .expect("hydrate and mark binary side");
         let before_moments = moment_count(&store);
+        let resolve = envelope(
+            "peer",
+            1,
+            "conflict.resolve",
+            json!({
+                "conflictId": "binary-resolve",
+                "status": "resolved",
+                "chosenFrom": "current",
+                "resolution": "kept-current",
+                "updatedAtMs": 3_000,
+                "targetVersionId": "main"
+            }),
+        );
+        let outcome = apply_conflict_envelope(&mut store, &resolve, &NoFaults)
+            .expect("hydrated binary resolve applies");
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Applied(ConflictApplyResult {
+                conflict_id: "binary-resolve".to_owned(),
+                inserted: None,
+                matched: true,
+                pending_resolve: None,
+            })
+        );
+        assert_eq!(moment_count(&store), before_moments);
+        assert_binary_file_staged(&store, &binary_sha);
+        assert_resolved_conflict(&store, "binary-resolve");
+        assert_replication_advanced(&store, "peer", 1, 2);
+        let jobs_after_apply = materialization_job_count(&store);
+        assert_eq!(
+            apply_conflict_envelope(&mut store, &resolve, &NoFaults)
+                .expect("same-coordinate replay is idempotent"),
+            ApplyOutcome::Skipped
+        );
+        assert_eq!(materialization_job_count(&store), jobs_after_apply);
+    }
+
+    #[test]
+    fn mirrored_unhydrated_binary_side_resolve_is_surfaced_and_acked() {
+        let (_scratch, mut store) = store();
+        let binary_bytes = b"binary bytes not retained";
+        let binary_sha = dohc_engine_storage::hex_sha256(binary_bytes);
+        seed_current(&mut store, "receiver current");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                0,
+                "conflict.open",
+                mirrored_open_payload("binary-unhydrated", "receiver current", "origin current"),
+            ),
+            &NoFaults,
+        )
+        .expect("open text conflict");
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::conflicts::hydrate_binary_conflict_blob(
+                    tx,
+                    &binary_sha,
+                    binary_bytes,
+                )
+                .map_err(map_domain)?;
+                tx.execute(
+                    "UPDATE conflicts SET incoming_content_kind = 'binary', \
+                     incoming_blob_sha256 = NULL, incoming_binary_sha256 = ?1 \
+                     WHERE workspace_id = 'ws' AND conflict_id = 'binary-unhydrated'",
+                    [&binary_sha],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("prepare binary side");
+        store
+            .read_with(|conn| {
+                conn.execute_batch("PRAGMA foreign_keys = OFF")?;
+                conn.execute("DELETE FROM binary_blobs WHERE sha256 = ?1", [&binary_sha])?;
+                conn.execute_batch("PRAGMA foreign_keys = ON")?;
+                Ok::<_, rusqlite::Error>(())
+            })
+            .expect("simulate a bundle whose bytes are not hydrated yet");
+        let before_moments = moment_count(&store);
+
         let outcome = apply_conflict_envelope(
             &mut store,
             &envelope(
@@ -1292,7 +1594,7 @@ mod tests {
                 1,
                 "conflict.resolve",
                 json!({
-                    "conflictId": "binary-resolve",
+                    "conflictId": "binary-unhydrated",
                     "status": "resolved",
                     "chosenFrom": "current",
                     "resolution": "kept-current",
@@ -1302,18 +1604,25 @@ mod tests {
             ),
             &NoFaults,
         )
-        .expect("binary resolve is deferred");
-        assert!(matches!(
+        .expect("unhydrated binary resolve is acknowledged and surfaced");
+        assert_eq!(
             outcome,
             ApplyOutcome::Applied(ConflictApplyResult {
+                conflict_id: "binary-unhydrated".to_owned(),
+                inserted: None,
                 matched: false,
-                deferred: true,
-                ..
+                pending_resolve: Some(PendingResolve {
+                    remote_conflict_id: "binary-unhydrated".to_owned(),
+                    local_conflict_id: Some("binary-unhydrated".to_owned()),
+                    path: Some("doc.md".to_owned()),
+                    reason: PendingResolveReason::BinaryUnhydrated,
+                }),
             })
-        ));
+        );
         assert_eq!(read_text(&mut store), "receiver current");
         assert_eq!(moment_count(&store), before_moments);
-        assert_open_conflict(&store, "binary-resolve");
+        assert_eq!(materialization_job_count(&store), 0);
+        assert_open_conflict(&store, "binary-unhydrated");
         assert_replication_advanced(&store, "peer", 1, 2);
     }
 

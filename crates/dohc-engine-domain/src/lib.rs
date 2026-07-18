@@ -48,9 +48,9 @@ pub use chats::{
 pub use conflicts::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
     ConflictRowUpdate, ConflictStatus, ResolveConflictKind, ResolveTextConflict,
-    ResolveTextConflictResult, TextConflict, enqueue_delete, enqueue_write,
+    ResolveTextConflictResult, TextConflict, WriteBinaryFile, enqueue_delete, enqueue_write,
     insert_text_conflict_if_absent, live_state_matches_conflict_current, load_text_conflict_in_tx,
-    select_text_snapshot_by_path_in_tx, update_text_conflict_row,
+    select_text_snapshot_by_path_in_tx, update_text_conflict_row, write_binary_file_in_tx,
 };
 pub use error::DomainError;
 pub use merge::{

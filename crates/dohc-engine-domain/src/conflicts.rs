@@ -4,7 +4,7 @@ use crate::error::DomainError;
 use crate::records::{DeleteResult, DeleteTextFile, TextSnapshot, WriteResult, WriteText};
 use crate::store::{
     VersionedTextStore, delete_text_in_tx, hash_fields, lookup_request, record_request,
-    validate_delete_input, validate_write_input, write_text_in_tx,
+    validate_delete_input, validate_path, validate_write_input, write_text_in_tx,
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
@@ -197,6 +197,21 @@ pub struct ConflictRowUpdate {
     pub chosen_from: ConflictChoice,
     pub resolution: Option<ConflictResolution>,
     pub updated_at_ms: i64,
+}
+
+/// Inputs for the narrow replicated-conflict binary write seam. Binary bytes
+/// remain content-addressed in `binary_blobs`; this mutation only updates the
+/// file-object/path identity and commits the durable materialization intent.
+#[derive(Debug, Clone)]
+pub struct WriteBinaryFile {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub object_id: String,
+    pub path: String,
+    pub binary_sha256: String,
+    pub job_id: String,
+    pub preimage: Preimage,
+    pub now_ms: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -664,6 +679,126 @@ pub fn enqueue_delete(
             now_ms: result.moment.recorded_at_ms,
         },
     )?;
+    Ok(())
+}
+
+/// Apply a verified binary file state inside a caller-owned transaction.
+///
+/// Rust's current version-domain snapshot rows are text-only. Binary file
+/// state therefore uses the shared file-object/path identity plus the same
+/// content-addressed materialization ledger consumed by
+/// `dohc-engine-files::materialize`. The superseded text snapshot is removed
+/// in the same transaction as the binary write intent, so it can never remain
+/// authoritative after the binary bytes have been selected.
+#[doc(hidden)]
+pub fn write_binary_file_in_tx(
+    tx: &Transaction<'_>,
+    input: &WriteBinaryFile,
+) -> Result<(), DomainError> {
+    validate_path(&input.path)?;
+    let (classification, normalized_path) =
+        dohc_engine_files::classify_engine_file_path_normalized(&input.path);
+    if classification != dohc_engine_files::PathClassification::Tracked
+        || normalized_path.as_deref() != Some(input.path.as_str())
+    {
+        return Err(DomainError::InvalidPath {
+            reason: "binary file path is not a normalized tracked path",
+        });
+    }
+    validate_path_like_id(&input.workspace_id, "workspace id must not be empty")?;
+    validate_path_like_id(&input.version_id, "version id must not be empty")?;
+    validate_path_like_id(&input.object_id, "object id must not be empty")?;
+    validate_path_like_id(&input.job_id, "materialization job id must not be empty")?;
+    if !has_binary_blob(tx, &input.binary_sha256)? {
+        return Err(DomainError::InvalidInput {
+            reason: "binary file write references a missing binary blob",
+        });
+    }
+    let version_exists: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+            params![input.workspace_id, input.version_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    if version_exists.is_none() {
+        return Err(DomainError::VersionNotFound);
+    }
+
+    let existing_object: Option<String> = tx
+        .query_row(
+            "SELECT object_id FROM path_aliases \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+            params![input.workspace_id, input.version_id, input.path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let object_id = if let Some(existing) = existing_object {
+        existing
+    } else {
+        let object_exists: Option<i64> = tx
+            .query_row(
+                "SELECT 1 FROM file_objects WHERE object_id = ?1",
+                [&input.object_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DomainError::sql_corrupt)?;
+        if object_exists.is_some() {
+            return Err(DomainError::InvalidInput {
+                reason: "object_id is already bound to another object",
+            });
+        }
+        tx.execute(
+            "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+             VALUES (?1, ?2, ?3)",
+            params![input.workspace_id, input.object_id, input.now_ms],
+        )
+        .map_err(DomainError::sql_persist)?;
+        tx.execute(
+            "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                input.workspace_id,
+                input.version_id,
+                input.path,
+                input.object_id
+            ],
+        )
+        .map_err(DomainError::sql_persist)?;
+        input.object_id.clone()
+    };
+
+    let target_generation: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(generation), 0) + 1 FROM (\
+               SELECT moment_order AS generation FROM moments \
+               UNION ALL \
+               SELECT target_generation AS generation FROM materialization_jobs\
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    tx.execute(
+        "DELETE FROM snapshots WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+        params![input.workspace_id, input.version_id, object_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+    enqueue_job(
+        tx,
+        &MaterializationJobSpec {
+            job_id: input.job_id.clone(),
+            target_path: input.path.clone(),
+            content_sha256: input.binary_sha256.clone(),
+            preimage: input.preimage.clone(),
+            target_generation,
+            now_ms: input.now_ms,
+        },
+    )?;
+
     Ok(())
 }
 
