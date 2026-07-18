@@ -525,3 +525,82 @@ fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
     assert_eq!(kind, "binary");
     assert_eq!(bin.as_deref(), Some(prev_sha.as_str()));
 }
+
+/// Finding 2 (hardening): a TEXT rollback must NEVER touch a materialization job
+/// that merely shares the mutation moment id. The disk-reconciliation path runs
+/// ONLY for a binary WRITE moment (and only against a job whose content matches
+/// this write's bytes), so an unrelated same-id job survives untouched — a text
+/// mutation cannot cancel or compensate against it.
+#[test]
+fn text_rollback_does_not_touch_a_materialization_job_with_the_same_id() {
+    let (_scratch, mut store) = open();
+    // A pre-existing pending materialization job whose id collides with the text
+    // write's moment id below.
+    let other_bytes = b"\x00unrelated\xff".as_slice();
+    store
+        .write_with(&NoFaults, |tx| {
+            let sha = put_binary_blob(tx, other_bytes)?;
+            enqueue_job(
+                tx,
+                &MaterializationJobSpec {
+                    job_id: "text-moment".to_owned(),
+                    target_path: "unrelated.bin".to_owned(),
+                    content_sha256: sha,
+                    preimage: Preimage::Absent,
+                    target_generation: 1,
+                    now_ms: 5,
+                },
+            )?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("enqueue unrelated job");
+
+    // A text write whose moment id equals the unrelated job id.
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "obj-doc".to_owned(),
+                path: "doc.md".to_owned(),
+                text: "hello".to_owned(),
+                moment_id: "text-moment".to_owned(),
+                metadata_origin: "user".to_owned(),
+                author_json: None,
+                now_ms: 10,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("text write");
+
+    // Roll the TEXT write back.
+    VersionedTextStore::new(&mut store)
+        .rollback_text_file_mutation(
+            &RollbackTextFileMutation {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: "doc.md".to_owned(),
+                mutation_moment_id: "text-moment".to_owned(),
+                legacy_before_text: None,
+            },
+            &NoFaults,
+        )
+        .expect("rollback text write");
+
+    // The unrelated job must be untouched (still pending, same target).
+    let (status, target): (String, String) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT status, target_path FROM materialization_jobs WHERE job_id = 'text-moment'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .expect("job still present");
+    assert_eq!(status, "pending", "the unrelated job must remain pending");
+    assert_eq!(
+        target, "unrelated.bin",
+        "the unrelated job must be untouched"
+    );
+}

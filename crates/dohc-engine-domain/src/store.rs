@@ -370,10 +370,14 @@ impl<'a> VersionedTextStore<'a> {
                 params![ws, input.version_id, prep.moment.object_id],
             )
             .map_err(DomainError::sql_persist)?;
-            // Reconcile DISK with the rolled-back head. A binary write enqueues a
-            // materialization job keyed by the mutation moment id (moment_id ==
-            // job_id). Rolling the moment back must not leave disk diverged from
-            // the restored/absent DB head:
+            // Reconcile DISK with the rolled-back head — but ONLY for a binary
+            // WRITE moment, the sole domain mutation that enqueues its own
+            // materialization job (text reaches disk via the collab layer, not a
+            // domain job; Delete/Rename enqueue nothing here). Gating on the
+            // moment's operation + content kind AND matching the job's content
+            // against THIS write's bytes makes a text/delete/rename rollback
+            // provably unable to touch an unrelated job that merely shares the
+            // moment id. For a genuine binary write:
             //   * job still PENDING  → cancel it; the bytes never reached disk, so
             //     disk already holds the pre-write state the rollback restores.
             //   * job COMPLETE/CONFLICT → the bytes are (or an external edit is)
@@ -381,32 +385,40 @@ impl<'a> VersionedTextStore<'a> {
             //     rolled-back-to state (delete for a first write, else the previous
             //     content). Preimage-guarded on the written bytes so an external
             //     edit is preserved, never clobbered.
-            // Text mutations enqueue no job, so `job` is `None` and this no-ops.
-            let job: Option<(String, i64, String)> = tx
-                .query_row(
-                    "SELECT status, target_generation, content_sha256 \
-                     FROM materialization_jobs WHERE job_id = ?1",
-                    params![input.mutation_moment_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()
-                .map_err(DomainError::sql_corrupt)?;
-            if let Some((status, generation, written_sha256)) = job {
-                if status == "pending" {
-                    tx.execute(
-                        "DELETE FROM materialization_jobs WHERE job_id = ?1",
+            if prep.moment.operation == MomentOp::Write
+                && prep.moment.after_content_kind == "binary"
+                && let Some(written_moment_sha) = prep.moment.after_binary_sha256.as_deref()
+            {
+                let job: Option<(String, i64, String)> = tx
+                    .query_row(
+                        "SELECT status, target_generation, content_sha256 \
+                         FROM materialization_jobs WHERE job_id = ?1",
                         params![input.mutation_moment_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
-                    .map_err(DomainError::sql_persist)?;
-                } else {
-                    enqueue_binary_rollback_restore(
-                        tx,
-                        input,
-                        &prep.before,
-                        generation,
-                        &written_sha256,
-                        prep.moment.recorded_at_ms,
-                    )?;
+                    .optional()
+                    .map_err(DomainError::sql_corrupt)?;
+                // Only act when the job's content is exactly this write's bytes —
+                // never cancel/compensate against an unrelated same-id job.
+                if let Some((status, generation, written_sha256)) = job
+                    && written_sha256.as_str() == written_moment_sha
+                {
+                    if status == "pending" {
+                        tx.execute(
+                            "DELETE FROM materialization_jobs WHERE job_id = ?1",
+                            params![input.mutation_moment_id],
+                        )
+                        .map_err(DomainError::sql_persist)?;
+                    } else {
+                        enqueue_binary_rollback_restore(
+                            tx,
+                            input,
+                            &prep.before,
+                            generation,
+                            &written_sha256,
+                            prep.moment.recorded_at_ms,
+                        )?;
+                    }
                 }
             }
 

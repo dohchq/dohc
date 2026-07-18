@@ -327,9 +327,15 @@ pub fn live_state_matches_conflict_current(
                 // v9-era binary conflict row) has no identity to compare. Fall
                 // back to the pre-M2 path+sha match (already satisfied above)
                 // rather than mismatching Some(..) != None and deferring the
-                // resolve FOREVER as StaleHead. Sides that DO carry identity keep
-                // the strict check above.
-                _ => true,
+                // resolve FOREVER as StaleHead.
+                (None, None) => true,
+                // Partially-populated identity (Some,None)/(None,Some) can only
+                // come from corruption — a real binary head always carries BOTH
+                // object + latest moment together (`binary_head`), and a legacy
+                // side carries NEITHER. Fail closed (defer as StaleHead) rather
+                // than let a half-identity side bypass the exact-head check and
+                // match a recreated same-bytes head.
+                _ => false,
             }
         }
     }
