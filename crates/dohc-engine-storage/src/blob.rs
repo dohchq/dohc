@@ -51,13 +51,16 @@ pub fn put_binary_blob(conn: &Connection, bytes: &[u8]) -> Result<String, Storag
 
 /// Store bytes supplied with a claimed content address, rejecting the write if
 /// the claim does not match the exact bytes. Replicated bundle importers can
-/// use this before persisting rows that foreign-key the binary blob.
+/// use this before persisting rows that foreign-key the binary blob. The claim
+/// is compared case-insensitively (an uppercase-hex claim of the correct bytes
+/// is not a mismatch), but the stored key and the returned key are always the
+/// canonical lowercase hex.
 pub fn put_binary_blob_verified(
     conn: &Connection,
     claimed_sha256: &str,
     bytes: &[u8],
 ) -> Result<String, StorageError> {
-    if hex_sha256(bytes) != claimed_sha256 {
+    if !hex_sha256(bytes).eq_ignore_ascii_case(claimed_sha256) {
         return Err(StorageError::BlobIntegrity {
             sha256: claimed_sha256.to_owned(),
         });
@@ -133,5 +136,32 @@ mod tests {
             error,
             StorageError::BlobIntegrity { sha256 } if sha256 == claimed
         ));
+    }
+
+    #[test]
+    fn verified_put_accepts_uppercase_claim_and_stores_lowercase_key() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        conn.execute_batch(
+            "CREATE TABLE binary_blobs (
+                sha256 TEXT NOT NULL PRIMARY KEY,
+                byte_length INTEGER NOT NULL,
+                bytes BLOB NOT NULL
+            ) STRICT;",
+        )
+        .expect("create binary_blobs");
+        let bytes = b"case-insensitive claim";
+        let canonical = hex_sha256(bytes);
+
+        let stored = put_binary_blob_verified(&conn, &canonical.to_uppercase(), bytes)
+            .expect("uppercase claim of correct bytes must be accepted");
+
+        assert_eq!(
+            stored, canonical,
+            "returned key must be canonical lowercase"
+        );
+        let fetched = get_binary_blob(&conn, &canonical)
+            .expect("get blob")
+            .expect("blob row under lowercase key");
+        assert_eq!(fetched, bytes);
     }
 }

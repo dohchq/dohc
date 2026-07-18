@@ -470,6 +470,16 @@ impl VersionedTextStore<'_> {
             let mut conflict =
                 load_text_conflict_in_tx(tx, &input.workspace_id, &input.conflict_id)?
                     .ok_or(DomainError::ConflictNotFound)?;
+            // BINCONFLICT opens/persists binary sides; RESOLVE of any conflict
+            // touching a binary side stays fail-closed until
+            // R10-CONFLICT-COMPLETE (mirrors the sync path's has_binary_side
+            // deferral).
+            if [&conflict.base, &conflict.current, &conflict.incoming]
+                .iter()
+                .any(|side| side.content_kind == ConflictContentKind::Binary)
+            {
+                return Err(binary_conflicts_unsupported());
+            }
             let live_snapshot = select_text_snapshot_by_path_in_tx(
                 tx,
                 &conflict.workspace_id,
@@ -488,10 +498,6 @@ impl VersionedTextStore<'_> {
                     (ConflictChoice::Current, ConflictResolution::KeptCurrent)
                 }
                 ResolveConflictKind::ApplyIncoming => {
-                    if conflict.incoming.content_kind == ConflictContentKind::Binary {
-                        // Binary APPLY lands in R10-CONFLICT-COMPLETE.
-                        return Err(binary_conflicts_unsupported());
-                    }
                     if let Some(incoming) = &conflict.incoming.snapshot {
                         let destination = conflict.incoming.path.clone();
                         if destination != conflict.path {
@@ -553,18 +559,6 @@ impl VersionedTextStore<'_> {
                     )
                 }
                 ResolveConflictKind::ApplyMerged { text } => {
-                    // Binary APPLY lands in R10-CONFLICT-COMPLETE.
-                    if [
-                        conflict.base.content_kind,
-                        conflict.current.content_kind,
-                        conflict.incoming.content_kind,
-                    ]
-                    .contains(&ConflictContentKind::Binary)
-                    {
-                        return Err(DomainError::InvalidInput {
-                            reason: "binary conflicts cannot be resolved with combined text",
-                        });
-                    }
                     let write_input = write_input(
                         input,
                         &conflict.target_version_id,
