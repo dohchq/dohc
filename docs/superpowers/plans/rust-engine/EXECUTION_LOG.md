@@ -1366,3 +1366,61 @@ source of truth every orchestrator session loads first).
   for the binary apply path — its isBinaryState branch consumes BINCONFLICT's
   schema), R13b-rest, tracked obligations. Then GATE6 (deps R14/R10b/R15-
   REHEARSE all met), then R15 (ICE checkpoint).
+
+## 2026-07-18 — R10-CONFLICT-COMPLETE merged (#192)
+
+- R10-CONFLICT-COMPLETE #192 MERGED (squash; no migration). Completes R13's
+  ACK-and-deferred mirrored-conflict-resolve. Scoping insight (Explore pass):
+  for path-change/merged/stale-head the R13 `deferred` behavior ALREADY matches
+  the TS oracle (`applyMirroredResolve` refuses+surfaces, does not auto-apply) —
+  so those keep deferring; the genuine functional gap was BINARY incoming apply,
+  which BINCONFLICT (#190) unblocked. Two deltas:
+  - DELTA 1: the sync mirror now APPLIES a resolved binary incoming side (mirrors
+    the TS isBinaryState branch) — integrity-verifies the sha via get_binary_blob
+    BEFORE closing (absent -> defer BinaryUnhydrated; present-but-corrupt/storage
+    error -> Err, envelope rolls back; never a doomed job over an advanced ack),
+    writes via the existing materialization ledger inside a savepoint (helper
+    failure -> rollback + defer BinaryApplyFailed), never hand-rolled disk writes.
+  - DELTA 2: structured PendingResolve{remote/local_conflict_id,path,reason
+    (PathChange/Merged/StaleHead/BinaryUnhydrated/BinaryApplyFailed/UnmatchedTarget)}
+    replaces the bare deferred:bool at every defer site; deferred() is derived;
+    the dormant adapter (replicated_conflict_json + actor.rs) emits both.
+  - Invariants preserved throughout (R13): never Err-rollback the ack for a
+    VALIDATION rejection (poison-pill class — fixed for text too, see below),
+    never a wrong/divergent apply, ack always advances on defer; STORAGE/
+    CORRUPTION errors DO propagate as Err (validation-vs-storage split via
+    is_apply_rejection, applied to BOTH text and binary paths).
+- Implemented via codex/gpt-5.6-sol (fable subagents hit their usage limit;
+  codex's sandbox couldn't create the target dir so it never compiled — I ran
+  the real gate + committed). Cell: 2 adversarial OPUS-4.8 reviewers + 2 Codex
+  rounds + CodeRabbit. Reviews caught (all real):
+  - P0-class (rev1) — the sibling TEXT apply (`apply_mirrored_write`/`_delete`)
+    Err-rollbacked the ack (validate_write/delete_input `?`), so a mirrored text
+    conflict on a reserved/ignored path or >MAX_TEXT_BYTES became an infinite-
+    redelivery POISON PILL stalling the peer cursor. Fixed: savepoint->defer
+    (TextApplyRejected) like the binary path; genuine storage errors still Err.
+  - rev2 P2 (oracle parity) — incoming binary DELETE deferred instead of
+    deleting (routed on kind before existence); fixed to existence-before-kind.
+  - Codex R2 — my over-aggressive S2 (presence-only has_binary_blob) let a
+    present-but-corrupt blob close the conflict + enqueue a doomed job; restored
+    integrity-at-resolve. Non-sync hydrated binary was false-deferred
+    BinaryUnhydrated; fixed to close. Unmatched resolve now surfaced
+    (UnmatchedTarget, best-effort informational — documented as not crash-durable
+    since there's no local state to reconcile). Declined a CR object-id-scoping
+    finding as a verified false positive (file_objects.object_id is GLOBALLY
+    unique per the canonical oracle schema).
+- NEW OBLIG — BINARY CONTENT HEAD REPRESENTATION (firm GATE6/R15 blocker,
+  DORMANT-only). Three R10CC gaps share one root cause: binary content has no
+  in-db head/snapshot/moment (moments.after_blob_sha256 is a NOT-NULL FK to the
+  TEXT blobs table). (1) M2 — the binary job's target_generation collides with
+  the next moment because store::next_moment_order counts only moments, not
+  materialization_jobs -> a stale binary can overwrite newer content on an
+  out-of-order/retry drain; (2) the text-only live-state check reads a binary-
+  occupied path (path_aliases, no snapshots row) as empty -> a mirrored resolve
+  can wrongly pass the stale-head gate; (3) a later same-path text write becomes
+  a spurious materialize-conflict. Fix = a binary-head schema change (migration);
+  then un-ignore R10CC's binary_generation_is_not_reused_by_next_text_write.
+- Wave 5 status: cutover-gating COMPLETE; BINCONFLICT + R10-CONFLICT-COMPLETE
+  done. Remaining pre-cutover: R13b-rest, tracked obligations (binary-head,
+  gate-perf, R14-deferred, fuzz coverage, shadow_fence harness-writer gating),
+  then GATE6 (deps R14/R10b/R15-REHEARSE met), then R15 (ICE checkpoint).
