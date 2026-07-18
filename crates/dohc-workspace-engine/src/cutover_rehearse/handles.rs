@@ -121,21 +121,22 @@ pub(crate) fn swap_and_verify(
     }
 
     let moved = paths.engine.join(MOVED_ASIDE_DIR);
-    match std::fs::create_dir(&moved) {
-        Ok(()) => {}
+    // CRITICAL alias gate: an ALIASED moved-aside dir would receive the live
+    // triplet OUTSIDE the clone root — prove it is a real directory (or
+    // absent) before read_dir and before any rename lands in it.
+    if super::require_real_dir(&moved, "moved-aside-alias-refused")? {
         // An EMPTY leftover dir is the crash window right after create_dir —
         // nothing was moved, so reuse it. A non-empty one is a real partial
         // move and stays a refusal.
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            let mut entries = std::fs::read_dir(&moved)
-                .map_err(|e| RehearsalError::io("moved-aside-inspect", e))?;
-            if entries.next().is_some() {
-                return Err(RehearsalError::Io {
-                    code: "moved-aside-not-clean",
-                });
-            }
+        let mut entries =
+            std::fs::read_dir(&moved).map_err(|e| RehearsalError::io("moved-aside-inspect", e))?;
+        if entries.next().is_some() {
+            return Err(RehearsalError::Io {
+                code: "moved-aside-not-clean",
+            });
         }
-        Err(error) => return Err(RehearsalError::io("moved-aside-create", error)),
+    } else {
+        std::fs::create_dir(&moved).map_err(|e| RehearsalError::io("moved-aside-create", e))?;
     }
     for entry in &verified.entries {
         let destination = moved.join(entry.name);
@@ -357,6 +358,11 @@ fn to_hex(digest: &[u8]) -> String {
 /// hard-linked, or foreign entry means the retained store cannot be trusted.
 pub(crate) fn moved_aside_store_retained(paths: &Paths) -> Result<bool, RehearsalError> {
     let moved = paths.engine.join(MOVED_ASIDE_DIR);
+    // Alias-safe: a symlinked sibling dir means the "retained" store lives
+    // outside `.dohc/engine` and cannot be trusted as the proof.
+    if !super::require_real_dir(&moved, "moved-aside-alias-refused")? {
+        return Ok(false);
+    }
     let entries = match std::fs::read_dir(&moved) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),

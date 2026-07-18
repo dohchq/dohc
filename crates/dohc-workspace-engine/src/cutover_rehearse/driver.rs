@@ -151,34 +151,19 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
                 // exist, prove its clone binding, AND carry the recorded
                 // reset identity — the user-file inventory below skips
                 // `.dohc`, and a stale same-clone copy shares the token.
-                verify_live_clone_binding(&paths.db, &validated.shadow_token)?;
-                verify_live_reset_identity(
-                    &paths.db,
-                    record
-                        .fresh_engine_uuid
-                        .as_deref()
-                        .ok_or(RehearsalError::Io {
-                            code: "resume-reset-identity-unrecorded",
-                        })?,
-                )?;
-                let capture = load_inventory(&paths.root)
-                    .and_then(|expected| {
-                        let actual = scan(&paths.root)?;
-                        if actual == expected {
-                            Ok(())
-                        } else {
-                            Err(RehearsalError::Io {
-                                code: "capture-inventory-mismatch",
-                            })
-                        }
-                    })
-                    .and_then(|()| verify_protected_snapshots(&paths, &recovery_dir));
-                if let Err(error) = capture {
+                verify_reset_preconditions(&paths, &validated, &record)?;
+                if let Err(error) = capture_proofs(&paths, &recovery_dir) {
                     return fail(&paths.root, &record, failure_code(&error));
                 }
                 record = state::transition(&paths.root, &record, StableState::Capturing)?;
             }
             RehearsalState::Capturing => {
+                // A crash between Capturing and Complete must not let a
+                // resume complete with stale proofs — re-run them all.
+                verify_reset_preconditions(&paths, &validated, &record)?;
+                if let Err(error) = capture_proofs(&paths, &recovery_dir) {
+                    return fail(&paths.root, &record, failure_code(&error));
+                }
                 record = state::transition(&paths.root, &record, StableState::Complete)?;
             }
         }
@@ -198,6 +183,37 @@ fn canonical_recovery_dir(recovery_dir: &Path) -> Result<PathBuf, RehearsalError
     super::backup::create_private_dir_all(recovery_dir)?;
     std::fs::canonicalize(recovery_dir)
         .map_err(|e| RehearsalError::io("recovery-dir-canonicalize", e))
+}
+
+/// The live-store resume preconditions shared by every post-reset state.
+fn verify_reset_preconditions(
+    paths: &Paths,
+    validated: &super::ValidatedRehearsalRoot,
+    record: &StateRecord,
+) -> Result<(), RehearsalError> {
+    verify_live_clone_binding(&paths.db, &validated.shadow_token)?;
+    verify_live_reset_identity(
+        &paths.db,
+        record
+            .fresh_engine_uuid
+            .as_deref()
+            .ok_or(RehearsalError::Io {
+                code: "resume-reset-identity-unrecorded",
+            })?,
+    )
+}
+
+/// The capture proofs: user-file inventory equality plus the protected
+/// `.dohc` sibling snapshots against the recorded backup.
+fn capture_proofs(paths: &Paths, recovery_dir: &Path) -> Result<(), RehearsalError> {
+    let expected = load_inventory(&paths.root)?;
+    let actual = scan(&paths.root)?;
+    if actual != expected {
+        return Err(RehearsalError::Io {
+            code: "capture-inventory-mismatch",
+        });
+    }
+    verify_protected_snapshots(paths, recovery_dir)
 }
 
 /// `.dohc` and `.dohc/engine` must be REAL directories: a symlinked component
@@ -228,12 +244,17 @@ struct RootLock {
 fn acquire_root_lock(paths: &Paths) -> Result<RootLock, RehearsalError> {
     std::fs::create_dir_all(&paths.engine)
         .map_err(|e| RehearsalError::io("rehearsal-lock-dir", e))?;
+    let lock_path = paths.engine.join(ROOT_LOCK_FILE);
+    // Alias-safe: opening through a symlinked lock file would create or lock
+    // a file outside the clone (the settle walk deliberately skips this
+    // path, so it must be proven real here).
+    super::require_real_file(&lock_path, "rehearsal-lock-alias-refused")?;
     let file = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(paths.engine.join(ROOT_LOCK_FILE))
+        .open(&lock_path)
         .map_err(|e| RehearsalError::io("rehearsal-lock-open", e))?;
     for attempt in 0..ROOT_LOCK_ATTEMPTS {
         // fs4 rather than std's `File::try_lock`: same OS lock, but available
@@ -334,6 +355,10 @@ fn initialize_fresh_store(
             code: "initialize-retained-store-missing",
         });
     }
+    // Alias-safe: an existing engine.db must be a REAL regular file before
+    // the read-write open can follow a symlink/hard link and bind or migrate
+    // a database outside the clone. Absent is fine — a fresh store is made.
+    super::require_real_file(&paths.db, "initialize-live-db-alias-refused")?;
     let mut store = EngineStore::open(&paths.db, now_ms)?;
     // A fresh store is bound here; an EXISTING store is acceptable only when
     // already bound to this clone (the crash window between a completed

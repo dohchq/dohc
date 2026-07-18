@@ -78,6 +78,62 @@ pub(crate) fn fsync_dir(dir: &std::path::Path) -> Result<(), RehearsalError> {
     Ok(())
 }
 
+/// The alias-safe file gate: `Ok(Some(metadata))` for a REAL regular file —
+/// not a symlink, not a special file, and (Unix) not hard-linked — `Ok(None)`
+/// when absent, `Err(code)` for an alias/special file or a metadata error.
+/// Every attacker-influenceable file the rehearsal opens, hashes, copies, or
+/// renames must pass through this BEFORE the operation.
+pub(crate) fn require_real_file(
+    path: &std::path::Path,
+    code: &'static str,
+) -> Result<Option<std::fs::Metadata>, RehearsalError> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(RehearsalError::io(code, error)),
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink()
+                || !metadata.file_type().is_file()
+                || metadata_is_hard_linked(&metadata)
+            {
+                Err(RehearsalError::Io { code })
+            } else {
+                Ok(Some(metadata))
+            }
+        }
+    }
+}
+
+/// The alias-safe directory gate: `Ok(true)` for a REAL directory (never a
+/// symlink/junction), `Ok(false)` when absent, `Err(code)` otherwise.
+pub(crate) fn require_real_dir(
+    path: &std::path::Path,
+    code: &'static str,
+) -> Result<bool, RehearsalError> {
+    match std::fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(RehearsalError::io(code, error)),
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                Err(RehearsalError::Io { code })
+            } else {
+                Ok(true)
+            }
+        }
+    }
+}
+
+/// Flush a just-published file's CONTENTS (rename durability alone is not
+/// enough when the writer never synced the bytes).
+pub(crate) fn fsync_file(path: &std::path::Path, code: &'static str) -> Result<(), RehearsalError> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| RehearsalError::io(code, e))?;
+    file.sync_all().map_err(|e| RehearsalError::io(code, e))?;
+    Ok(())
+}
+
 /// Hard links alias content reachable outside the tree being walked. The link
 /// count is only exposed by stable std on Unix; on Windows the file-identity
 /// query needs Win32 calls that require `unsafe` (forbidden by this crate),

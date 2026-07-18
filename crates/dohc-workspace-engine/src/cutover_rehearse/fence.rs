@@ -61,11 +61,11 @@ pub(crate) fn verify_live_clone_binding(
     db: &Path,
     expected_token: &str,
 ) -> Result<(), RehearsalError> {
-    let metadata =
-        std::fs::symlink_metadata(db).map_err(|e| RehearsalError::io("live-db-missing", e))?;
-    if !metadata.file_type().is_file() {
+    // Alias-safe: a symlinked, special, or (Unix) hard-linked live db is a
+    // store reachable outside the clone and is refused before any open.
+    if super::require_real_file(db, "live-db-not-regular")?.is_none() {
         return Err(RehearsalError::Io {
-            code: "live-db-not-regular",
+            code: "live-db-missing",
         });
     }
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| {

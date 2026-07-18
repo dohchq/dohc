@@ -41,6 +41,11 @@ pub fn load_valid_directory_backup(
     recovery_dir: &Path,
 ) -> Result<Option<DirectoryBackupManifest>, RehearsalError> {
     let manifest_path = recovery_dir.join(DIRECTORY_MANIFEST_NAME);
+    // Alias-safe: a symlinked/hard-linked manifest makes the restore point
+    // depend on a mutable file outside the recovery dir.
+    if super::require_real_file(&manifest_path, "directory-manifest-alias-refused")?.is_none() {
+        return Ok(None);
+    }
     let bytes = match std::fs::read(&manifest_path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -98,26 +103,58 @@ pub fn load_valid_directory_backup(
             Err(error) => return Err(RehearsalError::io("directory-backup-metadata", error)),
         }
     }
-    // The backup dir must contain EXACTLY the declared set: an undeclared
-    // extra, alias, or special file leaves the manifest hash unchanged and
-    // must invalidate the backup rather than ride along into a restore.
-    let mut actual = Vec::new();
-    if !collect_backup_paths(&root, &root, &mut actual)? {
+    // The backup dir must contain EXACTLY the declared set — files AND
+    // directories: an undeclared extra file, empty dir, alias, or special
+    // file leaves the manifest hash unchanged and must invalidate the backup
+    // rather than ride along into a restore.
+    let mut actual_files = Vec::new();
+    let mut actual_dirs = Vec::new();
+    if !collect_backup_paths(&root, &root, &mut actual_files, &mut actual_dirs)? {
         return Ok(None);
     }
-    let actual: BTreeSet<&str> = actual.iter().map(String::as_str).collect();
-    if actual != declared {
+    let actual_files: BTreeSet<&str> = actual_files.iter().map(String::as_str).collect();
+    if actual_files != declared {
+        return Ok(None);
+    }
+    let mut expected_dirs: BTreeSet<String> = BTreeSet::new();
+    for dir in &manifest.directories {
+        if !expected_dirs.insert(dir.clone()) {
+            return Ok(None);
+        }
+        add_ancestor_dirs(dir, &mut expected_dirs);
+    }
+    for entry in &manifest.files {
+        add_ancestor_dirs(&entry.relative_path, &mut expected_dirs);
+    }
+    let actual_dirs: BTreeSet<String> = actual_dirs.into_iter().collect();
+    if actual_dirs != expected_dirs {
         return Ok(None);
     }
     Ok(Some(manifest))
 }
 
-/// Walk the published backup dir; `Ok(false)` means the tree contains an
-/// alias/special/hard-linked/non-UTF-8 entry and the backup is invalid.
+/// Insert every ancestor directory of a relative path (portable separators).
+fn add_ancestor_dirs(relative: &str, output: &mut BTreeSet<String>) {
+    let mut path = Path::new(relative);
+    while let Some(parent) = path.parent() {
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        if let Some(text) = parent.to_str() {
+            output.insert(portable_separators(text));
+        }
+        path = parent;
+    }
+}
+
+/// Walk the published backup dir collecting files AND directories;
+/// `Ok(false)` means the tree contains an alias/special/hard-linked/non-UTF-8
+/// entry and the backup is invalid.
 fn collect_backup_paths(
     root: &Path,
     directory: &Path,
-    output: &mut Vec<String>,
+    files: &mut Vec<String>,
+    dirs: &mut Vec<String>,
 ) -> Result<bool, RehearsalError> {
     let entries = std::fs::read_dir(directory)
         .map_err(|e| RehearsalError::io("directory-backup-enumerate", e))?;
@@ -130,7 +167,11 @@ fn collect_backup_paths(
             return Ok(false);
         }
         if metadata.is_dir() {
-            if !collect_backup_paths(root, &path, output)? {
+            let Some(relative) = path.strip_prefix(root).ok().and_then(Path::to_str) else {
+                return Ok(false);
+            };
+            dirs.push(portable_separators(relative));
+            if !collect_backup_paths(root, &path, files, dirs)? {
                 return Ok(false);
             }
         } else if metadata.is_file() {
@@ -140,7 +181,7 @@ fn collect_backup_paths(
             let Some(relative) = path.strip_prefix(root).ok().and_then(Path::to_str) else {
                 return Ok(false);
             };
-            output.push(portable_separators(relative));
+            files.push(portable_separators(relative));
         } else {
             return Ok(false);
         }
@@ -158,12 +199,35 @@ pub(crate) fn create_restore_tested_backup(
     ensure_outside_root(&paths.root, recovery_dir)?;
     create_private_dir_all(recovery_dir)?;
 
-    // A pre-existing DB backup at this stem is never adopted OR overwritten
-    // unless the copy itself proves — via its own shadow_clone binding — that
-    // it came from THIS clone.
+    // A pre-existing DB backup at this stem must be a REAL file pair, and is
+    // never adopted OR overwritten unless the copy itself proves — via its
+    // own shadow_clone binding — that it came from THIS clone.
+    require_real_backup_pair(recovery_dir)?;
     if let Some(existing) = load_valid_backup(recovery_dir, DB_BACKUP_STEM)? {
         verify_reused_backup_binding(&existing.backup_path, shadow_token)?;
     }
+
+    // The directory-backup freshness gate runs BEFORE the DB republish, so a
+    // stale restore point is refused while the previous DB/directory pair is
+    // still coherent.
+    let directory_fresh = match load_valid_directory_backup(recovery_dir)? {
+        Some(manifest) => {
+            if !directory_backup_matches_live(paths, &manifest)? {
+                return Err(RehearsalError::Io {
+                    code: "prior-directory-backup-stale",
+                });
+            }
+            true
+        }
+        None => {
+            if recovery_dir.join(DIRECTORY_MANIFEST_NAME).exists() {
+                return Err(RehearsalError::Io {
+                    code: "prior-directory-backup-inconsistent",
+                });
+            }
+            false
+        }
+    };
 
     // The DB backup is ALWAYS rebuilt from the current live source (the
     // staged same-stem republish never destroys the prior valid copy until
@@ -189,35 +253,37 @@ pub(crate) fn create_restore_tested_backup(
         }
     }
     drop(store);
-    // The DB backup's directory entries must be durable before the BackedUp
-    // marker can ever be recorded over them.
+    // The backup pair's CONTENTS (the storage helper publishes by rename
+    // without a file sync) and its directory entries must all be durable
+    // before the BackedUp marker can ever be recorded over them.
+    super::fsync_file(&db_backup_path(recovery_dir), "backup-db-sync")?;
+    super::fsync_file(&db_manifest_path(recovery_dir), "backup-manifest-sync")?;
     super::fsync_dir(recovery_dir)?;
     if let Some(parent) = recovery_dir.parent() {
         super::fsync_dir(parent)?;
     }
 
-    // A pre-existing directory backup is reusable only when every backed-up
-    // file still hashes identically to its CURRENT live source; a stale one
-    // must never be recorded as this run's restore point.
-    match load_valid_directory_backup(recovery_dir)? {
-        Some(manifest) => {
-            if directory_backup_matches_live(paths, &manifest)? {
-                Ok(())
-            } else {
-                Err(RehearsalError::Io {
-                    code: "prior-directory-backup-stale",
-                })
-            }
-        }
-        None => {
-            if recovery_dir.join(DIRECTORY_MANIFEST_NAME).exists() {
-                return Err(RehearsalError::Io {
-                    code: "prior-directory-backup-inconsistent",
-                });
-            }
-            create_directory_backup(paths, recovery_dir, faults)
-        }
+    if directory_fresh {
+        Ok(())
+    } else {
+        create_directory_backup(paths, recovery_dir, faults)
     }
+}
+
+fn db_backup_path(recovery_dir: &Path) -> PathBuf {
+    recovery_dir.join(format!("{DB_BACKUP_STEM}.db"))
+}
+
+fn db_manifest_path(recovery_dir: &Path) -> PathBuf {
+    recovery_dir.join(format!("{DB_BACKUP_STEM}.manifest.json"))
+}
+
+/// The DB backup pair may only be trusted (or replaced) as REAL files inside
+/// the recovery dir; a symlinked/hard-linked half is an external dependency.
+fn require_real_backup_pair(recovery_dir: &Path) -> Result<(), RehearsalError> {
+    super::require_real_file(&db_backup_path(recovery_dir), "backup-db-alias-refused")?;
+    super::require_real_file(&db_manifest_path(recovery_dir), "backup-db-alias-refused")?;
+    Ok(())
 }
 
 /// Whether a validated directory-backup manifest still describes exactly the
@@ -294,6 +360,13 @@ pub(crate) fn verify_protected_snapshots(
         };
         manifested.insert(name);
         let live = paths.root.join(".dohc").join(name);
+        // Alias-safe: a snapshot replaced by a same-content symlink or (Unix)
+        // hard link is no longer the protected workspace file.
+        if super::require_real_file(&live, "capture-snapshot-alias-refused")?.is_none() {
+            return Err(RehearsalError::Io {
+                code: "capture-snapshot-missing",
+            });
+        }
         let (hash, bytes) = match hash_file(&live) {
             Ok(hashed) => hashed,
             Err(_) => {
@@ -466,6 +539,7 @@ fn migration_ledger_rows(
 /// Read-and-VALIDATE both backups at `recovery_dir` and return their identity.
 /// Errors (never silently `None`) when either backup is missing or invalid.
 pub(crate) fn fingerprint_backup(recovery_dir: &Path) -> Result<BackupFingerprint, RehearsalError> {
+    require_real_backup_pair(recovery_dir)?;
     let recovery = recovery_dir
         .to_str()
         .ok_or(RehearsalError::Io {

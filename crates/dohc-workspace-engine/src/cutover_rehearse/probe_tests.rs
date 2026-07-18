@@ -1145,6 +1145,146 @@ fn new_protected_sibling_after_backup_fails_capture() {
 }
 
 #[test]
+fn aliased_moved_aside_dir_is_refused_before_any_triplet_leaves_the_clone() {
+    use dohc_engine_testkit::try_make_dir_alias;
+
+    let fixture = Fixture::new();
+    crash_at_backed_up(&fixture);
+    let paths = fixture.paths();
+
+    // The moved-aside dir is an ALIAS pointing outside the clone: accepting
+    // it would move the live triplet into the target.
+    let target = ScratchDir::new().expect("alias target");
+    if !try_make_dir_alias(target.path(), &moved_aside_path(&paths)).expect("alias attempt") {
+        return; // platform cannot create directory aliases — skip honestly
+    }
+
+    let outcome = fixture.run(&NoFaults);
+    let record = match outcome {
+        RehearsalOutcome::Failed(record) => record,
+        other => panic!("an aliased moved-aside dir must be refused: {other:?}"),
+    };
+    assert_eq!(failure_reason(&record), "moved-aside-alias-refused");
+    assert!(
+        std::fs::read_dir(target.path())
+            .expect("target entries")
+            .next()
+            .is_none(),
+        "no triplet byte may land outside the clone root"
+    );
+    assert_triplet_matches(
+        &fixture.engine_dir(),
+        &fixture.original_triplet,
+        "live triplet after aliased moved-aside refusal",
+    );
+}
+
+#[test]
+fn symlinked_protected_snapshot_fails_capture() {
+    use dohc_engine_testkit::try_make_file_symlink;
+
+    let fixture = Fixture::new();
+    let faults = ScriptedFaults::crash_at(FaultPoint::AfterInitialized);
+    assert!(matches!(
+        fixture.run(faults.as_ref()),
+        RehearsalOutcome::Crashed(_)
+    ));
+
+    // The protected snapshot is replaced by a SAME-CONTENT symlink: the bytes
+    // hash identically but the workspace file is now an external alias.
+    let live = fixture.root.join(".dohc").join("registry.json");
+    let stash = fixture.recovery.join("stashed-registry.json");
+    std::fs::copy(&live, &stash).expect("stash snapshot");
+    std::fs::remove_file(&live).expect("remove snapshot");
+    if !try_make_file_symlink(&stash, &live).expect("symlink attempt") {
+        return; // platform cannot create file symlinks — skip honestly
+    }
+
+    let outcome = fixture.run(&NoFaults);
+    let record = match outcome {
+        RehearsalOutcome::Failed(record) => record,
+        other => panic!("an aliased protected snapshot must fail capture: {other:?}"),
+    };
+    assert_eq!(failure_reason(&record), "capture-snapshot-alias-refused");
+}
+
+#[test]
+fn aliased_existing_live_db_is_refused_before_open() {
+    use dohc_engine_testkit::try_make_file_symlink;
+
+    let fixture = Fixture::new();
+    let faults = ScriptedFaults::crash_at(FaultPoint::AfterMovedAside);
+    assert!(matches!(
+        fixture.run(faults.as_ref()),
+        RehearsalOutcome::Crashed(_)
+    ));
+    let paths = fixture.paths();
+
+    // engine.db reappears as a symlink to an EXTERNAL database: the RW open
+    // would bind/migrate the target before any post-open check could refuse.
+    let external = fixture.recovery.join("external.db");
+    std::fs::copy(moved_aside_path(&paths).join("engine.db"), &external).expect("external db");
+    let external_before = std::fs::read(&external).expect("external bytes");
+    if !try_make_file_symlink(&external, &paths.db).expect("symlink attempt") {
+        return; // platform cannot create file symlinks — skip honestly
+    }
+
+    let outcome = fixture.run(&NoFaults);
+    let record = match outcome {
+        RehearsalOutcome::Failed(record) => record,
+        other => panic!("an aliased live db must be refused before open: {other:?}"),
+    };
+    assert_eq!(failure_reason(&record), "initialize-live-db-alias-refused");
+    assert_eq!(
+        std::fs::read(&external).expect("external bytes after"),
+        external_before,
+        "the external database must never be opened or mutated"
+    );
+}
+
+#[test]
+fn capturing_resume_reruns_the_capture_proofs() {
+    let fixture = Fixture::new();
+    let faults = ScriptedFaults::crash_at(FaultPoint::AfterInitialized);
+    assert!(matches!(
+        fixture.run(faults.as_ref()),
+        RehearsalOutcome::Crashed(_)
+    ));
+    let crashed = load_state(fixture.root.path())
+        .expect("state")
+        .expect("crashed record");
+
+    // The crash window between Capturing and Complete, forged from the real
+    // Initialized record; then a user file mutates AFTER the capture check.
+    let mut history = crashed.history.clone();
+    history.push(StableState::Capturing);
+    let forged = StateRecord {
+        generation: crashed.generation + 1,
+        current: RehearsalState::Capturing,
+        history,
+        backup: crashed.backup.clone(),
+        fresh_engine_uuid: crashed.fresh_engine_uuid.clone(),
+    };
+    forge_state_json(
+        &fixture.state_dir(),
+        forged.generation,
+        &serde_json::to_value(&forged).expect("forged value"),
+    );
+    std::fs::write(
+        fixture.root.join("documents").join("note.md"),
+        b"mutated after capture\n",
+    )
+    .expect("mutate user file");
+
+    let outcome = fixture.run(&NoFaults);
+    let record = match outcome {
+        RehearsalOutcome::Failed(record) => record,
+        other => panic!("a Capturing resume must re-run the proofs: {other:?}"),
+    };
+    assert_eq!(failure_reason(&record), "capture-inventory-mismatch");
+}
+
+#[test]
 fn empty_engine_subdir_is_recorded_in_backup() {
     use super::backup::create_restore_tested_backup;
 
@@ -1262,6 +1402,25 @@ fn directory_backup_with_extras_or_empty_manifest_is_invalid() {
     assert!(
         load_valid_directory_backup(recovery)
             .expect("restored")
+            .is_some()
+    );
+
+    // An undeclared EMPTY directory invalidates it too.
+    let extra_dir = fixture
+        .recovery
+        .join("cutover-files")
+        .join("undeclared-dir");
+    std::fs::create_dir(&extra_dir).expect("extra dir");
+    assert!(
+        load_valid_directory_backup(recovery)
+            .expect("extra dir probe")
+            .is_none(),
+        "an undeclared empty directory must invalidate the directory backup"
+    );
+    std::fs::remove_dir(&extra_dir).expect("remove extra dir");
+    assert!(
+        load_valid_directory_backup(recovery)
+            .expect("restored again")
             .is_some()
     );
 

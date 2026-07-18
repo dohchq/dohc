@@ -118,6 +118,11 @@ pub fn load_state(root: &Path) -> Result<Option<StateRecord>, RehearsalError> {
         if !name.ends_with(".json") {
             continue;
         }
+        // A state record supplied through an alias is a resume driven by a
+        // mutable file outside the clone — refuse before reading it.
+        if super::require_real_file(&entry.path(), "state-record-alias-refused")?.is_none() {
+            return Err(RehearsalError::State);
+        }
         let bytes = std::fs::read(entry.path()).map_err(|_| RehearsalError::State)?;
         let record: StateRecord =
             serde_json::from_slice(&bytes).map_err(|_| RehearsalError::State)?;
@@ -268,8 +273,12 @@ fn persist(root: &Path, record: StateRecord) -> Result<StateRecord, RehearsalErr
     drop(file);
     std::fs::rename(&tmp_path, &final_path).map_err(|e| RehearsalError::io("state-publish", e))?;
     // The rename itself must be durable before the machine acts on the new
-    // state — a power loss must not resurrect the previous generation.
+    // state — a power loss must not resurrect the previous generation. The
+    // parent sync makes a freshly created state DIRECTORY reachable too.
     super::fsync_dir(&dir)?;
+    if let Some(parent) = dir.parent() {
+        super::fsync_dir(parent)?;
+    }
     Ok(record)
 }
 
