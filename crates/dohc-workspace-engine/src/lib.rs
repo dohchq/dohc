@@ -667,6 +667,12 @@ impl ConflictStateDto {
         Ok(ConflictFileState {
             path: self.path,
             snapshot: self.snapshot.map(SnapshotDto::into_domain).transpose()?,
+            // This wire DTO carries no binary payload yet; a `content_kind:
+            // "binary"` side arriving here has no blob reference and fails
+            // closed downstream (`insert_text_conflict_if_absent`). Wiring an
+            // actual binary payload through this RPC surface is out of scope
+            // for BINCONFLICT (schema + persistence only).
+            binary_sha256: None,
             content_kind,
             metadata_summary: self.metadata_summary,
             metadata_correlation_id: self.metadata_correlation_id,

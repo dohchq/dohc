@@ -28,10 +28,12 @@ pub fn hex_sha256(bytes: &[u8]) -> String {
 
 /// Store `bytes` as a content-addressed binary blob, returning its sha-256 key.
 /// Dedup: a second put of identical content is a no-op that returns the same
-/// key. Bounded by [`MAX_BLOB_BYTES`]; over-cap input is a typed error, never a
-/// silent truncation. `conn` may be a plain connection or a `&Transaction`
-/// (which derefs to `&Connection`), so a caller can put a blob in the SAME
-/// transaction as the domain mutation that references it.
+/// key — but only after re-verifying the existing row's integrity, so a
+/// bit-rotted canonical row fails the put closed instead of being silently
+/// "deduplicated" against. Bounded by [`MAX_BLOB_BYTES`]; over-cap input is a
+/// typed error, never a silent truncation. `conn` may be a plain connection or
+/// a `&Transaction` (which derefs to `&Connection`), so a caller can put a
+/// blob in the SAME transaction as the domain mutation that references it.
 pub fn put_binary_blob(conn: &Connection, bytes: &[u8]) -> Result<String, StorageError> {
     if bytes.len() > MAX_BLOB_BYTES {
         return Err(StorageError::BlobTooLarge {
@@ -41,12 +43,47 @@ pub fn put_binary_blob(conn: &Connection, bytes: &[u8]) -> Result<String, Storag
     let sha256 = hex_sha256(bytes);
     // INSERT OR IGNORE is the dedup: an existing row for this hash is kept
     // (identical bytes by definition of content-addressing).
-    conn.execute(
-        "INSERT OR IGNORE INTO binary_blobs (sha256, byte_length, bytes) VALUES (?1, ?2, ?3)",
-        rusqlite::params![sha256, bytes.len() as i64, bytes],
-    )
-    .map_err(StorageError::persist)?;
+    let inserted = conn
+        .execute(
+            "INSERT OR IGNORE INTO binary_blobs (sha256, byte_length, bytes) VALUES (?1, ?2, ?3)",
+            rusqlite::params![sha256, bytes.len() as i64, bytes],
+        )
+        .map_err(StorageError::persist)?;
+    if inserted == 0 {
+        // The row pre-existed: read it back through the verifying getter so a
+        // corrupt canonical row surfaces as `BlobIntegrity` here, not as a
+        // deferred failure on some later read.
+        if get_binary_blob(conn, &sha256)?.is_none() {
+            return Err(StorageError::BlobIntegrity { sha256 });
+        }
+    }
     Ok(sha256)
+}
+
+/// Store bytes supplied with a claimed content address, rejecting the write if
+/// the claim does not match the exact bytes. Replicated bundle importers can
+/// use this before persisting rows that foreign-key the binary blob. The claim
+/// is compared case-insensitively (an uppercase-hex claim of the correct bytes
+/// is not a mismatch), but the stored key and the returned key are always the
+/// canonical lowercase hex.
+pub fn put_binary_blob_verified(
+    conn: &Connection,
+    claimed_sha256: &str,
+    bytes: &[u8],
+) -> Result<String, StorageError> {
+    // Size-cap first, same as the plain path: an over-cap import is the typed
+    // size error and never burns CPU hashing the untrusted buffer.
+    if bytes.len() > MAX_BLOB_BYTES {
+        return Err(StorageError::BlobTooLarge {
+            actual: bytes.len(),
+        });
+    }
+    if !hex_sha256(bytes).eq_ignore_ascii_case(claimed_sha256) {
+        return Err(StorageError::BlobIntegrity {
+            sha256: claimed_sha256.to_owned(),
+        });
+    }
+    put_binary_blob(conn, bytes)
 }
 
 /// Fetch a binary blob by key, verifying integrity on read. Returns `None` if
@@ -99,4 +136,98 @@ pub fn has_binary_blob(conn: &Connection, sha256: &str) -> Result<bool, StorageE
 pub fn binary_blob_count(conn: &Connection) -> Result<i64, StorageError> {
     conn.query_row("SELECT COUNT(*) FROM binary_blobs", [], |r| r.get(0))
         .map_err(StorageError::corrupt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verified_put_rejects_claimed_hash_mismatch() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        let claimed = hex_sha256(b"different bytes");
+
+        let error = put_binary_blob_verified(&conn, &claimed, b"actual bytes")
+            .expect_err("mismatched claimed hash must fail closed");
+
+        assert!(matches!(
+            error,
+            StorageError::BlobIntegrity { sha256 } if sha256 == claimed
+        ));
+    }
+
+    #[test]
+    fn verified_put_size_caps_before_hashing_or_storing() {
+        // No binary_blobs table on purpose: the over-cap guard must fire
+        // before any hashing or storage, so the call never reaches the db.
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        let huge = vec![0u8; MAX_BLOB_BYTES + 1];
+        let wrong_claim = hex_sha256(b"not the huge bytes");
+
+        let error = put_binary_blob_verified(&conn, &wrong_claim, &huge)
+            .expect_err("over-cap bytes must fail closed on size");
+
+        assert!(
+            matches!(error, StorageError::BlobTooLarge { actual } if actual == huge.len()),
+            "size guard must win over the integrity check, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn put_fails_closed_when_existing_canonical_row_is_corrupt() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        conn.execute_batch(
+            "CREATE TABLE binary_blobs (
+                sha256 TEXT NOT NULL PRIMARY KEY,
+                byte_length INTEGER NOT NULL,
+                bytes BLOB NOT NULL
+            ) STRICT;",
+        )
+        .expect("create binary_blobs");
+        let bytes = b"canonical bytes";
+        let sha = put_binary_blob(&conn, bytes).expect("initial put");
+        // Corrupt the canonical row out-of-band (bit rot simulation).
+        conn.execute(
+            "UPDATE binary_blobs SET bytes = ?2, byte_length = ?3 WHERE sha256 = ?1",
+            rusqlite::params![sha, b"rot".as_slice(), 3_i64],
+        )
+        .expect("corrupt row");
+
+        // The dedup put re-verifies the existing row: it must surface the
+        // corruption instead of silently succeeding against the rotted row.
+        let error = put_binary_blob_verified(&conn, &sha, bytes)
+            .expect_err("put over a corrupt canonical row must fail closed");
+
+        assert!(matches!(
+            error,
+            StorageError::BlobIntegrity { sha256 } if sha256 == sha
+        ));
+    }
+
+    #[test]
+    fn verified_put_accepts_uppercase_claim_and_stores_lowercase_key() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        conn.execute_batch(
+            "CREATE TABLE binary_blobs (
+                sha256 TEXT NOT NULL PRIMARY KEY,
+                byte_length INTEGER NOT NULL,
+                bytes BLOB NOT NULL
+            ) STRICT;",
+        )
+        .expect("create binary_blobs");
+        let bytes = b"case-insensitive claim";
+        let canonical = hex_sha256(bytes);
+
+        let stored = put_binary_blob_verified(&conn, &canonical.to_uppercase(), bytes)
+            .expect("uppercase claim of correct bytes must be accepted");
+
+        assert_eq!(
+            stored, canonical,
+            "returned key must be canonical lowercase"
+        );
+        let fetched = get_binary_blob(&conn, &canonical)
+            .expect("get blob")
+            .expect("blob row under lowercase key");
+        assert_eq!(fetched, bytes);
+    }
 }

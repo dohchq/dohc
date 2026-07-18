@@ -214,6 +214,11 @@ fn side(
     Ok(ConflictFileState {
         path: payload.path,
         snapshot,
+        // Binary mirror-apply payloads are not wired through this replication
+        // path yet (R10-CONFLICT-COMPLETE's job); a binary side built here
+        // always fails closed downstream in `insert_text_conflict_if_absent`
+        // for lacking a blob reference, same as before BINCONFLICT.
+        binary_sha256: None,
         content_kind,
         metadata_summary: side_metadata
             .as_ref()
@@ -1215,6 +1220,44 @@ mod tests {
         assert_eq!(replication_counts(&store), (0, 0, 0));
     }
 
+    /// An invalid binary open that REUSES an already-open conflict id must not
+    /// slip through the duplicate-id shortcut: it is rejected fail-closed
+    /// before log/ack, not absorbed as an idempotent duplicate.
+    #[test]
+    fn duplicate_conflict_open_with_binary_side_is_rejected_before_log_or_ack() {
+        let (_scratch, mut store) = store();
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                0,
+                "conflict.open",
+                open_payload("dup-c", "sync", false),
+            ),
+            &NoFaults,
+        )
+        .expect("valid text open applies");
+        assert_eq!(replication_counts(&store), (1, 1, 1));
+
+        let error = apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                1,
+                "conflict.open",
+                open_payload("dup-c", "sync", true),
+            ),
+            &NoFaults,
+        )
+        .expect_err("invalid binary side on a duplicate id must fail closed");
+        assert!(matches!(error, SyncError::InvalidInput { .. }));
+        assert_eq!(
+            replication_counts(&store),
+            (1, 1, 1),
+            "the rejected duplicate must not be logged or acked"
+        );
+    }
+
     #[test]
     fn mirrored_binary_side_resolve_is_acked_and_deferred() {
         let (_scratch, mut store) = store();
@@ -1272,5 +1315,56 @@ mod tests {
         assert_eq!(moment_count(&store), before_moments);
         assert_open_conflict(&store, "binary-resolve");
         assert_replication_advanced(&store, "peer", 1, 2);
+    }
+
+    /// BINCONFLICT review probe: a binary side that EXISTS and carries a sha
+    /// through the replicated open path must still be rejected before log/ack
+    /// (BINCONFLICT adds local persist capability only, not replicated binary
+    /// ingestion).
+    #[test]
+    fn replicated_open_with_existing_binary_side_rejected_before_ack() {
+        let (_scratch, mut store) = store();
+        let payload = json!({
+            "id": "bin-exists",
+            "workspaceId": "ws",
+            "path": "asset.bin",
+            "targetVersionId": "main",
+            "sourceVersionId": "peer",
+            "createdAtMs": 2_000,
+            "updatedAtMs": 2_000,
+            "base": { "exists": false, "path": "asset.bin", "contentKind": "text" },
+            "current": { "exists": false, "path": "asset.bin", "contentKind": "text" },
+            "incoming": {
+                "exists": true,
+                "path": "asset.bin",
+                "objectId": "obj-1",
+                "contentKind": "binary",
+                "sha256": dohc_engine_storage::hex_sha256(b"payload"),
+                "text": "",
+                "updatedAtMs": 1_900,
+                "latestMomentId": "m-1",
+                "metadata": { "origin": "sync" }
+            },
+            "status": "open",
+            "chosenFrom": "current",
+            "metadata": { "origin": "sync" }
+        });
+        let error = apply_conflict_envelope(
+            &mut store,
+            &envelope("peer", 0, "conflict.open", payload),
+            &NoFaults,
+        )
+        .expect_err("existing binary side must fail closed");
+        assert!(matches!(error, SyncError::InvalidInput { .. }));
+        let counts: (i64, i64, i64) = store
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row("SELECT COUNT(*) FROM conflicts", [], |r| r.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM replication_log", [], |r| r.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM binary_blobs", [], |r| r.get(0))?,
+                ))
+            })
+            .expect("counts");
+        assert_eq!(counts, (0, 0, 0), "nothing may persist, log, or hydrate");
     }
 }
