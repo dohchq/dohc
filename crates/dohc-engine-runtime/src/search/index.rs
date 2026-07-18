@@ -250,18 +250,30 @@ fn rebuild_file_index_for_version(
 ) -> Result<(), SearchError> {
     // Snapshots (text) UNION the fork-base fallback for objects not re-owned in
     // this version, joined to the text blob, ORDER BY path — the exact TS
-    // candidate set and order. All Rust `snapshots` rows are text (no
-    // content_kind column; binary content lives in `binary_blobs`, never here).
+    // candidate set and order. Since BINHEAD, `snapshots`/`fork_base_snapshots`
+    // carry a `content_kind` column and CAN hold binary heads (text `blob_sha256`
+    // NULL, `binary_sha256` set); those must NOT enter the file FTS index — the TS
+    // oracle deletes a path's file-search row on a binary write. The exclusion is
+    // made EXPLICIT via `content_kind IS NOT 'binary'` in each candidate branch so
+    // a future refactor of the text-blob JOIN (e.g. INNER -> LEFT) cannot leak a
+    // binary path into the file index; the INNER `JOIN blobs` below also drops
+    // NULL-blob binary rows, but that is now a belt-and-suspenders backstop, not
+    // the sole guarantee. `IS NOT 'binary'` (not `= 'text'`) preserves today's
+    // behavior for a defensively-NULL content_kind row that still carries a text
+    // blob — those are treated as text everywhere else via COALESCE and must stay
+    // indexed; only an explicit binary head is excluded.
     let mut stmt = conn.prepare(
         "SELECT candidate.object_id, candidate.path, b.text \
          FROM ( \
            SELECT s.object_id, s.path, s.blob_sha256 \
            FROM snapshots s \
            WHERE s.workspace_id = ?1 AND s.version_id = ?2 \
+             AND s.content_kind IS NOT 'binary' \
            UNION ALL \
            SELECT fb.object_id, fb.path, fb.blob_sha256 \
            FROM fork_base_snapshots fb \
            WHERE fb.workspace_id = ?1 AND fb.version_id = ?2 \
+             AND fb.content_kind IS NOT 'binary' \
              AND NOT EXISTS ( \
                SELECT 1 FROM snapshots s \
                WHERE s.workspace_id = fb.workspace_id \

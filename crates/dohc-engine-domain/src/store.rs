@@ -408,6 +408,13 @@ impl<'a> VersionedTextStore<'a> {
     /// Read the current text snapshot for `path` in `version`, or `None`. Fails
     /// closed (`VersionNotFound`) on an unknown version so a bad version never
     /// looks like a missing file (`versions-read-text-file` contract).
+    ///
+    /// BINARY-HEAD FOOTGUN: for a binary head this returns a [`TextSnapshot`]
+    /// whose `text` is `""` and whose `blob_sha256` carries the BINARY sha (a
+    /// `binary_blobs` ref, NOT a `blobs` ref). An empty `text` here does NOT mean
+    /// an empty text file — a caller that must distinguish binary from empty text
+    /// has to consult `content_kind` on the underlying snapshot, which this
+    /// text-compatibility view does not surface.
     pub fn read_text(
         &self,
         workspace_id: &str,
@@ -1534,6 +1541,14 @@ fn upsert_snapshot(conn: &Connection, snapshot: &SnapshotRecord) -> Result<(), D
     Ok(())
 }
 
+/// Project a [`SnapshotRecord`] into the text-compatibility [`TextSnapshot`].
+///
+/// BINARY-HEAD FOOTGUN: a binary head maps to `text: ""` with `blob_sha256` set
+/// to the record's BINARY sha (`binary_sha256`, a `binary_blobs` ref — NOT a
+/// `blobs` text ref). The empty `text` is therefore ambiguous: it does not mean
+/// "empty text file". This view drops `content_kind`, so a caller that needs to
+/// tell a binary head apart from an empty text file must read `content_kind`
+/// from the `SnapshotRecord` directly rather than trusting this projection.
 fn snapshot_text_view(snapshot: &SnapshotRecord) -> TextSnapshot {
     TextSnapshot {
         workspace_id: snapshot.workspace_id.clone(),

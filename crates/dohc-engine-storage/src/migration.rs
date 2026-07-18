@@ -1214,6 +1214,14 @@ pub(crate) const BINARY_CONFLICT_SIDES_MIGRATION_ID: &str = "v1-binary-conflict-
 /// The rebuild copies every v9 column explicitly. With foreign keys enabled,
 /// those copies also re-validate historical references and fail closed by
 /// rolling the whole migration back when a referent is missing.
+///
+/// INVARIANT: the fail-closed FK re-validation depends on the CALLER having set
+/// `PRAGMA foreign_keys=ON` before the runner opens the migration transaction
+/// (`schema.rs:181`), not on this migration. The migration deliberately does not
+/// toggle the pragma itself — a `PRAGMA foreign_keys` inside the active
+/// transactional rebuild is a silent no-op in SQLite and would break the
+/// transactional-rebuild semantics. Holds today because every open path enables
+/// it before migrating.
 const V1_BINARY_HEAD_DDL: &str = "\
 CREATE TABLE snapshots_v10 (
     workspace_id     TEXT    NOT NULL,
@@ -2452,6 +2460,315 @@ mod tests {
         let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("remediated store migrates cleanly");
         assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+    }
+
+    // ===================== ADVERSARIAL REVIEW PROBES (BINHEAD) =====================
+    // Ported verbatim from the migration reviewer's worktree as permanent
+    // regressions for the ordinal-10 binary-head migration.
+
+    /// Helper: open + migrate a fresh store all the way to ordinal 10 with FKs on.
+    fn open_migrated_v10(path: &std::path::Path) -> Connection {
+        let ctx = MigrationContext::current(1_900);
+        let mut conn = open_bare(path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("migrate to ordinal 10");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+             VALUES ('ws', 'main');
+             INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms)
+             VALUES ('ws', 'main', 'main', 'Main', 1);
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
+             VALUES ('ws', 'obj', 2);
+             INSERT INTO binary_blobs (sha256, byte_length, bytes)
+             VALUES ('bin-real', 3, x'aabbcc');",
+        )
+        .expect("seed parents");
+        conn
+    }
+
+    /// PROBE: after v10 the NOT-NULL was actually lifted — a binary snapshot
+    /// with NULL text blob but a real binary_sha256 must INSERT cleanly.
+    #[test]
+    fn probe_v10_permits_null_text_blob_for_binary_rows() {
+        let dir = tempdir();
+        let conn = open_migrated_v10(&dir.join("engine.db"));
+
+        conn.execute(
+            "INSERT INTO snapshots (
+                 workspace_id, version_id, object_id, path, blob_sha256,
+                 updated_at_ms, latest_moment_id, metadata_origin,
+                 content_kind, binary_sha256
+             ) VALUES ('ws','main','obj','p.png', NULL, 9, 'm', 'user', 'binary', 'bin-real')",
+            [],
+        )
+        .expect("binary snapshot with NULL text blob must be accepted post-v10");
+
+        conn.execute(
+            "INSERT INTO fork_base_snapshots (
+                 workspace_id, version_id, object_id, path, blob_sha256,
+                 updated_at_ms, latest_moment_id, metadata_origin,
+                 content_kind, binary_sha256
+             ) VALUES ('ws','main','obj','p.png', NULL, 9, 'm', 'user', 'binary', 'bin-real')",
+            [],
+        )
+        .expect("binary fork_base with NULL text blob must be accepted post-v10");
+
+        conn.execute(
+            "INSERT INTO moments (
+                 workspace_id, moment_order, moment_id, version_id, object_id, path,
+                 recorded_at_ms, operation, after_blob_sha256, before_present,
+                 metadata_origin, after_content_kind, after_binary_sha256
+             ) VALUES ('ws', 1, 'mm', 'main', 'obj', 'p.png', 3, 'write',
+                 NULL, 1, 'user', 'binary', 'bin-real')",
+            [],
+        )
+        .expect("binary moment with NULL after_blob_sha256 must be accepted post-v10");
+    }
+
+    /// PROBE: the NEW binary_sha256 -> binary_blobs FKs are actually ENFORCED
+    /// (a dangling reference is rejected) and a valid one is accepted.
+    #[test]
+    fn probe_v10_binary_sha256_fk_is_enforced() {
+        let dir = tempdir();
+        let conn = open_migrated_v10(&dir.join("engine.db"));
+
+        // Dangling binary ref on snapshots -> rejected.
+        let err = conn.execute(
+            "INSERT INTO snapshots (
+                 workspace_id, version_id, object_id, path, blob_sha256,
+                 updated_at_ms, latest_moment_id, metadata_origin,
+                 content_kind, binary_sha256
+             ) VALUES ('ws','main','obj','p.png', NULL, 9, 'm', 'user', 'binary', 'ghost')",
+            [],
+        );
+        assert!(
+            err.is_err(),
+            "dangling snapshots.binary_sha256 must be rejected"
+        );
+
+        // Dangling binary ref on moments (both after + before) -> rejected.
+        let err = conn.execute(
+            "INSERT INTO moments (
+                 workspace_id, moment_order, moment_id, version_id, object_id, path,
+                 recorded_at_ms, operation, after_blob_sha256, before_present,
+                 metadata_origin, after_binary_sha256
+             ) VALUES ('ws', 1, 'mm', 'main', 'obj', 'p.png', 3, 'write',
+                 NULL, 1, 'user', 'ghost')",
+            [],
+        );
+        assert!(
+            err.is_err(),
+            "dangling moments.after_binary_sha256 must be rejected"
+        );
+
+        let err = conn.execute(
+            "INSERT INTO moments (
+                 workspace_id, moment_order, moment_id, version_id, object_id, path,
+                 recorded_at_ms, operation, after_blob_sha256, before_present,
+                 metadata_origin, before_binary_sha256
+             ) VALUES ('ws', 2, 'mm2', 'main', 'obj', 'p.png', 3, 'write',
+                 NULL, 1, 'user', 'ghost')",
+            [],
+        );
+        assert!(
+            err.is_err(),
+            "dangling moments.before_binary_sha256 must be rejected"
+        );
+
+        // Valid binary ref -> accepted.
+        conn.execute(
+            "INSERT INTO moments (
+                 workspace_id, moment_order, moment_id, version_id, object_id, path,
+                 recorded_at_ms, operation, after_blob_sha256, before_present,
+                 metadata_origin, after_content_kind, after_binary_sha256
+             ) VALUES ('ws', 3, 'mm3', 'main', 'obj', 'p.png', 3, 'write',
+                 NULL, 1, 'user', 'binary', 'bin-real')",
+            [],
+        )
+        .expect("valid binary ref must be accepted");
+    }
+
+    /// PROBE: foreign_key_check is clean after the whole rebuild, and the
+    /// migrated schema is byte-identical to a freshly created v10 store for
+    /// all three tables (column defs + indexes + STRICT).
+    #[test]
+    fn probe_v10_schema_matches_fresh_and_fk_check_clean() {
+        // Migrated store: through v9, seed a row, then to v10.
+        let dir_m = tempdir();
+        let ctx = MigrationContext::current(1_900);
+        let mut migrated = open_bare(&dir_m.join("m.db"));
+        migrated
+            .pragma_update(None, "foreign_keys", true)
+            .expect("fk on");
+        run_migrations(&mut migrated, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults)
+            .expect("through v9");
+        migrated
+            .execute_batch(
+                "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES ('ws','main');
+                 INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms)
+                 VALUES ('ws','main','main','Main',1);
+                 INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES ('ws','obj',2);
+                 INSERT INTO blobs (sha256, byte_length, text) VALUES ('b', 1, 'x');
+                 INSERT INTO snapshots (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, latest_moment_id, metadata_origin)
+                 VALUES ('ws','main','obj','p', 'b', 3, 'm', 'user');
+                 INSERT INTO moments (workspace_id, moment_order, moment_id, version_id, object_id, path, recorded_at_ms, operation, after_blob_sha256, before_present, metadata_origin)
+                 VALUES ('ws', 1, 'm', 'main', 'obj', 'p', 3, 'write', 'b', 1, 'user');",
+            )
+            .expect("seed v9");
+        run_migrations(&mut migrated, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("to v10");
+
+        // foreign_key_check must be clean.
+        let fk_violations: i64 = migrated
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .expect("fk check");
+        assert_eq!(
+            fk_violations, 0,
+            "foreign_key_check must be clean after rebuild"
+        );
+
+        // Fresh store straight to v10.
+        let dir_f = tempdir();
+        let mut fresh = open_bare(&dir_f.join("f.db"));
+        fresh
+            .pragma_update(None, "foreign_keys", true)
+            .expect("fk on");
+        run_migrations(&mut fresh, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("fresh v10");
+
+        for table in ["snapshots", "fork_base_snapshots", "moments"] {
+            // Column definitions (name, type, notnull, dflt, pk) must match.
+            let cols = |c: &Connection| -> Vec<(i64, String, String, i64, Option<String>, i64)> {
+                let mut stmt = c
+                    .prepare(&format!("SELECT cid, name, type, \"notnull\", dflt_value, pk FROM pragma_table_info('{table}') ORDER BY cid"))
+                    .unwrap();
+                stmt.query_map([], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+            };
+            assert_eq!(
+                cols(&migrated),
+                cols(&fresh),
+                "{table} column defs must match fresh"
+            );
+
+            // FK list must match.
+            let fks = |c: &Connection| -> Vec<(String, String, String)> {
+                let mut stmt = c
+                    .prepare(&format!("SELECT \"table\", \"from\", \"to\" FROM pragma_foreign_key_list('{table}') ORDER BY \"table\", \"from\""))
+                    .unwrap();
+                stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap()
+            };
+            assert_eq!(
+                fks(&migrated),
+                fks(&fresh),
+                "{table} FK list must match fresh"
+            );
+
+            // Index list (name + unique + origin) must match.
+            let idx = |c: &Connection| -> Vec<(String, i64, String)> {
+                let mut stmt = c
+                    .prepare(&format!("SELECT name, \"unique\", origin FROM pragma_index_list('{table}') ORDER BY name"))
+                    .unwrap();
+                stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                    .unwrap()
+                    .collect::<Result<_, _>>()
+                    .unwrap()
+            };
+            assert_eq!(
+                idx(&migrated),
+                idx(&fresh),
+                "{table} index list must match fresh"
+            );
+
+            // STRICT flag must match (sqlite_schema.sql retains the keyword).
+            let sql: String = migrated
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                sql.to_uppercase().contains("STRICT"),
+                "{table} must remain STRICT"
+            );
+        }
+    }
+
+    /// PROBE: v9 -> v10 is idempotent — re-running the full baseline is a no-op
+    /// that changes no rows.
+    #[test]
+    fn probe_v10_is_idempotent() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_900);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("fk on");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("to v10");
+        let before = dump_table_rows(&conn, "moments");
+        let rerun =
+            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("rerun no-op");
+        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });
+        assert_eq!(dump_table_rows(&conn, "moments"), before);
+        let max_ordinal: i64 = conn
+            .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |r| {
+                r.get(0)
+            })
+            .expect("ordinal");
+        assert_eq!(max_ordinal, 10);
+    }
+
+    /// PROBE: NULL nullable columns (author_json, sync_record_only,
+    /// before_blob_sha256) round-trip as NULL, not defaulted/dropped.
+    #[test]
+    fn probe_v10_null_nullable_columns_round_trip() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_900);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("fk on");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults).expect("v9");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES ('ws','main');
+             INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms)
+             VALUES ('ws','main','main','Main',1);
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES ('ws','obj',2);
+             INSERT INTO blobs (sha256, byte_length, text) VALUES ('b', 1, 'x');
+             INSERT INTO moments (
+                 workspace_id, moment_order, moment_id, version_id, object_id, path,
+                 recorded_at_ms, operation, after_blob_sha256, before_present, metadata_origin
+             ) VALUES ('ws', 1, 'm', 'main', 'obj', 'p', 3, 'write', 'b', 1, 'user');",
+        )
+        .expect("seed moment with NULL author_json/sync_record_only/before_blob_sha256");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("v10");
+        let (author, sync_only, before_blob): (Option<String>, Option<i64>, Option<String>) = conn
+            .query_row(
+                "SELECT author_json, sync_record_only, before_blob_sha256 FROM moments WHERE moment_id='m'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("read back");
+        assert_eq!(author, None, "NULL author_json must stay NULL");
+        assert_eq!(sync_only, None, "NULL sync_record_only must stay NULL");
+        assert_eq!(before_blob, None, "NULL before_blob_sha256 must stay NULL");
     }
 
     #[test]

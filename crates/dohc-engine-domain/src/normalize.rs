@@ -146,7 +146,7 @@ pub(crate) fn capture(
                     .or(m.after_binary_sha256)
                     .unwrap_or_default(),
                 before_present: m.before_present,
-                before_blob_sha256: m.before_blob_sha256,
+                before_blob_sha256: m.before_blob_sha256.or(m.before_binary_sha256),
                 before_latest_moment_id: m.before_latest_moment_id,
                 metadata_origin: m.metadata_origin,
                 sync_record_only: m.sync_record_only,
