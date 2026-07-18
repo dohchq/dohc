@@ -874,6 +874,7 @@ fn map_domain_code(error: DomainError) -> ErrorCode {
         | DomainError::VersionNameConflict
         | DomainError::DuplicateMomentId
         | DomainError::FileNotFound
+        | DomainError::BinaryHeadNotText
         | DomainError::TargetPathExists
         | DomainError::ForkBaseNotFound
         | DomainError::ConflictNotFound
@@ -969,6 +970,12 @@ mod tests {
             reason: "test invalid input",
         }));
         assert_eq!(invalid.code, ErrorCode::InvalidParams);
+
+        // S1 (BINHEAD): a text read of a binary head is a normal user error, not
+        // an internal server fault — it must map to InvalidParams, never fall
+        // through the catch-all to Internal.
+        let binary_head = map_runtime(RuntimeError::Domain(DomainError::BinaryHeadNotText));
+        assert_eq!(binary_head.code, ErrorCode::InvalidParams);
     }
 
     #[test]

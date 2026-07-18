@@ -258,9 +258,14 @@ fn rollback_text_over_binary_restores_the_binary_head() {
 
 /// Rolling back a FIRST binary write (no preimage) removes the file and GCs the
 /// object — the binary head is not left as a phantom absent-text snapshot.
+///
+/// M1: the write also enqueued a durable materialization job. Rollback must
+/// cancel it, so DRAINING the materializer afterward leaves NO file on disk. The
+/// pre-M1 code left the pending job, and the drain resurrected the rolled-back
+/// bytes onto disk while the DB said the path was absent.
 #[test]
 fn rollback_first_binary_write_removes_file_and_object() {
-    let (_scratch, mut store) = open();
+    let (scratch, mut store) = open();
     write_binary(
         &mut store,
         "obj-doc",
@@ -282,6 +287,35 @@ fn rollback_first_binary_write_removes_file_and_object() {
             &NoFaults,
         )
         .expect("rollback first binary write");
+
+    // M1: the rolled-back mutation's materialization job must be cancelled, so
+    // there is nothing pending to drain.
+    let pending: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs WHERE status = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .expect("pending job count");
+    assert_eq!(pending, 0, "the rolled-back binary job must be cancelled");
+
+    // DISK-STATE proof: draining the materializer must NOT resurrect the file.
+    run_pending_jobs(
+        &store,
+        scratch.path(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        200,
+        &NoFaults,
+    )
+    .expect("drain after rollback");
+    assert!(
+        !scratch.path().join("doc.md").exists(),
+        "M1: no file may be resurrected onto disk after rolling back a binary write"
+    );
 
     let (snap_count, obj_count): (i64, i64) = store
         .read_with(|conn| {

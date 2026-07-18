@@ -307,14 +307,30 @@ pub fn live_state_matches_conflict_current(
             _ => false,
         },
         ConflictContentKind::Binary => {
-            // As strict as text: path + bytes AND head identity (object +
-            // latest moment). A same-bytes-but-recreated binary head has a
-            // different object/latest moment, so it must NOT match — otherwise a
-            // mirrored resolve would clobber the newer head.
-            live.path == recorded.path
-                && live.binary_sha256 == recorded.binary_sha256
-                && live.binary_object_id == recorded.binary_object_id
-                && live.binary_latest_moment_id == recorded.binary_latest_moment_id
+            // Path + bytes must always match.
+            if live.path != recorded.path || live.binary_sha256 != recorded.binary_sha256 {
+                return false;
+            }
+            match (
+                &recorded.binary_object_id,
+                &recorded.binary_latest_moment_id,
+            ) {
+                // The recorded side carries head identity (the M2 no-clobber
+                // path). As strict as text: require the SAME object + latest
+                // moment, so a same-bytes-but-recreated binary head does NOT
+                // match and cannot be clobbered by a mirrored resolve.
+                (Some(_), Some(_)) => {
+                    live.binary_object_id == recorded.binary_object_id
+                        && live.binary_latest_moment_id == recorded.binary_latest_moment_id
+                }
+                // Legacy NULL-identity side (`ConflictFileState::binary()` or a
+                // v9-era binary conflict row) has no identity to compare. Fall
+                // back to the pre-M2 path+sha match (already satisfied above)
+                // rather than mismatching Some(..) != None and deferring the
+                // resolve FOREVER as StaleHead. Sides that DO carry identity keep
+                // the strict check above.
+                _ => true,
+            }
         }
     }
 }
@@ -1282,10 +1298,11 @@ fn binary_conflicts_unsupported() -> DomainError {
 #[doc(hidden)]
 /// Read the live head at `path` as a content-aware [`ConflictFileState`] — a
 /// text head, a binary head (WITH its object + latest-moment identity), or an
-/// absent side. Unlike [`select_text_snapshot_by_path_in_tx`] (which JOINs
-/// `blobs` and is blind to a binary head), this is authoritative for BOTH kinds,
-/// so a stale-target / occupied-destination gate never misses a binary head
-/// sitting at the path.
+/// absent side. Unlike a text-only read that inner-`JOIN`s `blobs` (and is blind
+/// to a binary head, whose `blob_sha256` is NULL), this is authoritative for
+/// BOTH kinds, so a stale-target / occupied-destination gate never misses a
+/// binary head sitting at the path. Use THIS in every gate/comparison; a
+/// text-only head read must never decide a clobber.
 pub fn select_snapshot_by_path_in_tx(
     conn: &Connection,
     workspace_id: &str,
@@ -1380,36 +1397,6 @@ pub fn select_snapshot_by_path_in_tx(
             reason: "snapshot has an unknown content kind",
         }),
     }
-}
-
-pub fn select_text_snapshot_by_path_in_tx(
-    conn: &Connection,
-    workspace_id: &str,
-    version_id: &str,
-    path: &str,
-) -> Result<Option<TextSnapshot>, DomainError> {
-    conn.query_row(
-        "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms,
-         s.latest_moment_id, s.metadata_origin FROM snapshots s
-         JOIN blobs b ON b.sha256 = s.blob_sha256
-         WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path = ?3",
-        params![workspace_id, version_id, path],
-        |row| {
-            Ok(TextSnapshot {
-                workspace_id: workspace_id.to_owned(),
-                version_id: version_id.to_owned(),
-                object_id: row.get(0)?,
-                path: row.get(1)?,
-                text: row.get(2)?,
-                blob_sha256: row.get(3)?,
-                updated_at_ms: row.get(4)?,
-                latest_moment_id: row.get(5)?,
-                metadata_origin: row.get(6)?,
-            })
-        },
-    )
-    .optional()
-    .map_err(DomainError::sql_corrupt)
 }
 
 #[cfg(test)]

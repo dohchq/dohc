@@ -367,6 +367,17 @@ impl<'a> VersionedTextStore<'a> {
                 params![ws, input.version_id, prep.moment.object_id],
             )
             .map_err(DomainError::sql_persist)?;
+            // A binary write enqueues a durable materialization job keyed by the
+            // mutation moment id (moment_id == job_id). Rolling the moment back
+            // must cancel that still-pending job; otherwise `run_pending_jobs`
+            // would materialize the rolled-back bytes onto disk while the DB head
+            // is absent/restored — disk resurrection. Text mutations enqueue no
+            // job, so this is a no-op for them.
+            tx.execute(
+                "DELETE FROM materialization_jobs WHERE job_id = ?1 AND status = 'pending'",
+                params![input.mutation_moment_id],
+            )
+            .map_err(DomainError::sql_persist)?;
 
             if let Some(before) = &prep.before {
                 if before.content_kind == "text" {
