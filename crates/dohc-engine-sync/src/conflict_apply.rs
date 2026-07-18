@@ -330,6 +330,17 @@ fn apply_resolve(
         // but the unmatched remote decision is surfaced with `localConflictId:
         // null` + the payload path, mirroring the oracle, so a reconciliation
         // layer can show it instead of it vanishing silently.
+        //
+        // This surfacing is deliberately BEST-EFFORT / informational and is not
+        // durably persisted: unlike the four defer reasons — each backed by an
+        // Open `conflicts` row that survives a crash — an unmatched resolve has
+        // NO local state to reconcile (the conflict does not exist on this
+        // node), so there is nothing actionable to rebuild. A commit-to-response
+        // crash + replay returns `Skipped` and drops only the diagnostic
+        // surfacing of a peer's decision about a conflict we never held — never
+        // any convergence-relevant or actionable state. Durable persistence
+        // (a pending-resolve table) would need a migration and is unwarranted
+        // for a purely informational no-op.
         return Ok(ConflictApplyResult {
             conflict_id: payload.conflict_id.clone(),
             inserted: None,
