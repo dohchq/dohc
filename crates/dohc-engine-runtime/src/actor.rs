@@ -622,6 +622,8 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<ApplyOutcome<ConflictApplyResult>, RuntimeError> {
+        // Keep the complete typed result on the actor boundary: callers need
+        // the structured `pending_resolve`, not only its derived boolean view.
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ConflictApplyReplicated {

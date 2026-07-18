@@ -788,14 +788,18 @@ fn conflict_state_json(state: &ConflictFileState) -> Value {
 
 fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value {
     match outcome {
-        ApplyOutcome::Applied(result) => json!({
-            "replicated": true,
-            "status": "applied",
-            "conflictId": result.conflict_id,
-            "inserted": result.inserted,
-            "matched": result.matched,
-            "deferred": result.deferred
-        }),
+        ApplyOutcome::Applied(result) => {
+            let deferred = result.deferred();
+            json!({
+                "replicated": true,
+                "status": "applied",
+                "conflictId": result.conflict_id,
+                "inserted": result.inserted,
+                "matched": result.matched,
+                "deferred": deferred,
+                "pendingResolve": result.pending_resolve
+            })
+        }
         ApplyOutcome::Skipped => json!({ "replicated": true, "status": "skipped" }),
         ApplyOutcome::Crashed { committed } => json!({
             "replicated": true,
@@ -963,6 +967,32 @@ mod tests {
             reason: "test invalid input",
         }));
         assert_eq!(invalid.code, ErrorCode::InvalidParams);
+    }
+
+    #[test]
+    fn replicated_conflict_json_keeps_deferred_and_adds_pending_resolve() {
+        let value = replicated_conflict_json(ApplyOutcome::Applied(ConflictApplyResult {
+            conflict_id: "remote-c".to_owned(),
+            inserted: None,
+            matched: false,
+            pending_resolve: Some(dohc_engine_sync::PendingResolve {
+                remote_conflict_id: "remote-c".to_owned(),
+                local_conflict_id: Some("local-c".to_owned()),
+                path: Some("doc.md".to_owned()),
+                reason: dohc_engine_sync::PendingResolveReason::BinaryUnhydrated,
+            }),
+        }));
+
+        assert_eq!(value["deferred"], true);
+        assert_eq!(
+            value["pendingResolve"],
+            json!({
+                "remoteConflictId": "remote-c",
+                "localConflictId": "local-c",
+                "path": "doc.md",
+                "reason": "binary-unhydrated"
+            })
+        );
     }
 
     #[tokio::test]
