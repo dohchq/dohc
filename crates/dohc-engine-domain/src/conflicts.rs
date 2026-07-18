@@ -8,7 +8,7 @@ use crate::store::{
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
-    enqueue_job, put_binary_blob,
+    enqueue_job, has_binary_blob, put_binary_blob, put_binary_blob_verified,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -54,13 +54,15 @@ impl ConflictMetadata {
     }
 }
 
-/// One conflict side. Existence is represented only by `snapshot: Option<_>`;
-/// `path` remains explicit because an absent side and a divergent move still
-/// carry a meaningful destination.
+/// One conflict side. Text and binary content are mutually exclusive: text is
+/// carried by `snapshot`, while binary is carried by `binary_sha256`. `path`
+/// remains explicit because an absent side and a divergent move still carry a
+/// meaningful destination.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConflictFileState {
     pub path: String,
     pub snapshot: Option<TextSnapshot>,
+    pub binary_sha256: Option<String>,
     pub content_kind: ConflictContentKind,
     pub metadata_summary: Option<String>,
     pub metadata_correlation_id: Option<String>,
@@ -71,7 +73,19 @@ impl ConflictFileState {
         ConflictFileState {
             path: path.into(),
             snapshot,
+            binary_sha256: None,
             content_kind: ConflictContentKind::Text,
+            metadata_summary: None,
+            metadata_correlation_id: None,
+        }
+    }
+
+    pub fn binary(path: impl Into<String>, binary_sha256: impl Into<String>) -> Self {
+        ConflictFileState {
+            path: path.into(),
+            snapshot: None,
+            binary_sha256: Some(binary_sha256.into()),
+            content_kind: ConflictContentKind::Binary,
             metadata_summary: None,
             metadata_correlation_id: None,
         }
@@ -219,21 +233,23 @@ pub fn live_state_matches_conflict_current(
     live: &ConflictFileState,
     recorded: &ConflictFileState,
 ) -> bool {
-    match (&live.snapshot, &recorded.snapshot) {
-        (None, None) => true,
-        (Some(live_snapshot), Some(recorded_snapshot)) => {
-            live.path == recorded.path
-                && live_snapshot.object_id == recorded_snapshot.object_id
-                && live_snapshot.latest_moment_id == recorded_snapshot.latest_moment_id
-                && live.content_kind == recorded.content_kind
-                && match live.content_kind {
-                    ConflictContentKind::Text => live_snapshot.text == recorded_snapshot.text,
-                    ConflictContentKind::Binary => {
-                        live_snapshot.blob_sha256 == recorded_snapshot.blob_sha256
-                    }
-                }
+    if live.content_kind != recorded.content_kind {
+        return false;
+    }
+    match live.content_kind {
+        ConflictContentKind::Text => match (&live.snapshot, &recorded.snapshot) {
+            (None, None) => true,
+            (Some(live_snapshot), Some(recorded_snapshot)) => {
+                live.path == recorded.path
+                    && live_snapshot.object_id == recorded_snapshot.object_id
+                    && live_snapshot.latest_moment_id == recorded_snapshot.latest_moment_id
+                    && live_snapshot.text == recorded_snapshot.text
+            }
+            _ => false,
+        },
+        ConflictContentKind::Binary => {
+            live.path == recorded.path && live.binary_sha256 == recorded.binary_sha256
         }
-        _ => false,
     }
 }
 
@@ -243,13 +259,6 @@ pub fn insert_text_conflict_if_absent(
     tx: &Transaction<'_>,
     conflict: &TextConflict,
 ) -> Result<bool, DomainError> {
-    // R10 binary mirroring must add a distinct storage and apply path first.
-    if [&conflict.base, &conflict.current, &conflict.incoming]
-        .iter()
-        .any(|side| side.content_kind == ConflictContentKind::Binary)
-    {
-        return Err(binary_conflicts_unsupported());
-    }
     let exists: Option<i64> = tx
         .query_row(
             "SELECT 1 FROM conflicts WHERE workspace_id = ?1 AND conflict_id = ?2",
@@ -260,6 +269,35 @@ pub fn insert_text_conflict_if_absent(
         .map_err(DomainError::sql_corrupt)?;
     if exists.is_some() {
         return Ok(false);
+    }
+    for side in [&conflict.base, &conflict.current, &conflict.incoming] {
+        match side.content_kind {
+            ConflictContentKind::Text => {
+                if side.binary_sha256.is_some() {
+                    return Err(DomainError::InvalidInput {
+                        reason: "text conflict side cannot reference a binary blob",
+                    });
+                }
+            }
+            ConflictContentKind::Binary => {
+                if side.snapshot.is_some() {
+                    return Err(DomainError::InvalidInput {
+                        reason: "binary conflict side cannot carry a text snapshot",
+                    });
+                }
+                let sha256 = side
+                    .binary_sha256
+                    .as_deref()
+                    .ok_or(DomainError::InvalidInput {
+                        reason: "binary conflict side is missing its blob reference",
+                    })?;
+                if !has_binary_blob(tx, sha256)? {
+                    return Err(DomainError::InvalidInput {
+                        reason: "binary conflict side references a missing binary blob",
+                    });
+                }
+            }
+        }
     }
     // Mirror TS `insertConflictFileState`: persist each existing text side's blob
     // so the row's blob FKs hold on a peer that has not yet materialized them.
@@ -292,12 +330,14 @@ pub fn insert_text_conflict_if_absent(
           current_metadata_origin, current_metadata_summary, current_metadata_correlation_id,
           incoming_exists, incoming_path, incoming_object_id, incoming_content_kind,
           incoming_blob_sha256, incoming_updated_at_ms, incoming_latest_moment_id,
-          incoming_metadata_origin, incoming_metadata_summary, incoming_metadata_correlation_id
+          incoming_metadata_origin, incoming_metadata_summary, incoming_metadata_correlation_id,
+          base_binary_sha256, current_binary_sha256, incoming_binary_sha256
         ) VALUES (
           ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
           ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23,
           ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33,
-          ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43)",
+          ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43,
+          ?44, ?45, ?46)",
         params![
             conflict.workspace_id,
             conflict.conflict_id,
@@ -342,6 +382,9 @@ pub fn insert_text_conflict_if_absent(
             incoming.metadata_origin,
             incoming.metadata_summary,
             incoming.metadata_correlation_id,
+            base.binary_sha256,
+            current.binary_sha256,
+            incoming.binary_sha256,
         ],
     )
     .map_err(DomainError::sql_persist)?;
@@ -446,6 +489,7 @@ impl VersionedTextStore<'_> {
                 }
                 ResolveConflictKind::ApplyIncoming => {
                     if conflict.incoming.content_kind == ConflictContentKind::Binary {
+                        // Binary APPLY lands in R10-CONFLICT-COMPLETE.
                         return Err(binary_conflicts_unsupported());
                     }
                     if let Some(incoming) = &conflict.incoming.snapshot {
@@ -509,6 +553,7 @@ impl VersionedTextStore<'_> {
                     )
                 }
                 ResolveConflictKind::ApplyMerged { text } => {
+                    // Binary APPLY lands in R10-CONFLICT-COMPLETE.
                     if [
                         conflict.base.content_kind,
                         conflict.current.content_kind,
@@ -677,6 +722,7 @@ struct SideBindings<'a> {
     object_id: Option<&'a str>,
     content_kind: &'static str,
     blob_sha256: Option<&'a str>,
+    binary_sha256: Option<&'a str>,
     updated_at_ms: Option<i64>,
     latest_moment_id: Option<&'a str>,
     metadata_origin: Option<&'a str>,
@@ -686,7 +732,7 @@ struct SideBindings<'a> {
 
 fn side_bindings(side: &ConflictFileState) -> SideBindings<'_> {
     SideBindings {
-        exists: i64::from(side.snapshot.is_some()),
+        exists: i64::from(side.snapshot.is_some() || side.binary_sha256.is_some()),
         path: &side.path,
         object_id: side
             .snapshot
@@ -697,6 +743,7 @@ fn side_bindings(side: &ConflictFileState) -> SideBindings<'_> {
             .snapshot
             .as_ref()
             .map(|snapshot| snapshot.blob_sha256.as_str()),
+        binary_sha256: side.binary_sha256.as_deref(),
         updated_at_ms: side
             .snapshot
             .as_ref()
@@ -831,38 +878,72 @@ fn map_side(
         .get(column("content_kind").as_str())
         .map_err(DomainError::sql_corrupt)?;
     let content_kind = ConflictContentKind::parse(content_kind_raw.as_deref().unwrap_or("text"))?;
-    let snapshot = if exists == 0 {
-        None
-    } else {
-        // Never reinterpret a mirrored binary side through the text blob join.
-        if content_kind == ConflictContentKind::Binary {
-            return Err(binary_conflicts_unsupported());
+    let text_blob_sha256: Option<String> = row
+        .get(column("blob_sha256").as_str())
+        .map_err(DomainError::sql_corrupt)?;
+    let binary_sha256: Option<String> = row
+        .get(column("binary_sha256").as_str())
+        .map_err(DomainError::sql_corrupt)?;
+    let snapshot = match content_kind {
+        ConflictContentKind::Text if exists == 0 => {
+            if binary_sha256.is_some() {
+                return Err(DomainError::StateCorrupt {
+                    reason: "text conflict side references a binary blob",
+                });
+            }
+            None
         }
-        Some(TextSnapshot {
-            workspace_id: workspace_id.to_owned(),
-            version_id: version_id.to_owned(),
-            object_id: row
-                .get(column("object_id").as_str())
-                .map_err(DomainError::sql_corrupt)?,
-            path: path.clone(),
-            text: row
-                .get(format!("{prefix}_text").as_str())
-                .map_err(DomainError::sql_corrupt)?,
-            blob_sha256: row
-                .get(column("blob_sha256").as_str())
-                .map_err(DomainError::sql_corrupt)?,
-            updated_at_ms: row_ms(row, column("updated_at_ms").as_str())?,
-            latest_moment_id: row
-                .get(column("latest_moment_id").as_str())
-                .map_err(DomainError::sql_corrupt)?,
-            metadata_origin: row
-                .get(column("metadata_origin").as_str())
-                .map_err(DomainError::sql_corrupt)?,
-        })
+        ConflictContentKind::Text => {
+            if binary_sha256.is_some() {
+                return Err(DomainError::StateCorrupt {
+                    reason: "text conflict side references a binary blob",
+                });
+            }
+            Some(TextSnapshot {
+                workspace_id: workspace_id.to_owned(),
+                version_id: version_id.to_owned(),
+                object_id: row
+                    .get(column("object_id").as_str())
+                    .map_err(DomainError::sql_corrupt)?,
+                path: path.clone(),
+                text: row
+                    .get(format!("{prefix}_text").as_str())
+                    .map_err(DomainError::sql_corrupt)?,
+                blob_sha256: text_blob_sha256.ok_or(DomainError::StateCorrupt {
+                    reason: "text conflict side is missing its blob reference",
+                })?,
+                updated_at_ms: row_ms(row, column("updated_at_ms").as_str())?,
+                latest_moment_id: row
+                    .get(column("latest_moment_id").as_str())
+                    .map_err(DomainError::sql_corrupt)?,
+                metadata_origin: row
+                    .get(column("metadata_origin").as_str())
+                    .map_err(DomainError::sql_corrupt)?,
+            })
+        }
+        ConflictContentKind::Binary => {
+            if text_blob_sha256.is_some() {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary conflict side references a text blob",
+                });
+            }
+            if exists == 0 && binary_sha256.is_some() {
+                return Err(DomainError::StateCorrupt {
+                    reason: "absent binary conflict side references a blob",
+                });
+            }
+            if exists != 0 && binary_sha256.is_none() {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary conflict side is missing its blob reference",
+                });
+            }
+            None
+        }
     };
     Ok(ConflictFileState {
         path,
         snapshot,
+        binary_sha256,
         content_kind,
         metadata_summary: row
             .get(column("metadata_summary").as_str())
@@ -871,6 +952,16 @@ fn map_side(
             .get(column("metadata_correlation_id").as_str())
             .map_err(DomainError::sql_corrupt)?,
     })
+}
+
+/// Hydrate replicated binary conflict bytes only when their claimed content
+/// address matches. Conflict rows can then safely reference the verified blob.
+pub fn hydrate_binary_conflict_blob(
+    conn: &Connection,
+    claimed_sha256: &str,
+    bytes: &[u8],
+) -> Result<String, DomainError> {
+    put_binary_blob_verified(conn, claimed_sha256, bytes).map_err(DomainError::from)
 }
 
 fn row_ms(row: &rusqlite::Row<'_>, column: &str) -> Result<i64, DomainError> {
@@ -912,4 +1003,197 @@ pub fn select_text_snapshot_by_path_in_tx(
     )
     .optional()
     .map_err(DomainError::sql_corrupt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256};
+    use dohc_engine_testkit::ScratchDir;
+
+    const WORKSPACE_ID: &str = "binary-conflict-tests";
+
+    fn open_store() -> (ScratchDir, EngineStore) {
+        let scratch = ScratchDir::new().expect("scratch directory");
+        let path = scratch.engine_db_path().expect("database path");
+        let mut store = EngineStore::open(&path, 1).expect("open engine store");
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                     VALUES (?1, 'main')",
+                    [WORKSPACE_ID],
+                )
+                .map_err(DomainError::sql_persist)?;
+                Ok::<_, DomainError>(())
+            })
+            .expect("seed workspace");
+        (scratch, store)
+    }
+
+    fn conflict(
+        conflict_id: &str,
+        base: ConflictFileState,
+        current: ConflictFileState,
+        incoming: ConflictFileState,
+    ) -> TextConflict {
+        TextConflict {
+            conflict_id: conflict_id.to_owned(),
+            workspace_id: WORKSPACE_ID.to_owned(),
+            path: current.path.clone(),
+            target_version_id: "main".to_owned(),
+            source_version_id: "feature".to_owned(),
+            created_at_ms: 10,
+            updated_at_ms: 11,
+            status: ConflictStatus::Open,
+            chosen_from: ConflictChoice::Current,
+            resolution: None,
+            metadata: ConflictMetadata::origin("sync"),
+            base,
+            current,
+            incoming,
+        }
+    }
+
+    fn text_snapshot(path: &str, text: &str) -> TextSnapshot {
+        TextSnapshot {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            version_id: "main".to_owned(),
+            object_id: "object-1".to_owned(),
+            path: path.to_owned(),
+            text: text.to_owned(),
+            blob_sha256: hex_sha256(text.as_bytes()),
+            updated_at_ms: 9,
+            latest_moment_id: "moment-1".to_owned(),
+            metadata_origin: "user".to_owned(),
+        }
+    }
+
+    #[test]
+    fn binary_conflict_sides_round_trip() {
+        let (_scratch, mut store) = open_store();
+        let base_bytes = b"binary base";
+        let current_bytes = b"binary current";
+        let incoming_bytes = b"binary incoming";
+        let base_sha = hex_sha256(base_bytes);
+        let current_sha = hex_sha256(current_bytes);
+        let incoming_sha = hex_sha256(incoming_bytes);
+        let expected = conflict(
+            "both-binary",
+            ConflictFileState::binary("asset.bin", base_sha.clone()),
+            ConflictFileState::binary("asset.bin", current_sha.clone()),
+            ConflictFileState::binary("asset.bin", incoming_sha.clone()),
+        );
+
+        let outcome = store
+            .write_with(&NoFaults, |tx| {
+                hydrate_binary_conflict_blob(tx, &base_sha, base_bytes)?;
+                hydrate_binary_conflict_blob(tx, &current_sha, current_bytes)?;
+                hydrate_binary_conflict_blob(tx, &incoming_sha, incoming_bytes)?;
+                insert_text_conflict_if_absent(tx, &expected)
+            })
+            .expect("insert binary conflict");
+        assert_eq!(outcome, TxnOutcome::Committed(true));
+
+        let loaded = store
+            .read_with(|conn| load_text_conflict_in_tx(conn, WORKSPACE_ID, "both-binary"))
+            .expect("load binary conflict")
+            .expect("binary conflict row");
+        assert_eq!(loaded, expected);
+
+        let persisted: (String, String, String, String, String, String) = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT base_content_kind, base_binary_sha256,
+                            current_content_kind, current_binary_sha256,
+                            incoming_content_kind, incoming_binary_sha256
+                     FROM conflicts WHERE workspace_id = ?1 AND conflict_id = 'both-binary'",
+                    [WORKSPACE_ID],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+            })
+            .expect("read persisted binary bindings");
+        assert_eq!(
+            persisted,
+            (
+                "binary".to_owned(),
+                base_sha,
+                "binary".to_owned(),
+                current_sha,
+                "binary".to_owned(),
+                incoming_sha,
+            )
+        );
+    }
+
+    #[test]
+    fn mixed_text_and_binary_conflict_sides_round_trip() {
+        let (_scratch, mut store) = open_store();
+        let incoming_bytes = b"incoming binary";
+        let incoming_sha = hex_sha256(incoming_bytes);
+        let expected = conflict(
+            "mixed",
+            ConflictFileState::text("mixed.dat", None),
+            ConflictFileState::text(
+                "mixed.dat",
+                Some(text_snapshot("mixed.dat", "current text")),
+            ),
+            ConflictFileState::binary("mixed.dat", incoming_sha.clone()),
+        );
+
+        let outcome = store
+            .write_with(&NoFaults, |tx| {
+                hydrate_binary_conflict_blob(tx, &incoming_sha, incoming_bytes)?;
+                insert_text_conflict_if_absent(tx, &expected)
+            })
+            .expect("insert mixed conflict");
+        assert_eq!(outcome, TxnOutcome::Committed(true));
+
+        let loaded = store
+            .read_with(|conn| load_text_conflict_in_tx(conn, WORKSPACE_ID, "mixed"))
+            .expect("load mixed conflict")
+            .expect("mixed conflict row");
+        assert_eq!(loaded, expected);
+        assert!(loaded.current.binary_sha256.is_none());
+        assert!(loaded.incoming.snapshot.is_none());
+    }
+
+    #[test]
+    fn missing_binary_blob_is_rejected_before_conflict_insert() {
+        let (_scratch, mut store) = open_store();
+        let missing_sha = hex_sha256(b"not hydrated");
+        let expected = conflict(
+            "missing-binary",
+            ConflictFileState::text("missing.bin", None),
+            ConflictFileState::text("missing.bin", None),
+            ConflictFileState::binary("missing.bin", missing_sha),
+        );
+
+        let error = store
+            .write_with(&NoFaults, |tx| {
+                insert_text_conflict_if_absent(tx, &expected)
+            })
+            .expect_err("missing binary blob must fail closed");
+        assert_eq!(error.code(), "invalid-input");
+
+        let count: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM conflicts WHERE workspace_id = ?1",
+                    [WORKSPACE_ID],
+                    |row| row.get(0),
+                )
+            })
+            .expect("conflict count");
+        assert_eq!(count, 0);
+    }
 }

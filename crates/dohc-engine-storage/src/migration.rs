@@ -1106,6 +1106,104 @@ CREATE TABLE shadow_clone (
 
 pub(crate) const SHADOW_CLONE_MIGRATION_ID: &str = "v1-shadow-clone";
 
+/// Ordinal 9. Adds content-addressed binary-blob references to each conflict
+/// side while preserving the existing text-blob references. SQLite keeps this
+/// schema change declarative through a transactional table rebuild.
+const V1_BINARY_CONFLICT_SIDES_DDL: &str = "\
+CREATE TABLE conflicts_v9 (
+    workspace_id TEXT NOT NULL,
+    conflict_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    target_version_id TEXT NOT NULL,
+    source_version_id TEXT NOT NULL,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    chosen_from TEXT NOT NULL,
+    resolution TEXT,
+    metadata_origin TEXT NOT NULL,
+    metadata_summary TEXT,
+    metadata_correlation_id TEXT,
+    base_exists INTEGER NOT NULL,
+    base_path TEXT NOT NULL,
+    base_object_id TEXT,
+    base_content_kind TEXT DEFAULT 'text',
+    base_blob_sha256 TEXT,
+    base_updated_at_ms INTEGER,
+    base_latest_moment_id TEXT,
+    base_metadata_origin TEXT,
+    base_metadata_summary TEXT,
+    base_metadata_correlation_id TEXT,
+    current_exists INTEGER NOT NULL,
+    current_path TEXT NOT NULL,
+    current_object_id TEXT,
+    current_content_kind TEXT DEFAULT 'text',
+    current_blob_sha256 TEXT,
+    current_updated_at_ms INTEGER,
+    current_latest_moment_id TEXT,
+    current_metadata_origin TEXT,
+    current_metadata_summary TEXT,
+    current_metadata_correlation_id TEXT,
+    incoming_exists INTEGER NOT NULL,
+    incoming_path TEXT NOT NULL,
+    incoming_object_id TEXT,
+    incoming_content_kind TEXT DEFAULT 'text',
+    incoming_blob_sha256 TEXT,
+    incoming_updated_at_ms INTEGER,
+    incoming_latest_moment_id TEXT,
+    incoming_metadata_origin TEXT,
+    incoming_metadata_summary TEXT,
+    incoming_metadata_correlation_id TEXT,
+    base_binary_sha256 TEXT,
+    current_binary_sha256 TEXT,
+    incoming_binary_sha256 TEXT,
+    PRIMARY KEY (workspace_id, conflict_id),
+    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
+    FOREIGN KEY (base_blob_sha256) REFERENCES blobs(sha256),
+    FOREIGN KEY (current_blob_sha256) REFERENCES blobs(sha256),
+    FOREIGN KEY (incoming_blob_sha256) REFERENCES blobs(sha256),
+    FOREIGN KEY (base_binary_sha256) REFERENCES binary_blobs(sha256),
+    FOREIGN KEY (current_binary_sha256) REFERENCES binary_blobs(sha256),
+    FOREIGN KEY (incoming_binary_sha256) REFERENCES binary_blobs(sha256)
+) STRICT;
+INSERT INTO conflicts_v9 (
+    workspace_id, conflict_id, path, target_version_id, source_version_id,
+    created_at_ms, updated_at_ms, status, chosen_from, resolution,
+    metadata_origin, metadata_summary, metadata_correlation_id,
+    base_exists, base_path, base_object_id, base_content_kind, base_blob_sha256,
+    base_updated_at_ms, base_latest_moment_id, base_metadata_origin,
+    base_metadata_summary, base_metadata_correlation_id,
+    current_exists, current_path, current_object_id, current_content_kind,
+    current_blob_sha256, current_updated_at_ms, current_latest_moment_id,
+    current_metadata_origin, current_metadata_summary, current_metadata_correlation_id,
+    incoming_exists, incoming_path, incoming_object_id, incoming_content_kind,
+    incoming_blob_sha256, incoming_updated_at_ms, incoming_latest_moment_id,
+    incoming_metadata_origin, incoming_metadata_summary, incoming_metadata_correlation_id,
+    base_binary_sha256, current_binary_sha256, incoming_binary_sha256
+)
+SELECT
+    workspace_id, conflict_id, path, target_version_id, source_version_id,
+    created_at_ms, updated_at_ms, status, chosen_from, resolution,
+    metadata_origin, metadata_summary, metadata_correlation_id,
+    base_exists, base_path, base_object_id, base_content_kind, base_blob_sha256,
+    base_updated_at_ms, base_latest_moment_id, base_metadata_origin,
+    base_metadata_summary, base_metadata_correlation_id,
+    current_exists, current_path, current_object_id, current_content_kind,
+    current_blob_sha256, current_updated_at_ms, current_latest_moment_id,
+    current_metadata_origin, current_metadata_summary, current_metadata_correlation_id,
+    incoming_exists, incoming_path, incoming_object_id, incoming_content_kind,
+    incoming_blob_sha256, incoming_updated_at_ms, incoming_latest_moment_id,
+    incoming_metadata_origin, incoming_metadata_summary, incoming_metadata_correlation_id,
+    NULL, NULL, NULL
+FROM conflicts;
+DROP TABLE conflicts;
+ALTER TABLE conflicts_v9 RENAME TO conflicts;
+CREATE INDEX idx_conflicts_workspace_status ON conflicts(workspace_id, status, created_at_ms, conflict_id);
+";
+
+/// The `id` of the binary conflict-side migration.
+pub(crate) const BINARY_CONFLICT_SIDES_MIGRATION_ID: &str = "v1-binary-conflict-sides";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1170,6 +1268,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: SHADOW_CLONE_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_SHADOW_CLONE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 9,
+        id: BINARY_CONFLICT_SIDES_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_BINARY_CONFLICT_SIDES_DDL,
         sets_user_version: None,
     },
 ];
@@ -1479,11 +1584,11 @@ mod tests {
     // waiting for a real future schema change.
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     fn two_migrations() -> Vec<Migration> {
-        // The frozen list now ends at ordinal 8 (shadow clone), so a synthetic
-        // probe appends at ordinal 9.
+        // The frozen list now ends at ordinal 9 (binary conflict sides), so a
+        // synthetic probe appends at ordinal 10.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 9,
+            ordinal: 10,
             id: "r04-probe",
             kind: MigrationKind::Transactional,
             sql: M2_SQL,
@@ -1622,8 +1727,8 @@ mod tests {
         assert!(before.is_none());
 
         let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("apply R06 and shadow fence");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 2 });
+            .expect("apply R06, shadow fence, and binary conflict sides");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 3 });
         let objects: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_schema WHERE \
@@ -1666,7 +1771,91 @@ mod tests {
                 row.get(0)
             })
             .expect("ledger");
-        assert_eq!(ledger, 9);
+        assert_eq!(ledger, 10);
+    }
+
+    #[test]
+    fn binary_conflict_sides_migration_preserves_v8_text_conflict() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_800);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..9], &ctx, &NoFaults)
+            .expect("migrate through ordinal 8");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+             VALUES ('ws', 'main');
+             INSERT INTO conflicts (
+                 workspace_id, conflict_id, path, target_version_id, source_version_id,
+                 created_at_ms, updated_at_ms, status, chosen_from, resolution,
+                 metadata_origin, metadata_summary, metadata_correlation_id,
+                 base_exists, base_path, current_exists, current_path,
+                 incoming_exists, incoming_path
+             ) VALUES (
+                 'ws', 'conflict-1', 'note.md', 'main', 'feature',
+                 10, 11, 'open', 'current', NULL,
+                 'sync', 'preserve me', 'corr-1',
+                 0, 'note.md', 0, 'note.md', 0, 'note.md'
+             );",
+        )
+        .expect("seed ordinal-8 text conflict");
+
+        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("apply binary conflict-side migration");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+
+        let preserved: (
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ) = conn
+            .query_row(
+                "SELECT path, metadata_summary, base_binary_sha256,
+                        current_binary_sha256, incoming_binary_sha256
+                 FROM conflicts WHERE workspace_id = 'ws' AND conflict_id = 'conflict-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("preserved conflict row");
+        assert_eq!(
+            preserved,
+            (
+                "note.md".to_owned(),
+                "preserve me".to_owned(),
+                None,
+                None,
+                None,
+            )
+        );
+
+        let binary_fks: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_list('conflicts')
+                 WHERE \"table\" = 'binary_blobs'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("binary conflict foreign keys");
+        assert_eq!(binary_fks, 3);
+        let max_ordinal: i64 = conn
+            .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("latest migration ordinal");
+        assert_eq!(max_ordinal, 9);
     }
 
     #[test]
@@ -1746,10 +1935,10 @@ mod tests {
         // secrets migration (1), the Y.Doc migration (2), the chats migration
         // (3), the search migration (4), the moment-link migration (5), the
         // sync migration (6), conflicts migration (7), shadow-clone migration
-        // (8), AND the probe (9).
+        // (8), binary-conflict-sides migration (9), AND the probe (10).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 9 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 10 });
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -1846,7 +2035,7 @@ mod tests {
         }
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 9,
+            ordinal: 10,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
@@ -1864,7 +2053,7 @@ mod tests {
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();
         changed.push(Migration {
-            ordinal: 9,
+            ordinal: 10,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
@@ -1884,7 +2073,7 @@ mod tests {
         // baseline first (transactional), then a non-transactional idempotent step.
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 9,
+            ordinal: 10,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",

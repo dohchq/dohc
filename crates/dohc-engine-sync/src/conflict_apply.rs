@@ -214,6 +214,11 @@ fn side(
     Ok(ConflictFileState {
         path: payload.path,
         snapshot,
+        // Binary mirror-apply payloads are not wired through this replication
+        // path yet (R10-CONFLICT-COMPLETE's job); a binary side built here
+        // always fails closed downstream in `insert_text_conflict_if_absent`
+        // for lacking a blob reference, same as before BINCONFLICT.
+        binary_sha256: None,
         content_kind,
         metadata_summary: side_metadata
             .as_ref()

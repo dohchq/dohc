@@ -49,6 +49,22 @@ pub fn put_binary_blob(conn: &Connection, bytes: &[u8]) -> Result<String, Storag
     Ok(sha256)
 }
 
+/// Store bytes supplied with a claimed content address, rejecting the write if
+/// the claim does not match the exact bytes. Replicated bundle importers can
+/// use this before persisting rows that foreign-key the binary blob.
+pub fn put_binary_blob_verified(
+    conn: &Connection,
+    claimed_sha256: &str,
+    bytes: &[u8],
+) -> Result<String, StorageError> {
+    if hex_sha256(bytes) != claimed_sha256 {
+        return Err(StorageError::BlobIntegrity {
+            sha256: claimed_sha256.to_owned(),
+        });
+    }
+    put_binary_blob(conn, bytes)
+}
+
 /// Fetch a binary blob by key, verifying integrity on read. Returns `None` if
 /// no such blob exists. If the stored bytes do not hash to `sha256`, fails
 /// closed with [`StorageError::BlobIntegrity`] rather than returning corrupt
@@ -99,4 +115,23 @@ pub fn has_binary_blob(conn: &Connection, sha256: &str) -> Result<bool, StorageE
 pub fn binary_blob_count(conn: &Connection) -> Result<i64, StorageError> {
     conn.query_row("SELECT COUNT(*) FROM binary_blobs", [], |r| r.get(0))
         .map_err(StorageError::corrupt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verified_put_rejects_claimed_hash_mismatch() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        let claimed = hex_sha256(b"different bytes");
+
+        let error = put_binary_blob_verified(&conn, &claimed, b"actual bytes")
+            .expect_err("mismatched claimed hash must fail closed");
+
+        assert!(matches!(
+            error,
+            StorageError::BlobIntegrity { sha256 } if sha256 == claimed
+        ));
+    }
 }
