@@ -1309,3 +1309,60 @@ source of truth every orchestrator session loads first).
   unblocked), then R15 (ICE checkpoint: cutover scope + dogfood reset +
   member-share-reset semantics). Non-R15-blocking, still open:
   R10-CONFLICT-COMPLETE, BINCONFLICT, R13b-rest, tracked obligations.
+
+## 2026-07-18 — HOTFIX #189 (2 real YRS-ABORT-SAFETY DoS) · BINCONFLICT merged (#190)
+
+- HOTFIX #189 MERGED (squash; no migration). Surfaced when BINCONFLICT's full
+  run-rust-checks (on the post-#185 main) went red. Two problems, BOTH in the
+  merged YRS-ABORT-SAFETY code, neither caught by that shard's own "green x2":
+  1. **A real decode-reachable OOM DoS** — `scan_content`'s `ContentDeleted`
+     arm looped `for i in 0..len { record_identity(Tombstone) }` where `len` is
+     a wire-declared u32 (up to ~4.29e9) with ZERO input bytes consumed per
+     iteration. A ~15-byte hostile packet (`len = u32::MAX`) OOMs the engine on
+     the `apply_remote_update` pre-validator path (`scan_v1` runs on fully
+     untrusted bytes). Seed-dependent, so the 256-case fuzz gate passed for some
+     seeds. Fixed: tombstones recorded as O(1) half-open `[clock,clock+len)`
+     ranges (`tombstone_ranges` + `tombstone_covers`); the dead
+     `ClockIdentity::Tombstone` variant removed. Parity semantics PRESERVED (all
+     20 cross-engine differential tests pass unchanged) + 2 `u32::MAX`
+     regressions. Verified under a 512 MiB Job-Object cap at 20k cases/property.
+  2. **A quadratic-CPU DoS (CodeRabbit)** — `tombstone_covers` AND the
+     pre-existing `delete_set_covers` linearly scanned attacker-controlled range
+     vectors per established live clock → O(clocks x ranges) CPU exhaustion.
+     Fixed: `scan_v1` normalizes (sort+coalesce) both range maps once; both
+     queries binary-search (`partition_point`) → O(clocks x log ranges).
+  3. Plus a `cargo fmt --check` drift (2 YRS-ABORT-SAFETY files). LESSON:
+     rustfmt/gate nondeterminism + seed-dependent fuzz can pass "green x2" yet
+     leave main red/vulnerable — a downstream shard's full-workspace gate caught
+     both. Consider a large-corpus (PROPTEST_CASES) fuzz run in the pre-merge
+     gate for decode-path shards.
+- BINCONFLICT #190 MERGED (squash; migration ordinal 9 `v1-binary-conflict-
+  sides`, ledger len 10). The binary conflict-side SUBSTRATE: `conflicts` table
+  REBUILT (create->INSERT..SELECT->drop->rename->reindex) to add
+  `{base,current,incoming}_binary_sha256 -> binary_blobs(sha256)` FKs; content-
+  addressed `put_binary_blob_verified` hydrate; R06's fail-closed
+  `binary_conflicts_unsupported` gate lifted at the OPEN/PERSIST layer only
+  (requires the binary_blobs row pre-exist). Binary RESOLVE/APPLY stays fail-
+  closed (R10-CONFLICT-COMPLETE). FIRST table-rebuild migration in the codebase.
+- Cell: 2 adversarial fable reviewers (migration-correctness: NO P0/P1, verified
+  43-col preservation + FK/STRICT + rollback-to-v8 with probes; fail-closed:
+  found the P0) + Codex (2) + CodeRabbit (4, APPROVED after fixes). Findings:
+  - P0 (fail-closed reviewer) — `resolve_text_conflict` gated binary only per-
+    path (KeepCurrent gated NOTHING, ApplyIncoming checked incoming only), so a
+    binary-BASE conflict RESOLVED locally, overstepping into R10 and causing
+    unrecoverable origin/peer divergence. Fixed: any-side-binary guard before
+    the live-state gate (matches sync `has_binary_side`).
+  - Codex — `put_binary_blob_verified` hashed untrusted bytes BEFORE the size
+    cap (now BlobTooLarge before hashing); binary validation ran AFTER the
+    duplicate-id shortcut → invalid binary open on a dup id got logged+acked
+    (moved validation before the shortcut; sync regression proves no log/ack).
+  - CodeRabbit — `(None,None)` state-equality ignored path (REACHABLE via a
+    replicated conflict.open with a divergent per-side path; now path-checked);
+    an absent text side carrying a blob ref is now `state-corrupt`; dedup
+    `put_binary_blob` reads back + re-verifies the canonical row (INSERT OR
+    IGNORE left a corrupt row + returned success); reason-exact probe asserts.
+- Wave 5 status: cutover-gating COMPLETE (YRS-ABORT-SAFETY, R15-REHEARSE).
+  BINCONFLICT done. Remaining pre-cutover: R10-CONFLICT-COMPLETE (now unblocked
+  for the binary apply path — its isBinaryState branch consumes BINCONFLICT's
+  schema), R13b-rest, tracked obligations. Then GATE6 (deps R14/R10b/R15-
+  REHEARSE all met), then R15 (ICE checkpoint).
