@@ -142,7 +142,7 @@ fn portable_path(path: &Path) -> Result<String, RehearsalError> {
     let text = path.to_str().ok_or(RehearsalError::Io {
         code: "inventory-non-utf8-path",
     })?;
-    Ok(text.replace('\\', "/"))
+    Ok(super::backup::portable_separators(text))
 }
 
 fn persist(root: &Path, inventory: &Inventory) -> Result<(), RehearsalError> {

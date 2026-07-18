@@ -14,12 +14,11 @@ mod state;
 pub use backup::{DirectoryBackupManifest, load_valid_directory_backup};
 pub use driver::{RehearsalConfig, RehearsalOutcome, run_rehearsal};
 pub use faults::{FaultAction, FaultInjector, FaultPoint, NoFaults};
-pub use fence::{
-    REHEARSAL_TOKEN_RELATIVE_PATH, ValidatedRehearsalRoot, validate_rehearsal_root,
-    write_rehearsal_token_for_harness,
-};
+#[cfg(any(test, feature = "harness"))]
+pub use fence::write_rehearsal_token_for_harness;
+pub use fence::{REHEARSAL_TOKEN_RELATIVE_PATH, ValidatedRehearsalRoot, validate_rehearsal_root};
 pub use inventory::{Inventory, InventoryEntry, load_inventory};
-pub use state::{RehearsalState, StableState, StateRecord, load_state};
+pub use state::{BackupFingerprint, RehearsalState, StableState, StateRecord, load_state};
 
 use std::path::PathBuf;
 
@@ -58,5 +57,7 @@ impl Paths {
     }
 }
 
+#[cfg(test)]
+mod probe_tests;
 #[cfg(test)]
 mod tests;

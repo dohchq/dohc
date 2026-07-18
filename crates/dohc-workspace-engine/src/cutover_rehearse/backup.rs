@@ -1,17 +1,21 @@
 use super::faults::{FaultAction, FaultInjector, FaultPoint};
+use super::handles::DB_TRIPLET;
+use super::state::BackupFingerprint;
 use super::{Paths, RehearsalError};
 use dohc_engine_storage::{
     BackupOutcome, EngineStore, RealFreeSpace, create_verified_backup, load_valid_backup,
 };
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const DB_BACKUP_STEM: &str = "cutover-engine";
 const DIRECTORY_BACKUP_NAME: &str = "cutover-files";
 const DIRECTORY_MANIFEST_NAME: &str = "cutover-files.manifest.json";
+const MIGRATION_PROBE_DIR: &str = "cutover-migration-probe";
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 const SIBLING_SNAPSHOTS: [&str; 3] = ["registry.json", "dm-homing.json", "agent-runs.json"];
 
@@ -44,7 +48,16 @@ pub fn load_valid_directory_backup(
     }
     let root = recovery_dir.join(DIRECTORY_BACKUP_NAME);
     for entry in &manifest.files {
-        let path = root.join(Path::new(&entry.relative_path));
+        let relative = Path::new(&entry.relative_path);
+        if relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            // A forged manifest path (absolute, `..`, drive prefix) must never
+            // resolve outside the backup directory.
+            return Ok(None);
+        }
+        let path = root.join(relative);
         let metadata = match std::fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -83,6 +96,7 @@ pub(crate) fn create_restore_tested_backup(
     }
 
     if !db_valid {
+        ensure_no_pending_migrations(&paths.db, recovery_dir, now_ms)?;
         let store = EngineStore::open(&paths.db, now_ms)?;
         let adapter = StorageFaultAdapter { faults };
         match create_verified_backup(
@@ -104,6 +118,110 @@ pub(crate) fn create_restore_tested_backup(
     }
 
     create_directory_backup(paths, recovery_dir, faults)
+}
+
+/// `EngineStore::open` applies any pending migration to the store it opens.
+/// The backup source must be opened write-free, so a source whose applied
+/// migration ledger differs from this build's expectation is refused BEFORE
+/// the read-write open. The expectation comes from a throwaway probe store
+/// created by the same build in the recovery dir.
+fn ensure_no_pending_migrations(
+    db: &Path,
+    recovery_dir: &Path,
+    now_ms: i64,
+) -> Result<(), RehearsalError> {
+    let applied = {
+        let conn =
+            Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| {
+                RehearsalError::Io {
+                    code: "backup-source-open-read-only-failed",
+                }
+            })?;
+        let (applied, incomplete): (i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*), COUNT(*) FILTER (WHERE completed_at IS NULL) \
+                 FROM engine_migrations",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| RehearsalError::Io {
+                code: "backup-source-migrations-unreadable",
+            })?;
+        if incomplete != 0 {
+            return Err(RehearsalError::Io {
+                code: "backup-source-pending-migrations",
+            });
+        }
+        applied
+    };
+
+    let probe_dir = recovery_dir.join(MIGRATION_PROBE_DIR);
+    if probe_dir.exists() {
+        std::fs::remove_dir_all(&probe_dir)
+            .map_err(|e| RehearsalError::io("migration-probe-clean", e))?;
+    }
+    std::fs::create_dir(&probe_dir).map_err(|e| RehearsalError::io("migration-probe-create", e))?;
+    let expected = {
+        let probe = EngineStore::open(&probe_dir.join("engine.db"), now_ms)?;
+        probe.migration_ledger_len()?
+    };
+    let _ = std::fs::remove_dir_all(&probe_dir);
+
+    if applied != expected {
+        return Err(RehearsalError::Io {
+            code: "backup-source-pending-migrations",
+        });
+    }
+    Ok(())
+}
+
+/// Read-and-VALIDATE both backups at `recovery_dir` and return their identity.
+/// Errors (never silently `None`) when either backup is missing or invalid.
+pub(crate) fn fingerprint_backup(recovery_dir: &Path) -> Result<BackupFingerprint, RehearsalError> {
+    let recovery = recovery_dir
+        .to_str()
+        .ok_or(RehearsalError::Io {
+            code: "recovery-dir-non-utf8",
+        })?
+        .to_owned();
+    let db = load_valid_backup(recovery_dir, DB_BACKUP_STEM)?.ok_or(RehearsalError::Io {
+        code: "backup-db-not-valid",
+    })?;
+    if load_valid_directory_backup(recovery_dir)?.is_none() {
+        return Err(RehearsalError::Io {
+            code: "backup-directory-not-valid",
+        });
+    }
+    let (manifest_hash, _) = hash_file(&recovery_dir.join(DIRECTORY_MANIFEST_NAME))?;
+    Ok(BackupFingerprint {
+        recovery_dir: recovery,
+        db_checksum: db.manifest.checksum,
+        directory_manifest_sha256: manifest_hash,
+    })
+}
+
+/// The resume gate in front of every destructive step: the recovery dir passed
+/// to THIS invocation must be the recorded one, and both backups there must
+/// still validate byte-for-byte against the recorded fingerprint.
+pub(crate) fn verify_recorded_backup(
+    recovery_dir: &Path,
+    recorded: Option<&BackupFingerprint>,
+) -> Result<(), RehearsalError> {
+    let recorded = recorded.ok_or(RehearsalError::Io {
+        code: "resume-backup-unrecorded",
+    })?;
+    if recovery_dir.to_str() != Some(recorded.recovery_dir.as_str()) {
+        return Err(RehearsalError::Io {
+            code: "resume-recovery-dir-mismatch",
+        });
+    }
+    let actual = fingerprint_backup(recovery_dir)?;
+    if actual != *recorded {
+        return Err(RehearsalError::Io {
+            code: "resume-backup-mismatch",
+        });
+    }
+    Ok(())
 }
 
 struct StorageFaultAdapter<'a> {
@@ -219,13 +337,16 @@ fn collect_engine_files(
             let relative = path
                 .strip_prefix(engine_root)
                 .map_err(|_| RehearsalError::State)?;
-            if relative == Path::new("engine.db") {
+            // The whole live triplet is excluded: the vacuumed DB backup is the
+            // complete database state, and a copied WAL/SHM restored beside it
+            // would be replayed by SQLite into silent corruption.
+            if DB_TRIPLET.iter().any(|name| relative == Path::new(name)) {
                 continue;
             }
             let text = relative.to_str().ok_or(RehearsalError::Io {
                 code: "engine-backup-non-utf8-path",
             })?;
-            output.push((format!("engine/{}", text.replace('\\', "/")), path));
+            output.push((format!("engine/{}", portable_separators(text)), path));
         } else {
             return Err(RehearsalError::Io {
                 code: "engine-backup-special-file-refused",
@@ -303,7 +424,17 @@ fn write_manifest_atomic(
     std::fs::rename(temp, path).map_err(|e| RehearsalError::io("directory-manifest-publish", e))
 }
 
-fn ensure_outside_root(root: &Path, recovery_dir: &Path) -> Result<(), RehearsalError> {
+/// `\` is a path separator only on Windows; on Unix a backslash is an ordinary
+/// filename byte, and rewriting it would alias two distinct paths.
+pub(crate) fn portable_separators(text: &str) -> String {
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text.to_owned()
+    }
+}
+
+pub(crate) fn ensure_outside_root(root: &Path, recovery_dir: &Path) -> Result<(), RehearsalError> {
     let canonical_root = std::fs::canonicalize(root)
         .map_err(|e| RehearsalError::io("backup-root-canonicalize", e))?;
     let ancestor = recovery_dir

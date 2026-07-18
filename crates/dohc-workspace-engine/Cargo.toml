@@ -16,6 +16,7 @@ dohc-engine-runtime = { path = "../dohc-engine-runtime" }
 dohc-engine-sync = { path = "../dohc-engine-sync" }
 dohc-engine-protocol = { path = "../dohc-engine-protocol" }
 base64 = "0.22"
+rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -30,9 +31,13 @@ tokio = { version = "1", features = [
 ] }
 tokio-util = "0.7"
 
+[features]
+# Compiles the harness-only marker writers (e.g.
+# `write_rehearsal_token_for_harness`); production builds must not enable it.
+harness = []
+
 [dev-dependencies]
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
-rusqlite = { version = "0.37", features = ["bundled"] }
 yrs = "=0.27.3"
 
 [lints]

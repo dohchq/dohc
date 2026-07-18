@@ -1,4 +1,7 @@
+use super::RehearsalError;
 use crate::shadow_fence::{ShadowFenceError, ValidatedShadowRoot, validate_shadow_root};
+use dohc_engine_storage::ENGINE_SCHEMA_VERSION;
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use std::path::{Path, PathBuf};
 
 pub const REHEARSAL_TOKEN_RELATIVE_PATH: &str = ".dohc/engine/CUTOVER_REHEARSAL_TOKEN";
@@ -50,7 +53,56 @@ pub fn validate_rehearsal_root(root: &Path) -> Result<ValidatedRehearsalRoot, Fe
     })
 }
 
+/// The plaintext markers alone must never authorize touching a store: the live
+/// `engine.db` has to prove — via its own `shadow_clone` binding, read
+/// strictly read-only — that it IS the clone the fence validated. Called
+/// before the backup is taken and again before the destructive move-aside.
+pub(crate) fn verify_live_clone_binding(
+    db: &Path,
+    expected_token: &str,
+) -> Result<(), RehearsalError> {
+    let metadata =
+        std::fs::symlink_metadata(db).map_err(|e| RehearsalError::io("live-db-missing", e))?;
+    if !metadata.file_type().is_file() {
+        return Err(RehearsalError::Io {
+            code: "live-db-not-regular",
+        });
+    }
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| {
+        RehearsalError::Io {
+            code: "live-db-open-read-only-failed",
+        }
+    })?;
+    let fingerprint: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(|_| RehearsalError::Io {
+            code: "live-db-fingerprint-unreadable",
+        })?;
+    if fingerprint != ENGINE_SCHEMA_VERSION {
+        return Err(RehearsalError::Io {
+            code: "live-db-foreign-fingerprint",
+        });
+    }
+    let token: Option<String> = conn
+        .query_row(
+            "SELECT token FROM shadow_clone WHERE rowid_guard = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| RehearsalError::Io {
+            code: "live-db-shadow-binding-unreadable",
+        })?;
+    if token.as_deref() != Some(expected_token) {
+        return Err(RehearsalError::Io {
+            code: "live-db-shadow-binding-mismatch",
+        });
+    }
+    Ok(())
+}
+
 /// Harness-only marker writer. Production rehearsal code only validates.
+#[cfg(any(test, feature = "harness"))]
 pub fn write_rehearsal_token_for_harness(root: &Path, token: &str) -> Result<(), FenceError> {
     if !valid_token(token.as_bytes()) {
         return Err(FenceError::TokenMalformed);

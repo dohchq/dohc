@@ -60,11 +60,25 @@ impl From<StableState> for RehearsalState {
     }
 }
 
+/// Identity of the restore-tested backup recorded at the BackedUp transition.
+/// A resume must re-verify the on-disk backup against this before any
+/// destructive step; a record claiming BackedUp-or-later without it is invalid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupFingerprint {
+    /// Canonicalized recovery directory the backup was written to.
+    pub recovery_dir: String,
+    /// sha-256 of the vacuumed DB backup (its manifest checksum).
+    pub db_checksum: String,
+    /// sha-256 of the directory-backup manifest file.
+    pub directory_manifest_sha256: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StateRecord {
     pub generation: u64,
     pub current: RehearsalState,
     pub history: Vec<StableState>,
+    pub backup: Option<BackupFingerprint>,
 }
 
 pub fn load_state(root: &Path) -> Result<Option<StateRecord>, RehearsalError> {
@@ -105,6 +119,7 @@ pub(crate) fn initialize(root: &Path) -> Result<StateRecord, RehearsalError> {
             generation: 0,
             current: RehearsalState::NotStarted,
             history: vec![StableState::NotStarted],
+            backup: None,
         },
     )
 }
@@ -113,6 +128,25 @@ pub(crate) fn transition(
     root: &Path,
     record: &StateRecord,
     next: StableState,
+) -> Result<StateRecord, RehearsalError> {
+    transition_inner(root, record, next, record.backup.clone())
+}
+
+/// The Settled→BackedUp transition: records the just-verified backup identity
+/// alongside the state so every later resume can re-prove it.
+pub(crate) fn transition_backed_up(
+    root: &Path,
+    record: &StateRecord,
+    backup: BackupFingerprint,
+) -> Result<StateRecord, RehearsalError> {
+    transition_inner(root, record, StableState::BackedUp, Some(backup))
+}
+
+fn transition_inner(
+    root: &Path,
+    record: &StateRecord,
+    next: StableState,
+    backup: Option<BackupFingerprint>,
 ) -> Result<StateRecord, RehearsalError> {
     let current = record.current.stable().ok_or(RehearsalError::State)?;
     if next_index(next) != next_index(current).saturating_add(1) {
@@ -126,6 +160,7 @@ pub(crate) fn transition(
             generation: record.generation.saturating_add(1),
             current: next.into(),
             history,
+            backup,
         },
     )
 }
@@ -145,6 +180,7 @@ pub(crate) fn fail(
                 at,
             },
             history: record.history.clone(),
+            backup: record.backup.clone(),
         },
     )
 }
@@ -186,6 +222,11 @@ fn validate_record(record: &StateRecord) -> Result<(), RehearsalError> {
     let expected_generation = record.history.len().saturating_sub(1) as u64
         + u64::from(matches!(record.current, RehearsalState::Failed { .. }));
     if record.generation != expected_generation {
+        return Err(RehearsalError::State);
+    }
+    // A record claiming BackedUp-or-later must carry the backup fingerprint it
+    // was recorded with; a record before BackedUp must not carry one.
+    if record.backup.is_some() != record.history.contains(&StableState::BackedUp) {
         return Err(RehearsalError::State);
     }
     match &record.current {

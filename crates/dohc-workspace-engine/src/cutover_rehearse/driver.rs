@@ -1,14 +1,16 @@
-use super::backup::create_restore_tested_backup;
+use super::backup::{
+    create_restore_tested_backup, ensure_outside_root, fingerprint_backup, verify_recorded_backup,
+};
 use super::faults::{FaultAction, FaultInjector, FaultPoint};
-use super::fence::validate_rehearsal_root;
-use super::handles::move_aside;
+use super::fence::{validate_rehearsal_root, verify_live_clone_binding};
+use super::handles::{move_aside, moved_aside_db_present};
 use super::inventory::{load_inventory, load_or_record, scan};
 use super::state::{self, RehearsalState, StableState, StateRecord};
 use super::{Paths, RehearsalError};
 use dohc_engine_storage::EngineStore;
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const SETTLE_READ_BUFFER_BYTES: usize = 64 * 1024;
 
@@ -30,10 +32,34 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
     let validated = validate_rehearsal_root(config.root)?;
     let paths = Paths::new(validated.root.clone());
     let mut record = state::initialize(&paths.root)?;
+    if let RehearsalState::Failed { .. } = record.current {
+        return Ok(RehearsalOutcome::Failed(record));
+    }
+
+    // Every invocation — fresh or resumed — re-proves the recovery dir is
+    // outside the clone root before any step may touch it.
+    if let Err(error) = ensure_outside_root(&paths.root, config.recovery_dir) {
+        return fail(&paths.root, &record, failure_code(&error));
+    }
+    let recovery_dir = match canonical_recovery_dir(config.recovery_dir) {
+        Ok(dir) => dir,
+        Err(error) => return fail(&paths.root, &record, failure_code(&error)),
+    };
 
     loop {
         match record.current {
-            RehearsalState::Complete => return Ok(RehearsalOutcome::Complete(record)),
+            RehearsalState::Complete => {
+                // A persisted Complete is only trusted once the artifacts it
+                // implies — the recorded backups and the retained old store —
+                // are re-proven on disk.
+                if let Err(error) = verify_recorded_backup(&recovery_dir, record.backup.as_ref()) {
+                    return fail(&paths.root, &record, failure_code(&error));
+                }
+                if !moved_aside_db_present(&paths) {
+                    return fail(&paths.root, &record, "complete-retained-store-missing");
+                }
+                return Ok(RehearsalOutcome::Complete(record));
+            }
             RehearsalState::Failed { .. } => return Ok(RehearsalOutcome::Failed(record)),
             RehearsalState::NotStarted => {
                 if let Err(error) = settle_fixture_tree(&paths.root) {
@@ -42,23 +68,36 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
                 record = state::transition(&paths.root, &record, StableState::Settled)?;
             }
             RehearsalState::Settled => {
-                if let Err(error) = load_or_record(&paths.root).and_then(|_| {
-                    create_restore_tested_backup(
-                        &paths,
-                        config.recovery_dir,
-                        config.now_ms,
-                        config.faults,
-                    )
-                }) {
-                    return fail(&paths.root, &record, failure_code(&error));
-                }
-                record = state::transition(&paths.root, &record, StableState::BackedUp)?;
+                let backed_up = verify_live_clone_binding(&paths.db, &validated.shadow_token)
+                    .and_then(|()| load_or_record(&paths.root))
+                    .and_then(|_| {
+                        create_restore_tested_backup(
+                            &paths,
+                            &recovery_dir,
+                            config.now_ms,
+                            config.faults,
+                        )
+                    })
+                    .and_then(|()| fingerprint_backup(&recovery_dir));
+                let fingerprint = match backed_up {
+                    Ok(fingerprint) => fingerprint,
+                    Err(error) => return fail(&paths.root, &record, failure_code(&error)),
+                };
+                record = state::transition_backed_up(&paths.root, &record, fingerprint)?;
                 if config.faults.poll(FaultPoint::AfterBackedUp) == FaultAction::Crash {
                     return Ok(RehearsalOutcome::Crashed(record));
                 }
             }
             RehearsalState::BackedUp => {
-                if let Err(error) = move_aside(&paths, config.recovery_dir) {
+                // The destructive move runs only after (a) the recorded backup
+                // re-validates at the recorded recovery dir and (b) the live db
+                // itself proves it is the clone the fence validated.
+                if let Err(error) = verify_recorded_backup(&recovery_dir, record.backup.as_ref())
+                    .and_then(|()| verify_live_clone_binding(&paths.db, &validated.shadow_token))
+                {
+                    return fail(&paths.root, &record, failure_code(&error));
+                }
+                if let Err(error) = move_aside(&paths, &recovery_dir) {
                     return fail(&paths.root, &record, failure_code(&error));
                 }
                 record = state::transition(&paths.root, &record, StableState::MovedAside)?;
@@ -107,6 +146,13 @@ fn fail(
 ) -> Result<RehearsalOutcome, RehearsalError> {
     let failed = state::fail(root, record, reason)?;
     Ok(RehearsalOutcome::Failed(failed))
+}
+
+fn canonical_recovery_dir(recovery_dir: &Path) -> Result<PathBuf, RehearsalError> {
+    std::fs::create_dir_all(recovery_dir)
+        .map_err(|e| RehearsalError::io("recovery-dir-create", e))?;
+    std::fs::canonicalize(recovery_dir)
+        .map_err(|e| RehearsalError::io("recovery-dir-canonicalize", e))
 }
 
 fn failure_code(error: &RehearsalError) -> &'static str {

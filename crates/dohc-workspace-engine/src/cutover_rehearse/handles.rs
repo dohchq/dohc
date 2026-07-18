@@ -5,7 +5,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const TRIPLET: [&str; 3] = ["engine.db", "engine.db-wal", "engine.db-shm"];
+pub(crate) const DB_TRIPLET: [&str; 3] = ["engine.db", "engine.db-wal", "engine.db-shm"];
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 const SWAP_ATTEMPTS: usize = 6;
 const MOVED_ASIDE_DIR: &str = "moved-aside-cutover-rehearsal";
@@ -41,7 +41,7 @@ pub(crate) fn acquire_copy_hash_close(
     std::fs::create_dir(&proof_dir).map_err(|e| RehearsalError::io("triplet-proof-create", e))?;
 
     let mut held = Vec::new();
-    for name in TRIPLET {
+    for name in DB_TRIPLET {
         let source = paths.engine.join(name);
         match open_exclusive(&source) {
             Ok(file) => held.push((name, source, file)),
@@ -87,8 +87,10 @@ pub(crate) fn swap_and_verify(
     for entry in &verified.entries {
         let destination = moved.join(entry.name);
         if let Err(error) = rename_with_retry(&entry.source, &destination) {
-            restore_missing_live(verified)?;
-            return Err(RehearsalError::io("triplet-swap-timeout", error));
+            return Err(fail_swap(
+                verified,
+                RehearsalError::io("triplet-swap-timeout", error),
+            ));
         }
     }
 
@@ -97,20 +99,35 @@ pub(crate) fn swap_and_verify(
         let metadata = std::fs::symlink_metadata(&destination)
             .map_err(|e| RehearsalError::io("moved-aside-metadata", e))?;
         if !metadata.file_type().is_file() || metadata.len() != entry.size_bytes {
-            restore_missing_live(verified)?;
-            return Err(RehearsalError::Io {
-                code: "moved-aside-identity-mismatch",
-            });
+            return Err(fail_swap(
+                verified,
+                RehearsalError::Io {
+                    code: "moved-aside-identity-mismatch",
+                },
+            ));
         }
         let (hash, bytes) = hash_file(&destination)?;
         if hash != entry.sha256 || bytes != entry.size_bytes {
-            restore_missing_live(verified)?;
-            return Err(RehearsalError::Io {
-                code: "moved-aside-hash-mismatch",
-            });
+            return Err(fail_swap(
+                verified,
+                RehearsalError::Io {
+                    code: "moved-aside-hash-mismatch",
+                },
+            ));
         }
     }
     Ok(moved)
+}
+
+/// Roll back after a failed swap without masking the swap error. Only when the
+/// rollback ITSELF also fails is a combined code surfaced instead.
+fn fail_swap(verified: &VerifiedTriplet, primary: RehearsalError) -> RehearsalError {
+    match restore_missing_live(verified) {
+        Ok(()) => primary,
+        Err(_) => RehearsalError::Io {
+            code: "triplet-swap-failed-and-rollback-failed",
+        },
+    }
 }
 
 pub(crate) fn move_aside(paths: &Paths, recovery_dir: &Path) -> Result<PathBuf, RehearsalError> {
@@ -175,11 +192,7 @@ fn rename_with_retry(source: &Path, destination: &Path) -> std::io::Result<()> {
         match std::fs::rename(source, destination) {
             Ok(()) => return Ok(()),
             Err(error) => {
-                let retryable = matches!(
-                    error.kind(),
-                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::WouldBlock
-                );
-                if !retryable || attempt + 1 == SWAP_ATTEMPTS {
+                if !retryable_rename_error(&error) || attempt + 1 == SWAP_ATTEMPTS {
                     return Err(error);
                 }
                 last_error = Some(error);
@@ -188,6 +201,16 @@ fn rename_with_retry(source: &Path, destination: &Path) -> std::io::Result<()> {
         }
     }
     Err(last_error.unwrap_or_else(|| std::io::Error::other("swap retry exhausted")))
+}
+
+fn retryable_rename_error(error: &std::io::Error) -> bool {
+    // ERROR_SHARING_VIOLATION (32) is the Windows contention this retry
+    // targets; it maps to no stable `ErrorKind`.
+    const WINDOWS_SHARING_VIOLATION: i32 = 32;
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::WouldBlock
+    ) || (cfg!(windows) && error.raw_os_error() == Some(WINDOWS_SHARING_VIOLATION))
 }
 
 fn restore_missing_live(verified: &VerifiedTriplet) -> Result<(), RehearsalError> {
@@ -237,6 +260,16 @@ fn to_hex(digest: &[u8]) -> String {
         let _ = write!(output, "{byte:02x}");
     }
     output
+}
+
+/// Whether the retained (moved-aside) old store is present — the artifact a
+/// persisted `Complete` state implies.
+pub(crate) fn moved_aside_db_present(paths: &Paths) -> bool {
+    paths
+        .engine
+        .join(MOVED_ASIDE_DIR)
+        .join("engine.db")
+        .is_file()
 }
 
 #[cfg(test)]
