@@ -12,8 +12,8 @@ use dohc_engine_domain::{
     ConflictRowUpdate, ConflictStatus, DeleteTextFile, DomainError, TextConflict, TextSnapshot,
     WriteBinaryFile, WriteText, delete_text_in_tx, enqueue_delete, enqueue_write,
     file_states_equal, insert_text_conflict_if_absent, live_state_matches_conflict_current,
-    load_text_conflict_in_tx, select_text_snapshot_by_path_in_tx, update_text_conflict_row,
-    validate_delete_input, validate_write_input, write_binary_file_in_tx, write_text_in_tx,
+    load_text_conflict_in_tx, update_text_conflict_row, validate_delete_input,
+    validate_write_input, write_binary_file_in_tx, write_text_in_tx,
 };
 use dohc_engine_storage::{EngineStore, FaultInjector, Preimage};
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -460,23 +460,12 @@ fn apply_mirrored_content(
     {
         return Ok(MirroredOutcome::Deferred(PendingResolveReason::PathChange));
     }
-    let live = match conflict.current.content_kind {
-        ConflictContentKind::Text => ConflictFileState::text(
-            conflict.path.clone(),
-            select_text_snapshot_by_path_in_tx(
-                tx,
-                &envelope.workspace_id,
-                &conflict.target_version_id,
-                &conflict.path,
-            )
-            .map_err(map_domain)?,
-        ),
-        // The current Rust version-domain tables do not expose a binary
-        // snapshot head. Refuse to guess that state is still live.
-        ConflictContentKind::Binary => {
-            return Ok(MirroredOutcome::Deferred(PendingResolveReason::StaleHead));
-        }
-    };
+    let live = select_snapshot_by_path(
+        tx,
+        &envelope.workspace_id,
+        &conflict.target_version_id,
+        &conflict.path,
+    )?;
     if !live_state_matches_conflict_current(&live, &conflict.current) {
         return Ok(MirroredOutcome::Deferred(PendingResolveReason::StaleHead));
     }
@@ -495,11 +484,11 @@ fn apply_mirrored_content(
                 return apply_mirrored_delete(tx, envelope, &conflict);
             }
             if conflict.incoming.content_kind == ConflictContentKind::Binary {
-                return apply_mirrored_binary_write(tx, envelope, &conflict);
+                return apply_mirrored_binary_write(tx, envelope, &conflict, &live);
             }
             match &conflict.incoming.snapshot {
                 Some(incoming) => {
-                    apply_mirrored_text_write(tx, envelope, &conflict, &incoming.text)
+                    apply_mirrored_text_write(tx, envelope, &conflict, &live, &incoming.text)
                 }
                 // An existing text side always carries a snapshot; a missing one
                 // is nothing to apply rather than invented content.
@@ -509,6 +498,97 @@ fn apply_mirrored_content(
         ConflictResolution::AppliedMerged => {
             Ok(MirroredOutcome::Deferred(PendingResolveReason::Merged))
         }
+    }
+}
+
+fn select_snapshot_by_path(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<ConflictFileState, SyncError> {
+    type HeadRow = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        String,
+        String,
+        String,
+        Option<String>,
+    );
+    let row: Option<HeadRow> = tx
+        .query_row(
+            "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
+             s.latest_moment_id, s.metadata_origin, COALESCE(s.content_kind, 'text'), \
+             bb.sha256 FROM snapshots s \
+             LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
+             LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
+             WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path = ?3",
+            params![workspace_id, version_id, path],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let Some((
+        object_id,
+        snapshot_path,
+        text,
+        blob_sha256,
+        updated_at_ms,
+        latest_moment_id,
+        metadata_origin,
+        content_kind,
+        binary_sha256,
+    )) = row
+    else {
+        return Ok(ConflictFileState::text(path.to_owned(), None));
+    };
+    match content_kind.as_str() {
+        "text" => {
+            let text = text.ok_or(SyncError::InvalidInput {
+                reason: "text snapshot is missing its blob",
+            })?;
+            let blob_sha256 = blob_sha256.ok_or(SyncError::InvalidInput {
+                reason: "text snapshot is missing its hash",
+            })?;
+            Ok(ConflictFileState::text(
+                snapshot_path.clone(),
+                Some(TextSnapshot {
+                    workspace_id: workspace_id.to_owned(),
+                    version_id: version_id.to_owned(),
+                    object_id,
+                    path: snapshot_path,
+                    text,
+                    blob_sha256,
+                    updated_at_ms,
+                    latest_moment_id,
+                    metadata_origin,
+                }),
+            ))
+        }
+        "binary" => {
+            let binary_sha256 = binary_sha256.ok_or(SyncError::InvalidInput {
+                reason: "binary snapshot is missing its blob",
+            })?;
+            Ok(ConflictFileState::binary(snapshot_path, binary_sha256))
+        }
+        _ => Err(SyncError::InvalidInput {
+            reason: "snapshot has an unknown content kind",
+        }),
     }
 }
 
@@ -526,6 +606,7 @@ fn apply_mirrored_binary_write(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
     conflict: &TextConflict,
+    live: &ConflictFileState,
 ) -> Result<MirroredOutcome, SyncError> {
     let Some(sha256) = conflict.incoming.binary_sha256.as_deref() else {
         return Ok(MirroredOutcome::Deferred(
@@ -553,13 +634,7 @@ fn apply_mirrored_binary_write(
         }
         Err(err) => return Err(SyncError::Storage(err)),
     }
-    let preimage = conflict
-        .current
-        .snapshot
-        .as_ref()
-        .map_or(Preimage::Absent, |snapshot| {
-            Preimage::Present(snapshot.blob_sha256.clone())
-        });
+    let preimage = state_preimage(live);
     let input = WriteBinaryFile {
         workspace_id: envelope.workspace_id.clone(),
         version_id: conflict.target_version_id.clone(),
@@ -590,6 +665,7 @@ fn apply_mirrored_text_write(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
     conflict: &TextConflict,
+    live: &ConflictFileState,
     text: &str,
 ) -> Result<MirroredOutcome, SyncError> {
     let input = WriteText {
@@ -604,13 +680,7 @@ fn apply_mirrored_text_write(
         now_ms: envelope.recorded_at_ms,
         request_id: None,
     };
-    let preimage = conflict
-        .current
-        .snapshot
-        .as_ref()
-        .map_or(Preimage::Absent, |snapshot| {
-            Preimage::Present(snapshot.blob_sha256.clone())
-        });
+    let preimage = state_preimage(live);
     apply_within_savepoint(
         tx,
         "mirrored_text_apply",
@@ -621,6 +691,21 @@ fn apply_mirrored_text_write(
             enqueue_write(tx, &result, preimage, "sync-resolve")
         },
     )
+}
+
+fn state_preimage(state: &ConflictFileState) -> Preimage {
+    match state.content_kind {
+        ConflictContentKind::Text => state
+            .snapshot
+            .as_ref()
+            .map_or(Preimage::Absent, |snapshot| {
+                Preimage::Present(snapshot.blob_sha256.clone())
+            }),
+        ConflictContentKind::Binary => state
+            .binary_sha256
+            .as_ref()
+            .map_or(Preimage::Absent, |sha| Preimage::Present(sha.clone())),
+    }
 }
 
 /// Apply an incoming delete (an absent incoming side) inside its own savepoint,
@@ -940,6 +1025,55 @@ mod tests {
             .expect("seed current text");
     }
 
+    fn stage_binary_head(store: &mut EngineStore, conflict_id: &str, bytes: &[u8]) -> String {
+        let sha = dohc_engine_storage::hex_sha256(bytes);
+        seed_current(store, "receiver current");
+        apply_conflict_envelope(
+            store,
+            &envelope(
+                "binary-peer",
+                0,
+                "conflict.open",
+                mirrored_open_payload(conflict_id, "receiver current", "origin current"),
+            ),
+            &NoFaults,
+        )
+        .expect("open conflict for binary head");
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::conflicts::hydrate_binary_conflict_blob(tx, &sha, bytes)
+                    .map_err(map_domain)?;
+                tx.execute(
+                    "UPDATE conflicts SET incoming_content_kind = 'binary', \
+                     incoming_blob_sha256 = NULL, incoming_binary_sha256 = ?1 \
+                     WHERE workspace_id = 'ws' AND conflict_id = ?2",
+                    params![sha, conflict_id],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("hydrate binary side");
+        apply_conflict_envelope(
+            store,
+            &envelope(
+                "binary-peer",
+                1,
+                "conflict.resolve",
+                json!({
+                    "conflictId": conflict_id,
+                    "status": "resolved",
+                    "chosenFrom": "current",
+                    "resolution": "kept-current",
+                    "updatedAtMs": 3_000,
+                    "targetVersionId": "main"
+                }),
+            ),
+            &NoFaults,
+        )
+        .expect("apply binary head");
+        sha
+    }
+
     fn read_text(store: &mut EngineStore) -> String {
         VersionedTextStore::new(store)
             .read_text("ws", "main", "doc.md")
@@ -1031,17 +1165,18 @@ mod tests {
                     [],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )?;
-                let snapshot_count: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM snapshots \
-                     WHERE workspace_id = 'ws' AND version_id = 'main' AND object_id = ?1",
+                let (snapshot_kind, snapshot_sha): (String, Option<String>) = conn.query_row(
+                    "SELECT content_kind, binary_sha256 FROM snapshots \
+                      WHERE workspace_id = 'ws' AND version_id = 'main' AND object_id = ?1",
                     [&object_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )?;
                 assert_eq!(object_count, 1);
                 assert_eq!(job_sha, sha256);
                 assert_eq!(status, "pending");
                 assert_eq!(operation, "write");
-                assert_eq!(snapshot_count, 0, "the superseded text head must be gone");
+                assert_eq!(snapshot_kind, "binary");
+                assert_eq!(snapshot_sha.as_deref(), Some(sha256));
                 Ok::<_, rusqlite::Error>(())
             })
             .expect("binary file object and materialization intent");
@@ -1651,7 +1786,7 @@ mod tests {
                 pending_resolve: None,
             })
         );
-        assert_eq!(moment_count(&store), before_moments);
+        assert_eq!(moment_count(&store), before_moments + 1);
         assert_binary_file_staged(&store, &binary_sha);
         assert_resolved_conflict(&store, "binary-resolve");
         assert_replication_advanced(&store, "peer", 1, 2);
@@ -1662,6 +1797,157 @@ mod tests {
             ApplyOutcome::Skipped
         );
         assert_eq!(materialization_job_count(&store), jobs_after_apply);
+    }
+
+    #[test]
+    fn mirrored_resolve_matches_binary_live_head_and_text_preimage_uses_binary_sha() {
+        let (_scratch, mut store) = store();
+        let binary_sha = stage_binary_head(&mut store, "first-binary", b"\x00binary live\xff");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "text-peer",
+                0,
+                "conflict.open",
+                mirrored_open_payload("text-over-binary", "placeholder", "replacement text"),
+            ),
+            &NoFaults,
+        )
+        .expect("open text-over-binary conflict");
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE conflicts SET current_content_kind = 'binary', \
+                     current_blob_sha256 = NULL, current_binary_sha256 = ?1 \
+                     WHERE workspace_id = 'ws' AND conflict_id = 'text-over-binary'",
+                    [&binary_sha],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("record binary current side");
+
+        let outcome = apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "text-peer",
+                1,
+                "conflict.resolve",
+                json!({
+                    "conflictId": "text-over-binary",
+                    "status": "resolved",
+                    "chosenFrom": "current",
+                    "resolution": "kept-current",
+                    "updatedAtMs": 4_000,
+                    "targetVersionId": "main"
+                }),
+            ),
+            &NoFaults,
+        )
+        .expect("matching binary head permits text apply");
+        assert!(matches!(
+            outcome,
+            ApplyOutcome::Applied(ConflictApplyResult {
+                matched: true,
+                pending_resolve: None,
+                ..
+            })
+        ));
+        assert_eq!(read_text(&mut store), "replacement text");
+        let (preimage_present, preimage_sha, status): (i64, Option<String>, String) = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT preimage_present, preimage_sha256, status \
+                     FROM materialization_jobs WHERE target_path = 'doc.md' \
+                     ORDER BY target_generation DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .expect("text materialization preimage");
+        assert_eq!(preimage_present, 1);
+        assert_eq!(preimage_sha.as_deref(), Some(binary_sha.as_str()));
+        assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn mirrored_resolve_defers_when_recorded_binary_head_is_stale() {
+        let (_scratch, mut store) = store();
+        let live_sha = stage_binary_head(&mut store, "first-binary", b"\x00binary live\xff");
+        let stale_bytes = b"\x00stale binary\xff";
+        let stale_sha = dohc_engine_storage::hex_sha256(stale_bytes);
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "stale-peer",
+                0,
+                "conflict.open",
+                mirrored_open_payload("stale-binary", "placeholder", "replacement text"),
+            ),
+            &NoFaults,
+        )
+        .expect("open stale binary conflict");
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::conflicts::hydrate_binary_conflict_blob(
+                    tx,
+                    &stale_sha,
+                    stale_bytes,
+                )
+                .map_err(map_domain)?;
+                tx.execute(
+                    "UPDATE conflicts SET current_content_kind = 'binary', \
+                     current_blob_sha256 = NULL, current_binary_sha256 = ?1 \
+                     WHERE workspace_id = 'ws' AND conflict_id = 'stale-binary'",
+                    [&stale_sha],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("record stale binary current side");
+
+        let outcome = apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "stale-peer",
+                1,
+                "conflict.resolve",
+                json!({
+                    "conflictId": "stale-binary",
+                    "status": "resolved",
+                    "chosenFrom": "current",
+                    "resolution": "kept-current",
+                    "updatedAtMs": 4_000,
+                    "targetVersionId": "main"
+                }),
+            ),
+            &NoFaults,
+        )
+        .expect("stale binary head is deferred");
+        assert!(matches!(
+            outcome,
+            ApplyOutcome::Applied(ConflictApplyResult {
+                matched: false,
+                pending_resolve: Some(PendingResolve {
+                    reason: PendingResolveReason::StaleHead,
+                    ..
+                }),
+                ..
+            })
+        ));
+        let live: (String, Option<String>) = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT content_kind, binary_sha256 FROM snapshots \
+                     WHERE workspace_id = 'ws' AND version_id = 'main' AND path = 'doc.md'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("live binary head");
+        assert_eq!(live.0, "binary");
+        assert_eq!(live.1.as_deref(), Some(live_sha.as_str()));
+        assert_open_conflict(&store, "stale-binary");
     }
 
     #[test]
@@ -1873,14 +2159,9 @@ mod tests {
         );
     }
 
-    /// M2 (rev2 PROBE B, INVERTED — `#[ignore]d`). A binary job's generation
-    /// must NOT be re-issued to the next same-path text write. This is BLOCKED
-    /// on an out-of-owned-path change (a real binary moment, or a
-    /// `store::next_moment_order` that counts jobs), so the assertion documents
-    /// the target invariant and stays ignored until that fix lands. Run with
-    /// `--ignored` to reproduce the collision.
+    /// A binary job's moment generation must not be re-issued to the next text
+    /// write. The binary head now consumes the same moment sequence as text.
     #[test]
-    #[ignore = "M2: generation collision fix needs a moments-schema or store::next_moment_order change (outside this shard's owned paths); documents the target invariant"]
     fn binary_generation_is_not_reused_by_next_text_write() {
         let (_scratch, mut store) = store();
         let binary_bytes = b"\x00binary head\xff";
@@ -1969,8 +2250,7 @@ mod tests {
                 )
             })
             .expect("later moment order");
-        // TARGET INVARIANT (currently violated → this test is #[ignore]d): the
-        // binary job's generation must be strictly below the next moment order,
+        // The binary job's generation must be strictly below the next moment order,
         // preserving the materializer's strict-`>` newest-wins supersede gate.
         assert_ne!(
             binary_gen, next_moment_order,

@@ -1209,6 +1209,115 @@ CREATE INDEX idx_conflicts_workspace_status ON conflicts(workspace_id, status, c
 /// The `id` of the binary conflict-side migration.
 pub(crate) const BINARY_CONFLICT_SIDES_MIGRATION_ID: &str = "v1-binary-conflict-sides";
 
+/// Ordinal 10. Gives binary content the same durable head shape as text by
+/// adding discriminated binary references to moments and both snapshot tables.
+/// The rebuild copies every v9 column explicitly. With foreign keys enabled,
+/// those copies also re-validate historical references and fail closed by
+/// rolling the whole migration back when a referent is missing.
+const V1_BINARY_HEAD_DDL: &str = "\
+CREATE TABLE snapshots_v10 (
+    workspace_id     TEXT    NOT NULL,
+    version_id       TEXT    NOT NULL,
+    object_id        TEXT    NOT NULL,
+    path             TEXT    NOT NULL,
+    blob_sha256      TEXT,
+    updated_at_ms    INTEGER NOT NULL,
+    latest_moment_id TEXT    NOT NULL,
+    metadata_origin  TEXT    NOT NULL,
+    content_kind     TEXT    DEFAULT 'text',
+    binary_sha256    TEXT    REFERENCES binary_blobs(sha256),
+    PRIMARY KEY (workspace_id, version_id, object_id),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
+    FOREIGN KEY (blob_sha256) REFERENCES blobs(sha256)
+) STRICT;
+INSERT INTO snapshots_v10 (
+    workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
+    latest_moment_id, metadata_origin, content_kind, binary_sha256
+)
+SELECT
+    workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
+    latest_moment_id, metadata_origin, 'text', NULL
+FROM snapshots;
+DROP TABLE snapshots;
+ALTER TABLE snapshots_v10 RENAME TO snapshots;
+
+CREATE TABLE fork_base_snapshots_v10 (
+    workspace_id     TEXT    NOT NULL,
+    version_id       TEXT    NOT NULL,
+    object_id        TEXT    NOT NULL,
+    path             TEXT    NOT NULL,
+    blob_sha256      TEXT,
+    updated_at_ms    INTEGER NOT NULL,
+    latest_moment_id TEXT    NOT NULL,
+    metadata_origin  TEXT    NOT NULL,
+    content_kind     TEXT    DEFAULT 'text',
+    binary_sha256    TEXT    REFERENCES binary_blobs(sha256),
+    PRIMARY KEY (workspace_id, version_id, object_id),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
+    FOREIGN KEY (blob_sha256) REFERENCES blobs(sha256)
+) STRICT;
+INSERT INTO fork_base_snapshots_v10 (
+    workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
+    latest_moment_id, metadata_origin, content_kind, binary_sha256
+)
+SELECT
+    workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
+    latest_moment_id, metadata_origin, 'text', NULL
+FROM fork_base_snapshots;
+DROP TABLE fork_base_snapshots;
+ALTER TABLE fork_base_snapshots_v10 RENAME TO fork_base_snapshots;
+
+CREATE TABLE moments_v10 (
+    workspace_id      TEXT    NOT NULL,
+    moment_order      INTEGER NOT NULL,
+    moment_id         TEXT    NOT NULL,
+    version_id        TEXT    NOT NULL,
+    object_id         TEXT    NOT NULL,
+    path              TEXT    NOT NULL,
+    recorded_at_ms    INTEGER NOT NULL,
+    operation         TEXT    NOT NULL,
+    after_blob_sha256 TEXT,
+    before_present    INTEGER NOT NULL,
+    before_blob_sha256 TEXT,
+    metadata_origin   TEXT    NOT NULL,
+    author_json       TEXT,
+    sync_record_only  INTEGER,
+    before_latest_moment_id TEXT,
+    after_content_kind TEXT DEFAULT 'text',
+    after_binary_sha256 TEXT REFERENCES binary_blobs(sha256),
+    before_content_kind TEXT DEFAULT 'text',
+    before_binary_sha256 TEXT REFERENCES binary_blobs(sha256),
+    PRIMARY KEY (workspace_id, moment_id),
+    UNIQUE (workspace_id, moment_order),
+    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
+    FOREIGN KEY (after_blob_sha256) REFERENCES blobs(sha256)
+) STRICT;
+INSERT INTO moments_v10 (
+    workspace_id, moment_order, moment_id, version_id, object_id, path,
+    recorded_at_ms, operation, after_blob_sha256, before_present,
+    before_blob_sha256, metadata_origin, author_json, sync_record_only,
+    before_latest_moment_id, after_content_kind, after_binary_sha256,
+    before_content_kind, before_binary_sha256
+)
+SELECT
+    workspace_id, moment_order, moment_id, version_id, object_id, path,
+    recorded_at_ms, operation, after_blob_sha256, before_present,
+    before_blob_sha256, metadata_origin, author_json, sync_record_only,
+    before_latest_moment_id, 'text', NULL, 'text', NULL
+FROM moments;
+DROP TABLE moments;
+ALTER TABLE moments_v10 RENAME TO moments;
+CREATE INDEX idx_moments_workspace_order ON moments(workspace_id, moment_order DESC);
+CREATE INDEX idx_moments_version_order ON moments(workspace_id, version_id, moment_order DESC);
+CREATE INDEX idx_moments_object_order ON moments(workspace_id, object_id, moment_order DESC);
+";
+
+/// The `id` of the binary-head migration.
+pub(crate) const BINARY_HEAD_MIGRATION_ID: &str = "v1-binary-head";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1280,6 +1389,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: BINARY_CONFLICT_SIDES_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_BINARY_CONFLICT_SIDES_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 10,
+        id: BINARY_HEAD_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_BINARY_HEAD_DDL,
         sets_user_version: None,
     },
 ];
@@ -1589,11 +1705,11 @@ mod tests {
     // waiting for a real future schema change.
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     fn two_migrations() -> Vec<Migration> {
-        // The frozen list now ends at ordinal 9 (binary conflict sides), so a
-        // synthetic probe appends at ordinal 10.
+        // The frozen list now ends at ordinal 10 (binary heads), so a
+        // synthetic probe appends at ordinal 11.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 10,
+            ordinal: 11,
             id: "r04-probe",
             kind: MigrationKind::Transactional,
             sql: M2_SQL,
@@ -1602,7 +1718,7 @@ mod tests {
         v
     }
 
-    /// Count of frozen baseline migrations (baseline + secrets + ydoc + chats).
+    /// Count of frozen baseline migrations through the binary-head rebuild.
     const BASELINE_COUNT: u32 = BASELINE_MIGRATIONS.len() as u32;
 
     #[test]
@@ -1732,8 +1848,8 @@ mod tests {
         assert!(before.is_none());
 
         let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("apply R06, shadow fence, and binary conflict sides");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 3 });
+            .expect("apply R06, shadow fence, binary conflict sides, and binary head");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 4 });
         let objects: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_schema WHERE \
@@ -1776,7 +1892,7 @@ mod tests {
                 row.get(0)
             })
             .expect("ledger");
-        assert_eq!(ledger, 10);
+        assert_eq!(ledger, 11);
     }
 
     /// Every `conflicts` column, dumped by name, for value-for-value rebuild
@@ -1796,6 +1912,25 @@ mod tests {
         .expect("query conflicts dump")
         .collect::<Result<_, _>>()
         .expect("collect conflicts dump")
+    }
+
+    fn dump_table_rows(
+        conn: &Connection,
+        table: &str,
+    ) -> Vec<Vec<(String, rusqlite::types::Value)>> {
+        let sql = format!("SELECT * FROM {table} ORDER BY rowid");
+        let mut stmt = conn.prepare(&sql).expect("prepare table dump");
+        let names: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
+        stmt.query_map([], |row| {
+            names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| Ok((name.clone(), row.get::<_, rusqlite::types::Value>(i)?)))
+                .collect()
+        })
+        .expect("query table dump")
+        .collect::<Result<_, _>>()
+        .expect("collect table dump")
     }
 
     #[test]
@@ -1883,7 +2018,7 @@ mod tests {
         let before = dump_conflict_rows(&conn);
         assert_eq!(before.len(), 3);
 
-        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults)
             .expect("apply binary conflict-side migration");
         assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
 
@@ -1975,7 +2110,7 @@ mod tests {
         assert_eq!(max_ordinal, 9);
 
         // Idempotency: a second run has nothing to apply and changes nothing.
-        let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+        let rerun = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults)
             .expect("rerun is a no-op");
         assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });
         assert_eq!(dump_conflict_rows(&conn), after);
@@ -2019,7 +2154,7 @@ mod tests {
 
         // The ordinal-9 rebuild re-validates the row's FKs and must fail
         // closed, rolling the store back to intact v8.
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults)
             .expect_err("dangling blob reference must abort the rebuild");
         let has_new_column: i64 = conn
             .query_row(
@@ -2068,7 +2203,7 @@ mod tests {
             [],
         )
         .expect("restore missing blob");
-        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults)
             .expect("remediated store migrates cleanly");
         assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
         let migrated: (String, Option<String>) = conn
@@ -2080,6 +2215,243 @@ mod tests {
             )
             .expect("migrated row");
         assert_eq!(migrated, ("sha-missing".to_owned(), None));
+    }
+
+    #[test]
+    fn fresh_store_reaches_binary_head_migration() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_900);
+        let mut conn = open_bare(&path);
+
+        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("apply baseline through binary heads");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 11 });
+        let max_ordinal: i64 = conn
+            .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("latest migration ordinal");
+        assert_eq!(max_ordinal, 10);
+    }
+
+    #[test]
+    fn binary_head_migration_preserves_every_v9_column() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_900);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults)
+            .expect("migrate through ordinal 9");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+             VALUES ('ws', 'main');
+             INSERT INTO versions (
+                 workspace_id, version_id, kind, name, created_at_ms,
+                 fork_version_id, fork_moment_id
+             ) VALUES ('ws', 'main', 'main', 'Main', 101, NULL, NULL);
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
+             VALUES ('ws', 'object-full', 102), ('ws', 'object-null', 103);
+             INSERT INTO blobs (sha256, byte_length, text)
+             VALUES ('sha-after', 10, 'after text'), ('sha-before', 11, 'before text');
+             INSERT INTO snapshots (
+                 workspace_id, version_id, object_id, path, blob_sha256,
+                 updated_at_ms, latest_moment_id, metadata_origin
+             ) VALUES (
+                 'ws', 'main', 'object-full', 'snapshot.md', 'sha-after',
+                 201, 'moment-full', 'user'
+             );
+             INSERT INTO fork_base_snapshots (
+                 workspace_id, version_id, object_id, path, blob_sha256,
+                 updated_at_ms, latest_moment_id, metadata_origin
+             ) VALUES (
+                 'ws', 'main', 'object-null', 'fork.md', 'sha-before',
+                 202, 'moment-fork', 'sync'
+             );
+             INSERT INTO moments (
+                 workspace_id, moment_order, moment_id, version_id, object_id,
+                 path, recorded_at_ms, operation, after_blob_sha256,
+                 before_present, before_blob_sha256, metadata_origin,
+                 author_json, sync_record_only, before_latest_moment_id
+             ) VALUES (
+                 'ws', 7, 'moment-full', 'main', 'object-full',
+                 'moment.md', 203, 'write', 'sha-after',
+                 2, 'sha-before', 'agent',
+                 '{\"name\":\"Ada\"}', 1, 'moment-before'
+             );",
+        )
+        .expect("seed ordinal-9 head rows");
+
+        let before_snapshots = dump_table_rows(&conn, "snapshots");
+        let before_fork_bases = dump_table_rows(&conn, "fork_base_snapshots");
+        let before_moments = dump_table_rows(&conn, "moments");
+
+        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("apply binary-head migration");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+
+        let cases = [
+            (
+                "snapshots",
+                before_snapshots,
+                vec![("content_kind", "text"), ("binary_sha256", "")],
+            ),
+            (
+                "fork_base_snapshots",
+                before_fork_bases,
+                vec![("content_kind", "text"), ("binary_sha256", "")],
+            ),
+            (
+                "moments",
+                before_moments,
+                vec![
+                    ("after_content_kind", "text"),
+                    ("after_binary_sha256", ""),
+                    ("before_content_kind", "text"),
+                    ("before_binary_sha256", ""),
+                ],
+            ),
+        ];
+        for (table, before, added_columns) in cases {
+            let after = dump_table_rows(&conn, table);
+            assert_eq!(after.len(), before.len());
+            for (before_row, after_row) in before.iter().zip(&after) {
+                assert_eq!(
+                    after_row.len(),
+                    before_row.len() + added_columns.len(),
+                    "{table} rebuild must add only its binary-head columns"
+                );
+                for (name, value) in before_row {
+                    let migrated = after_row
+                        .iter()
+                        .find(|(after_name, _)| after_name == name)
+                        .map(|(_, after_value)| after_value);
+                    assert_eq!(
+                        migrated,
+                        Some(value),
+                        "{table}.{name} must survive value-for-value"
+                    );
+                }
+                for (name, expected) in &added_columns {
+                    let added = after_row
+                        .iter()
+                        .find(|(after_name, _)| after_name == name)
+                        .map(|(_, value)| value);
+                    let expected = if expected.is_empty() {
+                        rusqlite::types::Value::Null
+                    } else {
+                        rusqlite::types::Value::Text((*expected).to_owned())
+                    };
+                    assert_eq!(added, Some(&expected), "unexpected {table}.{name}");
+                }
+            }
+        }
+
+        let moment_indexes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name IN (
+                     'idx_moments_workspace_order',
+                     'idx_moments_version_order',
+                     'idx_moments_object_order'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("moments indexes");
+        assert_eq!(moment_indexes, 3);
+    }
+
+    #[test]
+    fn binary_head_migration_rolls_back_when_fk_revalidation_fails() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_900);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults)
+            .expect("migrate through ordinal 9");
+        conn.pragma_update(None, "foreign_keys", false)
+            .expect("disable foreign keys");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+             VALUES ('ws', 'main');
+             INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms)
+             VALUES ('ws', 'main', 'main', 'Main', 1);
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
+             VALUES ('ws', 'object', 2);
+             INSERT INTO moments (
+                 workspace_id, moment_order, moment_id, version_id, object_id,
+                 path, recorded_at_ms, operation, after_blob_sha256,
+                 before_present, metadata_origin
+             ) VALUES (
+                 'ws', 1, 'moment', 'main', 'object', 'note.md', 3,
+                 'write', 'sha-missing', 1, 'user'
+             );",
+        )
+        .expect("seed dangling ordinal-9 moment");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("re-enable foreign keys");
+
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect_err("dangling blob reference must abort all three rebuilds");
+        for (table, column) in [
+            ("snapshots", "content_kind"),
+            ("fork_base_snapshots", "content_kind"),
+            ("moments", "after_content_kind"),
+        ] {
+            let has_new_column: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                    rusqlite::params![table, column],
+                    |row| row.get(0),
+                )
+                .expect("v9 table schema");
+            assert_eq!(has_new_column, 0, "rollback must restore v9 {table}");
+        }
+        let orphan_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name IN (
+                    'snapshots_v10', 'fork_base_snapshots_v10', 'moments_v10'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("no orphan rebuild tables");
+        assert_eq!(orphan_tables, 0);
+        let moment_indexes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name IN (
+                     'idx_moments_workspace_order',
+                     'idx_moments_version_order',
+                     'idx_moments_object_order'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("v9 moments indexes");
+        assert_eq!(moment_indexes, 3);
+        let max_ordinal: i64 = conn
+            .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("ledger after rollback");
+        assert_eq!(max_ordinal, 9);
+
+        conn.execute(
+            "INSERT INTO blobs (sha256, byte_length, text) VALUES ('sha-missing', 4, 'body')",
+            [],
+        )
+        .expect("restore missing blob");
+        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("remediated store migrates cleanly");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
     }
 
     #[test]
@@ -2159,10 +2531,11 @@ mod tests {
         // secrets migration (1), the Y.Doc migration (2), the chats migration
         // (3), the search migration (4), the moment-link migration (5), the
         // sync migration (6), conflicts migration (7), shadow-clone migration
-        // (8), binary-conflict-sides migration (9), AND the probe (10).
+        // (8), binary-conflict-sides migration (9), binary-head migration (10),
+        // AND the probe (11).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 10 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 11 });
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -2259,7 +2632,7 @@ mod tests {
         }
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 10,
+            ordinal: 11,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
@@ -2277,7 +2650,7 @@ mod tests {
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();
         changed.push(Migration {
-            ordinal: 10,
+            ordinal: 11,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
@@ -2297,7 +2670,7 @@ mod tests {
         // baseline first (transactional), then a non-transactional idempotent step.
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 10,
+            ordinal: 11,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",

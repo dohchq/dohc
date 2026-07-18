@@ -141,7 +141,10 @@ pub(crate) fn capture(
                 path: m.path,
                 recorded_at_ms: m.recorded_at_ms,
                 operation: m.operation.as_str().to_owned(),
-                after_blob_sha256: m.after_blob_sha256,
+                after_blob_sha256: m
+                    .after_blob_sha256
+                    .or(m.after_binary_sha256)
+                    .unwrap_or_default(),
                 before_present: m.before_present,
                 before_blob_sha256: m.before_blob_sha256,
                 before_latest_moment_id: m.before_latest_moment_id,

@@ -17,8 +17,8 @@
 use crate::error::DomainError;
 use crate::records::{
     CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord, ListMomentsQuery, MomentOp,
-    MomentPage, MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation, TextSnapshot,
-    VersionKind, VersionRecord, WriteResult, WriteText,
+    MomentPage, MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation,
+    SnapshotRecord, TextSnapshot, VersionKind, VersionRecord, WriteResult, WriteText,
 };
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -193,13 +193,15 @@ impl<'a> VersionedTextStore<'a> {
             Ok((object, before))
         })?;
 
-        let after = TextSnapshot {
+        let after = SnapshotRecord {
             workspace_id: ws.clone(),
             version_id: input.version_id.clone(),
             object_id: before.object_id.clone(),
             path: input.to_path.clone(),
             text: before.text.clone(),
             blob_sha256: before.blob_sha256.clone(),
+            content_kind: before.content_kind.clone(),
+            binary_sha256: before.binary_sha256.clone(),
             updated_at_ms: input.now_ms,
             latest_moment_id: input.moment_id.clone(),
             metadata_origin: input.metadata_origin.clone(),
@@ -211,8 +213,10 @@ impl<'a> VersionedTextStore<'a> {
                  (workspace_id, moment_order, moment_id, version_id, object_id, path, \
                   recorded_at_ms, operation, after_blob_sha256, before_present, \
                   before_blob_sha256, before_latest_moment_id, metadata_origin, author_json, \
-                  sync_record_only) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'rename', ?8, 2, ?8, ?9, ?10, ?11, NULL)",
+                  sync_record_only, after_content_kind, after_binary_sha256, \
+                  before_content_kind, before_binary_sha256) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'rename', ?8, 2, ?8, ?9, ?10, ?11, \
+                         NULL, ?12, ?13, ?12, ?13)",
                 params![
                     ws,
                     moment_order,
@@ -225,6 +229,8 @@ impl<'a> VersionedTextStore<'a> {
                     before.latest_moment_id,
                     input.metadata_origin,
                     input.author_json,
+                    before.content_kind,
+                    before.binary_sha256,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -251,8 +257,8 @@ impl<'a> VersionedTextStore<'a> {
 
             Ok::<_, DomainError>(RenameResult {
                 object: object.clone(),
-                before: before.clone(),
-                after: after.clone(),
+                before: snapshot_text_view(&before),
+                after: snapshot_text_view(&after),
                 moment: MomentRecord {
                     moment_order,
                     moment_id: input.moment_id.clone(),
@@ -261,9 +267,13 @@ impl<'a> VersionedTextStore<'a> {
                     path: input.to_path.clone(),
                     recorded_at_ms: input.now_ms,
                     operation: MomentOp::Rename,
+                    after_content_kind: before.content_kind.clone(),
                     after_blob_sha256: before.blob_sha256.clone(),
+                    after_binary_sha256: before.binary_sha256.clone(),
                     before_present: true,
-                    before_blob_sha256: Some(before.blob_sha256.clone()),
+                    before_blob_sha256: before.blob_sha256.clone(),
+                    before_content_kind: before.content_kind.clone(),
+                    before_binary_sha256: before.binary_sha256.clone(),
                     before_latest_moment_id: Some(before.latest_moment_id.clone()),
                     metadata_origin: input.metadata_origin.clone(),
                     author_json: input.author_json.clone(),
@@ -359,11 +369,18 @@ impl<'a> VersionedTextStore<'a> {
             .map_err(DomainError::sql_persist)?;
 
             if let Some(before) = &prep.before {
-                tx.execute(
-                    "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
-                    params![before.blob_sha256, before.text.len() as i64, before.text],
-                )
-                .map_err(DomainError::sql_persist)?;
+                if before.content_kind == "text" {
+                    let blob_sha256 = before.blob_sha256.as_ref().ok_or(
+                        DomainError::StateCorrupt {
+                            reason: "text rollback snapshot has no text blob",
+                        },
+                    )?;
+                    tx.execute(
+                        "INSERT OR IGNORE INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3)",
+                        params![blob_sha256, before.text.len() as i64, before.text],
+                    )
+                    .map_err(DomainError::sql_persist)?;
+                }
                 tx.execute(
                     "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
                      VALUES (?1, ?2, ?3, ?4) ON CONFLICT(workspace_id, version_id, path) \
@@ -406,6 +423,7 @@ impl<'a> VersionedTextStore<'a> {
                 return Ok(None);
             };
             get_snapshot(conn, workspace_id, version_id, &object_id)
+                .map(|snapshot| snapshot.map(|value| snapshot_text_view(&value)))
         })
     }
 
@@ -465,8 +483,13 @@ impl<'a> VersionedTextStore<'a> {
             let mut sql = String::from(
                 "SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
                  operation, after_blob_sha256, before_present, before_blob_sha256, \
-                 before_latest_moment_id, metadata_origin, author_json, sync_record_only \
-                 FROM moments WHERE workspace_id = ?1",
+                 before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
+                 COALESCE(after_content_kind, 'text'), after_binary.sha256, \
+                 COALESCE(before_content_kind, 'text'), before_binary.sha256 \
+                 FROM moments m \
+                 LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
+                 LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \
+                 WHERE workspace_id = ?1",
             );
             let mut binds: Vec<Box<dyn rusqlite::ToSql>> =
                 vec![Box::new(query.workspace_id.clone())];
@@ -523,8 +546,10 @@ impl<'a> VersionedTextStore<'a> {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
-                     s.latest_moment_id, s.metadata_origin FROM snapshots s \
-                     JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                     s.latest_moment_id, s.metadata_origin, \
+                     COALESCE(s.content_kind, 'text'), bb.sha256 FROM snapshots s \
+                     LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                     LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
                      WHERE s.workspace_id = ?1 AND s.version_id = ?2 ORDER BY s.path",
                 )
                 .map_err(DomainError::sql_corrupt)?;
@@ -532,22 +557,13 @@ impl<'a> VersionedTextStore<'a> {
             let ver = version_id.to_owned();
             let rows = stmt
                 .query_map(params![workspace_id, version_id], move |row| {
-                    Ok(TextSnapshot {
-                        workspace_id: ws.clone(),
-                        version_id: ver.clone(),
-                        object_id: row.get(0)?,
-                        path: row.get(1)?,
-                        text: row.get(2)?,
-                        blob_sha256: row.get(3)?,
-                        updated_at_ms: row.get(4)?,
-                        latest_moment_id: row.get(5)?,
-                        metadata_origin: row.get(6)?,
-                    })
+                    map_snapshot_row(row, &ws, &ver)
                 })
                 .map_err(DomainError::sql_corrupt)?;
             let mut out = Vec::new();
             for row in rows {
-                out.push(row.map_err(DomainError::sql_corrupt)?);
+                let snapshot = row.map_err(DomainError::sql_corrupt)??;
+                out.push(snapshot_text_view(&snapshot));
             }
             Ok(out)
         })
@@ -566,8 +582,10 @@ impl<'a> VersionedTextStore<'a> {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT f.object_id, f.path, b.text, f.blob_sha256, f.updated_at_ms, \
-                     f.latest_moment_id, f.metadata_origin FROM fork_base_snapshots f \
-                     JOIN blobs b ON b.sha256 = f.blob_sha256 \
+                     f.latest_moment_id, f.metadata_origin, \
+                     COALESCE(f.content_kind, 'text'), bb.sha256 FROM fork_base_snapshots f \
+                     LEFT JOIN blobs b ON b.sha256 = f.blob_sha256 \
+                     LEFT JOIN binary_blobs bb ON bb.sha256 = f.binary_sha256 \
                      WHERE f.workspace_id = ?1 AND f.version_id = ?2 ORDER BY f.path",
                 )
                 .map_err(DomainError::sql_corrupt)?;
@@ -575,22 +593,13 @@ impl<'a> VersionedTextStore<'a> {
             let ver = version_id.to_owned();
             let rows = stmt
                 .query_map(params![workspace_id, version_id], move |row| {
-                    Ok(TextSnapshot {
-                        workspace_id: ws.clone(),
-                        version_id: ver.clone(),
-                        object_id: row.get(0)?,
-                        path: row.get(1)?,
-                        text: row.get(2)?,
-                        blob_sha256: row.get(3)?,
-                        updated_at_ms: row.get(4)?,
-                        latest_moment_id: row.get(5)?,
-                        metadata_origin: row.get(6)?,
-                    })
+                    map_snapshot_row(row, &ws, &ver)
                 })
                 .map_err(DomainError::sql_corrupt)?;
             let mut out = Vec::new();
             for row in rows {
-                out.push(row.map_err(DomainError::sql_corrupt)?);
+                let snapshot = row.map_err(DomainError::sql_corrupt)??;
+                out.push(snapshot_text_view(&snapshot));
             }
             Ok(out)
         })
@@ -725,20 +734,20 @@ impl<'a> VersionedTextStore<'a> {
             .map_err(DomainError::sql_persist)?;
             tx.execute(
                 "INSERT INTO snapshots \
-                 (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
-                  latest_moment_id, metadata_origin) \
-                 SELECT workspace_id, ?2, object_id, path, blob_sha256, updated_at_ms, \
-                  latest_moment_id, metadata_origin FROM snapshots \
+                  (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
+                   latest_moment_id, metadata_origin, content_kind, binary_sha256) \
+                  SELECT workspace_id, ?2, object_id, path, blob_sha256, updated_at_ms, \
+                   latest_moment_id, metadata_origin, content_kind, binary_sha256 FROM snapshots \
                  WHERE workspace_id = ?1 AND version_id = ?3",
                 params![ws, input.new_version_id, input.from_version_id],
             )
             .map_err(DomainError::sql_persist)?;
             tx.execute(
                 "INSERT INTO fork_base_snapshots \
-                 (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
-                  latest_moment_id, metadata_origin) \
-                 SELECT workspace_id, ?2, object_id, path, blob_sha256, updated_at_ms, \
-                  latest_moment_id, metadata_origin FROM snapshots \
+                  (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
+                   latest_moment_id, metadata_origin, content_kind, binary_sha256) \
+                  SELECT workspace_id, ?2, object_id, path, blob_sha256, updated_at_ms, \
+                   latest_moment_id, metadata_origin, content_kind, binary_sha256 FROM snapshots \
                  WHERE workspace_id = ?1 AND version_id = ?3",
                 params![ws, input.new_version_id, input.from_version_id],
             )
@@ -810,7 +819,7 @@ impl<'a> VersionedTextStore<'a> {
 
 struct RollbackPrep {
     moment: MomentRecord,
-    before: Option<TextSnapshot>,
+    before: Option<SnapshotRecord>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -938,7 +947,11 @@ pub fn write_text_in_tx(
     let is_new_object = existing_object.is_none();
     let object_id = existing_object.unwrap_or_else(|| input.object_id.clone());
     let blob = text_blob_sha256(&input.text);
-    let before_blob = before.as_ref().map(|s| s.blob_sha256.clone());
+    let before_blob = before.as_ref().and_then(|s| s.blob_sha256.clone());
+    let before_content_kind = before
+        .as_ref()
+        .map_or_else(|| "text".to_owned(), |s| s.content_kind.clone());
+    let before_binary_sha256 = before.as_ref().and_then(|s| s.binary_sha256.clone());
     let before_latest_moment_id = before.as_ref().map(|s| s.latest_moment_id.clone());
     let moment_order = next_moment_order(tx)?;
 
@@ -963,9 +976,11 @@ pub fn write_text_in_tx(
     tx.execute(
         "INSERT INTO moments \
          (workspace_id, moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
-          operation, after_blob_sha256, before_present, before_blob_sha256, \
-          before_latest_moment_id, metadata_origin, author_json, sync_record_only) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'write', ?8, ?9, ?10, ?11, ?12, ?13, NULL)",
+           operation, after_blob_sha256, before_present, before_blob_sha256, \
+           before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
+           after_content_kind, after_binary_sha256, before_content_kind, before_binary_sha256) \
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'write', ?8, ?9, ?10, ?11, ?12, ?13, \
+                  NULL, 'text', NULL, ?14, ?15)",
         params![
             ws,
             moment_order,
@@ -980,17 +995,21 @@ pub fn write_text_in_tx(
             before_latest_moment_id,
             input.metadata_origin,
             input.author_json,
+            before_content_kind,
+            before_binary_sha256,
         ],
     )
     .map_err(DomainError::sql_persist)?;
     tx.execute(
         "INSERT INTO snapshots \
          (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
-          latest_moment_id, metadata_origin) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+           latest_moment_id, metadata_origin, content_kind, binary_sha256) \
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'text', NULL) \
          ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET \
-          path = excluded.path, blob_sha256 = excluded.blob_sha256, \
-          updated_at_ms = excluded.updated_at_ms, latest_moment_id = excluded.latest_moment_id, \
-          metadata_origin = excluded.metadata_origin",
+           path = excluded.path, blob_sha256 = excluded.blob_sha256, \
+           updated_at_ms = excluded.updated_at_ms, latest_moment_id = excluded.latest_moment_id, \
+           metadata_origin = excluded.metadata_origin, content_kind = excluded.content_kind, \
+           binary_sha256 = excluded.binary_sha256",
         params![
             ws,
             input.version_id,
@@ -1037,9 +1056,13 @@ pub fn write_text_in_tx(
             path: input.path.clone(),
             recorded_at_ms: input.now_ms,
             operation: MomentOp::Write,
-            after_blob_sha256: blob,
+            after_content_kind: "text".to_owned(),
+            after_blob_sha256: Some(blob),
+            after_binary_sha256: None,
             before_present: before.is_some(),
             before_blob_sha256: before_blob,
+            before_content_kind,
+            before_binary_sha256,
             before_latest_moment_id,
             metadata_origin: input.metadata_origin.clone(),
             author_json: input.author_json.clone(),
@@ -1055,7 +1078,18 @@ fn reconstruct_write(conn: &Connection, input: &WriteText) -> Result<WriteResult
             reason: "deduped write has no moment",
         },
     )?;
-    let text = blob_text(conn, &moment.after_blob_sha256)?.ok_or(DomainError::StateCorrupt {
+    if moment.after_content_kind != "text" {
+        return Err(DomainError::StateCorrupt {
+            reason: "deduped text write points at non-text content",
+        });
+    }
+    let blob_sha256 = moment
+        .after_blob_sha256
+        .clone()
+        .ok_or(DomainError::StateCorrupt {
+            reason: "deduped text write moment has no text blob",
+        })?;
+    let text = blob_text(conn, &blob_sha256)?.ok_or(DomainError::StateCorrupt {
         reason: "deduped write moment blob missing",
     })?;
     Ok(WriteResult {
@@ -1065,7 +1099,7 @@ fn reconstruct_write(conn: &Connection, input: &WriteText) -> Result<WriteResult
             object_id: moment.object_id.clone(),
             path: moment.path.clone(),
             text,
-            blob_sha256: moment.after_blob_sha256.clone(),
+            blob_sha256,
             updated_at_ms: moment.recorded_at_ms,
             latest_moment_id: moment.moment_id.clone(),
             metadata_origin: moment.metadata_origin.clone(),
@@ -1101,9 +1135,11 @@ pub fn delete_text_in_tx(
     tx.execute(
         "INSERT INTO moments \
          (workspace_id, moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
-          operation, after_blob_sha256, before_present, before_blob_sha256, \
-          before_latest_moment_id, metadata_origin, author_json, sync_record_only) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'delete', ?8, 2, ?8, ?9, ?10, ?11, NULL)",
+           operation, after_blob_sha256, before_present, before_blob_sha256, \
+           before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
+           after_content_kind, after_binary_sha256, before_content_kind, before_binary_sha256) \
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'delete', ?8, 2, ?8, ?9, ?10, ?11, \
+                  NULL, ?12, ?13, ?12, ?13)",
         params![
             ws,
             moment_order,
@@ -1116,6 +1152,8 @@ pub fn delete_text_in_tx(
             before.latest_moment_id,
             input.metadata_origin,
             input.author_json,
+            before.content_kind,
+            before.binary_sha256,
         ],
     )
     .map_err(DomainError::sql_persist)?;
@@ -1139,7 +1177,7 @@ pub fn delete_text_in_tx(
 
     Ok(DeleteResult {
         object,
-        before: before.clone(),
+        before: snapshot_text_view(&before),
         moment: MomentRecord {
             moment_order,
             moment_id: input.moment_id.clone(),
@@ -1148,9 +1186,13 @@ pub fn delete_text_in_tx(
             path: input.path.clone(),
             recorded_at_ms: input.now_ms,
             operation: MomentOp::Delete,
+            after_content_kind: before.content_kind.clone(),
             after_blob_sha256: before.blob_sha256.clone(),
+            after_binary_sha256: before.binary_sha256.clone(),
             before_present: true,
-            before_blob_sha256: Some(before.blob_sha256.clone()),
+            before_blob_sha256: before.blob_sha256.clone(),
+            before_content_kind: before.content_kind.clone(),
+            before_binary_sha256: before.binary_sha256.clone(),
             before_latest_moment_id: Some(before.latest_moment_id.clone()),
             metadata_origin: input.metadata_origin.clone(),
             author_json: input.author_json.clone(),
@@ -1384,7 +1426,7 @@ fn alias_object_id(
     .map_err(DomainError::sql_corrupt)
 }
 
-fn next_moment_order(conn: &Connection) -> Result<i64, DomainError> {
+pub(crate) fn next_moment_order(conn: &Connection) -> Result<i64, DomainError> {
     // Store-global MAX+1. Correct for one-workspace-per-engine.db (global ==
     // per-workspace); a future multi-workspace / share-mount shard MUST add a
     // `WHERE workspace_id = ?` bound here (see the `moments` schema comment).
@@ -1447,40 +1489,34 @@ fn get_snapshot(
     workspace_id: &str,
     version_id: &str,
     object_id: &str,
-) -> Result<Option<TextSnapshot>, DomainError> {
-    conn.query_row(
-        "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
-         s.latest_moment_id, s.metadata_origin FROM snapshots s \
-         JOIN blobs b ON b.sha256 = s.blob_sha256 \
+) -> Result<Option<SnapshotRecord>, DomainError> {
+    let row = conn
+        .query_row(
+            "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
+         s.latest_moment_id, s.metadata_origin, COALESCE(s.content_kind, 'text'), \
+         bb.sha256 FROM snapshots s \
+         LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
+         LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
          WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.object_id = ?3",
-        params![workspace_id, version_id, object_id],
-        |row| {
-            Ok(TextSnapshot {
-                workspace_id: workspace_id.to_owned(),
-                version_id: version_id.to_owned(),
-                object_id: row.get(0)?,
-                path: row.get(1)?,
-                text: row.get(2)?,
-                blob_sha256: row.get(3)?,
-                updated_at_ms: row.get(4)?,
-                latest_moment_id: row.get(5)?,
-                metadata_origin: row.get(6)?,
-            })
-        },
-    )
-    .optional()
-    .map_err(DomainError::sql_corrupt)
+            params![workspace_id, version_id, object_id],
+            |row| map_snapshot_row(row, workspace_id, version_id),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    row.transpose()
 }
 
-fn upsert_snapshot(conn: &Connection, snapshot: &TextSnapshot) -> Result<(), DomainError> {
+fn upsert_snapshot(conn: &Connection, snapshot: &SnapshotRecord) -> Result<(), DomainError> {
     conn.execute(
         "INSERT INTO snapshots \
          (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
-          latest_moment_id, metadata_origin) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+          latest_moment_id, metadata_origin, content_kind, binary_sha256) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
          ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET \
           path = excluded.path, blob_sha256 = excluded.blob_sha256, \
           updated_at_ms = excluded.updated_at_ms, latest_moment_id = excluded.latest_moment_id, \
-          metadata_origin = excluded.metadata_origin",
+          metadata_origin = excluded.metadata_origin, content_kind = excluded.content_kind, \
+          binary_sha256 = excluded.binary_sha256",
         params![
             snapshot.workspace_id,
             snapshot.version_id,
@@ -1490,10 +1526,30 @@ fn upsert_snapshot(conn: &Connection, snapshot: &TextSnapshot) -> Result<(), Dom
             snapshot.updated_at_ms,
             snapshot.latest_moment_id,
             snapshot.metadata_origin,
+            snapshot.content_kind,
+            snapshot.binary_sha256,
         ],
     )
     .map_err(DomainError::sql_persist)?;
     Ok(())
+}
+
+fn snapshot_text_view(snapshot: &SnapshotRecord) -> TextSnapshot {
+    TextSnapshot {
+        workspace_id: snapshot.workspace_id.clone(),
+        version_id: snapshot.version_id.clone(),
+        object_id: snapshot.object_id.clone(),
+        path: snapshot.path.clone(),
+        text: snapshot.text.clone(),
+        blob_sha256: snapshot
+            .blob_sha256
+            .clone()
+            .or_else(|| snapshot.binary_sha256.clone())
+            .unwrap_or_default(),
+        updated_at_ms: snapshot.updated_at_ms,
+        latest_moment_id: snapshot.latest_moment_id.clone(),
+        metadata_origin: snapshot.metadata_origin.clone(),
+    }
 }
 
 fn select_moment_by_order(
@@ -1507,8 +1563,13 @@ fn select_moment_by_order(
         .query_row(
             "SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
              operation, after_blob_sha256, before_present, before_blob_sha256, \
-             before_latest_moment_id, metadata_origin, author_json, sync_record_only \
-             FROM moments WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
+             before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
+             COALESCE(after_content_kind, 'text'), after_binary.sha256, \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256 \
+             FROM moments m \
+             LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
+             LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
                AND moment_order <= ?4 AND (sync_record_only IS NULL OR sync_record_only = 0) \
              ORDER BY moment_order DESC LIMIT 1",
             params![workspace_id, version_id, object_id, max_order],
@@ -1565,15 +1626,8 @@ fn resolve_rollback_before(
     input: &RollbackTextFileMutation,
     moment: &MomentRecord,
     before_state: MomentBeforeState,
-) -> Result<Option<TextSnapshot>, DomainError> {
+) -> Result<Option<SnapshotRecord>, DomainError> {
     if before_state == MomentBeforeState::Present {
-        let before_blob_sha256 =
-            moment
-                .before_blob_sha256
-                .clone()
-                .ok_or(DomainError::StateCorrupt {
-                    reason: "moment preimage is missing its blob",
-                })?;
         let producer = match &moment.before_latest_moment_id {
             Some(before_latest_moment_id) => {
                 get_moment(conn, &input.workspace_id, before_latest_moment_id)?.ok_or(
@@ -1593,16 +1647,56 @@ fn resolve_rollback_before(
                 reason: "moment preimage producer belongs to another object",
             });
         }
-        let text = blob_text(conn, &before_blob_sha256)?.ok_or(DomainError::StateCorrupt {
-            reason: "moment preimage blob is missing",
-        })?;
-        return Ok(Some(TextSnapshot {
+        let (text, blob_sha256, binary_sha256) = match moment.before_content_kind.as_str() {
+            "text" => {
+                let sha = moment
+                    .before_blob_sha256
+                    .clone()
+                    .ok_or(DomainError::StateCorrupt {
+                        reason: "text moment preimage is missing its blob",
+                    })?;
+                let text = blob_text(conn, &sha)?.ok_or(DomainError::StateCorrupt {
+                    reason: "moment preimage blob is missing",
+                })?;
+                (text, Some(sha), None)
+            }
+            "binary" => {
+                let sha = moment
+                    .before_binary_sha256
+                    .clone()
+                    .ok_or(DomainError::StateCorrupt {
+                        reason: "binary moment preimage is missing its blob",
+                    })?;
+                let exists: Option<i64> = conn
+                    .query_row(
+                        "SELECT 1 FROM binary_blobs WHERE sha256 = ?1",
+                        params![sha],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(DomainError::sql_corrupt)?;
+                if exists.is_none() {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "binary moment preimage blob is missing",
+                    });
+                }
+                (String::new(), None, Some(sha))
+            }
+            _ => {
+                return Err(DomainError::StateCorrupt {
+                    reason: "moment preimage has an unknown content kind",
+                });
+            }
+        };
+        return Ok(Some(SnapshotRecord {
             workspace_id: input.workspace_id.clone(),
             version_id: input.version_id.clone(),
             object_id: moment.object_id.clone(),
             path: producer.path,
             text,
-            blob_sha256: before_blob_sha256,
+            blob_sha256,
+            content_kind: moment.before_content_kind.clone(),
+            binary_sha256,
             updated_at_ms: producer.recorded_at_ms,
             latest_moment_id: producer.moment_id,
             metadata_origin: producer.metadata_origin,
@@ -1626,13 +1720,15 @@ fn resolve_rollback_before(
         } else {
             input.path.clone()
         };
-        return Ok(Some(TextSnapshot {
+        return Ok(Some(SnapshotRecord {
             workspace_id: input.workspace_id.clone(),
             version_id: input.version_id.clone(),
             object_id: moment.object_id.clone(),
             path,
             text: legacy_before_text.clone(),
-            blob_sha256: text_blob_sha256(legacy_before_text),
+            blob_sha256: Some(text_blob_sha256(legacy_before_text)),
+            content_kind: "text".to_owned(),
+            binary_sha256: None,
             updated_at_ms: previous.recorded_at_ms,
             latest_moment_id: previous.moment_id,
             metadata_origin: previous.metadata_origin,
@@ -1969,8 +2065,13 @@ fn get_moment(
         .query_row(
             "SELECT moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
              operation, after_blob_sha256, before_present, before_blob_sha256, \
-             before_latest_moment_id, metadata_origin, author_json, sync_record_only \
-             FROM moments WHERE workspace_id = ?1 AND moment_id = ?2",
+             before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
+             COALESCE(after_content_kind, 'text'), after_binary.sha256, \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256 \
+             FROM moments m \
+             LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
+             LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \
+             WHERE workspace_id = ?1 AND moment_id = ?2",
             params![workspace_id, moment_id],
             map_moment_row,
         )
@@ -2038,6 +2139,47 @@ fn map_version_row(
     }))
 }
 
+fn map_snapshot_row(
+    row: &rusqlite::Row<'_>,
+    workspace_id: &str,
+    version_id: &str,
+) -> rusqlite::Result<Result<SnapshotRecord, DomainError>> {
+    let object_id: String = row.get(0)?;
+    let path: String = row.get(1)?;
+    let text: Option<String> = row.get(2)?;
+    let blob_sha256: Option<String> = row.get(3)?;
+    let updated_at_ms: i64 = row.get(4)?;
+    let latest_moment_id: String = row.get(5)?;
+    let metadata_origin: String = row.get(6)?;
+    let content_kind: String = row.get(7)?;
+    let binary_sha256: Option<String> = row.get(8)?;
+    let text = match content_kind.as_str() {
+        "text" => text.ok_or(DomainError::StateCorrupt {
+            reason: "text snapshot is missing its blob",
+        }),
+        "binary" if binary_sha256.is_some() => Ok(String::new()),
+        "binary" => Err(DomainError::StateCorrupt {
+            reason: "binary snapshot is missing its blob",
+        }),
+        _ => Err(DomainError::StateCorrupt {
+            reason: "snapshot has an unknown content kind",
+        }),
+    };
+    Ok(text.map(|text| SnapshotRecord {
+        workspace_id: workspace_id.to_owned(),
+        version_id: version_id.to_owned(),
+        object_id,
+        path,
+        text,
+        blob_sha256,
+        content_kind,
+        binary_sha256,
+        updated_at_ms,
+        latest_moment_id,
+        metadata_origin,
+    }))
+}
+
 fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentRecord, DomainError>> {
     let moment_order: i64 = row.get(0)?;
     let moment_id: String = row.get(1)?;
@@ -2046,15 +2188,59 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
     let path: String = row.get(4)?;
     let recorded_at_ms: i64 = row.get(5)?;
     let op_str: String = row.get(6)?;
-    let after_blob_sha256: String = row.get(7)?;
+    let after_blob_sha256: Option<String> = row.get(7)?;
     let before_present_raw: i64 = row.get(8)?;
     let before_blob_sha256: Option<String> = row.get(9)?;
     let before_latest_moment_id: Option<String> = row.get(10)?;
     let metadata_origin: String = row.get(11)?;
     let author_json: Option<String> = row.get(12)?;
     let sync_record_only: Option<i64> = row.get(13)?;
+    let after_content_kind: String = row.get(14)?;
+    let after_binary_sha256: Option<String> = row.get(15)?;
+    let before_content_kind: String = row.get(16)?;
+    let before_binary_sha256: Option<String> = row.get(17)?;
     Ok(MomentOp::from_db(&op_str).and_then(|operation| {
         let before_state = MomentBeforeState::from_db(before_present_raw)?;
+        match after_content_kind.as_str() {
+            "text" if after_blob_sha256.is_some() => {}
+            "binary" if after_binary_sha256.is_some() => {}
+            "text" => {
+                return Err(DomainError::StateCorrupt {
+                    reason: "text moment is missing its after blob",
+                });
+            }
+            "binary" => {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary moment is missing its after blob",
+                });
+            }
+            _ => {
+                return Err(DomainError::StateCorrupt {
+                    reason: "moment has an unknown after content kind",
+                });
+            }
+        }
+        if before_state == MomentBeforeState::Present {
+            match before_content_kind.as_str() {
+                "text" if before_blob_sha256.is_some() => {}
+                "binary" if before_binary_sha256.is_some() => {}
+                "text" => {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "text moment preimage is missing its blob",
+                    });
+                }
+                "binary" => {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "binary moment preimage is missing its blob",
+                    });
+                }
+                _ => {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "moment has an unknown before content kind",
+                    });
+                }
+            }
+        }
         Ok(MomentRecord {
             moment_order,
             moment_id,
@@ -2063,9 +2249,13 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
             path,
             recorded_at_ms,
             operation,
+            after_content_kind,
             after_blob_sha256,
+            after_binary_sha256,
             before_present: before_state == MomentBeforeState::Present,
             before_blob_sha256,
+            before_content_kind,
+            before_binary_sha256,
             before_latest_moment_id,
             metadata_origin,
             author_json,
