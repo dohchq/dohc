@@ -60,6 +60,13 @@ pub fn put_binary_blob_verified(
     claimed_sha256: &str,
     bytes: &[u8],
 ) -> Result<String, StorageError> {
+    // Size-cap first, same as the plain path: an over-cap import is the typed
+    // size error and never burns CPU hashing the untrusted buffer.
+    if bytes.len() > MAX_BLOB_BYTES {
+        return Err(StorageError::BlobTooLarge {
+            actual: bytes.len(),
+        });
+    }
     if !hex_sha256(bytes).eq_ignore_ascii_case(claimed_sha256) {
         return Err(StorageError::BlobIntegrity {
             sha256: claimed_sha256.to_owned(),
@@ -136,6 +143,23 @@ mod tests {
             error,
             StorageError::BlobIntegrity { sha256 } if sha256 == claimed
         ));
+    }
+
+    #[test]
+    fn verified_put_size_caps_before_hashing_or_storing() {
+        // No binary_blobs table on purpose: the over-cap guard must fire
+        // before any hashing or storage, so the call never reaches the db.
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        let huge = vec![0u8; MAX_BLOB_BYTES + 1];
+        let wrong_claim = hex_sha256(b"not the huge bytes");
+
+        let error = put_binary_blob_verified(&conn, &wrong_claim, &huge)
+            .expect_err("over-cap bytes must fail closed on size");
+
+        assert!(
+            matches!(error, StorageError::BlobTooLarge { actual } if actual == huge.len()),
+            "size guard must win over the integrity check, got {error:?}"
+        );
     }
 
     #[test]

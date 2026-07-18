@@ -259,17 +259,10 @@ pub fn insert_text_conflict_if_absent(
     tx: &Transaction<'_>,
     conflict: &TextConflict,
 ) -> Result<bool, DomainError> {
-    let exists: Option<i64> = tx
-        .query_row(
-            "SELECT 1 FROM conflicts WHERE workspace_id = ?1 AND conflict_id = ?2",
-            params![conflict.workspace_id, conflict.conflict_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
-    if exists.is_some() {
-        return Ok(false);
-    }
+    // Validate sides BEFORE the duplicate-id shortcut: an invalid or
+    // unhydrated binary side must fail closed even when it reuses an existing
+    // conflict id, or a replicated open would be acked without ever passing
+    // this gate. Honest duplicates are valid, pass, and still no-op below.
     for side in [&conflict.base, &conflict.current, &conflict.incoming] {
         match side.content_kind {
             ConflictContentKind::Text => {
@@ -298,6 +291,17 @@ pub fn insert_text_conflict_if_absent(
                 }
             }
         }
+    }
+    let exists: Option<i64> = tx
+        .query_row(
+            "SELECT 1 FROM conflicts WHERE workspace_id = ?1 AND conflict_id = ?2",
+            params![conflict.workspace_id, conflict.conflict_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    if exists.is_some() {
+        return Ok(false);
     }
     // Mirror TS `insertConflictFileState`: persist each existing text side's blob
     // so the row's blob FKs hold on a peer that has not yet materialized them.

@@ -412,10 +412,21 @@ fn hydrate_size_bounds() {
     let huge = vec![0u8; MAX_BLOB_BYTES + 1];
     let huge_sha = hex_sha256(&huge);
     let err = store
-        .write_with(&NoFaults, move |tx| {
-            hydrate_binary_conflict_blob(tx, &huge_sha, &huge)
+        .write_with(&NoFaults, {
+            let huge = huge.clone();
+            move |tx| hydrate_binary_conflict_blob(tx, &huge_sha, &huge)
         })
         .expect_err("over-cap bytes must be rejected");
+    assert_eq!(err.code(), "blob-too-large");
+
+    // The size cap fires BEFORE the claim comparison: an over-cap buffer with
+    // a wrong claim is the size error, never hashed into an integrity error.
+    let wrong_claim = hex_sha256(b"not the huge bytes");
+    let err = store
+        .write_with(&NoFaults, move |tx| {
+            hydrate_binary_conflict_blob(tx, &wrong_claim, &huge)
+        })
+        .expect_err("over-cap bytes with a wrong claim must be rejected on size");
     assert_eq!(err.code(), "blob-too-large");
 }
 
@@ -576,6 +587,63 @@ fn binary_side_with_text_snapshot_rejected() {
     let err = store
         .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
         .expect_err("binary side with text snapshot must be rejected");
+    assert_eq!(err.code(), "invalid-input");
+}
+
+/// Binary-side validation must run BEFORE the duplicate-id shortcut: an
+/// invalid/unhydrated binary side reusing an already-open conflict id is
+/// rejected fail-closed, never absorbed as an idempotent duplicate. Honest
+/// duplicates (valid hydrated sides) still no-op.
+#[test]
+fn duplicate_conflict_id_with_invalid_binary_side_rejected() {
+    let (_scratch, mut store) = open_store();
+    let sha = hydrate(&mut store, b"dup payload");
+    let valid = conflict(
+        "dup",
+        "d.bin",
+        ConflictFileState::text("d.bin", None),
+        ConflictFileState::text("d.bin", None),
+        ConflictFileState::binary("d.bin", sha.clone()),
+    );
+    let inserted = store
+        .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &valid))
+        .expect("open valid binary-side conflict");
+    assert_eq!(inserted, dohc_engine_domain::TxnOutcome::Committed(true));
+
+    // Honest idempotent duplicate: same id, valid hydrated side -> no-op Ok.
+    let duplicate = store
+        .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &valid))
+        .expect("honest duplicate stays idempotent");
+    assert_eq!(duplicate, dohc_engine_domain::TxnOutcome::Committed(false));
+
+    // Same id, UNHYDRATED binary sha: must fail closed, not ack as duplicate.
+    let unhydrated = conflict(
+        "dup",
+        "d.bin",
+        ConflictFileState::text("d.bin", None),
+        ConflictFileState::text("d.bin", None),
+        ConflictFileState::binary("d.bin", hex_sha256(b"never hydrated")),
+    );
+    let err = store
+        .write_with(&NoFaults, |tx| {
+            insert_text_conflict_if_absent(tx, &unhydrated)
+        })
+        .expect_err("unhydrated binary side on duplicate id must be rejected");
+    assert_eq!(err.code(), "invalid-input");
+
+    // Same id, binary side missing its sha entirely: also rejected.
+    let mut missing_side = ConflictFileState::text("d.bin", None);
+    missing_side.content_kind = ConflictContentKind::Binary;
+    let missing = conflict(
+        "dup",
+        "d.bin",
+        ConflictFileState::text("d.bin", None),
+        ConflictFileState::text("d.bin", None),
+        missing_side,
+    );
+    let err = store
+        .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &missing))
+        .expect_err("sha-less binary side on duplicate id must be rejected");
     assert_eq!(err.code(), "invalid-input");
 }
 

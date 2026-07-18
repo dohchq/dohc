@@ -1220,6 +1220,44 @@ mod tests {
         assert_eq!(replication_counts(&store), (0, 0, 0));
     }
 
+    /// An invalid binary open that REUSES an already-open conflict id must not
+    /// slip through the duplicate-id shortcut: it is rejected fail-closed
+    /// before log/ack, not absorbed as an idempotent duplicate.
+    #[test]
+    fn duplicate_conflict_open_with_binary_side_is_rejected_before_log_or_ack() {
+        let (_scratch, mut store) = store();
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                0,
+                "conflict.open",
+                open_payload("dup-c", "sync", false),
+            ),
+            &NoFaults,
+        )
+        .expect("valid text open applies");
+        assert_eq!(replication_counts(&store), (1, 1, 1));
+
+        let error = apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                1,
+                "conflict.open",
+                open_payload("dup-c", "sync", true),
+            ),
+            &NoFaults,
+        )
+        .expect_err("invalid binary side on a duplicate id must fail closed");
+        assert!(matches!(error, SyncError::InvalidInput { .. }));
+        assert_eq!(
+            replication_counts(&store),
+            (1, 1, 1),
+            "the rejected duplicate must not be logged or acked"
+        );
+    }
+
     #[test]
     fn mirrored_binary_side_resolve_is_acked_and_deferred() {
         let (_scratch, mut store) = store();
