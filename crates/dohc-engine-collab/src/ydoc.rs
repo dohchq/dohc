@@ -164,12 +164,12 @@ impl Ydoc {
     /// whole process on adversarial bytes (uncatchable UB —
     /// `std::panic::catch_unwind` cannot intercept it; see
     /// `replay_parity::safe_read_string`'s doc comment for the root cause).
-    /// This method (and [`Ydoc::apply`] below) are the ONLY two call sites of
-    /// `Update::decode_v1` in this crate, so guarding here — not merely at the
-    /// durable layer's `validate_update_bytes` choke point — is what makes
-    /// EVERY caller of the raw primitive (durable, replication, tests, and any
-    /// future caller) intrinsically safe, not just the ones that remember to
-    /// pre-validate first.
+    /// This method, [`Ydoc::apply`] below, and [`merge_updates`] are the
+    /// crate's `Update::decode_v1` call sites, and each pre-validates first, so
+    /// guarding here — not merely at the durable layer's `validate_update_bytes`
+    /// choke point — is what makes EVERY caller of the raw primitive (durable,
+    /// replication, tests, and any future caller) intrinsically safe, not just
+    /// the ones that remember to pre-validate first.
     pub fn validate_update(bytes: &[u8]) -> Result<(), CollabError> {
         crate::replay_parity::prevalidate_update_bytes(bytes)?;
         Update::decode_v1(bytes).map_err(|e| CollabError::MalformedUpdate {
@@ -228,6 +228,7 @@ impl Ydoc {
     /// The v1 update carrying everything this doc has that `remote_sv` lacks
     /// (the sync-by-diff primitive).
     pub fn diff(&self, remote_sv: &[u8]) -> Result<Vec<u8>, CollabError> {
+        crate::replay_parity::prevalidate_state_vector_bytes(remote_sv)?;
         let sv = StateVector::decode_v1(remote_sv).map_err(|e| CollabError::MalformedUpdate {
             reason: format!("state vector decode: {e}"),
         })?;
@@ -422,10 +423,14 @@ impl Ydoc {
 }
 
 /// Merge independent v1 updates into one (the compaction analog / `merge_updates`
-/// primitive). Every input is decoded first; a malformed input is rejected.
+/// primitive). Every input is pre-validated (the same abort-safe choke point as
+/// [`Ydoc::apply`] — see [`Ydoc::validate_update`]'s doc comment) and then
+/// decoded; a malformed or adversarial input is rejected fail-closed before it
+/// can reach yrs' uncatchable `Update::decode_v1` abort.
 pub fn merge_updates(updates: &[Vec<u8>]) -> Result<Vec<u8>, CollabError> {
     let mut decoded = Vec::with_capacity(updates.len());
     for u in updates {
+        crate::replay_parity::prevalidate_update_bytes(u)?;
         decoded.push(
             Update::decode_v1(u).map_err(|e| CollabError::MalformedUpdate {
                 reason: e.to_string(),

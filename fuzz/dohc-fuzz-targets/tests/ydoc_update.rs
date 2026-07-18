@@ -26,11 +26,14 @@
 //! calls `Update::decode_v1` and NEVER uses yrs' own unsafe string decode --
 //! every string-bearing field is read via `read_buf` (safe, bounds-checked)
 //! and validated with the CHECKED `std::str::from_utf8` (which by construction
-//! can never accept a surrogate or out-of-range scalar). `Ydoc::apply` and
-//! `Ydoc::validate_update` -- the ONLY two call sites of `Update::decode_v1` in
-//! the crate -- now run this pre-validator FIRST, so malformed/adversarial
-//! bytes are rejected fail-closed, before `decode_v1` (or anything else
-//! unsafe) ever sees them. The durable choke point
+//! can never accept a surrogate or out-of-range scalar). `Ydoc::apply`,
+//! `Ydoc::validate_update`, and `merge_updates` -- the crate's
+//! `Update::decode_v1` call sites -- each run this pre-validator FIRST, so
+//! malformed/adversarial bytes are rejected fail-closed, before `decode_v1`
+//! (or anything else unsafe) ever sees them. `scan_v1` also bounds `Any`
+//! container nesting (`MAX_ANY_DEPTH`) so a deeply-nested `ContentAny`/sub-doc
+//! payload cannot overflow the stack (an uncatchable abort) inside the
+//! validator or the downstream decode. The durable choke point
 //! (`durable::validate_update_bytes`, shared by the local edit path and the
 //! remote replication path) also runs it explicitly as a second, redundant
 //! guard at the policy layer.
@@ -130,9 +133,9 @@ proptest! {
         let _ = doc.apply(&bytes);
     }
 
-    /// Same property against `Ydoc::validate_update` (the crate's other, and
-    /// only other, `Update::decode_v1` call site) -- it must agree with
-    /// `apply` on accept/reject and never abort either.
+    /// Same property against `Ydoc::validate_update` (another of the crate's
+    /// `Update::decode_v1` call sites) -- it must agree with `apply` on
+    /// accept/reject and never abort either.
     #[test]
     fn arbitrary_bytes_never_abort_validate_update(bytes in prop::collection::vec(any::<u8>(), 0..128)) {
         let doc = Ydoc::wire();
@@ -166,6 +169,30 @@ proptest! {
             bytes[at] = value;
         }
         let doc = Ydoc::wire();
+        let _ = doc.apply(&bytes);
+    }
+
+    /// A `ContentAny` block whose payload is an attacker-controlled chain of
+    /// length-1 `Any::Array`s (2 bytes per level) must NEVER abort -- an
+    /// unbounded decode recursion overflows the stack, which is uncatchable
+    /// (not a Rust panic), the same severity class as the char-decode UB. The
+    /// pre-validator's `MAX_ANY_DEPTH` bound rejects these fail-closed; this
+    /// property proves it across a wide depth range including well past the
+    /// bound. Uniform/mutation fuzzing never synthesizes multi-thousand-deep
+    /// nesting, so this dedicated generator is what actually exercises the hole.
+    #[test]
+    fn nested_any_never_aborts(depth in 0usize..20_000) {
+        // clients_len=1, blocks_len=1, client=9, clock=0,
+        // info=0x08 (ContentAny), parent_info=1, root name "t", ContentAny len=1
+        let mut bytes: Vec<u8> = vec![0x01, 0x01, 0x09, 0x00, 0x08, 0x01, 0x01, b't', 0x01];
+        for _ in 0..depth {
+            bytes.push(117); // Any::Array
+            bytes.push(0x01); // len = 1
+        }
+        bytes.push(126); // innermost Any::Null
+        bytes.push(0x00); // empty delete set
+        let doc = Ydoc::wire();
+        // Must return (Err beyond the bound, possibly Ok when shallow) -- never abort.
         let _ = doc.apply(&bytes);
     }
 }

@@ -384,6 +384,36 @@ pub(crate) fn prevalidate_update_bytes(bytes: &[u8]) -> Result<(), CollabError> 
     scan_v1(bytes).map(|_| ())
 }
 
+/// Pre-validate a v1 STATE VECTOR (the `Ydoc::diff` primitive's untrusted
+/// remote input) before yrs' `StateVector::decode_v1`. A state vector carries
+/// no strings, so the char-decode UB class does not apply — but yrs'
+/// `StateVector::decode` constructs `ClientID` from the raw varint with the
+/// same unchecked 53-bit behavior [`safe_read_client`] guards against (release:
+/// silent high-bit aliasing of an honest client), and pre-allocates a
+/// `HashMap` sized to the attacker-controlled `clients_len`. This walk applies
+/// the 53-bit bound and reads every field with the ordinary bounds-checked
+/// varint (no unsafe cast, no up-front allocation), rejecting a malformed or
+/// out-of-range state vector fail-closed first.
+pub(crate) fn prevalidate_state_vector_bytes(bytes: &[u8]) -> Result<(), CollabError> {
+    let mut decoder = DecoderV1::from(bytes);
+    let clients_len: u32 = decoder.read_var().map_err(parity_decode_error)?;
+    for _ in 0..clients_len {
+        // Bounds + 53-bit range checked; the clock is read but unconstrained.
+        let _client = safe_read_client(&mut decoder)?;
+        let _clock: u32 = decoder.read_var().map_err(parity_decode_error)?;
+    }
+    if !decoder
+        .read_to_end()
+        .map_err(parity_decode_error)?
+        .is_empty()
+    {
+        return Err(CollabError::ReplayParityViolation {
+            reason: "the state vector contains unconsumed bytes".to_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// yrs 0.27.3's `Read::read_string` (the default impl `DecoderV1` uses, and
 /// therefore every string-bearing v1 decode — `Any::decode`'s String/Map-key
 /// cases, `Decoder::read_key`, `Decoder::read_json`, `TypeRef::decode`'s XML
@@ -438,6 +468,17 @@ fn safe_read_json(decoder: &mut DecoderV1<'_>) -> Result<Any, CollabError> {
     })
 }
 
+/// Maximum `Any` container nesting the pre-validator (and, transitively, the
+/// downstream `any_to_json` projection and yrs' own `Any::decode`) will accept.
+/// Matches `serde_json`'s default recursion limit, so the embedded-JSON path
+/// (`safe_read_json` → `Any::from_json`) and this manual path reject at the
+/// same depth. An `Any::Array`/`Any::Map` chain is 2 bytes per level on the
+/// wire (`[tag, len]`), so without this bound a hostile ~20 KB update nests
+/// ~10k deep and OVERFLOWS THE STACK — an uncatchable process abort, the same
+/// severity class this shard exists to close. No honest document nests remotely
+/// this deep.
+const MAX_ANY_DEPTH: usize = 128;
+
 /// A from-scratch, SAFE reimplementation of yrs' `Any::decode` for
 /// `DecoderV1`. Cannot reuse `decoder.read_any()` / `Any::decode` directly:
 /// both bottom out in yrs' unsafe `Read::read_string` for the String and
@@ -448,7 +489,20 @@ fn safe_read_json(decoder: &mut DecoderV1<'_>) -> Result<Any, CollabError> {
 /// pre-allocating an attacker-controlled `len` (bounded-everything: a huge
 /// claimed length fails fast on the next out-of-bounds read instead of
 /// driving a large up-front allocation).
-fn safe_read_any(decoder: &mut DecoderV1<'_>) -> Result<Any, CollabError> {
+///
+/// `depth` bounds recursion at [`MAX_ANY_DEPTH`]: an `Any::Array`/`Any::Map`
+/// nest is attacker-controlled and cheap on the wire, so without this an
+/// adversarial update overflows the stack (an uncatchable abort — a stack
+/// overflow is not a Rust panic, so neither `catch_unwind` nor this module's
+/// gate wrapper contains it). yrs' own `Any::decode` recurses unbounded too,
+/// so bounding HERE — before the pre-validator accepts the update — is what
+/// protects the downstream `decode_v1` as well.
+fn safe_read_any(decoder: &mut DecoderV1<'_>, depth: usize) -> Result<Any, CollabError> {
+    if depth >= MAX_ANY_DEPTH {
+        return Err(CollabError::ReplayParityViolation {
+            reason: "the update nests an Any value beyond the maximum depth".to_owned(),
+        });
+    }
     let tag = decoder.read_u8().map_err(parity_decode_error)?;
     Ok(match tag {
         127 => Any::Undefined,
@@ -465,7 +519,7 @@ fn safe_read_any(decoder: &mut DecoderV1<'_>) -> Result<Any, CollabError> {
             let mut map = HashMap::new();
             for _ in 0..len {
                 let key = safe_read_string(decoder)?.to_owned();
-                let value = safe_read_any(decoder)?;
+                let value = safe_read_any(decoder, depth + 1)?;
                 map.insert(key, value);
             }
             Any::Map(Arc::new(map))
@@ -474,7 +528,7 @@ fn safe_read_any(decoder: &mut DecoderV1<'_>) -> Result<Any, CollabError> {
             let len: usize = decoder.read_var().map_err(parity_decode_error)?;
             let mut arr = Vec::new();
             for _ in 0..len {
-                arr.push(safe_read_any(decoder)?);
+                arr.push(safe_read_any(decoder, depth + 1)?);
             }
             Any::Array(Arc::from(arr))
         }
@@ -526,7 +580,7 @@ fn safe_read_options_fingerprint(decoder: &mut DecoderV1<'_>) -> Result<Vec<u8>,
     let guid = safe_read_string(decoder)?;
     let mut canonical = guid.as_bytes().to_vec();
     canonical.push(0);
-    let opts = safe_read_any(decoder)?;
+    let opts = safe_read_any(decoder, 0)?;
     canonical.extend_from_slice(
         serde_json::to_vec(&crate::ydoc::any_to_json(&opts))
             .unwrap_or_default()
@@ -818,7 +872,7 @@ fn scan_content(
         BLOCK_ITEM_ANY_REF_NUMBER => {
             let len = decoder.read_len().map_err(parity_decode_error)?;
             for i in 0..len {
-                let value = safe_read_any(decoder)?;
+                let value = safe_read_any(decoder, 0)?;
                 let clock = id.clock.checked_add(i).ok_or_else(parity_clock_overflow)?;
                 record_identity(
                     structure,
@@ -1088,6 +1142,59 @@ mod tests {
         ];
         let error = scan_err(&bytes);
         assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    }
+
+    /// A `ContentAny` block (content-ref 8) whose `Any` payload is a chain of
+    /// `MAX_ANY_DEPTH`+ length-1 arrays must be rejected — NOT drive
+    /// `safe_read_any` into a stack overflow (an uncatchable abort). Each level
+    /// is the 2 bytes `[117, 0x01]`, so this is the cheap, attacker-controlled
+    /// nesting a hostile ~20 KB update would carry. This scan must complete and
+    /// return `Err` without the recursion ever reaching the stack limit.
+    #[test]
+    fn rejects_deeply_nested_any_without_overflow() {
+        let mut bytes: Vec<u8> = vec![
+            0x01, // clients_len
+            0x01, // blocks_len
+            0x09, // client
+            0x00, // clock
+            0x08, // info: BLOCK_ITEM_ANY_REF_NUMBER content, no origins
+            0x01, // parent_info: named root follows
+            0x04, b't', b'e', b's', b't', // root name
+            0x01, // ContentAny len = 1 value
+        ];
+        // MAX_ANY_DEPTH + 100 nested length-1 arrays, then a terminal Null.
+        for _ in 0..(MAX_ANY_DEPTH + 100) {
+            bytes.push(117); // Any::Array
+            bytes.push(0x01); // len = 1
+        }
+        bytes.push(126); // innermost: Any::Null
+        bytes.push(0x00); // empty delete set
+        let error = scan_err(&bytes);
+        assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    }
+
+    /// The depth bound must not reject honest, shallow nesting: an `Any` array
+    /// nested a few levels deep is well within `MAX_ANY_DEPTH` and must pass.
+    #[test]
+    fn accepts_shallow_nested_any() {
+        let mut bytes: Vec<u8> = vec![
+            0x01, // clients_len
+            0x01, // blocks_len
+            0x09, // client
+            0x00, // clock
+            0x08, // info: BLOCK_ITEM_ANY_REF_NUMBER content, no origins
+            0x01, // parent_info: named root follows
+            0x04, b't', b'e', b's', b't', // root name
+            0x01, // ContentAny len = 1 value
+        ];
+        for _ in 0..4 {
+            bytes.push(117); // Any::Array
+            bytes.push(0x01); // len = 1
+        }
+        bytes.push(120); // innermost: Any::Bool(true)
+        bytes.push(0x00); // empty delete set
+        let structure = scan_v1(&bytes).expect("4-deep Any nesting must be accepted");
+        assert_eq!(structure.claimed_clocks.len(), 1);
     }
 
     /// The 53-bit bound is exact: the LARGEST honest client identifier
