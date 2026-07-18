@@ -771,6 +771,11 @@ pub fn write_binary_file_in_tx(
         input.object_id.clone()
     };
 
+    // TRACKED FOLLOW-UP (rev2 P1 / "no binary head"): a binary write inserts no
+    // moment, so `next_moment_order` (MAX(moments)+1, ignoring jobs) re-issues
+    // this generation to the next same-path text write. Fixing it needs a real
+    // binary moment (blocked: `moments.after_blob_sha256` FKs the text `blobs`
+    // table) or a `store::next_moment_order` change — both outside this shard.
     let target_generation: i64 = tx
         .query_row(
             "SELECT COALESCE(MAX(generation), 0) + 1 FROM (\

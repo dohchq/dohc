@@ -49,14 +49,24 @@ pub struct PendingResolve {
     pub reason: PendingResolveReason,
 }
 
-/// The four fail-closed reasons supported by mirrored conflict application.
+/// The fail-closed reasons surfaced by mirrored conflict application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PendingResolveReason {
     PathChange,
     Merged,
     StaleHead,
+    /// The incoming binary side's bytes are not hydrated yet (no sha, or the
+    /// blob is absent). A pure pre-check state — nothing was attempted.
     BinaryUnhydrated,
+    /// The incoming binary side was present but the write helper rejected it
+    /// (object-id collision, missing version, non-normalized path, …). Distinct
+    /// from `BinaryUnhydrated`: the apply was attempted and rolled back.
+    BinaryApplyFailed,
+    /// A mirrored text write/delete was rejected by validation (reserved or
+    /// ignored path, over the byte cap, …). The apply was rolled back and the
+    /// row deferred so the ack still advances rather than Err-stalling the peer.
+    TextApplyRejected,
 }
 
 pub fn apply_conflict_envelope(
@@ -450,29 +460,22 @@ fn apply_mirrored_content(
             if conflict_file_states_equal(&conflict.current, &conflict.incoming) {
                 return Ok(MirroredOutcome::Applied);
             }
+            // Mirror the oracle (`applyMirroredIncomingState`): existence is
+            // checked BEFORE content kind. An absent incoming side (text OR
+            // binary) is a delete, never a content write — so a binary deletion
+            // deletes the current file rather than deferring `BinaryUnhydrated`.
+            if !incoming_side_exists(&conflict.incoming) {
+                return apply_mirrored_delete(tx, envelope, &conflict);
+            }
             if conflict.incoming.content_kind == ConflictContentKind::Binary {
                 return apply_mirrored_binary_write(tx, envelope, &conflict);
             }
             match &conflict.incoming.snapshot {
                 Some(incoming) => {
-                    apply_mirrored_write(tx, envelope, &conflict, &incoming.text, "incoming")?;
-                    Ok(MirroredOutcome::Applied)
+                    apply_mirrored_text_write(tx, envelope, &conflict, &incoming.text)
                 }
-                None if conflict.current.snapshot.is_some() => {
-                    let input = DeleteTextFile {
-                        workspace_id: envelope.workspace_id.clone(),
-                        version_id: conflict.target_version_id.clone(),
-                        path: conflict.path.clone(),
-                        moment_id: mirrored_id(envelope, "delete"),
-                        metadata_origin: "sync".to_owned(),
-                        author_json: None,
-                        now_ms: envelope.recorded_at_ms,
-                    };
-                    validate_delete_input(&input).map_err(map_domain)?;
-                    let result = delete_text_in_tx(tx, &input).map_err(map_domain)?;
-                    enqueue_delete(tx, &result, "sync-resolve").map_err(map_domain)?;
-                    Ok(MirroredOutcome::Applied)
-                }
+                // An existing text side always carries a snapshot; a missing one
+                // is nothing to apply rather than invented content.
                 None => Ok(MirroredOutcome::Applied),
             }
         }
@@ -502,13 +505,17 @@ fn apply_mirrored_binary_write(
             PendingResolveReason::BinaryUnhydrated,
         ));
     };
-    match dohc_engine_storage::get_binary_blob(tx, sha256) {
-        Ok(Some(_)) => {}
-        Ok(None) | Err(_) => {
+    // Presence-only probe (bare `SELECT 1`). The bytes are consumed and
+    // integrity-checked when the materializer drains the staged job, so loading
+    // + re-hashing the whole blob here just to test presence reads it twice.
+    match dohc_engine_storage::has_binary_blob(tx, sha256) {
+        Ok(true) => {}
+        Ok(false) => {
             return Ok(MirroredOutcome::Deferred(
                 PendingResolveReason::BinaryUnhydrated,
             ));
         }
+        Err(err) => return Err(SyncError::Storage(err)),
     }
     let preimage = conflict
         .current
@@ -517,54 +524,50 @@ fn apply_mirrored_binary_write(
         .map_or(Preimage::Absent, |snapshot| {
             Preimage::Present(snapshot.blob_sha256.clone())
         });
-    tx.execute_batch("SAVEPOINT mirrored_binary_write")
-        .map_err(SyncError::persist)?;
-    let write = write_binary_file_in_tx(
+    let input = WriteBinaryFile {
+        workspace_id: envelope.workspace_id.clone(),
+        version_id: conflict.target_version_id.clone(),
+        object_id: mirrored_id(envelope, "object"),
+        path: conflict.path.clone(),
+        binary_sha256: sha256.to_owned(),
+        job_id: mirrored_id(envelope, "binary-materialize"),
+        preimage,
+        now_ms: envelope.recorded_at_ms,
+    };
+    // A genuine helper failure (object-id collision, missing version, a
+    // non-normalized path, …) is distinct from the unhydrated pre-check: roll
+    // back the partial write and surface `BinaryApplyFailed`, not
+    // `BinaryUnhydrated`.
+    apply_within_savepoint(
         tx,
-        &WriteBinaryFile {
-            workspace_id: envelope.workspace_id.clone(),
-            version_id: conflict.target_version_id.clone(),
-            object_id: mirrored_id(envelope, "object"),
-            path: conflict.path.clone(),
-            binary_sha256: sha256.to_owned(),
-            job_id: mirrored_id(envelope, "binary-materialize"),
-            preimage,
-            now_ms: envelope.recorded_at_ms,
-        },
-    );
-    if write.is_err() {
-        tx.execute_batch("ROLLBACK TO mirrored_binary_write; RELEASE mirrored_binary_write")
-            .map_err(SyncError::persist)?;
-        return Ok(MirroredOutcome::Deferred(
-            PendingResolveReason::BinaryUnhydrated,
-        ));
-    }
-    tx.execute_batch("RELEASE mirrored_binary_write")
-        .map_err(SyncError::persist)?;
-    Ok(MirroredOutcome::Applied)
+        "mirrored_binary_write",
+        PendingResolveReason::BinaryApplyFailed,
+        |tx| write_binary_file_in_tx(tx, &input),
+    )
 }
 
-fn apply_mirrored_write(
+/// Apply an incoming text side inside its own savepoint. A validation-class
+/// rejection (reserved/ignored path, over the byte cap, …) rolls back and
+/// DEFERS `TextApplyRejected` so the ack still advances; a genuine
+/// storage/corruption failure rolls back and propagates as `Err`.
+fn apply_mirrored_text_write(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
     conflict: &TextConflict,
     text: &str,
-    id_kind: &str,
-) -> Result<(), SyncError> {
+) -> Result<MirroredOutcome, SyncError> {
     let input = WriteText {
         workspace_id: envelope.workspace_id.clone(),
         version_id: conflict.target_version_id.clone(),
         object_id: mirrored_id(envelope, "object"),
         path: conflict.path.clone(),
         text: text.to_owned(),
-        moment_id: mirrored_id(envelope, id_kind),
+        moment_id: mirrored_id(envelope, "incoming"),
         metadata_origin: "sync".to_owned(),
         author_json: None,
         now_ms: envelope.recorded_at_ms,
         request_id: None,
     };
-    validate_write_input(&input).map_err(map_domain)?;
-    let result = write_text_in_tx(tx, &input).map_err(map_domain)?;
     let preimage = conflict
         .current
         .snapshot
@@ -572,7 +575,95 @@ fn apply_mirrored_write(
         .map_or(Preimage::Absent, |snapshot| {
             Preimage::Present(snapshot.blob_sha256.clone())
         });
-    enqueue_write(tx, &result, preimage, "sync-resolve").map_err(map_domain)
+    apply_within_savepoint(
+        tx,
+        "mirrored_text_apply",
+        PendingResolveReason::TextApplyRejected,
+        |tx| {
+            validate_write_input(&input)?;
+            let result = write_text_in_tx(tx, &input)?;
+            enqueue_write(tx, &result, preimage, "sync-resolve")
+        },
+    )
+}
+
+/// Apply an incoming delete (an absent incoming side) inside its own savepoint,
+/// with the same defer-vs-`Err` contract as the text write.
+fn apply_mirrored_delete(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+    conflict: &TextConflict,
+) -> Result<MirroredOutcome, SyncError> {
+    // Nothing to remove if the receiver already has no live text head.
+    if conflict.current.snapshot.is_none() {
+        return Ok(MirroredOutcome::Applied);
+    }
+    let input = DeleteTextFile {
+        workspace_id: envelope.workspace_id.clone(),
+        version_id: conflict.target_version_id.clone(),
+        path: conflict.path.clone(),
+        moment_id: mirrored_id(envelope, "delete"),
+        metadata_origin: "sync".to_owned(),
+        author_json: None,
+        now_ms: envelope.recorded_at_ms,
+    };
+    apply_within_savepoint(
+        tx,
+        "mirrored_text_apply",
+        PendingResolveReason::TextApplyRejected,
+        |tx| {
+            validate_delete_input(&input)?;
+            let result = delete_text_in_tx(tx, &input)?;
+            enqueue_delete(tx, &result, "sync-resolve")
+        },
+    )
+}
+
+/// Run a mirrored content apply inside a named savepoint. On success the
+/// savepoint is released; on a validation-class `DomainError` it rolls back and
+/// returns `Deferred(reject_reason)` so the envelope journal + ack still
+/// advance; a storage/corruption error rolls back and propagates as `Err` so a
+/// genuine fault is never silently swallowed.
+fn apply_within_savepoint(
+    tx: &Transaction<'_>,
+    savepoint: &str,
+    reject_reason: PendingResolveReason,
+    apply: impl FnOnce(&Transaction<'_>) -> Result<(), DomainError>,
+) -> Result<MirroredOutcome, SyncError> {
+    tx.execute_batch(&format!("SAVEPOINT {savepoint}"))
+        .map_err(SyncError::persist)?;
+    match apply(tx) {
+        Ok(()) => {
+            tx.execute_batch(&format!("RELEASE {savepoint}"))
+                .map_err(SyncError::persist)?;
+            Ok(MirroredOutcome::Applied)
+        }
+        Err(err) => {
+            tx.execute_batch(&format!("ROLLBACK TO {savepoint}; RELEASE {savepoint}"))
+                .map_err(SyncError::persist)?;
+            if is_apply_rejection(&err) {
+                Ok(MirroredOutcome::Deferred(reject_reason))
+            } else {
+                Err(map_domain(err))
+            }
+        }
+    }
+}
+
+/// A validation-class rejection (bad path/size/input, missing version,
+/// duplicate moment, …) that must DEFER, versus a genuine storage/corruption
+/// failure that must `Err`-fail-closed.
+fn is_apply_rejection(err: &DomainError) -> bool {
+    !matches!(
+        err,
+        DomainError::Storage(_) | DomainError::StateCorrupt { .. } | DomainError::Crypto(_)
+    )
+}
+
+/// Whether a conflict side carries content (a text snapshot or a hydrated
+/// binary sha). An absent side is a deletion.
+fn incoming_side_exists(side: &ConflictFileState) -> bool {
+    side.snapshot.is_some() || side.binary_sha256.is_some()
 }
 
 fn mirrored_id(envelope: &ReplicationEnvelope, kind: &str) -> String {
@@ -1675,5 +1766,184 @@ mod tests {
             })
             .expect("counts");
         assert_eq!(counts, (0, 0, 0), "nothing may persist, log, or hydrate");
+    }
+
+    /// M3 (rev2 PROBE A, INVERTED). An incoming binary DELETE (exists=0,
+    /// content_kind=binary, no sha) must DELETE the current file — mirroring the
+    /// oracle's existence-before-kind ordering — not defer `BinaryUnhydrated`.
+    #[test]
+    fn incoming_binary_delete_deletes_like_the_oracle() {
+        let (_scratch, mut store) = store();
+        seed_current(&mut store, "receiver current");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                0,
+                "conflict.open",
+                mirrored_open_payload("bin-delete", "receiver current", "origin current"),
+            ),
+            &NoFaults,
+        )
+        .expect("open text conflict");
+        // Mark the incoming side as an ABSENT binary (a binary deletion).
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE conflicts SET incoming_exists = 0, \
+                     incoming_content_kind = 'binary', incoming_blob_sha256 = NULL, \
+                     incoming_binary_sha256 = NULL \
+                     WHERE workspace_id = 'ws' AND conflict_id = 'bin-delete'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("mark incoming as binary delete");
+
+        let outcome = apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                1,
+                "conflict.resolve",
+                json!({
+                    "conflictId": "bin-delete",
+                    "status": "resolved",
+                    "chosenFrom": "current",
+                    "resolution": "kept-current",
+                    "updatedAtMs": 3_000,
+                    "targetVersionId": "main"
+                }),
+            ),
+            &NoFaults,
+        )
+        .expect("resolve applies");
+        assert!(
+            matches!(
+                outcome,
+                ApplyOutcome::Applied(ConflictApplyResult {
+                    matched: true,
+                    pending_resolve: None,
+                    ..
+                })
+            ),
+            "the binary delete resolves, not defers: {outcome:?}"
+        );
+        assert_resolved_conflict(&store, "bin-delete");
+        assert_replication_advanced(&store, "peer", 1, 2);
+        // The oracle DELETES here (read -> None); Rust now matches.
+        assert_eq!(
+            VersionedTextStore::new(&mut store)
+                .read_text("ws", "main", "doc.md")
+                .expect("read"),
+            None,
+            "the current file must be deleted, not left in place"
+        );
+    }
+
+    /// M2 (rev2 PROBE B, INVERTED — `#[ignore]d`). A binary job's generation
+    /// must NOT be re-issued to the next same-path text write. This is BLOCKED
+    /// on an out-of-owned-path change (a real binary moment, or a
+    /// `store::next_moment_order` that counts jobs), so the assertion documents
+    /// the target invariant and stays ignored until that fix lands. Run with
+    /// `--ignored` to reproduce the collision.
+    #[test]
+    #[ignore = "M2: generation collision fix needs a moments-schema or store::next_moment_order change (outside this shard's owned paths); documents the target invariant"]
+    fn binary_generation_is_not_reused_by_next_text_write() {
+        let (_scratch, mut store) = store();
+        let binary_bytes = b"\x00binary head\xff";
+        let binary_sha = dohc_engine_storage::hex_sha256(binary_bytes);
+        seed_current(&mut store, "receiver current");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                0,
+                "conflict.open",
+                mirrored_open_payload("gen-reuse", "receiver current", "origin current"),
+            ),
+            &NoFaults,
+        )
+        .expect("open text conflict");
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::conflicts::hydrate_binary_conflict_blob(
+                    tx,
+                    &binary_sha,
+                    binary_bytes,
+                )
+                .map_err(map_domain)?;
+                tx.execute(
+                    "UPDATE conflicts SET incoming_content_kind = 'binary', \
+                     incoming_blob_sha256 = NULL, incoming_binary_sha256 = ?1 \
+                     WHERE workspace_id = 'ws' AND conflict_id = 'gen-reuse'",
+                    [&binary_sha],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("hydrate binary side");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                1,
+                "conflict.resolve",
+                json!({
+                    "conflictId": "gen-reuse",
+                    "status": "resolved",
+                    "chosenFrom": "current",
+                    "resolution": "kept-current",
+                    "updatedAtMs": 3_000,
+                    "targetVersionId": "main"
+                }),
+            ),
+            &NoFaults,
+        )
+        .expect("binary apply");
+        let binary_gen: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT target_generation FROM materialization_jobs \
+                     WHERE target_path = 'doc.md' ORDER BY target_generation DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("binary job generation");
+        VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: "ws".to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "other-object".to_owned(),
+                    path: "other.md".to_owned(),
+                    text: "hello".to_owned(),
+                    moment_id: "other-moment".to_owned(),
+                    metadata_origin: "user".to_owned(),
+                    author_json: None,
+                    now_ms: 4_000,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("later text write");
+        let next_moment_order: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT moment_order FROM moments WHERE moment_id = 'other-moment'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("later moment order");
+        // TARGET INVARIANT (currently violated → this test is #[ignore]d): the
+        // binary job's generation must be strictly below the next moment order,
+        // preserving the materializer's strict-`>` newest-wins supersede gate.
+        assert_ne!(
+            binary_gen, next_moment_order,
+            "generation collision: binary job gen must not equal the next moment order"
+        );
     }
 }
