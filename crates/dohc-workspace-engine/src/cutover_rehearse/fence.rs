@@ -101,6 +101,37 @@ pub(crate) fn verify_live_clone_binding(
     Ok(())
 }
 
+/// The reset-freshness proof: the live db's own `engine_ownership` identity
+/// must equal the one recorded when `initialize_fresh_store` created it. A
+/// stale same-clone copy (the moved-aside store or the backup restored over
+/// `engine.db`) shares the shadow token but NOT this identity.
+pub(crate) fn verify_live_reset_identity(
+    db: &Path,
+    expected_uuid: &str,
+) -> Result<(), RehearsalError> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| {
+        RehearsalError::Io {
+            code: "live-db-open-read-only-failed",
+        }
+    })?;
+    let uuid: Option<String> = conn
+        .query_row(
+            "SELECT engine_uuid FROM engine_ownership WHERE rowid_guard = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| RehearsalError::Io {
+            code: "live-db-identity-unreadable",
+        })?;
+    if uuid.as_deref() != Some(expected_uuid) {
+        return Err(RehearsalError::Io {
+            code: "live-db-reset-identity-mismatch",
+        });
+    }
+    Ok(())
+}
+
 /// Harness-only marker writer. Production rehearsal code only validates.
 #[cfg(any(test, feature = "harness"))]
 pub fn write_rehearsal_token_for_harness(root: &Path, token: &str) -> Result<(), FenceError> {

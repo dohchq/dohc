@@ -31,6 +31,10 @@ pub struct DirectoryBackupEntry {
 pub struct DirectoryBackupManifest {
     pub verified: bool,
     pub files: Vec<DirectoryBackupEntry>,
+    /// Every source engine subdirectory (`engine/<rel>`), so EMPTY dirs are
+    /// part of the restore-tested backup rather than silently lost.
+    #[serde(default)]
+    pub directories: Vec<String>,
 }
 
 pub fn load_valid_directory_backup(
@@ -76,6 +80,22 @@ pub fn load_valid_directory_backup(
         let (hash, bytes) = hash_file(&path)?;
         if hash != entry.sha256 || bytes != entry.size_bytes {
             return Ok(None);
+        }
+    }
+    for relative in &manifest.directories {
+        let relative = Path::new(relative);
+        if relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Ok(None);
+        }
+        let path = root.join(relative);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(RehearsalError::io("directory-backup-metadata", error)),
         }
     }
     // The backup dir must contain EXACTLY the declared set: an undeclared
@@ -169,6 +189,12 @@ pub(crate) fn create_restore_tested_backup(
         }
     }
     drop(store);
+    // The DB backup's directory entries must be durable before the BackedUp
+    // marker can ever be recorded over them.
+    super::fsync_dir(recovery_dir)?;
+    if let Some(parent) = recovery_dir.parent() {
+        super::fsync_dir(parent)?;
+    }
 
     // A pre-existing directory backup is reusable only when every backed-up
     // file still hashes identically to its CURRENT live source; a stale one
@@ -202,6 +228,12 @@ fn directory_backup_matches_live(
 ) -> Result<bool, RehearsalError> {
     let sources = collect_directory_sources(paths)?;
     if sources.len() != manifest.files.len() {
+        return Ok(false);
+    }
+    let mut live_dirs = Vec::new();
+    collect_engine_dirs(&paths.engine, &paths.engine, &mut live_dirs)?;
+    live_dirs.sort();
+    if live_dirs != manifest.directories {
         return Ok(false);
     }
     let mut declared: Vec<&DirectoryBackupEntry> = manifest.files.iter().collect();
@@ -255,10 +287,12 @@ pub(crate) fn verify_protected_snapshots(
     let manifest = load_valid_directory_backup(recovery_dir)?.ok_or(RehearsalError::Io {
         code: "backup-directory-not-valid",
     })?;
+    let mut manifested = BTreeSet::new();
     for entry in &manifest.files {
         let Some(name) = entry.relative_path.strip_prefix("dohc/") else {
             continue;
         };
+        manifested.insert(name);
         let live = paths.root.join(".dohc").join(name);
         let (hash, bytes) = match hash_file(&live) {
             Ok(hashed) => hashed,
@@ -274,7 +308,32 @@ pub(crate) fn verify_protected_snapshots(
             });
         }
     }
+    // Set compare, not just entry re-hash: a protected sibling that APPEARED
+    // after the backup has no restore point and must fail the capture.
+    for sibling in SIBLING_SNAPSHOTS {
+        match std::fs::symlink_metadata(paths.root.join(".dohc").join(sibling)) {
+            Ok(_) if !manifested.contains(sibling) => {
+                return Err(RehearsalError::Io {
+                    code: "capture-snapshot-unprotected",
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(RehearsalError::io("capture-snapshot-metadata", error)),
+        }
+    }
     Ok(())
+}
+
+/// The recorded original-store identity from the DB backup's manifest — the
+/// reference a freshly-reset store must DIFFER from.
+pub(crate) fn recorded_backup_engine_uuid(recovery_dir: &Path) -> Result<String, RehearsalError> {
+    Ok(load_valid_backup(recovery_dir, DB_BACKUP_STEM)?
+        .ok_or(RehearsalError::Io {
+            code: "backup-db-not-valid",
+        })?
+        .manifest
+        .engine_uuid)
 }
 
 /// The recovery dir holds a full copy of the workspace database, so it must be
@@ -495,6 +554,15 @@ fn create_directory_backup(
     }
     std::fs::create_dir(&staging)
         .map_err(|e| RehearsalError::io("directory-backup-staging-create", e))?;
+    // Recreate every source engine subdirectory up front, so EMPTY dirs are
+    // carried by the backup instead of silently lost.
+    let mut directories = Vec::new();
+    collect_engine_dirs(&paths.engine, &paths.engine, &mut directories)?;
+    directories.sort();
+    for relative in &directories {
+        std::fs::create_dir_all(staging.join(Path::new(relative)))
+            .map_err(|e| RehearsalError::io("directory-backup-subdir-create", e))?;
+    }
     let sources = collect_directory_sources(paths)?;
     let mut entries = Vec::with_capacity(sources.len());
     for (relative, source) in sources {
@@ -524,6 +592,7 @@ fn create_directory_backup(
     let manifest = DirectoryBackupManifest {
         verified: true,
         files: entries,
+        directories,
     };
     // Every directory entry in the staged tree must be durable BEFORE the
     // publish rename can be recorded; otherwise a power loss could keep the
@@ -536,6 +605,38 @@ fn create_directory_backup(
         return Err(RehearsalError::Io {
             code: "directory-backup-readback-failed",
         });
+    }
+    Ok(())
+}
+
+/// Every subdirectory of the engine tree as `engine/<rel>` (aliases refused).
+fn collect_engine_dirs(
+    engine_root: &Path,
+    directory: &Path,
+    output: &mut Vec<String>,
+) -> Result<(), RehearsalError> {
+    let entries = std::fs::read_dir(directory)
+        .map_err(|e| RehearsalError::io("engine-backup-enumerate", e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| RehearsalError::io("engine-backup-entry", e))?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|e| RehearsalError::io("engine-backup-metadata", e))?;
+        if metadata.file_type().is_symlink() {
+            return Err(RehearsalError::Io {
+                code: "engine-backup-alias-refused",
+            });
+        }
+        if metadata.is_dir() {
+            let relative = path
+                .strip_prefix(engine_root)
+                .map_err(|_| RehearsalError::State)?;
+            let text = relative.to_str().ok_or(RehearsalError::Io {
+                code: "engine-backup-non-utf8-path",
+            })?;
+            output.push(format!("engine/{}", portable_separators(text)));
+            collect_engine_dirs(engine_root, &path, output)?;
+        }
     }
     Ok(())
 }

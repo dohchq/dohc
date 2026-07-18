@@ -1,10 +1,12 @@
 use super::backup::{
     create_restore_tested_backup, ensure_outside_root, fingerprint_backup,
-    verify_protected_snapshots, verify_recorded_backup,
+    recorded_backup_engine_uuid, verify_protected_snapshots, verify_recorded_backup,
 };
 use super::faults::{FaultAction, FaultInjector, FaultPoint};
-use super::fence::{validate_rehearsal_root, verify_live_clone_binding};
-use super::handles::{move_aside, moved_aside_db_present};
+use super::fence::{
+    validate_rehearsal_root, verify_live_clone_binding, verify_live_reset_identity,
+};
+use super::handles::{move_aside, moved_aside_store_retained};
 use super::inventory::{load_inventory, load_or_record, scan};
 use super::state::{self, RehearsalState, StableState, StateRecord};
 use super::{Paths, RehearsalError};
@@ -44,6 +46,11 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
     ensure_outside_root(&paths.root, config.recovery_dir)?;
     let recovery_dir = canonical_recovery_dir(config.recovery_dir)?;
 
+    // The fence resolves marker files THROUGH `.dohc`/`engine`, so an aliased
+    // component would let the lock file below be created outside the clone.
+    // Refuse before anything under the root is written.
+    ensure_real_engine_dir(&paths)?;
+
     // One rehearsal per root at a time: an advisory cross-process lock held
     // from before the first state read until this function returns.
     let _root_lock = acquire_root_lock(&paths)?;
@@ -57,12 +64,21 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
                 // implies — the recorded backups, the retained old store, and
                 // the bound fresh live store — are re-proven on disk.
                 verify_recorded_backup(&recovery_dir, record.backup.as_ref())?;
-                if !moved_aside_db_present(&paths) {
+                if !moved_aside_store_retained(&paths)? {
                     return Err(RehearsalError::Io {
                         code: "complete-retained-store-missing",
                     });
                 }
                 verify_live_clone_binding(&paths.db, &validated.shadow_token)?;
+                verify_live_reset_identity(
+                    &paths.db,
+                    record
+                        .fresh_engine_uuid
+                        .as_deref()
+                        .ok_or(RehearsalError::Io {
+                            code: "resume-reset-identity-unrecorded",
+                        })?,
+                )?;
                 return Ok(RehearsalOutcome::Complete(record));
             }
             RehearsalState::Failed { .. } => return Ok(RehearsalOutcome::Failed(record)),
@@ -116,22 +132,35 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
             }
             RehearsalState::MovedAside => {
                 verify_recorded_backup(&recovery_dir, record.backup.as_ref())?;
-                if let Err(error) =
-                    initialize_fresh_store(&paths, &validated.shadow_token, config.now_ms)
-                {
-                    return fail(&paths.root, &record, failure_code(&error));
-                }
-                record = state::transition(&paths.root, &record, StableState::Initialized)?;
+                let fresh_engine_uuid = match initialize_fresh_store(
+                    &paths,
+                    &validated.shadow_token,
+                    &recovery_dir,
+                    config.now_ms,
+                ) {
+                    Ok(uuid) => uuid,
+                    Err(error) => return fail(&paths.root, &record, failure_code(&error)),
+                };
+                record = state::transition_initialized(&paths.root, &record, fresh_engine_uuid)?;
                 if config.faults.poll(FaultPoint::AfterInitialized) == FaultAction::Crash {
                     return Ok(RehearsalOutcome::Crashed(record));
                 }
             }
             RehearsalState::Initialized => {
                 // Precondition (refusal): the fresh live store must still
-                // exist and prove its clone binding — the user-file inventory
-                // below skips `.dohc`, so a missing/replaced store would
-                // otherwise be invisible on resume.
+                // exist, prove its clone binding, AND carry the recorded
+                // reset identity — the user-file inventory below skips
+                // `.dohc`, and a stale same-clone copy shares the token.
                 verify_live_clone_binding(&paths.db, &validated.shadow_token)?;
+                verify_live_reset_identity(
+                    &paths.db,
+                    record
+                        .fresh_engine_uuid
+                        .as_deref()
+                        .ok_or(RehearsalError::Io {
+                            code: "resume-reset-identity-unrecorded",
+                        })?,
+                )?;
                 let capture = load_inventory(&paths.root)
                     .and_then(|expected| {
                         let actual = scan(&paths.root)?;
@@ -169,6 +198,25 @@ fn canonical_recovery_dir(recovery_dir: &Path) -> Result<PathBuf, RehearsalError
     super::backup::create_private_dir_all(recovery_dir)?;
     std::fs::canonicalize(recovery_dir)
         .map_err(|e| RehearsalError::io("recovery-dir-canonicalize", e))
+}
+
+/// `.dohc` and `.dohc/engine` must be REAL directories: a symlinked component
+/// would redirect every marker lookup — and the lock/state writes below —
+/// into a directory outside the clone root.
+fn ensure_real_engine_dir(paths: &Paths) -> Result<(), RehearsalError> {
+    for dir in [&paths.root.join(".dohc"), &paths.engine] {
+        match std::fs::symlink_metadata(dir) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(RehearsalError::Io {
+                    code: "engine-dir-alias-refused",
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(RehearsalError::io("engine-dir-metadata", error)),
+        }
+    }
+    Ok(())
 }
 
 /// Advisory single-writer guard: the OS releases the lock when the file
@@ -275,12 +323,13 @@ fn prove_readable(path: &Path) -> Result<(), RehearsalError> {
 fn initialize_fresh_store(
     paths: &Paths,
     shadow_token: &str,
+    recovery_dir: &Path,
     now_ms: i64,
-) -> Result<(), RehearsalError> {
+) -> Result<String, RehearsalError> {
     // The retained moved-aside store is the proof that MovedAside really
     // happened. Without it (forged marker, lost sibling) nothing may be
     // created or opened — `EngineStore::open` would fabricate a fresh db.
-    if !moved_aside_db_present(paths) {
+    if !moved_aside_store_retained(paths)? {
         return Err(RehearsalError::Io {
             code: "initialize-retained-store-missing",
         });
@@ -300,5 +349,13 @@ fn initialize_fresh_store(
             code: "initialize-ownership-missing",
         });
     }
-    Ok(())
+    // The freshness proof: the backed-up ORIGINAL identity may not reappear
+    // as the live store — a stale same-clone copy (old store or backup
+    // restored over engine.db) shares the shadow token but not a new uuid.
+    if engine_uuid == recorded_backup_engine_uuid(recovery_dir)? {
+        return Err(RehearsalError::Io {
+            code: "initialize-stale-store",
+        });
+    }
+    Ok(engine_uuid)
 }

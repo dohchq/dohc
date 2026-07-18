@@ -181,9 +181,21 @@ fn verify_moved_entries(moved: &Path, verified: &VerifiedTriplet) -> Result<(), 
 }
 
 /// Roll back after a failed swap without masking the swap error. Only when the
-/// rollback ITSELF also fails is a combined code surfaced instead.
+/// rollback ITSELF also fails is a combined code surfaced instead. The engine
+/// dir is fsynced so the recreated live entries are durable before the caller
+/// can persist a terminal Failed over them.
 fn fail_swap(verified: &VerifiedTriplet, primary: RehearsalError) -> RehearsalError {
-    match restore_missing_live(verified) {
+    let rolled_back = restore_missing_live(verified).and_then(|()| {
+        match verified
+            .entries
+            .first()
+            .and_then(|entry| entry.source.parent())
+        {
+            Some(engine_dir) => super::fsync_dir(engine_dir),
+            None => Ok(()),
+        }
+    });
+    match rolled_back {
         Ok(()) => primary,
         Err(_) => RehearsalError::Io {
             code: "triplet-swap-failed-and-rollback-failed",
@@ -339,14 +351,37 @@ fn to_hex(digest: &[u8]) -> String {
     output
 }
 
-/// Whether the retained (moved-aside) old store is present — the artifact a
-/// persisted `Complete` state implies.
-pub(crate) fn moved_aside_db_present(paths: &Paths) -> bool {
-    paths
-        .engine
-        .join(MOVED_ASIDE_DIR)
-        .join("engine.db")
-        .is_file()
+/// Whether the retained (moved-aside) old store is genuinely present: a REAL
+/// regular `engine.db` (symlink_metadata — `is_file` would follow a symlink)
+/// and nothing but real regular triplet files beside it. A symlinked,
+/// hard-linked, or foreign entry means the retained store cannot be trusted.
+pub(crate) fn moved_aside_store_retained(paths: &Paths) -> Result<bool, RehearsalError> {
+    let moved = paths.engine.join(MOVED_ASIDE_DIR);
+    let entries = match std::fs::read_dir(&moved) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(RehearsalError::io("moved-aside-enumerate", error)),
+    };
+    let mut db_present = false;
+    for entry in entries {
+        let entry = entry.map_err(|e| RehearsalError::io("moved-aside-entry", e))?;
+        let metadata = std::fs::symlink_metadata(entry.path())
+            .map_err(|e| RehearsalError::io("moved-aside-metadata", e))?;
+        if metadata.file_type().is_symlink()
+            || !metadata.file_type().is_file()
+            || super::metadata_is_hard_linked(&metadata)
+        {
+            return Ok(false);
+        }
+        let name = entry.file_name();
+        if !DB_TRIPLET.iter().any(|triplet| name == *triplet) {
+            return Ok(false);
+        }
+        if name == "engine.db" {
+            db_present = true;
+        }
+    }
+    Ok(db_present)
 }
 
 #[cfg(test)]

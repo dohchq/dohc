@@ -79,6 +79,12 @@ pub struct StateRecord {
     pub current: RehearsalState,
     pub history: Vec<StableState>,
     pub backup: Option<BackupFingerprint>,
+    /// The freshly-initialized store's `engine_uuid`, recorded at the
+    /// Initialized transition. The reset-freshness proof: a stale same-clone
+    /// db (old store or backup copy, bound to the same shadow token) carries
+    /// a DIFFERENT identity and must be refused on resume.
+    #[serde(default)]
+    pub fresh_engine_uuid: Option<String>,
 }
 
 /// The state dir path, refusing any symlinked component so records can never
@@ -136,6 +142,7 @@ pub(crate) fn initialize(root: &Path) -> Result<StateRecord, RehearsalError> {
             current: RehearsalState::NotStarted,
             history: vec![StableState::NotStarted],
             backup: None,
+            fresh_engine_uuid: None,
         },
     )
 }
@@ -145,7 +152,13 @@ pub(crate) fn transition(
     record: &StateRecord,
     next: StableState,
 ) -> Result<StateRecord, RehearsalError> {
-    transition_inner(root, record, next, record.backup.clone())
+    transition_inner(
+        root,
+        record,
+        next,
+        record.backup.clone(),
+        record.fresh_engine_uuid.clone(),
+    )
 }
 
 /// The Settled→BackedUp transition: records the just-verified backup identity
@@ -155,7 +168,29 @@ pub(crate) fn transition_backed_up(
     record: &StateRecord,
     backup: BackupFingerprint,
 ) -> Result<StateRecord, RehearsalError> {
-    transition_inner(root, record, StableState::BackedUp, Some(backup))
+    transition_inner(
+        root,
+        record,
+        StableState::BackedUp,
+        Some(backup),
+        record.fresh_engine_uuid.clone(),
+    )
+}
+
+/// The MovedAside→Initialized transition: records the fresh store's identity
+/// so every later resume can re-prove the reset actually happened.
+pub(crate) fn transition_initialized(
+    root: &Path,
+    record: &StateRecord,
+    fresh_engine_uuid: String,
+) -> Result<StateRecord, RehearsalError> {
+    transition_inner(
+        root,
+        record,
+        StableState::Initialized,
+        record.backup.clone(),
+        Some(fresh_engine_uuid),
+    )
 }
 
 fn transition_inner(
@@ -163,6 +198,7 @@ fn transition_inner(
     record: &StateRecord,
     next: StableState,
     backup: Option<BackupFingerprint>,
+    fresh_engine_uuid: Option<String>,
 ) -> Result<StateRecord, RehearsalError> {
     let current = record.current.stable().ok_or(RehearsalError::State)?;
     if next_index(next) != next_index(current).saturating_add(1) {
@@ -177,6 +213,7 @@ fn transition_inner(
             current: next.into(),
             history,
             backup,
+            fresh_engine_uuid,
         },
     )
 }
@@ -197,6 +234,7 @@ pub(crate) fn fail(
             },
             history: record.history.clone(),
             backup: record.backup.clone(),
+            fresh_engine_uuid: record.fresh_engine_uuid.clone(),
         },
     )
 }
@@ -211,6 +249,12 @@ fn persist(root: &Path, record: StateRecord) -> Result<StateRecord, RehearsalErr
         record.generation,
         std::process::id()
     ));
+    // A stale temp from a crash before publication (PID reuse included) is
+    // uncommitted scratch; clear it so the resume is not wedged by
+    // `create_new`.
+    if std::fs::symlink_metadata(&tmp_path).is_ok() {
+        std::fs::remove_file(&tmp_path).map_err(|e| RehearsalError::io("state-temp-clear", e))?;
+    }
     let bytes = serde_json::to_vec(&record).map_err(|_| RehearsalError::State)?;
     let mut file = OpenOptions::new()
         .write(true)
@@ -246,6 +290,10 @@ fn validate_record(record: &StateRecord) -> Result<(), RehearsalError> {
     // A record claiming BackedUp-or-later must carry the backup fingerprint it
     // was recorded with; a record before BackedUp must not carry one.
     if record.backup.is_some() != record.history.contains(&StableState::BackedUp) {
+        return Err(RehearsalError::State);
+    }
+    // Same discipline for the reset-identity proof at Initialized.
+    if record.fresh_engine_uuid.is_some() != record.history.contains(&StableState::Initialized) {
         return Err(RehearsalError::State);
     }
     match &record.current {

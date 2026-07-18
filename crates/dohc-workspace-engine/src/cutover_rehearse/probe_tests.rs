@@ -526,6 +526,7 @@ fn forged_backed_up_state_with_fabricated_fingerprint_fails_closed() {
             db_checksum: "00".repeat(32),
             directory_manifest_sha256: "11".repeat(32),
         }),
+        fresh_engine_uuid: None,
     };
     forge_state_json(
         &fixture.state_dir(),
@@ -563,6 +564,7 @@ fn forged_moved_aside_state_does_not_clobber_live_store() {
             StableState::MovedAside,
         ],
         backup: crashed.backup.clone(),
+        fresh_engine_uuid: None,
     };
     forge_state_json(
         &fixture.state_dir(),
@@ -991,6 +993,192 @@ fn directory_backup_reuse_requires_matching_live_source() {
             }
         ),
         "unexpected error: {error:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Alias escapes and reset-freshness proofs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn aliased_engine_dir_is_refused_before_lock_creation() {
+    use dohc_engine_testkit::try_make_dir_alias;
+
+    let root = ScratchDir::new().expect("root");
+    let target = ScratchDir::new().expect("alias target");
+    // Valid marker files live in the TARGET; the clone's `.dohc/engine` is an
+    // alias pointing at it, so the fence lookups succeed through the alias.
+    std::fs::write(target.join("SHADOW_CLONE"), SHADOW_TOKEN).expect("shadow marker");
+    std::fs::write(target.join("CUTOVER_REHEARSAL_TOKEN"), REHEARSAL_TOKEN)
+        .expect("rehearsal token");
+    let dohc = root.join(".dohc");
+    std::fs::create_dir(&dohc).expect("dohc dir");
+    if !try_make_dir_alias(target.path(), &dohc.join("engine")).expect("alias attempt") {
+        return; // platform cannot create directory aliases — skip honestly
+    }
+
+    let recovery = ScratchDir::new().expect("recovery");
+    let result = run_rehearsal(RehearsalConfig {
+        root: root.path(),
+        recovery_dir: recovery.path(),
+        now_ms: NOW_MS,
+        faults: &NoFaults,
+    });
+    assert_refusal_code(result, "engine-dir-alias-refused");
+    assert!(
+        !target.join("CUTOVER_REHEARSAL_LOCK").exists(),
+        "the lock must never be created through the alias"
+    );
+    assert!(
+        !target.join("CUTOVER_REHEARSAL_STATE").exists(),
+        "no state may be created through the alias"
+    );
+}
+
+#[test]
+fn symlinked_retained_store_is_refused() {
+    use dohc_engine_testkit::try_make_file_symlink;
+
+    let fixture = Fixture::new();
+    let faults = ScriptedFaults::crash_at(FaultPoint::AfterMovedAside);
+    assert!(matches!(
+        fixture.run(faults.as_ref()),
+        RehearsalOutcome::Crashed(_)
+    ));
+    let paths = fixture.paths();
+
+    // The retained engine.db is replaced by a symlink to a stashed copy: the
+    // followed bytes are identical, but the retained store is no longer real.
+    let moved_db = moved_aside_path(&paths).join("engine.db");
+    let stash = fixture.recovery.join("stashed-retained.db");
+    std::fs::copy(&moved_db, &stash).expect("stash retained db");
+    std::fs::remove_file(&moved_db).expect("remove retained db");
+    if !try_make_file_symlink(&stash, &moved_db).expect("symlink attempt") {
+        return; // platform cannot create file symlinks — skip honestly
+    }
+
+    let outcome = fixture.run(&NoFaults);
+    let record = match outcome {
+        RehearsalOutcome::Failed(record) => record,
+        other => panic!("a symlinked retained store must be refused: {other:?}"),
+    };
+    assert_eq!(failure_reason(&record), "initialize-retained-store-missing");
+    assert!(
+        !paths.db.exists(),
+        "initialize must not fabricate a fresh store over an untrusted sibling"
+    );
+}
+
+#[test]
+fn stale_same_clone_db_at_moved_aside_resume_is_refused() {
+    let fixture = Fixture::new();
+    let faults = ScriptedFaults::crash_at(FaultPoint::AfterMovedAside);
+    assert!(matches!(
+        fixture.run(faults.as_ref()),
+        RehearsalOutcome::Crashed(_)
+    ));
+    let paths = fixture.paths();
+
+    // The ORIGINAL store (bound to the same shadow token) is copied back over
+    // engine.db: the token check alone would accept it as "reset".
+    std::fs::copy(moved_aside_path(&paths).join("engine.db"), &paths.db)
+        .expect("copy stale store back");
+
+    let outcome = fixture.run(&NoFaults);
+    let record = match outcome {
+        RehearsalOutcome::Failed(record) => record,
+        other => panic!("a stale same-clone db must not pass as a reset: {other:?}"),
+    };
+    assert_eq!(failure_reason(&record), "initialize-stale-store");
+}
+
+#[test]
+fn stale_same_clone_db_at_initialized_resume_is_refused() {
+    let fixture = Fixture::new();
+    let faults = ScriptedFaults::crash_at(FaultPoint::AfterInitialized);
+    assert!(matches!(
+        fixture.run(faults.as_ref()),
+        RehearsalOutcome::Crashed(_)
+    ));
+    let paths = fixture.paths();
+
+    // The fresh store is replaced by the stale same-clone original AFTER the
+    // Initialized marker: the shared token passes, the recorded reset
+    // identity must not.
+    std::fs::remove_file(&paths.db).expect("drop fresh store");
+    std::fs::copy(moved_aside_path(&paths).join("engine.db"), &paths.db)
+        .expect("copy stale store back");
+
+    assert_refused(
+        fixture.root.path(),
+        || fixture.try_run_with_recovery(fixture.recovery.path()),
+        "live-db-reset-identity-mismatch",
+    );
+}
+
+#[test]
+fn new_protected_sibling_after_backup_fails_capture() {
+    let fixture = Fixture::new();
+    // No agent-runs.json at backup time.
+    std::fs::remove_file(fixture.root.join(".dohc").join("agent-runs.json"))
+        .expect("remove sibling before backup");
+    let faults = ScriptedFaults::crash_at(FaultPoint::AfterInitialized);
+    assert!(matches!(
+        fixture.run(faults.as_ref()),
+        RehearsalOutcome::Crashed(_)
+    ));
+
+    // The protected sibling APPEARS before the capture resume: it has no
+    // restore point, so Complete must be refused.
+    std::fs::write(
+        fixture.root.join(".dohc").join("agent-runs.json"),
+        br#"{"runs":["late"]}"#,
+    )
+    .expect("late sibling");
+
+    let outcome = fixture.run(&NoFaults);
+    let record = match outcome {
+        RehearsalOutcome::Failed(record) => record,
+        other => panic!("an unprotected new sibling must fail capture: {other:?}"),
+    };
+    assert_eq!(failure_reason(&record), "capture-snapshot-unprotected");
+}
+
+#[test]
+fn empty_engine_subdir_is_recorded_in_backup() {
+    use super::backup::create_restore_tested_backup;
+
+    let fixture = Fixture::new();
+    std::fs::create_dir(fixture.engine_dir().join("empty-subdir")).expect("empty subdir");
+    let paths = fixture.paths();
+    create_restore_tested_backup(
+        &paths,
+        fixture.recovery.path(),
+        SHADOW_TOKEN,
+        NOW_MS + 1,
+        &NoFaults,
+    )
+    .expect("backup with empty subdir");
+
+    let manifest = load_valid_directory_backup(fixture.recovery.path())
+        .expect("manifest")
+        .expect("backup validates");
+    assert!(
+        manifest
+            .directories
+            .iter()
+            .any(|dir| dir == "engine/empty-subdir"),
+        "the empty subdir must be manifested: {:?}",
+        manifest.directories
+    );
+    assert!(
+        fixture
+            .recovery
+            .join("cutover-files")
+            .join("engine")
+            .join("empty-subdir")
+            .is_dir(),
+        "the empty subdir must exist in the backup"
     );
 }
 
