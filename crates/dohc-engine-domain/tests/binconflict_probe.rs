@@ -8,11 +8,13 @@ use dohc_engine_domain::conflicts::hydrate_binary_conflict_blob;
 use dohc_engine_domain::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictStatus,
     DomainError, EngineStore, NoFaults, ResolveConflictKind, ResolveTextConflict, TextConflict,
-    TextSnapshot, VersionedTextStore, WriteText, insert_text_conflict_if_absent,
-    load_text_conflict_in_tx,
+    TextSnapshot, VersionedTextStore, WriteBinaryFile, WriteText, insert_text_conflict_if_absent,
+    load_text_conflict_in_tx, write_binary_file_in_tx,
 };
 use dohc_engine_storage::blob::{binary_blob_count, get_binary_blob};
-use dohc_engine_storage::{MAX_BLOB_BYTES, StorageError, has_binary_blob, hex_sha256};
+use dohc_engine_storage::{
+    MAX_BLOB_BYTES, Preimage, StorageError, has_binary_blob, hex_sha256, put_binary_blob,
+};
 use dohc_engine_testkit::ScratchDir;
 use rusqlite::params;
 
@@ -104,6 +106,30 @@ fn resolve_input(id: &str, kind: ResolveConflictKind) -> ResolveTextConflict {
         now_ms: 3_000,
         request_id: None,
     }
+}
+
+/// Write a live BINARY head at `path` (its own object + moment).
+fn write_binary_head(store: &mut EngineStore, object_id: &str, path: &str, bytes: &[u8]) -> String {
+    let sha = hex_sha256(bytes);
+    store
+        .write_with(&NoFaults, |tx| {
+            put_binary_blob(tx, bytes).map_err(DomainError::from)?;
+            write_binary_file_in_tx(
+                tx,
+                &WriteBinaryFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: object_id.to_owned(),
+                    path: path.to_owned(),
+                    binary_sha256: sha.clone(),
+                    job_id: format!("binjob-{object_id}"),
+                    preimage: Preimage::Absent,
+                    now_ms: 2_500,
+                },
+            )
+        })
+        .expect("write binary head");
+    sha
 }
 
 fn hydrate(store: &mut EngineStore, bytes: &[u8]) -> String {
@@ -757,4 +783,100 @@ fn text_side_with_binary_sha_rejected() {
         .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
         .expect_err("text side with binary sha must be rejected");
     assert_invalid_input(&err, "text conflict side cannot reference a binary blob");
+}
+
+/// M3 regression: a TEXT conflict recorded while the path was ABSENT must NOT be
+/// resolvable after a BINARY head appears at that path. The stale-target gate has
+/// to see the binary head (content-kind mismatch) and fail closed with
+/// `ConflictStaleTarget`, NOT invisibly treat the path as still-absent and let the
+/// incoming text overwrite/delete the newer binary head.
+#[test]
+fn text_resolve_over_now_binary_path_is_stale_not_clobber() {
+    let (_scratch, mut store) = open_store();
+    let c = conflict(
+        "text-over-binary",
+        "occupied.md",
+        ConflictFileState::text("occupied.md", None),
+        // Path was absent when the conflict opened.
+        ConflictFileState::text("occupied.md", None),
+        ConflictFileState::text(
+            "occupied.md",
+            Some(incoming_text_snapshot("occupied.md", "incoming body")),
+        ),
+    );
+    store
+        .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
+        .expect("open text conflict over absent path");
+
+    // A binary head now occupies the path.
+    let binary_sha = write_binary_head(&mut store, "occupied-obj", "occupied.md", b"\x00pic\xff");
+
+    let err = VersionedTextStore::new(&mut store)
+        .resolve_text_conflict(
+            &resolve_input("text-over-binary", ResolveConflictKind::ApplyIncoming),
+            &NoFaults,
+        )
+        .expect_err("a binary head at the path must make the resolve stale");
+    assert_eq!(err.code(), "conflict-stale-target");
+
+    // The binary head is untouched — no clobber.
+    let (kind, bin_sha): (String, Option<String>) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT content_kind, binary_sha256 FROM snapshots \
+                 WHERE workspace_id = ?1 AND version_id = 'main' AND path = 'occupied.md'",
+                [WS],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .expect("live head");
+    assert_eq!(kind, "binary");
+    assert_eq!(bin_sha.as_deref(), Some(binary_sha.as_str()));
+}
+
+/// M3 regression: the occupied-DESTINATION check on a move-resolve must also see
+/// a binary head. A text conflict that moves its head onto a destination now held
+/// by a binary head must report `TargetPathExists`, not clobber the binary head.
+#[test]
+fn text_move_resolve_onto_binary_destination_is_occupied_not_clobber() {
+    let (_scratch, mut store) = open_store();
+    let current = write_file(&mut store, "src.md", "current body");
+    // Incoming is a MOVE: same content, different destination path.
+    let mut incoming = incoming_text_snapshot("dst.md", "current body");
+    incoming.blob_sha256 = current.blob_sha256.clone();
+    let c = conflict(
+        "text-move",
+        "src.md",
+        ConflictFileState::text("src.md", None),
+        ConflictFileState::text("src.md", Some(current)),
+        ConflictFileState::text("dst.md", Some(incoming)),
+    );
+    store
+        .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
+        .expect("open move conflict");
+
+    // A binary head occupies the destination.
+    let binary_sha = write_binary_head(&mut store, "dst-obj", "dst.md", b"\x00dst\xff");
+
+    let err = VersionedTextStore::new(&mut store)
+        .resolve_text_conflict(
+            &resolve_input("text-move", ResolveConflictKind::ApplyIncoming),
+            &NoFaults,
+        )
+        .expect_err("a binary head at the destination must be occupied");
+    assert_eq!(err.code(), "target-path-exists");
+
+    // The binary destination head is untouched.
+    let (kind, bin_sha): (String, Option<String>) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT content_kind, binary_sha256 FROM snapshots \
+                 WHERE workspace_id = ?1 AND version_id = 'main' AND path = 'dst.md'",
+                [WS],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .expect("live destination head");
+    assert_eq!(kind, "binary");
+    assert_eq!(bin_sha.as_deref(), Some(binary_sha.as_str()));
 }

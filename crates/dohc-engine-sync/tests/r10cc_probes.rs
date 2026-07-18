@@ -454,3 +454,66 @@ fn mirrored_text_resolve_on_ignored_path_defers_and_acks() {
         "the ack must advance even when the text apply cannot proceed"
     );
 }
+
+/// Finding B (ACK-and-defer liveness): a mirrored binary resolve whose derived
+/// moment id (== job id) collides with a moment id already in this workspace
+/// must ACK-and-DEFER (`BinaryApplyFailed`), NOT fatally `Err`. Before the
+/// precheck, the `INSERT INTO moments` hit the UNIQUE constraint → `Storage`
+/// (fatal) → the replicated resolve retried forever (poison pill). The binary
+/// write now prechecks `moment_exists` and returns `DuplicateMomentId` (a
+/// validation rejection), which `apply_within_savepoint` routes to defer.
+#[test]
+fn binary_apply_defers_on_duplicate_moment_id_instead_of_poison_pilling() {
+    let (_s, mut store) = store();
+    // Pre-seed a moment with EXACTLY the id the mirrored binary write will derive
+    // for resolve coord (peer, seq=1): mirrored_id(envelope, "binary-materialize")
+    // = sha256("ws:peer:1:binary-materialize"). A real local write at a different
+    // path is the cleanest way to occupy that moment id with a valid row.
+    let colliding_moment = format!(
+        "sync-conflict-binary-materialize-{}",
+        hex_sha256(b"ws:peer:1:binary-materialize")
+    );
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &WriteText {
+                workspace_id: "ws".to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "collide-obj".to_owned(),
+                path: "other.md".to_owned(),
+                text: "occupant".to_owned(),
+                moment_id: colliding_moment,
+                metadata_origin: "local".to_owned(),
+                author_json: None,
+                now_ms: 1_600,
+                request_id: None,
+            },
+            &NoFaults,
+        )
+        .expect("pre-seed colliding moment id");
+
+    // current absent → the binary write takes the new-object branch and reaches
+    // the moment INSERT (where the collision would otherwise be fatal).
+    open_mirrored(&mut store, "dupmoment-bin", false);
+    make_incoming_binary(&mut store, "dupmoment-bin", b"\x00dup moment binary\xff");
+    let jobs_before = job_count(&store);
+
+    let outcome = apply_conflict_envelope(
+        &mut store,
+        &resolve_env("peer", 1, "dupmoment-bin"),
+        &NoFaults,
+    )
+    .expect("a duplicate moment id must DEFER, never propagate as Err");
+
+    assert_eq!(
+        deferred_reason(&outcome),
+        PendingResolveReason::BinaryApplyFailed
+    );
+    // The conflict stays open and the ack advances — no infinite retry.
+    assert_eq!(conflict_status(&store, "dupmoment-bin"), "open");
+    assert_eq!(acked_seq(&store, "peer"), 1);
+    assert_eq!(
+        job_count(&store),
+        jobs_before,
+        "no binary job may be staged from the rolled-back apply"
+    );
+}

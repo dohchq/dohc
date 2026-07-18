@@ -90,6 +90,26 @@ pub struct TextSnapshot {
     pub metadata_origin: String,
 }
 
+/// The durable snapshot head for either text or binary content.
+///
+/// `TextSnapshot` remains the compatibility view exposed by the text APIs;
+/// storage and conflict paths use this record so a binary head is never
+/// mistaken for an absent text snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SnapshotRecord {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub object_id: String,
+    pub path: String,
+    pub text: String,
+    pub blob_sha256: Option<String>,
+    pub content_kind: String,
+    pub binary_sha256: Option<String>,
+    pub updated_at_ms: i64,
+    pub latest_moment_id: String,
+    pub metadata_origin: String,
+}
+
 /// Stable file-object identity, independent of any version-local path alias.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileObjectRecord {
@@ -108,11 +128,15 @@ pub struct MomentRecord {
     pub path: String,
     pub recorded_at_ms: i64,
     pub operation: MomentOp,
-    pub after_blob_sha256: String,
+    pub after_content_kind: String,
+    pub after_blob_sha256: Option<String>,
+    pub after_binary_sha256: Option<String>,
     /// `true` when a concrete rollback preimage was recorded. This represents
     /// TS `before_present = 2`; `false` covers both no preimage and legacy-unset.
     pub before_present: bool,
     pub before_blob_sha256: Option<String>,
+    pub before_content_kind: String,
+    pub before_binary_sha256: Option<String>,
     /// The moment that produced the concrete `before` snapshot, or `None` when
     /// this mutation had no preimage (a first write / legacy row).
     pub before_latest_moment_id: Option<String>,

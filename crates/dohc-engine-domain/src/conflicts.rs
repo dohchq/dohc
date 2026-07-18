@@ -3,8 +3,9 @@
 use crate::error::DomainError;
 use crate::records::{DeleteResult, DeleteTextFile, TextSnapshot, WriteResult, WriteText};
 use crate::store::{
-    VersionedTextStore, delete_text_in_tx, hash_fields, lookup_request, record_request,
-    validate_delete_input, validate_path, validate_write_input, write_text_in_tx,
+    VersionedTextStore, delete_text_in_tx, hash_fields, lookup_request, moment_exists,
+    next_moment_order, record_request, validate_delete_input, validate_path, validate_write_input,
+    write_text_in_tx,
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
@@ -58,11 +59,20 @@ impl ConflictMetadata {
 /// carried by `snapshot`, while binary is carried by `binary_sha256`. `path`
 /// remains explicit because an absent side and a divergent move still carry a
 /// meaningful destination.
+///
+/// A binary head carries its own IDENTITY (`binary_object_id` +
+/// `binary_latest_moment_id`) so the exact-head stale gate is as strict for
+/// binary as it is for text (a text side keeps identity inside its
+/// `TextSnapshot`). Without it, any later binary head sharing the same bytes at
+/// the same path would spuriously match the recorded current head and let a
+/// mirrored resolve clobber a NEWER head.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConflictFileState {
     pub path: String,
     pub snapshot: Option<TextSnapshot>,
     pub binary_sha256: Option<String>,
+    pub binary_object_id: Option<String>,
+    pub binary_latest_moment_id: Option<String>,
     pub content_kind: ConflictContentKind,
     pub metadata_summary: Option<String>,
     pub metadata_correlation_id: Option<String>,
@@ -74,17 +84,49 @@ impl ConflictFileState {
             path: path.into(),
             snapshot,
             binary_sha256: None,
+            binary_object_id: None,
+            binary_latest_moment_id: None,
             content_kind: ConflictContentKind::Text,
             metadata_summary: None,
             metadata_correlation_id: None,
         }
     }
 
+    /// A binary side by bytes only (no head identity). Used where only the
+    /// content is compared (e.g. current-vs-incoming byte equality).
     pub fn binary(path: impl Into<String>, binary_sha256: impl Into<String>) -> Self {
         ConflictFileState {
             path: path.into(),
             snapshot: None,
             binary_sha256: Some(binary_sha256.into()),
+            binary_object_id: None,
+            binary_latest_moment_id: None,
+            content_kind: ConflictContentKind::Binary,
+            metadata_summary: None,
+            metadata_correlation_id: None,
+        }
+    }
+
+    /// Whether this side carries live content (a text snapshot or a binary
+    /// head). An absent side is a deletion / an unoccupied path.
+    pub fn is_present(&self) -> bool {
+        self.snapshot.is_some() || self.binary_sha256.is_some()
+    }
+
+    /// A binary HEAD carrying its full identity — object + latest moment — so
+    /// the exact-head gate can reject a same-bytes-but-recreated head.
+    pub fn binary_head(
+        path: impl Into<String>,
+        binary_sha256: impl Into<String>,
+        object_id: impl Into<String>,
+        latest_moment_id: impl Into<String>,
+    ) -> Self {
+        ConflictFileState {
+            path: path.into(),
+            snapshot: None,
+            binary_sha256: Some(binary_sha256.into()),
+            binary_object_id: Some(object_id.into()),
+            binary_latest_moment_id: Some(latest_moment_id.into()),
             content_kind: ConflictContentKind::Binary,
             metadata_summary: None,
             metadata_correlation_id: None,
@@ -266,7 +308,36 @@ pub fn live_state_matches_conflict_current(
             _ => false,
         },
         ConflictContentKind::Binary => {
-            live.path == recorded.path && live.binary_sha256 == recorded.binary_sha256
+            // Path + bytes must always match.
+            if live.path != recorded.path || live.binary_sha256 != recorded.binary_sha256 {
+                return false;
+            }
+            match (
+                &recorded.binary_object_id,
+                &recorded.binary_latest_moment_id,
+            ) {
+                // The recorded side carries head identity (the M2 no-clobber
+                // path). As strict as text: require the SAME object + latest
+                // moment, so a same-bytes-but-recreated binary head does NOT
+                // match and cannot be clobbered by a mirrored resolve.
+                (Some(_), Some(_)) => {
+                    live.binary_object_id == recorded.binary_object_id
+                        && live.binary_latest_moment_id == recorded.binary_latest_moment_id
+                }
+                // Legacy NULL-identity side (`ConflictFileState::binary()` or a
+                // v9-era binary conflict row) has no identity to compare. Fall
+                // back to the pre-M2 path+sha match (already satisfied above)
+                // rather than mismatching Some(..) != None and deferring the
+                // resolve FOREVER as StaleHead.
+                (None, None) => true,
+                // Partially-populated identity (Some,None)/(None,Some) can only
+                // come from corruption — a real binary head always carries BOTH
+                // object + latest moment together (`binary_head`), and a legacy
+                // side carries NEITHER. Fail closed (defer as StaleHead) rather
+                // than let a half-identity side bypass the exact-head check and
+                // match a recreated same-bytes head.
+                _ => false,
+            }
         }
     }
 }
@@ -502,13 +573,16 @@ impl VersionedTextStore<'_> {
             {
                 return Err(binary_conflicts_unsupported());
             }
-            let live_snapshot = select_text_snapshot_by_path_in_tx(
+            // Binary-head-aware live read: a binary head that appeared at the
+            // path after a (text) conflict was opened must fail the exact-head
+            // gate (content-kind mismatch), NOT be invisibly treated as absent
+            // and clobbered by the incoming text.
+            let live = select_snapshot_by_path_in_tx(
                 tx,
                 &conflict.workspace_id,
                 &conflict.target_version_id,
                 &conflict.path,
             )?;
-            let live = ConflictFileState::text(conflict.path.clone(), live_snapshot);
             if !live_state_matches_conflict_current(&live, &conflict.current) {
                 return Err(DomainError::ConflictStaleTarget);
             }
@@ -523,13 +597,16 @@ impl VersionedTextStore<'_> {
                     if let Some(incoming) = &conflict.incoming.snapshot {
                         let destination = conflict.incoming.path.clone();
                         if destination != conflict.path {
-                            if select_text_snapshot_by_path_in_tx(
+                            // Occupied-destination check must see a binary head
+                            // too: writing the incoming text onto a path already
+                            // held by a binary head would clobber it.
+                            if select_snapshot_by_path_in_tx(
                                 tx,
                                 &conflict.workspace_id,
                                 &conflict.target_version_id,
                                 &destination,
                             )?
-                            .is_some()
+                            .is_present()
                             {
                                 return Err(DomainError::TargetPathExists);
                             }
@@ -684,12 +761,8 @@ pub fn enqueue_delete(
 
 /// Apply a verified binary file state inside a caller-owned transaction.
 ///
-/// Rust's current version-domain snapshot rows are text-only. Binary file
-/// state therefore uses the shared file-object/path identity plus the same
-/// content-addressed materialization ledger consumed by
-/// `dohc-engine-files::materialize`. The superseded text snapshot is removed
-/// in the same transaction as the binary write intent, so it can never remain
-/// authoritative after the binary bytes have been selected.
+/// Binary writes append the same durable head shape as text writes: one moment,
+/// one current snapshot, and one materialization intent sharing its generation.
 #[doc(hidden)]
 pub fn write_binary_file_in_tx(
     tx: &Transaction<'_>,
@@ -725,6 +798,16 @@ pub fn write_binary_file_in_tx(
     if version_exists.is_none() {
         return Err(DomainError::VersionNotFound);
     }
+    // The moment id (== job_id) must be unique. Precheck and return a VALIDATION
+    // error (`DuplicateMomentId`) rather than letting the `INSERT INTO moments`
+    // hit the UNIQUE constraint and surface as `Storage(PersistFailed)`. On the
+    // mirrored-resolve path a Storage error is treated as FATAL by
+    // `apply_within_savepoint` (retries forever), whereas a validation rejection
+    // acks-and-defers — mirroring `write_text_in_tx`, which prechecks the same
+    // way so a colliding id never poison-pills replication.
+    if moment_exists(tx, &input.workspace_id, &input.job_id)? {
+        return Err(DomainError::DuplicateMomentId);
+    }
 
     let existing_object: Option<String> = tx
         .query_row(
@@ -735,8 +818,40 @@ pub fn write_binary_file_in_tx(
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    let object_id = if let Some(existing) = existing_object {
-        existing
+    let (object_id, before) = if let Some(existing) = existing_object {
+        let before: Option<(String, Option<String>, Option<String>, String)> = tx
+            .query_row(
+                "SELECT COALESCE(content_kind, 'text'), blob_sha256, binary_sha256, \
+                 latest_moment_id FROM snapshots \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![input.workspace_id, input.version_id, existing],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(DomainError::sql_corrupt)?;
+        let before = before.ok_or(DomainError::StateCorrupt {
+            reason: "path alias points at a missing snapshot",
+        })?;
+        match before.0.as_str() {
+            "text" if before.1.is_some() => {}
+            "binary" if before.2.is_some() => {}
+            "text" => {
+                return Err(DomainError::StateCorrupt {
+                    reason: "text snapshot is missing its blob",
+                });
+            }
+            "binary" => {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary snapshot is missing its blob",
+                });
+            }
+            _ => {
+                return Err(DomainError::StateCorrupt {
+                    reason: "snapshot has an unknown content kind",
+                });
+            }
+        }
+        (existing, Some(before))
     } else {
         // Object identity is GLOBALLY unique: `file_objects` declares
         // `UNIQUE (object_id)` (matching the canonical engine schema), so the
@@ -773,44 +888,82 @@ pub fn write_binary_file_in_tx(
             ],
         )
         .map_err(DomainError::sql_persist)?;
-        input.object_id.clone()
+        (input.object_id.clone(), None)
     };
 
-    // TRACKED FOLLOW-UP — "binary content head representation" obligation. All
-    // three items below stem from binary content having NO in-db head/snapshot/
-    // moment row, blocked because `moments.after_blob_sha256` is a NOT-NULL FK
-    // to the TEXT `blobs` table. Each needs a binary content head (a schema
-    // change outside this shard's owned paths) and is DORMANT-only (no real
-    // binary data before R15):
-    //   1. GENERATION COLLISION (this line): a binary write inserts no moment,
-    //      so `next_moment_order` (MAX(moments)+1, ignoring jobs) re-issues this
-    //      generation to the next same-path text write, defeating the
-    //      materializer's strict-`>` newest-wins supersede gate. Fixing it needs
-    //      a real binary moment or a `store::next_moment_order` that also counts
-    //      jobs. (See the `#[ignore]`d `binary_generation_is_not_reused_by_next_
-    //      text_write` regression.)
-    //   2. TEXTLESS-ALIAS STALE-HEAD BLINDNESS (conflict_apply.rs live-state
-    //      check): after a binary apply the path has a `path_aliases` entry but
-    //      no `snapshots` row, so a later mirrored resolve whose current side is
-    //      absent-text reads `None`, sees "absent", and can wrongly pass the
-    //      stale-head gate over the binary-occupied path.
-    //   3. SPURIOUS MATERIALIZE-CONFLICT: with no snapshot row, a later same-path
-    //      text write is a fresh `Preimage::Absent` insert, which can surface a
-    //      false materialize-conflict against the invisible binary head.
-    let target_generation: i64 = tx
-        .query_row(
-            "SELECT COALESCE(MAX(generation), 0) + 1 FROM (\
-               SELECT moment_order AS generation FROM moments \
-               UNION ALL \
-               SELECT target_generation AS generation FROM materialization_jobs\
-             )",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(DomainError::sql_corrupt)?;
+    let moment_order = next_moment_order(tx)?;
+    let (
+        before_present,
+        before_content_kind,
+        before_blob_sha256,
+        before_binary_sha256,
+        before_latest_moment_id,
+    ) = match before {
+        Some((content_kind, blob_sha256, binary_sha256, latest_moment_id)) => (
+            2,
+            content_kind,
+            blob_sha256,
+            binary_sha256,
+            Some(latest_moment_id),
+        ),
+        None => (1, "text".to_owned(), None, None, None),
+    };
     tx.execute(
-        "DELETE FROM snapshots WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-        params![input.workspace_id, input.version_id, object_id],
+        "INSERT INTO moments (
+             workspace_id, moment_order, moment_id, version_id, object_id, path,
+             recorded_at_ms, operation, after_blob_sha256, before_present,
+             before_blob_sha256, before_latest_moment_id, metadata_origin, author_json,
+             sync_record_only, after_content_kind, after_binary_sha256,
+             before_content_kind, before_binary_sha256
+         ) VALUES (
+             ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'write', NULL, ?8,
+             ?9, ?10, 'sync', NULL, NULL, 'binary', ?11, ?12, ?13
+         )",
+        params![
+            input.workspace_id,
+            moment_order,
+            input.job_id,
+            input.version_id,
+            object_id,
+            input.path,
+            input.now_ms,
+            before_present,
+            before_blob_sha256,
+            before_latest_moment_id,
+            input.binary_sha256,
+            before_content_kind,
+            before_binary_sha256,
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    tx.execute(
+        "INSERT INTO snapshots (
+             workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
+             latest_moment_id, metadata_origin, content_kind, binary_sha256
+         ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, 'sync', 'binary', ?7)
+         ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET
+             path = excluded.path,
+             blob_sha256 = NULL,
+             updated_at_ms = excluded.updated_at_ms,
+             latest_moment_id = excluded.latest_moment_id,
+             metadata_origin = excluded.metadata_origin,
+             content_kind = excluded.content_kind,
+             binary_sha256 = excluded.binary_sha256",
+        params![
+            input.workspace_id,
+            input.version_id,
+            object_id,
+            input.path,
+            input.now_ms,
+            input.job_id,
+            input.binary_sha256,
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    tx.execute(
+        "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
+         VALUES (?1, 'moment.append', ?2)",
+        params![object_id, input.now_ms],
     )
     .map_err(DomainError::sql_persist)?;
     enqueue_job(
@@ -820,7 +973,7 @@ pub fn write_binary_file_in_tx(
             target_path: input.path.clone(),
             content_sha256: input.binary_sha256.clone(),
             preimage: input.preimage.clone(),
-            target_generation,
+            target_generation: moment_order,
             now_ms: input.now_ms,
         },
     )?;
@@ -896,10 +1049,13 @@ fn side_bindings(side: &ConflictFileState) -> SideBindings<'_> {
     SideBindings {
         exists: i64::from(side.snapshot.is_some() || side.binary_sha256.is_some()),
         path: &side.path,
+        // Object id + latest moment carry head identity for BOTH kinds: text
+        // takes them from its snapshot, binary from its head-identity fields.
         object_id: side
             .snapshot
             .as_ref()
-            .map(|snapshot| snapshot.object_id.as_str()),
+            .map(|snapshot| snapshot.object_id.as_str())
+            .or(side.binary_object_id.as_deref()),
         content_kind: side.content_kind.as_str(),
         blob_sha256: side
             .snapshot
@@ -913,7 +1069,8 @@ fn side_bindings(side: &ConflictFileState) -> SideBindings<'_> {
         latest_moment_id: side
             .snapshot
             .as_ref()
-            .map(|snapshot| snapshot.latest_moment_id.as_str()),
+            .map(|snapshot| snapshot.latest_moment_id.as_str())
+            .or(side.binary_latest_moment_id.as_deref()),
         metadata_origin: side
             .snapshot
             .as_ref()
@@ -1107,10 +1264,24 @@ fn map_side(
             None
         }
     };
+    // Head identity for a binary side is carried in the shared object/latest
+    // moment columns; a text side keeps it inside its `TextSnapshot`, so leave
+    // these `None` there to avoid duplicating it.
+    let (binary_object_id, binary_latest_moment_id) = match content_kind {
+        ConflictContentKind::Binary => (
+            row.get(column("object_id").as_str())
+                .map_err(DomainError::sql_corrupt)?,
+            row.get(column("latest_moment_id").as_str())
+                .map_err(DomainError::sql_corrupt)?,
+        ),
+        ConflictContentKind::Text => (None, None),
+    };
     Ok(ConflictFileState {
         path,
         snapshot,
         binary_sha256,
+        binary_object_id,
+        binary_latest_moment_id,
         content_kind,
         metadata_summary: row
             .get(column("metadata_summary").as_str())
@@ -1142,34 +1313,107 @@ fn binary_conflicts_unsupported() -> DomainError {
 }
 
 #[doc(hidden)]
-pub fn select_text_snapshot_by_path_in_tx(
+/// Read the live head at `path` as a content-aware [`ConflictFileState`] — a
+/// text head, a binary head (WITH its object + latest-moment identity), or an
+/// absent side. Unlike a text-only read that inner-`JOIN`s `blobs` (and is blind
+/// to a binary head, whose `blob_sha256` is NULL), this is authoritative for
+/// BOTH kinds, so a stale-target / occupied-destination gate never misses a
+/// binary head sitting at the path. Use THIS in every gate/comparison; a
+/// text-only head read must never decide a clobber.
+pub fn select_snapshot_by_path_in_tx(
     conn: &Connection,
     workspace_id: &str,
     version_id: &str,
     path: &str,
-) -> Result<Option<TextSnapshot>, DomainError> {
-    conn.query_row(
-        "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms,
-         s.latest_moment_id, s.metadata_origin FROM snapshots s
-         JOIN blobs b ON b.sha256 = s.blob_sha256
-         WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path = ?3",
-        params![workspace_id, version_id, path],
-        |row| {
-            Ok(TextSnapshot {
-                workspace_id: workspace_id.to_owned(),
-                version_id: version_id.to_owned(),
-                object_id: row.get(0)?,
-                path: row.get(1)?,
-                text: row.get(2)?,
-                blob_sha256: row.get(3)?,
-                updated_at_ms: row.get(4)?,
-                latest_moment_id: row.get(5)?,
-                metadata_origin: row.get(6)?,
-            })
-        },
-    )
-    .optional()
-    .map_err(DomainError::sql_corrupt)
+) -> Result<ConflictFileState, DomainError> {
+    type HeadRow = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        String,
+        String,
+        String,
+        Option<String>,
+    );
+    let row: Option<HeadRow> = conn
+        .query_row(
+            "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
+             s.latest_moment_id, s.metadata_origin, COALESCE(s.content_kind, 'text'), \
+             bb.sha256 FROM snapshots s \
+             LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
+             LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
+             WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path = ?3",
+            params![workspace_id, version_id, path],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let Some((
+        object_id,
+        snapshot_path,
+        text,
+        blob_sha256,
+        updated_at_ms,
+        latest_moment_id,
+        metadata_origin,
+        content_kind,
+        binary_sha256,
+    )) = row
+    else {
+        return Ok(ConflictFileState::text(path.to_owned(), None));
+    };
+    match content_kind.as_str() {
+        "text" => {
+            let text = text.ok_or(DomainError::StateCorrupt {
+                reason: "text snapshot is missing its blob",
+            })?;
+            let blob_sha256 = blob_sha256.ok_or(DomainError::StateCorrupt {
+                reason: "text snapshot is missing its hash",
+            })?;
+            Ok(ConflictFileState::text(
+                snapshot_path.clone(),
+                Some(TextSnapshot {
+                    workspace_id: workspace_id.to_owned(),
+                    version_id: version_id.to_owned(),
+                    object_id,
+                    path: snapshot_path,
+                    text,
+                    blob_sha256,
+                    updated_at_ms,
+                    latest_moment_id,
+                    metadata_origin,
+                }),
+            ))
+        }
+        "binary" => {
+            let binary_sha256 = binary_sha256.ok_or(DomainError::StateCorrupt {
+                reason: "binary snapshot is missing its blob",
+            })?;
+            Ok(ConflictFileState::binary_head(
+                snapshot_path,
+                binary_sha256,
+                object_id,
+                latest_moment_id,
+            ))
+        }
+        _ => Err(DomainError::StateCorrupt {
+            reason: "snapshot has an unknown content kind",
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -1434,5 +1678,92 @@ mod tests {
             "invalid-input",
             "cross-workspace reuse must be the clean domain error, got {error:?}"
         );
+    }
+
+    #[test]
+    fn binary_write_records_binary_head_and_consumes_moment_generation() {
+        let (_scratch, mut store) = open_store();
+        let bytes = b"\x00binary head\xff";
+        let sha = hex_sha256(bytes);
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms) \
+                     VALUES (?1, 'main', 'main', 'main', 1)",
+                    [WORKSPACE_ID],
+                )
+                .map_err(DomainError::sql_persist)?;
+                put_binary_blob(tx, bytes).map_err(DomainError::from)?;
+                write_binary_file_in_tx(
+                    tx,
+                    &WriteBinaryFile {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: "binary-object".to_owned(),
+                        path: "image.bin".to_owned(),
+                        binary_sha256: sha.clone(),
+                        job_id: "binary-moment".to_owned(),
+                        preimage: Preimage::Absent,
+                        now_ms: 10,
+                    },
+                )
+            })
+            .expect("write binary head");
+
+        let (moment_order, moment_kind, moment_text_sha, moment_binary_sha): (
+            i64,
+            String,
+            Option<String>,
+            Option<String>,
+        ) = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT moment_order, after_content_kind, after_blob_sha256, \
+                     after_binary_sha256 FROM moments WHERE moment_id = 'binary-moment'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .expect("binary moment");
+        assert_eq!(moment_kind, "binary");
+        assert_eq!(moment_text_sha, None);
+        assert_eq!(moment_binary_sha.as_deref(), Some(sha.as_str()));
+
+        let (snapshot_kind, snapshot_text_sha, snapshot_binary_sha): (
+            String,
+            Option<String>,
+            Option<String>,
+        ) = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT content_kind, blob_sha256, binary_sha256 FROM snapshots \
+                     WHERE workspace_id = ?1 AND version_id = 'main' AND path = 'image.bin'",
+                    [WORKSPACE_ID],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .expect("binary snapshot");
+        assert_eq!(snapshot_kind, "binary");
+        assert_eq!(snapshot_text_sha, None);
+        assert_eq!(snapshot_binary_sha.as_deref(), Some(sha.as_str()));
+
+        let text = VersionedTextStore::new(&mut store)
+            .write_text(
+                &WriteText {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "text-object".to_owned(),
+                    path: "note.md".to_owned(),
+                    text: "after binary".to_owned(),
+                    moment_id: "text-moment".to_owned(),
+                    metadata_origin: "user".to_owned(),
+                    author_json: None,
+                    now_ms: 11,
+                    request_id: None,
+                },
+                &NoFaults,
+            )
+            .expect("write next text moment");
+        assert_eq!(text.moment.moment_order, moment_order + 1);
     }
 }

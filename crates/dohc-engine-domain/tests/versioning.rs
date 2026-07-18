@@ -258,7 +258,7 @@ fn update_in_place_reuses_object_and_records_before() {
     assert!(second.moment.before_present);
     assert_eq!(
         second.moment.before_blob_sha256,
-        Some(first.moment.after_blob_sha256.clone())
+        first.moment.after_blob_sha256.clone()
     );
     assert_eq!(
         vt.read_text(WS, "main", "a.md").unwrap().unwrap().text,

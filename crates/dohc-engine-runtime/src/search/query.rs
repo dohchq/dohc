@@ -23,9 +23,31 @@ use crate::search::{
     MAX_FTS_FETCH, MAX_QUERY_CHARS, MAX_RESULT_LIMIT, MIN_TRIGRAM_QUERY_CHARS, SearchError,
     THREAD_HEADER_MESSAGE_ID,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::collections::HashSet;
 use std::path::Path;
+
+/// Whether the live head for `object_id` in this version is a BINARY head. Used
+/// by the file-search reader to filter a stale text FTS row whose path has since
+/// been overwritten by binary content (the index freezes such rows; the reader
+/// drops them). A genuinely absent snapshot is not binary — its staleness (a
+/// deleted file) is out of scope here and cleaned by a full rebuild.
+fn live_head_is_binary(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<bool, SearchError> {
+    let kind: Option<String> = conn
+        .query_row(
+            "SELECT content_kind FROM snapshots \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            params![workspace_id, version_id, object_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(kind.as_deref() == Some("binary"))
+}
 
 /// An indexed candidate before line-preview extraction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +180,15 @@ pub fn query_search_index(
                 continue;
             }
             let object_id: String = row.get(1)?;
+            // Live re-check (reader invariant): a path indexed while it was TEXT
+            // but now backed by a BINARY head must not be served by its stale
+            // former text. The file index "freezes, doesn't drop" (rebuild-time
+            // binary exclusion never cleans an already-built index), so — exactly
+            // as for the policy re-check above — the reader filters a now-binary
+            // head out here.
+            if live_head_is_binary(conn, workspace_id, version_id, &object_id)? {
+                continue;
+            }
             let key = format!("{path}\u{0}{object_id}");
             if !seen_files.insert(key) {
                 continue;

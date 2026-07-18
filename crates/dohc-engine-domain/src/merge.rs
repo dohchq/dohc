@@ -407,6 +407,37 @@ fn compare_text_file_versions_in_db(
         return Err(DomainError::ForkBaseNotFound);
     }
 
+    // BINHEAD: the three-way text comparison below reads snapshots via an inner
+    // `JOIN blobs`, so a binary head (`blob_sha256 = NULL`) reads as ABSENT. If
+    // any of the three sides holds a binary head at this path, a text merge
+    // could see current == base == absent, fast-forward, and CLOBBER the binary
+    // head with `write_text_in_tx`. Fail closed instead: the binary head
+    // survives untouched and the caller sees `binary-head-not-text` rather than
+    // a silent overwrite. A binary-aware three-way merge is the tracked
+    // TextSnapshot→content-aware refactor follow-up; this guard only closes the
+    // clobber hole.
+    if binary_head_present(
+        conn,
+        "snapshots",
+        &input.workspace_id,
+        &input.target_version_id,
+        &input.path,
+    )? || binary_head_present(
+        conn,
+        "snapshots",
+        &input.workspace_id,
+        &input.source_version_id,
+        &input.path,
+    )? || binary_head_present(
+        conn,
+        "fork_base_snapshots",
+        &input.workspace_id,
+        &input.source_version_id,
+        &input.path,
+    )? {
+        return Err(DomainError::BinaryHeadNotText);
+    }
+
     let base = select_snapshot(
         conn,
         "fork_base_snapshots",
@@ -439,6 +470,29 @@ fn compare_text_file_versions_in_db(
         incoming,
         status,
     })
+}
+
+/// True when `path` holds a live BINARY head in `table` for `version_id`. The
+/// text-merge comparison ([`select_snapshot`]) is blind to binary heads because
+/// its inner `JOIN blobs` drops any row with `blob_sha256 = NULL`, so a merge
+/// gate must consult this before deciding — otherwise it treats a binary head as
+/// an unoccupied path and clobbers it.
+fn binary_head_present(
+    conn: &Connection,
+    table: &str,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<bool, DomainError> {
+    let sql = format!(
+        "SELECT 1 FROM {table} \
+         WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3 \
+         AND content_kind = 'binary'"
+    );
+    conn.query_row(&sql, params![workspace_id, version_id, path], |_| Ok(()))
+        .optional()
+        .map(|found| found.is_some())
+        .map_err(DomainError::sql_corrupt)
 }
 
 fn select_snapshot(

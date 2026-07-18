@@ -9,14 +9,16 @@
 //! same row shapes the product writes — the round-trip is non-tautological.
 
 use dohc_engine_domain::{
-    ChatActorKind, ChatChannelKind, LinkedChatStore, SendMessage, StartChannelThread,
-    VersionedTextStore, WriteText,
+    ChatActorKind, ChatChannelKind, DomainError, LinkedChatStore, SendMessage, StartChannelThread,
+    VersionedTextStore, WriteBinaryFile, WriteText, write_binary_file_in_tx,
 };
 use dohc_engine_runtime::search::{
     SearchCandidate, SearchSurface, ensure_search_index_for_version, query_chat_messages_granular,
     query_search_index, search_workspace, upsert_file_search_index,
 };
-use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
+use dohc_engine_storage::{
+    EngineStore, FaultPoint, NoFaults, Preimage, TxnOutcome, hex_sha256, put_binary_blob,
+};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 use std::path::Path;
 
@@ -719,4 +721,65 @@ fn multiple_chat_threads_all_return() {
             "thread {th} missing from grouped chat previews: {results:?}"
         );
     }
+}
+
+/// Finding C (search correctness): when a binary write overwrites an
+/// already-indexed TEXT file, the file FTS row is frozen (the lazy index never
+/// rebuilds, and the rebuild-time binary exclusion never cleans an already-built
+/// index). The query reader must therefore drop a candidate whose LIVE head is
+/// now binary — otherwise the binary file stays searchable by its stale former
+/// text.
+#[test]
+fn binary_overwrite_of_indexed_text_is_no_longer_searchable() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let root = scratch.path().to_path_buf();
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+
+    write_file(
+        &mut store,
+        "obj-notes",
+        "notes/plan.md",
+        "the needle is here",
+        10,
+    );
+    ensure_index(&mut store, &root, 30);
+    assert!(
+        run_search(&store, &root, "needle")
+            .iter()
+            .any(|r| r.surface == SearchSurface::File && r.path == "notes/plan.md"),
+        "text file must be searchable before the binary overwrite"
+    );
+
+    // Overwrite the SAME path/object with a BINARY head (no index rebuild).
+    let bytes = b"\x00binary now\xff".as_slice();
+    let sha = hex_sha256(bytes);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            put_binary_blob(tx, bytes).map_err(DomainError::from)?;
+            write_binary_file_in_tx(
+                tx,
+                &WriteBinaryFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: V.to_owned(),
+                    object_id: "obj-notes".to_owned(),
+                    path: "notes/plan.md".to_owned(),
+                    binary_sha256: sha,
+                    job_id: "bin-overwrite".to_owned(),
+                    preimage: Preimage::Absent,
+                    now_ms: 40,
+                },
+            )?;
+            Ok::<_, DomainError>(())
+        })
+        .expect("binary overwrite");
+
+    // The stale text FTS row is still present, but the reader must not serve it.
+    let after = run_search(&store, &root, "needle");
+    assert!(
+        !after
+            .iter()
+            .any(|r| r.surface == SearchSurface::File && r.path == "notes/plan.md"),
+        "a binary-overwritten path must not be served by its stale former text: {after:?}"
+    );
 }

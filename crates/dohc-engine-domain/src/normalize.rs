@@ -24,31 +24,42 @@ pub struct VersionRow {
     pub fork_moment_id: Option<String>,
 }
 
-/// One normalized snapshot row (content by hash — N8).
+/// One normalized snapshot row (content by hash — N8). `content_kind` is
+/// carried alongside the digest so a binary head and a text head that happen to
+/// share a digest are NEVER indistinguishable in the differential (a binary
+/// head must never be mis-projected as empty/blank text).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotRow {
     pub version_id: String,
     pub path: String,
     pub object_id: String,
-    pub blob_sha256: String,
+    pub content_kind: String,
+    pub blob_sha256: Option<String>,
+    pub binary_sha256: Option<String>,
     pub metadata_origin: String,
 }
 
 /// One normalized fork-base row (the frozen three-way-merge anchor). Included
 /// so a wrong, leaked, or missing fork base is visible in the differential —
-/// the exact provenance the fork-point bug corrupts.
+/// the exact provenance the fork-point bug corrupts. Carries `content_kind` for
+/// the same text-vs-binary distinguishability as [`SnapshotRow`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForkBaseRow {
     pub version_id: String,
     pub path: String,
     pub object_id: String,
-    pub blob_sha256: String,
+    pub content_kind: String,
+    pub blob_sha256: Option<String>,
+    pub binary_sha256: Option<String>,
 }
 
 /// One normalized moment row (ascending `moment_order`). Carries the full
 /// deterministic-history contract — stable id, object identity, before-linking,
 /// timestamp, and origin — so the differential fails when any of them is wrong,
-/// not only when the after-content diverges.
+/// not only when the after-content diverges. Content kind is preserved for BOTH
+/// directions (never folded into the text digest) so a text moment and a binary
+/// moment with the same digest produce DIFFERENT canonical output — the exact
+/// cross-engine divergence the oracle must not mask.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MomentRow {
     pub moment_order: i64,
@@ -58,9 +69,13 @@ pub struct MomentRow {
     pub path: String,
     pub recorded_at_ms: i64,
     pub operation: String,
-    pub after_blob_sha256: String,
+    pub after_content_kind: String,
+    pub after_blob_sha256: Option<String>,
+    pub after_binary_sha256: Option<String>,
     pub before_present: bool,
+    pub before_content_kind: String,
     pub before_blob_sha256: Option<String>,
+    pub before_binary_sha256: Option<String>,
     pub before_latest_moment_id: Option<String>,
     pub metadata_origin: String,
     pub sync_record_only: bool,
@@ -95,12 +110,16 @@ pub(crate) fn capture(
 
     let mut snapshots = Vec::new();
     for version in &versions {
-        for snap in store.list_snapshots(workspace_id, &version.version_id)? {
+        // Content-aware records (NOT the text-compatibility projection) so a
+        // binary head is captured as binary, never as an empty text snapshot.
+        for snap in store.list_snapshot_records(workspace_id, &version.version_id)? {
             snapshots.push(SnapshotRow {
                 version_id: snap.version_id,
                 path: snap.path,
                 object_id: snap.object_id,
+                content_kind: snap.content_kind,
                 blob_sha256: snap.blob_sha256,
+                binary_sha256: snap.binary_sha256,
                 metadata_origin: snap.metadata_origin,
             });
         }
@@ -110,12 +129,14 @@ pub(crate) fn capture(
 
     let mut fork_bases = Vec::new();
     for version in &versions {
-        for base in store.list_fork_base_snapshots(workspace_id, &version.version_id)? {
+        for base in store.list_fork_base_records(workspace_id, &version.version_id)? {
             fork_bases.push(ForkBaseRow {
                 version_id: base.version_id,
                 path: base.path,
                 object_id: base.object_id,
+                content_kind: base.content_kind,
                 blob_sha256: base.blob_sha256,
+                binary_sha256: base.binary_sha256,
             });
         }
     }
@@ -141,9 +162,16 @@ pub(crate) fn capture(
                 path: m.path,
                 recorded_at_ms: m.recorded_at_ms,
                 operation: m.operation.as_str().to_owned(),
+                // PRESERVE content kind + BOTH digests separately. Folding
+                // binary into the text field would make a text moment and a
+                // binary moment with the same digest indistinguishable.
+                after_content_kind: m.after_content_kind,
                 after_blob_sha256: m.after_blob_sha256,
+                after_binary_sha256: m.after_binary_sha256,
                 before_present: m.before_present,
+                before_content_kind: m.before_content_kind,
                 before_blob_sha256: m.before_blob_sha256,
+                before_binary_sha256: m.before_binary_sha256,
                 before_latest_moment_id: m.before_latest_moment_id,
                 metadata_origin: m.metadata_origin,
                 sync_record_only: m.sync_record_only,
@@ -204,24 +232,41 @@ impl NormalizedState {
         }
         for s in &self.snapshots {
             out.push_str(&format!(
-                "snapshot version={} path={} object={} blob={} origin={}\n",
+                "snapshot version={} path={} object={} content={} origin={}\n",
                 field(&s.version_id),
                 field(&s.path),
                 field(&s.object_id),
-                s.blob_sha256,
+                tagged_digest(
+                    &s.content_kind,
+                    s.blob_sha256.as_deref(),
+                    s.binary_sha256.as_deref()
+                ),
                 field(&s.metadata_origin),
             ));
         }
         for f in &self.fork_bases {
             out.push_str(&format!(
-                "forkbase version={} path={} object={} blob={}\n",
+                "forkbase version={} path={} object={} content={}\n",
                 field(&f.version_id),
                 field(&f.path),
                 field(&f.object_id),
-                f.blob_sha256,
+                tagged_digest(
+                    &f.content_kind,
+                    f.blob_sha256.as_deref(),
+                    f.binary_sha256.as_deref()
+                ),
             ));
         }
         for m in &self.moments {
+            let before = if m.before_present {
+                tagged_digest(
+                    &m.before_content_kind,
+                    m.before_blob_sha256.as_deref(),
+                    m.before_binary_sha256.as_deref(),
+                )
+            } else {
+                "-".to_owned()
+            };
             out.push_str(&format!(
                 "moment order={} id={} version={} object={} path={} recorded={} op={} after={} before_present={} before={} before_latest={} origin={} sync_only={}\n",
                 m.moment_order,
@@ -231,15 +276,36 @@ impl NormalizedState {
                 field(&m.path),
                 m.recorded_at_ms,
                 m.operation,
-                m.after_blob_sha256,
+                tagged_digest(
+                    &m.after_content_kind,
+                    m.after_blob_sha256.as_deref(),
+                    m.after_binary_sha256.as_deref(),
+                ),
                 m.before_present,
-                m.before_blob_sha256.as_deref().unwrap_or("-"),
+                before,
                 m.before_latest_moment_id.as_deref().unwrap_or("-"),
                 field(&m.metadata_origin),
                 m.sync_record_only,
             ));
         }
         out
+    }
+}
+
+/// A kind-tagged content digest for the canonical form. Emitting the
+/// `content_kind` alongside the digest keeps text and binary at the SAME digest
+/// distinguishable (`text:<sha>` vs `binary:<sha>`), so the differential never
+/// masks a text-vs-binary divergence. An absent digest for the kind is `-`.
+fn tagged_digest(
+    content_kind: &str,
+    blob_sha256: Option<&str>,
+    binary_sha256: Option<&str>,
+) -> String {
+    match content_kind {
+        "binary" => format!("binary:{}", binary_sha256.unwrap_or("-")),
+        // Default to text for any legacy/unset kind, matching the read path's
+        // `COALESCE(content_kind, 'text')`.
+        _ => format!("text:{}", blob_sha256.unwrap_or("-")),
     }
 }
 
@@ -251,5 +317,88 @@ fn field(value: &str) -> String {
         format!("<invalid:{}>", value.escape_default())
     } else {
         value.to_owned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn moment(content_kind: &str, blob: Option<&str>, binary: Option<&str>) -> MomentRow {
+        MomentRow {
+            moment_order: 1,
+            moment_id: "m1".to_owned(),
+            version_id: "main".to_owned(),
+            object_id: "o1".to_owned(),
+            path: "a".to_owned(),
+            recorded_at_ms: 10,
+            operation: "write".to_owned(),
+            after_content_kind: content_kind.to_owned(),
+            after_blob_sha256: blob.map(str::to_owned),
+            after_binary_sha256: binary.map(str::to_owned),
+            before_present: false,
+            before_content_kind: "text".to_owned(),
+            before_blob_sha256: None,
+            before_binary_sha256: None,
+            before_latest_moment_id: None,
+            metadata_origin: "user".to_owned(),
+            sync_record_only: false,
+        }
+    }
+
+    /// M4 regression: a TEXT moment and a BINARY moment with the SAME digest must
+    /// produce DIFFERENT canonical output — folding the binary digest into the
+    /// text field (the old bug) made a text-vs-binary divergence invisible to the
+    /// differential.
+    #[test]
+    fn text_and_binary_moment_with_same_digest_are_distinguishable() {
+        const SHA: &str = "deadbeef";
+        let text = NormalizedState {
+            moments: vec![moment("text", Some(SHA), None)],
+            ..NormalizedState::default()
+        };
+        let binary = NormalizedState {
+            moments: vec![moment("binary", None, Some(SHA))],
+            ..NormalizedState::default()
+        };
+        let text_out = text.to_canonical_string();
+        let binary_out = binary.to_canonical_string();
+        assert_ne!(
+            text_out, binary_out,
+            "same-digest text and binary moments must not normalize identically"
+        );
+        assert!(text_out.contains("after=text:deadbeef"));
+        assert!(binary_out.contains("after=binary:deadbeef"));
+    }
+
+    /// The same distinguishability holds for the current-head (snapshot) rows.
+    #[test]
+    fn text_and_binary_snapshot_with_same_digest_are_distinguishable() {
+        const SHA: &str = "cafef00d";
+        let text = NormalizedState {
+            snapshots: vec![SnapshotRow {
+                version_id: "main".to_owned(),
+                path: "a".to_owned(),
+                object_id: "o1".to_owned(),
+                content_kind: "text".to_owned(),
+                blob_sha256: Some(SHA.to_owned()),
+                binary_sha256: None,
+                metadata_origin: "user".to_owned(),
+            }],
+            ..NormalizedState::default()
+        };
+        let binary = NormalizedState {
+            snapshots: vec![SnapshotRow {
+                version_id: "main".to_owned(),
+                path: "a".to_owned(),
+                object_id: "o1".to_owned(),
+                content_kind: "binary".to_owned(),
+                blob_sha256: None,
+                binary_sha256: Some(SHA.to_owned()),
+                metadata_origin: "user".to_owned(),
+            }],
+            ..NormalizedState::default()
+        };
+        assert_ne!(text.to_canonical_string(), binary.to_canonical_string());
     }
 }

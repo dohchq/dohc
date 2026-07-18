@@ -8,11 +8,15 @@ use dohc_engine_domain::{
     ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus, CreateNamedVersion,
     DeleteTextFile, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
     MergeUnchangedReason, NoFaults, ResolveConflictKind, ResolveTextConflict, TextConflict,
-    TextSnapshot, VersionFileChangeStatus, VersionedTextStore, WriteText,
-    insert_text_conflict_if_absent, store::text_blob_sha256,
+    TextSnapshot, VersionFileChangeStatus, VersionedTextStore, WriteBinaryFile, WriteText,
+    insert_text_conflict_if_absent, live_state_matches_conflict_current, store::text_blob_sha256,
+    write_binary_file_in_tx,
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs};
-use dohc_engine_storage::{EngineStore, FaultPoint, JobStatus, MaterializationOperation, Preimage};
+use dohc_engine_storage::{
+    EngineStore, FaultPoint, JobStatus, MaterializationOperation, Preimage, hex_sha256,
+    put_binary_blob,
+};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 
 const WS: &str = "ws-r06";
@@ -900,5 +904,127 @@ fn merge_job_crash_then_external_edit_is_preserved_on_recovery() {
             .expect("present")
             .status,
         JobStatus::Conflict
+    );
+}
+
+/// M2 (BINHEAD): the three-way text merge must NEVER clobber a binary head. A
+/// fork forked before `a.md` existed (base absent) adds TEXT at `a.md`, while
+/// the target grows a BINARY head at `a.md`. The pre-fix merge read the binary
+/// head as absent (its `JOIN blobs` is binary-blind), saw current == base ==
+/// absent, fast-forwarded, and overwrote the binary head with text. It must fail
+/// closed instead — `binary-head-not-text` — and the binary head must survive.
+#[test]
+fn merge_refuses_to_clobber_a_binary_head_at_the_target() {
+    let (_scratch, mut store) = open();
+    // Seed an UNRELATED file on main so the fork carries a non-empty durable
+    // fork base (else the merge short-circuits with `fork-base-not-found` before
+    // reaching the binary-head gate). `a.md` itself does NOT exist yet, so its
+    // fork base is genuinely absent.
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &write("main", "seed.md", "seed", "seed-moment", "obj-seed"),
+            &NO_FAULTS,
+        )
+        .expect("seed file");
+    let mut vt = VersionedTextStore::new(&mut store);
+    fork(&mut vt);
+    drop(vt);
+
+    // Target (main) grows a BINARY head at a.md AFTER the fork.
+    let bin_bytes = b"\x00binary head\xff";
+    let bin_sha = hex_sha256(bin_bytes);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            let sha = put_binary_blob(tx, bin_bytes)?;
+            write_binary_file_in_tx(
+                tx,
+                &WriteBinaryFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "obj-a".to_owned(),
+                    path: "a.md".to_owned(),
+                    binary_sha256: sha,
+                    job_id: "bin-a-job".to_owned(),
+                    preimage: Preimage::Absent,
+                    now_ms: 120,
+                },
+            )?;
+            Ok::<_, DomainError>(())
+        })
+        .expect("write binary head on main");
+
+    // The fork adds TEXT at the same path.
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &write("feat", "a.md", "fork text", "feat-a", "obj-feat-a"),
+            &NO_FAULTS,
+        )
+        .expect("fork text at a.md");
+
+    // The merge must fail closed — never clobber the binary head.
+    let err = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version(
+            &merge_input("a.md", "merge-a", "merge-a-conflict", "obj-merge-a"),
+            &NO_FAULTS,
+        )
+        .expect_err("merge must refuse to clobber a binary head");
+    assert_eq!(err.code(), "binary-head-not-text");
+
+    // The binary head SURVIVES on main, unchanged.
+    let (kind, blob, bin): (String, Option<String>, Option<String>) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT content_kind, blob_sha256, binary_sha256 FROM snapshots \
+                 WHERE workspace_id = ?1 AND version_id = 'main' AND path = 'a.md'",
+                [WS],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        })
+        .expect("main head after refused merge");
+    assert_eq!(
+        kind, "binary",
+        "the binary head must survive the refused merge"
+    );
+    assert_eq!(blob, None, "a surviving binary head has no text blob");
+    assert_eq!(bin.as_deref(), Some(bin_sha.as_str()));
+}
+
+/// S2 (BINHEAD): the exact-head gate must not defer FOREVER on a legacy binary
+/// side that carries no head identity. A recorded side built via
+/// `ConflictFileState::binary()` (or a v9-era row) has NULL object/latest-moment,
+/// so requiring `Some(..) == None` would always mismatch and strand the resolve
+/// as StaleHead. When the recorded side has NO identity, fall back to path+sha;
+/// a recorded side that DOES carry identity keeps the strict no-clobber check.
+#[test]
+fn exact_head_gate_falls_back_for_legacy_null_identity_binary_sides() {
+    let live = ConflictFileState::binary_head("a.md", "sha-bytes", "obj-live", "moment-live");
+
+    // Legacy recorded side (NULL identity) with matching path+bytes RESOLVES.
+    let legacy = ConflictFileState::binary("a.md", "sha-bytes");
+    assert!(
+        live_state_matches_conflict_current(&live, &legacy),
+        "a legacy NULL-identity side matching path+sha must resolve, not defer forever"
+    );
+
+    // Legacy side whose bytes differ must still NOT match.
+    let legacy_other = ConflictFileState::binary("a.md", "sha-other");
+    assert!(
+        !live_state_matches_conflict_current(&live, &legacy_other),
+        "path+sha fallback must still reject a byte mismatch"
+    );
+
+    // A recorded side that DOES carry identity keeps the strict check: same
+    // bytes but a recreated head (different object/moment) must NOT match.
+    let strict_same =
+        ConflictFileState::binary_head("a.md", "sha-bytes", "obj-live", "moment-live");
+    assert!(
+        live_state_matches_conflict_current(&live, &strict_same),
+        "an identity-carrying side matching object+moment must still match"
+    );
+    let strict_recreated =
+        ConflictFileState::binary_head("a.md", "sha-bytes", "obj-recreated", "moment-recreated");
+    assert!(
+        !live_state_matches_conflict_current(&live, &strict_recreated),
+        "an identity-carrying side must reject a same-bytes-but-recreated head (no clobber)"
     );
 }

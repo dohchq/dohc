@@ -344,8 +344,9 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // the R09 chats migration (ordinal 3), the R12 search migration (ordinal 4),
     // the R05 moment-preimage-link migration (ordinal 5), the R10 sync
     // migration (ordinal 6), the R06 conflicts migration (ordinal 7), the
-    // shadow-clone migration (ordinal 8), and binary conflict sides (ordinal 9).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 10);
+    // shadow-clone migration (ordinal 8), binary conflict sides (ordinal 9),
+    // and binary heads (ordinal 10).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 11);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(
