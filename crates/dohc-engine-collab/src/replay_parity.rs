@@ -48,8 +48,26 @@
 //! becomes a fail-closed rejection instead of poisoning the caller's
 //! transaction (mirrors the hash worker's containment) — a backstop, not the
 //! primary mechanism.
+//!
+//! ## Abort safety (the pre-validator)
+//!
+//! `catch_unwind` is a backstop, not a cure: yrs 0.27.3's `Update::decode_v1`
+//! can HARD-ABORT the whole process (uncatchable UB — see
+//! [`safe_read_string`]'s doc comment for the root cause), which no unwind
+//! boundary can contain. [`scan_v1`] — the wire walk this module already
+//! performs for replay parity — doubles as the pre-validator that closes this:
+//! it never calls `decode_v1` and never uses yrs' own unsafe string decode, so
+//! it can safely reject a malformed/adversarial update BEFORE any decode that
+//! could abort ever sees the bytes. [`prevalidate_update_bytes`] is the public
+//! entry point [`crate::durable::validate_update_bytes`] calls FIRST — the
+//! shared choke point for both the local edit path and the remote replication
+//! path (`crates/dohc-engine-collab/src/durable.rs`,
+//! `crates/dohc-engine-collab/src/replication.rs`) — and this module's own
+//! `validate_replay_parity_inner` runs it before its own `Ydoc::validate_update`
+//! call for the same reason.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use yrs::block::{
     BLOCK_GC_REF_NUMBER, BLOCK_ITEM_ANY_REF_NUMBER, BLOCK_ITEM_BINARY_REF_NUMBER,
@@ -59,10 +77,12 @@ use yrs::block::{
     HAS_RIGHT_ORIGIN, ID,
 };
 use yrs::encoding::read::Read;
-use yrs::types::TypeRef;
-use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
-use yrs::updates::encoder::Encode;
-use yrs::{Any, ClientID, IdSet, Options, Update};
+use yrs::types::{
+    TYPE_REFS_ARRAY, TYPE_REFS_DOC, TYPE_REFS_MAP, TYPE_REFS_TEXT, TYPE_REFS_UNDEFINED,
+    TYPE_REFS_XML_ELEMENT, TYPE_REFS_XML_FRAGMENT, TYPE_REFS_XML_HOOK, TYPE_REFS_XML_TEXT,
+};
+use yrs::updates::decoder::{Decoder, DecoderV1};
+use yrs::{Any, ClientID};
 
 use crate::{CollabError, Ydoc};
 
@@ -165,10 +185,16 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<(), Col
     if PANIC_INJECT.with(std::cell::Cell::get) {
         panic!("injected replay-gate unwind for fail-closed test");
     }
+    // `scan_v1` MUST run before anything that can reach yrs' own uncatchable
+    // `Update::decode_v1` hard-abort (`Ydoc::validate_update` below, and the
+    // scratch-doc `apply`s further down) — it never calls `decode_v1` and
+    // never uses yrs' unsafe string decode (see `safe_read_string`'s doc
+    // comment), so malformed/adversarial `candidate` bytes are rejected here,
+    // fail-closed, before anything unsafe ever sees them.
+    let candidate_structure = scan_v1(candidate)?;
     Ydoc::validate_update(candidate)?;
     let base_full = base.encode_full_state();
     let base_structure = scan_v1(&base_full)?;
-    let candidate_structure = scan_v1(candidate)?;
     let pending_bytes = base.pending_update_v1();
     let pending_structure = match &pending_bytes {
         Some(bytes) => scan_v1(bytes)?,
@@ -347,16 +373,213 @@ fn record_identity(
         .insert(clock, identity);
 }
 
+/// The pre-validator [`crate::durable::validate_update_bytes`] (the shared
+/// choke point for BOTH the local edit path — `record_local_update` /
+/// `record_local_update_creating_marker` — and the remote replication path —
+/// `apply_remote_update` / `apply_remote_update_in_transaction`) runs BEFORE
+/// any call that can reach yrs 0.27.3's uncatchable `Update::decode_v1`
+/// hard-abort. See [`safe_read_string`]'s doc comment for the root cause and
+/// why `scan_v1`'s manual wire walk is safe to run on fully untrusted bytes.
+pub(crate) fn prevalidate_update_bytes(bytes: &[u8]) -> Result<(), CollabError> {
+    scan_v1(bytes).map(|_| ())
+}
+
+/// yrs 0.27.3's `Read::read_string` (the default impl `DecoderV1` uses, and
+/// therefore every string-bearing v1 decode — `Any::decode`'s String/Map-key
+/// cases, `Decoder::read_key`, `Decoder::read_json`, `TypeRef::decode`'s XML
+/// element tag, `Options::decode`'s guid) casts the raw length-prefixed bytes
+/// straight to `&str` via `std::str::from_utf8_unchecked`, WITHOUT checking
+/// they are valid UTF-8:
+///
+/// ```ignore
+/// fn read_string(&mut self) -> Result<&str, Error> {
+///     let buf = self.read_buf()?;
+///     Ok(unsafe { std::str::from_utf8_unchecked(buf) })
+/// }
+/// ```
+///
+/// Malformed bytes therefore produce a `&str` that violates Rust's UTF-8
+/// invariant. The moment anything iterates `.chars()` over that fake `str`
+/// (yrs's own integration code inside `Update::decode_v1`, or this module's
+/// own structural walk if it naively reused yrs's decode helpers), the char
+/// decoder can synthesize an out-of-range/surrogate `u32` and hand it to an
+/// unchecked `char` construction — a debug-mode precondition check catches it
+/// as an UNCATCHABLE process abort (`std::panic::catch_unwind` cannot
+/// intercept it); in a release build the check compiles out and the same
+/// input is silent undefined behavior instead. This is the root cause of the
+/// `known_crash_witness_yrs_char_decode_ub` hard-abort.
+///
+/// Every string-bearing field this module reads therefore goes through this
+/// function instead of yrs's own `read_string`/`read_key`/`read_json`/
+/// `read_any`/`TypeRef::decode`/`Options::decode`. It reads the raw bytes
+/// with the ordinary bounds-checked `read_buf` (safe: yrs' `Read` trait only
+/// makes the STRING CAST unsafe, not the length-prefixed byte read) and
+/// validates them with the CHECKED `std::str::from_utf8`, rejecting anything
+/// that is not well-formed UTF-8 — which by construction can never encode a
+/// surrogate (0xD800..=0xDFFF) or an out-of-range scalar (> 0x10FFFF) — BEFORE
+/// it is ever treated as a `str`. Once bytes have passed through here, no
+/// later `.chars()` iteration over them (by this module, or by yrs's own real
+/// `Update::decode_v1` once the pre-validator has accepted the update) can
+/// hit the UB, because they are now provably valid UTF-8.
+fn safe_read_string<'b>(decoder: &'b mut DecoderV1<'_>) -> Result<&'b str, CollabError> {
+    let raw = decoder.read_buf().map_err(parity_decode_error)?;
+    std::str::from_utf8(raw).map_err(|_| CollabError::ReplayParityViolation {
+        reason: "the update contains a string field with invalid UTF-8 bytes".to_owned(),
+    })
+}
+
+/// [`safe_read_string`] plus JSON parsing, replacing `Decoder::read_json`
+/// (which bottoms out in the unsafe `read_string`). `Any::from_json` itself
+/// (a `serde_json` parse) is safe once handed a genuine, validated `&str`.
+fn safe_read_json(decoder: &mut DecoderV1<'_>) -> Result<Any, CollabError> {
+    let src = safe_read_string(decoder)?;
+    Any::from_json(src).map_err(|error| CollabError::ReplayParityViolation {
+        reason: format!("the update contains malformed embedded JSON: {error}"),
+    })
+}
+
+/// A from-scratch, SAFE reimplementation of yrs' `Any::decode` for
+/// `DecoderV1`. Cannot reuse `decoder.read_any()` / `Any::decode` directly:
+/// both bottom out in yrs' unsafe `Read::read_string` for the String and
+/// Map-key cases (see [`safe_read_string`]). Every primitive used here
+/// (`read_u8`, `read_var`, `read_f32`/`read_f64`/`read_i64`, `read_buf`) is
+/// bounds-checked with no unsafe casts, so this can never reach the UB
+/// regardless of input. Collections grow incrementally rather than
+/// pre-allocating an attacker-controlled `len` (bounded-everything: a huge
+/// claimed length fails fast on the next out-of-bounds read instead of
+/// driving a large up-front allocation).
+fn safe_read_any(decoder: &mut DecoderV1<'_>) -> Result<Any, CollabError> {
+    let tag = decoder.read_u8().map_err(parity_decode_error)?;
+    Ok(match tag {
+        127 => Any::Undefined,
+        126 => Any::Null,
+        125 => Any::Number(decoder.read_var::<i64>().map_err(parity_decode_error)? as f64),
+        124 => Any::Number(decoder.read_f32().map_err(parity_decode_error)? as f64),
+        123 => Any::Number(decoder.read_f64().map_err(parity_decode_error)?),
+        122 => Any::BigInt(decoder.read_i64().map_err(parity_decode_error)?),
+        121 => Any::Bool(false),
+        120 => Any::Bool(true),
+        119 => Any::String(Arc::from(safe_read_string(decoder)?)),
+        118 => {
+            let len: usize = decoder.read_var().map_err(parity_decode_error)?;
+            let mut map = HashMap::new();
+            for _ in 0..len {
+                let key = safe_read_string(decoder)?.to_owned();
+                let value = safe_read_any(decoder)?;
+                map.insert(key, value);
+            }
+            Any::Map(Arc::new(map))
+        }
+        117 => {
+            let len: usize = decoder.read_var().map_err(parity_decode_error)?;
+            let mut arr = Vec::new();
+            for _ in 0..len {
+                arr.push(safe_read_any(decoder)?);
+            }
+            Any::Array(Arc::from(arr))
+        }
+        116 => Any::Buffer(Arc::from(decoder.read_buf().map_err(parity_decode_error)?)),
+        _ => {
+            return Err(CollabError::ReplayParityViolation {
+                reason: "the update contains an unsupported Any value tag".to_owned(),
+            })
+        }
+    })
+}
+
+/// A SAFE reimplementation of `TypeRef::decode`'s wire shape, sufficient for a
+/// content-identity fingerprint (this module only ever needs KIND identity
+/// for the content-parity check, never the constructed `TypeRef` value
+/// itself). Reimplemented rather than calling `TypeRef::decode` because its
+/// `TYPE_REFS_XML_ELEMENT` arm reads a tag name via `decoder.read_key()`,
+/// which bottoms out in yrs' unsafe `read_string` (see [`safe_read_string`]).
+fn safe_read_type_ref_fingerprint(decoder: &mut DecoderV1<'_>) -> Result<Vec<u8>, CollabError> {
+    let type_ref = decoder.read_type_ref().map_err(parity_decode_error)?;
+    let mut canonical = vec![type_ref];
+    match type_ref {
+        TYPE_REFS_XML_ELEMENT => {
+            canonical.extend_from_slice(safe_read_string(decoder)?.as_bytes());
+        }
+        TYPE_REFS_ARRAY
+        | TYPE_REFS_MAP
+        | TYPE_REFS_TEXT
+        | TYPE_REFS_XML_FRAGMENT
+        | TYPE_REFS_XML_HOOK
+        | TYPE_REFS_XML_TEXT
+        | TYPE_REFS_DOC
+        | TYPE_REFS_UNDEFINED => {}
+        _ => {
+            return Err(CollabError::ReplayParityViolation {
+                reason: "the update contains an unsupported type reference".to_owned(),
+            })
+        }
+    }
+    Ok(canonical)
+}
+
+/// A SAFE reimplementation of `Options::decode`'s wire shape (a guid string
+/// plus an `Any` map of sub-document options), sufficient for a
+/// content-identity fingerprint. Reimplemented rather than calling
+/// `Options::decode` because it reads the guid via yrs' unsafe `read_string`
+/// (see [`safe_read_string`]).
+fn safe_read_options_fingerprint(decoder: &mut DecoderV1<'_>) -> Result<Vec<u8>, CollabError> {
+    let guid = safe_read_string(decoder)?;
+    let mut canonical = guid.as_bytes().to_vec();
+    canonical.push(0);
+    let opts = safe_read_any(decoder)?;
+    canonical.extend_from_slice(
+        serde_json::to_vec(&crate::ydoc::any_to_json(&opts))
+            .unwrap_or_default()
+            .as_slice(),
+    );
+    Ok(canonical)
+}
+
+/// yjs client identifiers are JavaScript numbers, so they must fit in 53 bits
+/// — an invariant yrs' `ClientID::new` only `debug_assert!`s: an unwinding
+/// panic in debug builds, and in RELEASE builds the check compiles out and the
+/// high bits are silently masked off, so a hostile wire client id of
+/// `2^53 + n` would alias honest client `n` and let a forged update claim
+/// another peer's blocks. No honest yjs/yrs encoder can produce one (JS
+/// numbers cannot represent it), so reject it here, before any `ClientID` is
+/// ever constructed from the wire value. Replaces `Decoder::read_client`,
+/// which performs no range check.
+fn safe_read_client(decoder: &mut DecoderV1<'_>) -> Result<ClientID, CollabError> {
+    const CLIENT_53_BIT_OVERFLOW: u64 = u64::MAX << 53;
+    let raw: u64 = decoder.read_var().map_err(parity_decode_error)?;
+    if raw & CLIENT_53_BIT_OVERFLOW != 0 {
+        return Err(CollabError::ReplayParityViolation {
+            reason: "the update contains a client identifier outside the 53-bit yjs range"
+                .to_owned(),
+        });
+    }
+    Ok(ClientID::new(raw))
+}
+
+/// [`safe_read_client`] plus a clock — replaces `Decoder::read_left_id` /
+/// `read_right_id`, which construct `ClientID` from the raw wire value with
+/// no range check (see [`safe_read_client`]).
+fn safe_read_id(decoder: &mut DecoderV1<'_>) -> Result<ID, CollabError> {
+    let client = safe_read_client(decoder)?;
+    let clock: u32 = decoder.read_var().map_err(parity_decode_error)?;
+    Ok(ID::new(client, clock))
+}
+
+/// Walk the v1 wire structure with yrs' own public `DecoderV1` PRIMITIVES —
+/// never yrs' own `Update::decode_v1`, and never yrs' own unsafe string decode
+/// (every string-bearing field goes through [`safe_read_string`] and its
+/// derivatives above) — so this function is safe to run on fully untrusted,
+/// adversarial bytes. This IS the pre-validator: [`prevalidate_update_bytes`]
+/// is a thin public wrapper around it, and every caller in this module that
+/// used to call `Update::decode_v1`/`Ydoc::validate_update` on untrusted bytes
+/// now calls this (or the wrapper) FIRST.
 fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
-    Update::decode_v1(bytes).map_err(|error| CollabError::MalformedUpdate {
-        reason: error.to_string(),
-    })?;
     let mut decoder = DecoderV1::from(bytes);
     let mut structure = WireStructure::default();
     let clients_len: u32 = decoder.read_var().map_err(parity_decode_error)?;
     for _ in 0..clients_len {
         let blocks_len: u32 = decoder.read_var().map_err(parity_decode_error)?;
-        let client = decoder.read_client().map_err(parity_decode_error)?;
+        let client = safe_read_client(&mut decoder)?;
         let mut clock: u32 = decoder.read_var().map_err(parity_decode_error)?;
         for _ in 0..blocks_len {
             let info = decoder.read_info().map_err(parity_decode_error)?;
@@ -388,18 +611,32 @@ fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
             .and_modify(|claimed| *claimed = (*claimed).max(clock))
             .or_insert(clock);
     }
-    let deletes = IdSet::decode(&mut decoder).map_err(parity_decode_error)?;
-    for (client, ranges) in deletes.iter() {
-        let coverage = structure.deleted_ranges.entry(*client).or_default();
-        for range in ranges {
-            structure
-                .deletion_boundaries
-                .push(ID::new(*client, range.start));
-            structure
-                .deletion_boundaries
-                .push(ID::new(*client, range.end));
+    // The delete-set. Replaces `IdSet::decode`, which constructs `ClientID`
+    // from the raw wire value with no range check (see [`safe_read_client`])
+    // and computes each range's `clock + len` UNCHECKED (an overflow panic in
+    // debug builds, a silent wrap in release). yrs' decode also silently keeps
+    // only the LAST section when a client appears twice — a duplicate section
+    // is a wire claim no honest encoder produces, and mirroring that discard
+    // here would let a hostile update smuggle delete claims this scan sees but
+    // yrs drops (or vice versa), so it is rejected outright instead.
+    let ds_clients: u32 = decoder.read_var().map_err(parity_decode_error)?;
+    for _ in 0..ds_clients {
+        let client = safe_read_client(&mut decoder)?;
+        if structure.deleted_ranges.contains_key(&client) {
+            return Err(CollabError::ReplayParityViolation {
+                reason: "the update delete-set repeats a client section".to_owned(),
+            });
+        }
+        let ranges_len: u32 = decoder.read_var().map_err(parity_decode_error)?;
+        let coverage = structure.deleted_ranges.entry(client).or_default();
+        for _ in 0..ranges_len {
+            let start: u32 = decoder.read_var().map_err(parity_decode_error)?;
+            let len: u32 = decoder.read_var().map_err(parity_decode_error)?;
             // yrs delete-set ranges are half-open `start..end` (Rust `Range`).
-            coverage.push((range.start, range.end));
+            let end = start.checked_add(len).ok_or_else(parity_clock_overflow)?;
+            structure.deletion_boundaries.push(ID::new(client, start));
+            structure.deletion_boundaries.push(ID::new(client, end));
+            coverage.push((start, end));
         }
     }
     if !decoder
@@ -423,7 +660,7 @@ fn scan_item(
     let has_origin = info & HAS_ORIGIN != 0;
     let has_right_origin = info & HAS_RIGHT_ORIGIN != 0;
     if has_origin {
-        let origin = decoder.read_left_id().map_err(parity_decode_error)?;
+        let origin = safe_read_id(decoder)?;
         let boundary_clock = origin
             .clock
             .checked_add(1)
@@ -433,18 +670,16 @@ fn scan_item(
             .push(ID::new(origin.client, boundary_clock));
     }
     if has_right_origin {
-        structure
-            .insertion_boundaries
-            .push(decoder.read_right_id().map_err(parity_decode_error)?);
+        structure.insertion_boundaries.push(safe_read_id(decoder)?);
     }
     if !has_origin && !has_right_origin {
         if decoder.read_parent_info().map_err(parity_decode_error)? {
-            let _ = decoder.read_string().map_err(parity_decode_error)?;
+            let _ = safe_read_string(decoder)?;
         } else {
-            let _ = decoder.read_left_id().map_err(parity_decode_error)?;
+            let _ = safe_read_id(decoder)?;
         }
         if info & HAS_PARENT_SUB != 0 {
-            let _ = decoder.read_string().map_err(parity_decode_error)?;
+            let _ = safe_read_string(decoder)?;
         }
     }
     scan_content(decoder, info & 0b0000_1111, id, structure)
@@ -474,7 +709,7 @@ fn scan_content(
             let count = decoder.read_len().map_err(parity_decode_error)?;
             let strings = count.checked_add(1).ok_or_else(parity_clock_overflow)?;
             for i in 0..strings {
-                let text = decoder.read_string().map_err(parity_decode_error)?;
+                let text = safe_read_string(decoder)?;
                 let clock = id.clock.checked_add(i).ok_or_else(parity_clock_overflow)?;
                 record_identity(
                     structure,
@@ -502,7 +737,7 @@ fn scan_content(
             Ok(1)
         }
         BLOCK_ITEM_STRING_REF_NUMBER => {
-            let text = decoder.read_string().map_err(parity_decode_error)?;
+            let text = safe_read_string(decoder)?;
             let mut offset = 0u32;
             for scalar in text.chars() {
                 let mut buf = [0u16; 2];
@@ -532,7 +767,7 @@ fn scan_content(
             Ok(offset)
         }
         BLOCK_ITEM_EMBED_REF_NUMBER => {
-            let value = decoder.read_json().map_err(parity_decode_error)?;
+            let value = safe_read_json(decoder)?;
             record_identity(
                 structure,
                 id.client,
@@ -545,8 +780,8 @@ fn scan_content(
             Ok(1)
         }
         BLOCK_ITEM_FORMAT_REF_NUMBER => {
-            let key = decoder.read_key().map_err(parity_decode_error)?;
-            let value = decoder.read_json().map_err(parity_decode_error)?;
+            let key = safe_read_string(decoder)?.to_owned();
+            let value = safe_read_json(decoder)?;
             // Canonicalize (key, value) together: key bytes, a NUL separator
             // (keys cannot contain NUL), then the order-independent Any payload.
             let mut canonical = key.as_bytes().to_vec();
@@ -568,14 +803,14 @@ fn scan_content(
             Ok(1)
         }
         BLOCK_ITEM_TYPE_REF_NUMBER => {
-            let type_ref = TypeRef::decode(decoder).map_err(parity_decode_error)?;
+            let fingerprint = safe_read_type_ref_fingerprint(decoder)?;
             record_identity(
                 structure,
                 id.client,
                 id.clock,
                 ClockIdentity::Typed {
                     kind: content_ref,
-                    payload: crate::hex_sha256(&type_ref.encode_v1()),
+                    payload: crate::hex_sha256(&fingerprint),
                 },
             );
             Ok(1)
@@ -583,7 +818,7 @@ fn scan_content(
         BLOCK_ITEM_ANY_REF_NUMBER => {
             let len = decoder.read_len().map_err(parity_decode_error)?;
             for i in 0..len {
-                let value = decoder.read_any().map_err(parity_decode_error)?;
+                let value = safe_read_any(decoder)?;
                 let clock = id.clock.checked_add(i).ok_or_else(parity_clock_overflow)?;
                 record_identity(
                     structure,
@@ -598,14 +833,14 @@ fn scan_content(
             Ok(len)
         }
         BLOCK_ITEM_DOC_REF_NUMBER => {
-            let options = Options::decode(decoder).map_err(parity_decode_error)?;
+            let fingerprint = safe_read_options_fingerprint(decoder)?;
             record_identity(
                 structure,
                 id.client,
                 id.clock,
                 ClockIdentity::Typed {
                     kind: content_ref,
-                    payload: crate::hex_sha256(&options.encode_v1()),
+                    payload: crate::hex_sha256(&fingerprint),
                 },
             );
             Ok(1)
@@ -718,5 +953,158 @@ mod tests {
         let error =
             validate_replay_parity(&base, &bytes).expect_err("zero-length block must be rejected");
         assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    }
+
+    /// No-false-positive coverage for [`safe_read_type_ref_fingerprint`]'s
+    /// `TYPE_REFS_XML_ELEMENT` arm specifically (the one arm that reads a
+    /// string field — the honest-corpus fixtures exercise `TypeRef` content
+    /// via non-string variants like `TYPE_REFS_MAP`, so this pins the
+    /// string-bearing arm directly): a well-formed `ContentType` item naming
+    /// an XML element tag ("paragraph") must be accepted, not rejected.
+    #[test]
+    fn accepts_well_formed_xml_element_type_ref_content() {
+        let bytes: Vec<u8> = vec![
+            0x01, // clients_len
+            0x01, // blocks_len
+            0x09, // client
+            0x00, // clock
+            0x07, // info: BLOCK_ITEM_TYPE_REF_NUMBER content, no origin/right-origin
+            0x01, // parent_info: true (named root follows)
+            0x04, b't', b'e', b's', b't', // root name "test" (len=4)
+            0x03, // TypeRef tag = TYPE_REFS_XML_ELEMENT
+            0x09, b'p', b'a', b'r', b'a', b'g', b'r', b'a', b'p', b'h', // tag "paragraph"
+            0x00, // empty delete set
+        ];
+        let structure = scan_v1(&bytes).expect("well-formed XmlElement type ref must be accepted");
+        assert_eq!(structure.claimed_clocks.len(), 1);
+    }
+
+    /// No-false-positive coverage for [`safe_read_options_fingerprint`]
+    /// (`BLOCK_ITEM_DOC_REF_NUMBER` — a sub-document reference): a
+    /// well-formed guid string plus a nested `Any::Map` options payload must
+    /// be accepted, not rejected. Not exercised by the honest-corpus fixtures
+    /// (this schema never embeds sub-documents), so this is the direct
+    /// evidence for that code path.
+    #[test]
+    fn accepts_well_formed_sub_document_content() {
+        let bytes: Vec<u8> = vec![
+            0x01, // clients_len
+            0x01, // blocks_len
+            0x09, // client
+            0x00, // clock
+            0x09, // info: BLOCK_ITEM_DOC_REF_NUMBER content, no origin/right-origin
+            0x01, // parent_info: true (named root follows)
+            0x04, b't', b'e', b's', b't', // root name "test" (len=4)
+            0x04, b'g', b'u', b'i', b'd', // guid string (len=4) "guid"
+            0x76, // Any tag 118: Map
+            0x01, // map len = 1
+            0x02, b'g', b'c', // key "gc" (len=2)
+            0x78, // value: Any tag 120 = Bool(true)
+            0x00, // empty delete set
+        ];
+        let structure = scan_v1(&bytes).expect("well-formed sub-document content must be accepted");
+        assert_eq!(structure.claimed_clocks.len(), 1);
+    }
+
+    /// `scan_v1` whose `Ok` payload (`WireStructure`, deliberately not
+    /// `Debug`) is discarded — asserting only that it rejects.
+    fn scan_err(bytes: &[u8]) -> CollabError {
+        match scan_v1(bytes) {
+            Ok(_) => panic!("expected scan_v1 to reject these bytes"),
+            Err(error) => error,
+        }
+    }
+
+    /// varint encoding of `2^53` — the smallest client identifier OUTSIDE the
+    /// 53-bit yjs range (yrs `ClientID::new` debug-asserts on it; in release
+    /// it would silently alias client `0`).
+    const CLIENT_2_POW_53: [u8; 8] = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x10];
+    /// varint encoding of `2^53 - 1` — the LARGEST honest client identifier.
+    const CLIENT_MAX_HONEST: [u8; 8] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x0f];
+
+    #[test]
+    fn rejects_53_bit_overflow_client_in_block_section() {
+        let mut bytes: Vec<u8> = vec![0x01, 0x01]; // clients_len, blocks_len
+        bytes.extend_from_slice(&CLIENT_2_POW_53);
+        // Nothing after the client id should even be read — the reject fires
+        // at the client read itself (this is also byte-for-byte the shrunken
+        // proptest regression seed that used to panic inside yrs).
+        let error = scan_err(&bytes);
+        assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    }
+
+    #[test]
+    fn rejects_53_bit_overflow_client_in_origin_id() {
+        let mut bytes: Vec<u8> = vec![
+            0x01, // clients_len
+            0x01, // blocks_len
+            0x09, // client
+            0x00, // clock
+            0x84, // info: string content (4) | HAS_ORIGIN
+        ];
+        bytes.extend_from_slice(&CLIENT_2_POW_53); // origin id client
+        let error = scan_err(&bytes);
+        assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    }
+
+    #[test]
+    fn rejects_53_bit_overflow_client_in_delete_set() {
+        let mut bytes: Vec<u8> = vec![
+            0x00, // clients_len: no blocks
+            0x01, // delete-set client sections
+        ];
+        bytes.extend_from_slice(&CLIENT_2_POW_53);
+        let error = scan_err(&bytes);
+        assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    }
+
+    #[test]
+    fn rejects_delete_set_range_end_clock_overflow() {
+        let bytes: Vec<u8> = vec![
+            0x00, // clients_len: no blocks
+            0x01, // delete-set client sections
+            0x09, // client
+            0x01, // ranges_len
+            0xff, 0xff, 0xff, 0xff, 0x0f, // start = u32::MAX
+            0x01, // len = 1 -> end overflows u32 (yrs computes this UNCHECKED)
+        ];
+        let error = scan_err(&bytes);
+        assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    }
+
+    #[test]
+    fn rejects_duplicate_delete_set_client_section() {
+        let bytes: Vec<u8> = vec![
+            0x00, // clients_len: no blocks
+            0x02, // delete-set client sections
+            0x09, // client
+            0x01, // ranges_len
+            0x00, // start
+            0x01, // len
+            0x09, // the SAME client again (yrs would silently drop the first)
+            0x01, // ranges_len
+            0x05, // start
+            0x01, // len
+        ];
+        let error = scan_err(&bytes);
+        assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    }
+
+    /// The 53-bit bound is exact: the LARGEST honest client identifier
+    /// (`2^53 - 1`, producible by real yjs) must still be accepted end-to-end.
+    #[test]
+    fn accepts_max_honest_53_bit_client() {
+        let mut bytes: Vec<u8> = vec![0x01, 0x01]; // clients_len, blocks_len
+        bytes.extend_from_slice(&CLIENT_MAX_HONEST);
+        bytes.extend_from_slice(&[
+            0x00, // clock
+            0x04, // info: string content, no origins
+            0x01, // parent_info: named root follows
+            0x04, b't', b'e', b's', b't', // root name
+            0x02, b'h', b'i', // string content "hi"
+            0x00, // empty delete set
+        ]);
+        let structure = scan_v1(&bytes).expect("max honest 53-bit client must be accepted");
+        assert_eq!(structure.claimed_clocks.len(), 1);
     }
 }

@@ -557,6 +557,92 @@ fn truncated_update_is_rejected_and_never_journaled() {
     );
 }
 
+/// YRS-ABORT-SAFETY regression: the deterministic 41-byte witness for yrs
+/// 0.27.3's uncatchable `char`-decode UB hard-abort
+/// (`known_crash_witness_yrs_char_decode_ub`,
+/// `fuzz/dohc-fuzz-targets/tests/ydoc_update.rs`) is rejected fail-closed
+/// through BOTH real ingestion choke points this crate exposes to untrusted
+/// input: the local edit path (`record_local_update`) and the remote
+/// replication path (`apply_remote_update`). Before the fix, either call
+/// would abort the WHOLE PROCESS (not just fail this test) — this test
+/// merely completing and asserting `Err` is itself part of the proof the
+/// abort is closed.
+#[test]
+fn yrs_abort_witness_is_rejected_fail_closed_on_both_ingestion_paths() {
+    const WITNESS: [u8; 41] = [
+        0x0a, 0x06, 0x08, 0x94, 0x4b, 0x44, 0xa1, 0x2f, 0x63, 0x19, 0x03, 0x5f, 0xcb, 0xa3, 0xfc,
+        0xb8, 0x5e, 0x48, 0xdd, 0xd4, 0xb4, 0xe5, 0x09, 0x27, 0x56, 0x51, 0xd9, 0xa8, 0xeb, 0x9f,
+        0xf6, 0xfc, 0xae, 0x1d, 0xbd, 0x17, 0xee, 0x48, 0x42, 0xb4, 0x02,
+    ];
+
+    // Local edit path: `record_local_update_creating_marker` /
+    // `record_local_update` -> `validate_update_bytes` -> the pre-validator.
+    let mut local = fresh_store("yrs-abort-witness-local");
+    let local_key = test_key();
+    seed_parents(&mut local.store, &local_key, 1_000);
+    committed(
+        ensure_marker(
+            &mut local.store,
+            &local_key,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let local_result =
+        record_local_update(&mut local.store, &local_key, &WITNESS, &NoFaults, 1_000);
+    assert!(
+        local_result.is_err(),
+        "the witness must be rejected fail-closed on the local edit path, not journaled: {local_result:?}"
+    );
+    assert_eq!(
+        count(&local.store, "ydoc_updates", &local_key),
+        0,
+        "a rejected update must never be journaled"
+    );
+
+    // Remote replication path: `apply_remote_update` ->
+    // `apply_remote_update_in_transaction` -> `validate_update_bytes` -> the
+    // same pre-validator.
+    let mut remote = fresh_store("yrs-abort-witness-remote");
+    let remote_key = test_key();
+    seed_parents(&mut remote.store, &remote_key, 1_000);
+    committed(
+        ensure_marker(
+            &mut remote.store,
+            &remote_key,
+            ContentKind::Plaintext,
+            Regime::Replicated,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let remote_update = RemoteUpdate {
+        origin_id: "peer-hostile".to_owned(),
+        origin_seq: 0,
+        bytes: WITNESS.to_vec(),
+    };
+    let remote_result = apply_remote_update(
+        &mut remote.store,
+        &remote_key,
+        &remote_update,
+        &NoFaults,
+        1_000,
+    );
+    assert!(
+        remote_result.is_err(),
+        "the witness must be rejected fail-closed on the remote replication path, not journaled: {remote_result:?}"
+    );
+    assert_eq!(
+        count(&remote.store, "ydoc_updates", &remote_key),
+        0,
+        "a rejected remote update must never be journaled"
+    );
+}
+
 // ---- leases -----------------------------------------------------------------
 
 #[test]

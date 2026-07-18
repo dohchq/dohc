@@ -763,6 +763,15 @@ pub(crate) fn validate_update_bytes(update: &[u8]) -> Result<(), CollabError> {
             max: MAX_YDOC_UPDATE_BYTES,
         });
     }
+    // Pre-validate the raw wire bytes FIRST, before any call that can reach
+    // yrs 0.27.3's uncatchable `Update::decode_v1` hard-abort on malformed
+    // input (`std::panic::catch_unwind` cannot intercept it — see
+    // `replay_parity::safe_read_string`'s doc comment for the root cause).
+    // This is the shared choke point both the local edit path
+    // (`record_local_update` / `record_local_update_creating_marker`) and the
+    // remote replication path (`apply_remote_update` /
+    // `apply_remote_update_in_transaction`) call before anything else.
+    crate::replay_parity::prevalidate_update_bytes(update)?;
     // Constraint 5: reject truncated/malformed bytes BEFORE journaling.
     Ydoc::validate_update(update)?;
     Ok(())
