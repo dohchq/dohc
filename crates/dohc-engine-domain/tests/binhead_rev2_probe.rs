@@ -343,3 +343,185 @@ fn rollback_first_binary_write_removes_file_and_object() {
         "the path must read as absent after rollback"
     );
 }
+
+/// M1 COMPLETED-job half: rolling back a first binary write whose materialization
+/// job ALREADY drained to disk must reconcile disk with the absent DB head. The
+/// pending-cancel fix alone left disk holding the rolled-back bytes while the DB
+/// said absent; the rollback must enqueue a compensating DELETE so a later drain
+/// removes the file. Proven against DISK, not just DB.
+#[test]
+fn rollback_of_completed_binary_write_deletes_the_materialized_file() {
+    let (scratch, mut store) = open();
+    write_binary(
+        &mut store,
+        "obj-doc",
+        "doc.md",
+        b"\x00materialized binary\xff",
+        "bin-job",
+        10,
+    );
+
+    // Drain FIRST so the binary write is really on disk and its job is COMPLETE.
+    run_pending_jobs(
+        &store,
+        scratch.path(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        50,
+        &NoFaults,
+    )
+    .expect("drain write to disk");
+    assert!(
+        scratch.path().join("doc.md").exists(),
+        "the binary write must be materialized on disk before rollback"
+    );
+
+    // Roll the completed binary write back.
+    VersionedTextStore::new(&mut store)
+        .rollback_text_file_mutation(
+            &RollbackTextFileMutation {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: "doc.md".to_owned(),
+                mutation_moment_id: "bin-job".to_owned(),
+                legacy_before_text: None,
+            },
+            &NoFaults,
+        )
+        .expect("rollback completed binary write");
+
+    // A compensating job must be pending (the original completed job is not
+    // replayed; a NEW delete job restores disk).
+    let pending: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs WHERE status = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .expect("pending job count");
+    assert_eq!(
+        pending, 1,
+        "rollback of a completed write must enqueue a compensating job"
+    );
+
+    // DISK-STATE proof: draining removes the resurrected file so disk matches the
+    // absent DB head.
+    run_pending_jobs(
+        &store,
+        scratch.path(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        60,
+        &NoFaults,
+    )
+    .expect("drain compensating delete");
+    assert!(
+        !scratch.path().join("doc.md").exists(),
+        "M1: disk must match the rolled-back absent head, not keep the binary bytes"
+    );
+
+    let view = VersionedTextStore::new(&mut store)
+        .read_text(WS, "main", "doc.md")
+        .expect("read");
+    assert!(view.is_none(), "the DB head must be absent after rollback");
+}
+
+/// M1 COMPLETED-job half, OVERWRITE branch: rolling back a binary write that
+/// overwrote a PREVIOUS binary head, after both reached disk, must restore disk
+/// to the PREVIOUS content (not leave the rolled-back bytes). Exercises the
+/// compensating WRITE (restore-previous) branch, not just the delete branch.
+#[test]
+fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
+    let (scratch, mut store) = open();
+    let prev_bytes = b"\x00previous binary\xff".as_slice();
+    let prev_sha = write_binary(&mut store, "obj-doc", "doc.md", prev_bytes, "bin-job-1", 10);
+    // Overwrite with new binary content at the same path/object. A real overwrite
+    // carries the previous content as its preimage so the materializer replaces it
+    // on disk (rather than conflict-preserving as an unexpected external write).
+    let newer_bytes = b"\x00newer binary\xff".as_slice();
+    let newer_sha = hex_sha256(newer_bytes);
+    store
+        .write_with(&NoFaults, |tx| {
+            put_binary_blob(tx, newer_bytes).map_err(dohc_engine_domain::DomainError::from)?;
+            write_binary_file_in_tx(
+                tx,
+                &WriteBinaryFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: "main".to_owned(),
+                    object_id: "obj-doc".to_owned(),
+                    path: "doc.md".to_owned(),
+                    binary_sha256: newer_sha,
+                    job_id: "bin-job-2".to_owned(),
+                    preimage: Preimage::Present(prev_sha.clone()),
+                    now_ms: 20,
+                },
+            )
+        })
+        .expect("overwrite binary head");
+
+    // Drain both writes to disk; the newest content wins the path.
+    run_pending_jobs(
+        &store,
+        scratch.path(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        50,
+        &NoFaults,
+    )
+    .expect("drain writes to disk");
+    assert_eq!(
+        std::fs::read(scratch.path().join("doc.md")).expect("read doc.md"),
+        b"\x00newer binary\xff",
+        "disk must hold the newer binary before rollback"
+    );
+
+    // Roll the overwrite back → head restored to the previous binary content.
+    VersionedTextStore::new(&mut store)
+        .rollback_text_file_mutation(
+            &RollbackTextFileMutation {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: "doc.md".to_owned(),
+                mutation_moment_id: "bin-job-2".to_owned(),
+                legacy_before_text: None,
+            },
+            &NoFaults,
+        )
+        .expect("rollback completed binary overwrite");
+
+    // Drain the compensating restore → disk holds the PREVIOUS content again.
+    run_pending_jobs(
+        &store,
+        scratch.path(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        60,
+        &NoFaults,
+    )
+    .expect("drain compensating restore");
+    assert_eq!(
+        std::fs::read(scratch.path().join("doc.md")).expect("read doc.md"),
+        prev_bytes,
+        "M1: disk must be restored to the previous binary content after rollback"
+    );
+
+    // The DB head matches: previous binary sha.
+    let (kind, bin): (String, Option<String>) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT content_kind, binary_sha256 FROM snapshots \
+                 WHERE workspace_id = ?1 AND version_id = 'main' AND path = 'doc.md'",
+                [WS],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+        })
+        .expect("restored head");
+    assert_eq!(kind, "binary");
+    assert_eq!(bin.as_deref(), Some(prev_sha.as_str()));
+}

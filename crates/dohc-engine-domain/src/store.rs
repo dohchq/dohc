@@ -20,7 +20,10 @@ use crate::records::{
     MomentPage, MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation,
     SnapshotRecord, TextSnapshot, VersionKind, VersionRecord, WriteResult, WriteText,
 };
-use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
+use dohc_engine_storage::{
+    EngineStore, FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
+    enqueue_delete_job, enqueue_job, put_binary_blob,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -367,17 +370,45 @@ impl<'a> VersionedTextStore<'a> {
                 params![ws, input.version_id, prep.moment.object_id],
             )
             .map_err(DomainError::sql_persist)?;
-            // A binary write enqueues a durable materialization job keyed by the
-            // mutation moment id (moment_id == job_id). Rolling the moment back
-            // must cancel that still-pending job; otherwise `run_pending_jobs`
-            // would materialize the rolled-back bytes onto disk while the DB head
-            // is absent/restored — disk resurrection. Text mutations enqueue no
-            // job, so this is a no-op for them.
-            tx.execute(
-                "DELETE FROM materialization_jobs WHERE job_id = ?1 AND status = 'pending'",
-                params![input.mutation_moment_id],
-            )
-            .map_err(DomainError::sql_persist)?;
+            // Reconcile DISK with the rolled-back head. A binary write enqueues a
+            // materialization job keyed by the mutation moment id (moment_id ==
+            // job_id). Rolling the moment back must not leave disk diverged from
+            // the restored/absent DB head:
+            //   * job still PENDING  → cancel it; the bytes never reached disk, so
+            //     disk already holds the pre-write state the rollback restores.
+            //   * job COMPLETE/CONFLICT → the bytes are (or an external edit is)
+            //     on disk; enqueue a compensating job that restores disk to the
+            //     rolled-back-to state (delete for a first write, else the previous
+            //     content). Preimage-guarded on the written bytes so an external
+            //     edit is preserved, never clobbered.
+            // Text mutations enqueue no job, so `job` is `None` and this no-ops.
+            let job: Option<(String, i64, String)> = tx
+                .query_row(
+                    "SELECT status, target_generation, content_sha256 \
+                     FROM materialization_jobs WHERE job_id = ?1",
+                    params![input.mutation_moment_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            if let Some((status, generation, written_sha256)) = job {
+                if status == "pending" {
+                    tx.execute(
+                        "DELETE FROM materialization_jobs WHERE job_id = ?1",
+                        params![input.mutation_moment_id],
+                    )
+                    .map_err(DomainError::sql_persist)?;
+                } else {
+                    enqueue_binary_rollback_restore(
+                        tx,
+                        input,
+                        &prep.before,
+                        generation,
+                        &written_sha256,
+                        prep.moment.recorded_at_ms,
+                    )?;
+                }
+            }
 
             if let Some(before) = &prep.before {
                 if before.content_kind == "text" {
@@ -1556,6 +1587,74 @@ fn get_snapshot(
         .optional()
         .map_err(DomainError::sql_corrupt)?;
     row.transpose()
+}
+
+/// Enqueue the compensating materialization job that restores DISK to the
+/// rolled-back-to state after a binary write whose original job already reached
+/// disk (COMPLETE) or was preserved-both (CONFLICT). Mirrors the text write/
+/// resolve path (`enqueue_write`/`enqueue_delete`): content bytes live in
+/// `binary_blobs` (what the materializer reads) and the job carries the write's
+/// own generation so the newest-wins gate treats it as a peer of the completed
+/// write, not a superseded older generation.
+///
+/// The preimage is the WRITTEN bytes (`written_sha256`): the compensator only
+/// acts if disk still holds exactly what the rolled-back write put there, so an
+/// external edit after materialization is preserved (conflict), never clobbered.
+fn enqueue_binary_rollback_restore(
+    tx: &Transaction<'_>,
+    input: &RollbackTextFileMutation,
+    before: &Option<SnapshotRecord>,
+    generation: i64,
+    written_sha256: &str,
+    now_ms: i64,
+) -> Result<(), DomainError> {
+    let job_id = format!("rollback-restore_{}", input.mutation_moment_id);
+    let preimage = Preimage::Present(written_sha256.to_owned());
+    match before {
+        // First write: the rolled-back-to state is ABSENT → delete the file.
+        // `content_sha256` must reference an existing `binary_blobs` row (FK); the
+        // written bytes still qualify and are unused by a delete job.
+        None => enqueue_delete_job(
+            tx,
+            &MaterializationJobSpec {
+                job_id,
+                target_path: input.path.clone(),
+                content_sha256: written_sha256.to_owned(),
+                preimage,
+                target_generation: generation,
+                now_ms,
+            },
+        )
+        .map_err(DomainError::from)?,
+        // Overwrite: restore the PREVIOUS content. Text lives in `blobs`; copy its
+        // bytes into `binary_blobs` (mirroring `enqueue_write`) and materialize
+        // that sha. A previous binary head's bytes are already in `binary_blobs`.
+        Some(before) => {
+            let content_sha256 = if before.content_kind == "binary" {
+                before
+                    .binary_sha256
+                    .clone()
+                    .ok_or(DomainError::StateCorrupt {
+                        reason: "binary rollback snapshot has no binary hash",
+                    })?
+            } else {
+                put_binary_blob(tx, before.text.as_bytes()).map_err(DomainError::from)?
+            };
+            enqueue_job(
+                tx,
+                &MaterializationJobSpec {
+                    job_id,
+                    target_path: input.path.clone(),
+                    content_sha256,
+                    preimage,
+                    target_generation: generation,
+                    now_ms,
+                },
+            )
+            .map_err(DomainError::from)?;
+        }
+    }
+    Ok(())
 }
 
 fn upsert_snapshot(conn: &Connection, snapshot: &SnapshotRecord) -> Result<(), DomainError> {
