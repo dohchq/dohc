@@ -59,11 +59,6 @@ pub(crate) fn scan(root: &Path) -> Result<Inventory, RehearsalError> {
     let mut files = Vec::new();
     enumerate(root, root, &mut files)?;
     files.sort_by(|left, right| left.0.cmp(&right.0));
-    if files.len() > MAX_FILES {
-        return Err(RehearsalError::Io {
-            code: "inventory-too-many-files",
-        });
-    }
     let inputs: Vec<HashInput> = files
         .iter()
         .enumerate()
@@ -126,9 +121,21 @@ fn enumerate(
         if metadata.is_dir() {
             enumerate(root, &path, files)?;
         } else if metadata.is_file() {
+            if super::metadata_is_hard_linked(&metadata) {
+                return Err(RehearsalError::Io {
+                    code: "inventory-hardlink-refused",
+                });
+            }
             let relative = path.strip_prefix(root).map_err(|_| RehearsalError::State)?;
             let relative = portable_path(relative)?;
             files.push((relative, path, metadata.len()));
+            // Enforced DURING the walk so an oversized clone fails closed
+            // before it can exhaust memory.
+            if files.len() > MAX_FILES {
+                return Err(RehearsalError::Io {
+                    code: "inventory-too-many-files",
+                });
+            }
         } else {
             return Err(RehearsalError::Io {
                 code: "inventory-special-file-refused",
@@ -148,6 +155,11 @@ fn portable_path(path: &Path) -> Result<String, RehearsalError> {
 fn persist(root: &Path, inventory: &Inventory) -> Result<(), RehearsalError> {
     let path = inventory_path(root);
     let temp = path.with_extension("json.tmp");
+    // A stale temp from a crash before publication is uncommitted scratch;
+    // clear it so the resumed run is not wedged by `create_new`.
+    if std::fs::symlink_metadata(&temp).is_ok() {
+        std::fs::remove_file(&temp).map_err(|e| RehearsalError::io("inventory-temp-clear", e))?;
+    }
     let bytes = serde_json::to_vec(inventory).map_err(|_| RehearsalError::State)?;
     let mut file = OpenOptions::new()
         .write(true)
@@ -159,7 +171,11 @@ fn persist(root: &Path, inventory: &Inventory) -> Result<(), RehearsalError> {
     file.sync_all()
         .map_err(|e| RehearsalError::io("inventory-temp-sync", e))?;
     drop(file);
-    std::fs::rename(temp, path).map_err(|e| RehearsalError::io("inventory-publish", e))
+    std::fs::rename(&temp, &path).map_err(|e| RehearsalError::io("inventory-publish", e))?;
+    if let Some(parent) = path.parent() {
+        super::fsync_dir(parent)?;
+    }
+    Ok(())
 }
 
 fn inventory_path(root: &Path) -> PathBuf {

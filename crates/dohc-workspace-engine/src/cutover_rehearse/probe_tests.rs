@@ -124,6 +124,26 @@ fn failure_reason(record: &StateRecord) -> &str {
     }
 }
 
+impl Fixture {
+    fn try_run_with_recovery(&self, recovery: &Path) -> Result<RehearsalOutcome, RehearsalError> {
+        run_rehearsal(RehearsalConfig {
+            root: self.root.path(),
+            recovery_dir: recovery,
+            now_ms: NOW_MS + 1,
+            faults: &NoFaults,
+        })
+    }
+}
+
+/// A precondition refusal: `Err` with the given code, never a state mutation.
+#[track_caller]
+fn assert_refused(result: Result<RehearsalOutcome, RehearsalError>, code: &str) {
+    match result {
+        Err(RehearsalError::Io { code: actual }) => assert_eq!(actual, code),
+        other => panic!("expected refusal {code}, got {other:?}"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Resume must re-prove the recorded backup before the destructive move.
 // ---------------------------------------------------------------------------
@@ -142,17 +162,15 @@ fn backed_up_record_carries_the_verified_backup_fingerprint() {
 }
 
 #[test]
-fn resume_with_different_recovery_dir_fails_closed_before_move_aside() {
+fn resume_with_different_recovery_dir_is_refused_before_move_aside() {
     let fixture = Fixture::new();
     crash_at_backed_up(&fixture);
 
     let empty_recovery = ScratchDir::new().expect("empty recovery");
-    let outcome = fixture.run_with_recovery(&NoFaults, empty_recovery.path());
-    let record = match outcome {
-        RehearsalOutcome::Failed(record) => record,
-        other => panic!("resume at a different recovery dir must fail closed: {other:?}"),
-    };
-    assert_eq!(failure_reason(&record), "resume-recovery-dir-mismatch");
+    assert_refused(
+        fixture.try_run_with_recovery(empty_recovery.path()),
+        "resume-recovery-dir-mismatch",
+    );
     assert!(
         !moved_aside_path(&fixture.paths()).exists(),
         "nothing may be moved aside without a re-verified backup"
@@ -162,10 +180,15 @@ fn resume_with_different_recovery_dir_fails_closed_before_move_aside() {
         &fixture.original_triplet,
         "live triplet after refused resume",
     );
+    // The refusal is not terminal: the recorded dir still resumes to Complete.
+    assert!(matches!(
+        fixture.run(&NoFaults),
+        RehearsalOutcome::Complete(_)
+    ));
 }
 
 #[test]
-fn resume_with_lost_backup_fails_closed_before_move_aside() {
+fn resume_with_lost_backup_is_refused_before_move_aside() {
     let fixture = Fixture::new();
     crash_at_backed_up(&fixture);
 
@@ -179,12 +202,10 @@ fn resume_with_lost_backup_fails_closed_before_move_aside() {
         }
     }
 
-    let outcome = fixture.run(&NoFaults);
-    let record = match outcome {
-        RehearsalOutcome::Failed(record) => record,
-        other => panic!("resume with a lost backup must fail closed: {other:?}"),
-    };
-    assert_eq!(failure_reason(&record), "backup-db-not-valid");
+    assert_refused(
+        fixture.try_run_with_recovery(fixture.recovery.path()),
+        "backup-db-not-valid",
+    );
     assert!(!moved_aside_path(&fixture.paths()).exists());
     assert_triplet_matches(
         &fixture.engine_dir(),
@@ -204,12 +225,10 @@ fn resume_refuses_recovery_dir_inside_root() {
 
     let inside = fixture.root.join("recovery-inside-root");
     std::fs::create_dir(&inside).expect("inside recovery dir");
-    let outcome = fixture.run_with_recovery(&NoFaults, &inside);
-    let record = match outcome {
-        RehearsalOutcome::Failed(record) => record,
-        other => panic!("inside-root recovery must fail closed on resume: {other:?}"),
-    };
-    assert_eq!(failure_reason(&record), "backup-must-be-outside-root");
+    assert_refused(
+        fixture.try_run_with_recovery(&inside),
+        "backup-must-be-outside-root",
+    );
     assert!(
         !inside.join("triplet-proof").exists(),
         "no proof copies may be written inside the clone root"
@@ -219,6 +238,11 @@ fn resume_refuses_recovery_dir_inside_root() {
         &fixture.original_triplet,
         "live triplet after inside-root resume refusal",
     );
+    // The refusal is not terminal: a valid recovery dir still resumes.
+    assert!(matches!(
+        fixture.run(&NoFaults),
+        RehearsalOutcome::Complete(_)
+    ));
 }
 
 #[test]
@@ -226,15 +250,13 @@ fn fresh_start_refuses_recovery_dir_inside_root() {
     for relative in ["recovery", "deep/nested/recovery"] {
         let fixture = Fixture::new();
         let inside = fixture.root.join(relative);
-        let outcome = fixture.run_with_recovery(&NoFaults, &inside);
-        let record = match outcome {
-            RehearsalOutcome::Failed(record) => record,
-            other => panic!("inside-root recovery must fail ({relative}): {other:?}"),
-        };
-        assert_eq!(
-            failure_reason(&record),
+        assert_refused(
+            fixture.try_run_with_recovery(&inside),
             "backup-must-be-outside-root",
-            "unexpected failure ({relative})"
+        );
+        assert!(
+            !fixture.state_dir().exists(),
+            "no state may be persisted for an invalid recovery dir ({relative})"
         );
         assert_triplet_matches(
             &fixture.engine_dir(),
@@ -314,18 +336,13 @@ fn live_db_bound_to_different_shadow_token_fails_closed_before_any_move() {
     std::fs::write(dohc.join("agent-runs.json"), br#"{}"#).expect("agent runs");
     let db_before = std::fs::read(&db).expect("db before");
 
-    let outcome = run_rehearsal(RehearsalConfig {
+    let result = run_rehearsal(RehearsalConfig {
         root: root.path(),
         recovery_dir: recovery.path(),
         now_ms: NOW_MS + 1,
         faults: &NoFaults,
-    })
-    .expect("rehearsal result");
-    let record = match outcome {
-        RehearsalOutcome::Failed(record) => record,
-        other => panic!("binding mismatch must fail closed: {other:?}"),
-    };
-    assert_eq!(failure_reason(&record), "live-db-shadow-binding-mismatch");
+    });
+    assert_refused(result, "live-db-shadow-binding-mismatch");
     assert!(
         !root
             .join(".dohc/engine/moved-aside-cutover-rehearsal")
@@ -341,12 +358,10 @@ fn missing_engine_db_is_refused_not_fabricated() {
     let db = fixture.engine_dir().join("engine.db");
     std::fs::remove_file(&db).expect("remove live db");
 
-    let outcome = fixture.run(&NoFaults);
-    let record = match outcome {
-        RehearsalOutcome::Failed(record) => record,
-        other => panic!("missing db must fail closed: {other:?}"),
-    };
-    assert_eq!(failure_reason(&record), "live-db-missing");
+    assert_refused(
+        fixture.try_run_with_recovery(fixture.recovery.path()),
+        "live-db-missing",
+    );
     assert!(
         !db.exists(),
         "the backup step must never create a source db"
@@ -465,12 +480,10 @@ fn forged_backed_up_state_with_fabricated_fingerprint_fails_closed() {
         &serde_json::to_value(&forged).expect("forged value"),
     );
 
-    let outcome = fixture.run(&NoFaults);
-    let record = match outcome {
-        RehearsalOutcome::Failed(record) => record,
-        other => panic!("fabricated fingerprint must fail closed: {other:?}"),
-    };
-    assert_eq!(failure_reason(&record), "backup-db-not-valid");
+    assert_refused(
+        fixture.try_run_with_recovery(fixture.recovery.path()),
+        "backup-db-not-valid",
+    );
     assert!(
         !moved_aside_path(&fixture.paths()).exists(),
         "no move may run on a fingerprint that never matched a real backup"
@@ -546,37 +559,30 @@ fn torn_state_marker_fails_closed() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn resume_after_phantom_move_aside_fails_closed() {
+fn resume_after_phantom_move_aside_is_refused() {
     let fixture = Fixture::new();
     crash_at_backed_up(&fixture);
     let paths = fixture.paths();
 
     // The crash window: move-aside physically completed but the MovedAside
-    // marker was never persisted.
+    // marker was never persisted. The moved bytes cannot be re-proven against
+    // the recorded fingerprint, so this stays a refusal.
     move_aside(&paths, fixture.recovery.path()).expect("manual move-aside");
     assert!(!paths.db.exists());
 
-    let outcome = fixture.run(&NoFaults);
-    let record = match outcome {
-        RehearsalOutcome::Failed(record) => record,
-        other => panic!("resume after phantom move-aside must fail closed: {other:?}"),
-    };
-    assert!(
-        matches!(
-            &record.current,
-            RehearsalState::Failed { at, .. } if *at == StableState::BackedUp
-        ),
-        "unexpected failure point: {record:?}"
+    assert_refused(
+        fixture.try_run_with_recovery(fixture.recovery.path()),
+        "live-db-missing",
     );
     assert_triplet_matches(
         &moved_aside_path(&paths),
         &fixture.original_triplet,
         "retained triplet after phantom-move resume",
     );
-    assert!(matches!(
-        fixture.run(&NoFaults),
-        RehearsalOutcome::Failed(_)
-    ));
+    assert_refused(
+        fixture.try_run_with_recovery(fixture.recovery.path()),
+        "live-db-missing",
+    );
 }
 
 #[test]
@@ -591,10 +597,9 @@ fn resume_after_partial_swap_preserves_split_triplet() {
     std::fs::create_dir(&moved).expect("moved dir");
     std::fs::rename(&paths.db, moved.join("engine.db")).expect("partial swap");
 
-    let outcome = fixture.run(&NoFaults);
-    assert!(
-        matches!(outcome, RehearsalOutcome::Failed(_)),
-        "resume after partial swap must fail closed: {outcome:?}"
+    assert_refused(
+        fixture.try_run_with_recovery(fixture.recovery.path()),
+        "live-db-missing",
     );
     let original_db = fixture
         .original_triplet
@@ -654,6 +659,271 @@ fn crash_before_initialized_marker_fails_closed_on_resume() {
         fixture.run(&NoFaults),
         RehearsalOutcome::Failed(_)
     ));
+}
+
+#[test]
+fn completed_initialize_without_marker_resumes_to_complete() {
+    let fixture = Fixture::new();
+    let faults = ScriptedFaults::crash_at(FaultPoint::AfterMovedAside);
+    assert!(matches!(
+        fixture.run(faults.as_ref()),
+        RehearsalOutcome::Crashed(_)
+    ));
+    let paths = fixture.paths();
+
+    // The crash window AFTER initialize fully completed (fresh store created
+    // AND bound) but before the Initialized marker persisted: the retained
+    // moved-aside store proves the window, so resume continues.
+    let mut store = EngineStore::open(&paths.db, NOW_MS + 2).expect("fresh store");
+    assert!(store.was_freshly_created());
+    assert!(store.bind_shadow_clone_token(SHADOW_TOKEN).expect("bind"));
+    drop(store);
+
+    let outcome = fixture.run(&NoFaults);
+    assert!(
+        matches!(outcome, RehearsalOutcome::Complete(_)),
+        "a completed-but-unmarked initialize must resume: {outcome:?}"
+    );
+    assert_triplet_matches(
+        &moved_aside_path(&paths),
+        &fixture.original_triplet,
+        "retained triplet after resumed initialize",
+    );
+}
+
+#[test]
+fn stale_triplet_proof_from_crashed_attempt_is_cleared_on_resume() {
+    let fixture = Fixture::new();
+    crash_at_backed_up(&fixture);
+    let paths = fixture.paths();
+
+    // The crash window: Phase A completed (proof exists, handles closed) but
+    // the process died before any rename. The live triplet is intact, so the
+    // resume must rebuild the proof and finish, not wedge on the leftover.
+    let _ = acquire_copy_hash_close(&paths, fixture.recovery.path()).expect("phase A");
+
+    let outcome = fixture.run(&NoFaults);
+    assert!(
+        matches!(outcome, RehearsalOutcome::Complete(_)),
+        "a stale proof dir must not wedge the resume: {outcome:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Backup reuse, hygiene, and crash-recoverable publishes.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn foreign_db_backup_in_recovery_dir_is_refused() {
+    use dohc_engine_storage::{
+        BackupOutcome, NoFaults as StorageNoFaults, RealFreeSpace, create_verified_backup,
+    };
+
+    let fixture = Fixture::new();
+    // A valid backup pair already sits in the recovery dir — but it was taken
+    // from a DIFFERENT clone (bound to another shadow token).
+    let foreign_root = ScratchDir::new().expect("foreign root");
+    let foreign_db = foreign_root.engine_db_path().expect("foreign db path");
+    let mut foreign = EngineStore::open(&foreign_db, NOW_MS).expect("foreign store");
+    let other_token = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    assert!(foreign.bind_shadow_clone_token(other_token).expect("bind"));
+    let outcome = create_verified_backup(
+        &foreign,
+        fixture.recovery.path(),
+        db_backup_stem(),
+        "cutover-rehearsal",
+        NOW_MS,
+        &RealFreeSpace,
+        &StorageNoFaults,
+    )
+    .expect("foreign backup");
+    assert!(matches!(outcome, BackupOutcome::Verified(_)));
+    drop(foreign);
+
+    let outcome = fixture.run(&NoFaults);
+    let record = match outcome {
+        RehearsalOutcome::Failed(record) => record,
+        other => panic!("a foreign backup must never be adopted: {other:?}"),
+    };
+    assert_eq!(failure_reason(&record), "backup-reuse-foreign-clone");
+    assert!(
+        load_valid_directory_backup(fixture.recovery.path())
+            .expect("directory backup probe")
+            .is_none(),
+        "no directory backup may be built over a foreign safety net"
+    );
+    assert_triplet_matches(
+        &fixture.engine_dir(),
+        &fixture.original_triplet,
+        "live triplet after foreign-backup refusal",
+    );
+}
+
+#[test]
+fn directory_backup_with_extras_or_empty_manifest_is_invalid() {
+    let fixture = Fixture::new();
+    assert!(matches!(
+        fixture.run(&NoFaults),
+        RehearsalOutcome::Complete(_)
+    ));
+    let recovery = fixture.recovery.path();
+    assert!(
+        load_valid_directory_backup(recovery)
+            .expect("valid")
+            .is_some()
+    );
+
+    // An undeclared extra file inside the backup dir invalidates it.
+    let extra = fixture
+        .recovery
+        .join("cutover-files")
+        .join("undeclared.txt");
+    std::fs::write(&extra, b"extra").expect("extra file");
+    assert!(
+        load_valid_directory_backup(recovery)
+            .expect("extra probe")
+            .is_none(),
+        "an undeclared extra file must invalidate the directory backup"
+    );
+    std::fs::remove_file(&extra).expect("remove extra");
+    assert!(
+        load_valid_directory_backup(recovery)
+            .expect("restored")
+            .is_some()
+    );
+
+    // An empty manifest never validates.
+    std::fs::write(
+        fixture.recovery.join("cutover-files.manifest.json"),
+        br#"{"verified":true,"files":[]}"#,
+    )
+    .expect("empty manifest");
+    assert!(
+        load_valid_directory_backup(recovery)
+            .expect("empty probe")
+            .is_none(),
+        "an empty manifest must never validate"
+    );
+}
+
+#[test]
+fn stale_directory_backup_artifacts_are_cleared_and_rebuilt() {
+    let fixture = Fixture::new();
+    // Crash leftovers: a staging dir and an unmanifested published dir.
+    let staging = fixture.recovery.join("cutover-files.staging");
+    std::fs::create_dir(&staging).expect("staging dir");
+    std::fs::write(staging.join("garbage"), b"x").expect("staging garbage");
+    let published = fixture.recovery.join("cutover-files");
+    std::fs::create_dir(&published).expect("published dir");
+    std::fs::write(published.join("stale"), b"y").expect("published garbage");
+
+    let outcome = fixture.run(&NoFaults);
+    assert!(
+        matches!(outcome, RehearsalOutcome::Complete(_)),
+        "stale uncommitted backup artifacts must not wedge the run: {outcome:?}"
+    );
+    assert!(!staging.exists(), "staging must be cleared");
+    let manifest = load_valid_directory_backup(fixture.recovery.path())
+        .expect("manifest")
+        .expect("rebuilt backup validates");
+    assert!(
+        !manifest
+            .files
+            .iter()
+            .any(|entry| entry.relative_path == "stale"),
+        "the rebuilt backup must not adopt stale garbage"
+    );
+}
+
+#[test]
+fn stale_inventory_temp_does_not_wedge_the_run() {
+    let fixture = Fixture::new();
+    // The crash window: a torn inventory temp exists, no inventory published.
+    let temp = fixture
+        .engine_dir()
+        .join("CUTOVER_REHEARSAL_INVENTORY.json.tmp");
+    std::fs::write(&temp, b"{torn").expect("stale temp");
+
+    let outcome = fixture.run(&NoFaults);
+    assert!(
+        matches!(outcome, RehearsalOutcome::Complete(_)),
+        "a stale inventory temp must not wedge the run: {outcome:?}"
+    );
+    assert!(!temp.exists(), "the stale temp must be cleared by publish");
+    assert!(load_inventory(fixture.root.path()).is_ok());
+}
+
+#[test]
+fn absent_optional_sibling_snapshot_is_allowed() {
+    let fixture = Fixture::new();
+    std::fs::remove_file(fixture.root.join(".dohc").join("agent-runs.json"))
+        .expect("remove optional sibling");
+
+    let outcome = fixture.run(&NoFaults);
+    assert!(
+        matches!(outcome, RehearsalOutcome::Complete(_)),
+        "an absent optional sibling snapshot must not fail the backup: {outcome:?}"
+    );
+    let manifest = load_valid_directory_backup(fixture.recovery.path())
+        .expect("manifest")
+        .expect("backup validates");
+    assert!(
+        !manifest
+            .files
+            .iter()
+            .any(|entry| entry.relative_path == "dohc/agent-runs.json"),
+        "an absent sibling must simply not be manifested"
+    );
+}
+
+#[test]
+fn tampered_migration_ledger_same_length_is_refused_before_backup() {
+    let fixture = Fixture::new();
+    // Same LENGTH, different identity: the last expected migration row is
+    // replaced by an unrelated one, so a count compare would pass.
+    {
+        let conn = rusqlite::Connection::open(fixture.engine_dir().join("engine.db"))
+            .expect("open rw for tamper");
+        conn.execute(
+            "UPDATE engine_migrations SET id = 'v1-bogus', checksum = 'beef' \
+             WHERE ordinal = (SELECT MAX(ordinal) FROM engine_migrations)",
+            [],
+        )
+        .expect("tamper ledger");
+    }
+
+    let outcome = fixture.run(&NoFaults);
+    let record = match outcome {
+        RehearsalOutcome::Failed(record) => record,
+        other => panic!("a tampered ledger must refuse the backup: {other:?}"),
+    };
+    assert_eq!(failure_reason(&record), "backup-source-pending-migrations");
+    assert!(
+        load_valid_backup(fixture.recovery.path(), db_backup_stem())
+            .expect("db backup probe")
+            .is_none(),
+        "no backup may be taken from a source the build would migrate"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hard_linked_workspace_file_is_refused() {
+    use dohc_engine_testkit::make_hardlink;
+
+    let fixture = Fixture::new();
+    make_hardlink(
+        &fixture.root.join("documents").join("note.md"),
+        &fixture.root.join("documents").join("alias.md"),
+    )
+    .expect("hard link");
+
+    let outcome = fixture.run(&NoFaults);
+    let record = match outcome {
+        RehearsalOutcome::Failed(record) => record,
+        other => panic!("a hard-linked workspace file must be refused: {other:?}"),
+    };
+    assert_eq!(failure_reason(&record), "settle-hardlink-refused");
 }
 
 // ---------------------------------------------------------------------------
@@ -738,6 +1008,53 @@ fn close_to_rename_window_write_is_caught_and_restored() {
         &paths.engine,
         &fixture.original_triplet,
         "restored live triplet after window write",
+    );
+}
+
+/// An IO ERROR (not a mismatch) inside the post-move verification must route
+/// through the rollback exactly like a mismatch — never bypass it and leave
+/// the live triplet absent.
+#[cfg(windows)]
+#[test]
+fn post_move_verification_error_restores_live_triplet() {
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    let root = ScratchDir::new().expect("root");
+    let recovery = ScratchDir::new().expect("recovery");
+    let engine = root.join(".dohc").join("engine");
+    std::fs::create_dir_all(&engine).expect("engine dir");
+    std::fs::write(engine.join("engine.db"), b"primary bytes").expect("db");
+    std::fs::write(engine.join("engine.db-wal"), b"wal bytes").expect("wal");
+    std::fs::write(engine.join("engine.db-shm"), b"shm bytes").expect("shm");
+    let original = snapshot_triplet(root.path());
+    let paths = Paths::new(root.path().to_path_buf());
+
+    let verified = acquire_copy_hash_close(&paths, recovery.path()).expect("phase A");
+    // Shares only DELETE: Phase B's rename succeeds, but the post-move hash
+    // open is denied — an IO error inside verification.
+    let interloper = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0x4)
+        .open(&paths.db)
+        .expect("delete-only handle");
+
+    let error = super::handles::swap_and_verify(&paths, &verified)
+        .expect_err("verification must error while the handle denies reads");
+    drop(interloper);
+
+    assert!(
+        matches!(
+            error,
+            RehearsalError::Io {
+                code: "triplet-verify-open"
+            }
+        ),
+        "unexpected error: {error:?}"
+    );
+    assert_triplet_matches(
+        &paths.engine,
+        &original,
+        "restored live triplet after verification IO error",
     );
 }
 

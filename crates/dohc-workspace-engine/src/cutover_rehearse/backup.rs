@@ -5,9 +5,10 @@ use super::{Paths, RehearsalError};
 use dohc_engine_storage::{
     BackupOutcome, EngineStore, RealFreeSpace, create_verified_backup, load_valid_backup,
 };
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -43,8 +44,14 @@ pub fn load_valid_directory_backup(
     };
     let manifest: DirectoryBackupManifest =
         serde_json::from_slice(&bytes).map_err(|_| RehearsalError::State)?;
-    if !manifest.verified {
+    if !manifest.verified || manifest.files.is_empty() {
         return Ok(None);
+    }
+    let mut declared = BTreeSet::new();
+    for entry in &manifest.files {
+        if !declared.insert(entry.relative_path.as_str()) {
+            return Ok(None);
+        }
     }
     let root = recovery_dir.join(DIRECTORY_BACKUP_NAME);
     for entry in &manifest.files {
@@ -71,20 +78,75 @@ pub fn load_valid_directory_backup(
             return Ok(None);
         }
     }
+    // The backup dir must contain EXACTLY the declared set: an undeclared
+    // extra, alias, or special file leaves the manifest hash unchanged and
+    // must invalidate the backup rather than ride along into a restore.
+    let mut actual = Vec::new();
+    if !collect_backup_paths(&root, &root, &mut actual)? {
+        return Ok(None);
+    }
+    let actual: BTreeSet<&str> = actual.iter().map(String::as_str).collect();
+    if actual != declared {
+        return Ok(None);
+    }
     Ok(Some(manifest))
+}
+
+/// Walk the published backup dir; `Ok(false)` means the tree contains an
+/// alias/special/hard-linked/non-UTF-8 entry and the backup is invalid.
+fn collect_backup_paths(
+    root: &Path,
+    directory: &Path,
+    output: &mut Vec<String>,
+) -> Result<bool, RehearsalError> {
+    let entries = std::fs::read_dir(directory)
+        .map_err(|e| RehearsalError::io("directory-backup-enumerate", e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| RehearsalError::io("directory-backup-entry", e))?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .map_err(|e| RehearsalError::io("directory-backup-walk-metadata", e))?;
+        if metadata.file_type().is_symlink() {
+            return Ok(false);
+        }
+        if metadata.is_dir() {
+            if !collect_backup_paths(root, &path, output)? {
+                return Ok(false);
+            }
+        } else if metadata.is_file() {
+            if super::metadata_is_hard_linked(&metadata) {
+                return Ok(false);
+            }
+            let Some(relative) = path.strip_prefix(root).ok().and_then(Path::to_str) else {
+                return Ok(false);
+            };
+            output.push(portable_separators(relative));
+        } else {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub(crate) fn create_restore_tested_backup(
     paths: &Paths,
     recovery_dir: &Path,
+    shadow_token: &str,
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<(), RehearsalError> {
     ensure_outside_root(&paths.root, recovery_dir)?;
-    std::fs::create_dir_all(recovery_dir)
-        .map_err(|e| RehearsalError::io("recovery-dir-create", e))?;
+    create_private_dir_all(recovery_dir)?;
 
     let db_valid = load_valid_backup(recovery_dir, DB_BACKUP_STEM)?.is_some();
+    if db_valid {
+        // A pre-existing DB backup is only reusable if the copy itself proves
+        // it came from THIS clone — its own shadow_clone binding must match.
+        verify_reused_backup_binding(
+            &recovery_dir.join(format!("{DB_BACKUP_STEM}.db")),
+            shadow_token,
+        )?;
+    }
     let directory_valid = load_valid_directory_backup(recovery_dir)?.is_some();
     if db_valid && directory_valid {
         return Ok(());
@@ -120,6 +182,57 @@ pub(crate) fn create_restore_tested_backup(
     create_directory_backup(paths, recovery_dir, faults)
 }
 
+/// The recovery dir holds a full copy of the workspace database, so it must be
+/// private. Unix: 0700 (created and tightened). Windows: the profile-inherited
+/// default ACL is already owner-scoped and accepted as-is.
+pub(crate) fn create_private_dir_all(dir: &Path) -> Result<(), RehearsalError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|e| RehearsalError::io("recovery-dir-create", e))?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| RehearsalError::io("recovery-dir-restrict", e))?;
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir).map_err(|e| RehearsalError::io("recovery-dir-create", e))?;
+    Ok(())
+}
+
+/// Open the backup COPY read-only and require its `shadow_clone` binding to
+/// match this run's validated token — a valid backup from another workspace or
+/// clone must never be adopted as this rehearsal's safety net.
+fn verify_reused_backup_binding(
+    backup_db: &Path,
+    shadow_token: &str,
+) -> Result<(), RehearsalError> {
+    let conn =
+        Connection::open_with_flags(backup_db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| {
+            RehearsalError::Io {
+                code: "backup-reuse-open-failed",
+            }
+        })?;
+    let token: Option<String> = conn
+        .query_row(
+            "SELECT token FROM shadow_clone WHERE rowid_guard = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| RehearsalError::Io {
+            code: "backup-reuse-binding-unreadable",
+        })?;
+    if token.as_deref() != Some(shadow_token) {
+        return Err(RehearsalError::Io {
+            code: "backup-reuse-foreign-clone",
+        });
+    }
+    Ok(())
+}
+
 /// `EngineStore::open` applies any pending migration to the store it opens.
 /// The backup source must be opened write-free, so a source whose applied
 /// migration ledger differs from this build's expectation is refused BEFORE
@@ -130,30 +243,22 @@ fn ensure_no_pending_migrations(
     recovery_dir: &Path,
     now_ms: i64,
 ) -> Result<(), RehearsalError> {
-    let applied = {
+    let (applied, incomplete) = {
         let conn =
             Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| {
                 RehearsalError::Io {
                     code: "backup-source-open-read-only-failed",
                 }
             })?;
-        let (applied, incomplete): (i64, i64) = conn
-            .query_row(
-                "SELECT COUNT(*), COUNT(*) FILTER (WHERE completed_at IS NULL) \
-                 FROM engine_migrations",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(|_| RehearsalError::Io {
-                code: "backup-source-migrations-unreadable",
-            })?;
-        if incomplete != 0 {
-            return Err(RehearsalError::Io {
-                code: "backup-source-pending-migrations",
-            });
-        }
-        applied
+        migration_ledger_rows(&conn).map_err(|_| RehearsalError::Io {
+            code: "backup-source-migrations-unreadable",
+        })?
     };
+    if incomplete {
+        return Err(RehearsalError::Io {
+            code: "backup-source-pending-migrations",
+        });
+    }
 
     let probe_dir = recovery_dir.join(MIGRATION_PROBE_DIR);
     if probe_dir.exists() {
@@ -161,18 +266,44 @@ fn ensure_no_pending_migrations(
             .map_err(|e| RehearsalError::io("migration-probe-clean", e))?;
     }
     std::fs::create_dir(&probe_dir).map_err(|e| RehearsalError::io("migration-probe-create", e))?;
-    let expected = {
+    let (expected, _) = {
         let probe = EngineStore::open(&probe_dir.join("engine.db"), now_ms)?;
-        probe.migration_ledger_len()?
+        probe
+            .read_with(migration_ledger_rows)
+            .map_err(|_| RehearsalError::Io {
+                code: "migration-probe-unreadable",
+            })?
     };
     let _ = std::fs::remove_dir_all(&probe_dir);
 
+    // Identity compare, not a count: a ledger with one expected migration
+    // missing and one unrelated row present has the same LENGTH but is still
+    // pending work for `EngineStore::open`.
     if applied != expected {
         return Err(RehearsalError::Io {
             code: "backup-source-pending-migrations",
         });
     }
     Ok(())
+}
+
+/// The ordered `(ordinal, id, checksum)` ledger identity plus whether any row
+/// is incomplete.
+#[allow(clippy::type_complexity, reason = "local ledger-row triple")]
+fn migration_ledger_rows(
+    conn: &Connection,
+) -> Result<(Vec<(i64, String, String)>, bool), rusqlite::Error> {
+    let mut statement = conn.prepare(
+        "SELECT ordinal, id, checksum, completed_at IS NULL FROM engine_migrations ORDER BY ordinal",
+    )?;
+    let mut rows = statement.query([])?;
+    let mut ledger = Vec::new();
+    let mut incomplete = false;
+    while let Some(row) = rows.next()? {
+        ledger.push((row.get(0)?, row.get(1)?, row.get(2)?));
+        incomplete |= row.get::<_, bool>(3)?;
+    }
+    Ok((ledger, incomplete))
 }
 
 /// Read-and-VALIDATE both backups at `recovery_dir` and return their identity.
@@ -253,10 +384,16 @@ fn create_directory_backup(
 ) -> Result<(), RehearsalError> {
     let staging = recovery_dir.join(format!("{DIRECTORY_BACKUP_NAME}.staging"));
     let published = recovery_dir.join(DIRECTORY_BACKUP_NAME);
-    if staging.exists() || published.exists() {
-        return Err(RehearsalError::Io {
-            code: "directory-backup-staging-not-clean",
-        });
+    // Reaching this point means no valid manifest exists, so any leftover
+    // staging dir or unmanifested published dir is an uncommitted artifact of
+    // a crashed attempt — clear it and rebuild instead of wedging forever.
+    if staging.exists() {
+        std::fs::remove_dir_all(&staging)
+            .map_err(|e| RehearsalError::io("directory-backup-staging-clear", e))?;
+    }
+    if published.exists() {
+        std::fs::remove_dir_all(&published)
+            .map_err(|e| RehearsalError::io("directory-backup-unmanifested-clear", e))?;
     }
     std::fs::create_dir(&staging)
         .map_err(|e| RehearsalError::io("directory-backup-staging-create", e))?;
@@ -264,9 +401,14 @@ fn create_directory_backup(
     collect_engine_files(&paths.engine, &paths.engine, &mut sources)?;
     for sibling in SIBLING_SNAPSHOTS {
         let source = paths.root.join(".dohc").join(sibling);
-        let metadata = std::fs::symlink_metadata(&source)
-            .map_err(|e| RehearsalError::io("snapshot-metadata", e))?;
-        if !metadata.file_type().is_file() {
+        let metadata = match std::fs::symlink_metadata(&source) {
+            Ok(metadata) => metadata,
+            // The sibling snapshots are optional workspace files; absent means
+            // there is nothing to protect, not a broken fixture.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(RehearsalError::io("snapshot-metadata", error)),
+        };
+        if !metadata.file_type().is_file() || super::metadata_is_hard_linked(&metadata) {
             return Err(RehearsalError::Io {
                 code: "snapshot-not-regular",
             });
@@ -334,6 +476,11 @@ fn collect_engine_files(
         if metadata.is_dir() {
             collect_engine_files(engine_root, &path, output)?;
         } else if metadata.is_file() {
+            if super::metadata_is_hard_linked(&metadata) {
+                return Err(RehearsalError::Io {
+                    code: "engine-backup-hardlink-refused",
+                });
+            }
             let relative = path
                 .strip_prefix(engine_root)
                 .map_err(|_| RehearsalError::State)?;
@@ -410,6 +557,12 @@ fn write_manifest_atomic(
     manifest: &DirectoryBackupManifest,
 ) -> Result<(), RehearsalError> {
     let temp = path.with_extension("json.tmp");
+    // A stale temp from a crashed attempt is uncommitted scratch; clear it so
+    // the retry is not wedged by `create_new`.
+    if std::fs::symlink_metadata(&temp).is_ok() {
+        std::fs::remove_file(&temp)
+            .map_err(|e| RehearsalError::io("directory-manifest-temp-clear", e))?;
+    }
     let bytes = serde_json::to_vec(manifest).map_err(|_| RehearsalError::State)?;
     let mut file = OpenOptions::new()
         .write(true)
@@ -421,7 +574,12 @@ fn write_manifest_atomic(
     file.sync_all()
         .map_err(|e| RehearsalError::io("directory-manifest-temp-sync", e))?;
     drop(file);
-    std::fs::rename(temp, path).map_err(|e| RehearsalError::io("directory-manifest-publish", e))
+    std::fs::rename(&temp, path)
+        .map_err(|e| RehearsalError::io("directory-manifest-publish", e))?;
+    if let Some(parent) = path.parent() {
+        super::fsync_dir(parent)?;
+    }
+    Ok(())
 }
 
 /// `\` is a path separator only on Windows; on Unix a backslash is an ordinary

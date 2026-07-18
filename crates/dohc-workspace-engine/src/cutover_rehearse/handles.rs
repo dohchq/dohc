@@ -33,10 +33,11 @@ pub(crate) fn acquire_copy_hash_close(
     recovery_dir: &Path,
 ) -> Result<VerifiedTriplet, RehearsalError> {
     let proof_dir = recovery_dir.join(PROOF_DIR);
+    // Proof copies are per-attempt scratch rebuilt from the live triplet; a
+    // leftover dir from a crashed attempt must not wedge the resume.
     if proof_dir.exists() {
-        return Err(RehearsalError::Io {
-            code: "triplet-proof-already-exists",
-        });
+        std::fs::remove_dir_all(&proof_dir)
+            .map_err(|e| RehearsalError::io("triplet-proof-clear", e))?;
     }
     std::fs::create_dir(&proof_dir).map_err(|e| RehearsalError::io("triplet-proof-create", e))?;
 
@@ -82,6 +83,18 @@ pub(crate) fn swap_and_verify(
     paths: &Paths,
     verified: &VerifiedTriplet,
 ) -> Result<PathBuf, RehearsalError> {
+    // A triplet file that exists now but was not captured by Phase A appeared
+    // after the proof — nothing has been moved yet, so refuse outright.
+    for name in DB_TRIPLET {
+        if !verified.entries.iter().any(|entry| entry.name == name)
+            && std::fs::symlink_metadata(paths.engine.join(name)).is_ok()
+        {
+            return Err(RehearsalError::Io {
+                code: "triplet-unverified-sidecar",
+            });
+        }
+    }
+
     let moved = paths.engine.join(MOVED_ASIDE_DIR);
     std::fs::create_dir(&moved).map_err(|e| RehearsalError::io("moved-aside-create", e))?;
     for entry in &verified.entries {
@@ -94,29 +107,32 @@ pub(crate) fn swap_and_verify(
         }
     }
 
+    // EVERY verification failure — including an IO error while inspecting the
+    // moved bytes — must route through the rollback, never bypass it.
+    if let Err(error) = verify_moved_entries(&moved, verified) {
+        return Err(fail_swap(verified, error));
+    }
+    Ok(moved)
+}
+
+fn verify_moved_entries(moved: &Path, verified: &VerifiedTriplet) -> Result<(), RehearsalError> {
     for entry in &verified.entries {
         let destination = moved.join(entry.name);
         let metadata = std::fs::symlink_metadata(&destination)
             .map_err(|e| RehearsalError::io("moved-aside-metadata", e))?;
         if !metadata.file_type().is_file() || metadata.len() != entry.size_bytes {
-            return Err(fail_swap(
-                verified,
-                RehearsalError::Io {
-                    code: "moved-aside-identity-mismatch",
-                },
-            ));
+            return Err(RehearsalError::Io {
+                code: "moved-aside-identity-mismatch",
+            });
         }
         let (hash, bytes) = hash_file(&destination)?;
         if hash != entry.sha256 || bytes != entry.size_bytes {
-            return Err(fail_swap(
-                verified,
-                RehearsalError::Io {
-                    code: "moved-aside-hash-mismatch",
-                },
-            ));
+            return Err(RehearsalError::Io {
+                code: "moved-aside-hash-mismatch",
+            });
         }
     }
-    Ok(moved)
+    Ok(())
 }
 
 /// Roll back after a failed swap without masking the swap error. Only when the
@@ -143,10 +159,24 @@ fn open_exclusive(path: &Path) -> std::io::Result<File> {
 
 #[cfg(unix)]
 fn open_exclusive(path: &Path) -> std::io::Result<File> {
-    use fs4::FileExt as _;
     let file = OpenOptions::new().read(true).open(path)?;
-    file.lock()?;
-    Ok(file)
+    // Bounded advisory-lock acquisition: contention means a foreign holder
+    // (the rehearsal fixture has no live engine writers — force-settle is
+    // TS-owned and runs before this harness), so fail closed instead of
+    // blocking forever. The real `--cutover` tier must add a SQLite-level
+    // exclusive gate; flock cannot stop a live SQLite writer.
+    for attempt in 0..SWAP_ATTEMPTS {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if attempt + 1 < SWAP_ATTEMPTS {
+                    std::thread::sleep(Duration::from_millis(10_u64 << attempt));
+                }
+            }
+        }
+    }
+    Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
 }
 
 #[cfg(not(any(windows, unix)))]

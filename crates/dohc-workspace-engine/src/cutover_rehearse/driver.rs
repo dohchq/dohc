@@ -31,20 +31,15 @@ pub enum RehearsalOutcome {
 pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, RehearsalError> {
     let validated = validate_rehearsal_root(config.root)?;
     let paths = Paths::new(validated.root.clone());
-    let mut record = state::initialize(&paths.root)?;
-    if let RehearsalState::Failed { .. } = record.current {
-        return Ok(RehearsalOutcome::Failed(record));
-    }
 
-    // Every invocation — fresh or resumed — re-proves the recovery dir is
-    // outside the clone root before any step may touch it.
-    if let Err(error) = ensure_outside_root(&paths.root, config.recovery_dir) {
-        return fail(&paths.root, &record, failure_code(&error));
-    }
-    let recovery_dir = match canonical_recovery_dir(config.recovery_dir) {
-        Ok(dir) => dir,
-        Err(error) => return fail(&paths.root, &record, failure_code(&error)),
-    };
+    // The recovery dir is proven valid — outside the clone root, creatable,
+    // canonical — BEFORE any state is persisted, on every invocation. A
+    // violation is a caller/configuration error: refuse with `Err` (retryable
+    // with a correct dir) rather than poisoning the persisted state.
+    ensure_outside_root(&paths.root, config.recovery_dir)?;
+    let recovery_dir = canonical_recovery_dir(config.recovery_dir)?;
+
+    let mut record = state::initialize(&paths.root)?;
 
     loop {
         match record.current {
@@ -52,11 +47,11 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
                 // A persisted Complete is only trusted once the artifacts it
                 // implies — the recorded backups and the retained old store —
                 // are re-proven on disk.
-                if let Err(error) = verify_recorded_backup(&recovery_dir, record.backup.as_ref()) {
-                    return fail(&paths.root, &record, failure_code(&error));
-                }
+                verify_recorded_backup(&recovery_dir, record.backup.as_ref())?;
                 if !moved_aside_db_present(&paths) {
-                    return fail(&paths.root, &record, "complete-retained-store-missing");
+                    return Err(RehearsalError::Io {
+                        code: "complete-retained-store-missing",
+                    });
                 }
                 return Ok(RehearsalOutcome::Complete(record));
             }
@@ -68,12 +63,15 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
                 record = state::transition(&paths.root, &record, StableState::Settled)?;
             }
             RehearsalState::Settled => {
-                let backed_up = verify_live_clone_binding(&paths.db, &validated.shadow_token)
-                    .and_then(|()| load_or_record(&paths.root))
+                // Precondition (refusal, not terminal): the live db itself
+                // must prove it is the clone the fence validated.
+                verify_live_clone_binding(&paths.db, &validated.shadow_token)?;
+                let backed_up = load_or_record(&paths.root)
                     .and_then(|_| {
                         create_restore_tested_backup(
                             &paths,
                             &recovery_dir,
+                            &validated.shadow_token,
                             config.now_ms,
                             config.faults,
                         )
@@ -89,14 +87,15 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
                 }
             }
             RehearsalState::BackedUp => {
-                // The destructive move runs only after (a) the recorded backup
-                // re-validates at the recorded recovery dir and (b) the live db
-                // itself proves it is the clone the fence validated.
-                if let Err(error) = verify_recorded_backup(&recovery_dir, record.backup.as_ref())
-                    .and_then(|()| verify_live_clone_binding(&paths.db, &validated.shadow_token))
-                {
-                    return fail(&paths.root, &record, failure_code(&error));
-                }
+                // Preconditions (refusals, not terminal — the operator can
+                // restore the backup or pass the recorded dir and resume):
+                // the recorded backup must re-validate at the recorded
+                // recovery dir, and the live db must re-prove its binding. A
+                // missing live db here (crash between the physical move and
+                // the MovedAside marker) cannot be re-proven against the
+                // recorded fingerprint, so it stays a refusal.
+                verify_recorded_backup(&recovery_dir, record.backup.as_ref())?;
+                verify_live_clone_binding(&paths.db, &validated.shadow_token)?;
                 if let Err(error) = move_aside(&paths, &recovery_dir) {
                     return fail(&paths.root, &record, failure_code(&error));
                 }
@@ -106,6 +105,7 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
                 }
             }
             RehearsalState::MovedAside => {
+                verify_recorded_backup(&recovery_dir, record.backup.as_ref())?;
                 if let Err(error) =
                     initialize_fresh_store(&paths, &validated.shadow_token, config.now_ms)
                 {
@@ -149,8 +149,7 @@ fn fail(
 }
 
 fn canonical_recovery_dir(recovery_dir: &Path) -> Result<PathBuf, RehearsalError> {
-    std::fs::create_dir_all(recovery_dir)
-        .map_err(|e| RehearsalError::io("recovery-dir-create", e))?;
+    super::backup::create_private_dir_all(recovery_dir)?;
     std::fs::canonicalize(recovery_dir)
         .map_err(|e| RehearsalError::io("recovery-dir-canonicalize", e))
 }
@@ -188,6 +187,11 @@ fn settle_directory(directory: &Path) -> Result<(), RehearsalError> {
         if metadata.is_dir() {
             settle_directory(&path)?;
         } else if metadata.is_file() {
+            if super::metadata_is_hard_linked(&metadata) {
+                return Err(RehearsalError::Io {
+                    code: "settle-hardlink-refused",
+                });
+            }
             prove_readable(&path)?;
         } else {
             return Err(RehearsalError::Io {
@@ -217,7 +221,13 @@ fn initialize_fresh_store(
     now_ms: i64,
 ) -> Result<(), RehearsalError> {
     let mut store = EngineStore::open(&paths.db, now_ms)?;
-    if !store.was_freshly_created() || !store.bind_shadow_clone_token(shadow_token)? {
+    let fresh = store.was_freshly_created();
+    let bound = store.bind_shadow_clone_token(shadow_token)?;
+    // An EXISTING bound store is acceptable only as the crash window between
+    // a completed initialize and its marker — proven by the retained
+    // moved-aside store. Any other pre-existing db (e.g. a forged MovedAside
+    // marker over a live store) is refused.
+    if !bound || (!fresh && !moved_aside_db_present(paths)) {
         return Err(RehearsalError::Io {
             code: "initialize-not-fresh",
         });

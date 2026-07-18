@@ -57,6 +57,38 @@ impl Paths {
     }
 }
 
+/// Make a just-published rename durable by syncing its directory. Windows std
+/// cannot open directory handles; NTFS metadata durability is accepted there.
+pub(crate) fn fsync_dir(dir: &std::path::Path) -> Result<(), RehearsalError> {
+    #[cfg(unix)]
+    {
+        let handle =
+            std::fs::File::open(dir).map_err(|e| RehearsalError::io("dir-sync-open", e))?;
+        handle
+            .sync_all()
+            .map_err(|e| RehearsalError::io("dir-sync", e))?;
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
+/// Hard links alias content reachable outside the tree being walked. The link
+/// count is only exposed by stable std on Unix; on Windows the check is
+/// unavailable and hard links stay a documented limitation.
+pub(crate) fn metadata_is_hard_linked(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        metadata.nlink() > 1
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
 #[cfg(test)]
 mod probe_tests;
 #[cfg(test)]

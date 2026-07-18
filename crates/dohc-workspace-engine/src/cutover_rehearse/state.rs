@@ -81,8 +81,24 @@ pub struct StateRecord {
     pub backup: Option<BackupFingerprint>,
 }
 
+/// The state dir path, refusing any symlinked component so records can never
+/// be written through an alias that escapes the workspace root.
+fn state_dir(root: &Path) -> Result<std::path::PathBuf, RehearsalError> {
+    let dohc = root.join(".dohc");
+    let engine = dohc.join("engine");
+    let state = engine.join(STATE_DIR);
+    for dir in [&dohc, &engine, &state] {
+        if let Ok(metadata) = std::fs::symlink_metadata(dir)
+            && metadata.file_type().is_symlink()
+        {
+            return Err(RehearsalError::State);
+        }
+    }
+    Ok(state)
+}
+
 pub fn load_state(root: &Path) -> Result<Option<StateRecord>, RehearsalError> {
-    let dir = root.join(".dohc").join("engine").join(STATE_DIR);
+    let dir = state_dir(root)?;
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -187,7 +203,7 @@ pub(crate) fn fail(
 
 fn persist(root: &Path, record: StateRecord) -> Result<StateRecord, RehearsalError> {
     validate_record(&record)?;
-    let dir = root.join(".dohc").join("engine").join(STATE_DIR);
+    let dir = state_dir(root)?;
     std::fs::create_dir_all(&dir).map_err(|e| RehearsalError::io("state-dir", e))?;
     let final_path = dir.join(format!("{:020}.json", record.generation));
     let tmp_path = dir.join(format!(
@@ -207,6 +223,9 @@ fn persist(root: &Path, record: StateRecord) -> Result<StateRecord, RehearsalErr
         .map_err(|e| RehearsalError::io("state-temp-sync", e))?;
     drop(file);
     std::fs::rename(&tmp_path, &final_path).map_err(|e| RehearsalError::io("state-publish", e))?;
+    // The rename itself must be durable before the machine acts on the new
+    // state — a power loss must not resurrect the previous generation.
+    super::fsync_dir(&dir)?;
     Ok(record)
 }
 
