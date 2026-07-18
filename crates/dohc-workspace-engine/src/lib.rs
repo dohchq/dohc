@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod cutover_rehearse;
 pub mod shadow_fence;
 
 use base64::Engine as _;
