@@ -1216,3 +1216,48 @@ source of truth every orchestrator session loads first).
   BINCONFLICT, R13b-rest, member-share-reset semantics (ICE). Remaining path to
   cutover: GATE6 (deps R14 ✓, R10b ✓, R15-REHEARSE), R15-REHEARSE (deps R13, R14
   ✓), then R15 cutover (ICE checkpoint), R16.
+
+## 2026-07-18 — YRS-ABORT-SAFETY merged (#185) · R15-REHEARSE in review
+
+- YRS-ABORT-SAFETY #185 MERGED (squash; no migration). THE cutover-gating
+  abort-safety milestone: yrs 0.27.3 `Update::decode_v1` HARD-ABORTS the
+  process (uncatchable UB, `catch_unwind` does not stop it; SILENT UB in
+  release) on malformed update bytes, reachable via hostile-peer replication
+  and local `ydoc.apply`. Closed with a byte-level well-formedness
+  PRE-VALIDATOR built on `replay_parity::scan_v1` (never calls `decode_v1`,
+  never uses yrs' unsafe string decode), wired FIRST at every `decode_v1` site
+  (`Ydoc::validate_update`, `Ydoc::apply`, `merge_updates`) and again at the
+  durable `validate_update_bytes` choke point. The R14 41-byte crash witness is
+  un-ignored and passes fail-closed; new never-abort proptest families
+  (arbitrary/mutated/nested-Any/structured-parser-deep) run at proptest-default
+  in the gate and scale to 20k cases via `PROPTEST_CASES`.
+- Review caught (2 local fable reviewers + CodeRabbit + Codex, 3 fix rounds
+  before merge — every finding real):
+  - P0 (BOTH local reviewers, independently reproduced) — unbounded
+    `safe_read_any` recursion → uncatchable STACK OVERFLOW via deeply-nested
+    `ContentAny`/sub-doc (2 wire bytes/level, ~KB reachable on the replication
+    path). Fixed: `MAX_ANY_DEPTH=128` + `nested_any_never_aborts` proptest.
+  - P1 (Codex, past CodeRabbit's approval) — `safe_read_client` applied the
+    53-bit mask to yrs' `read_var::<u64>` output, but yrs decodes with
+    `wrapping_shl` and only errors past 70 bits, so an OVERLONG/padded wire
+    client id (`2^70+n`) wraps to `n` and aliased honest client `n`. Fixed:
+    read the client LEB128 groups CANONICALLY, fail closed on non-minimal
+    terminator / >8 groups / value >2^53-1 (stricter than yrs, no false
+    positives).
+  - Major (CodeRabbit) — the content-parity fingerprint used the LOSSY
+    `any_to_json` projection (collapses BigInt/Number, Null/Undefined,
+    Buffer/`{__bytes__}`), so a hostile re-encode could share a fingerprint.
+    Fixed: tagged variant-preserving `append_canonical_any`.
+  - P2 (Codex) — hashing raw sub-document `Options` false-REJECTED honest
+    full-state resends (yrs fills option defaults on re-encode). Fixed:
+    ContentDoc fingerprint is GUID-only (the subdoc identity); options still
+    consumed+validated for wire position.
+  - + P2/P3: `merge_updates`/`diff` state-vector pre-validation, the redundant
+    durable double-scan removed, and the fuzz `validate==apply` equality
+    dropped (validate only decodes; apply also integrates — not a valid
+    invariant). collab 27+17 + ydoc fuzz 9/9 green; run-rust-checks PASS.
+- R15 dep YRS-ABORT-SAFETY satisfied. Remaining cutover-gating: R15-REHEARSE
+  (PR #186, in review — multi-round bot hardening of the cutover state machine:
+  resume-precondition re-verification, live-db reset-identity proof,
+  alias-escape fences, prove-zero-handles, Unix durability fsync ordering),
+  then GATE6, then R15 (ICE checkpoint).
