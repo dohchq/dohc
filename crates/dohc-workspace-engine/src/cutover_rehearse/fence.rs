@@ -1,4 +1,5 @@
 use super::RehearsalError;
+use super::handles::DB_TRIPLET;
 use crate::shadow_fence::{ShadowFenceError, ValidatedShadowRoot, validate_shadow_root};
 use dohc_engine_storage::ENGINE_SCHEMA_VERSION;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
@@ -68,10 +69,19 @@ pub(crate) fn verify_live_clone_binding(
             code: "live-db-missing",
         });
     }
-    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| {
-        RehearsalError::Io {
-            code: "live-db-open-read-only-failed",
+    // The WAL-mode read-only connection also consumes the sidecars, so any
+    // present WAL/SHM must be a real file too (NotFound is fine).
+    if let Some(engine_dir) = db.parent() {
+        for name in DB_TRIPLET {
+            super::require_real_file(&engine_dir.join(name), "live-db-sidecar-alias-refused")?;
         }
+    }
+    let conn = Connection::open_with_flags(
+        db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|_| RehearsalError::Io {
+        code: "live-db-open-read-only-failed",
     })?;
     let fingerprint: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -109,10 +119,12 @@ pub(crate) fn verify_live_reset_identity(
     db: &Path,
     expected_uuid: &str,
 ) -> Result<(), RehearsalError> {
-    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| {
-        RehearsalError::Io {
-            code: "live-db-open-read-only-failed",
-        }
+    let conn = Connection::open_with_flags(
+        db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|_| RehearsalError::Io {
+        code: "live-db-open-read-only-failed",
     })?;
     let uuid: Option<String> = conn
         .query_row(

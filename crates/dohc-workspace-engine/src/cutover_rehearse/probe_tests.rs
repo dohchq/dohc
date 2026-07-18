@@ -164,6 +164,26 @@ fn assert_refusal_code(result: Result<RehearsalOutcome, RehearsalError>, code: &
     }
 }
 
+/// The FIRST refusal on a fresh run may legitimately advance the state
+/// machine before refusing, but it must never persist a terminal state.
+#[track_caller]
+fn assert_first_refusal(
+    root: &Path,
+    run: impl FnOnce() -> Result<RehearsalOutcome, RehearsalError>,
+    code: &str,
+) {
+    assert_refusal_code(run(), code);
+    if let Some(record) = load_state(root).expect("state loads") {
+        assert!(
+            !matches!(
+                record.current,
+                RehearsalState::Failed { .. } | RehearsalState::Complete
+            ),
+            "a refusal must not persist a terminal state: {record:?}"
+        );
+    }
+}
+
 /// A precondition refusal: the given error code AND a byte-identical state
 /// dir before and after — a refusal must never mutate rehearsal state.
 #[track_caller]
@@ -385,9 +405,10 @@ fn live_db_bound_to_different_shadow_token_fails_closed_before_any_move() {
             faults: &NoFaults,
         })
     };
-    // The first attempt legitimately advances to Settled before refusing; the
-    // repeated refusal must not mutate state further.
-    assert_refusal_code(attempt(), "live-db-shadow-binding-mismatch");
+    // The first attempt legitimately advances to Settled before refusing; it
+    // must not persist a terminal state, and the repeated refusal must not
+    // mutate state further.
+    assert_first_refusal(root.path(), attempt, "live-db-shadow-binding-mismatch");
     assert_refused(root.path(), attempt, "live-db-shadow-binding-mismatch");
     assert!(
         !root
@@ -404,10 +425,12 @@ fn missing_engine_db_is_refused_not_fabricated() {
     let db = fixture.engine_dir().join("engine.db");
     std::fs::remove_file(&db).expect("remove live db");
 
-    // The first attempt legitimately advances to Settled before refusing; the
-    // repeated refusal must not mutate state further.
-    assert_refusal_code(
-        fixture.try_run_with_recovery(fixture.recovery.path()),
+    // The first attempt legitimately advances to Settled before refusing; it
+    // must not persist a terminal state, and the repeated refusal must not
+    // mutate state further.
+    assert_first_refusal(
+        fixture.root.path(),
+        || fixture.try_run_with_recovery(fixture.recovery.path()),
         "live-db-missing",
     );
     assert_refused(
@@ -1388,14 +1411,10 @@ fn deleted_db_backup_after_initialized_never_persists_complete() {
     std::fs::remove_file(fixture.recovery.join(format!("{}.db", db_backup_stem())))
         .expect("delete db backup");
 
-    let result = fixture.try_run_with_recovery(fixture.recovery.path());
-    assert_refusal_code(result, "backup-db-not-valid");
-    let state = load_state(fixture.root.path())
-        .expect("state loads")
-        .expect("state present");
-    assert!(
-        !matches!(state.current, RehearsalState::Complete),
-        "Complete must not be persisted without a valid restore point: {state:?}"
+    assert_first_refusal(
+        fixture.root.path(),
+        || fixture.try_run_with_recovery(fixture.recovery.path()),
+        "backup-db-not-valid",
     );
 
     // The refusal stays non-terminal and repeatable.
@@ -1404,6 +1423,101 @@ fn deleted_db_backup_after_initialized_never_persists_complete() {
         || fixture.try_run_with_recovery(fixture.recovery.path()),
         "backup-db-not-valid",
     );
+}
+
+#[test]
+fn aliased_wal_sidecar_is_refused_before_binding_open() {
+    use dohc_engine_testkit::try_make_file_symlink;
+
+    let fixture = Fixture::new();
+    crash_at_backed_up(&fixture);
+
+    // A WAL sidecar appears as a symlink to an external file: the read-only
+    // WAL-mode binding open would consume it.
+    let external = fixture.recovery.join("external-wal");
+    std::fs::write(&external, vec![0_u8; 32]).expect("external wal bytes");
+    let wal = fixture.engine_dir().join("engine.db-wal");
+    if !try_make_file_symlink(&external, &wal).expect("symlink attempt") {
+        return; // platform cannot create file symlinks — skip honestly
+    }
+
+    assert_refused(
+        fixture.root.path(),
+        || fixture.try_run_with_recovery(fixture.recovery.path()),
+        "live-db-sidecar-alias-refused",
+    );
+
+    // Removing the alias resumes to Complete.
+    std::fs::remove_file(&wal).expect("remove aliased sidecar");
+    assert!(matches!(
+        fixture.run(&NoFaults),
+        RehearsalOutcome::Complete(_)
+    ));
+}
+
+#[test]
+fn malformed_directory_manifest_is_retryable_at_capture() {
+    let fixture = Fixture::new();
+    let faults = ScriptedFaults::crash_at(FaultPoint::AfterInitialized);
+    assert!(matches!(
+        fixture.run(faults.as_ref()),
+        RehearsalOutcome::Crashed(_)
+    ));
+
+    // The directory manifest is transiently malformed (torn restore of the
+    // recovery volume): refuse WITHOUT persisting a terminal Failed.
+    let manifest = fixture.recovery.join("cutover-files.manifest.json");
+    let original = std::fs::read(&manifest).expect("manifest bytes");
+    std::fs::write(&manifest, b"{torn").expect("malform manifest");
+    assert_refused(
+        fixture.root.path(),
+        || fixture.try_run_with_recovery(fixture.recovery.path()),
+        "directory-manifest-malformed",
+    );
+
+    // Restored: the rehearsal resumes to Complete.
+    std::fs::write(&manifest, &original).expect("restore manifest");
+    assert!(matches!(
+        fixture.run(&NoFaults),
+        RehearsalOutcome::Complete(_)
+    ));
+}
+
+#[test]
+fn edited_backup_manifest_uuid_cannot_evade_stale_store_refusal() {
+    let fixture = Fixture::new();
+    let faults = ScriptedFaults::crash_at(FaultPoint::AfterMovedAside);
+    assert!(matches!(
+        fixture.run(faults.as_ref()),
+        RehearsalOutcome::Crashed(_)
+    ));
+    let paths = fixture.paths();
+
+    // The stale ORIGINAL store is copied back over engine.db, and the DB
+    // backup manifest's engine_uuid field is edited (the DB checksum field is
+    // untouched, so the pair still validates). The identity must come from
+    // the backup DB bytes, so the stale copy is still refused.
+    std::fs::copy(moved_aside_path(&paths).join("engine.db"), &paths.db)
+        .expect("copy stale store back");
+    let manifest_path = fixture
+        .recovery
+        .join(format!("{}.manifest.json", db_backup_stem()));
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).expect("manifest bytes"))
+            .expect("manifest json");
+    manifest["engine_uuid"] = serde_json::Value::String("forged-other-identity".to_owned());
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec(&manifest).expect("edited manifest"),
+    )
+    .expect("write edited manifest");
+
+    let outcome = fixture.run(&NoFaults);
+    let record = match outcome {
+        RehearsalOutcome::Failed(record) => record,
+        other => panic!("an edited manifest uuid must not evade the refusal: {other:?}"),
+    };
+    assert_eq!(failure_reason(&record), "initialize-stale-store");
 }
 
 #[test]

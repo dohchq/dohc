@@ -51,8 +51,12 @@ pub fn load_valid_directory_backup(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(RehearsalError::io("directory-manifest-read", error)),
     };
+    // Malformed JSON is a backup-READ failure (retryable at capture — the
+    // operator can restore the recovery dir), not in-clone state corruption.
     let manifest: DirectoryBackupManifest =
-        serde_json::from_slice(&bytes).map_err(|_| RehearsalError::State)?;
+        serde_json::from_slice(&bytes).map_err(|_| RehearsalError::Io {
+            code: "directory-manifest-malformed",
+        })?;
     if !manifest.verified || manifest.files.is_empty() {
         return Ok(None);
     }
@@ -255,7 +259,9 @@ pub(crate) fn create_restore_tested_backup(
     drop(store);
     // The backup pair's CONTENTS (the storage helper publishes by rename
     // without a file sync) and its directory entries must all be durable
-    // before the BackedUp marker can ever be recorded over them.
+    // before the BackedUp marker can ever be recorded over them. The pair is
+    // re-gated first — these fsyncs open by path.
+    require_real_backup_pair(recovery_dir)?;
     super::fsync_file(&db_backup_path(recovery_dir), "backup-db-sync")?;
     super::fsync_file(&db_manifest_path(recovery_dir), "backup-manifest-sync")?;
     super::fsync_dir(recovery_dir)?;
@@ -387,6 +393,21 @@ pub(crate) fn verify_protected_snapshots(
             });
         }
     }
+    // Every manifested engine DIRECTORY must still exist as a real live dir
+    // (an empty subdir deleted after backup is invisible to the file checks).
+    for relative in &manifest.directories {
+        let Some(rel) = relative.strip_prefix("engine/") else {
+            continue;
+        };
+        if !super::require_real_dir(
+            &paths.engine.join(Path::new(rel)),
+            "capture-directory-alias-refused",
+        )? {
+            return Err(RehearsalError::Io {
+                code: "capture-directory-missing",
+            });
+        }
+    }
     // Set compare, not just entry re-hash: a protected sibling that APPEARED
     // after the backup has no restore point and must fail the capture.
     for sibling in SIBLING_SNAPSHOTS {
@@ -407,12 +428,35 @@ pub(crate) fn verify_protected_snapshots(
 /// The recorded original-store identity from the DB backup's manifest — the
 /// reference a freshly-reset store must DIFFER from.
 pub(crate) fn recorded_backup_engine_uuid(recovery_dir: &Path) -> Result<String, RehearsalError> {
-    Ok(load_valid_backup(recovery_dir, DB_BACKUP_STEM)?
-        .ok_or(RehearsalError::Io {
+    require_real_backup_pair(recovery_dir)?;
+    if load_valid_backup(recovery_dir, DB_BACKUP_STEM)?.is_none() {
+        return Err(RehearsalError::Io {
             code: "backup-db-not-valid",
-        })?
-        .manifest
-        .engine_uuid)
+        });
+    }
+    // The identity comes from the BACKUP DB BYTES (covered by the recorded
+    // checksum), never from the editable manifest JSON — an edited
+    // `engine_uuid` field must not be able to evade the stale-store refusal.
+    let conn = Connection::open_with_flags(
+        db_backup_path(recovery_dir),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|_| RehearsalError::Io {
+        code: "backup-db-identity-unreadable",
+    })?;
+    let uuid: Option<String> = conn
+        .query_row(
+            "SELECT engine_uuid FROM engine_ownership WHERE rowid_guard = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| RehearsalError::Io {
+            code: "backup-db-identity-unreadable",
+        })?;
+    uuid.ok_or(RehearsalError::Io {
+        code: "backup-db-identity-unreadable",
+    })
 }
 
 /// The recovery dir holds a full copy of the workspace database, so it must be
@@ -445,12 +489,13 @@ fn verify_reused_backup_binding(
     backup_db: &Path,
     shadow_token: &str,
 ) -> Result<(), RehearsalError> {
-    let conn =
-        Connection::open_with_flags(backup_db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| {
-            RehearsalError::Io {
-                code: "backup-reuse-open-failed",
-            }
-        })?;
+    let conn = Connection::open_with_flags(
+        backup_db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|_| RehearsalError::Io {
+        code: "backup-reuse-open-failed",
+    })?;
     let token: Option<String> = conn
         .query_row(
             "SELECT token FROM shadow_clone WHERE rowid_guard = 1",
@@ -480,12 +525,13 @@ fn ensure_no_pending_migrations(
     now_ms: i64,
 ) -> Result<(), RehearsalError> {
     let (applied, incomplete) = {
-        let conn =
-            Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|_| {
-                RehearsalError::Io {
-                    code: "backup-source-open-read-only-failed",
-                }
-            })?;
+        let conn = Connection::open_with_flags(
+            db,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(|_| RehearsalError::Io {
+            code: "backup-source-open-read-only-failed",
+        })?;
         migration_ledger_rows(&conn).map_err(|_| RehearsalError::Io {
             code: "backup-source-migrations-unreadable",
         })?

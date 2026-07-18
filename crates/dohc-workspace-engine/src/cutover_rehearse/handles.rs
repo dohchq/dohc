@@ -360,6 +360,7 @@ fn to_hex(digest: &[u8]) -> String {
 pub(crate) fn moved_aside_store_retained(
     paths: &Paths,
     shadow_token: &str,
+    original_engine_uuid: &str,
 ) -> Result<bool, RehearsalError> {
     let moved = paths.engine.join(MOVED_ASIDE_DIR);
     // Alias-safe: a symlinked sibling dir means the "retained" store lives
@@ -394,11 +395,13 @@ pub(crate) fn moved_aside_store_retained(
     if !db_present {
         return Ok(false);
     }
-    // The retained file must BE the old engine store, not junk with the right
-    // name: opened read-only, its own shadow_clone binding must match.
-    let Ok(conn) =
-        Connection::open_with_flags(moved.join("engine.db"), OpenFlags::SQLITE_OPEN_READ_ONLY)
-    else {
+    // The retained file must BE the preserved ORIGINAL store, not junk (or a
+    // fresh/stale sibling) with the right name: opened read-only, its own
+    // shadow_clone binding AND its engine identity must both match.
+    let Ok(conn) = Connection::open_with_flags(
+        moved.join("engine.db"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    ) else {
         return Ok(false);
     };
     let token: Option<String> = match conn
@@ -412,7 +415,21 @@ pub(crate) fn moved_aside_store_retained(
         Ok(token) => token,
         Err(_) => return Ok(false),
     };
-    Ok(token.as_deref() == Some(shadow_token))
+    if token.as_deref() != Some(shadow_token) {
+        return Ok(false);
+    }
+    let uuid: Option<String> = match conn
+        .query_row(
+            "SELECT engine_uuid FROM engine_ownership WHERE rowid_guard = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+    {
+        Ok(uuid) => uuid,
+        Err(_) => return Ok(false),
+    };
+    Ok(uuid.as_deref() == Some(original_engine_uuid))
 }
 
 #[cfg(test)]

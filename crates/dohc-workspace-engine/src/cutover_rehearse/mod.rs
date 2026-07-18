@@ -78,6 +78,16 @@ pub(crate) fn fsync_dir(dir: &std::path::Path) -> Result<(), RehearsalError> {
     Ok(())
 }
 
+/// NOTE on the residual check-then-use window: these gates validate by
+/// PATHNAME and callers then re-open/hash/rename by pathname, so a concurrent
+/// replacement between check and use remains possible. That residue is
+/// bounded by the per-root `CUTOVER_REHEARSAL_LOCK` (rehearsals are
+/// serialized) and the shadow-rehearsal threat model (trusted local machine,
+/// clone-marked fixture — an attacker racing writes INSIDE the fixture
+/// mid-run is out of scope). The DB opens are additionally atomic via
+/// `SQLITE_OPEN_NOFOLLOW`; full fd-based atomicity for every operation is
+/// deferred to the real signed `--cutover` tier, where it matters.
+///
 /// The alias-safe file gate: `Ok(Some(metadata))` for a REAL regular file —
 /// not a symlink, not a special file, and (Unix) not hard-linked — `Ok(None)`
 /// when absent, `Err(code)` for an alias/special file or a metadata error.

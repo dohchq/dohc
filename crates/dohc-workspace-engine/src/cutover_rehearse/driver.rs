@@ -64,7 +64,8 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
                 // implies — the recorded backups, the retained old store, and
                 // the bound fresh live store — are re-proven on disk.
                 verify_recorded_backup(&recovery_dir, record.backup.as_ref())?;
-                if !moved_aside_store_retained(&paths, &validated.shadow_token)? {
+                let original = recorded_backup_engine_uuid(&recovery_dir)?;
+                if !moved_aside_store_retained(&paths, &validated.shadow_token, &original)? {
                     return Err(RehearsalError::Io {
                         code: "complete-retained-store-missing",
                     });
@@ -174,7 +175,8 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
                 // re-proven restore point and retained store — verifying on
                 // the next loop iteration would be after the rename.
                 verify_recorded_backup(&recovery_dir, record.backup.as_ref())?;
-                if !moved_aside_store_retained(&paths, &validated.shadow_token)? {
+                let original = recorded_backup_engine_uuid(&recovery_dir)?;
+                if !moved_aside_store_retained(&paths, &validated.shadow_token, &original)? {
                     return Err(RehearsalError::Io {
                         code: "complete-retained-store-missing",
                     });
@@ -227,6 +229,7 @@ fn is_retryable_capture_error(error: &RehearsalError) -> bool {
         RehearsalError::Io {
             code: "backup-directory-not-valid"
                 | "directory-manifest-read"
+                | "directory-manifest-malformed"
                 | "directory-manifest-alias-refused"
                 | "directory-backup-metadata"
                 | "directory-backup-walk-metadata"
@@ -383,9 +386,11 @@ fn initialize_fresh_store(
     now_ms: i64,
 ) -> Result<String, RehearsalError> {
     // The retained moved-aside store is the proof that MovedAside really
-    // happened. Without it (forged marker, lost sibling) nothing may be
-    // created or opened — `EngineStore::open` would fabricate a fresh db.
-    if !moved_aside_store_retained(paths, shadow_token)? {
+    // happened — and it must BE the backed-up ORIGINAL. Without it (forged
+    // marker, lost or substituted sibling) nothing may be created or opened —
+    // `EngineStore::open` would fabricate a fresh db.
+    let original_engine_uuid = recorded_backup_engine_uuid(recovery_dir)?;
+    if !moved_aside_store_retained(paths, shadow_token, &original_engine_uuid)? {
         return Err(RehearsalError::Io {
             code: "initialize-retained-store-missing",
         });
@@ -415,7 +420,7 @@ fn initialize_fresh_store(
     // The freshness proof: the backed-up ORIGINAL identity may not reappear
     // as the live store — a stale same-clone copy (old store or backup
     // restored over engine.db) shares the shadow token but not a new uuid.
-    if engine_uuid == recorded_backup_engine_uuid(recovery_dir)? {
+    if engine_uuid == original_engine_uuid {
         return Err(RehearsalError::Io {
             code: "initialize-stale-store",
         });
