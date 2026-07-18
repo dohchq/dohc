@@ -1424,3 +1424,57 @@ source of truth every orchestrator session loads first).
   done. Remaining pre-cutover: R13b-rest, tracked obligations (binary-head,
   gate-perf, R14-deferred, fuzz coverage, shadow_fence harness-writer gating),
   then GATE6 (deps R14/R10b/R15-REHEARSE met), then R15 (ICE checkpoint).
+
+## 2026-07-19 — BINHEAD merged (#194) · binary-content-head obligation DISCHARGED
+
+- BINHEAD gives binary file content a real in-DB head — a `moment` +
+  `snapshot` row with a `content_kind` discriminator and a separate nullable
+  `binary_sha256 -> binary_blobs` FK (migration ordinal 10, BINHEAD) — rather
+  than forcing binary through `moments.after_blob_sha256`'s NOT-NULL FK to the
+  TEXT blobs table. This closes the binary-content-head class end to end:
+  write/read_text/live-state, local + mirrored resolve, merge/version-compare,
+  rollback, search, and normalize are all binary-head aware and fail closed
+  wherever head identity is partial or absent.
+- Discharges the firm GATE6/R15 obligation tracked on the R10-CONFLICT-COMPLETE
+  row (M2 gen-collision + textless-live-state + post-apply-snapshot). Un-ignores
+  R10CC's `binary_generation_is_not_reused_by_next_text_write` regression: the
+  compensating/restore job now targets the write's own moment generation as a
+  peer (G>G false), so a stale binary can no longer overwrite newer content.
+- Five adversarial review rounds; every finding was a genuine correctness bug,
+  not style. Notable defects caught and fixed before any real data:
+  - Delete-that-doesn't-delete, stale-identity clobber, normalize masking, and
+    empty-text/CHECK-constraint gaps on the first-classness sweep (rounds 1-2).
+  - Disk resurrection on rollback — BOTH halves: the pending-job case (cancel)
+    AND the completed-job case (enqueue a preimage-guarded compensating
+    delete/restore job so the DB head and on-disk bytes can't diverge).
+  - The pending-branch crash window: the materializer can crash at
+    `MaterializeAfterRenameBeforeComplete` (bytes on disk, job still pending),
+    so the compensating restore now runs UNCONDITIONALLY for a binary-write
+    rollback (harmless no-op when bytes never landed) and additionally cancels
+    the pending job. Fault-injection regression drives the real crash point.
+  - Fail-closed partial binary identity: `(Some,None)`/`(None,Some)` no longer
+    fall through to a legacy path+sha match that a recreated same-bytes head
+    could satisfy — only `(None,None)` uses the legacy fallback, `(Some,Some)`
+    requires strict object+moment equality, partial defers as StaleHead.
+  - ACK-and-defer liveness: a mirrored binary resolve whose generated job/moment
+    id collides with a caller moment id now prechecks `moment_exists` and returns
+    `DuplicateMomentId` (a validation rejection -> ack-and-defer), instead of a
+    fatal `PersistFailed` poison-pill that retried indefinitely.
+  - Search correctness: a binary write over an already-indexed text file left a
+    stale FTS row (the index freezes once healthy). Per the module's documented
+    reader invariant (freeze, don't drop — every reader re-checks live state),
+    `query_search_index` now drops a candidate whose current head is binary.
+  - Rollback job lookup scoped to binary Write moments + SHA-matched, so a
+    text/delete/rename rollback can never touch an unrelated same-id job.
+- DEFERRED (A2, dormant display-only): `compare_version_files` projects binary
+  heads into the text-only `TextSnapshot` (empty text), so binary-vs-binary
+  diffs are lossy. Verified ZERO authority consumers — its only callers are
+  `merge_conflicts.rs` tests; conflict/merge uses the fail-closed
+  `compare_text_file_versions_in_db`, resolve/materialize use binary-aware
+  `select_snapshot_by_path[_in_tx]`. Tracked to the A2 TextSnapshot ->
+  content-aware-enum obligation, not refactored here to avoid scope creep.
+- Gate: green x2 (independent) — fmt/clippy/build/test --workspace/cargo-deny.
+  CodeRabbit APPROVED, Codex "didn't find any major issues" on `b4123aa2`.
+- Wave 5 remaining pre-cutover: R13b-rest, remaining obligations (A2 display
+  enum, gate-perf, R14-deferred, fuzz coverage, shadow_fence harness-writer
+  gating), then GATE6, then R15 (ICE checkpoint — STOP).
