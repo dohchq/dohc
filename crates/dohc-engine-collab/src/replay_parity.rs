@@ -633,16 +633,25 @@ fn safe_read_type_ref_fingerprint(decoder: &mut DecoderV1<'_>) -> Result<Vec<u8>
 }
 
 /// A SAFE reimplementation of `Options::decode`'s wire shape (a guid string
-/// plus an `Any` map of sub-document options), sufficient for a
-/// content-identity fingerprint. Reimplemented rather than calling
-/// `Options::decode` because it reads the guid via yrs' unsafe `read_string`
-/// (see [`safe_read_string`]).
+/// plus an `Any` map of sub-document options). The subdocument's IDENTITY for
+/// the content-parity check is its GUID alone; the options `Any` is consumed
+/// and validated (so the wire position stays correct and a malformed options
+/// payload is still rejected) but deliberately NOT folded into the fingerprint.
+/// yrs fills option defaults (`gc`/`encoding`/`shouldLoad`, and drops fields it
+/// ignores) when it re-encodes an integrated `ContentDoc`, so `encode_full_state`
+/// presents a different options payload than an honest Yjs full-state resend of
+/// the same subdocument — hashing the raw options would false-reject that honest
+/// resend as a hostile redefinition. A genuine redefinition changes the GUID
+/// (a different subdocument), which the fingerprint still catches. Reimplemented
+/// rather than calling `Options::decode` because it reads the guid via yrs'
+/// unsafe `read_string` (see [`safe_read_string`]).
 fn safe_read_options_fingerprint(decoder: &mut DecoderV1<'_>) -> Result<Vec<u8>, CollabError> {
     let guid = safe_read_string(decoder)?;
     let mut canonical = (guid.len() as u64).to_be_bytes().to_vec();
     canonical.extend_from_slice(guid.as_bytes());
-    let opts = safe_read_any(decoder, 0)?;
-    append_canonical_any(&mut canonical, &opts);
+    // Consume + validate the options `Any` (wire position + well-formedness);
+    // see the doc comment for why it is NOT part of the fingerprint.
+    let _ = safe_read_any(decoder, 0)?;
     Ok(canonical)
 }
 
@@ -655,17 +664,50 @@ fn safe_read_options_fingerprint(decoder: &mut DecoderV1<'_>) -> Result<Vec<u8>,
 /// numbers cannot represent it), so reject it here, before any `ClientID` is
 /// ever constructed from the wire value. Replaces `Decoder::read_client`,
 /// which performs no range check.
+///
+/// The varint is read CANONICALLY rather than via `read_var::<u64>`: yrs'
+/// `read_var` decodes with `wrapping_shl` and only errors past 70 bits, so an
+/// OVERLONG encoding (e.g. `2^70 + n`) wraps down to `n` — a mask applied to
+/// that already-decoded value would then see an in-range client and let the
+/// out-of-range wire id through. Reading the LEB128 groups directly and failing
+/// closed on a non-minimal terminator, more than 8 groups, or a value `> 2^53-1`
+/// closes that: no honest yjs encoder produces any of those, so there are no
+/// false positives; the gate is simply stricter than yrs here.
 fn safe_read_client(decoder: &mut DecoderV1<'_>) -> Result<ClientID, CollabError> {
-    const CLIENT_53_BIT_OVERFLOW: u64 = u64::MAX << 53;
-    let raw: u64 = decoder.read_var().map_err(parity_decode_error)?;
-    if raw & CLIENT_53_BIT_OVERFLOW != 0 {
-        return Err(CollabError::ReplayParityViolation {
-            reason: "the update contains a client identifier outside the 53-bit yjs range"
-                .to_owned(),
-        });
+    let out_of_range = || CollabError::ReplayParityViolation {
+        reason: "the update contains a client identifier outside the 53-bit yjs range".to_owned(),
+    };
+    let mut value: u64 = 0;
+    let mut shift: u32 = 0;
+    let mut groups: u32 = 0;
+    loop {
+        let byte = decoder.read_u8().map_err(parity_decode_error)?;
+        groups += 1;
+        value |= ((byte & 0x7f) as u64) << shift;
+        if byte & 0x80 == 0 {
+            // Terminating group. Reject a non-minimal encoding: a multi-byte
+            // varint whose final group is empty (a canonical encoder never
+            // emits trailing zero groups).
+            if groups > 1 && byte == 0 {
+                return Err(out_of_range());
+            }
+            break;
+        }
+        shift += 7;
+        // 8 groups (shifts 0..=49) span the 53-bit range; a 9th continuation
+        // group is out of range (and, being padding, non-canonical).
+        if shift >= 56 {
+            return Err(out_of_range());
+        }
     }
-    Ok(ClientID::new(raw))
+    if value > MAX_CLIENT_ID {
+        return Err(out_of_range());
+    }
+    Ok(ClientID::new(value))
 }
+
+/// Maximum yjs client identifier: JavaScript numbers, so 53 bits.
+const MAX_CLIENT_ID: u64 = (1u64 << 53) - 1;
 
 /// [`safe_read_client`] plus a clock — replaces `Decoder::read_left_id` /
 /// `read_right_id`, which construct `ClientID` from the raw wire value with
@@ -1163,6 +1205,68 @@ mod tests {
         bytes.extend_from_slice(&CLIENT_2_POW_53);
         let error = scan_err(&bytes);
         assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    }
+
+    /// A NON-MINIMAL (overlong) client varint must be rejected, even though it
+    /// decodes (via yrs' wrapping `read_var`) to an in-range value. `[0x89,
+    /// 0x00]` is client `9` with a redundant trailing all-zero group — no
+    /// honest yjs encoder emits it, and it is exactly the shape that would let
+    /// an out-of-range wire id wrap past a mask applied to the decoded value.
+    #[test]
+    fn rejects_overlong_client_varint_in_block_section() {
+        let bytes: Vec<u8> = vec![
+            0x01, // clients_len
+            0x01, // blocks_len
+            0x89, 0x00, // client 9, non-minimal (trailing zero group)
+        ];
+        let error = scan_err(&bytes);
+        assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    }
+
+    /// A 9-group client varint (padding continuation bytes past the 53-bit
+    /// range) must be rejected before it can wrap to an in-range value.
+    #[test]
+    fn rejects_padded_9_group_client_varint() {
+        let bytes: Vec<u8> = vec![
+            0x01, // clients_len
+            0x01, // blocks_len
+            // client 9 padded to 9 groups: 8 continuation groups then a
+            // terminating one -> exceeds the 8-group (53-bit) budget.
+            0x89, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x00,
+        ];
+        let error = scan_err(&bytes);
+        assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
+    }
+
+    /// A `ContentDoc` sub-document whose GUID matches but whose options `Any`
+    /// differs (as happens when yrs fills option defaults on re-encode) must
+    /// fingerprint IDENTICALLY — the guid is the identity, the options are not
+    /// part of it — so an honest full-state resend is never false-rejected.
+    #[test]
+    fn sub_document_fingerprint_ignores_options_payload() {
+        // Two ContentDoc blocks, same guid "g", different options maps.
+        let with_opts = |opts: &[u8]| -> Vec<u8> {
+            let mut b: Vec<u8> = vec![
+                0x01, // clients_len
+                0x01, // blocks_len
+                0x09, // client
+                0x00, // clock
+                0x09, // info: BLOCK_ITEM_DOC_REF_NUMBER, no origins
+                0x01, // parent_info: named root
+                0x01, b'r', // root "r"
+                0x01, b'g', // guid "g"
+            ];
+            b.extend_from_slice(opts);
+            b.push(0x00); // empty delete set
+            b
+        };
+        // Options A: empty map. Options B: a map with one bool entry.
+        let a = scan_v1(&with_opts(&[0x76, 0x00])).expect("A valid");
+        let b = scan_v1(&with_opts(&[0x76, 0x01, 0x02, b'g', b'c', 0x78]))
+            .expect("B valid");
+        let ida = &a.identities[&ClientID::new(9)][&0];
+        let idb = &b.identities[&ClientID::new(9)][&0];
+        assert!(ida == idb, "same-guid subdocs must fingerprint identically");
     }
 
     #[test]

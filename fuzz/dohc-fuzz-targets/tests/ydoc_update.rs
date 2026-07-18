@@ -275,12 +275,15 @@ proptest! {
         let kind = if kind_any { 0x08 } else { 0x09 };
         let bytes = structured_update(kind, &script, depth);
         let doc = Ydoc::wire();
-        let validated = Ydoc::validate_update(&bytes).is_ok();
-        let applied = doc.apply(&bytes).is_ok();
-        prop_assert_eq!(
-            validated, applied,
-            "validate_update and apply must agree on accept/reject for the same structured bytes"
-        );
+        // Exercise BOTH decode_v1 call sites. Their results may legitimately
+        // differ -- `validate_update` only pre-validates + decodes, while
+        // `apply` additionally integrates (`txn.apply_update`), which can `Err`
+        // on a structurally-decodable but not-integratable update (e.g. a parent
+        // id that resolves to a non-type item). The property under test is
+        // never-abort, which the mere COMPLETION of both calls proves; the
+        // accept/reject verdicts are deliberately NOT asserted equal.
+        let _ = Ydoc::validate_update(&bytes);
+        let _ = doc.apply(&bytes);
     }
 
     /// The R14 property under test, now actually provable: arbitrary bytes
@@ -297,18 +300,17 @@ proptest! {
         let _ = doc.apply(&bytes);
     }
 
-    /// Same property against `Ydoc::validate_update` (another of the crate's
-    /// `Update::decode_v1` call sites) -- it must agree with `apply` on
-    /// accept/reject and never abort either.
+    /// Same never-abort property against `Ydoc::validate_update` (another of
+    /// the crate's `Update::decode_v1` call sites). It and `apply` may
+    /// legitimately DISAGREE on accept/reject -- `validate_update` only decodes,
+    /// `apply` also integrates and can `Err` on a decodable-but-not-integratable
+    /// update -- so only the never-abort property (proven by completion) is
+    /// exercised here, not verdict equality.
     #[test]
     fn arbitrary_bytes_never_abort_validate_update(bytes in prop::collection::vec(any::<u8>(), 0..128)) {
         let doc = Ydoc::wire();
-        let validated = Ydoc::validate_update(&bytes).is_ok();
-        let applied = doc.apply(&bytes).is_ok();
-        prop_assert_eq!(
-            validated, applied,
-            "validate_update and apply must agree on accept/reject for the same bytes"
-        );
+        let _ = Ydoc::validate_update(&bytes);
+        let _ = doc.apply(&bytes);
     }
 
     /// A denser search near the witness's own shape: near-valid updates built
