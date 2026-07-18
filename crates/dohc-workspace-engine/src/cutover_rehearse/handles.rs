@@ -1,4 +1,5 @@
 use super::{Paths, RehearsalError};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -356,7 +357,10 @@ fn to_hex(digest: &[u8]) -> String {
 /// regular `engine.db` (symlink_metadata — `is_file` would follow a symlink)
 /// and nothing but real regular triplet files beside it. A symlinked,
 /// hard-linked, or foreign entry means the retained store cannot be trusted.
-pub(crate) fn moved_aside_store_retained(paths: &Paths) -> Result<bool, RehearsalError> {
+pub(crate) fn moved_aside_store_retained(
+    paths: &Paths,
+    shadow_token: &str,
+) -> Result<bool, RehearsalError> {
     let moved = paths.engine.join(MOVED_ASIDE_DIR);
     // Alias-safe: a symlinked sibling dir means the "retained" store lives
     // outside `.dohc/engine` and cannot be trusted as the proof.
@@ -387,7 +391,28 @@ pub(crate) fn moved_aside_store_retained(paths: &Paths) -> Result<bool, Rehearsa
             db_present = true;
         }
     }
-    Ok(db_present)
+    if !db_present {
+        return Ok(false);
+    }
+    // The retained file must BE the old engine store, not junk with the right
+    // name: opened read-only, its own shadow_clone binding must match.
+    let Ok(conn) =
+        Connection::open_with_flags(moved.join("engine.db"), OpenFlags::SQLITE_OPEN_READ_ONLY)
+    else {
+        return Ok(false);
+    };
+    let token: Option<String> = match conn
+        .query_row(
+            "SELECT token FROM shadow_clone WHERE rowid_guard = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+    {
+        Ok(token) => token,
+        Err(_) => return Ok(false),
+    };
+    Ok(token.as_deref() == Some(shadow_token))
 }
 
 #[cfg(test)]

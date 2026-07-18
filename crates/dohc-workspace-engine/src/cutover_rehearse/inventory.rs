@@ -28,6 +28,13 @@ pub struct Inventory {
 
 pub fn load_inventory(root: &Path) -> Result<Inventory, RehearsalError> {
     let path = inventory_path(root);
+    // Alias-safe: a symlinked inventory would let capture compare against
+    // mutable JSON outside the clone.
+    if super::require_real_file(&path, "inventory-alias-refused")?.is_none() {
+        return Err(RehearsalError::Io {
+            code: "inventory-read",
+        });
+    }
     let bytes = std::fs::read(path).map_err(|e| RehearsalError::io("inventory-read", e))?;
     let inventory: Inventory = serde_json::from_slice(&bytes).map_err(|_| RehearsalError::State)?;
     if inventory.record_count != inventory.files.len()

@@ -355,11 +355,17 @@ pub(crate) fn verify_protected_snapshots(
     })?;
     let mut manifested = BTreeSet::new();
     for entry in &manifest.files {
-        let Some(name) = entry.relative_path.strip_prefix("dohc/") else {
+        // Every manifested protected file is re-proven — the `dohc/` siblings
+        // AND the non-triplet `engine/` files (the user inventory skips the
+        // whole `.dohc` tree, so drift there is invisible to it).
+        let live = if let Some(name) = entry.relative_path.strip_prefix("dohc/") {
+            manifested.insert(name);
+            paths.root.join(".dohc").join(name)
+        } else if let Some(relative) = entry.relative_path.strip_prefix("engine/") {
+            paths.engine.join(Path::new(relative))
+        } else {
             continue;
         };
-        manifested.insert(name);
-        let live = paths.root.join(".dohc").join(name);
         // Alias-safe: a snapshot replaced by a same-content symlink or (Unix)
         // hard link is no longer the protected workspace file.
         if super::require_real_file(&live, "capture-snapshot-alias-refused")?.is_none() {

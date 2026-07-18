@@ -6,7 +6,7 @@ use super::faults::{FaultAction, FaultInjector, FaultPoint};
 use super::fence::{
     validate_rehearsal_root, verify_live_clone_binding, verify_live_reset_identity,
 };
-use super::handles::{move_aside, moved_aside_store_retained};
+use super::handles::{DB_TRIPLET, move_aside, moved_aside_store_retained};
 use super::inventory::{load_inventory, load_or_record, scan};
 use super::state::{self, RehearsalState, StableState, StateRecord};
 use super::{Paths, RehearsalError};
@@ -64,7 +64,7 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
                 // implies — the recorded backups, the retained old store, and
                 // the bound fresh live store — are re-proven on disk.
                 verify_recorded_backup(&recovery_dir, record.backup.as_ref())?;
-                if !moved_aside_store_retained(&paths)? {
+                if !moved_aside_store_retained(&paths, &validated.shadow_token)? {
                     return Err(RehearsalError::Io {
                         code: "complete-retained-store-missing",
                     });
@@ -153,6 +153,9 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
                 // `.dohc`, and a stale same-clone copy shares the token.
                 verify_reset_preconditions(&paths, &validated, &record)?;
                 if let Err(error) = capture_proofs(&paths, &recovery_dir) {
+                    if is_retryable_capture_error(&error) {
+                        return Err(error);
+                    }
                     return fail(&paths.root, &record, failure_code(&error));
                 }
                 record = state::transition(&paths.root, &record, StableState::Capturing)?;
@@ -162,7 +165,19 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
                 // resume complete with stale proofs — re-run them all.
                 verify_reset_preconditions(&paths, &validated, &record)?;
                 if let Err(error) = capture_proofs(&paths, &recovery_dir) {
+                    if is_retryable_capture_error(&error) {
+                        return Err(error);
+                    }
                     return fail(&paths.root, &record, failure_code(&error));
+                }
+                // The Complete marker must never be persisted without a
+                // re-proven restore point and retained store — verifying on
+                // the next loop iteration would be after the rename.
+                verify_recorded_backup(&recovery_dir, record.backup.as_ref())?;
+                if !moved_aside_store_retained(&paths, &validated.shadow_token)? {
+                    return Err(RehearsalError::Io {
+                        code: "complete-retained-store-missing",
+                    });
                 }
                 record = state::transition(&paths.root, &record, StableState::Complete)?;
             }
@@ -200,6 +215,26 @@ fn verify_reset_preconditions(
             .ok_or(RehearsalError::Io {
                 code: "resume-reset-identity-unrecorded",
             })?,
+    )
+}
+
+/// A backup READ/validity failure during capture is a refusal — the operator
+/// can restore the recovery dir and resume — while a genuine content
+/// mismatch stays terminal.
+fn is_retryable_capture_error(error: &RehearsalError) -> bool {
+    matches!(
+        error,
+        RehearsalError::Io {
+            code: "backup-directory-not-valid"
+                | "directory-manifest-read"
+                | "directory-manifest-alias-refused"
+                | "directory-backup-metadata"
+                | "directory-backup-walk-metadata"
+                | "directory-backup-enumerate"
+                | "directory-backup-entry"
+                | "backup-verify-open"
+                | "backup-verify-read"
+        }
     )
 }
 
@@ -350,15 +385,18 @@ fn initialize_fresh_store(
     // The retained moved-aside store is the proof that MovedAside really
     // happened. Without it (forged marker, lost sibling) nothing may be
     // created or opened — `EngineStore::open` would fabricate a fresh db.
-    if !moved_aside_store_retained(paths)? {
+    if !moved_aside_store_retained(paths, shadow_token)? {
         return Err(RehearsalError::Io {
             code: "initialize-retained-store-missing",
         });
     }
-    // Alias-safe: an existing engine.db must be a REAL regular file before
-    // the read-write open can follow a symlink/hard link and bind or migrate
-    // a database outside the clone. Absent is fine — a fresh store is made.
-    super::require_real_file(&paths.db, "initialize-live-db-alias-refused")?;
+    // Alias-safe: every existing triplet path (db AND WAL/SHM sidecars) must
+    // be a REAL regular file before the read-write open can follow a
+    // symlink/junction and bind or migrate a database — or replay an aliased
+    // sidecar — outside the clone. Absent is fine: a fresh store is made.
+    for name in DB_TRIPLET {
+        super::require_real_file(&paths.engine.join(name), "initialize-live-db-alias-refused")?;
+    }
     let mut store = EngineStore::open(&paths.db, now_ms)?;
     // A fresh store is bound here; an EXISTING store is acceptable only when
     // already bound to this clone (the crash window between a completed

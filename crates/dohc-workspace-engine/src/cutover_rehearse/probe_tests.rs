@@ -1285,6 +1285,128 @@ fn capturing_resume_reruns_the_capture_proofs() {
 }
 
 #[test]
+fn aliased_inventory_file_fails_capture() {
+    use dohc_engine_testkit::try_make_file_symlink;
+
+    let fixture = Fixture::new();
+    let faults = ScriptedFaults::crash_at(FaultPoint::AfterInitialized);
+    assert!(matches!(
+        fixture.run(faults.as_ref()),
+        RehearsalOutcome::Crashed(_)
+    ));
+
+    // The recorded inventory is replaced by a SAME-CONTENT symlink: capture
+    // would compare against mutable JSON outside the clone.
+    let inventory = fixture
+        .engine_dir()
+        .join("CUTOVER_REHEARSAL_INVENTORY.json");
+    let stash = fixture.recovery.join("stashed-inventory.json");
+    std::fs::copy(&inventory, &stash).expect("stash inventory");
+    std::fs::remove_file(&inventory).expect("remove inventory");
+    if !try_make_file_symlink(&stash, &inventory).expect("symlink attempt") {
+        return; // platform cannot create file symlinks — skip honestly
+    }
+
+    let outcome = fixture.run(&NoFaults);
+    let record = match outcome {
+        RehearsalOutcome::Failed(record) => record,
+        other => panic!("an aliased inventory must fail capture: {other:?}"),
+    };
+    assert_eq!(failure_reason(&record), "inventory-alias-refused");
+}
+
+#[test]
+fn junk_retained_store_is_refused() {
+    let fixture = Fixture::new();
+    let faults = ScriptedFaults::crash_at(FaultPoint::AfterMovedAside);
+    assert!(matches!(
+        fixture.run(faults.as_ref()),
+        RehearsalOutcome::Crashed(_)
+    ));
+    let paths = fixture.paths();
+
+    // The retained engine.db is overwritten with junk: a regular file with
+    // the right name, but not the preserved old store.
+    std::fs::write(
+        moved_aside_path(&paths).join("engine.db"),
+        b"not a database",
+    )
+    .expect("junk retained file");
+
+    let outcome = fixture.run(&NoFaults);
+    let record = match outcome {
+        RehearsalOutcome::Failed(record) => record,
+        other => panic!("a junk retained store must be refused: {other:?}"),
+    };
+    assert_eq!(failure_reason(&record), "initialize-retained-store-missing");
+    assert!(
+        !paths.db.exists(),
+        "initialize must not fabricate a fresh store over a junk retained proof"
+    );
+}
+
+#[test]
+fn transient_backup_read_failure_during_capture_is_not_terminal() {
+    let fixture = Fixture::new();
+    let faults = ScriptedFaults::crash_at(FaultPoint::AfterInitialized);
+    assert!(matches!(
+        fixture.run(faults.as_ref()),
+        RehearsalOutcome::Crashed(_)
+    ));
+
+    // The directory-backup manifest is transiently unavailable (e.g. the
+    // recovery volume is being restored): capture must refuse WITHOUT
+    // persisting a terminal Failed.
+    let manifest = fixture.recovery.join("cutover-files.manifest.json");
+    let parked = fixture.recovery.join("parked-manifest.json");
+    std::fs::rename(&manifest, &parked).expect("park manifest");
+    assert_refused(
+        fixture.root.path(),
+        || fixture.try_run_with_recovery(fixture.recovery.path()),
+        "backup-directory-not-valid",
+    );
+
+    // Restored: the rehearsal resumes to Complete.
+    std::fs::rename(&parked, &manifest).expect("restore manifest");
+    assert!(matches!(
+        fixture.run(&NoFaults),
+        RehearsalOutcome::Complete(_)
+    ));
+}
+
+#[test]
+fn deleted_db_backup_after_initialized_never_persists_complete() {
+    let fixture = Fixture::new();
+    let faults = ScriptedFaults::crash_at(FaultPoint::AfterInitialized);
+    assert!(matches!(
+        fixture.run(faults.as_ref()),
+        RehearsalOutcome::Crashed(_)
+    ));
+
+    // The recorded DB backup vanishes after Initialized: the Complete marker
+    // must never be persisted without a re-proven restore point.
+    std::fs::remove_file(fixture.recovery.join(format!("{}.db", db_backup_stem())))
+        .expect("delete db backup");
+
+    let result = fixture.try_run_with_recovery(fixture.recovery.path());
+    assert_refusal_code(result, "backup-db-not-valid");
+    let state = load_state(fixture.root.path())
+        .expect("state loads")
+        .expect("state present");
+    assert!(
+        !matches!(state.current, RehearsalState::Complete),
+        "Complete must not be persisted without a valid restore point: {state:?}"
+    );
+
+    // The refusal stays non-terminal and repeatable.
+    assert_refused(
+        fixture.root.path(),
+        || fixture.try_run_with_recovery(fixture.recovery.path()),
+        "backup-db-not-valid",
+    );
+}
+
+#[test]
 fn empty_engine_subdir_is_recorded_in_backup() {
     use super::backup::create_restore_tested_backup;
 
