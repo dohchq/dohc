@@ -247,12 +247,13 @@ fn rollback_text_over_binary_restores_the_binary_head() {
     assert_eq!(blob_sha, None, "a binary head has no text blob");
     assert_eq!(bin_sha.as_deref(), Some(binary_sha.as_str()));
 
-    // read_text exposes the compatibility view: empty text.
-    let view = VersionedTextStore::new(&mut store)
+    // S1 regression: the text-only read surface must NOT serve the restored
+    // binary head as an empty text document — it fails closed instead, so a
+    // caller can never silently overwrite it as if it were blank text.
+    let err = VersionedTextStore::new(&mut store)
         .read_text(WS, "main", "doc.md")
-        .expect("read")
-        .expect("snapshot present");
-    assert_eq!(view.text, "", "binary head reads back as empty text");
+        .expect_err("a binary head must not read back as empty text");
+    assert_eq!(err.code(), "binary-head-not-text");
 }
 
 /// Rolling back a FIRST binary write (no preimage) removes the file and GCs the

@@ -45,6 +45,13 @@ pub enum DomainError {
     #[error("text file not found")]
     FileNotFound,
 
+    /// The path resolves to a live BINARY head, so a text-only read surface
+    /// must not serve it. Fails closed rather than projecting the binary head as
+    /// an empty text document (which would invite a silent overwrite). Distinct
+    /// from `FileNotFound` — the head exists, it just is not text.
+    #[error("content at path is a binary head, not text")]
+    BinaryHeadNotText,
+
     /// A rename/rollback restore path is already occupied by another object.
     #[error("target path already exists")]
     TargetPathExists,
@@ -126,6 +133,7 @@ impl DomainError {
             DomainError::VersionNameConflict => "version-name-conflict",
             DomainError::DuplicateMomentId => "duplicate-moment-id",
             DomainError::FileNotFound => "file-not-found",
+            DomainError::BinaryHeadNotText => "binary-head-not-text",
             DomainError::TargetPathExists => "target-path-exists",
             DomainError::ForkBaseNotFound => "fork-base-not-found",
             DomainError::ConflictNotFound => "conflict-not-found",

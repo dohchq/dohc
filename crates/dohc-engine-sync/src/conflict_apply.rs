@@ -261,6 +261,8 @@ fn side(
         // always fails closed downstream in `insert_text_conflict_if_absent`
         // for lacking a blob reference, same as before BINCONFLICT.
         binary_sha256: None,
+        binary_object_id: None,
+        binary_latest_moment_id: None,
         content_kind,
         metadata_summary: side_metadata
             .as_ref()
@@ -481,7 +483,7 @@ fn apply_mirrored_content(
             // binary) is a delete, never a content write — so a binary deletion
             // deletes the current file rather than deferring `BinaryUnhydrated`.
             if !incoming_side_exists(&conflict.incoming) {
-                return apply_mirrored_delete(tx, envelope, &conflict);
+                return apply_mirrored_delete(tx, envelope, &conflict, &live);
             }
             if conflict.incoming.content_kind == ConflictContentKind::Binary {
                 return apply_mirrored_binary_write(tx, envelope, &conflict, &live);
@@ -584,7 +586,15 @@ fn select_snapshot_by_path(
             let binary_sha256 = binary_sha256.ok_or(SyncError::InvalidInput {
                 reason: "binary snapshot is missing its blob",
             })?;
-            Ok(ConflictFileState::binary(snapshot_path, binary_sha256))
+            // Carry the binary head's IDENTITY (object + latest moment), not just
+            // path+bytes, so the exact-head stale gate rejects a
+            // same-bytes-but-recreated head instead of clobbering it.
+            Ok(ConflictFileState::binary_head(
+                snapshot_path,
+                binary_sha256,
+                object_id,
+                latest_moment_id,
+            ))
         }
         _ => Err(SyncError::InvalidInput {
             reason: "snapshot has an unknown content kind",
@@ -714,9 +724,15 @@ fn apply_mirrored_delete(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
     conflict: &TextConflict,
+    live: &ConflictFileState,
 ) -> Result<MirroredOutcome, SyncError> {
-    // Nothing to remove if the receiver already has no live text head.
-    if conflict.current.snapshot.is_none() {
+    // Nothing to remove only if the LIVE head is genuinely absent. A binary
+    // current head has `snapshot == None` (its bytes live in `binary_sha256`),
+    // so checking `snapshot.is_none()` alone would mark the delete applied while
+    // the binary snapshot/path-alias/file stayed live. `delete_text_in_tx`
+    // removes the object at the path regardless of kind, so a present binary
+    // head is deleted here just like a text head.
+    if !incoming_side_exists(live) {
         return Ok(MirroredOutcome::Applied);
     }
     let input = DeleteTextFile {
@@ -1814,13 +1830,28 @@ mod tests {
             &NoFaults,
         )
         .expect("open text-over-binary conflict");
+        // Record the current side as the EXACT live binary head — its bytes AND
+        // its identity (object + latest moment) — so the strict exact-head gate
+        // recognizes it. A shortcut that omitted the identity would now (rightly)
+        // be refused as stale.
+        let (live_object_id, live_latest_moment): (String, String) = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT object_id, latest_moment_id FROM snapshots \
+                     WHERE workspace_id = 'ws' AND version_id = 'main' AND path = 'doc.md'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .expect("live binary head identity");
         store
             .write_with(&NoFaults, |tx| {
                 tx.execute(
                     "UPDATE conflicts SET current_content_kind = 'binary', \
-                     current_blob_sha256 = NULL, current_binary_sha256 = ?1 \
+                     current_blob_sha256 = NULL, current_binary_sha256 = ?1, \
+                     current_object_id = ?2, current_latest_moment_id = ?3 \
                      WHERE workspace_id = 'ws' AND conflict_id = 'text-over-binary'",
-                    [&binary_sha],
+                    params![binary_sha, live_object_id, live_latest_moment],
                 )
                 .map_err(SyncError::persist)?;
                 Ok::<_, SyncError>(())
@@ -1948,6 +1979,226 @@ mod tests {
         assert_eq!(live.0, "binary");
         assert_eq!(live.1.as_deref(), Some(live_sha.as_str()));
         assert_open_conflict(&store, "stale-binary");
+    }
+
+    /// M2 regression: a recorded binary current side with the SAME bytes as the
+    /// live head but a DIFFERENT identity (object + latest moment) — i.e. the
+    /// head was rewritten/recreated with identical content after the conflict
+    /// opened — must NOT pass the exact-head gate. A bytes-only comparison would
+    /// wrongly match and let the mirrored resolve clobber the NEWER head.
+    #[test]
+    fn mirrored_resolve_defers_when_recorded_binary_head_has_same_bytes_but_stale_identity() {
+        let (_scratch, mut store) = store();
+        let live_sha = stage_binary_head(&mut store, "first-binary", b"\x00binary live\xff");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "recreate-peer",
+                0,
+                "conflict.open",
+                mirrored_open_payload("same-bytes-recreated", "placeholder", "replacement text"),
+            ),
+            &NoFaults,
+        )
+        .expect("open same-bytes-recreated conflict");
+        // Same bytes as the live head, but a stale object/latest-moment identity.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE conflicts SET current_content_kind = 'binary', \
+                     current_blob_sha256 = NULL, current_binary_sha256 = ?1, \
+                     current_object_id = 'stale-object', \
+                     current_latest_moment_id = 'stale-moment' \
+                     WHERE workspace_id = 'ws' AND conflict_id = 'same-bytes-recreated'",
+                    [&live_sha],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("record same-bytes stale-identity current side");
+        let before_moments = moment_count(&store);
+
+        let outcome = apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "recreate-peer",
+                1,
+                "conflict.resolve",
+                json!({
+                    "conflictId": "same-bytes-recreated",
+                    "status": "resolved",
+                    "chosenFrom": "current",
+                    "resolution": "kept-current",
+                    "updatedAtMs": 4_000,
+                    "targetVersionId": "main"
+                }),
+            ),
+            &NoFaults,
+        )
+        .expect("same-bytes stale identity is deferred");
+        assert!(matches!(
+            outcome,
+            ApplyOutcome::Applied(ConflictApplyResult {
+                matched: false,
+                pending_resolve: Some(PendingResolve {
+                    reason: PendingResolveReason::StaleHead,
+                    ..
+                }),
+                ..
+            })
+        ));
+        // The newer binary head is untouched and no text clobbered it.
+        let live: (String, Option<String>) = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT content_kind, binary_sha256 FROM snapshots \
+                     WHERE workspace_id = 'ws' AND version_id = 'main' AND path = 'doc.md'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .expect("live binary head");
+        assert_eq!(live.0, "binary");
+        assert_eq!(live.1.as_deref(), Some(live_sha.as_str()));
+        assert_eq!(moment_count(&store), before_moments, "no clobbering write");
+        assert_open_conflict(&store, "same-bytes-recreated");
+    }
+
+    /// M1 regression: a mirrored DELETE (absent incoming) over a BINARY current
+    /// head must actually remove the head — snapshot, path alias, and file
+    /// (materialization) — and resolve the row + advance the ack. The old no-op
+    /// guard treated `current.snapshot.is_none()` as "nothing to remove", so a
+    /// binary head (whose `snapshot` is always `None`) survived a delete that was
+    /// nonetheless marked applied/resolved/acked.
+    #[test]
+    fn mirrored_delete_over_binary_head_actually_removes_it() {
+        let (_scratch, mut store) = store();
+        let live_sha = stage_binary_head(&mut store, "first-binary", b"\x00binary live\xff");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "delete-peer",
+                0,
+                "conflict.open",
+                mirrored_open_payload("delete-binary", "placeholder", "origin current"),
+            ),
+            &NoFaults,
+        )
+        .expect("open delete-binary conflict");
+        let (live_object_id, live_latest_moment): (String, String) = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT object_id, latest_moment_id FROM snapshots \
+                     WHERE workspace_id = 'ws' AND version_id = 'main' AND path = 'doc.md'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .expect("live binary head identity");
+        // Current = the live binary head (with its identity); incoming = ABSENT
+        // (a delete).
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE conflicts SET \
+                     current_content_kind = 'binary', current_blob_sha256 = NULL, \
+                     current_binary_sha256 = ?1, current_object_id = ?2, \
+                     current_latest_moment_id = ?3, \
+                     incoming_exists = 0, incoming_content_kind = 'text', \
+                     incoming_blob_sha256 = NULL, incoming_binary_sha256 = NULL, \
+                     incoming_object_id = NULL, incoming_latest_moment_id = NULL \
+                     WHERE workspace_id = 'ws' AND conflict_id = 'delete-binary'",
+                    params![live_sha, live_object_id, live_latest_moment],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("record binary current + absent incoming");
+
+        let outcome = apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "delete-peer",
+                1,
+                "conflict.resolve",
+                json!({
+                    "conflictId": "delete-binary",
+                    "status": "resolved",
+                    "chosenFrom": "current",
+                    "resolution": "kept-current",
+                    "updatedAtMs": 4_000,
+                    "targetVersionId": "main"
+                }),
+            ),
+            &NoFaults,
+        )
+        .expect("mirrored delete of binary head applies");
+        assert!(matches!(
+            outcome,
+            ApplyOutcome::Applied(ConflictApplyResult {
+                matched: true,
+                pending_resolve: None,
+                ..
+            })
+        ));
+        // The binary snapshot AND its path alias are gone.
+        let (snap_count, alias_count): (i64, i64) = store
+            .read_with(|conn| {
+                let s: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots \
+                     WHERE workspace_id = 'ws' AND version_id = 'main' AND path = 'doc.md'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let a: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM path_aliases \
+                     WHERE workspace_id = 'ws' AND version_id = 'main' AND path = 'doc.md'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                Ok::<_, rusqlite::Error>((s, a))
+            })
+            .expect("counts");
+        assert_eq!(snap_count, 0, "the binary snapshot must be removed");
+        assert_eq!(alias_count, 0, "the path alias must be removed");
+        // A delete materialization job was enqueued over the binary preimage.
+        let delete_job: (String, i64, Option<String>) = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT status, preimage_present, preimage_sha256 \
+                     FROM materialization_jobs WHERE target_path = 'doc.md' \
+                     ORDER BY target_generation DESC LIMIT 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+            })
+            .expect("delete materialization job");
+        assert_eq!(delete_job.1, 1, "delete preimage present");
+        assert_eq!(delete_job.2.as_deref(), Some(live_sha.as_str()));
+        assert_resolved_conflict(&store, "delete-binary");
+        // The delete-peer's resolve envelope was imported and its ack advanced.
+        let (imported, acked_seq): (i64, i64) = store
+            .read_with(|conn| {
+                let imported: i64 = conn.query_row(
+                    "SELECT imported FROM replication_log \
+                     WHERE workspace_id = 'ws' AND origin_id = 'delete-peer' AND origin_seq = 1",
+                    [],
+                    |r| r.get(0),
+                )?;
+                let acked_seq: i64 = conn.query_row(
+                    "SELECT acked_seq FROM replication_peers \
+                     WHERE workspace_id = 'ws' AND origin_id = 'delete-peer'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                Ok::<_, rusqlite::Error>((imported, acked_seq))
+            })
+            .expect("delete-peer replication cursor");
+        assert_ne!(imported, 0, "the delete resolve was imported");
+        assert_eq!(
+            acked_seq, 1,
+            "the delete-peer ack advanced past the resolve"
+        );
     }
 
     #[test]

@@ -58,11 +58,20 @@ impl ConflictMetadata {
 /// carried by `snapshot`, while binary is carried by `binary_sha256`. `path`
 /// remains explicit because an absent side and a divergent move still carry a
 /// meaningful destination.
+///
+/// A binary head carries its own IDENTITY (`binary_object_id` +
+/// `binary_latest_moment_id`) so the exact-head stale gate is as strict for
+/// binary as it is for text (a text side keeps identity inside its
+/// `TextSnapshot`). Without it, any later binary head sharing the same bytes at
+/// the same path would spuriously match the recorded current head and let a
+/// mirrored resolve clobber a NEWER head.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConflictFileState {
     pub path: String,
     pub snapshot: Option<TextSnapshot>,
     pub binary_sha256: Option<String>,
+    pub binary_object_id: Option<String>,
+    pub binary_latest_moment_id: Option<String>,
     pub content_kind: ConflictContentKind,
     pub metadata_summary: Option<String>,
     pub metadata_correlation_id: Option<String>,
@@ -74,17 +83,49 @@ impl ConflictFileState {
             path: path.into(),
             snapshot,
             binary_sha256: None,
+            binary_object_id: None,
+            binary_latest_moment_id: None,
             content_kind: ConflictContentKind::Text,
             metadata_summary: None,
             metadata_correlation_id: None,
         }
     }
 
+    /// A binary side by bytes only (no head identity). Used where only the
+    /// content is compared (e.g. current-vs-incoming byte equality).
     pub fn binary(path: impl Into<String>, binary_sha256: impl Into<String>) -> Self {
         ConflictFileState {
             path: path.into(),
             snapshot: None,
             binary_sha256: Some(binary_sha256.into()),
+            binary_object_id: None,
+            binary_latest_moment_id: None,
+            content_kind: ConflictContentKind::Binary,
+            metadata_summary: None,
+            metadata_correlation_id: None,
+        }
+    }
+
+    /// Whether this side carries live content (a text snapshot or a binary
+    /// head). An absent side is a deletion / an unoccupied path.
+    pub fn is_present(&self) -> bool {
+        self.snapshot.is_some() || self.binary_sha256.is_some()
+    }
+
+    /// A binary HEAD carrying its full identity — object + latest moment — so
+    /// the exact-head gate can reject a same-bytes-but-recreated head.
+    pub fn binary_head(
+        path: impl Into<String>,
+        binary_sha256: impl Into<String>,
+        object_id: impl Into<String>,
+        latest_moment_id: impl Into<String>,
+    ) -> Self {
+        ConflictFileState {
+            path: path.into(),
+            snapshot: None,
+            binary_sha256: Some(binary_sha256.into()),
+            binary_object_id: Some(object_id.into()),
+            binary_latest_moment_id: Some(latest_moment_id.into()),
             content_kind: ConflictContentKind::Binary,
             metadata_summary: None,
             metadata_correlation_id: None,
@@ -266,7 +307,14 @@ pub fn live_state_matches_conflict_current(
             _ => false,
         },
         ConflictContentKind::Binary => {
-            live.path == recorded.path && live.binary_sha256 == recorded.binary_sha256
+            // As strict as text: path + bytes AND head identity (object +
+            // latest moment). A same-bytes-but-recreated binary head has a
+            // different object/latest moment, so it must NOT match — otherwise a
+            // mirrored resolve would clobber the newer head.
+            live.path == recorded.path
+                && live.binary_sha256 == recorded.binary_sha256
+                && live.binary_object_id == recorded.binary_object_id
+                && live.binary_latest_moment_id == recorded.binary_latest_moment_id
         }
     }
 }
@@ -502,13 +550,16 @@ impl VersionedTextStore<'_> {
             {
                 return Err(binary_conflicts_unsupported());
             }
-            let live_snapshot = select_text_snapshot_by_path_in_tx(
+            // Binary-head-aware live read: a binary head that appeared at the
+            // path after a (text) conflict was opened must fail the exact-head
+            // gate (content-kind mismatch), NOT be invisibly treated as absent
+            // and clobbered by the incoming text.
+            let live = select_snapshot_by_path_in_tx(
                 tx,
                 &conflict.workspace_id,
                 &conflict.target_version_id,
                 &conflict.path,
             )?;
-            let live = ConflictFileState::text(conflict.path.clone(), live_snapshot);
             if !live_state_matches_conflict_current(&live, &conflict.current) {
                 return Err(DomainError::ConflictStaleTarget);
             }
@@ -523,13 +574,16 @@ impl VersionedTextStore<'_> {
                     if let Some(incoming) = &conflict.incoming.snapshot {
                         let destination = conflict.incoming.path.clone();
                         if destination != conflict.path {
-                            if select_text_snapshot_by_path_in_tx(
+                            // Occupied-destination check must see a binary head
+                            // too: writing the incoming text onto a path already
+                            // held by a binary head would clobber it.
+                            if select_snapshot_by_path_in_tx(
                                 tx,
                                 &conflict.workspace_id,
                                 &conflict.target_version_id,
                                 &destination,
                             )?
-                            .is_some()
+                            .is_present()
                             {
                                 return Err(DomainError::TargetPathExists);
                             }
@@ -962,10 +1016,13 @@ fn side_bindings(side: &ConflictFileState) -> SideBindings<'_> {
     SideBindings {
         exists: i64::from(side.snapshot.is_some() || side.binary_sha256.is_some()),
         path: &side.path,
+        // Object id + latest moment carry head identity for BOTH kinds: text
+        // takes them from its snapshot, binary from its head-identity fields.
         object_id: side
             .snapshot
             .as_ref()
-            .map(|snapshot| snapshot.object_id.as_str()),
+            .map(|snapshot| snapshot.object_id.as_str())
+            .or(side.binary_object_id.as_deref()),
         content_kind: side.content_kind.as_str(),
         blob_sha256: side
             .snapshot
@@ -979,7 +1036,8 @@ fn side_bindings(side: &ConflictFileState) -> SideBindings<'_> {
         latest_moment_id: side
             .snapshot
             .as_ref()
-            .map(|snapshot| snapshot.latest_moment_id.as_str()),
+            .map(|snapshot| snapshot.latest_moment_id.as_str())
+            .or(side.binary_latest_moment_id.as_deref()),
         metadata_origin: side
             .snapshot
             .as_ref()
@@ -1173,10 +1231,24 @@ fn map_side(
             None
         }
     };
+    // Head identity for a binary side is carried in the shared object/latest
+    // moment columns; a text side keeps it inside its `TextSnapshot`, so leave
+    // these `None` there to avoid duplicating it.
+    let (binary_object_id, binary_latest_moment_id) = match content_kind {
+        ConflictContentKind::Binary => (
+            row.get(column("object_id").as_str())
+                .map_err(DomainError::sql_corrupt)?,
+            row.get(column("latest_moment_id").as_str())
+                .map_err(DomainError::sql_corrupt)?,
+        ),
+        ConflictContentKind::Text => (None, None),
+    };
     Ok(ConflictFileState {
         path,
         snapshot,
         binary_sha256,
+        binary_object_id,
+        binary_latest_moment_id,
         content_kind,
         metadata_summary: row
             .get(column("metadata_summary").as_str())
@@ -1208,6 +1280,108 @@ fn binary_conflicts_unsupported() -> DomainError {
 }
 
 #[doc(hidden)]
+/// Read the live head at `path` as a content-aware [`ConflictFileState`] — a
+/// text head, a binary head (WITH its object + latest-moment identity), or an
+/// absent side. Unlike [`select_text_snapshot_by_path_in_tx`] (which JOINs
+/// `blobs` and is blind to a binary head), this is authoritative for BOTH kinds,
+/// so a stale-target / occupied-destination gate never misses a binary head
+/// sitting at the path.
+pub fn select_snapshot_by_path_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<ConflictFileState, DomainError> {
+    type HeadRow = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        String,
+        String,
+        String,
+        Option<String>,
+    );
+    let row: Option<HeadRow> = conn
+        .query_row(
+            "SELECT s.object_id, s.path, b.text, s.blob_sha256, s.updated_at_ms, \
+             s.latest_moment_id, s.metadata_origin, COALESCE(s.content_kind, 'text'), \
+             bb.sha256 FROM snapshots s \
+             LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
+             LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
+             WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path = ?3",
+            params![workspace_id, version_id, path],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let Some((
+        object_id,
+        snapshot_path,
+        text,
+        blob_sha256,
+        updated_at_ms,
+        latest_moment_id,
+        metadata_origin,
+        content_kind,
+        binary_sha256,
+    )) = row
+    else {
+        return Ok(ConflictFileState::text(path.to_owned(), None));
+    };
+    match content_kind.as_str() {
+        "text" => {
+            let text = text.ok_or(DomainError::StateCorrupt {
+                reason: "text snapshot is missing its blob",
+            })?;
+            let blob_sha256 = blob_sha256.ok_or(DomainError::StateCorrupt {
+                reason: "text snapshot is missing its hash",
+            })?;
+            Ok(ConflictFileState::text(
+                snapshot_path.clone(),
+                Some(TextSnapshot {
+                    workspace_id: workspace_id.to_owned(),
+                    version_id: version_id.to_owned(),
+                    object_id,
+                    path: snapshot_path,
+                    text,
+                    blob_sha256,
+                    updated_at_ms,
+                    latest_moment_id,
+                    metadata_origin,
+                }),
+            ))
+        }
+        "binary" => {
+            let binary_sha256 = binary_sha256.ok_or(DomainError::StateCorrupt {
+                reason: "binary snapshot is missing its blob",
+            })?;
+            Ok(ConflictFileState::binary_head(
+                snapshot_path,
+                binary_sha256,
+                object_id,
+                latest_moment_id,
+            ))
+        }
+        _ => Err(DomainError::StateCorrupt {
+            reason: "snapshot has an unknown content kind",
+        }),
+    }
+}
+
 pub fn select_text_snapshot_by_path_in_tx(
     conn: &Connection,
     workspace_id: &str,

@@ -673,6 +673,8 @@ impl ConflictStateDto {
             // actual binary payload through this RPC surface is out of scope
             // for BINCONFLICT (schema + persistence only).
             binary_sha256: None,
+            binary_object_id: None,
+            binary_latest_moment_id: None,
             content_kind,
             metadata_summary: self.metadata_summary,
             metadata_correlation_id: self.metadata_correlation_id,

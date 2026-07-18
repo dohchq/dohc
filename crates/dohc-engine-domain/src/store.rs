@@ -409,12 +409,12 @@ impl<'a> VersionedTextStore<'a> {
     /// closed (`VersionNotFound`) on an unknown version so a bad version never
     /// looks like a missing file (`versions-read-text-file` contract).
     ///
-    /// BINARY-HEAD FOOTGUN: for a binary head this returns a [`TextSnapshot`]
-    /// whose `text` is `""` and whose `blob_sha256` carries the BINARY sha (a
-    /// `binary_blobs` ref, NOT a `blobs` ref). An empty `text` here does NOT mean
-    /// an empty text file — a caller that must distinguish binary from empty text
-    /// has to consult `content_kind` on the underlying snapshot, which this
-    /// text-compatibility view does not surface.
+    /// FAIL-CLOSED ON BINARY: a live binary head at `path` is NOT text, so this
+    /// text-only surface returns [`DomainError::BinaryHeadNotText`] rather than
+    /// projecting it as an empty [`TextSnapshot`]. Serving a binary head as a
+    /// blank text document would invite a silent overwrite and hide the real
+    /// content. `Ok(None)` still means genuinely absent; `Ok(Some(_))` is always
+    /// a real text head.
     pub fn read_text(
         &self,
         workspace_id: &str,
@@ -429,8 +429,13 @@ impl<'a> VersionedTextStore<'a> {
             let Some(object_id) = alias_object_id(conn, workspace_id, version_id, &path)? else {
                 return Ok(None);
             };
-            get_snapshot(conn, workspace_id, version_id, &object_id)
-                .map(|snapshot| snapshot.map(|value| snapshot_text_view(&value)))
+            let Some(snapshot) = get_snapshot(conn, workspace_id, version_id, &object_id)? else {
+                return Ok(None);
+            };
+            if snapshot.content_kind == "binary" {
+                return Err(DomainError::BinaryHeadNotText);
+            }
+            Ok(Some(snapshot_text_view(&snapshot)))
         })
     }
 
@@ -549,6 +554,23 @@ impl<'a> VersionedTextStore<'a> {
         workspace_id: &str,
         version_id: &str,
     ) -> Result<Vec<TextSnapshot>, DomainError> {
+        Ok(self
+            .list_snapshot_records(workspace_id, version_id)?
+            .iter()
+            .map(snapshot_text_view)
+            .collect())
+    }
+
+    /// Content-aware snapshot records for `version`, ordered by path. Unlike
+    /// [`Self::list_snapshots`], this preserves `content_kind`/`binary_sha256`
+    /// so a binary head is never flattened into the empty-text projection — the
+    /// differential/normalize surface consumes this so text-vs-binary is never
+    /// masked.
+    pub(crate) fn list_snapshot_records(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+    ) -> Result<Vec<SnapshotRecord>, DomainError> {
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(
@@ -569,8 +591,7 @@ impl<'a> VersionedTextStore<'a> {
                 .map_err(DomainError::sql_corrupt)?;
             let mut out = Vec::new();
             for row in rows {
-                let snapshot = row.map_err(DomainError::sql_corrupt)??;
-                out.push(snapshot_text_view(&snapshot));
+                out.push(row.map_err(DomainError::sql_corrupt)??);
             }
             Ok(out)
         })
@@ -585,6 +606,20 @@ impl<'a> VersionedTextStore<'a> {
         workspace_id: &str,
         version_id: &str,
     ) -> Result<Vec<TextSnapshot>, DomainError> {
+        Ok(self
+            .list_fork_base_records(workspace_id, version_id)?
+            .iter()
+            .map(snapshot_text_view)
+            .collect())
+    }
+
+    /// Content-aware fork-base records for `version` (see
+    /// [`Self::list_snapshot_records`]).
+    pub(crate) fn list_fork_base_records(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+    ) -> Result<Vec<SnapshotRecord>, DomainError> {
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(
@@ -605,8 +640,7 @@ impl<'a> VersionedTextStore<'a> {
                 .map_err(DomainError::sql_corrupt)?;
             let mut out = Vec::new();
             for row in rows {
-                let snapshot = row.map_err(DomainError::sql_corrupt)??;
-                out.push(snapshot_text_view(&snapshot));
+                out.push(row.map_err(DomainError::sql_corrupt)??);
             }
             Ok(out)
         })

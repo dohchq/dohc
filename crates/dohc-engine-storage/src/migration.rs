@@ -1232,8 +1232,17 @@ CREATE TABLE snapshots_v10 (
     updated_at_ms    INTEGER NOT NULL,
     latest_moment_id TEXT    NOT NULL,
     metadata_origin  TEXT    NOT NULL,
-    content_kind     TEXT    DEFAULT 'text',
+    content_kind     TEXT    NOT NULL DEFAULT 'text'
+                             CHECK (content_kind IN ('text', 'binary')),
     binary_sha256    TEXT    REFERENCES binary_blobs(sha256),
+    -- A head carries EXACTLY the digest for its kind: a text head has its text
+    -- blob and no binary ref; a binary head has its binary ref and no text blob.
+    -- Fail-closed at the DB level so a malformed dual/absent-digest union can
+    -- never become durable state.
+    CHECK (
+        (content_kind = 'text'   AND blob_sha256   IS NOT NULL AND binary_sha256 IS NULL)
+     OR (content_kind = 'binary' AND binary_sha256 IS NOT NULL AND blob_sha256   IS NULL)
+    ),
     PRIMARY KEY (workspace_id, version_id, object_id),
     FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
     FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
@@ -1259,8 +1268,13 @@ CREATE TABLE fork_base_snapshots_v10 (
     updated_at_ms    INTEGER NOT NULL,
     latest_moment_id TEXT    NOT NULL,
     metadata_origin  TEXT    NOT NULL,
-    content_kind     TEXT    DEFAULT 'text',
+    content_kind     TEXT    NOT NULL DEFAULT 'text'
+                             CHECK (content_kind IN ('text', 'binary')),
     binary_sha256    TEXT    REFERENCES binary_blobs(sha256),
+    CHECK (
+        (content_kind = 'text'   AND blob_sha256   IS NOT NULL AND binary_sha256 IS NULL)
+     OR (content_kind = 'binary' AND binary_sha256 IS NOT NULL AND blob_sha256   IS NULL)
+    ),
     PRIMARY KEY (workspace_id, version_id, object_id),
     FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
     FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
@@ -1293,15 +1307,32 @@ CREATE TABLE moments_v10 (
     author_json       TEXT,
     sync_record_only  INTEGER,
     before_latest_moment_id TEXT,
-    after_content_kind TEXT DEFAULT 'text',
+    after_content_kind TEXT NOT NULL DEFAULT 'text'
+                       CHECK (after_content_kind IN ('text', 'binary')),
     after_binary_sha256 TEXT REFERENCES binary_blobs(sha256),
-    before_content_kind TEXT DEFAULT 'text',
+    before_content_kind TEXT NOT NULL DEFAULT 'text'
+                        CHECK (before_content_kind IN ('text', 'binary')),
     before_binary_sha256 TEXT REFERENCES binary_blobs(sha256),
+    -- The AFTER content of every moment carries exactly the digest matching its
+    -- kind (a text moment its text blob, a binary moment its binary ref) and
+    -- never the other kind's digest.
+    CHECK (
+        (after_content_kind = 'text'   AND after_blob_sha256   IS NOT NULL AND after_binary_sha256 IS NULL)
+     OR (after_content_kind = 'binary' AND after_binary_sha256 IS NOT NULL AND after_blob_sha256   IS NULL)
+    ),
+    -- The BEFORE (rollback preimage) may be ABSENT (first write / no preimage),
+    -- so only forbid the WRONG-kind digest: a text preimage never carries a
+    -- binary ref and a binary preimage never carries a text blob.
+    CHECK (
+        (before_content_kind = 'text'   AND before_binary_sha256 IS NULL)
+     OR (before_content_kind = 'binary' AND before_blob_sha256   IS NULL)
+    ),
     PRIMARY KEY (workspace_id, moment_id),
     UNIQUE (workspace_id, moment_order),
     FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
     FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
-    FOREIGN KEY (after_blob_sha256) REFERENCES blobs(sha256)
+    FOREIGN KEY (after_blob_sha256) REFERENCES blobs(sha256),
+    FOREIGN KEY (before_blob_sha256) REFERENCES blobs(sha256)
 ) STRICT;
 INSERT INTO moments_v10 (
     workspace_id, moment_order, moment_id, version_id, object_id, path,
