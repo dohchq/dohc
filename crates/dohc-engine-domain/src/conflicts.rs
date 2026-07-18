@@ -238,7 +238,10 @@ pub fn live_state_matches_conflict_current(
     }
     match live.content_kind {
         ConflictContentKind::Text => match (&live.snapshot, &recorded.snapshot) {
-            (None, None) => true,
+            // Absent-at-a-different-path is not the same state: a replicated
+            // open records per-side paths, so the gate must not treat two
+            // unrelated absences as a match.
+            (None, None) => live.path == recorded.path,
             (Some(live_snapshot), Some(recorded_snapshot)) => {
                 live.path == recorded.path
                     && live_snapshot.object_id == recorded_snapshot.object_id
@@ -887,6 +890,11 @@ fn map_side(
             if binary_sha256.is_some() {
                 return Err(DomainError::StateCorrupt {
                     reason: "text conflict side references a binary blob",
+                });
+            }
+            if text_blob_sha256.is_some() {
+                return Err(DomainError::StateCorrupt {
+                    reason: "absent text conflict side references a blob",
                 });
             }
             None

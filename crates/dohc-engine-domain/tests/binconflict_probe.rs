@@ -7,8 +7,9 @@
 use dohc_engine_domain::conflicts::hydrate_binary_conflict_blob;
 use dohc_engine_domain::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictStatus,
-    EngineStore, NoFaults, ResolveConflictKind, ResolveTextConflict, TextConflict, TextSnapshot,
-    VersionedTextStore, WriteText, insert_text_conflict_if_absent, load_text_conflict_in_tx,
+    DomainError, EngineStore, NoFaults, ResolveConflictKind, ResolveTextConflict, TextConflict,
+    TextSnapshot, VersionedTextStore, WriteText, insert_text_conflict_if_absent,
+    load_text_conflict_in_tx,
 };
 use dohc_engine_storage::blob::{binary_blob_count, get_binary_blob};
 use dohc_engine_storage::{MAX_BLOB_BYTES, StorageError, has_binary_blob, hex_sha256};
@@ -16,6 +17,23 @@ use dohc_engine_testkit::ScratchDir;
 use rusqlite::params;
 
 const WS: &str = "probe-ws";
+
+/// Assert the exact `InvalidInput` reason, not just the shared code — an
+/// unrelated validation failure must not satisfy a binary-gate probe.
+#[track_caller]
+fn assert_invalid_input(err: &DomainError, expected_reason: &str) {
+    match err {
+        DomainError::InvalidInput { reason } => assert_eq!(*reason, expected_reason),
+        other => panic!("expected InvalidInput({expected_reason:?}), got {other:?}"),
+    }
+}
+
+/// The `binary_conflicts_unsupported()` refusal every binary resolve path
+/// must return.
+#[track_caller]
+fn assert_binary_unsupported(err: &DomainError) {
+    assert_invalid_input(err, "binary conflict sides are not supported yet");
+}
 
 fn open_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch dir");
@@ -139,7 +157,7 @@ fn keep_current_on_binary_incoming_fails_closed() {
             &NoFaults,
         )
         .expect_err("KeepCurrent must not resolve a conflict with a binary incoming side");
-    assert_eq!(err.code(), "invalid-input", "got {err:?}");
+    assert_binary_unsupported(&err);
 }
 
 /// ApplyIncoming with a binary BASE side (text incoming). The sync mirror path
@@ -169,7 +187,7 @@ fn apply_incoming_with_binary_base_fails_closed() {
             &NoFaults,
         )
         .expect_err("ApplyIncoming must not resolve a conflict with a binary base side");
-    assert_eq!(err.code(), "invalid-input", "got {err:?}");
+    assert_binary_unsupported(&err);
 }
 
 /// KeepCurrent with binary BASE (both other sides text).
@@ -195,7 +213,7 @@ fn keep_current_with_binary_base_fails_closed() {
             &NoFaults,
         )
         .expect_err("KeepCurrent must not resolve a conflict with a binary base side");
-    assert_eq!(err.code(), "invalid-input", "got {err:?}");
+    assert_binary_unsupported(&err);
 }
 
 /// ApplyMerged must reject any binary side.
@@ -226,7 +244,7 @@ fn apply_merged_with_binary_side_fails_closed() {
             &NoFaults,
         )
         .expect_err("ApplyMerged must reject binary sides");
-    assert_eq!(err.code(), "invalid-input", "got {err:?}");
+    assert_binary_unsupported(&err);
 }
 
 /// An all-binary conflict must fail closed on every resolve path, and the
@@ -261,10 +279,13 @@ fn all_binary_resolve_fails_closed_with_binary_unsupported_error() {
         let err = VersionedTextStore::new(&mut store)
             .resolve_text_conflict(&resolve_input("all-binary", kind), &NoFaults)
             .expect_err("all-binary resolve must fail closed");
-        assert_eq!(
-            err.code(),
-            "invalid-input",
-            "{label}: expected a binary-unsupported invalid-input error, got {err:?}",
+        assert!(
+            matches!(
+                &err,
+                DomainError::InvalidInput { reason }
+                    if *reason == "binary conflict sides are not supported yet"
+            ),
+            "{label}: expected the binary-unsupported refusal, got {err:?}",
         );
     }
 }
@@ -297,7 +318,10 @@ fn binary_sha_only_in_text_blobs_table_is_rejected() {
     let err = store
         .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
         .expect_err("sha present only in text blobs must be rejected");
-    assert_eq!(err.code(), "invalid-input");
+    assert_invalid_input(
+        &err,
+        "binary conflict side references a missing binary blob",
+    );
 }
 
 /// Empty-string sha reference is rejected.
@@ -314,7 +338,10 @@ fn empty_binary_sha_is_rejected() {
     let err = store
         .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
         .expect_err("empty sha must be rejected");
-    assert_eq!(err.code(), "invalid-input");
+    assert_invalid_input(
+        &err,
+        "binary conflict side references a missing binary blob",
+    );
 }
 
 /// Mismatched claimed sha must reject AND leave no row behind.
@@ -430,11 +457,12 @@ fn hydrate_size_bounds() {
     assert_eq!(err.code(), "blob-too-large");
 }
 
-/// A pre-existing row under the same sha must not be overwritten by a later
-/// hydrate; and if the stored bytes were corrupted out-of-band, reads still
-/// fail closed after a "successful" re-hydrate.
+/// A pre-existing row under the same sha is never overwritten by a later
+/// hydrate — and if the canonical row was corrupted out-of-band, the
+/// deduplicating re-hydrate itself fails closed (no silent success against a
+/// rotted row), as does the read path.
 #[test]
-fn hydrate_never_overwrites_existing_row() {
+fn hydrate_fails_closed_when_existing_row_is_corrupt() {
     let (_scratch, mut store) = open_store();
     let bytes = b"original bytes";
     let sha = hydrate(&mut store, bytes);
@@ -450,15 +478,76 @@ fn hydrate_never_overwrites_existing_row() {
             Ok::<_, StorageError>(())
         })
         .expect("corrupt row");
-    // Re-hydrate with the true bytes: INSERT OR IGNORE means the corrupt row
-    // survives (no silent repair, but also no overwrite).
-    let sha_again = hydrate(&mut store, bytes);
-    assert_eq!(sha, sha_again);
-    // The read path must fail closed on the corrupt row.
+    // Re-hydrate with the true bytes: the dedup path re-verifies the existing
+    // row and must surface the corruption instead of reporting success.
+    let sha_for_rehydrate = sha.clone();
+    let bytes_for_rehydrate = bytes.to_vec();
+    let err = store
+        .write_with(&NoFaults, move |tx| {
+            hydrate_binary_conflict_blob(tx, &sha_for_rehydrate, &bytes_for_rehydrate)
+        })
+        .expect_err("re-hydrate over a corrupt canonical row must fail closed");
+    assert_eq!(err.code(), "blob-integrity");
+    // The corrupt row is left as evidence (no silent repair/overwrite), and
+    // the read path fails closed on it too.
     let err = store
         .read_with(|conn| get_binary_blob(conn, &sha))
         .expect_err("corrupt row must fail closed on read");
     assert_eq!(err.code(), "blob-integrity");
+}
+
+/// An ABSENT text side that carries a text-blob reference (row corruption) is
+/// inconsistent durable state and must fail closed on load, not be silently
+/// reconstructed as an ordinary absent side.
+#[test]
+fn absent_text_side_with_blob_reference_fails_closed_on_read() {
+    let (_scratch, mut store) = open_store();
+    let current = write_file(&mut store, "ghost.md", "current body");
+    let current_blob = current.blob_sha256.clone();
+    let c = conflict(
+        "ghost",
+        "ghost.md",
+        ConflictFileState::text("ghost.md", None),
+        ConflictFileState::text("ghost.md", Some(current)),
+        ConflictFileState::text(
+            "ghost.md",
+            Some(incoming_text_snapshot("ghost.md", "incoming body")),
+        ),
+    );
+    store
+        .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
+        .expect("open text conflict");
+    // Corrupt the row: the absent base side gains a dangling text-blob
+    // reference (pointing at a real blobs row so the FK holds).
+    store
+        .write_with(&NoFaults, move |tx| {
+            tx.execute(
+                "UPDATE conflicts SET base_blob_sha256 = ?1 \
+                 WHERE workspace_id = ?2 AND conflict_id = 'ghost'",
+                params![current_blob, WS],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("inject stray text-blob reference");
+    let err = store
+        .read_with(|conn| load_text_conflict_in_tx(conn, WS, "ghost"))
+        .expect_err("absent side with a blob reference must fail closed");
+    assert_eq!(err.code(), "state-corrupt");
+}
+
+/// The stale-head gate must not treat two ABSENT text states at DIFFERENT
+/// paths as the same state: a replicated open records per-side paths, so a
+/// divergent recorded current path must fail the match even when both
+/// snapshots are absent.
+#[test]
+fn absent_states_at_different_paths_do_not_match() {
+    use dohc_engine_domain::live_state_matches_conflict_current;
+    let live = ConflictFileState::text("a.md", None);
+    let same = ConflictFileState::text("a.md", None);
+    let divergent = ConflictFileState::text("b.md", None);
+    assert!(live_state_matches_conflict_current(&live, &same));
+    assert!(!live_state_matches_conflict_current(&live, &divergent));
 }
 
 /// A text side that gains a stray binary reference (row corruption) must fail
@@ -566,7 +655,7 @@ fn binary_current_blocks_resolve() {
         let err = VersionedTextStore::new(&mut store)
             .resolve_text_conflict(&resolve_input("bin-current", kind), &NoFaults)
             .expect_err("binary current must block resolve");
-        assert_eq!(err.code(), "invalid-input", "got {err:?}");
+        assert_binary_unsupported(&err);
     }
 }
 
@@ -587,7 +676,7 @@ fn binary_side_with_text_snapshot_rejected() {
     let err = store
         .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
         .expect_err("binary side with text snapshot must be rejected");
-    assert_eq!(err.code(), "invalid-input");
+    assert_invalid_input(&err, "binary conflict side cannot carry a text snapshot");
 }
 
 /// Binary-side validation must run BEFORE the duplicate-id shortcut: an
@@ -629,7 +718,10 @@ fn duplicate_conflict_id_with_invalid_binary_side_rejected() {
             insert_text_conflict_if_absent(tx, &unhydrated)
         })
         .expect_err("unhydrated binary side on duplicate id must be rejected");
-    assert_eq!(err.code(), "invalid-input");
+    assert_invalid_input(
+        &err,
+        "binary conflict side references a missing binary blob",
+    );
 
     // Same id, binary side missing its sha entirely: also rejected.
     let mut missing_side = ConflictFileState::text("d.bin", None);
@@ -644,7 +736,7 @@ fn duplicate_conflict_id_with_invalid_binary_side_rejected() {
     let err = store
         .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &missing))
         .expect_err("sha-less binary side on duplicate id must be rejected");
-    assert_eq!(err.code(), "invalid-input");
+    assert_invalid_input(&err, "binary conflict side is missing its blob reference");
 }
 
 /// Text side carrying a binary_sha256 is rejected at insert.
@@ -664,5 +756,5 @@ fn text_side_with_binary_sha_rejected() {
     let err = store
         .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
         .expect_err("text side with binary sha must be rejected");
-    assert_eq!(err.code(), "invalid-input");
+    assert_invalid_input(&err, "text conflict side cannot reference a binary blob");
 }
