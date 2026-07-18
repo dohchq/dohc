@@ -57,6 +57,10 @@ pub fn load_valid_directory_backup(
         serde_json::from_slice(&bytes).map_err(|_| RehearsalError::Io {
             code: "directory-manifest-malformed",
         })?;
+    // NOTE: an empty file list also rejects a LEGITIMATELY minimal clone (no
+    // non-triplet engine files, no sibling snapshots). Unreachable in this
+    // fixture harness (markers + sibling stand-ins always exist); relaxing it
+    // safely is a real `--cutover` consideration.
     if !manifest.verified || manifest.files.is_empty() {
         return Ok(None);
     }
@@ -289,6 +293,21 @@ fn db_manifest_path(recovery_dir: &Path) -> PathBuf {
 fn require_real_backup_pair(recovery_dir: &Path) -> Result<(), RehearsalError> {
     super::require_real_file(&db_backup_path(recovery_dir), "backup-db-alias-refused")?;
     super::require_real_file(&db_manifest_path(recovery_dir), "backup-db-alias-refused")?;
+    // `VACUUM INTO` never produces a WAL/SHM: a sidecar beside the backup DB
+    // could feed logical rows outside the recorded checksum into the reads
+    // that trust it (identity, binding). Its presence is tampering.
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = recovery_dir.join(format!("{DB_BACKUP_STEM}.db{suffix}"));
+        match std::fs::symlink_metadata(&sidecar) {
+            Ok(_) => {
+                return Err(RehearsalError::Io {
+                    code: "backup-db-sidecar-refused",
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(RehearsalError::io("backup-db-sidecar-refused", error)),
+        }
+    }
     Ok(())
 }
 
@@ -352,6 +371,10 @@ fn collect_directory_sources(paths: &Paths) -> Result<Vec<(String, PathBuf)>, Re
 /// against the recorded backup: a snapshot that drifted (or vanished) after
 /// the backup was taken must fail the rehearsal, not silently leave a stale
 /// restore point behind a Complete marker.
+///
+/// NOTE: a NEW unbacked file appearing under `.dohc/engine` between BackedUp
+/// and Capturing is not detected here — bounded by the single-writer per-root
+/// lock; full engine-tree set-compare is a real `--cutover` follow-up.
 pub(crate) fn verify_protected_snapshots(
     paths: &Paths,
     recovery_dir: &Path,

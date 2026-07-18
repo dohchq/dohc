@@ -91,7 +91,11 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
             }
             RehearsalState::Settled => {
                 // Precondition (refusal, not terminal): the live db itself
-                // must prove it is the clone the fence validated.
+                // must prove it is the clone the fence validated. Backup
+                // CREATION failures below (torn staging/manifest included)
+                // stay terminal by design — the shadow clone is disposable
+                // and re-runs fresh; finer-grained resume is a `--cutover`
+                // follow-up.
                 verify_live_clone_binding(&paths.db, &validated.shadow_token)?;
                 let backed_up = load_or_record(&paths.root)
                     .and_then(|_| {
@@ -120,7 +124,8 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
                 // recovery dir, and the live db must re-prove its binding. A
                 // missing live db here (crash between the physical move and
                 // the MovedAside marker) cannot be re-proven against the
-                // recorded fingerprint, so it stays a refusal.
+                // recorded fingerprint, so it stays a refusal — a `--cutover`
+                // tier would record the proof hashes to resume this window.
                 verify_recorded_backup(&recovery_dir, record.backup.as_ref())?;
                 verify_live_clone_binding(&paths.db, &validated.shadow_token)?;
                 if let Err(error) = move_aside(&paths, &recovery_dir) {
@@ -405,7 +410,9 @@ fn initialize_fresh_store(
     let mut store = EngineStore::open(&paths.db, now_ms)?;
     // A fresh store is bound here; an EXISTING store is acceptable only when
     // already bound to this clone (the crash window between a completed
-    // initialize and its marker).
+    // initialize and its marker). A crash between store CREATION and the
+    // bind leaves an unbound store that stays a terminal refusal —
+    // disposable-clone recovery, not a `--cutover`-grade resume.
     if !store.bind_shadow_clone_token(shadow_token)? {
         return Err(RehearsalError::Io {
             code: "initialize-not-fresh",

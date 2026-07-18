@@ -1521,6 +1521,35 @@ fn edited_backup_manifest_uuid_cannot_evade_stale_store_refusal() {
 }
 
 #[test]
+fn planted_backup_wal_sidecar_refuses_the_backup_pair() {
+    let fixture = Fixture::new();
+    let faults = ScriptedFaults::crash_at(FaultPoint::AfterMovedAside);
+    assert!(matches!(
+        fixture.run(faults.as_ref()),
+        RehearsalOutcome::Crashed(_)
+    ));
+
+    // `VACUUM INTO` never produces a WAL: one planted beside the backup DB
+    // could feed rows outside the recorded checksum into the identity read.
+    let wal = fixture
+        .recovery
+        .join(format!("{}.db-wal", db_backup_stem()));
+    std::fs::write(&wal, vec![0_u8; 32]).expect("planted wal");
+    assert_refused(
+        fixture.root.path(),
+        || fixture.try_run_with_recovery(fixture.recovery.path()),
+        "backup-db-sidecar-refused",
+    );
+
+    // Removing the planted sidecar resumes to Complete.
+    std::fs::remove_file(&wal).expect("remove planted wal");
+    assert!(matches!(
+        fixture.run(&NoFaults),
+        RehearsalOutcome::Complete(_)
+    ));
+}
+
+#[test]
 fn empty_engine_subdir_is_recorded_in_backup() {
     use super::backup::create_restore_tested_backup;
 
