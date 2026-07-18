@@ -738,6 +738,11 @@ pub fn write_binary_file_in_tx(
     let object_id = if let Some(existing) = existing_object {
         existing
     } else {
+        // Object identity is GLOBALLY unique: `file_objects` declares
+        // `UNIQUE (object_id)` (matching the canonical engine schema), so the
+        // pre-check is deliberately NOT scoped to `workspace_id`. Scoping it
+        // would let a cross-workspace collision slip past this clean fail-closed
+        // domain error and fail with a raw SQLite UNIQUE violation instead.
         let object_exists: Option<i64> = tx
             .query_row(
                 "SELECT 1 FROM file_objects WHERE object_id = ?1",
@@ -771,11 +776,27 @@ pub fn write_binary_file_in_tx(
         input.object_id.clone()
     };
 
-    // TRACKED FOLLOW-UP (rev2 P1 / "no binary head"): a binary write inserts no
-    // moment, so `next_moment_order` (MAX(moments)+1, ignoring jobs) re-issues
-    // this generation to the next same-path text write. Fixing it needs a real
-    // binary moment (blocked: `moments.after_blob_sha256` FKs the text `blobs`
-    // table) or a `store::next_moment_order` change — both outside this shard.
+    // TRACKED FOLLOW-UP — "binary content head representation" obligation. All
+    // three items below stem from binary content having NO in-db head/snapshot/
+    // moment row, blocked because `moments.after_blob_sha256` is a NOT-NULL FK
+    // to the TEXT `blobs` table. Each needs a binary content head (a schema
+    // change outside this shard's owned paths) and is DORMANT-only (no real
+    // binary data before R15):
+    //   1. GENERATION COLLISION (this line): a binary write inserts no moment,
+    //      so `next_moment_order` (MAX(moments)+1, ignoring jobs) re-issues this
+    //      generation to the next same-path text write, defeating the
+    //      materializer's strict-`>` newest-wins supersede gate. Fixing it needs
+    //      a real binary moment or a `store::next_moment_order` that also counts
+    //      jobs. (See the `#[ignore]`d `binary_generation_is_not_reused_by_next_
+    //      text_write` regression.)
+    //   2. TEXTLESS-ALIAS STALE-HEAD BLINDNESS (conflict_apply.rs live-state
+    //      check): after a binary apply the path has a `path_aliases` entry but
+    //      no `snapshots` row, so a later mirrored resolve whose current side is
+    //      absent-text reads `None`, sees "absent", and can wrongly pass the
+    //      stale-head gate over the binary-occupied path.
+    //   3. SPURIOUS MATERIALIZE-CONFLICT: with no snapshot row, a later same-path
+    //      text write is a fresh `Preimage::Absent` insert, which can surface a
+    //      false materialize-conflict against the invisible binary head.
     let target_generation: i64 = tx
         .query_row(
             "SELECT COALESCE(MAX(generation), 0) + 1 FROM (\
@@ -1341,5 +1362,77 @@ mod tests {
             })
             .expect("conflict count");
         assert_eq!(count, 0);
+    }
+
+    /// Object identity is GLOBALLY unique (`file_objects` declares
+    /// `UNIQUE (object_id)`, matching the canonical engine schema), so a binary
+    /// write reusing an object id already bound in ANOTHER workspace must fail
+    /// CLOSED with the clean `object_id is already bound` domain error — not a
+    /// raw SQLite UNIQUE violation. This documents why the CodeRabbit "scope the
+    /// check to the workspace" suggestion was declined: scoping the pre-check
+    /// would bypass this clean error, and a truly workspace-scoped identity
+    /// would need a migration to drop the `UNIQUE (object_id)` constraint.
+    #[test]
+    fn binary_write_rejects_cross_workspace_object_id_reuse_fail_closed() {
+        let (_scratch, mut store) = open_store();
+        let bytes = b"\x00shared object bytes\xff";
+        let sha = hex_sha256(bytes);
+        let other_ws = "other-workspace";
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
+                     VALUES (?1, 'main')",
+                    [other_ws],
+                )
+                .map_err(DomainError::sql_persist)?;
+                for ws in [WORKSPACE_ID, other_ws] {
+                    tx.execute(
+                        "INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms) \
+                         VALUES (?1, 'main', 'main', 'main', 1)",
+                        [ws],
+                    )
+                    .map_err(DomainError::sql_persist)?;
+                }
+                put_binary_blob(tx, bytes).map_err(DomainError::from)?;
+                write_binary_file_in_tx(
+                    tx,
+                    &WriteBinaryFile {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: "shared-object".to_owned(),
+                        path: "doc.md".to_owned(),
+                        binary_sha256: sha.clone(),
+                        job_id: "job-a".to_owned(),
+                        preimage: Preimage::Absent,
+                        now_ms: 10,
+                    },
+                )?;
+                Ok::<_, DomainError>(())
+            })
+            .expect("first workspace binds the object id");
+
+        let error = store
+            .write_with(&NoFaults, |tx| {
+                write_binary_file_in_tx(
+                    tx,
+                    &WriteBinaryFile {
+                        workspace_id: other_ws.to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: "shared-object".to_owned(),
+                        path: "doc.md".to_owned(),
+                        binary_sha256: sha.clone(),
+                        job_id: "job-b".to_owned(),
+                        preimage: Preimage::Absent,
+                        now_ms: 11,
+                    },
+                )
+            })
+            .expect_err("a globally-bound object id must fail closed");
+        assert_eq!(
+            error.code(),
+            "invalid-input",
+            "cross-workspace reuse must be the clean domain error, got {error:?}"
+        );
     }
 }

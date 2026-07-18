@@ -67,6 +67,10 @@ pub enum PendingResolveReason {
     /// ignored path, over the byte cap, …). The apply was rolled back and the
     /// row deferred so the ack still advances rather than Err-stalling the peer.
     TextApplyRejected,
+    /// A peer `conflict.resolve` matched no local conflict (neither by id nor by
+    /// swapped heads). The envelope is journaled + acked so the cursor advances,
+    /// but the unmatched remote decision is surfaced rather than silently lost.
+    UnmatchedTarget,
 }
 
 pub fn apply_conflict_envelope(
@@ -298,7 +302,6 @@ struct ResolveTarget {
     status: String,
     chosen_from: String,
     resolution: Option<String>,
-    has_binary_side: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -322,11 +325,21 @@ fn apply_resolve(
     }
     let target = resolve_target(tx, &envelope.workspace_id, &payload)?;
     let Some(target) = target else {
+        // No local conflict matched this resolve by id or by swapped heads. The
+        // envelope still journals + acks (idempotency and ordering must hold),
+        // but the unmatched remote decision is surfaced with `localConflictId:
+        // null` + the payload path, mirroring the oracle, so a reconciliation
+        // layer can show it instead of it vanishing silently.
         return Ok(ConflictApplyResult {
-            conflict_id: payload.conflict_id,
+            conflict_id: payload.conflict_id.clone(),
             inserted: None,
             matched: false,
-            pending_resolve: None,
+            pending_resolve: Some(PendingResolve {
+                remote_conflict_id: payload.conflict_id,
+                local_conflict_id: None,
+                path: payload.path,
+                reason: PendingResolveReason::UnmatchedTarget,
+            }),
         });
     };
     let mut choice = parse_choice(&payload.chosen_from)?;
@@ -357,18 +370,14 @@ fn apply_resolve(
             pending_resolve: None,
         });
     }
-    if target.has_binary_side && target.metadata_origin != "sync" {
-        return Ok(ConflictApplyResult {
-            conflict_id: target.conflict_id.clone(),
-            inserted: None,
-            matched: false,
-            pending_resolve: Some(pending_resolve(
-                &payload,
-                &target,
-                PendingResolveReason::BinaryUnhydrated,
-            )),
-        });
-    }
+    // A NON-sync ("verbatim replicated merge") conflict closes its row here and
+    // never applies content in this path — content changes replicate as their
+    // own ordered moment operations. A binary side of such a row is hydrated by
+    // construction (BINCONFLICT's persist gate requires an existing
+    // `binary_blobs` row before the side can be stored), so it must close like
+    // any other verbatim resolve (mirroring the oracle's `else if (local)`
+    // arm), NOT falsely defer `BinaryUnhydrated`. Only the sync-mirror path
+    // below applies recorded content in-transaction.
     if target.metadata_origin == "sync" {
         match apply_mirrored_content(tx, envelope, &target.conflict_id, resolution)? {
             MirroredOutcome::Applied => {}
@@ -429,7 +438,14 @@ fn apply_mirrored_content(
         .ok_or(SyncError::InvalidInput {
             reason: "replicated conflict target disappeared",
         })?;
-    if resolution == ConflictResolution::AppliedIncoming && conflict.incoming.path != conflict.path
+    // Divergent-move refusal, mirroring the oracle: it refuses a divergent path
+    // ONLY for an EXISTING incoming side (`incoming.exists && incoming.path !=
+    // conflict.path`). An ABSENT incoming (a delete) has no meaningful path to
+    // diverge, so it must fall through to the delete rather than defer
+    // `PathChange`; the delete still passes the live/stale-head gate below.
+    if resolution == ConflictResolution::AppliedIncoming
+        && incoming_side_exists(&conflict.incoming)
+        && conflict.incoming.path != conflict.path
     {
         return Ok(MirroredOutcome::Deferred(PendingResolveReason::PathChange));
     }
@@ -505,12 +521,21 @@ fn apply_mirrored_binary_write(
             PendingResolveReason::BinaryUnhydrated,
         ));
     };
-    // Presence-only probe (bare `SELECT 1`). The bytes are consumed and
-    // integrity-checked when the materializer drains the staged job, so loading
-    // + re-hashing the whole blob here just to test presence reads it twice.
-    match dohc_engine_storage::has_binary_blob(tx, sha256) {
-        Ok(true) => {}
-        Ok(false) => {
+    // Verify integrity BEFORE closing the conflict, mirroring `is_apply_rejection`
+    // for the text path. A presence-only probe would let a PRESENT-but-CORRUPT
+    // blob close the row and enqueue a doomed materialization job over an
+    // already-advanced ack. `get_binary_blob` re-hashes and length-checks the
+    // bytes, so the taxonomy is exact:
+    //   - genuinely ABSENT (`Ok(None)`) → DEFER `BinaryUnhydrated` (ack advances);
+    //   - PRESENT-but-CORRUPT (`Err(BlobIntegrity)`) or any storage/read error →
+    //     propagate as `Err` so the envelope rolls back and retries, never
+    //     silently deferred+acked over a genuine fault.
+    // This is the sole in-transaction byte load (the write helper's own check is
+    // a cheap `SELECT 1` presence probe, no byte read), so integrity is restored
+    // without a second full-blob read here.
+    match dohc_engine_storage::get_binary_blob(tx, sha256) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
             return Ok(MirroredOutcome::Deferred(
                 PendingResolveReason::BinaryUnhydrated,
             ));
@@ -694,9 +719,7 @@ fn resolve_target(
     };
     let _ = payload.path.as_deref();
     tx.query_row(
-        "SELECT conflict_id, path, metadata_origin, status, chosen_from, resolution, \
-         (base_content_kind = 'binary' OR current_content_kind = 'binary' OR \
-          incoming_content_kind = 'binary') \
+        "SELECT conflict_id, path, metadata_origin, status, chosen_from, resolution \
          FROM conflicts WHERE workspace_id = ?1 AND status = 'open' \
            AND target_version_id = ?2 AND current_latest_moment_id IS ?3 \
            AND incoming_latest_moment_id IS ?4 \
@@ -714,9 +737,7 @@ fn query_target_by_id(
     conflict_id: &str,
 ) -> Result<Option<ResolveTarget>, SyncError> {
     tx.query_row(
-        "SELECT conflict_id, path, metadata_origin, status, chosen_from, resolution, \
-         (base_content_kind = 'binary' OR current_content_kind = 'binary' OR \
-          incoming_content_kind = 'binary') \
+        "SELECT conflict_id, path, metadata_origin, status, chosen_from, resolution \
          FROM conflicts WHERE workspace_id = ?1 AND conflict_id = ?2",
         params![workspace_id, conflict_id],
         map_resolve_target,
@@ -733,7 +754,6 @@ fn map_resolve_target(row: &rusqlite::Row<'_>) -> rusqlite::Result<ResolveTarget
         status: row.get(3)?,
         chosen_from: row.get(4)?,
         resolution: row.get(5)?,
-        has_binary_side: row.get(6)?,
     })
 }
 
@@ -1945,5 +1965,308 @@ mod tests {
             binary_gen, next_moment_order,
             "generation collision: binary job gen must not equal the next moment order"
         );
+    }
+
+    /// Fix 1 (integrity-at-resolve). A PRESENT-but-CORRUPT incoming binary blob
+    /// must PROPAGATE as `Err` (rolling back the envelope) rather than closing
+    /// the conflict + enqueuing a doomed materialization job over an advanced
+    /// ack. Only genuinely ABSENT bytes may defer.
+    #[test]
+    fn mirrored_corrupt_binary_side_resolve_errs_and_does_not_close() {
+        let (_scratch, mut store) = store();
+        let binary_bytes = b"\x00resolved binary\xff";
+        let binary_sha = dohc_engine_storage::hex_sha256(binary_bytes);
+        seed_current(&mut store, "receiver current");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                0,
+                "conflict.open",
+                mirrored_open_payload("binary-corrupt", "receiver current", "origin current"),
+            ),
+            &NoFaults,
+        )
+        .expect("open text conflict");
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::conflicts::hydrate_binary_conflict_blob(
+                    tx,
+                    &binary_sha,
+                    binary_bytes,
+                )
+                .map_err(map_domain)?;
+                tx.execute(
+                    "UPDATE conflicts SET incoming_content_kind = 'binary', \
+                     incoming_blob_sha256 = NULL, incoming_binary_sha256 = ?1 \
+                     WHERE workspace_id = 'ws' AND conflict_id = 'binary-corrupt'",
+                    [&binary_sha],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("hydrate and mark binary side");
+        // Bit-rot the canonical blob row out-of-band: the stored bytes no longer
+        // hash to their key, so the integrity-verifying read must fail closed.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE binary_blobs SET bytes = ?2 WHERE sha256 = ?1",
+                    rusqlite::params![binary_sha, b"rot".as_slice()],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("corrupt the canonical blob row");
+        let before_moments = moment_count(&store);
+
+        let error = apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                1,
+                "conflict.resolve",
+                json!({
+                    "conflictId": "binary-corrupt",
+                    "status": "resolved",
+                    "chosenFrom": "current",
+                    "resolution": "kept-current",
+                    "updatedAtMs": 3_000,
+                    "targetVersionId": "main"
+                }),
+            ),
+            &NoFaults,
+        )
+        .expect_err("a corrupt binary blob must fail closed, not close the conflict");
+        assert!(
+            matches!(
+                error,
+                SyncError::Storage(dohc_engine_storage::StorageError::BlobIntegrity { .. })
+            ),
+            "corruption must surface as a storage integrity error, got {error:?}"
+        );
+        // The envelope rolled back: nothing applied, logged, acked, or staged.
+        assert_eq!(moment_count(&store), before_moments);
+        assert_eq!(materialization_job_count(&store), 0);
+        assert_open_conflict(&store, "binary-corrupt");
+        assert_eq!(
+            replication_counts(&store),
+            (1, 1, 1),
+            "the failed resolve must not journal or ack over a storage fault"
+        );
+    }
+
+    /// Fix 2 (delete-before-path-change). An ABSENT incoming side (a delete)
+    /// whose recorded side path DIVERGES from the conflict path must DELETE the
+    /// current file, not defer `PathChange`. The oracle refuses divergent paths
+    /// only for an EXISTING incoming side.
+    #[test]
+    fn incoming_delete_with_divergent_path_deletes_not_defers() {
+        let (_scratch, mut store) = store();
+        seed_current(&mut store, "receiver current");
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                0,
+                "conflict.open",
+                mirrored_open_payload("divergent-delete", "receiver current", "origin current"),
+            ),
+            &NoFaults,
+        )
+        .expect("open text conflict");
+        // Mark the incoming side as an ABSENT binary at a DIVERGENT recorded path.
+        store
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "UPDATE conflicts SET incoming_exists = 0, incoming_path = 'renamed.md', \
+                     incoming_content_kind = 'binary', incoming_blob_sha256 = NULL, \
+                     incoming_binary_sha256 = NULL \
+                     WHERE workspace_id = 'ws' AND conflict_id = 'divergent-delete'",
+                    [],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("mark incoming as divergent-path delete");
+
+        let outcome = apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                1,
+                "conflict.resolve",
+                json!({
+                    "conflictId": "divergent-delete",
+                    "status": "resolved",
+                    "chosenFrom": "current",
+                    "resolution": "kept-current",
+                    "updatedAtMs": 3_000,
+                    "targetVersionId": "main"
+                }),
+            ),
+            &NoFaults,
+        )
+        .expect("resolve applies");
+        assert!(
+            matches!(
+                outcome,
+                ApplyOutcome::Applied(ConflictApplyResult {
+                    matched: true,
+                    pending_resolve: None,
+                    ..
+                })
+            ),
+            "the divergent-path delete resolves, not defers PathChange: {outcome:?}"
+        );
+        assert_resolved_conflict(&store, "divergent-delete");
+        assert_replication_advanced(&store, "peer", 1, 2);
+        assert_eq!(
+            VersionedTextStore::new(&mut store)
+                .read_text("ws", "main", "doc.md")
+                .expect("read"),
+            None,
+            "the current file must be deleted, not left in place"
+        );
+    }
+
+    /// Fix 3 (non-sync hydrated binary). A NON-sync ("verbatim replicated
+    /// merge") conflict carrying a hydrated binary side must CLOSE its row like
+    /// any other verbatim resolve — content replicates via its own moments — and
+    /// must NOT falsely defer `BinaryUnhydrated`.
+    #[test]
+    fn non_sync_hydrated_binary_conflict_resolve_closes_the_row() {
+        let (_scratch, mut store) = store();
+        let binary_bytes = b"\x00verbatim binary\xff";
+        let binary_sha = dohc_engine_storage::hex_sha256(binary_bytes);
+        apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                0,
+                "conflict.open",
+                open_payload("nonsync-bin", "merge", false),
+            ),
+            &NoFaults,
+        )
+        .expect("open non-sync text conflict");
+        // Hydrate a binary side and mark it on the (non-sync) row.
+        store
+            .write_with(&NoFaults, |tx| {
+                dohc_engine_domain::conflicts::hydrate_binary_conflict_blob(
+                    tx,
+                    &binary_sha,
+                    binary_bytes,
+                )
+                .map_err(map_domain)?;
+                tx.execute(
+                    "UPDATE conflicts SET incoming_exists = 1, \
+                     incoming_content_kind = 'binary', incoming_object_id = 'incoming-object', \
+                     incoming_blob_sha256 = NULL, incoming_binary_sha256 = ?1 \
+                     WHERE workspace_id = 'ws' AND conflict_id = 'nonsync-bin'",
+                    [&binary_sha],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("hydrate and mark non-sync binary side");
+
+        let outcome = apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                1,
+                "conflict.resolve",
+                json!({
+                    "conflictId": "nonsync-bin",
+                    "status": "resolved",
+                    "chosenFrom": "current",
+                    "resolution": "kept-current",
+                    "updatedAtMs": 3_000
+                }),
+            ),
+            &NoFaults,
+        )
+        .expect("non-sync binary resolve closes the row");
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Applied(ConflictApplyResult {
+                conflict_id: "nonsync-bin".to_owned(),
+                inserted: None,
+                matched: true,
+                pending_resolve: None,
+            }),
+            "a hydrated non-sync binary conflict must close, not defer BinaryUnhydrated"
+        );
+        store
+            .read_with(|conn| {
+                let (status, resolution): (String, Option<String>) = conn.query_row(
+                    "SELECT status, resolution FROM conflicts \
+                     WHERE workspace_id = 'ws' AND conflict_id = 'nonsync-bin'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                assert_eq!(status, "resolved");
+                assert_eq!(resolution.as_deref(), Some("kept-current"));
+                Ok::<_, rusqlite::Error>(())
+            })
+            .expect("closed non-sync binary conflict");
+    }
+
+    /// Fix 4 (unmatched target). A peer `conflict.resolve` that matches NO local
+    /// conflict must journal + ack (the cursor advances) but be SURFACED as a
+    /// `PendingResolve` with `local_conflict_id: None` and the payload path,
+    /// never silently dropped.
+    #[test]
+    fn unmatched_conflict_resolve_is_surfaced_and_acked() {
+        let (_scratch, mut store) = store();
+        let outcome = apply_conflict_envelope(
+            &mut store,
+            &envelope(
+                "peer",
+                0,
+                "conflict.resolve",
+                json!({
+                    "conflictId": "ghost",
+                    "status": "resolved",
+                    "chosenFrom": "current",
+                    "resolution": "kept-current",
+                    "updatedAtMs": 3_000,
+                    "path": "ghost.md"
+                }),
+            ),
+            &NoFaults,
+        )
+        .expect("unmatched resolve is acknowledged and surfaced");
+        assert_eq!(
+            outcome,
+            ApplyOutcome::Applied(ConflictApplyResult {
+                conflict_id: "ghost".to_owned(),
+                inserted: None,
+                matched: false,
+                pending_resolve: Some(PendingResolve {
+                    remote_conflict_id: "ghost".to_owned(),
+                    local_conflict_id: None,
+                    path: Some("ghost.md".to_owned()),
+                    reason: PendingResolveReason::UnmatchedTarget,
+                }),
+            })
+        );
+        // No conflict row exists, but the peer cursor still advanced.
+        store
+            .read_with(|conn| {
+                let acked_seq: i64 = conn.query_row(
+                    "SELECT acked_seq FROM replication_peers \
+                     WHERE workspace_id = 'ws' AND origin_id = 'peer'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(acked_seq, 0);
+                let conflicts: i64 =
+                    conn.query_row("SELECT COUNT(*) FROM conflicts", [], |row| row.get(0))?;
+                assert_eq!(conflicts, 0);
+                Ok::<_, rusqlite::Error>(())
+            })
+            .expect("cursor advanced without a conflict row");
     }
 }
