@@ -1261,3 +1261,51 @@ source of truth every orchestrator session loads first).
   resume-precondition re-verification, live-db reset-identity proof,
   alias-escape fences, prove-zero-handles, Unix durability fsync ordering),
   then GATE6, then R15 (ICE checkpoint).
+
+## 2026-07-18 — R15-REHEARSE merged (#186) · both cutover-gating shards done
+
+- R15-REHEARSE #186 MERGED (squash; no migration). The cutover state machine,
+  rehearsed SHADOW-ONLY against clone-marked fixture roots (never real data):
+  not-started → settled → backed-up → moved-aside → initialized → capturing →
+  complete (+ durable terminal failed), resumable from a temp-then-rename
+  marker. Proves the fences the real R15 cutover reuses: rehearsal fence
+  (SHADOW_CLONE marker AND a rehearsal token; validate_rehearsal_root the sole
+  entry), prove-zero-handles move-aside (Windows exclusive no-share handles /
+  POSIX flock through copy+verify on the engine.db/-wal/-shm triplet),
+  restore-tested backup (VACUUM INTO + integrity_check + row-count + read-back
+  hash-compare, into a recovery dir OUTSIDE the clone), rollback-proof swap
+  (post-move verify errors route through fail_swap → live triplet restored),
+  pre-reset HashPool inventory compared at capture, reset-identity proof, and a
+  bounded per-root lock. The real signed --cutover tier is stubbed (R15/ICE).
+- Cell: 2 independent adversarial fable reviewers (each reproduced its P1 with
+  probe tests) + 8 CodeRabbit/Codex rounds — every finding real, converging on
+  rarer edges each round. Highlights caught before merge:
+  - CRITICAL — `read_dir` followed a symlinked moved-aside dir → the live
+    triplet could be moved OUTSIDE the clone root. Fixed by a systematic
+    alias-audit: shared require_real_file / require_real_dir gates + SQLITE_OPEN
+    _NOFOLLOW on every read-only DB open, routed through EVERY fs touch (files,
+    dirs, sidecars, manifests, state records, lock, inventory, backup-DB
+    sidecars).
+  - P1s — resume never re-verified the backup (BackupFingerprint recorded +
+    re-checked before the destructive move); live engine.db shadow_clone binding
+    never verified before move-aside (a real workspace with both markers dropped
+    in would get its triplet moved) → verify_live_clone_binding; reused/stale
+    same-clone DB passing resume → reset-identity uuid read from the BACKUP DB
+    bytes (not the editable manifest); WAL/SHM in the directory backup / beside
+    the backup DB → excluded/gated.
+  - Durability — Unix fsync ordering (moved-triplet parents, staging tree,
+    recovery dir, rollback dir, state dir) so a marker can't outlive the data;
+    retryable-vs-terminal split so a transient backup-read failure stays
+    recoverable. 71 lib tests; run-rust-checks PASS.
+  - MSRV: reverted std File::try_lock (1.89) to fs4 (workspace MSRV 1.85).
+- Documented non-blocking real-`--cutover` follow-ups (in-source): residual
+  path-based check-then-use TOCTOU (fd-atomicity), Windows owner-only DACL,
+  Windows hard-link detection, SQLite writer-quiescence gate, empty-manifest
+  minimal-clone relaxation, new-unbacked-engine-file mid-run, and 3 crash-window
+  resumability edges — all fail-closed, out of the shadow-rehearsal threat
+  model, and re-reviewed by R15 proper with a human checkpoint.
+- Cutover-gating COMPLETE: YRS-ABORT-SAFETY ✓ (#185) + R15-REHEARSE ✓ (#186).
+  Remaining path to cutover: GATE6 (deps R14 ✓, R10b ✓, R15-REHEARSE ✓ — now
+  unblocked), then R15 (ICE checkpoint: cutover scope + dogfood reset +
+  member-share-reset semantics). Non-R15-blocking, still open:
+  R10-CONFLICT-COMPLETE, BINCONFLICT, R13b-rest, tracked obligations.
