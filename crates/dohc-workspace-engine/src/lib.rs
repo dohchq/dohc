@@ -18,8 +18,8 @@ use dohc_engine_protocol::{
     wire::{Request, Response, WorkspaceHandle},
 };
 use dohc_engine_runtime::{
-    ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, NoFaults, RuntimeError,
-    SearchError, SearchSurface, WorkspaceSupervisor,
+    ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, LifecycleState, NoFaults,
+    RuntimeError, SearchError, SearchSurface, WorkspaceSupervisor,
 };
 use dohc_engine_sync::{ReplicationEnvelope, SyncError};
 use serde::Deserialize;
@@ -131,17 +131,26 @@ impl EngineService {
             shadow_fence::validate_shadow_root(PathBuf::from(&params.root_dir).as_path())
                 .map_err(map_shadow_fence)?;
         let root = validated.root;
-        if let Some((handle, open)) = lock(&self.handles)
-            .iter()
-            .find(|(_, open)| open.root == root)
-        {
-            if open.workspace_id == params.workspace_id {
-                return Ok(json!({ "workspace": handle }));
+        let existing = {
+            let guard = lock(&self.handles);
+            guard
+                .iter()
+                .find(|(_, open)| open.root == root)
+                .map(|(handle, open)| (handle.clone(), open.clone()))
+        };
+        if let Some((handle, open)) = existing {
+            // Only short-circuit on a LIVE binding; a bound-but-closed actor (its
+            // worker died) is stale — drop it and fall through to reopen.
+            if open.actor.lifecycle() != LifecycleState::Closed {
+                if open.workspace_id == params.workspace_id {
+                    return Ok(json!({ "workspace": handle }));
+                }
+                return Err(wire(
+                    ErrorCode::InvalidParams,
+                    "workspace root is already bound to another workspace",
+                ));
             }
-            return Err(wire(
-                ErrorCode::InvalidParams,
-                "workspace root is already bound to another workspace",
-            ));
+            lock(&self.handles).remove(&handle);
         }
         if lock(&self.handles).len() >= MAX_OPEN_HANDLES {
             return Err(wire(
@@ -198,10 +207,21 @@ impl EngineService {
         // the detached finish stays cancellation-safe.
         let closing = {
             let _serial = self.open_lock.lock().await;
-            let open = lock(&self.handles)
-                .remove(&handle)
-                .ok_or_else(workspace_unavailable)?;
-            supervisor.begin_close(&open.db_path).map_err(map_runtime)?
+            let db_path = {
+                let guard = lock(&self.handles);
+                guard
+                    .get(&handle)
+                    .ok_or_else(workspace_unavailable)?
+                    .db_path
+                    .clone()
+            };
+            // Install the GLOBAL Closing marker BEFORE removing the handle, so a
+            // workspace_open on another EngineService (which does not take this
+            // service's open_lock) observes Closing at supervisor.open and waits
+            // for a fresh actor instead of the one being torn down.
+            let closing = supervisor.begin_close(&db_path).map_err(map_runtime)?;
+            lock(&self.handles).remove(&handle);
+            closing
         };
         let closed = closing.is_some();
         let close_task = tokio::task::spawn_blocking(move || match closing {
