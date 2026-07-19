@@ -8,8 +8,9 @@ mod common;
 
 use common::Scratch;
 use dohc_engine_files::{
-    CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesActor, FilesHandle, IngestReason,
-    LifecycleState, ReconcileRun, ScanBounds, ScanOutcome, apply_reconcile_plan,
+    CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesActor, FilesHandle,
+    IngestOutcome, IngestReason, LifecycleState, ReconcileRun, ScanBounds, ScanOutcome,
+    apply_reconcile_plan,
 };
 use dohc_engine_storage::NoFaults;
 use std::time::Duration;
@@ -24,8 +25,8 @@ impl CaptureSink for AcceptAll {
         _sha256: &str,
         _media_type: &str,
         _reason: IngestReason,
-    ) -> Result<(), CaptureError> {
-        Ok(())
+    ) -> Result<IngestOutcome, CaptureError> {
+        Ok(IngestOutcome::Captured)
     }
 
     fn retire(&mut self, _path: &str) -> Result<(), CaptureError> {

@@ -9,7 +9,7 @@ mod common;
 use common::Scratch;
 use dohc_engine_files::{
     AbsenceProbe, CancellationToken, CaptureError, CaptureOp, CaptureSink, DEGRADED_RESCAN_BACKOFF,
-    IngestReason, ManifestEntry, ReconcileController, ReconcileRun, ScanBounds,
+    IngestOutcome, IngestReason, ManifestEntry, ReconcileController, ReconcileRun, ScanBounds,
     ScanIoFaultInjector, ScanIoOperation, ScanManifest, Scanner, StubWatchSource, WatchEvent,
     apply_then_ack,
 };
@@ -35,8 +35,8 @@ impl CaptureSink for AcceptAll {
         _sha256: &str,
         _media_type: &str,
         _reason: IngestReason,
-    ) -> Result<(), CaptureError> {
-        Ok(())
+    ) -> Result<IngestOutcome, CaptureError> {
+        Ok(IngestOutcome::Captured)
     }
 
     fn retire(&mut self, _path: &str) -> Result<(), CaptureError> {

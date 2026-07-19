@@ -1,11 +1,18 @@
 //! Dormant files-reconcile adapter for the actor-owned capture primitives.
 
-use dohc_engine_files::{CaptureError, CaptureSink, IngestReason, MAX_CAPTURE_TEXT_BYTES};
-use dohc_engine_runtime::search::{PathFloor, classify_engine_file_path};
+use dohc_engine_files::media::is_text_media_type;
+use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
+use dohc_engine_files::{
+    CaptureError, CaptureSink, IngestOutcome, IngestReason, MAX_CAPTURE_BINARY_BYTES,
+    MAX_CAPTURE_TEXT_BYTES,
+};
+use dohc_engine_runtime::search::{
+    FilesPolicyRule, read_engine_search_policy, resolve_effective_policy,
+};
 use dohc_engine_runtime::{ActorHandle, CaptureIngest, CaptureRetire, NoFaults};
-use std::fs::File;
-use std::io::Read;
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::io::{ErrorKind, Read};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const CAPTURE_METADATA_ORIGIN: &str = "capture";
@@ -18,12 +25,28 @@ const INGEST_FAILED: CaptureError = CaptureError {
 const RETIRE_FAILED: CaptureError = CaptureError {
     reason: "capture retire failed",
 };
+const ESCAPES_ROOT: CaptureError = CaptureError {
+    reason: "capture path did not resolve inside the workspace root",
+};
+/// Deferral, not success: the op must NOT be acknowledged (the manifest would
+/// record secret content as captured and never retry it), and not `NotOwned`
+/// either (the path IS engine-owned — by the encrypted store). The contained
+/// failure keeps it dirty for the secret-capture sub-shard, bounded by the
+/// controller's degraded-retry quarantine.
+const SECRET_DEFERRED: CaptureError = CaptureError {
+    reason: "secret capture deferred to the secret-capture sub-shard",
+};
+/// Same deferral posture for engine-ownable binary content.
+const BINARY_DEFERRED: CaptureError = CaptureError {
+    reason: "binary capture deferred to the binary-capture sub-shard",
+};
 
 /// Bridges a files-crate reconcile plan to the actor's domain capture writes.
 ///
 /// The adapter is intentionally not wired into workspace open/close yet. Its
 /// caller supplies the active version and capture-time provenance for one
-/// reconcile run.
+/// reconcile run; `.dohc/files.toml` is read once at construction, matching
+/// the one-policy-snapshot-per-task rule in the TS capture path.
 pub struct StoreCaptureSink {
     actor: ActorHandle,
     workspace_id: String,
@@ -31,6 +54,7 @@ pub struct StoreCaptureSink {
     shadow_root: PathBuf,
     now_ms: i64,
     author_json: Option<String>,
+    files_policy: Option<Vec<FilesPolicyRule>>,
 }
 
 impl StoreCaptureSink {
@@ -42,40 +66,97 @@ impl StoreCaptureSink {
         now_ms: i64,
         author_json: Option<String>,
     ) -> Self {
+        let shadow_root = shadow_root.into();
+        // `.dohc/files.toml` can only NARROW engine ownership below the hard
+        // floor. A broken policy file keeps capture FLOOR-ONLY (the WS-F rule:
+        // writes are never dropped for a malformed policy — search is where a
+        // broken policy fails closed), which is exactly the `None` this
+        // returns for a missing OR broken file.
+        let files_policy = read_engine_search_policy(&shadow_root).files_policy;
         StoreCaptureSink {
             actor,
             workspace_id: workspace_id.into(),
             version_id: version_id.into(),
-            shadow_root: shadow_root.into(),
+            shadow_root,
             now_ms,
             author_json,
+            files_policy,
         }
     }
 
-    fn read_current_text(&self, path: &str) -> Result<CurrentContent, CaptureError> {
+    fn policy_tracks(&self, path: &str) -> bool {
+        match &self.files_policy {
+            None => true,
+            Some(rules) => resolve_effective_policy(path, Some(rules.as_slice()), None).tracked,
+        }
+    }
+
+    /// Re-read the CURRENT disk state for a planned ingest, mirroring the TS
+    /// oracle's `readDiskTextState`: lstat-refuse symlink leaves, route by
+    /// media type BEFORE UTF-8 sniffing, and apply the text/binary caps. The
+    /// reopen itself must not follow symlinks (a swap between the lstat and
+    /// the open would otherwise read outside the workspace), and a symlinked
+    /// ancestor directory must not carry the read off-root.
+    fn read_current(&self, path: &str, media_type: &str) -> Result<CurrentContent, CaptureError> {
         let absolute = self.shadow_root.join(path);
-        let metadata = std::fs::symlink_metadata(&absolute).map_err(|_| READ_FAILED)?;
+        match contained_parent(&self.shadow_root, &absolute) {
+            Containment::Contained => {}
+            Containment::Absent => return Ok(CurrentContent::Untracked),
+            Containment::Escaped => return Err(ESCAPES_ROOT),
+        }
+        // Advisory lstat mirror of the TS refusal (symlink leaf and non-file
+        // entries are not engine-ownable); the no-follow open below is what
+        // actually closes the check-then-open race.
+        match std::fs::symlink_metadata(&absolute) {
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return Ok(CurrentContent::Untracked);
+            }
+            Ok(_) => {}
+            Err(err) if absent_error(&err) => return Ok(CurrentContent::Untracked),
+            Err(_) => return Err(READ_FAILED),
+        }
+        let file = match open_no_follow(&absolute) {
+            NoFollowOpen::Opened(file) => file,
+            NoFollowOpen::Refused | NoFollowOpen::Absent => return Ok(CurrentContent::Untracked),
+            NoFollowOpen::Failed => return Err(READ_FAILED),
+        };
+        let metadata = file.metadata().map_err(|_| READ_FAILED)?;
         if !metadata.file_type().is_file() {
             return Ok(CurrentContent::Untracked);
         }
-        if metadata.len() > MAX_CAPTURE_TEXT_BYTES {
+        if metadata.len() > MAX_CAPTURE_BINARY_BYTES {
             return Ok(CurrentContent::Untracked);
         }
-
-        let file = File::open(&absolute).map_err(|_| READ_FAILED)?;
+        if !is_text_media_type(media_type, path) {
+            // Non-text media is engine-ownable BINARY content: the TS oracle
+            // routes it to the binary store before any UTF-8 sniffing, so a
+            // UTF-8-clean `.png` must never land in the plaintext store.
+            return Ok(CurrentContent::Binary);
+        }
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        file.take(MAX_CAPTURE_TEXT_BYTES.saturating_add(1))
+        file.take(MAX_CAPTURE_BINARY_BYTES.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|_| READ_FAILED)?;
-        if bytes.len() as u64 > MAX_CAPTURE_TEXT_BYTES {
+        if bytes.len() as u64 > MAX_CAPTURE_BINARY_BYTES {
             return Ok(CurrentContent::Untracked);
         }
         match String::from_utf8(bytes) {
+            Ok(text) if text.len() as u64 > MAX_CAPTURE_TEXT_BYTES => {
+                // Genuine text over the text cap stays untracked (established
+                // TS behavior), even though binary of the same size would be
+                // ownable.
+                Ok(CurrentContent::Untracked)
+            }
             Ok(text) => Ok(CurrentContent::Text(text)),
+            // A text-suffixed path can be binary in disguise (invalid UTF-8);
+            // the store accepts that as binary up to the binary cap.
             Err(_) => Ok(CurrentContent::Binary),
         }
     }
 
+    // The blocking actor calls below carry no timeout; this adapter is dormant
+    // and not on any request path. The composition driver (sub-shard C) owns
+    // stall handling when it wires this sink into workspace open/close.
     fn ingest_text(&self, path: &str, text: String) -> Result<(), CaptureError> {
         self.actor
             .capture_ingest_blocking(
@@ -95,46 +176,7 @@ impl StoreCaptureSink {
             .map_err(|_| INGEST_FAILED)
     }
 
-    fn record_deferred(marker: &str, path: &str) {
-        eprintln!("[{marker}] path={path:?}");
-    }
-}
-
-impl CaptureSink for StoreCaptureSink {
-    fn ingest(
-        &mut self,
-        path: &str,
-        _size: u64,
-        _sha256: &str,
-        _media_type: &str,
-        _reason: IngestReason,
-    ) -> Result<(), CaptureError> {
-        // Plan hashes and sizes describe the scan observation only. Re-read the
-        // path so settled rapid writes coalesce to the latest disk state.
-        match classify_engine_file_path(path) {
-            PathFloor::Ignored => return Ok(()),
-            PathFloor::Secret => {
-                // TODO(files-daemon-secret-capture): route through the encrypted
-                // secret store in the dedicated secret-capture sub-shard.
-                Self::record_deferred("DEFERRED_CAPTURE_SECRET", path);
-                return Ok(());
-            }
-            PathFloor::Tracked => {}
-        }
-
-        match self.read_current_text(path)? {
-            CurrentContent::Text(text) => self.ingest_text(path, text),
-            CurrentContent::Untracked => self.retire(path),
-            CurrentContent::Binary => {
-                // TODO(files-daemon-binary-capture): route through the binary
-                // domain primitive in the dedicated binary-capture sub-shard.
-                Self::record_deferred("DEFERRED_CAPTURE_BINARY", path);
-                Ok(())
-            }
-        }
-    }
-
-    fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
+    fn retire_head(&self, path: &str) -> Result<(), CaptureError> {
         self.actor
             .capture_retire_blocking(
                 CaptureRetire {
@@ -151,10 +193,158 @@ impl CaptureSink for StoreCaptureSink {
     }
 }
 
+impl CaptureSink for StoreCaptureSink {
+    fn ingest(
+        &mut self,
+        path: &str,
+        _size: u64,
+        _sha256: &str,
+        media_type: &str,
+        _reason: IngestReason,
+    ) -> Result<IngestOutcome, CaptureError> {
+        // Plan hashes and sizes describe the scan observation only. Re-read the
+        // path so settled rapid writes coalesce to the latest disk state.
+        let normalized = match classify_engine_file_path_normalized(path) {
+            (PathClassification::Ignored, _) => return Ok(IngestOutcome::NotOwned),
+            (PathClassification::Secret, _) => return Err(SECRET_DEFERRED),
+            (PathClassification::Tracked, normalized) => normalized.ok_or(INGEST_FAILED)?,
+        };
+        // The domain stores under the CANONICAL relative path. A scanned disk
+        // name that normalizes to a DIFFERENT key (e.g. a literal `a%2fb.md`
+        // decoding to `a/b.md`) would persist content for a path that does not
+        // exist on disk and could clobber the real file at that key. Refuse to
+        // capture it — and never retire through it, the canonical key may
+        // belong to another live file.
+        if normalized != path {
+            return Ok(IngestOutcome::NotOwned);
+        }
+        if !self.policy_tracks(path) {
+            // `.dohc/files.toml` narrowed the path out of engine ownership:
+            // retire any stale head (TS: "Stopped tracking by policy") so
+            // opted-out content is never left stale-but-authoritative.
+            self.retire_head(path)?;
+            return Ok(IngestOutcome::NotOwned);
+        }
+        match self.read_current(path, media_type)? {
+            CurrentContent::Text(text) => {
+                self.ingest_text(path, text)?;
+                Ok(IngestOutcome::Captured)
+            }
+            CurrentContent::Untracked => {
+                // The path stopped being engine-ownable text (absent, symlink,
+                // non-file, or over cap): retire so no stale snapshot remains,
+                // and report NotOwned so the manifest forgets the path instead
+                // of recording the planned ingest as captured.
+                self.retire_head(path)?;
+                Ok(IngestOutcome::NotOwned)
+            }
+            CurrentContent::Binary => {
+                // A path that WAS text and became binary must not keep the old
+                // text authoritative while binary capture is deferred.
+                self.retire_head(path)?;
+                Err(BINARY_DEFERRED)
+            }
+        }
+    }
+
+    fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
+        match classify_engine_file_path_normalized(path) {
+            (PathClassification::Ignored, _) => Ok(()),
+            (PathClassification::Secret, _) => Err(SECRET_DEFERRED),
+            (PathClassification::Tracked, Some(normalized)) if normalized == path => {
+                self.retire_head(path)
+            }
+            // Nothing was ever stored under a non-canonical literal name.
+            (PathClassification::Tracked, _) => Ok(()),
+        }
+    }
+}
+
 enum CurrentContent {
     Text(String),
+    /// Present, engine-ownable binary bytes (capture deferred to B-binary).
     Binary,
+    /// Absent, or present but not engine-ownable at this path.
     Untracked,
+}
+
+fn absent_error(err: &std::io::Error) -> bool {
+    matches!(err.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
+}
+
+enum Containment {
+    Contained,
+    Absent,
+    Escaped,
+}
+
+/// A symlinked ancestor directory must never carry a capture read outside the
+/// workspace root: the resolved parent has to stay under the resolved root.
+/// Unresolvable-for-any-other-reason fails CLOSED as an escape.
+fn contained_parent(root: &Path, absolute: &Path) -> Containment {
+    let Some(parent) = absolute.parent() else {
+        return Containment::Escaped;
+    };
+    let real_parent = match parent.canonicalize() {
+        Ok(real) => real,
+        Err(err) if absent_error(&err) => return Containment::Absent,
+        Err(_) => return Containment::Escaped,
+    };
+    let Ok(real_root) = root.canonicalize() else {
+        return Containment::Escaped;
+    };
+    if real_parent.starts_with(&real_root) {
+        Containment::Contained
+    } else {
+        Containment::Escaped
+    }
+}
+
+enum NoFollowOpen {
+    Opened(File),
+    /// The leaf is a symlink/reparse point; not engine-ownable.
+    Refused,
+    Absent,
+    Failed,
+}
+
+#[cfg(windows)]
+fn open_no_follow(absolute: &Path) -> NoFollowOpen {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    // Open the reparse point itself (never its target), then refuse anything
+    // reparse-tagged — symlinks, junctions, and other redirectors alike.
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    match OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(absolute)
+    {
+        Ok(file) => match file.metadata() {
+            Ok(metadata) if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
+                NoFollowOpen::Refused
+            }
+            Ok(_) => NoFollowOpen::Opened(file),
+            Err(_) => NoFollowOpen::Failed,
+        },
+        Err(err) if absent_error(&err) => NoFollowOpen::Absent,
+        Err(_) => NoFollowOpen::Failed,
+    }
+}
+
+#[cfg(unix)]
+fn open_no_follow(absolute: &Path) -> NoFollowOpen {
+    use std::os::unix::fs::OpenOptionsExt;
+    match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(absolute)
+    {
+        Ok(file) => NoFollowOpen::Opened(file),
+        Err(err) if err.raw_os_error() == Some(libc::ELOOP) => NoFollowOpen::Refused,
+        Err(err) if absent_error(&err) => NoFollowOpen::Absent,
+        Err(_) => NoFollowOpen::Failed,
+    }
 }
 
 #[cfg(test)]
@@ -165,7 +355,6 @@ mod tests {
     use dohc_engine_runtime::WorkspaceSupervisor;
     use dohc_engine_storage::{EngineStore, NoFaults as FilesNoFaults};
     use dohc_engine_testkit::ScratchDir;
-    use std::path::Path;
 
     const WORKSPACE_ID: &str = "ws-capture-sink";
     const VERSION_ID: &str = "main";
@@ -190,14 +379,16 @@ mod tests {
         std::fs::write(absolute, bytes).expect("write fixture");
     }
 
-    fn ingest(sink: &mut StoreCaptureSink, path: &str) -> Result<(), CaptureError> {
-        sink.ingest(
-            path,
-            0,
-            "advisory-sha",
-            "text/markdown",
-            IngestReason::Changed,
-        )
+    fn ingest(sink: &mut StoreCaptureSink, path: &str) -> Result<IngestOutcome, CaptureError> {
+        ingest_as(sink, path, "text/markdown")
+    }
+
+    fn ingest_as(
+        sink: &mut StoreCaptureSink,
+        path: &str,
+        media_type: &str,
+    ) -> Result<IngestOutcome, CaptureError> {
+        sink.ingest(path, 0, "advisory-sha", media_type, IngestReason::Changed)
     }
 
     fn snapshot(db: &Path, path: &str) -> Option<dohc_engine_domain::TextSnapshot> {
@@ -220,6 +411,28 @@ mod tests {
             .expect("moment count")
     }
 
+    fn try_symlink_file(link: &Path, target: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(target, link).is_ok()
+        }
+    }
+
+    fn try_symlink_dir(link: &Path, target: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(target, link).is_ok()
+        }
+    }
+
     #[test]
     fn text_ingest_rereads_updates_and_dedupes_equal_content() {
         let scratch = ScratchDir::new().expect("scratch");
@@ -227,10 +440,19 @@ mod tests {
         let (db, mut sink) = sink_for(&scratch, &supervisor);
         write_file(scratch.path(), "notes/a.md", b"first");
 
-        ingest(&mut sink, "notes/a.md").expect("first ingest");
-        ingest(&mut sink, "notes/a.md").expect("equal ingest");
+        assert_eq!(
+            ingest(&mut sink, "notes/a.md").expect("first ingest"),
+            IngestOutcome::Captured
+        );
+        assert_eq!(
+            ingest(&mut sink, "notes/a.md").expect("equal ingest"),
+            IngestOutcome::Captured
+        );
         write_file(scratch.path(), "notes/a.md", b"latest");
-        ingest(&mut sink, "notes/a.md").expect("updated ingest");
+        assert_eq!(
+            ingest(&mut sink, "notes/a.md").expect("updated ingest"),
+            IngestOutcome::Captured
+        );
 
         drop(sink);
         supervisor.close(&db).expect("close actor");
@@ -262,10 +484,15 @@ mod tests {
         write_file(scratch.path(), "binary.md", &[0xff, 0x00, 0xfe]);
         write_file(scratch.path(), ".env", b"TOKEN=secret");
 
-        ingest(&mut sink, ".dohc/ignored.md").expect("ignored path");
-        // Follow-up sub-shards add binary and encrypted secret persistence.
-        ingest(&mut sink, "binary.md").expect("deferred binary");
-        ingest(&mut sink, ".env").expect("deferred secret");
+        assert_eq!(
+            ingest(&mut sink, ".dohc/ignored.md").expect("ignored path"),
+            IngestOutcome::NotOwned
+        );
+        // Deferrals FAIL the op (so it is never acknowledged as captured);
+        // the follow-up sub-shards add binary and encrypted secret persistence.
+        assert_eq!(ingest(&mut sink, "binary.md"), Err(BINARY_DEFERRED));
+        assert_eq!(ingest(&mut sink, ".env"), Err(SECRET_DEFERRED));
+        assert_eq!(sink.retire(".env"), Err(SECRET_DEFERRED));
 
         drop(sink);
         supervisor.close(&db).expect("close actor");
@@ -283,7 +510,10 @@ mod tests {
         ingest(&mut sink, "oversized.md").expect("seed ingest");
         let oversized = vec![b'x'; MAX_CAPTURE_TEXT_BYTES as usize + 1];
         write_file(scratch.path(), "oversized.md", &oversized);
-        ingest(&mut sink, "oversized.md").expect("oversized retire");
+        assert_eq!(
+            ingest(&mut sink, "oversized.md").expect("oversized retire"),
+            IngestOutcome::NotOwned
+        );
 
         drop(sink);
         supervisor.close(&db).expect("close actor");
@@ -291,29 +521,208 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_contains_one_read_failure_and_applies_its_sibling() {
+    fn text_media_that_turns_binary_retires_the_stale_text_head() {
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor = WorkspaceSupervisor::new();
         let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), "flip.md", b"was text");
+        ingest(&mut sink, "flip.md").expect("seed ingest");
+        write_file(scratch.path(), "flip.md", &[0xff, 0xfe, 0x00]);
+
+        assert_eq!(ingest(&mut sink, "flip.md"), Err(BINARY_DEFERRED));
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        // The stale text must not stay authoritative while binary is deferred.
+        assert!(snapshot(&db, "flip.md").is_none());
+    }
+
+    #[test]
+    fn non_text_media_never_lands_in_the_plaintext_store() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        // Valid UTF-8 bytes under a binary media type: UTF-8 sniffing alone
+        // would capture this as text.
+        write_file(scratch.path(), "photo.png", b"plain ascii bytes");
+
+        assert_eq!(
+            ingest_as(&mut sink, "photo.png", "image/png"),
+            Err(BINARY_DEFERRED)
+        );
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert!(snapshot(&db, "photo.png").is_none());
+        assert_eq!(moment_count(&db, "photo.png"), 0);
+    }
+
+    #[test]
+    fn scanned_name_that_normalizes_to_a_different_key_is_refused() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), "a/b.md", b"real");
+        ingest(&mut sink, "a/b.md").expect("capture the real file");
+        // A literal `a%2fb.md` on disk decodes to the SAME durable key as the
+        // real `a/b.md`; capturing or retiring through it would clobber the
+        // real file's head.
+        write_file(scratch.path(), "a%2fb.md", b"evil");
+
+        assert_eq!(
+            ingest(&mut sink, "a%2fb.md").expect("refused, settled"),
+            IngestOutcome::NotOwned
+        );
+        sink.retire("a%2fb.md").expect("refused retire is a no-op");
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(
+            snapshot(&db, "a/b.md").expect("real head intact").text,
+            "real"
+        );
+        assert_eq!(moment_count(&db, "a/b.md"), 1);
+    }
+
+    #[test]
+    fn files_toml_tracked_false_narrows_and_retires() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut seed_sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), "private/journal.md", b"personal");
+        write_file(scratch.path(), "public.md", b"shared");
+        ingest(&mut seed_sink, "private/journal.md").expect("seed private");
+        ingest(&mut seed_sink, "public.md").expect("seed public");
+        drop(seed_sink);
+
+        write_file(
+            scratch.path(),
+            ".dohc/files.toml",
+            b"[[rule]]\npath = \"private/**\"\ntracked = false\n",
+        );
+        // The policy snapshot is read at construction: a fresh sink sees it.
+        let actor = supervisor.open(&db, 1).expect("reopen actor");
+        let mut sink =
+            StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 20, None);
+        assert_eq!(
+            ingest(&mut sink, "private/journal.md").expect("narrowed"),
+            IngestOutcome::NotOwned
+        );
+        assert_eq!(
+            ingest(&mut sink, "public.md").expect("still tracked"),
+            IngestOutcome::Captured
+        );
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        // The opted-out path was retired, not left stale-but-authoritative.
+        assert!(snapshot(&db, "private/journal.md").is_none());
+        assert_eq!(
+            snapshot(&db, "public.md").expect("public head").text,
+            "shared"
+        );
+    }
+
+    #[test]
+    fn broken_files_toml_keeps_capture_floor_only() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        write_file(scratch.path(), ".dohc/files.toml", b"not = valid policy [[");
+        write_file(scratch.path(), "notes/a.md", b"kept");
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+
+        // WS-F: a malformed policy never drops writes — capture stays
+        // floor-only rather than failing closed.
+        assert_eq!(
+            ingest(&mut sink, "notes/a.md").expect("floor-only capture"),
+            IngestOutcome::Captured
+        );
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(snapshot(&db, "notes/a.md").expect("head").text, "kept");
+    }
+
+    #[test]
+    fn symlink_leaf_swap_is_refused_and_retired() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        let outside_scratch = ScratchDir::new().expect("outside scratch");
+        let outside = outside_scratch.path().join("outside-target.md");
+        std::fs::write(&outside, b"outside secret").expect("outside fixture");
+        write_file(scratch.path(), "swap.md", b"honest");
+        ingest(&mut sink, "swap.md").expect("seed ingest");
+
+        // Swap the regular file for a symlink pointing outside the workspace
+        // (the TOCTOU the no-follow reopen defends against).
+        std::fs::remove_file(scratch.path().join("swap.md")).expect("remove original");
+        let made = try_symlink_file(&scratch.path().join("swap.md"), &outside);
+        if !made {
+            eprintln!("note: symlink creation unavailable on this host; asserting the absent path");
+        }
+        // Symlink leaf (or, without symlink privilege, the now-absent path):
+        // either way the path stopped being engine-ownable and must be retired
+        // without ever reading the target's bytes.
+        assert_eq!(
+            ingest(&mut sink, "swap.md").expect("refused"),
+            IngestOutcome::NotOwned
+        );
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert!(snapshot(&db, "swap.md").is_none());
+    }
+
+    #[test]
+    fn symlinked_directory_never_carries_the_read_off_root() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        let outside_scratch = ScratchDir::new().expect("outside scratch");
+        let outside_dir = outside_scratch.path().join("outside-dir");
+        std::fs::create_dir_all(&outside_dir).expect("outside dir");
+        std::fs::write(outside_dir.join("leak.md"), b"outside bytes").expect("outside file");
+
+        let made = try_symlink_dir(&scratch.path().join("linkdir"), &outside_dir);
+        if made {
+            // The parent resolves outside the root: refused as an escape, and
+            // nothing is captured or retired through it.
+            assert_eq!(ingest(&mut sink, "linkdir/leak.md"), Err(ESCAPES_ROOT));
+        } else {
+            eprintln!("note: dir symlink unavailable on this host; asserting the absent path");
+            assert_eq!(
+                ingest(&mut sink, "linkdir/leak.md").expect("absent"),
+                IngestOutcome::NotOwned
+            );
+        }
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(moment_count(&db, "linkdir/leak.md"), 0);
+    }
+
+    #[test]
+    fn reconcile_contains_one_deferred_failure_and_applies_its_siblings() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), ".env", b"TOKEN=x");
         write_file(scratch.path(), "b-good.md", b"good");
+        let ingest_op = |path: &str| CaptureOp::Ingest {
+            path: path.to_owned(),
+            size: 1,
+            sha256: "stale".to_owned(),
+            media_type: "text/markdown",
+            reason: IngestReason::Added,
+        };
         let plan = ReconcilePlan {
             from_generation: ScanGeneration(0),
             to_generation: ScanGeneration(1),
             ops: vec![
-                CaptureOp::Ingest {
-                    path: "a-unreadable.md".to_owned(),
-                    size: 1,
-                    sha256: "stale".to_owned(),
-                    media_type: "text/markdown",
-                    reason: IngestReason::Added,
-                },
-                CaptureOp::Ingest {
-                    path: "b-good.md".to_owned(),
-                    size: 1,
-                    sha256: "stale".to_owned(),
-                    media_type: "text/markdown",
-                    reason: IngestReason::Added,
-                },
+                ingest_op(".env"),
+                ingest_op("b-good.md"),
+                ingest_op("c-gone.md"),
             ],
             retained_over_cap: Vec::new(),
             unconfirmed_removed: Vec::new(),
@@ -324,13 +733,17 @@ mod tests {
         };
 
         let result = apply_reconcile_plan(&plan, &mut sink, &FilesNoFaults);
-        assert_eq!(result.failed_applies, ["a-unreadable.md"]);
+        // The deferred secret fails (stays dirty for retry), the text sibling
+        // applies, and the raced-away path settles as not-owned.
+        assert_eq!(result.failed_applies, [".env"]);
         assert_eq!(result.applied_paths, ["b-good.md"]);
+        assert_eq!(result.not_owned_paths, ["c-gone.md"]);
         assert!(result.degraded);
 
         drop(sink);
         supervisor.close(&db).expect("close actor");
-        assert!(snapshot(&db, "a-unreadable.md").is_none());
+        assert!(snapshot(&db, ".env").is_none());
+        assert!(snapshot(&db, "c-gone.md").is_none());
         assert_eq!(
             snapshot(&db, "b-good.md").expect("sibling snapshot").text,
             "good"

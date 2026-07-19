@@ -10,6 +10,11 @@ use std::num::NonZeroUsize;
 /// larger [`ScanBounds::max_file_bytes`] remains the generic scan/hash ceiling.
 pub const MAX_CAPTURE_TEXT_BYTES: u64 = 128 * 1024;
 
+/// Maximum binary payload owned by workspace capture. This mirrors
+/// `MAX_VERSIONED_BINARY_FILE_BYTES` (`versionedTextStore.ts`): content over
+/// this cap is not engine-ownable in ANY representation.
+pub const MAX_CAPTURE_BINARY_BYTES: u64 = 5 * 1024 * 1024;
+
 /// What to do when a file exceeds [`ScanBounds::max_file_bytes`]. The TS capture
 /// path is tolerant — an over-cap file is skipped from the tracked listing, not
 /// a hard failure (`workspaceEngineCapture.ts` demotes/skips over-cap content) —

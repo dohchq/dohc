@@ -31,6 +31,21 @@ pub struct CaptureError {
     pub reason: &'static str,
 }
 
+/// How a sink disposed of a planned ingest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngestOutcome {
+    /// The observed content was captured; the manifest records the plan's
+    /// hash so an unchanged file is not re-ingested.
+    Captured,
+    /// The path is durably NOT engine-owned (policy-untracked, no longer
+    /// engine-ownable content, or an unsafe name). The op is acknowledged —
+    /// the disposition is settled, not retryable — but the manifest must
+    /// FORGET the path rather than record it as captured, so a later
+    /// ownership change (policy widened, content became ownable) re-ingests
+    /// on the next scan instead of reading as already-captured.
+    NotOwned,
+}
+
 /// The narrow downstream contract. Each call is one idempotent domain
 /// transaction; the capture loop never batches multiple paths into one commit.
 pub trait CaptureSink {
@@ -41,7 +56,7 @@ pub trait CaptureSink {
         sha256: &str,
         media_type: &str,
         reason: IngestReason,
-    ) -> Result<(), CaptureError>;
+    ) -> Result<IngestOutcome, CaptureError>;
 
     fn retire(&mut self, path: &str) -> Result<(), CaptureError>;
 }
@@ -49,8 +64,13 @@ pub trait CaptureSink {
 /// Bounded receipt from the apply phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureApplyResult {
-    /// Paths safe for the controller to acknowledge.
+    /// Paths safe for the controller to acknowledge as applied (captured
+    /// ingests and completed retires).
     pub applied_paths: Vec<String>,
+    /// Ingest paths the sink settled as [`IngestOutcome::NotOwned`]. They are
+    /// acknowledged, but the controller manifest drops them instead of
+    /// recording the plan's hash.
+    pub not_owned_paths: Vec<String>,
     /// Sink failures, in deterministic plan order. These remain dirty.
     pub failed_applies: Vec<String>,
     /// The path applied immediately before the injected crash. It is excluded
@@ -87,9 +107,10 @@ pub fn apply_reconcile_plan(
     faults: &dyn FaultInjector,
 ) -> CaptureApplyResult {
     let mut applied_paths = Vec::with_capacity(plan.ops.len());
+    let mut not_owned_paths = Vec::new();
     let mut failed_applies = Vec::new();
     for op in &plan.ops {
-        let applied = match op {
+        let outcome = match op {
             CaptureOp::Ingest {
                 path,
                 size,
@@ -97,25 +118,30 @@ pub fn apply_reconcile_plan(
                 media_type,
                 reason,
             } => sink.ingest(path, *size, sha256, media_type, *reason),
-            CaptureOp::Retire { path } => sink.retire(path),
+            CaptureOp::Retire { path } => sink.retire(path).map(|()| IngestOutcome::Captured),
         };
-        if applied.is_err() {
+        let Ok(outcome) = outcome else {
             failed_applies.push(op.path().to_owned());
             continue;
-        }
+        };
         if should_crash(faults) {
             return CaptureApplyResult {
                 applied_paths,
+                not_owned_paths,
                 failed_applies,
                 crashed_after_apply: Some(op.path().to_owned()),
                 degraded: true,
             };
         }
-        applied_paths.push(op.path().to_owned());
+        match outcome {
+            IngestOutcome::Captured => applied_paths.push(op.path().to_owned()),
+            IngestOutcome::NotOwned => not_owned_paths.push(op.path().to_owned()),
+        }
     }
     let degraded = plan.degraded || !failed_applies.is_empty();
     CaptureApplyResult {
         applied_paths,
+        not_owned_paths,
         failed_applies,
         crashed_after_apply: None,
         degraded,
@@ -133,7 +159,7 @@ pub fn apply_then_ack(
     controller.ensure_plan_fresh(plan)?;
     let result = apply_reconcile_plan(plan, sink, faults);
     if result.completed() {
-        controller.acknowledge_capture(plan, &result.applied_paths, &result.failed_applies)?;
+        controller.acknowledge_capture(plan, &result)?;
     }
     Ok(result)
 }
