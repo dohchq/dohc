@@ -30,10 +30,13 @@ use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
 use crate::search::{SearchResult, search_workspace};
 use dohc_engine_collab::{AppendOutcome, ContentKind, DocKey, Regime};
+use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
     CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
-    CaptureRetireResult, ResolveTextConflict, ResolveTextConflictResult, TextConflict,
-    TextSnapshot, VersionedTextStore, WriteResult, WriteText, insert_text_conflict_if_absent,
+    CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ResolveTextConflict,
+    ResolveTextConflictResult, SecretFileStore, SecretMomentRecord, SecretWriteResult,
+    TextConflict, TextSnapshot, VersionedTextStore, WriteResult, WriteText, capture_secret_retire,
+    insert_text_conflict_if_absent,
 };
 use dohc_engine_storage::{
     CompoundWrite, Document, EngineStore, FaultInjector, StorageError, TxnOutcome, WriteOutcome,
@@ -161,6 +164,20 @@ enum Command {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<CaptureIngestBinaryResult, RuntimeError>>,
+    },
+    CaptureSecret {
+        // Boxed: the plaintext + key payload should not size every command
+        // slot, and the key must never be duplicated by channel copies.
+        payload: Box<(CaptureSecret, SecretDataKey)>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<SecretWriteResult, RuntimeError>>,
+    },
+    CaptureSecretRetire {
+        input: CaptureSecretRetire,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Option<SecretMomentRecord>, RuntimeError>>,
     },
     CaptureRetire {
         input: CaptureRetire,
@@ -497,6 +514,52 @@ impl ActorHandle {
             .map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// Capture a secret file on the actor's writer, blocking the caller. The
+    /// workspace data key travels with the request (the actor holds no key
+    /// state; custody stays at the composition layer).
+    pub fn capture_secret_blocking(
+        &self,
+        input: CaptureSecret,
+        key: SecretDataKey,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<SecretWriteResult, RuntimeError> {
+        debug_assert_sync_context();
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::CaptureSecret {
+                payload: Box::new((input, key)),
+                faults,
+                token: CancellationToken::new(),
+                reply,
+            })
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Retire a captured secret path on the actor's writer, blocking the
+    /// caller. Keyless: a delete never decrypts.
+    pub fn capture_secret_retire_blocking(
+        &self,
+        input: CaptureSecretRetire,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
+        debug_assert_sync_context();
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::CaptureSecretRetire {
+                input,
+                faults,
+                token: CancellationToken::new(),
+                reply,
+            })
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Retire a captured path on the actor's writer, blocking the caller.
     pub fn capture_retire_blocking(
         &self,
@@ -622,6 +685,47 @@ impl ActorHandle {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::CaptureIngestBinary {
+                input,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Capture a secret file on the actor's single writer thread.
+    pub async fn capture_secret(
+        &self,
+        input: CaptureSecret,
+        key: SecretDataKey,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<SecretWriteResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CaptureSecret {
+                payload: Box::new((input, key)),
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Retire a captured secret path on the actor's single writer thread.
+    pub async fn capture_secret_retire(
+        &self,
+        input: CaptureSecretRetire,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CaptureSecretRetire {
                 input,
                 faults,
                 token,
@@ -994,6 +1098,27 @@ fn worker_main(
                     capture_ingest_binary_on_store(&mut store, &input, faults.as_ref(), &token);
                 let _ = reply.send(outcome);
             }
+            Command::CaptureSecret {
+                payload,
+                faults,
+                token,
+                reply,
+            } => {
+                let (input, key) = *payload;
+                let outcome =
+                    capture_secret_on_store(&mut store, &input, &key, faults.as_ref(), &token);
+                let _ = reply.send(outcome);
+            }
+            Command::CaptureSecretRetire {
+                input,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome =
+                    capture_secret_retire_on_store(&mut store, &input, faults.as_ref(), &token);
+                let _ = reply.send(outcome);
+            }
             Command::CaptureRetire {
                 input,
                 faults,
@@ -1230,6 +1355,51 @@ fn capture_ingest_binary_on_store(
     VersionedTextStore::new(store)
         .capture_ingest_binary(input, faults)
         .map_err(RuntimeError::from)
+}
+
+fn capture_secret_on_store(
+    store: &mut EngineStore,
+    input: &CaptureSecret,
+    key: &SecretDataKey,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<SecretWriteResult, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    VersionedTextStore::new(store).ensure_main_version(
+        &input.workspace_id,
+        &input.version_id,
+        input.now_ms,
+        faults,
+    )?;
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    SecretFileStore::new(store, key)
+        .capture_secret(input, faults)
+        .map_err(RuntimeError::from)
+}
+
+fn capture_secret_retire_on_store(
+    store: &mut EngineStore,
+    input: &CaptureSecretRetire,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<Option<SecretMomentRecord>, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    VersionedTextStore::new(store).ensure_main_version(
+        &input.workspace_id,
+        &input.version_id,
+        input.now_ms,
+        faults,
+    )?;
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    capture_secret_retire(store, input, faults).map_err(RuntimeError::from)
 }
 
 fn capture_retire_on_store(

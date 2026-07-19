@@ -85,6 +85,52 @@ impl core::fmt::Debug for SecretDataKey {
     }
 }
 
+/// Workspace-relative location of the key file.
+pub const SECRET_KEY_FILE_RELATIVE: &str = ".dohc/engine/secret.key";
+
+/// Load the workspace data key from `.dohc/engine/secret.key` under `root`,
+/// creating a fresh one on first use. Ports `loadSecretDataKey`
+/// (`secretFileStore.ts`): a MISSING file generates + persists a new key
+/// (0600 on Unix); an EXISTING file is parsed and a malformed one fails
+/// CLOSED (`key-corrupt`) — dohc never regenerates a key over an existing
+/// file, because that would silently orphan every sealed snapshot.
+pub fn load_or_create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoError> {
+    let path = root.join(SECRET_KEY_FILE_RELATIVE);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => SecretDataKey::parse_key_file(&content),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let key = SecretDataKey::generate()?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|_| CryptoError::KeyFileMalformed)?;
+            }
+            // create_new: if another writer won the race, fall back to
+            // PARSING the winner's file rather than clobbering it.
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&path) {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    file.write_all(key.to_key_file().as_bytes())
+                        .map_err(|_| CryptoError::KeyFileMalformed)?;
+                    Ok(key)
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let content = std::fs::read_to_string(&path)
+                        .map_err(|_| CryptoError::KeyFileMalformed)?;
+                    SecretDataKey::parse_key_file(&content)
+                }
+                Err(_) => Err(CryptoError::KeyFileMalformed),
+            }
+        }
+        Err(_) => Err(CryptoError::KeyFileMalformed),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +193,30 @@ mod tests {
         let mut key = SecretDataKey::from_bytes(&[0xFFu8; SECRET_KEY_BYTES]).unwrap();
         key.zeroize();
         assert_eq!(key.as_bytes(), &[0u8; SECRET_KEY_BYTES]);
+    }
+
+    #[test]
+    fn load_or_create_mints_once_then_reuses_and_fails_closed_on_corruption() {
+        let dir = std::env::temp_dir().join(format!(
+            "dohc-keyfile-test-{}-{:x}",
+            std::process::id(),
+            std::ptr::from_ref(&()) as usize
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let first = load_or_create_key_file(&dir).expect("mint");
+        let file = dir.join(SECRET_KEY_FILE_RELATIVE);
+        let content = std::fs::read_to_string(&file).expect("key file written");
+        assert!(content.starts_with(SECRET_KEY_FILE_PREFIX));
+
+        let second = load_or_create_key_file(&dir).expect("reuse");
+        assert_eq!(first, second, "an existing key is loaded, never re-minted");
+
+        // A malformed existing file fails CLOSED — regenerating over it would
+        // silently orphan every sealed snapshot.
+        std::fs::write(&file, "garbage").unwrap();
+        assert!(load_or_create_key_file(&dir).is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

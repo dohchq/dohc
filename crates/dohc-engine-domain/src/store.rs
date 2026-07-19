@@ -3249,7 +3249,7 @@ pub fn derive_capture_retire_moment_id(
     derive_capture_moment_id(workspace_id, object_id, next_moment_order)
 }
 
-fn hash_framed_fields(fields: &[&[u8]]) -> String {
+pub(crate) fn hash_framed_fields(fields: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
     for field in fields {
         hasher.update((field.len() as u64).to_le_bytes());

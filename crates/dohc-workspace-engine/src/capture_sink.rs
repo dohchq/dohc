@@ -1,5 +1,6 @@
 //! Dormant files-reconcile adapter for the actor-owned capture primitives.
 
+use dohc_engine_crypto::{SecretDataKey, load_or_create_key_file};
 use dohc_engine_domain::DomainError;
 use dohc_engine_files::media::is_text_media_type;
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
@@ -11,7 +12,8 @@ use dohc_engine_runtime::search::{
     FilesPolicyRule, read_engine_search_policy, resolve_effective_policy,
 };
 use dohc_engine_runtime::{
-    ActorHandle, CaptureIngest, CaptureIngestBinary, CaptureRetire, NoFaults, RuntimeError,
+    ActorHandle, CaptureIngest, CaptureIngestBinary, CaptureRetire, CaptureSecret,
+    CaptureSecretRetire, NoFaults, RuntimeError,
 };
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read};
@@ -19,6 +21,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const CAPTURE_METADATA_ORIGIN: &str = "capture";
+/// The encrypted store validates origins against the TS `WRITE_ORIGINS` set,
+/// which has no "capture" entry; the TS capture path writes secrets with
+/// origin "local-file" — mirrored here.
+const SECRET_CAPTURE_ORIGIN: &str = "local-file";
 const READ_FAILED: CaptureError = CaptureError {
     reason: "capture disk read failed",
 };
@@ -37,13 +43,16 @@ const ESCAPES_ROOT: CaptureError = CaptureError {
 const RETIRE_RACED: CaptureError = CaptureError {
     reason: "retire refused: a regular file reappeared at the path",
 };
-/// Guards RETIRE ops only (ingest deferrals settle as `NotOwned` — see
-/// `CaptureSink::ingest`). A secret retire targets the encrypted store, which
-/// this plaintext sink cannot reach; the contained failure keeps the op dirty
-/// for the secret-capture sub-shard. In practice unreachable: the manifest
-/// never records secret paths, so no plan can emit a secret retire.
-const SECRET_DEFERRED: CaptureError = CaptureError {
-    reason: "secret capture deferred to the secret-capture sub-shard",
+const SECRET_INGEST_FAILED: CaptureError = CaptureError {
+    reason: "capture secret ingest failed",
+};
+const SECRET_RETIRE_FAILED: CaptureError = CaptureError {
+    reason: "capture secret retire failed",
+};
+/// The workspace key could not be loaded or created — a transient/config
+/// failure, kept dirty for retry (never silently dropping secret capture).
+const SECRET_KEY_UNAVAILABLE: CaptureError = CaptureError {
+    reason: "workspace secret key unavailable",
 };
 
 /// Bridges a files-crate reconcile plan to the actor's domain capture writes.
@@ -60,6 +69,10 @@ pub struct StoreCaptureSink {
     now_ms: i64,
     author_json: Option<String>,
     files_policy: Option<Vec<FilesPolicyRule>>,
+    /// Lazily loaded-or-created on the FIRST secret capture (TS parity:
+    /// `loadSecretDataKey` create branch) so workspaces without secrets never
+    /// mint a key file.
+    secret_key: Option<SecretDataKey>,
 }
 
 impl StoreCaptureSink {
@@ -86,7 +99,17 @@ impl StoreCaptureSink {
             now_ms,
             author_json,
             files_policy,
+            secret_key: None,
         }
+    }
+
+    fn ensure_secret_key(&mut self) -> Result<&SecretDataKey, CaptureError> {
+        if self.secret_key.is_none() {
+            let key =
+                load_or_create_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)?;
+            self.secret_key = Some(key);
+        }
+        Ok(self.secret_key.as_ref().expect("key just ensured"))
     }
 
     fn policy_tracks(&self, path: &str) -> bool {
@@ -232,6 +255,108 @@ impl StoreCaptureSink {
         }
     }
 
+    /// Capture one secret path: read the CURRENT plaintext (mirroring the TS
+    /// oracle's `readDiskSecretState` — text rules WITHOUT the media-type
+    /// heuristic; non-UTF-8 is untracked, never binary) and write it through
+    /// the encrypted store. The workspace key is loaded-or-created on first
+    /// use.
+    fn ingest_secret(&mut self, path: &str) -> Result<IngestOutcome, CaptureError> {
+        match self.read_current_secret(path)? {
+            SecretContent::Text(text) => {
+                let size = text.len() as u64;
+                let sha256 = sha256_hex(text.as_bytes());
+                self.ensure_secret_key()?;
+                let key = self.secret_key.clone().expect("key ensured just above");
+                match self.actor.capture_secret_blocking(
+                    CaptureSecret {
+                        workspace_id: self.workspace_id.clone(),
+                        version_id: self.version_id.clone(),
+                        path: path.to_owned(),
+                        text,
+                        metadata_origin: SECRET_CAPTURE_ORIGIN.to_owned(),
+                        now_ms: self.now_ms,
+                    },
+                    key,
+                    Arc::new(NoFaults),
+                ) {
+                    Ok(_) => Ok(IngestOutcome::Captured { size, sha256 }),
+                    Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
+                        Ok(IngestOutcome::NotOwned)
+                    }
+                    Err(_) => Err(SECRET_INGEST_FAILED),
+                }
+            }
+            SecretContent::Untracked => {
+                // No longer capturable secret text (absent, symlink, binary in
+                // disguise, over cap): retire the encrypted tip so protected
+                // state never goes stale-but-authoritative (TS parity), and
+                // settle as NotOwned so the manifest forgets the path.
+                self.retire_secret(path)?;
+                Ok(IngestOutcome::NotOwned)
+            }
+        }
+    }
+
+    /// `readDiskSecretState` mirror: same containment/no-follow defenses as
+    /// the text read, text-cap bound, UTF-8-or-untracked (no binary route).
+    fn read_current_secret(&self, path: &str) -> Result<SecretContent, CaptureError> {
+        let absolute = self.shadow_root.join(path);
+        match contained_parent(&self.shadow_root, path) {
+            Containment::Contained => {}
+            Containment::Absent => return Ok(SecretContent::Untracked),
+            Containment::Escaped => return Err(ESCAPES_ROOT),
+        }
+        match std::fs::symlink_metadata(&absolute) {
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                return Ok(SecretContent::Untracked);
+            }
+            Ok(_) => {}
+            Err(err) if absent_error(&err) => return Ok(SecretContent::Untracked),
+            Err(_) => return Err(READ_FAILED),
+        }
+        let file = match open_no_follow(&absolute) {
+            NoFollowOpen::Opened(file) => file,
+            NoFollowOpen::Refused | NoFollowOpen::Absent => return Ok(SecretContent::Untracked),
+            NoFollowOpen::Failed => return Err(READ_FAILED),
+        };
+        verify_opened_containment(&self.shadow_root, path, &file)?;
+        let metadata = file.metadata().map_err(|_| READ_FAILED)?;
+        if !metadata.file_type().is_file() {
+            return Ok(SecretContent::Untracked);
+        }
+        if metadata.len() > MAX_CAPTURE_TEXT_BYTES {
+            return Ok(SecretContent::Untracked);
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take(MAX_CAPTURE_TEXT_BYTES.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .map_err(|_| READ_FAILED)?;
+        if bytes.len() as u64 > MAX_CAPTURE_TEXT_BYTES {
+            return Ok(SecretContent::Untracked);
+        }
+        match String::from_utf8(bytes) {
+            Ok(text) => Ok(SecretContent::Text(text)),
+            Err(_) => Ok(SecretContent::Untracked),
+        }
+    }
+
+    fn retire_secret(&self, path: &str) -> Result<(), CaptureError> {
+        match self.actor.capture_secret_retire_blocking(
+            CaptureSecretRetire {
+                workspace_id: self.workspace_id.clone(),
+                version_id: self.version_id.clone(),
+                path: path.to_owned(),
+                metadata_origin: SECRET_CAPTURE_ORIGIN.to_owned(),
+                now_ms: self.now_ms,
+            },
+            Arc::new(NoFaults),
+        ) {
+            Ok(_) => Ok(()),
+            Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => Ok(()),
+            Err(_) => Err(SECRET_RETIRE_FAILED),
+        }
+    }
+
     fn retire_head(&self, path: &str, only_if_text_head: bool) -> Result<(), CaptureError> {
         match self.actor.capture_retire_blocking(
             CaptureRetire {
@@ -273,14 +398,10 @@ impl CaptureSink for StoreCaptureSink {
         // path so settled rapid writes coalesce to the latest disk state.
         let normalized = match classify_engine_file_path_normalized(path) {
             (PathClassification::Ignored, _) => return Ok(IngestOutcome::NotOwned),
-            // The ENCRYPTED store owns secret paths, never this plaintext
-            // sink. NotOwned keeps the manifest honest AND keeps the deferral
-            // alive: a forgotten path is re-offered as `Added` by every later
-            // scan, so the secret-capture sub-shard picks it up with no state
-            // migration — and a healthy workspace with a `.env` never reads
-            // as degraded in the meantime. (No retire: a secret path can
-            // never have held a plaintext head.)
-            (PathClassification::Secret, _) => return Ok(IngestOutcome::NotOwned),
+            // Secret paths route to the ENCRYPTED store, never the plaintext
+            // one (the secret floor outranks policy — `.dohc` files can never
+            // unmark it).
+            (PathClassification::Secret, _) => return self.ingest_secret(path),
             (PathClassification::Tracked, normalized) => normalized.ok_or(INGEST_FAILED)?,
         };
         // The domain stores under the CANONICAL relative path. A scanned disk
@@ -347,7 +468,23 @@ impl CaptureSink for StoreCaptureSink {
     fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
         match classify_engine_file_path_normalized(path) {
             (PathClassification::Ignored, _) => Ok(()),
-            (PathClassification::Secret, _) => Err(SECRET_DEFERRED),
+            (PathClassification::Secret, _) => {
+                // Apply-time absence confirmation, then the KEYLESS secret
+                // retire (a delete never decrypts). Mirrors the text arm's
+                // reappearance refusal.
+                let absolute = self.shadow_root.join(path);
+                match contained_parent(&self.shadow_root, path) {
+                    Containment::Contained => {}
+                    Containment::Absent => return self.retire_secret(path),
+                    Containment::Escaped => return Err(ESCAPES_ROOT),
+                }
+                match std::fs::symlink_metadata(&absolute) {
+                    Ok(metadata) if metadata.file_type().is_file() => Err(RETIRE_RACED),
+                    Ok(_) => self.retire_secret(path),
+                    Err(err) if absent_error(&err) => self.retire_secret(path),
+                    Err(_) => Err(SECRET_RETIRE_FAILED),
+                }
+            }
             (PathClassification::Tracked, Some(normalized)) if normalized == path => {
                 // Apply-time absence confirmation, mirroring both the TS
                 // oracle (`pathConfirmedAbsentOnDisk` runs immediately before
@@ -391,6 +528,12 @@ fn sha256_hex(bytes: &[u8]) -> String {
         let _ = write!(hex, "{byte:02x}");
     }
     hex
+}
+
+enum SecretContent {
+    Text(String),
+    /// Absent, or present but not capturable secret text at this path.
+    Untracked,
 }
 
 enum CurrentContent {
@@ -604,6 +747,23 @@ mod tests {
             .flatten()
     }
 
+    /// The encrypted tip's plaintext byte length for a secret path (metadata
+    /// only — the test never decrypts).
+    fn secret_tip_len(db: &Path, path: &str) -> Option<i64> {
+        use rusqlite::OptionalExtension;
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT byte_length FROM secret_files WHERE workspace_id = ?1 AND path = ?2",
+                    [WORKSPACE_ID, path],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+            })
+            .expect("secret tip query")
+    }
+
     fn moment_count(db: &Path, path: &str) -> i64 {
         let store = EngineStore::open(db, 100).expect("reopen store");
         store
@@ -700,25 +860,25 @@ mod tests {
             ingest(&mut sink, ".dohc/ignored.md").expect("ignored path"),
             IngestOutcome::NotOwned
         );
-        // Binary content is now CAPTURED as a BINHEAD binary head; the
-        // secret deferral still settles as NotOwned (the manifest forgets the
-        // path, so every later scan re-offers it to the secret sub-shard).
+        // Binary content captures as a BINHEAD binary head; secret content
+        // captures into the ENCRYPTED store (never the plaintext one).
         assert!(matches!(
             ingest(&mut sink, "binary.md").expect("binary capture"),
             IngestOutcome::Captured { .. }
         ));
-        assert_eq!(
-            ingest(&mut sink, ".env").expect("deferred secret"),
-            IngestOutcome::NotOwned
-        );
-        assert_eq!(sink.retire(".env"), Err(SECRET_DEFERRED));
+        assert!(matches!(
+            ingest(&mut sink, ".env").expect("secret capture"),
+            IngestOutcome::Captured { .. }
+        ));
 
         drop(sink);
         supervisor.close(&db).expect("close actor");
         assert_eq!(moment_count(&db, ".dohc/ignored.md"), 0);
         assert_eq!(moment_count(&db, "binary.md"), 1);
         assert!(binary_head(&db, "binary.md").is_some());
+        // The plaintext tables never see the secret; the encrypted tip does.
         assert_eq!(moment_count(&db, ".env"), 0);
+        assert_eq!(secret_tip_len(&db, ".env"), Some(12));
     }
 
     #[test]
@@ -999,11 +1159,10 @@ mod tests {
         };
 
         let result = apply_reconcile_plan(&plan, &mut sink, &FilesNoFaults);
-        // The text sibling applies; the deferred secret and the raced-away
-        // path settle as not-owned (forgotten, re-offered by later scans) —
-        // a healthy workspace with a .env must not read as degraded.
-        assert_eq!(result.applied_paths, ["b-good.md"]);
-        assert_eq!(result.not_owned_paths, [".env", "c-gone.md"]);
+        // The text sibling AND the secret apply (the secret into the
+        // encrypted store); only the raced-away path settles as not-owned.
+        assert_eq!(result.applied_paths, [".env", "b-good.md"]);
+        assert_eq!(result.not_owned_paths, ["c-gone.md"]);
         assert!(result.failed_applies.is_empty());
         assert!(!result.degraded);
 
@@ -1147,5 +1306,81 @@ mod tests {
             snapshot(&db, "flip.md").expect("recaptured head").text,
             "same bytes"
         );
+    }
+
+    #[test]
+    fn secret_capture_encrypts_dedupes_and_retires() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), ".env", b"TOKEN=alpha");
+
+        let first = ingest(&mut sink, ".env").expect("secret capture");
+        assert_eq!(
+            first,
+            IngestOutcome::Captured {
+                size: 11,
+                sha256: sha256_hex(b"TOKEN=alpha"),
+            }
+        );
+        // The key file was minted on first use and is reused thereafter.
+        let key_path = scratch.path().join(".dohc/engine/secret.key");
+        let key_bytes = std::fs::read(&key_path).expect("key file exists");
+        assert!(matches!(
+            ingest(&mut sink, ".env").expect("equal secret capture"),
+            IngestOutcome::Captured { .. }
+        ));
+        assert_eq!(
+            std::fs::read(&key_path).expect("key file stable"),
+            key_bytes,
+            "an existing key is never regenerated"
+        );
+
+        // Delete from disk: the plan retire removes the encrypted tip.
+        std::fs::remove_file(scratch.path().join(".env")).expect("delete");
+        sink.retire(".env").expect("secret retire");
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(secret_tip_len(&db, ".env"), None, "tip retired");
+        assert_eq!(moment_count(&db, ".env"), 0, "plaintext tables untouched");
+    }
+
+    #[test]
+    fn secret_that_stops_being_utf8_text_retires_the_tip() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), ".env", b"TOKEN=alpha");
+        ingest(&mut sink, ".env").expect("seed secret");
+
+        // Binary-in-disguise is NOT capturable secret text (TS parity: the
+        // secret read has no binary route) — the stale tip must retire.
+        write_file(scratch.path(), ".env", &[0xff, 0x00, 0xfe]);
+        assert_eq!(
+            ingest(&mut sink, ".env").expect("untracked secret"),
+            IngestOutcome::NotOwned
+        );
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(secret_tip_len(&db, ".env"), None);
+    }
+
+    #[test]
+    fn secret_retire_is_refused_when_the_file_reappeared() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), ".env", b"TOKEN=alpha");
+        ingest(&mut sink, ".env").expect("seed secret");
+
+        // A Retire op prepared from an absent-scan must refuse if the secret
+        // file reappeared before the apply.
+        assert_eq!(sink.retire(".env"), Err(RETIRE_RACED));
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(secret_tip_len(&db, ".env"), Some(11), "tip retained");
     }
 }

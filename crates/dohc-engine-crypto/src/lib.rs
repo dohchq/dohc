@@ -42,5 +42,8 @@ pub use aead::{
     open, seal, secret_aad,
 };
 pub use error::CryptoError;
-pub use key::{SECRET_KEY_BYTES, SECRET_KEY_FILE_PREFIX, SecretDataKey};
+pub use key::{
+    SECRET_KEY_BYTES, SECRET_KEY_FILE_PREFIX, SECRET_KEY_FILE_RELATIVE, SecretDataKey,
+    load_or_create_key_file,
+};
 pub use secret::SecretPlaintext;

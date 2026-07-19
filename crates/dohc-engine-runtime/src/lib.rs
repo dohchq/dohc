@@ -46,12 +46,13 @@ pub use dohc_engine_storage::{
 
 // The cancellation primitive the async actor loop consumes. Re-exported so a
 // caller drives cancellation through one crate.
+pub use dohc_engine_crypto::SecretDataKey;
 pub use tokio_util::sync::CancellationToken;
 
 pub use dohc_engine_collab::{AppendOutcome, ContentKind, DocKey};
 pub use dohc_engine_domain::{
     CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
-    CaptureRetireResult, ResolveTextConflict, ResolveTextConflictResult, TextConflict,
-    TextSnapshot, WriteResult, WriteText,
+    CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ResolveTextConflict,
+    ResolveTextConflictResult, TextConflict, TextSnapshot, WriteResult, WriteText,
 };
 pub use dohc_engine_sync::{ApplyOutcome, ConflictApplyResult, ReplicationEnvelope};

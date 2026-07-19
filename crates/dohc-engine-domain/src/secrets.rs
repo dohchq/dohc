@@ -14,12 +14,15 @@
 //!   is metadata-only by type — [`SecretMomentRecord`] has no content field.
 //! - **Fail closed.** A tampered ciphertext/tag, wrong key, or AAD mismatch
 //!   surfaces as `decrypt-failed`, never garbage plaintext.
-//! - **Durable materialization intent.** A write enqueues an R04
-//!   materialization job in the SAME transaction as the secret state
-//!   (`enqueue_job` in `write_with`), so the intent to write the plaintext file
-//!   is crash-safe. The job references the CIPHERTEXT blob (integrity anchor);
-//!   the plaintext is produced only at execution time by the secret-aware
-//!   materializer (`materialize_secret_file`) and lives only on disk.
+//! - **Durable materialization intent.** A write records its R04
+//!   materialization row in the SAME transaction as the secret state, so the
+//!   disk intent is crash-safe. [`SecretDiskIntent::Materialize`] enqueues a
+//!   PENDING job (the secret-aware executor writes the plaintext file);
+//!   [`SecretDiskIntent::AlreadyOnDisk`] (capture) records a COMPLETED marker
+//!   instead — the plaintext came FROM disk, and the marker lets the
+//!   staleness gate supersede older pending jobs. The row references the
+//!   CIPHERTEXT blob (integrity anchor); plaintext is produced only at
+//!   execution time by `materialize_secret_file` and lives only on disk.
 //!
 //! R07's platform-independent path floor is enforced at every caller-supplied
 //! path entry point. The gate fails closed in BOTH directions: this encrypted
@@ -96,6 +99,60 @@ pub struct SecretWrite {
     pub metadata_origin: String,
     pub metadata_summary: Option<String>,
     pub metadata_correlation_id: Option<String>,
+    pub now_ms: i64,
+    pub disk_intent: SecretDiskIntent,
+}
+
+/// Whether a secret write's plaintext must REACH disk or is ALREADY there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecretDiskIntent {
+    /// Enqueue a pending materialization job: the secret-aware executor will
+    /// decrypt the tip and write the plaintext to the workspace file.
+    Materialize,
+    /// Capture: the plaintext came FROM the workspace file, so nothing must
+    /// ever run — but a COMPLETED job marker is recorded so the
+    /// materializer's staleness gate supersedes any OLDER still-pending job
+    /// for the path instead of letting it regress the captured bytes.
+    AlreadyOnDisk,
+}
+
+/// Inputs to [`SecretFileStore::capture_secret`]: the autonomous secret
+/// capture-write. The moment id is derived internally via the length-framed
+/// capture scheme. `Debug` redacts the plaintext (same invariant as
+/// [`SecretWrite`]) and `Clone` is deliberately not derived.
+pub struct CaptureSecret {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub path: String,
+    pub text: String,
+    pub metadata_origin: String,
+    pub now_ms: i64,
+}
+
+impl core::fmt::Debug for CaptureSecret {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CaptureSecret")
+            .field("workspace_id", &self.workspace_id)
+            .field("version_id", &self.version_id)
+            .field("path", &self.path)
+            .field(
+                "text",
+                &format_args!("<redacted, {} bytes>", self.text.len()),
+            )
+            .field("metadata_origin", &self.metadata_origin)
+            .field("now_ms", &self.now_ms)
+            .finish()
+    }
+}
+
+/// Inputs to [`capture_secret_retire`]: the autonomous, KEYLESS secret retire
+/// (a delete never decrypts, so it works without the workspace key).
+#[derive(Debug, Clone)]
+pub struct CaptureSecretRetire {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub path: String,
+    pub metadata_origin: String,
     pub now_ms: i64,
 }
 
@@ -206,7 +263,7 @@ impl<'a> SecretFileStore<'a> {
         // misreported as `DuplicateMomentId`.
         let no_op = self.store.read_with(|conn| {
             require_version(conn, ws, &input.version_id)?;
-            if let Some(tip) = self.select_tip(conn, ws, &input.version_id, &input.path)? {
+            if let Some(tip) = select_tip(conn, ws, &input.version_id, &input.path)? {
                 let current = aead::open(self.key, ws, &input.path, &tip)?;
                 if current.as_bytes() == input.text.as_bytes() {
                     return Ok(true);
@@ -246,21 +303,24 @@ impl<'a> SecretFileStore<'a> {
             // durable materialization intent referencing it. Blob before job so
             // the job's `content_sha256` FK is satisfied inside the txn.
             let ciphertext_sha = put_binary_blob(tx, sealed.ciphertext())?;
-            enqueue_job(
-                tx,
-                &MaterializationJobSpec {
-                    job_id: format!("secret-mat_{}", input.moment_id),
-                    target_path: input.path.clone(),
-                    content_sha256: ciphertext_sha,
-                    // The secret-aware executor decrypts the tip and writes
-                    // plaintext; preimage revalidation is its concern (it knows
-                    // the plaintext it is about to write), so the durable intent
-                    // records no on-disk preimage here.
-                    preimage: Preimage::Absent,
-                    target_generation: moment_order,
-                    now_ms: input.now_ms,
-                },
-            )?;
+            let spec = MaterializationJobSpec {
+                job_id: format!("secret-mat_{}", input.moment_id),
+                target_path: input.path.clone(),
+                content_sha256: ciphertext_sha,
+                // The secret-aware executor decrypts the tip and writes
+                // plaintext; preimage revalidation is its concern (it knows
+                // the plaintext it is about to write), so the durable intent
+                // records no on-disk preimage here.
+                preimage: Preimage::Absent,
+                target_generation: moment_order,
+                now_ms: input.now_ms,
+            };
+            match input.disk_intent {
+                SecretDiskIntent::Materialize => enqueue_job(tx, &spec)?,
+                SecretDiskIntent::AlreadyOnDisk => {
+                    dohc_engine_storage::record_completed_job(tx, &spec)?;
+                }
+            }
             journal(tx, &input.path, "secret.file.put", input.now_ms)?;
             Ok::<SecretMomentRecord, DomainError>(SecretMomentRecord {
                 moment_order,
@@ -281,62 +341,138 @@ impl<'a> SecretFileStore<'a> {
         input: &SecretDelete,
         faults: &dyn FaultInjector,
     ) -> Result<Option<SecretMomentRecord>, DomainError> {
+        delete_secret_file_keyless(self.store, input, faults)
+    }
+
+    // -------------------------------------------------------------- capture
+
+    /// Autonomous secret capture: derives the moment id via the length-framed
+    /// capture scheme (no caller-supplied ids), writes with
+    /// [`SecretDiskIntent::AlreadyOnDisk`] (the plaintext came FROM the
+    /// workspace file — a completed marker, never a runnable job), and pins
+    /// the reserved secret moment order against the persisted one. A deduped
+    /// (content-equality) capture still marks the CONFIRMED tip's generation
+    /// as materialized so an older stale pending job cannot regress bytes
+    /// capture just verified on disk.
+    pub fn capture_secret(
+        &mut self,
+        input: &CaptureSecret,
+        faults: &dyn FaultInjector,
+    ) -> Result<SecretWriteResult, DomainError> {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.version_id, "version_id")?;
-        non_empty(&input.moment_id, "moment_id")?;
         validate_secret_path(&input.path)?;
-        validate_origin(&input.metadata_origin)?;
-
-        let ws = &input.workspace_id;
-        // Desired-state first: an already-absent tip is an idempotent no-op
-        // (including an exactly-once retry of a delete that committed then
-        // crashed before the ack), so a committed retry is never misreported as
-        // `DuplicateMomentId`. Only a delete that will actually change state
-        // reaches the duplicate-moment-id guard.
-        let has_tip = self.store.read_with(|conn| {
-            require_version(conn, ws, &input.version_id)?;
-            if self
-                .select_tip(conn, ws, &input.version_id, &input.path)?
-                .is_none()
-            {
-                return Ok(false);
+        let ws = input.workspace_id.clone();
+        // Single-writer: this pre-read reservation is authoritative; the
+        // post-write pin makes the assumption release-checked.
+        let reserved = self
+            .store
+            .read_with(|conn| next_secret_moment_order(conn, &ws))?;
+        let moment_id = derive_capture_secret_moment_id(
+            &input.workspace_id,
+            &input.version_id,
+            &input.path,
+            reserved,
+        );
+        let basename = input
+            .path
+            .rsplit('/')
+            .next()
+            .unwrap_or(input.path.as_str())
+            .to_owned();
+        let result = self.write_secret_file(
+            &SecretWrite {
+                workspace_id: input.workspace_id.clone(),
+                version_id: input.version_id.clone(),
+                path: input.path.clone(),
+                text: input.text.clone(),
+                moment_id,
+                metadata_origin: input.metadata_origin.clone(),
+                metadata_summary: Some(format!("Updated {basename}")),
+                metadata_correlation_id: None,
+                now_ms: input.now_ms,
+                disk_intent: SecretDiskIntent::AlreadyOnDisk,
+            },
+            faults,
+        )?;
+        match &result.moment {
+            Some(moment) => {
+                if moment.moment_order != reserved {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "secret capture moment order diverged from reserved order",
+                    });
+                }
             }
-            if secret_moment_exists(conn, ws, &input.moment_id)? {
-                return Err(DomainError::DuplicateMomentId);
+            None => {
+                // Deduped: the tip's plaintext is VERIFIED on disk right now.
+                // Mark the tip's generation materialized (upsert) so the
+                // staleness gate supersedes any older pending job — the same
+                // regression class the binary capture marker closes.
+                self.mark_tip_materialized(
+                    &input.workspace_id,
+                    &input.version_id,
+                    &input.path,
+                    input.now_ms,
+                    faults,
+                )?;
             }
-            Ok::<bool, DomainError>(true)
-        })?;
-        if !has_tip {
-            return Ok(None);
         }
+        Ok(result)
+    }
 
-        let record = SecretMomentRecord {
-            moment_order: 0,
-            moment_id: input.moment_id.clone(),
-            workspace_id: ws.clone(),
-            version_id: input.version_id.clone(),
-            path: input.path.clone(),
-            recorded_at_ms: input.now_ms,
-            operation: SecretOp::Delete,
-            metadata_origin: input.metadata_origin.clone(),
-            metadata_summary: None,
-            metadata_correlation_id: None,
-        };
-        let outcome = self.store.write_with(faults, |tx| {
-            let moment_order = next_secret_moment_order(tx, ws)?;
-            insert_moment(tx, &record, moment_order, None)?;
-            tx.execute(
-                "DELETE FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
-                params![ws, input.version_id, input.path],
+    /// Mark the current tip's secret materialization as complete (capture
+    /// verified the plaintext on disk). A missing tip is a no-op.
+    fn mark_tip_materialized(
+        &mut self,
+        workspace_id: &str,
+        version_id: &str,
+        path: &str,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<(), DomainError> {
+        let ws = workspace_id.to_owned();
+        let version = version_id.to_owned();
+        let secret_path = path.to_owned();
+        let tip = self.store.read_with(move |conn| {
+            conn.query_row(
+                "SELECT f.latest_moment_id, f.ciphertext_base64, m.moment_order \
+                 FROM secret_files f \
+                 JOIN secret_moments m ON m.workspace_id = f.workspace_id \
+                   AND m.moment_id = f.latest_moment_id \
+                 WHERE f.workspace_id = ?1 AND f.version_id = ?2 AND f.path = ?3",
+                params![ws, version, secret_path],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
             )
-            .map_err(DomainError::sql_persist)?;
-            journal(tx, &input.path, "secret.file.delete", input.now_ms)?;
-            Ok::<SecretMomentRecord, DomainError>(SecretMomentRecord {
-                moment_order,
-                ..record.clone()
-            })
+            .optional()
+            .map_err(DomainError::sql_corrupt)
         })?;
-        Ok(Some(committed(outcome)?))
+        let Some((latest_moment_id, ciphertext_base64, moment_order)) = tip else {
+            return Ok(());
+        };
+        let ciphertext = dohc_engine_crypto::base64::forgiving_decode(&ciphertext_base64);
+        let ciphertext_sha = dohc_engine_storage::hex_sha256(&ciphertext);
+        let target_path = path.to_owned();
+        let outcome = self.store.write_with(faults, move |tx| {
+            dohc_engine_storage::record_completed_job(
+                tx,
+                &MaterializationJobSpec {
+                    job_id: format!("secret-mat_{latest_moment_id}"),
+                    target_path: target_path.clone(),
+                    content_sha256: ciphertext_sha.clone(),
+                    preimage: Preimage::Absent,
+                    target_generation: moment_order,
+                    now_ms,
+                },
+            )
+            .map_err(DomainError::from)
+        })?;
+        committed(outcome)
     }
 
     // ----------------------------------------------------------- materialize
@@ -356,7 +492,7 @@ impl<'a> SecretFileStore<'a> {
         let key = self.key;
         self.store.read_with(|conn| {
             require_version(conn, workspace_id, version_id)?;
-            let Some(tip) = self.select_tip(conn, workspace_id, version_id, path)? else {
+            let Some(tip) = select_tip(conn, workspace_id, version_id, path)? else {
                 return Ok(None);
             };
             let plaintext = aead::open(key, workspace_id, path, &tip)?;
@@ -526,46 +662,198 @@ impl<'a> SecretFileStore<'a> {
     }
 
     // ------------------------------------------------------------- internals
-
-    fn select_tip(
-        &self,
-        conn: &Connection,
-        workspace_id: &str,
-        version_id: &str,
-        path: &str,
-    ) -> Result<Option<SealedSecret>, DomainError> {
-        let row = conn
-            .query_row(
-                "SELECT iv_base64, auth_tag_base64, ciphertext_base64, byte_length \
-                 FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
-                params![workspace_id, version_id, path],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(DomainError::sql_corrupt)?;
-        match row {
-            None => Ok(None),
-            Some((iv, tag, ct, len)) => {
-                let byte_length = usize::try_from(len).map_err(|_| DomainError::StateCorrupt {
-                    reason: "secret tip has a negative byte length",
-                })?;
-                let sealed = SealedSecret::from_base64(&iv, &tag, &ct, byte_length)?;
-                Ok(Some(sealed))
-            }
-        }
-    }
 }
 
 // ============================================================================
 // Free helpers.
 // ============================================================================
+
+/// The keyless secret delete: records a delete moment and removes the tip. A
+/// no-op (no moment) when there is no current tip. Free-standing because a
+/// delete never decrypts — capture retire must work even when the workspace
+/// key is unavailable.
+pub fn delete_secret_file_keyless(
+    store: &mut EngineStore,
+    input: &SecretDelete,
+    faults: &dyn FaultInjector,
+) -> Result<Option<SecretMomentRecord>, DomainError> {
+    non_empty(&input.workspace_id, "workspace_id")?;
+    non_empty(&input.version_id, "version_id")?;
+    non_empty(&input.moment_id, "moment_id")?;
+    validate_secret_path(&input.path)?;
+    validate_origin(&input.metadata_origin)?;
+
+    let ws = &input.workspace_id;
+    // Desired-state first: an already-absent tip is an idempotent no-op
+    // (including an exactly-once retry of a delete that committed then
+    // crashed before the ack), so a committed retry is never misreported as
+    // `DuplicateMomentId`. Only a delete that will actually change state
+    // reaches the duplicate-moment-id guard.
+    let has_tip = store.read_with(|conn| {
+        require_version(conn, ws, &input.version_id)?;
+        if select_tip(conn, ws, &input.version_id, &input.path)?.is_none() {
+            return Ok(false);
+        }
+        if secret_moment_exists(conn, ws, &input.moment_id)? {
+            return Err(DomainError::DuplicateMomentId);
+        }
+        Ok::<bool, DomainError>(true)
+    })?;
+    if !has_tip {
+        return Ok(None);
+    }
+
+    let record = SecretMomentRecord {
+        moment_order: 0,
+        moment_id: input.moment_id.clone(),
+        workspace_id: ws.clone(),
+        version_id: input.version_id.clone(),
+        path: input.path.clone(),
+        recorded_at_ms: input.now_ms,
+        operation: SecretOp::Delete,
+        metadata_origin: input.metadata_origin.clone(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+    };
+    let outcome = store.write_with(faults, |tx| {
+        let moment_order = next_secret_moment_order(tx, ws)?;
+        insert_moment(tx, &record, moment_order, None)?;
+        tx.execute(
+            "DELETE FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+            params![ws, input.version_id, input.path],
+        )
+        .map_err(DomainError::sql_persist)?;
+        journal(tx, &input.path, "secret.file.delete", input.now_ms)?;
+        Ok::<SecretMomentRecord, DomainError>(SecretMomentRecord {
+            moment_order,
+            ..record.clone()
+        })
+    })?;
+    Ok(Some(committed(outcome)?))
+}
+
+/// Autonomous, KEYLESS secret retire: derives the delete moment id via the
+/// length-framed capture scheme (no caller-supplied ids) and removes the tip.
+/// An absent tip is an idempotent no-op. The reserved secret moment order is
+/// pinned against the one the delete actually persisted (release-safe).
+pub fn capture_secret_retire(
+    store: &mut EngineStore,
+    input: &CaptureSecretRetire,
+    faults: &dyn FaultInjector,
+) -> Result<Option<SecretMomentRecord>, DomainError> {
+    non_empty(&input.workspace_id, "workspace_id")?;
+    non_empty(&input.version_id, "version_id")?;
+    validate_secret_path(&input.path)?;
+    let ws = input.workspace_id.clone();
+    // Single-writer: the pre-read reservation is authoritative; the post-write
+    // pin makes the assumption release-checked.
+    let reserved = store.read_with(|conn| next_secret_moment_order(conn, &ws))?;
+    let moment_id = derive_capture_secret_retire_moment_id(
+        &input.workspace_id,
+        &input.version_id,
+        &input.path,
+        reserved,
+    );
+    let result = delete_secret_file_keyless(
+        store,
+        &SecretDelete {
+            workspace_id: input.workspace_id.clone(),
+            version_id: input.version_id.clone(),
+            path: input.path.clone(),
+            moment_id,
+            metadata_origin: input.metadata_origin.clone(),
+            now_ms: input.now_ms,
+        },
+        faults,
+    )?;
+    if let Some(moment) = &result
+        && moment.moment_order != reserved
+    {
+        return Err(DomainError::StateCorrupt {
+            reason: "secret capture moment order diverged from reserved order",
+        });
+    }
+    Ok(result)
+}
+
+/// Derive an autonomous secret capture WRITE moment id: length-framed over
+/// (workspace, version, path, reserved secret order), same scheme family as
+/// the plaintext capture ids but tagged so the two can never collide.
+pub fn derive_capture_secret_moment_id(
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+    next_secret_moment_order: i64,
+) -> String {
+    let order = next_secret_moment_order.to_string();
+    format!(
+        "moment-{}",
+        crate::store::hash_framed_fields(&[
+            b"capture-secret-write",
+            workspace_id.as_bytes(),
+            version_id.as_bytes(),
+            path.as_bytes(),
+            order.as_bytes(),
+        ])
+    )
+}
+
+/// Derive an autonomous secret capture RETIRE moment id (distinct tag from
+/// the write derivation).
+pub fn derive_capture_secret_retire_moment_id(
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+    next_secret_moment_order: i64,
+) -> String {
+    let order = next_secret_moment_order.to_string();
+    format!(
+        "moment-{}",
+        crate::store::hash_framed_fields(&[
+            b"capture-secret-retire",
+            workspace_id.as_bytes(),
+            version_id.as_bytes(),
+            path.as_bytes(),
+            order.as_bytes(),
+        ])
+    )
+}
+
+/// Read the encrypted tip for a secret path. Free-standing (no key borrow) so
+/// keyless flows — deletes, capture retires — can share it.
+fn select_tip(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<Option<SealedSecret>, DomainError> {
+    let row = conn
+        .query_row(
+            "SELECT iv_base64, auth_tag_base64, ciphertext_base64, byte_length \
+             FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+            params![workspace_id, version_id, path],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    match row {
+        None => Ok(None),
+        Some((iv, tag, ct, len)) => {
+            let byte_length = usize::try_from(len).map_err(|_| DomainError::StateCorrupt {
+                reason: "secret tip has a negative byte length",
+            })?;
+            let sealed = SealedSecret::from_base64(&iv, &tag, &ct, byte_length)?;
+            Ok(Some(sealed))
+        }
+    }
+}
 
 fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
     match outcome {
