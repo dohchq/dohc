@@ -344,3 +344,34 @@ async fn overflow_is_never_lost_even_when_the_queue_is_saturated() {
         ReconcileRun::Completed(_)
     ));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ack_rejects_an_applied_ingest_without_captured_identity() {
+    use dohc_engine_files::FilesError;
+
+    let ws = Scratch::new();
+    ws.write("a.md", b"alpha");
+    let mut actor = FilesActor::spawn_async(ws.path().to_path_buf(), ScanBounds::default())
+        .await
+        .expect("spawn");
+    let handle = actor.handle();
+    let run = handle
+        .reconcile(CancellationToken::new())
+        .await
+        .expect("reconcile");
+    let ReconcileRun::Completed(plan) = run else {
+        panic!("expected completed plan");
+    };
+    let mut result = apply_reconcile_plan(&plan, &mut AcceptAll, &NoFaults);
+    // A hand-built (or corrupted) receipt claiming an applied ingest without
+    // its captured identity must fail closed: recording the scan-time hash
+    // would recreate the rapid-write lost-capture bug.
+    result.captured.clear();
+    let err = handle
+        .acknowledge_capture(plan, result)
+        .await
+        .expect_err("malformed receipt must be refused");
+    assert!(matches!(err, FilesError::InvalidCaptureReceipt { .. }));
+
+    actor.close().expect("close");
+}

@@ -443,17 +443,24 @@ impl ReconcileController {
                 continue;
             }
             match op {
-                CaptureOp::Ingest {
-                    path, size, sha256, ..
-                } => {
+                CaptureOp::Ingest { path, .. } => {
                     // A re-reading sink can persist newer bytes than the scan
                     // hashed; record what was ACTUALLY captured so a later
                     // revert to the scan-time bytes still diffs as a change.
-                    let (size, sha256) = captured
-                        .get(path.as_str())
-                        .map(|(size, sha)| (*size, (*sha).to_owned()))
-                        .unwrap_or_else(|| (*size, sha256.clone()));
-                    next.insert(path.clone(), ManifestEntry { size, sha256 });
+                    // A receipt claiming an applied ingest WITHOUT its captured
+                    // identity is malformed — falling back to the scan hash
+                    // would recreate the exact lost-capture bug this exists to
+                    // prevent, so it fails closed before any state advances.
+                    let Some((size, sha)) = captured.get(path.as_str()) else {
+                        return Err(FilesError::InvalidCaptureReceipt { path: path.clone() });
+                    };
+                    next.insert(
+                        path.clone(),
+                        ManifestEntry {
+                            size: *size,
+                            sha256: (*sha).to_owned(),
+                        },
+                    );
                 }
                 CaptureOp::Retire { path } => next.remove(path),
             }

@@ -1177,6 +1177,11 @@ fn capture_retire_in_tx(
         b"capture",
         b"none",
         b"",
+        if input.only_if_text_head {
+            b"text-only".as_slice()
+        } else {
+            b"any-head".as_slice()
+        },
     ]);
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
@@ -1213,6 +1218,28 @@ fn capture_retire_in_tx(
             deduped: false,
         });
     };
+    if input.only_if_text_head {
+        let head = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?.ok_or(
+            DomainError::StateCorrupt {
+                reason: "path alias points at a missing snapshot",
+            },
+        )?;
+        if head.content_kind != "text" {
+            // A live non-text head is not the caller's to retire; settle as a
+            // no-op exactly like an absent path.
+            record_request(
+                tx,
+                input.request_id.as_deref(),
+                &payload_hash,
+                0,
+                input.now_ms,
+            )?;
+            return Ok(CaptureRetireResult {
+                retired: None,
+                deduped: false,
+            });
+        }
+    }
     let next_order = next_moment_order(tx)?;
     let moment_id = derive_capture_retire_moment_id(&input.workspace_id, &object_id, next_order);
     let delete = DeleteTextFile {

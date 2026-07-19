@@ -1,5 +1,6 @@
 //! Dormant files-reconcile adapter for the actor-owned capture primitives.
 
+use dohc_engine_domain::DomainError;
 use dohc_engine_files::media::is_text_media_type;
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_files::{
@@ -9,7 +10,7 @@ use dohc_engine_files::{
 use dohc_engine_runtime::search::{
     FilesPolicyRule, read_engine_search_policy, resolve_effective_policy,
 };
-use dohc_engine_runtime::{ActorHandle, CaptureIngest, CaptureRetire, NoFaults};
+use dohc_engine_runtime::{ActorHandle, CaptureIngest, CaptureRetire, NoFaults, RuntimeError};
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -168,40 +169,58 @@ impl StoreCaptureSink {
     // The blocking actor calls below carry no timeout; this adapter is dormant
     // and not on any request path. The composition driver (sub-shard C) owns
     // stall handling when it wires this sink into workspace open/close.
-    fn ingest_text(&self, path: &str, text: String) -> Result<(), CaptureError> {
-        self.actor
-            .capture_ingest_blocking(
-                CaptureIngest {
-                    workspace_id: self.workspace_id.clone(),
-                    version_id: self.version_id.clone(),
-                    path: path.to_owned(),
-                    text,
-                    metadata_origin: CAPTURE_METADATA_ORIGIN.to_owned(),
-                    author_json: self.author_json.clone(),
-                    now_ms: self.now_ms,
-                    request_id: None,
-                },
-                Arc::new(NoFaults),
-            )
-            .map(|_| ())
-            .map_err(|_| INGEST_FAILED)
+    fn ingest_text(&self, path: &str, text: String) -> Result<DomainIngest, CaptureError> {
+        match self.actor.capture_ingest_blocking(
+            CaptureIngest {
+                workspace_id: self.workspace_id.clone(),
+                version_id: self.version_id.clone(),
+                path: path.to_owned(),
+                text,
+                metadata_origin: CAPTURE_METADATA_ORIGIN.to_owned(),
+                author_json: self.author_json.clone(),
+                now_ms: self.now_ms,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+        ) {
+            Ok(_) => Ok(DomainIngest::Persisted),
+            // The store's admission gate is STRICTER than the scan floor
+            // (e.g. `..` substrings, byte-1 colons). A name the store refuses
+            // is settled — retrying can never succeed, and one legal on-disk
+            // filename must not poison every capture run as degraded.
+            Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
+                Ok(DomainIngest::NameRefused)
+            }
+            Err(_) => Err(INGEST_FAILED),
+        }
     }
 
-    fn retire_head(&self, path: &str) -> Result<(), CaptureError> {
-        self.actor
-            .capture_retire_blocking(
-                CaptureRetire {
-                    workspace_id: self.workspace_id.clone(),
-                    version_id: self.version_id.clone(),
-                    path: path.to_owned(),
-                    now_ms: self.now_ms,
-                    request_id: None,
-                },
-                Arc::new(NoFaults),
-            )
-            .map(|_| ())
-            .map_err(|_| RETIRE_FAILED)
+    fn retire_head(&self, path: &str, only_if_text_head: bool) -> Result<(), CaptureError> {
+        match self.actor.capture_retire_blocking(
+            CaptureRetire {
+                workspace_id: self.workspace_id.clone(),
+                version_id: self.version_id.clone(),
+                path: path.to_owned(),
+                now_ms: self.now_ms,
+                request_id: None,
+                only_if_text_head,
+            },
+            Arc::new(NoFaults),
+        ) {
+            Ok(_) => Ok(()),
+            // A name the store refuses to address can never hold a head;
+            // there is nothing to retire.
+            Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => Ok(()),
+            Err(_) => Err(RETIRE_FAILED),
+        }
     }
+}
+
+/// How the domain store disposed of a capture write.
+enum DomainIngest {
+    Persisted,
+    /// The store's admission gate refused the name (settled, not retryable).
+    NameRefused,
 }
 
 impl CaptureSink for StoreCaptureSink {
@@ -240,7 +259,7 @@ impl CaptureSink for StoreCaptureSink {
             // `.dohc/files.toml` narrowed the path out of engine ownership:
             // retire any stale head (TS: "Stopped tracking by policy") so
             // opted-out content is never left stale-but-authoritative.
-            self.retire_head(path)?;
+            self.retire_head(path, false)?;
             return Ok(IngestOutcome::NotOwned);
         }
         match self.read_current(path, media_type)? {
@@ -251,15 +270,17 @@ impl CaptureSink for StoreCaptureSink {
                 // scan-time bytes would diff clean and never re-ingest.
                 let size = text.len() as u64;
                 let sha256 = sha256_hex(text.as_bytes());
-                self.ingest_text(path, text)?;
-                Ok(IngestOutcome::Captured { size, sha256 })
+                match self.ingest_text(path, text)? {
+                    DomainIngest::Persisted => Ok(IngestOutcome::Captured { size, sha256 }),
+                    DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
+                }
             }
             CurrentContent::Untracked => {
                 // The path stopped being engine-ownable text (absent, symlink,
                 // non-file, or over cap): retire so no stale snapshot remains,
                 // and report NotOwned so the manifest forgets the path instead
                 // of recording the planned ingest as captured.
-                self.retire_head(path)?;
+                self.retire_head(path, false)?;
                 Ok(IngestOutcome::NotOwned)
             }
             CurrentContent::Binary => {
@@ -271,7 +292,11 @@ impl CaptureSink for StoreCaptureSink {
                 // never restore the head — a silent lost capture. Forgetting
                 // the path instead re-offers it on every later scan, which is
                 // also what lets binary capture pick it up once it lands.
-                self.retire_head(path)?;
+                //
+                // only_if_text_head: a LIVE binary head (mirrored resolve, or
+                // the binary sub-shard once it lands) is not this plaintext
+                // sink's to delete — the retire is a no-op for it.
+                self.retire_head(path, true)?;
                 Ok(IngestOutcome::NotOwned)
             }
         }
@@ -288,12 +313,22 @@ impl CaptureSink for StoreCaptureSink {
                 // regular file that REAPPEARED between scan and apply must not
                 // be retired — fail the op so the path stays dirty and the
                 // rescan captures the live content instead.
-                match std::fs::symlink_metadata(self.shadow_root.join(path)) {
+                let absolute = self.shadow_root.join(path);
+                // Same ancestor containment as read_current: the probe's
+                // verdict must never be based on an off-root file reached
+                // through a symlinked ancestor. A missing parent confirms the
+                // tracked file gone; an escape retains last-known-good.
+                match contained_parent(&self.shadow_root, &absolute) {
+                    Containment::Contained => {}
+                    Containment::Absent => return self.retire_head(path, false),
+                    Containment::Escaped => return Err(ESCAPES_ROOT),
+                }
+                match std::fs::symlink_metadata(&absolute) {
                     Ok(metadata) if metadata.file_type().is_file() => Err(RETIRE_RACED),
                     // A non-regular replacement confirms the tracked regular
                     // file gone; absence confirms it outright.
-                    Ok(_) => self.retire_head(path),
-                    Err(err) if absent_error(&err) => self.retire_head(path),
+                    Ok(_) => self.retire_head(path, false),
+                    Err(err) if absent_error(&err) => self.retire_head(path, false),
                     // Indeterminate (permissions, locks): cannot prove
                     // absence — retain last-known-good, fail-safe.
                     Err(_) => Err(RETIRE_FAILED),
@@ -860,6 +895,32 @@ mod tests {
     }
 
     #[test]
+    fn store_refused_name_settles_as_not_owned_instead_of_degrading() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        // Legal on-disk names the scan floor tracks but the domain store's
+        // stricter admission gate refuses (`..` substring). Retrying can never
+        // succeed, so the op must settle instead of poisoning every capture
+        // run as degraded.
+        write_file(scratch.path(), "release..notes.md", b"legal on disk");
+
+        assert_eq!(
+            ingest(&mut sink, "release..notes.md").expect("refused name settles"),
+            IngestOutcome::NotOwned
+        );
+        // Once the file is gone, a planned retire of the refused name is a
+        // clean no-op (the store can never have held a head for it).
+        std::fs::remove_file(scratch.path().join("release..notes.md")).expect("delete");
+        sink.retire("release..notes.md")
+            .expect("nothing to retire under a refused name");
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(moment_count(&db, "release..notes.md"), 0);
+    }
+
+    #[test]
     fn retire_is_refused_when_a_regular_file_reappeared() {
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor = WorkspaceSupervisor::new();
@@ -883,19 +944,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fifo_leaf_neither_blocks_nor_captures() {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor = WorkspaceSupervisor::new();
         let (db, mut sink) = sink_for(&scratch, &supervisor);
         let fifo_path = scratch.path().join("pipe.md");
-        let c_path = CString::new(fifo_path.as_os_str().as_bytes()).expect("cstring");
-        assert_eq!(
-            unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) },
-            0,
-            "mkfifo failed"
-        );
+        // The workspace forbids unsafe code, so shell out to coreutils
+        // instead of calling libc::mkfifo directly.
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo_path)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        assert!(made, "mkfifo unavailable on this unix host");
 
         // The advisory lstat rejects the at-rest FIFO; the O_NONBLOCK open is
         // what guarantees a FIFO swapped in AFTER that check cannot hang the

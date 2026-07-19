@@ -235,6 +235,12 @@ pub struct CaptureRetire {
     pub path: String,
     pub now_ms: i64,
     pub request_id: Option<String>,
+    /// Retire ONLY when the current head is text. The plaintext capture sink
+    /// sets this on its binary-deferral path so it can clear a stale TEXT
+    /// head without ever deleting a live binary head it does not own (binary
+    /// heads exist via mirrored resolve / the binary capture path). A binary
+    /// head under this flag is a no-op, not an error.
+    pub only_if_text_head: bool,
 }
 
 /// Inputs to [`crate::VersionedTextStore::delete_text_file`].
