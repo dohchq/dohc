@@ -101,18 +101,69 @@ pub fn load_or_create_key_file(root: &std::path::Path) -> Result<SecretDataKey, 
     }
 }
 
-/// Read the key file WITHOUT following a symlink at the leaf: a symlinked
-/// `secret.key` could point key custody (and the 0600 chmod) at an arbitrary
-/// file. Mirrors the policy-file symlink refusal in the search module.
+/// Read the key file WITHOUT following a symlink at the leaf, bound to the
+/// opened descriptor (O_NOFOLLOW / FILE_FLAG_OPEN_REPARSE_POINT — a leaf
+/// swapped in between a check and a separate path-open could otherwise point
+/// key custody, and the 0600 chmod, at an arbitrary file). Mirrors the
+/// capture sink's no-follow reopen posture.
 fn read_key_file_no_follow(path: &std::path::Path) -> std::io::Result<String> {
-    let metadata = std::fs::symlink_metadata(path)?;
-    if metadata.file_type().is_symlink() {
+    use std::io::Read;
+    let mut file = open_no_follow(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "secret key file must be a regular file",
+        ));
+    }
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    Ok(content)
+}
+
+#[cfg(unix)]
+fn open_no_follow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::MetadataExt;
+    // This crate carries no libc dependency for O_NOFOLLOW, so the race is
+    // closed by identity instead: lstat refuses an at-rest symlink, and the
+    // OPENED descriptor must describe the very inode the lstat saw — a leaf
+    // swapped to a symlink between the two resolves to a different inode and
+    // is refused.
+    let pre = std::fs::symlink_metadata(path)?;
+    if pre.file_type().is_symlink() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "secret key file must not be a symlink",
         ));
     }
-    std::fs::read_to_string(path)
+    let file = std::fs::OpenOptions::new().read(true).open(path)?;
+    let post = file.metadata()?;
+    if pre.dev() != post.dev() || pre.ino() != post.ino() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "secret key file changed identity during open",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn open_no_follow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "secret key file must not be a reparse point",
+        ));
+    }
+    Ok(file)
 }
 
 /// Load the workspace data key, returning `Ok(None)` when no key file exists.
@@ -163,6 +214,26 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
         builder
             .create(parent)
             .map_err(|_| CryptoError::KeyFileMalformed)?;
+        // The key directory must be the workspace's REAL `.dohc/engine` —
+        // an aliased `.dohc` (symlinked ancestor) would redirect key custody
+        // off-workspace. Strict equality against the canonicalized lexical
+        // location, the same rule the capture sink applies to content paths.
+        let real_parent = parent
+            .canonicalize()
+            .map_err(|_| CryptoError::KeyFileMalformed)?;
+        let mut expected = root
+            .canonicalize()
+            .map_err(|_| CryptoError::KeyFileMalformed)?;
+        for segment in std::path::Path::new(SECRET_KEY_FILE_RELATIVE)
+            .parent()
+            .into_iter()
+            .flat_map(|p| p.components())
+        {
+            expected.push(segment);
+        }
+        if real_parent != expected {
+            return Err(CryptoError::KeyFileMalformed);
+        }
     }
     // DURABLE publish: temp (0600) + fsync + hard-link. The key file must
     // be durably on disk BEFORE any ciphertext is committed under it —
