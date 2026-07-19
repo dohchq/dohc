@@ -59,6 +59,7 @@ pub fn validate_shadow_root(root: &Path) -> Result<ValidatedShadowRoot, ShadowFe
 
 /// Harness-only helper for a clone tool or integration test. Production daemon
 /// code only calls [`validate_shadow_root`]; it never manufactures markers.
+#[cfg(any(test, feature = "harness"))]
 pub fn write_shadow_marker_for_harness(root: &Path, token: &str) -> Result<(), ShadowFenceError> {
     if !valid_token(token.as_bytes()) {
         return Err(ShadowFenceError::MarkerMalformed);
