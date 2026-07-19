@@ -1549,3 +1549,66 @@ import scan, to fold into SHARDS on the next refinement):
 - Wave 5 remaining pre-cutover: R13b-rest rest (ICE scope decision), gate-perf
   redesign, R14-deferred (WatcherUnavailable prod wiring, open-after-close race,
   soak runner), then GATE6, then R15 (ICE checkpoint — STOP).
+
+## 2026-07-19 — R14-deferred open-after-close race merged (#201); AUTONOMOUS PRE-CUTOVER WORK COMPLETE — R15 CHECKPOINT
+
+### #201 (R14-deferred: open-after-close race) — DISCHARGED
+`workspace_close` did not serialize against `workspace_open`, so a concurrent
+reopen of the same root could receive an actor being torn down (ops then fail
+`ActorUnavailable` while the workspace reports open). Fix: a new
+`WorkspaceSupervisor::begin_close` installs the global `Closing` marker
+synchronously under the registry lock BEFORE the handle is removed; the close
+finishes on a detached blocking task (cancellation-safe; `WorkspaceClose::Drop`
+is the backstop, `finish()` takes the actor so Drop never double-closes).
+`workspace_open`'s idempotent short-circuit now rejects a differing workspace id
+first, then validates the bound actor's lifecycle (a dead actor is stale ->
+reopen). Four review rounds; tests: 128-cycle interleaving, cancellation, and a
+best-effort two-service regression. Documented as OUT OF SCOPE: full correctness
+for two `EngineService` instances sharing the global supervisor for one root —
+not a production configuration (the sidecar is one process, one service, one
+registry).
+
+### Autonomous pre-cutover status — everything tractable is DONE
+Merged this program run: BINHEAD (#194/#195), BlobChunk (#196), A2 (#197),
+shadow_fence gating (#198), fuzz surfaces (#199), integrator sweep (#200),
+open-after-close race (#201). Verified-resolved without change:
+flaky-Windows-materializer (no ignored/flaky test exists; `FlakyReplacer` is an
+intentional fault-injection double). All correctness-critical, cutover-relevant
+work is landed.
+
+### R15 CHECKPOINT — the following need ICE decisions before the path to R15 can proceed
+1. **gate-perf (#202, DRAFT — held for scope call).** The cached-base
+   implementation is correct (independent adversarial review: no staleness
+   hole; cross-process `Resumed`/base-claim invalidation + LRU cap added) but
+   does NOT meet the asymptotic goal: `advance()` re-runs `encode_full_state()`
+   + `scan_v1()` (O(doc)) per append, so it RELOCATED rather than eliminated the
+   O(doc) cost — a session is still O(N^2). It is a constant-factor win (no
+   per-append disk reconstruct). DECIDE: (a) invest in the harder incremental-
+   base redesign to hit O(N); (b) ship the constant-factor version (fix the two
+   remaining minor items); (c) defer — it's a dormant perf item, not
+   cutover-blocking.
+2. **WatcherUnavailable prod wiring + full soak runner (R14-deferred) — BLOCKED
+   on a missing composition.** The daemon does NOT compose the files/watcher
+   layer at all (`supervisor.open` spawns only the engine-STORE actor;
+   `dohc_engine_files::NativeWatcher` has zero daemon consumers; watch.rs's own
+   TODO says it has "no home until the composition shard wires files actor +
+   watcher into the daemon"). Composing that is SHARD-SIZED (like R13), not a
+   small obligation — the same blocked-on-missing-composition pattern as
+   R13b-rest. DECIDE: is a files-into-daemon composition shard in scope pre-
+   cutover? The full soak's watcher-storm scenarios depend on it; a partial soak
+   (open/close, crash/restart, workspace-switch) is buildable now if wanted.
+3. **R13b-rest remaining surfaces — BLOCKED on daemon RPC surface.** The
+   composed R13 daemon exposes 8 wire methods; cli/mcp/shares/capture need
+   chats/secrets/shares/blob-capture RPCs that don't exist (R13-dispatcher
+   growth). BlobChunk (the one dormant-actionable piece) is done. DECIDE: same
+   files/RPC composition question as (2).
+4. **GATE6 formal deps (R14, R10b, R15-REHEARSE) ARE all gate-passed** — GATE6 is
+   formally convenable. But the R14-deferred quality obligations above (watcher,
+   full soak) are open (blocked on the composition). DECIDE whether GATE6 passes
+   with those documented-open, or whether they must land first.
+5. **R15 cutover decisions (from the plan):** cutover scope, dogfood-data reset
+   confirmation, min dogfood duration (>= 2 weeks, DECISIONS #8), member-share-
+   log-across-epoch-reset semantics, macOS build evidence (DECISIONS #2 deferred).
+
+Per the standing directive, the autonomous run STOPS here at the R15 checkpoint.
+The above are handed back to Ice.
