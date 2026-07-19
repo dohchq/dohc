@@ -1,6 +1,6 @@
 use dohc_engine_domain::{
-    CaptureIngest, CaptureRetire, ListMomentsQuery, NoFaults, VersionedTextStore,
-    derive_capture_moment_id,
+    CaptureIngest, CaptureRetire, DomainError, ListMomentsQuery, NoFaults, RenameTextFile,
+    VersionedTextStore, derive_capture_moment_id, derive_capture_object_id,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
@@ -72,6 +72,95 @@ fn object_ids_are_stable_per_path_and_distinct_between_paths() {
 
     assert_eq!(first.snapshot.object_id, same.snapshot.object_id);
     assert_ne!(first.snapshot.object_id, other.snapshot.object_id);
+}
+
+#[test]
+fn recapturing_a_renamed_path_mints_a_distinct_object() {
+    let (_scratch, mut store) = open_store();
+    let original = VersionedTextStore::new(&mut store)
+        .capture_ingest(&ingest("a.md", "original", 10), &NO_FAULTS)
+        .expect("initial capture");
+    VersionedTextStore::new(&mut store)
+        .rename_text_file(
+            &RenameTextFile {
+                workspace_id: WS.to_owned(),
+                version_id: VERSION.to_owned(),
+                from_path: "a.md".to_owned(),
+                to_path: "b.md".to_owned(),
+                moment_id: "rename-a-to-b".to_owned(),
+                metadata_origin: "rpc-test".to_owned(),
+                author_json: None,
+                now_ms: 20,
+            },
+            &NO_FAULTS,
+        )
+        .expect("rename capture");
+
+    let recaptured = VersionedTextStore::new(&mut store)
+        .capture_ingest(&ingest("a.md", "new", 30), &NO_FAULTS)
+        .expect("recapture original path");
+
+    assert_ne!(recaptured.snapshot.object_id, original.snapshot.object_id);
+    let renamed = VersionedTextStore::new(&mut store)
+        .read_text(WS, VERSION, "b.md")
+        .expect("read renamed path")
+        .expect("renamed path remains live");
+    assert_eq!(renamed.object_id, original.snapshot.object_id);
+    assert_eq!(renamed.text, "original");
+    let new_path = VersionedTextStore::new(&mut store)
+        .read_text(WS, VERSION, "a.md")
+        .expect("read recaptured path")
+        .expect("recaptured path is live");
+    assert_eq!(new_path.object_id, recaptured.snapshot.object_id);
+    assert_eq!(new_path.text, "new");
+}
+
+#[test]
+fn length_prefixed_capture_ids_distinguish_embedded_nul_tuples() {
+    const FIRST_WS: &str = "a\0b";
+    const FIRST_VERSION: &str = "c";
+    const SECOND_WS: &str = "a";
+    const SECOND_VERSION: &str = "b\0c";
+    const PATH: &str = "same.md";
+
+    let first_id = derive_capture_object_id(FIRST_WS, FIRST_VERSION, PATH);
+    let second_id = derive_capture_object_id(SECOND_WS, SECOND_VERSION, PATH);
+    assert_ne!(first_id, second_id);
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(FIRST_WS, FIRST_VERSION, 1, &NO_FAULTS)
+        .expect("ensure first tuple");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(SECOND_WS, SECOND_VERSION, 2, &NO_FAULTS)
+        .expect("ensure second tuple");
+
+    let capture = |workspace_id: &str, version_id: &str, text: &str, now_ms: i64| CaptureIngest {
+        workspace_id: workspace_id.to_owned(),
+        version_id: version_id.to_owned(),
+        path: PATH.to_owned(),
+        text: text.to_owned(),
+        metadata_origin: "capture-test".to_owned(),
+        author_json: None,
+        now_ms,
+        request_id: None,
+    };
+    let first = VersionedTextStore::new(&mut store)
+        .capture_ingest(&capture(FIRST_WS, FIRST_VERSION, "first", 10), &NO_FAULTS)
+        .expect("capture first tuple");
+    let second = VersionedTextStore::new(&mut store)
+        .capture_ingest(
+            &capture(SECOND_WS, SECOND_VERSION, "second", 20),
+            &NO_FAULTS,
+        )
+        .expect("capture second tuple");
+
+    assert_eq!(first.snapshot.object_id, first_id);
+    assert_eq!(second.snapshot.object_id, second_id);
+    assert_eq!(first.snapshot.text, "first");
+    assert_eq!(second.snapshot.text, "second");
 }
 
 #[test]
@@ -271,4 +360,24 @@ fn request_ids_replay_ingest_and_retire_exactly_once() {
     assert!(replay_delete.deduped);
     assert_eq!(replay_delete.retired, first_delete.retired);
     assert_eq!(moment_count(&mut store), 2);
+}
+
+#[test]
+fn request_id_reuse_with_changed_capture_provenance_is_rejected() {
+    let (_scratch, mut store) = open_store();
+    let mut first = ingest("a.md", "A", 10);
+    first.request_id = Some("capture-provenance-request".to_owned());
+    VersionedTextStore::new(&mut store)
+        .capture_ingest(&first, &NO_FAULTS)
+        .expect("first capture");
+
+    let mut changed = first;
+    changed.metadata_origin = "different-origin".to_owned();
+    changed.now_ms = 20;
+    let error = VersionedTextStore::new(&mut store)
+        .capture_ingest(&changed, &NO_FAULTS)
+        .expect_err("changed provenance must not replay");
+
+    assert!(matches!(error, DomainError::IdempotencyKeyReuseMismatch));
+    assert_eq!(moment_count(&mut store), 1);
 }

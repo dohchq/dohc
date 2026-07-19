@@ -140,14 +140,14 @@ impl<'a> VersionedTextStore<'a> {
 
     /// Capture a text file without caller-supplied object or moment ids.
     ///
-    /// New objects use the full 64-character lowercase SHA-256 hex digest in
-    /// `object-<sha256(version_id || NUL || normalized_path)>`. Write moments
-    /// use `moment-<sha256(version_id || NUL || object_id || NUL ||
-    /// content_sha256 || NUL || before_latest_moment_id_or_empty)>`. Thus ids
-    /// are deterministic per history edge, stable across retries, and a revert
-    /// receives a different moment id from the earlier equal-content write.
-    /// Retires use `moment-<sha256(version_id || NUL || object_id || NUL ||
-    /// "DELETE" || NUL || before_latest_moment_id)>`, also with the full digest.
+    /// Every capture id hashes fields framed as `u64-LE byte length || bytes`,
+    /// so embedded delimiter bytes cannot make distinct inputs collide. New
+    /// paths first derive `object-<sha256(workspace_id, version_id, path)>`. An
+    /// existing row with that id is reused only when it has no live alias in
+    /// the workspace (retire/recreate continuity). If it is still live at
+    /// another path, capture mints a disambiguated object id by also framing
+    /// the next monotonic moment order. Write and retire moments both derive
+    /// `moment-<sha256(workspace_id, object_id, next_moment_order)>`.
     pub fn capture_ingest(
         &mut self,
         input: &CaptureIngest,
@@ -1045,12 +1045,19 @@ fn capture_ingest_in_tx(
     if !version_exists(tx, &input.workspace_id, &input.version_id)? {
         return Err(DomainError::VersionNotFound);
     }
-    let payload_hash = hash_fields(&[
+    let (author_kind, author_json) = match input.author_json.as_deref() {
+        Some(author_json) => (b"some".as_slice(), author_json.as_bytes()),
+        None => (b"none".as_slice(), b"".as_slice()),
+    };
+    let payload_hash = hash_framed_fields(&[
         b"capture-ingest",
         input.workspace_id.as_bytes(),
         input.version_id.as_bytes(),
         input.path.as_bytes(),
         input.text.as_bytes(),
+        input.metadata_origin.as_bytes(),
+        author_kind,
+        author_json,
     ]);
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
@@ -1061,20 +1068,40 @@ fn capture_ingest_in_tx(
         return reconstruct_capture_write(tx, &input.workspace_id, recorded.result_seq);
     }
 
+    let mut reserved_moment_order = None;
     let object_id = match alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?
     {
         Some(object_id) => object_id,
         None => {
-            let object_id =
+            let derived_object_id =
                 derive_capture_object_id(&input.workspace_id, &input.version_id, &input.path);
-            if !object_exists(tx, &input.workspace_id, &object_id)? {
+            let object_id = if !object_exists(tx, &input.workspace_id, &derived_object_id)? {
                 tx.execute(
                     "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
                      VALUES (?1, ?2, ?3)",
-                    params![input.workspace_id, object_id, input.now_ms],
+                    params![input.workspace_id, derived_object_id, input.now_ms],
                 )
                 .map_err(DomainError::sql_persist)?;
-            }
+                derived_object_id
+            } else if !object_has_live_alias(tx, &input.workspace_id, &derived_object_id)? {
+                derived_object_id
+            } else {
+                let next_order = next_moment_order(tx)?;
+                let disambiguated_object_id = derive_disambiguated_capture_object_id(
+                    &input.workspace_id,
+                    &input.version_id,
+                    &input.path,
+                    next_order,
+                );
+                tx.execute(
+                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                     VALUES (?1, ?2, ?3)",
+                    params![input.workspace_id, disambiguated_object_id, input.now_ms],
+                )
+                .map_err(DomainError::sql_persist)?;
+                reserved_moment_order = Some(next_order);
+                disambiguated_object_id
+            };
             tx.execute(
                 "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
                  VALUES (?1, ?2, ?3, ?4)",
@@ -1101,7 +1128,10 @@ fn capture_ingest_in_tx(
         return Ok(result);
     }
 
-    let next_order = next_moment_order(tx)?;
+    let next_order = match reserved_moment_order {
+        Some(next_order) => next_order,
+        None => next_moment_order(tx)?,
+    };
     let moment_id = derive_capture_moment_id(&input.workspace_id, &object_id, next_order);
     let write = WriteText {
         workspace_id: input.workspace_id.clone(),
@@ -1135,11 +1165,14 @@ fn capture_retire_in_tx(
     if !version_exists(tx, &input.workspace_id, &input.version_id)? {
         return Err(DomainError::VersionNotFound);
     }
-    let payload_hash = hash_fields(&[
+    let payload_hash = hash_framed_fields(&[
         b"capture-retire",
         input.workspace_id.as_bytes(),
         input.version_id.as_bytes(),
         input.path.as_bytes(),
+        b"capture",
+        b"none",
+        b"",
     ]);
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
@@ -1789,6 +1822,22 @@ fn object_exists(
     let found: Option<i64> = conn
         .query_row(
             "SELECT 1 FROM file_objects WHERE workspace_id = ?1 AND object_id = ?2",
+            params![workspace_id, object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(found.is_some())
+}
+
+fn object_has_live_alias(
+    conn: &Connection,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<bool, DomainError> {
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM path_aliases WHERE workspace_id = ?1 AND object_id = ?2 LIMIT 1",
             params![workspace_id, object_id],
             |row| row.get(0),
         )
@@ -2818,14 +2867,39 @@ pub fn text_blob_sha256(text: &str) -> String {
 }
 
 /// Derive the stable workspace-scoped object id for a captured version-local
-/// path: `object-` plus lowercase-hex SHA-256 over the NUL-separated
+/// path: `object-` plus lowercase-hex SHA-256 over length-prefixed
 /// `workspace_id`, `version_id`, and `path` fields.
 pub fn derive_capture_object_id(workspace_id: &str, version_id: &str, path: &str) -> String {
-    format!("object-{}", hash_joined(&[workspace_id, version_id, path]))
+    format!(
+        "object-{}",
+        hash_framed_fields(&[
+            workspace_id.as_bytes(),
+            version_id.as_bytes(),
+            path.as_bytes(),
+        ])
+    )
+}
+
+fn derive_disambiguated_capture_object_id(
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+    next_moment_order: i64,
+) -> String {
+    let next_moment_order = next_moment_order.to_string();
+    format!(
+        "object-{}",
+        hash_framed_fields(&[
+            workspace_id.as_bytes(),
+            version_id.as_bytes(),
+            path.as_bytes(),
+            next_moment_order.as_bytes(),
+        ])
+    )
 }
 
 /// Derive a capture moment id from its workspace, object, and next monotonic
-/// moment order: `moment-` plus lowercase-hex SHA-256 over those NUL-separated
+/// moment order: `moment-` plus lowercase-hex SHA-256 over those length-prefixed
 /// fields. The store allocates the same order inside the caller-owned write
 /// transaction, so delete/recreate cycles never reuse an id.
 pub fn derive_capture_moment_id(
@@ -2833,9 +2907,14 @@ pub fn derive_capture_moment_id(
     object_id: &str,
     next_moment_order: i64,
 ) -> String {
+    let next_moment_order = next_moment_order.to_string();
     format!(
         "moment-{}",
-        hash_joined(&[workspace_id, object_id, &next_moment_order.to_string()])
+        hash_framed_fields(&[
+            workspace_id.as_bytes(),
+            object_id.as_bytes(),
+            next_moment_order.as_bytes(),
+        ])
     )
 }
 
@@ -2849,13 +2928,11 @@ pub fn derive_capture_retire_moment_id(
     derive_capture_moment_id(workspace_id, object_id, next_moment_order)
 }
 
-fn hash_joined(fields: &[&str]) -> String {
+fn hash_framed_fields(fields: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
-    for (index, field) in fields.iter().enumerate() {
-        if index != 0 {
-            hasher.update([0u8]);
-        }
-        hasher.update(field.as_bytes());
+    for field in fields {
+        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(field);
     }
     hex(&hasher.finalize())
 }
