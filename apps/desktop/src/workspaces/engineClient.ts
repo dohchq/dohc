@@ -213,15 +213,25 @@ export class FrameDecoder {
     this.maxBlobChunkBytes = maxBlobChunkBytes;
   }
 
-  push(chunk: Uint8Array): Frame[] {
+  // onFrame lets the caller process each frame inline as it is decoded, so a
+  // per-stream cap can halt a coalesced flood mid-buffer instead of letting the
+  // whole batch materialize first. It is invoked OUTSIDE the decode try/catch so
+  // a consumer error propagates verbatim rather than being poisoned into a
+  // generic codec error.
+  push(chunk: Uint8Array, onFrame?: (frame: Frame) => void): Frame[] {
     this.assertHealthy();
     const frames: Frame[] = [];
+    const emit = (frame: Frame): void => {
+      if (onFrame) onFrame(frame);
+      else frames.push(frame);
+    };
     const bytes = Buffer.isBuffer(chunk)
       ? chunk
       : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
     let offset = 0;
-    try {
-      while (offset < bytes.length) {
+    while (offset < bytes.length) {
+      let frame: Frame | null = null;
+      try {
         if (this.headerBytes < FRAME_HEADER_BYTES) {
           const count = Math.min(
             FRAME_HEADER_BYTES - this.headerBytes,
@@ -233,12 +243,12 @@ export class FrameDecoder {
           if (this.headerBytes < FRAME_HEADER_BYTES) break;
           this.beginPayload();
           if (this.payload?.length === 0) {
-            frames.push(this.completeFrame());
+            frame = this.completeFrame();
             this.resetFrame();
           }
         }
 
-        if (this.payload !== null && this.payload.length > 0) {
+        if (frame === null && this.payload !== null && this.payload.length > 0) {
           const count = Math.min(
             this.payload.length - this.payloadBytes,
             bytes.length - offset,
@@ -247,15 +257,16 @@ export class FrameDecoder {
           this.payloadBytes += count;
           offset += count;
           if (this.payloadBytes === this.payload.length) {
-            frames.push(this.completeFrame());
+            frame = this.completeFrame();
             this.resetFrame();
           }
         }
+      } catch (error) {
+        throw this.poison(error);
       }
-      return frames;
-    } catch (error) {
-      throw this.poison(error);
+      if (frame !== null) emit(frame);
     }
+    return frames;
   }
 
   finish(): Frame[] {
@@ -668,10 +679,10 @@ export class EngineClient implements EngineTransport {
 
   private readonly handleData = (chunk: Buffer | Uint8Array): void => {
     try {
-      for (const frame of this.decoder.push(chunk)) {
-        if (this.closed) break;
+      this.decoder.push(chunk, (frame) => {
+        if (this.closed) return;
         this.receiveFrame(frame);
-      }
+      });
     } catch (cause) {
       this.fail(
         new EngineClientError("protocol-error", "Engine frame decoding failed.", {

@@ -641,11 +641,15 @@ describe("EngineClient", () => {
       totalBytes: null,
       sha256: null,
     });
-    // Under the byte budget (64MB default) but far past the per-stream chunk cap.
+    // One coalesced data event carrying 4097 one-byte chunks — under the byte
+    // budget (64MB default) but past the per-stream chunk cap. The inline decode
+    // path must halt mid-buffer rather than materialize the whole batch first.
     const oneByte = Buffer.from("x");
+    const flood: Buffer[] = [];
     for (let i = 0; i <= 4096; i++) {
-      peer.sendRaw(blobChunkFrame(51, oneByte, false));
+      flood.push(blobChunkFrame(51, oneByte, false));
     }
+    peer.sendRaw(Buffer.concat(flood));
 
     await expect(pending).rejects.toMatchObject({
       code: "protocol-error",
@@ -690,9 +694,12 @@ describe("EngineClient", () => {
   });
 
   it("rejects invalid and over-limit blobStart totalBytes", async () => {
-    for (const [totalBytes, code] of [
-      [-1, "invalid-blob-start"],
-      [6, "blob-too-large"],
+    // 1.5 is a JSON-representable non-integer (unlike NaN, which serializes to
+    // null), so it exercises the invalid-integer guard through the real wire.
+    for (const [streamId, totalBytes, code] of [
+      [40, -1, "invalid-blob-start"],
+      [41, 1.5, "invalid-blob-start"],
+      [46, 6, "blob-too-large"],
     ] as const) {
       const peer = new FakePeerConnection();
       const transport = client(peer, { maxBlobBytes: 5 });
@@ -702,7 +709,7 @@ describe("EngineClient", () => {
       peer.send({
         type: "blobStart",
         requestId: 1,
-        streamId: totalBytes + 40,
+        streamId,
         totalBytes,
         sha256: null,
       });
@@ -711,27 +718,6 @@ describe("EngineClient", () => {
         cause: { code },
       });
     }
-
-    const peer = new FakePeerConnection();
-    const transport = client(peer);
-    peer.acknowledge();
-    await transport.ready();
-    const receiveEnvelope = Reflect.get(
-      transport,
-      "receiveEnvelope",
-    ) as (this: EngineClient, envelope: Envelope) => void;
-    expect(() =>
-      receiveEnvelope.call(transport, {
-        type: "blobStart",
-        requestId: 1,
-        streamId: 48,
-        totalBytes: Number.NaN,
-        sha256: null,
-      }),
-    ).toThrowError(
-      expect.objectContaining({ code: "invalid-blob-start" }),
-    );
-    transport.close();
   });
 
   it("rejects FIN before the announced blob size is reached", async () => {
