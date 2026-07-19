@@ -218,6 +218,7 @@ pub struct SecretDelete {
     pub path: String,
     pub moment_id: String,
     pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
     pub now_ms: i64,
 }
 
@@ -721,7 +722,7 @@ fn delete_secret_file_inner(
         recorded_at_ms: input.now_ms,
         operation: SecretOp::Delete,
         metadata_origin: input.metadata_origin.clone(),
-        metadata_summary: None,
+        metadata_summary: input.metadata_summary.clone(),
         metadata_correlation_id: None,
     };
     let outcome = store.write_with(faults, |tx| {
@@ -796,6 +797,12 @@ pub fn capture_secret_retire(
         &input.path,
         reserved,
     );
+    let basename = input
+        .path
+        .rsplit('/')
+        .next()
+        .unwrap_or(input.path.as_str())
+        .to_owned();
     let result = delete_secret_file_inner(
         store,
         &SecretDelete {
@@ -804,6 +811,7 @@ pub fn capture_secret_retire(
             path: input.path.clone(),
             moment_id,
             metadata_origin: input.metadata_origin.clone(),
+            metadata_summary: Some(format!("Deleted {basename}")),
             now_ms: input.now_ms,
         },
         faults,

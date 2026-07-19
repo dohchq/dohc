@@ -101,14 +101,28 @@ pub fn load_or_create_key_file(root: &std::path::Path) -> Result<SecretDataKey, 
     }
 }
 
+/// Read the key file WITHOUT following a symlink at the leaf: a symlinked
+/// `secret.key` could point key custody (and the 0600 chmod) at an arbitrary
+/// file. Mirrors the policy-file symlink refusal in the search module.
+fn read_key_file_no_follow(path: &std::path::Path) -> std::io::Result<String> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "secret key file must not be a symlink",
+        ));
+    }
+    std::fs::read_to_string(path)
+}
+
 /// Load the workspace data key, returning `Ok(None)` when no key file exists.
-/// A present-but-malformed/unreadable file fails CLOSED. On a successful load
-/// the file's permissions are re-tightened to 0600 (Unix; TS parity —
-/// `secretFileStore.ts` chmods existing key files after read, so a restored
-/// or hand-copied key never stays world-readable).
+/// A present-but-malformed/unreadable/symlinked file fails CLOSED. On a
+/// successful read the file's permissions are re-tightened to 0600 (Unix; TS
+/// parity — `secretFileStore.ts` chmods existing key files after read, so a
+/// restored or hand-copied key never stays world-readable).
 pub fn load_key_file(root: &std::path::Path) -> Result<Option<SecretDataKey>, CryptoError> {
     let path = root.join(SECRET_KEY_FILE_RELATIVE);
-    match std::fs::read_to_string(&path) {
+    match read_key_file_no_follow(&path) {
         Ok(content) => {
             // The read succeeded, so the file holds (candidate) key material:
             // tighten permissions BEFORE parsing — a malformed-but-readable
@@ -156,7 +170,11 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
     // sealed snapshot, and a later restart would silently re-mint. The
     // link-publish also means a partially written key can never be visible
     // at the final path.
-    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    // Unique per attempt: pid + a process-wide counter, so two same-process
+    // minters can never share (and cross-delete) one temp file.
+    static MINT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = MINT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp = path.with_extension(format!("tmp-{}-{seq}", std::process::id()));
     let written = (|| -> std::io::Result<()> {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -190,7 +208,7 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
             let _ = std::fs::remove_file(&temp);
             let content = Zeroizing::new(
-                std::fs::read_to_string(&path).map_err(|_| CryptoError::KeyFileMalformed)?,
+                read_key_file_no_follow(&path).map_err(|_| CryptoError::KeyFileMalformed)?,
             );
             return SecretDataKey::parse_key_file(&content);
         }
@@ -202,7 +220,7 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
             if path.exists() {
                 let _ = std::fs::remove_file(&temp);
                 let content = Zeroizing::new(
-                    std::fs::read_to_string(&path).map_err(|_| CryptoError::KeyFileMalformed)?,
+                    read_key_file_no_follow(&path).map_err(|_| CryptoError::KeyFileMalformed)?,
                 );
                 return SecretDataKey::parse_key_file(&content);
             }
@@ -224,7 +242,7 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
     // Return what is DURABLY at the path — under any interleaving the
     // published file is the single source of truth.
     let content =
-        Zeroizing::new(std::fs::read_to_string(&path).map_err(|_| CryptoError::KeyFileMalformed)?);
+        Zeroizing::new(read_key_file_no_follow(&path).map_err(|_| CryptoError::KeyFileMalformed)?);
     SecretDataKey::parse_key_file(&content)
 }
 
