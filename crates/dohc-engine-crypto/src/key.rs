@@ -110,12 +110,17 @@ pub fn load_key_file(root: &std::path::Path) -> Result<Option<SecretDataKey>, Cr
     let path = root.join(SECRET_KEY_FILE_RELATIVE);
     match std::fs::read_to_string(&path) {
         Ok(content) => {
-            let key = SecretDataKey::parse_key_file(&content)?;
+            // The read succeeded, so the file holds (candidate) key material:
+            // tighten permissions BEFORE parsing — a malformed-but-readable
+            // file must not stay world-readable just because the parse fails
+            // closed. The content buffer zeroizes on drop either way.
+            let content = Zeroizing::new(content);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
             }
+            let key = SecretDataKey::parse_key_file(&content)?;
             Ok(Some(key))
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -193,7 +198,8 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
     }
     // Return what is DURABLY at the path — under any interleaving the
     // published file is the single source of truth.
-    let content = std::fs::read_to_string(&path).map_err(|_| CryptoError::KeyFileMalformed)?;
+    let content =
+        Zeroizing::new(std::fs::read_to_string(&path).map_err(|_| CryptoError::KeyFileMalformed)?);
     SecretDataKey::parse_key_file(&content)
 }
 
