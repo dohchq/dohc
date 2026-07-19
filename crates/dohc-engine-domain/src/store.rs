@@ -1359,16 +1359,34 @@ fn capture_ingest_binary_in_tx(
             && before.binary_sha256.as_deref() == Some(binary_sha256.as_str())
         {
             // Content-equality no-op: the interleave-safety guarantee.
+            let result_sha = binary_sha256.clone();
             let moment = get_moment(tx, &input.workspace_id, &before.latest_moment_id)?.ok_or(
                 DomainError::StateCorrupt {
                     reason: "snapshot points at a missing moment",
+                },
+            )?;
+            // The head's bytes are VERIFIED on disk right now, so record the
+            // head generation as materialized (upsert: the creating write's
+            // own job may still be pending — its content is this same sha —
+            // and flipping it complete both records reality and lets the
+            // staleness gate supersede any OLDER pending job that could
+            // otherwise regress disk behind the confirmed head).
+            dohc_engine_storage::record_completed_job(
+                tx,
+                &MaterializationJobSpec {
+                    job_id: moment.moment_id.clone(),
+                    target_path: path.clone(),
+                    content_sha256: result_sha.clone(),
+                    preimage: Preimage::Present(result_sha.clone()),
+                    target_generation: moment.moment_order,
+                    now_ms: input.now_ms,
                 },
             )?;
             let result = CaptureIngestBinaryResult {
                 object_id: object_id.clone(),
                 moment_id: moment.moment_id.clone(),
                 moment_order: moment.moment_order,
-                binary_sha256,
+                binary_sha256: result_sha,
                 deduped: true,
             };
             record_request(
