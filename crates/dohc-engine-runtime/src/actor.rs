@@ -31,8 +31,9 @@ use crate::identity::EngineDbIdentity;
 use crate::search::{SearchResult, search_workspace};
 use dohc_engine_collab::{AppendOutcome, ContentKind, DocKey, Regime};
 use dohc_engine_domain::{
-    ResolveTextConflict, ResolveTextConflictResult, TextConflict, TextSnapshot, VersionedTextStore,
-    WriteResult, WriteText, insert_text_conflict_if_absent,
+    CaptureIngest, CaptureRetire, CaptureRetireResult, ResolveTextConflict,
+    ResolveTextConflictResult, TextConflict, TextSnapshot, VersionedTextStore, WriteResult,
+    WriteText, insert_text_conflict_if_absent,
 };
 use dohc_engine_storage::{
     CompoundWrite, Document, EngineStore, FaultInjector, StorageError, TxnOutcome, WriteOutcome,
@@ -148,6 +149,18 @@ enum Command {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<WriteResult, RuntimeError>>,
+    },
+    CaptureIngest {
+        input: CaptureIngest,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<WriteResult, RuntimeError>>,
+    },
+    CaptureRetire {
+        input: CaptureRetire,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<CaptureRetireResult, RuntimeError>>,
     },
     VersionedTextRead {
         workspace_id: String,
@@ -436,6 +449,48 @@ impl ActorHandle {
             .map_err(RuntimeError::Storage)
     }
 
+    /// Capture a text file on the actor's writer, blocking the calling thread.
+    pub fn capture_ingest_blocking(
+        &self,
+        input: CaptureIngest,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<WriteResult, RuntimeError> {
+        debug_assert_sync_context();
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::CaptureIngest {
+                input,
+                faults,
+                token: CancellationToken::new(),
+                reply,
+            })
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Retire a captured path on the actor's writer, blocking the caller.
+    pub fn capture_retire_blocking(
+        &self,
+        input: CaptureRetire,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<CaptureRetireResult, RuntimeError> {
+        debug_assert_sync_context();
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::CaptureRetire {
+                input,
+                faults,
+                token: CancellationToken::new(),
+                reply,
+            })
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     // --- Async API (drives the tokio loop from within a runtime) ---
 
     /// Async compound write. Awaits queue space (bounded backpressure) and the
@@ -500,6 +555,46 @@ impl ActorHandle {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::VersionedTextWrite {
+                input,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Capture a text file on the actor's single writer thread.
+    pub async fn capture_ingest(
+        &self,
+        input: CaptureIngest,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<WriteResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CaptureIngest {
+                input,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Retire a captured path on the actor's single writer thread.
+    pub async fn capture_retire(
+        &self,
+        input: CaptureRetire,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<CaptureRetireResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CaptureRetire {
                 input,
                 faults,
                 token,
@@ -833,6 +928,24 @@ fn worker_main(
                     versioned_text_write_on_store(&mut store, &input, faults.as_ref(), &token);
                 let _ = reply.send(outcome);
             }
+            Command::CaptureIngest {
+                input,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = capture_ingest_on_store(&mut store, &input, faults.as_ref(), &token);
+                let _ = reply.send(outcome);
+            }
+            Command::CaptureRetire {
+                input,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = capture_retire_on_store(&mut store, &input, faults.as_ref(), &token);
+                let _ = reply.send(outcome);
+            }
             Command::VersionedTextRead {
                 workspace_id,
                 version_id,
@@ -1013,6 +1126,52 @@ fn versioned_text_write_on_store(
     }
     VersionedTextStore::new(store)
         .write_text(input, faults)
+        .map_err(RuntimeError::from)
+}
+
+fn capture_ingest_on_store(
+    store: &mut EngineStore,
+    input: &CaptureIngest,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<WriteResult, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    VersionedTextStore::new(store).ensure_main_version(
+        &input.workspace_id,
+        &input.version_id,
+        input.now_ms,
+        faults,
+    )?;
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    VersionedTextStore::new(store)
+        .capture_ingest(input, faults)
+        .map_err(RuntimeError::from)
+}
+
+fn capture_retire_on_store(
+    store: &mut EngineStore,
+    input: &CaptureRetire,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<CaptureRetireResult, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    VersionedTextStore::new(store).ensure_main_version(
+        &input.workspace_id,
+        &input.version_id,
+        input.now_ms,
+        faults,
+    )?;
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    VersionedTextStore::new(store)
+        .capture_retire(input, faults)
         .map_err(RuntimeError::from)
 }
 
