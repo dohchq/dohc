@@ -58,8 +58,12 @@ impl Default for EngineService {
 
 impl EngineService {
     pub fn new() -> Self {
+        Self::with_supervisor(WorkspaceSupervisor::global())
+    }
+
+    fn with_supervisor(supervisor: &'static WorkspaceSupervisor) -> Self {
         EngineService {
-            supervisor: WorkspaceSupervisor::global(),
+            supervisor,
             handles: Mutex::new(HashMap::new()),
             open_lock: tokio::sync::Mutex::new(()),
             next_handle: std::sync::atomic::AtomicU64::new(1),
@@ -1043,7 +1047,11 @@ mod tests {
         let scratch = ScratchDir::new().expect("scratch");
         shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
             .expect("shadow marker");
-        let service = Arc::new(EngineService::new());
+        // Isolated supervisor so the actor-count baseline can't race other tests
+        // sharing the process-global one.
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = Arc::new(EngineService::with_supervisor(supervisor));
         let baseline = service.supervisor.actor_count();
         let open_params = json!({
             "rootDir": scratch.path().to_string_lossy(),
@@ -1063,9 +1071,13 @@ mod tests {
                 tokio::spawn(
                     async move { closing_service.workspace_close(Some(closing_handle)).await },
                 );
-            while lock(&service.handles).contains_key(&handle) {
-                tokio::task::yield_now().await;
-            }
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while lock(&service.handles).contains_key(&handle) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("close removed the handle within the deadline");
 
             let opening_service = Arc::clone(&service);
             let iteration_params = open_params.clone();
