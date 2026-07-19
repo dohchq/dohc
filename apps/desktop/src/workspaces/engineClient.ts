@@ -570,9 +570,6 @@ export class EngineClient implements EngineTransport {
         "Maximum blob chunk bytes must be an unsigned 32-bit integer.",
       );
     }
-    // maxFrameBytes bounds control-frame payloads only; blob chunks are bounded
-    // solely by maxBlobChunkBytes, matching the Rust decoder.
-    this.maxBlobChunkBytes = this.maxBlobChunkBytesCap;
     this.maxBlobBytes = connectOptions.maxBlobBytes ?? DEFAULT_MAX_BLOB_BYTES;
     if (
       !Number.isSafeInteger(this.maxBlobBytes) ||
@@ -584,6 +581,15 @@ export class EngineClient implements EngineTransport {
         `Maximum blob bytes must be between 0 and ${DEFAULT_MAX_BLOB_BYTES}.`,
       );
     }
+    // maxFrameBytes bounds control-frame payloads only; blob chunks are bounded
+    // solely by maxBlobChunkBytes, matching the Rust decoder — and a chunk can
+    // never exceed a whole blob, so the local cap is clamped to the blob budget
+    // before it seeds the decoder's pre-negotiation allocation bound.
+    this.maxBlobChunkBytesCap = Math.min(
+      this.maxBlobChunkBytesCap,
+      this.maxBlobBytes,
+    );
+    this.maxBlobChunkBytes = this.maxBlobChunkBytesCap;
     this.decoder = new FrameDecoder(
       this.maxFrameBytes,
       this.maxBlobChunkBytes,
@@ -883,6 +889,20 @@ export class EngineClient implements EngineTransport {
       );
       return;
     }
+    // Inbound JSON is only cast to Envelope; a non-array here would make the
+    // capability gate a String.prototype.includes call.
+    if (
+      !Array.isArray(envelope.capabilities) ||
+      !envelope.capabilities.every((cap) => typeof cap === "string")
+    ) {
+      this.fail(
+        new EngineClientError(
+          "handshake-failed",
+          "Engine acknowledged malformed capabilities.",
+        ),
+      );
+      return;
+    }
     this.maxFrameBytes = Math.min(
       this.maxFrameBytes,
       envelope.limits.maxFrameBytes,
@@ -1101,6 +1121,14 @@ export class EngineClient implements EngineTransport {
       );
     }
     this.pending.delete(id);
+    // A failed request's announced blob streams are dead: free their budget and
+    // drop them so a late FIN cannot dispatch a blob the caller saw fail.
+    for (const [streamId, stream] of this.blobStreams) {
+      if (stream.start.requestId !== id) continue;
+      this.bufferedBlobBytes -= stream.receivedBytes;
+      this.bufferedBlobChunks -= stream.chunks.length;
+      this.blobStreams.delete(streamId);
+    }
     pending.reject(new EngineRequestError(pending.callerId, wireError));
   }
 

@@ -819,6 +819,70 @@ describe("EngineClient", () => {
     });
   });
 
+  it("drops a failed request's blob streams so a late FIN cannot dispatch", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    const failing = transport.sendRequest(request(18, "await.request.error"));
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 80,
+      totalBytes: 11,
+      sha256: null,
+    });
+    peer.sendRaw(blobChunkFrame(80, Buffer.from("hello "), false));
+    peer.send({
+      type: "error",
+      id: 1,
+      error: { code: "INTERNAL", message: "nope", retry: "no" },
+    });
+    await expect(failing).rejects.toMatchObject({ code: "wire-error" });
+
+    const witness = transport.sendRequest(request(19, "await.late.fin"));
+    peer.sendRaw(blobChunkFrame(80, Buffer.from("world"), true));
+
+    expect(onBlob).not.toHaveBeenCalled();
+    await expect(witness).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "unknown-blob-stream" },
+    });
+  });
+
+  it("fails the handshake on malformed helloAck capabilities", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.send(
+      helloAck(LIMITS, "not-blobs" as unknown as string[]),
+    );
+
+    await expect(transport.ready()).rejects.toMatchObject({
+      code: "handshake-failed",
+    });
+  });
+
+  it("clamps the local chunk cap to the blob budget", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, {
+      maxBlobBytes: 5,
+      maxBlobChunkBytes: 1024 * 1024,
+    });
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(20, "await.clamped.cap"));
+    // 10 bytes exceeds the blob budget (5), so the decode-level bound must trip
+    // even though the requested chunk cap was 1 MiB.
+    peer.sendRaw(blobChunkFrame(81, Buffer.alloc(10), true));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "blob-chunk-too-large" },
+    });
+  });
+
   it("rejects duplicate blobStart ids while live and after completion", async () => {
     const livePeer = new FakePeerConnection();
     const live = client(livePeer);
