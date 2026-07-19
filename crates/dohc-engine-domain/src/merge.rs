@@ -6,7 +6,8 @@ use crate::conflicts::{
 };
 use crate::error::DomainError;
 use crate::records::{
-    DeleteResult, DeleteTextFile, TextSnapshot, VersionKind, WriteResult, WriteText,
+    DeleteResult, DeleteTextFile, SnapshotContent, TextSnapshot, VersionKind, WriteResult,
+    WriteText,
 };
 use crate::store::{
     VersionedTextStore, delete_text_in_tx, validate_delete_input, validate_path,
@@ -103,9 +104,8 @@ pub enum VersionFileChangeStatus {
 pub struct VersionFileChange {
     pub path: String,
     pub status: VersionFileChangeStatus,
-    pub current_text: Option<String>,
-    pub incoming_text: Option<String>,
-    pub binary: bool,
+    pub current: Option<SnapshotContent>,
+    pub incoming: Option<SnapshotContent>,
 }
 
 /// Port of `mergeMarkdown.ts`: LCS-aligned line hunks with conservative
@@ -333,28 +333,25 @@ impl VersionedTextStore<'_> {
         let mut changes = Vec::new();
         for path in paths {
             match (target_by_path.get(&path), source_by_path.get(&path)) {
-                (Some(current), Some(incoming)) if current.text != incoming.text => {
+                (Some(current), Some(incoming)) if current.content != incoming.content => {
                     changes.push(VersionFileChange {
                         path,
                         status: VersionFileChangeStatus::Modified,
-                        current_text: Some(current.text.clone()),
-                        incoming_text: Some(incoming.text.clone()),
-                        binary: false,
+                        current: Some(current.content.clone()),
+                        incoming: Some(incoming.content.clone()),
                     });
                 }
                 (None, Some(incoming)) => changes.push(VersionFileChange {
                     path,
                     status: VersionFileChangeStatus::Added,
-                    current_text: None,
-                    incoming_text: Some(incoming.text.clone()),
-                    binary: false,
+                    current: None,
+                    incoming: Some(incoming.content.clone()),
                 }),
                 (Some(current), None) => changes.push(VersionFileChange {
                     path,
                     status: VersionFileChangeStatus::Deleted,
-                    current_text: Some(current.text.clone()),
-                    incoming_text: None,
-                    binary: false,
+                    current: Some(current.content.clone()),
+                    incoming: None,
                 }),
                 _ => {}
             }

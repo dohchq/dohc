@@ -13,8 +13,9 @@
 //! - **Compound commits.** Every mutation and its replication-journal entry (and
 //!   idempotency-ledger row) commit in ONE transaction via
 //!   [`dohc_engine_storage::EngineStore::write_with`] (`PORTING.md` §9).
-//! - **Identity, not paths.** [`records::TextSnapshot`]/[`records::MomentRecord`]
-//!   carry a stable `object_id`; a `path` is an alias onto it.
+//! - **Identity, not paths.** [`records::SnapshotView`]/[`records::TextSnapshot`]/
+//!   [`records::MomentRecord`] carry a stable `object_id`; a `path` is an alias
+//!   onto it.
 //! - **History as keyset pages.** [`VersionedTextStore::list_moments`] returns a
 //!   `limit + 1` probe page with a `next_before_moment_order` cursor.
 //! - **Restore preserves both sides.** [`VersionedTextStore::set_active_version`]
@@ -62,8 +63,9 @@ pub use merge::{
 pub use normalize::NormalizedState;
 pub use records::{
     CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord, ListMomentsQuery, MomentOp,
-    MomentPage, MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation, TextSnapshot,
-    VersionKind, VersionRecord, WriteResult, WriteText,
+    MomentPage, MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation,
+    SnapshotContent, SnapshotView, TextSnapshot, VersionKind, VersionRecord, WriteResult,
+    WriteText,
 };
 pub use secrets::{
     SecretDelete, SecretFileStat, SecretFileStore, SecretMomentRecord, SecretOp, SecretWrite,

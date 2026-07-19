@@ -7,10 +7,10 @@ use dohc_engine_domain::{
     CompareTextFileVersions, ComparisonStatus, ConflictChoice, ConflictContentKind,
     ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus, CreateNamedVersion,
     DeleteTextFile, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
-    MergeUnchangedReason, NoFaults, ResolveConflictKind, ResolveTextConflict, TextConflict,
-    TextSnapshot, VersionFileChangeStatus, VersionedTextStore, WriteBinaryFile, WriteText,
-    insert_text_conflict_if_absent, live_state_matches_conflict_current, store::text_blob_sha256,
-    write_binary_file_in_tx,
+    MergeUnchangedReason, NoFaults, ResolveConflictKind, ResolveTextConflict, SnapshotContent,
+    TextConflict, TextSnapshot, VersionFileChangeStatus, VersionedTextStore, WriteBinaryFile,
+    WriteText, insert_text_conflict_if_absent, live_state_matches_conflict_current,
+    store::text_blob_sha256, write_binary_file_in_tx,
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs};
 use dohc_engine_storage::{
@@ -62,6 +62,38 @@ fn fork(vt: &mut VersionedTextStore<'_>) {
         &NO_FAULTS,
     )
     .expect("fork");
+}
+
+fn write_binary(
+    store: &mut EngineStore,
+    version_id: &str,
+    path: &str,
+    bytes: &[u8],
+    object_id: &str,
+    job_id: &str,
+    preimage: Preimage,
+) -> String {
+    let sha256 = hex_sha256(bytes);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            let stored_sha256 = put_binary_blob(tx, bytes)?;
+            write_binary_file_in_tx(
+                tx,
+                &WriteBinaryFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: version_id.to_owned(),
+                    object_id: object_id.to_owned(),
+                    path: path.to_owned(),
+                    binary_sha256: stored_sha256,
+                    job_id: job_id.to_owned(),
+                    preimage,
+                    now_ms: 120,
+                },
+            )?;
+            Ok::<_, DomainError>(())
+        })
+        .expect("write binary head");
+    sha256
 }
 
 fn open() -> (ScratchDir, EngineStore) {
@@ -390,6 +422,178 @@ fn compare_version_files_classifies_omits_identical_and_sorts() {
     assert_eq!(changes[0].status, VersionFileChangeStatus::Added);
     assert_eq!(changes[1].status, VersionFileChangeStatus::Modified);
     assert_eq!(changes[2].status, VersionFileChangeStatus::Deleted);
+    assert_eq!(changes[0].current, None);
+    assert_eq!(
+        changes[0].incoming,
+        Some(SnapshotContent::Text {
+            text: "add".to_owned()
+        })
+    );
+    assert_eq!(
+        changes[1].current,
+        Some(SnapshotContent::Text {
+            text: "old".to_owned()
+        })
+    );
+    assert_eq!(
+        changes[1].incoming,
+        Some(SnapshotContent::Text {
+            text: "new".to_owned()
+        })
+    );
+    assert_eq!(
+        changes[2].current,
+        Some(SnapshotContent::Text {
+            text: "z".to_owned()
+        })
+    );
+    assert_eq!(changes[2].incoming, None);
+}
+
+#[test]
+fn compare_version_files_reports_binary_content_and_transitions() {
+    let (_scratch, mut store) = open();
+    let text_sha = VersionedTextStore::new(&mut store)
+        .write_text(
+            &write(
+                "main",
+                "switch.bin",
+                "text before",
+                "switch-text",
+                "switch-object",
+            ),
+            &NO_FAULTS,
+        )
+        .expect("write transition text")
+        .snapshot
+        .blob_sha256;
+    let old_sha = write_binary(
+        &mut store,
+        "main",
+        "changed.bin",
+        b"old binary",
+        "changed-object",
+        "changed-old",
+        Preimage::Absent,
+    );
+    let same_sha = write_binary(
+        &mut store,
+        "main",
+        "same.bin",
+        b"same binary",
+        "same-object",
+        "same-binary",
+        Preimage::Absent,
+    );
+    fork(&mut VersionedTextStore::new(&mut store));
+
+    let new_sha = write_binary(
+        &mut store,
+        "feat",
+        "changed.bin",
+        b"new binary",
+        "ignored",
+        "changed-new",
+        Preimage::Present(old_sha.clone()),
+    );
+    let added_sha = write_binary(
+        &mut store,
+        "feat",
+        "added.bin",
+        b"added binary",
+        "added-object",
+        "added-binary",
+        Preimage::Absent,
+    );
+    let deleted_sha = write_binary(
+        &mut store,
+        "main",
+        "deleted.bin",
+        b"deleted binary",
+        "deleted-object",
+        "deleted-binary",
+        Preimage::Absent,
+    );
+    let switched_sha = write_binary(
+        &mut store,
+        "feat",
+        "switch.bin",
+        b"binary after",
+        "ignored",
+        "switch-binary",
+        Preimage::Present(text_sha),
+    );
+
+    let vt = VersionedTextStore::new(&mut store);
+    let snapshots = vt.list_snapshots(WS, "feat").expect("list snapshots");
+    assert_eq!(
+        snapshots
+            .iter()
+            .find(|snapshot| snapshot.path == "changed.bin")
+            .expect("changed snapshot")
+            .content,
+        SnapshotContent::Binary {
+            sha256: new_sha.clone()
+        }
+    );
+    let fork_base = vt
+        .list_fork_base_snapshots(WS, "feat")
+        .expect("list fork base");
+    assert_eq!(
+        fork_base
+            .iter()
+            .find(|snapshot| snapshot.path == "same.bin")
+            .expect("same fork base")
+            .content,
+        SnapshotContent::Binary { sha256: same_sha }
+    );
+
+    let changes = vt
+        .compare_version_files(WS, "feat", "main")
+        .expect("compare versions");
+    assert_eq!(
+        changes
+            .iter()
+            .map(|change| change.path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["added.bin", "changed.bin", "deleted.bin", "switch.bin"]
+    );
+    assert_eq!(changes[0].status, VersionFileChangeStatus::Added);
+    assert_eq!(changes[0].current, None);
+    assert_eq!(
+        changes[0].incoming,
+        Some(SnapshotContent::Binary { sha256: added_sha })
+    );
+    assert_eq!(changes[1].status, VersionFileChangeStatus::Modified);
+    assert_eq!(
+        changes[1].current,
+        Some(SnapshotContent::Binary { sha256: old_sha })
+    );
+    assert_eq!(
+        changes[1].incoming,
+        Some(SnapshotContent::Binary { sha256: new_sha })
+    );
+    assert_eq!(changes[2].status, VersionFileChangeStatus::Deleted);
+    assert_eq!(
+        changes[2].current,
+        Some(SnapshotContent::Binary {
+            sha256: deleted_sha
+        })
+    );
+    assert_eq!(changes[2].incoming, None);
+    assert_eq!(changes[3].status, VersionFileChangeStatus::Modified);
+    assert_eq!(
+        changes[3].current,
+        Some(SnapshotContent::Text {
+            text: "text before".to_owned()
+        })
+    );
+    assert_eq!(
+        changes[3].incoming,
+        Some(SnapshotContent::Binary {
+            sha256: switched_sha
+        })
+    );
 }
 
 fn conflict(
@@ -960,6 +1164,16 @@ fn merge_refuses_to_clobber_a_binary_head_at_the_target() {
             &NO_FAULTS,
         )
         .expect("fork text at a.md");
+
+    let err = VersionedTextStore::new(&mut store)
+        .compare_text_file_versions(&CompareTextFileVersions {
+            workspace_id: WS.to_owned(),
+            target_version_id: "main".to_owned(),
+            source_version_id: "feat".to_owned(),
+            path: "a.md".to_owned(),
+        })
+        .expect_err("text compare must reject a binary head");
+    assert_eq!(err.code(), "binary-head-not-text");
 
     // The merge must fail closed — never clobber the binary head.
     let err = VersionedTextStore::new(&mut store)
