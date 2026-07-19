@@ -130,6 +130,40 @@ pub fn enqueue_delete_job(
     enqueue_operation(tx, spec, MaterializationOperation::Delete)
 }
 
+/// Record a write job that is ALREADY satisfied on disk, inserted directly as
+/// `'complete'`. Capture uses this: its bytes came FROM the file, so nothing
+/// must ever run — but the completed-generation marker is what lets the
+/// materializer's staleness gate supersede an OLDER still-pending job for the
+/// same path. Without it, a stale pending job whose preimage matches the
+/// just-captured disk bytes could later run and regress disk behind the
+/// captured head.
+pub fn record_completed_job(
+    tx: &Transaction<'_>,
+    spec: &MaterializationJobSpec,
+) -> Result<(), StorageError> {
+    let (present, preimage_sha): (i64, Option<&str>) = match &spec.preimage {
+        Preimage::Absent => (0, None),
+        Preimage::Present(sha) => (1, Some(sha.as_str())),
+    };
+    tx.execute(
+        "INSERT INTO materialization_jobs \
+         (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
+          target_generation, status, created_at_ms, completed_at_ms, operation) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'complete', ?7, ?7, 'write')",
+        rusqlite::params![
+            spec.job_id,
+            spec.target_path,
+            spec.content_sha256,
+            present,
+            preimage_sha,
+            spec.target_generation,
+            spec.now_ms,
+        ],
+    )
+    .map_err(StorageError::persist)?;
+    Ok(())
+}
+
 fn enqueue_operation(
     tx: &Transaction<'_>,
     spec: &MaterializationJobSpec,

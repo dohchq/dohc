@@ -1109,49 +1109,13 @@ fn capture_ingest_in_tx(
         return reconstruct_capture_write(tx, &input.workspace_id, recorded.result_seq);
     }
 
-    let mut reserved_moment_order = None;
-    let object_id = match alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?
-    {
-        Some(object_id) => object_id,
-        None => {
-            let derived_object_id =
-                derive_capture_object_id(&input.workspace_id, &input.version_id, &input.path);
-            let object_id = if !object_exists(tx, &input.workspace_id, &derived_object_id)? {
-                tx.execute(
-                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
-                     VALUES (?1, ?2, ?3)",
-                    params![input.workspace_id, derived_object_id, input.now_ms],
-                )
-                .map_err(DomainError::sql_persist)?;
-                derived_object_id
-            } else if !object_has_live_alias(tx, &input.workspace_id, &derived_object_id)? {
-                derived_object_id
-            } else {
-                let next_order = next_moment_order(tx)?;
-                let disambiguated_object_id = derive_disambiguated_capture_object_id(
-                    &input.workspace_id,
-                    &input.version_id,
-                    &input.path,
-                    next_order,
-                );
-                tx.execute(
-                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
-                     VALUES (?1, ?2, ?3)",
-                    params![input.workspace_id, disambiguated_object_id, input.now_ms],
-                )
-                .map_err(DomainError::sql_persist)?;
-                reserved_moment_order = Some(next_order);
-                disambiguated_object_id
-            };
-            tx.execute(
-                "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![input.workspace_id, input.version_id, input.path, object_id],
-            )
-            .map_err(DomainError::sql_persist)?;
-            object_id
-        }
-    };
+    let (object_id, reserved_moment_order) = resolve_capture_object(
+        tx,
+        &input.workspace_id,
+        &input.version_id,
+        &input.path,
+        input.now_ms,
+    )?;
     let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
     let content_sha256 = text_blob_sha256(&input.text);
     if let Some(before) = &before
@@ -1362,50 +1326,13 @@ fn capture_ingest_binary_in_tx(
         return reconstruct_capture_binary(tx, &input.workspace_id, recorded.result_seq);
     }
 
-    // Identical alias/object-id resolution to the TEXT capture primitive
-    // (`capture_ingest_in_tx`) — the locked, length-framed id scheme.
-    let mut reserved_moment_order = None;
-    let object_id = match alias_object_id(tx, &input.workspace_id, &input.version_id, &path)? {
-        Some(object_id) => object_id,
-        None => {
-            let derived_object_id =
-                derive_capture_object_id(&input.workspace_id, &input.version_id, &path);
-            let object_id = if !object_exists(tx, &input.workspace_id, &derived_object_id)? {
-                tx.execute(
-                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
-                     VALUES (?1, ?2, ?3)",
-                    params![input.workspace_id, derived_object_id, input.now_ms],
-                )
-                .map_err(DomainError::sql_persist)?;
-                derived_object_id
-            } else if !object_has_live_alias(tx, &input.workspace_id, &derived_object_id)? {
-                derived_object_id
-            } else {
-                let next_order = next_moment_order(tx)?;
-                let disambiguated_object_id = derive_disambiguated_capture_object_id(
-                    &input.workspace_id,
-                    &input.version_id,
-                    &path,
-                    next_order,
-                );
-                tx.execute(
-                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
-                     VALUES (?1, ?2, ?3)",
-                    params![input.workspace_id, disambiguated_object_id, input.now_ms],
-                )
-                .map_err(DomainError::sql_persist)?;
-                reserved_moment_order = Some(next_order);
-                disambiguated_object_id
-            };
-            tx.execute(
-                "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![input.workspace_id, input.version_id, path, object_id],
-            )
-            .map_err(DomainError::sql_persist)?;
-            object_id
-        }
-    };
+    let (object_id, reserved_moment_order) = resolve_capture_object(
+        tx,
+        &input.workspace_id,
+        &input.version_id,
+        &path,
+        input.now_ms,
+    )?;
     let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
     if let Some(before) = &before {
         // Fail closed on partial head identity, mirroring the binary writer.
@@ -1492,6 +1419,22 @@ fn capture_ingest_binary_in_tx(
             reason: "capture moment order diverged from reserved order",
         });
     }
+    // Disk ALREADY holds these bytes, so record the materialization as a
+    // COMPLETED job (never runnable). The marker is what the materializer's
+    // staleness gate reads: an OLDER still-pending job for this path — whose
+    // preimage may match the very bytes just captured — is superseded instead
+    // of later running and regressing disk behind this head.
+    dohc_engine_storage::record_completed_job(
+        tx,
+        &MaterializationJobSpec {
+            job_id: moment_id.clone(),
+            target_path: path.clone(),
+            content_sha256: binary_sha256.clone(),
+            preimage: Preimage::Present(binary_sha256.clone()),
+            target_generation: moment_order,
+            now_ms: input.now_ms,
+        },
+    )?;
     record_request(
         tx,
         input.request_id.as_deref(),
@@ -1723,6 +1666,64 @@ fn reconstruct_write(conn: &Connection, input: &WriteText) -> Result<WriteResult
         },
     )?;
     write_result_from_moment(conn, &input.workspace_id, moment, true)
+}
+
+/// The ONE locked implementation of autonomous capture's object/alias
+/// resolution, shared by the text and binary primitives so the length-framed,
+/// security-sensitive id scheme can never silently diverge between them:
+/// reuse a live alias; else derive the framed object id and reuse it ONLY when
+/// it has no live alias anywhere; else mint an order-disambiguated id, with
+/// that reserved order returned so the caller can pin it against the moment
+/// the write actually persists.
+fn resolve_capture_object(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+    now_ms: i64,
+) -> Result<(String, Option<i64>), DomainError> {
+    let mut reserved_moment_order = None;
+    let object_id = match alias_object_id(tx, workspace_id, version_id, path)? {
+        Some(object_id) => object_id,
+        None => {
+            let derived_object_id = derive_capture_object_id(workspace_id, version_id, path);
+            let object_id = if !object_exists(tx, workspace_id, &derived_object_id)? {
+                tx.execute(
+                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                     VALUES (?1, ?2, ?3)",
+                    params![workspace_id, derived_object_id, now_ms],
+                )
+                .map_err(DomainError::sql_persist)?;
+                derived_object_id
+            } else if !object_has_live_alias(tx, workspace_id, &derived_object_id)? {
+                derived_object_id
+            } else {
+                let next_order = next_moment_order(tx)?;
+                let disambiguated_object_id = derive_disambiguated_capture_object_id(
+                    workspace_id,
+                    version_id,
+                    path,
+                    next_order,
+                );
+                tx.execute(
+                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                     VALUES (?1, ?2, ?3)",
+                    params![workspace_id, disambiguated_object_id, now_ms],
+                )
+                .map_err(DomainError::sql_persist)?;
+                reserved_moment_order = Some(next_order);
+                disambiguated_object_id
+            };
+            tx.execute(
+                "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![workspace_id, version_id, path, object_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+            object_id
+        }
+    };
+    Ok((object_id, reserved_moment_order))
 }
 
 fn reconstruct_capture_write(
