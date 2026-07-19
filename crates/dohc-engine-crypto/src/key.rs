@@ -102,10 +102,8 @@ pub fn load_or_create_key_file(root: &std::path::Path) -> Result<SecretDataKey, 
 }
 
 /// Read the key file WITHOUT following a symlink at the leaf, bound to the
-/// opened descriptor (O_NOFOLLOW / FILE_FLAG_OPEN_REPARSE_POINT — a leaf
-/// swapped in between a check and a separate path-open could otherwise point
-/// key custody, and the 0600 chmod, at an arbitrary file). Mirrors the
-/// capture sink's no-follow reopen posture.
+/// opened descriptor. Serves the publish read-backs; `load_key_file` opens
+/// its own descriptor so the 0600 re-tighten can be descriptor-bound too.
 fn read_key_file_no_follow(path: &std::path::Path) -> std::io::Result<String> {
     use std::io::Read;
     let mut file = open_no_follow(path)?;
@@ -173,24 +171,39 @@ fn open_no_follow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
 /// restored or hand-copied key never stays world-readable).
 pub fn load_key_file(root: &std::path::Path) -> Result<Option<SecretDataKey>, CryptoError> {
     let path = root.join(SECRET_KEY_FILE_RELATIVE);
-    match read_key_file_no_follow(&path) {
-        Ok(content) => {
-            // The read succeeded, so the file holds (candidate) key material:
-            // tighten permissions BEFORE parsing — a malformed-but-readable
-            // file must not stay world-readable just because the parse fails
-            // closed. The content buffer zeroizes on drop either way.
-            let content = Zeroizing::new(content);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-            }
-            let key = SecretDataKey::parse_key_file(&content)?;
-            Ok(Some(key))
+    let mut file = match open_no_follow(&path) {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(CryptoError::KeyFileMalformed),
+    };
+    let read = (|| -> std::io::Result<String> {
+        use std::io::Read;
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "secret key file must be a regular file",
+            ));
         }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(CryptoError::KeyFileMalformed),
+        let mut content = String::new();
+        file.read_to_string(&mut content)?;
+        Ok(content)
+    })();
+    let content = match read {
+        Ok(content) => Zeroizing::new(content),
+        Err(_) => return Err(CryptoError::KeyFileMalformed),
+    };
+    // Tighten permissions BEFORE parsing (a malformed-but-readable file must
+    // not stay world-readable just because the parse fails closed), and
+    // DESCRIPTOR-BOUND: `File::set_permissions` is fchmod-equivalent, so a
+    // leaf swapped in after the open can never receive the chmod.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
     }
+    let key = SecretDataKey::parse_key_file(&content)?;
+    Ok(Some(key))
 }
 
 /// Mint and durably publish a fresh workspace data key. CALLER CONTRACT: only
