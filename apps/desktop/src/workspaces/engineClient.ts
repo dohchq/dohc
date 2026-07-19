@@ -27,6 +27,10 @@ const DEFAULT_MAX_BLOB_CHUNK_BYTES = 256 * 1024;
 const DEFAULT_MAX_BLOB_BYTES = 64 * 1024 * 1024;
 const MAX_CONCURRENT_BLOB_STREAMS = 64;
 const MAX_COMPLETED_BLOB_STREAM_IDS = 64;
+// Bounds retained per-chunk object overhead so a tiny-chunk flood cannot amplify
+// memory past the byte budget. A max-size blob at the default chunk size is ~256
+// chunks, so this leaves ample headroom for legitimate chunking.
+const MAX_BLOB_CHUNKS_PER_STREAM = 4096;
 // Leaves headroom for handshake and small control envelopes.
 const MIN_NEGOTIABLE_MAX_FRAME_BYTES = 64 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
@@ -963,6 +967,12 @@ export class EngineClient implements EngineTransport {
       throw new BlobStreamError(
         "blob-backpressure-exceeded",
         `Buffered blob bytes exceed the ${this.maxBlobBytes} byte global budget.`,
+      );
+    }
+    if (stream.chunks.length >= MAX_BLOB_CHUNKS_PER_STREAM) {
+      throw new BlobStreamError(
+        "blob-backpressure-exceeded",
+        `Blob stream ${frame.streamId} exceeded ${MAX_BLOB_CHUNKS_PER_STREAM} buffered chunks.`,
       );
     }
     stream.chunks.push(frame.payload);

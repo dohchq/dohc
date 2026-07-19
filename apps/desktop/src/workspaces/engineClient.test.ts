@@ -628,6 +628,31 @@ describe("EngineClient", () => {
     });
   });
 
+  it("caps buffered chunk count per stream to bound tiny-chunk floods", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(7, "await.blob.chunkflood"));
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 51,
+      totalBytes: null,
+      sha256: null,
+    });
+    // Under the byte budget (64MB default) but far past the per-stream chunk cap.
+    const oneByte = Buffer.from("x");
+    for (let i = 0; i <= 4096; i++) {
+      peer.sendRaw(blobChunkFrame(51, oneByte, false));
+    }
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "blob-backpressure-exceeded" },
+    });
+  });
+
   it("rejects duplicate blobStart ids while live and after completion", async () => {
     const livePeer = new FakePeerConnection();
     const live = client(livePeer);
