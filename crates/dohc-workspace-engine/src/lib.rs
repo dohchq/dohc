@@ -116,7 +116,7 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: WorkspaceOpenParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
-        let _serial = tokio::select! {
+        let _open_serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(wire(ErrorCode::Cancelled, "workspace open cancelled while queued"));
@@ -184,6 +184,7 @@ impl EngineService {
     }
 
     async fn workspace_close(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
+        let _open_serial = self.open_lock.lock().await;
         let handle = handle.ok_or_else(workspace_unavailable)?;
         let open = lock(&self.handles)
             .remove(&handle)
@@ -952,7 +953,10 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dohc_engine_testkit::ScratchDir;
     use std::time::Duration;
+
+    const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[test]
     fn runtime_error_mapping_separates_corruption_from_bad_input() {
@@ -1032,5 +1036,68 @@ mod tests {
             .expect_err("cancelled queued open must fail");
         assert_eq!(result.code, ErrorCode::Cancelled);
         drop(held);
+    }
+
+    #[tokio::test]
+    async fn interleaved_workspace_reopens_return_live_actors_without_leaks() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let service = Arc::new(EngineService::new());
+        let baseline = service.supervisor.actor_count();
+        let open_params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "open-close-race"
+        });
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), open_params.clone())
+            .await
+            .expect("initial workspace open");
+        let mut handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+
+        for _ in 0..128 {
+            let closing_service = Arc::clone(&service);
+            let closing_handle = handle.clone();
+            let closing =
+                tokio::spawn(
+                    async move { closing_service.workspace_close(Some(closing_handle)).await },
+                );
+            while lock(&service.handles).contains_key(&handle) {
+                tokio::task::yield_now().await;
+            }
+
+            let opening_service = Arc::clone(&service);
+            let iteration_params = open_params.clone();
+            let opening = tokio::spawn(async move {
+                opening_service
+                    .workspace_open(&RequestContext::unbounded(), iteration_params)
+                    .await
+            });
+            closing
+                .await
+                .expect("close task completed")
+                .expect("workspace close");
+            let reopened = opening
+                .await
+                .expect("open task completed")
+                .expect("workspace reopen");
+            handle = serde_json::from_value(reopened["workspace"].clone())
+                .expect("reopened workspace handle");
+            service
+                .conflicts_list(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    json!({}),
+                )
+                .await
+                .expect("reopened actor is live");
+        }
+
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("final workspace close");
+        assert_eq!(service.supervisor.actor_count(), baseline);
     }
 }
