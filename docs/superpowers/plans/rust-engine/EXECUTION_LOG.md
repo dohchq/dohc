@@ -1612,3 +1612,65 @@ work is landed.
 
 Per the standing directive, the autonomous run STOPS here at the R15 checkpoint.
 The above are handed back to Ice.
+
+## 2026-07-19 — Files-composition B merged (#205): StoreCaptureSink (text path)
+
+`StoreCaptureSink` bridges files-crate reconcile plans to the actor-owned
+domain capture primitives (A, #204). FIVE review rounds (CodeRabbit + Codex +
+an independent adversarial Claude reviewer, who independently converged with
+Codex on the manifest-desync bug); every finding fixed or refuted with a
+documented, ratified reason. What landed:
+
+- **Honest capture receipts (contract change, files crate).**
+  `CaptureSink::ingest` returns `IngestOutcome::{Captured{size,sha256},
+  NotOwned}`: the manifest records the bytes ACTUALLY persisted (never the
+  scan-time hash — kills a rapid-write lost-capture), and `NotOwned`
+  acknowledges but FORGETS the path (policy-untracked, non-ownable content,
+  store-refused names, and the interim binary/secret deferrals — re-offered by
+  every later scan, so the follow-up sub-shards need no state migration).
+  `acknowledge_capture` fails closed (`InvalidCaptureReceipt`) on a receipt
+  claiming an applied ingest without its captured identity. Kills two
+  review-found lost-capture bugs: flip-to-binary-and-revert manifest desync,
+  and stale-scan-hash recording.
+- **Symlink/TOCTOU defense with strict scanner parity.** Descriptor-bound
+  no-follow reopen (O_NOFOLLOW|O_NONBLOCK on Unix — a swapped-in FIFO cannot
+  hang the worker; FILE_FLAG_OPEN_REPARSE_POINT + reparse-attribute refusal on
+  Windows, junctions included). Containment is STRICT EQUALITY pre- and
+  post-open: the canonical parent/path must equal the canonical root joined
+  with the lexical segments, so a symlinked ancestor is refused even when it
+  resolves INSIDE the root (in-root aliasing = content under a path the
+  scanner would never enumerate). Unix additionally pins the descriptor's
+  (dev,ino) to the lexical location. Residual documented honestly: a
+  Windows-only double-swap inside the open window (symlink privilege
+  required; identity-by-handle needs non-std APIs) — candidate hardening in C.
+- **Domain-store alignment.** Namespace guard: names whose canonical key
+  differs (literal `a%2fb.md`) are neither captured nor retired; store-refused
+  names (`..` substring, byte-1 colon) settle as NotOwned instead of
+  poisoning runs as degraded. `CaptureRetire.only_if_text_head` (domain seam):
+  the sink's binary-deferral retire is a no-op on a live binary head —
+  mirrored-resolve/BINHEAD state is never the plaintext sink's to delete.
+  Retires confirm absence at APPLY time (TS `pathConfirmedAbsentOnDisk`
+  parity): a reappeared regular file refuses and stays dirty.
+- **Policy + media routing.** `.dohc/files.toml` tracked=false narrowing above
+  the hard floor (broken policy → floor-only per WS-F); `isTextMediaType`
+  ported byte-for-byte into `dohc-engine-files::media` (sqlite shapes,
+  site-source paths) and consulted BEFORE UTF-8 sniffing;
+  `MAX_CAPTURE_BINARY_BYTES` (5 MiB) mirrors `MAX_VERSIONED_BINARY_FILE_BYTES`.
+- **Deferred with mechanism (owned by sub-shard C):** policy-flip convergence
+  for UNCHANGED files (no diff op is emitted; the driver rebuilds the
+  controller with an empty manifest on a policy-snapshot change — `.dohc` is
+  unwatched, matching the TS oracle). **Refuted with ratified citations:**
+  retire-above-scan-cap (contradicts the CAL-3 retained_over_cap false-delete
+  defense, BEHAVIOR_DELTA.md §7.1) and legacy retire idempotency hashes (the
+  dormant capture path has no recorded rows anywhere; R15 resets shadow data).
+- Dormant throughout: no live TS behavior change; TS files read-only oracles.
+- Gate (every pushed head): fmt/clippy -D warnings/build --workspace/
+  test --workspace/cargo-deny PASS. Final:
+  - 2026-07-19T16:04:44.113Z | run-rust-checks | win32/x64 | PASS | fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS cargo-deny=PASS cargo-audit=SKIP
+- Bots on the merged head 0bb1d14b: Codex "didn't find any major issues",
+  CodeRabbit APPROVED.
+- Next: B-binary (capture_ingest_binary via the BINHEAD write path, framed id
+  scheme; open design question: whether capture-from-disk enqueues the binary
+  materialization job or skips it — decide against the TS oracle + the
+  rollback-compensator invariants at store.rs:365-460), then B-secret → C →
+  D → E → full-soak → RPC-growth → GATE6 → R15 (ICE checkpoint — STOP).
