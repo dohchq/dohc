@@ -12,6 +12,7 @@ dohc-engine-collab = { path = "../../crates/dohc-engine-collab" }
 dohc-engine-sync = { path = "../../crates/dohc-engine-sync" }
 dohc-engine-storage = { path = "../../crates/dohc-engine-storage" }
 dohc-engine-testkit = { path = "../../crates/dohc-engine-testkit" }
+dohc-engine-runtime = { path = "../../crates/dohc-engine-runtime" }
 serde_json = "1"
 
 [dev-dependencies]
