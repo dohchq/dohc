@@ -1711,3 +1711,51 @@ no P1/P2 across six probed surfaces). What landed:
   finished", zero findings on the final push).
 - Next: B-secret (capture_secret via SecretFileStore, framed moment ids) →
   C → D → E → full-soak → RPC-growth → GATE6 → R15 (ICE checkpoint — STOP).
+
+## 2026-07-19 — Files-composition B-secret merged (#210): autonomous secret capture
+
+`.env`-family content now captures into the ENCRYPTED store end-to-end
+(sink → actor → SecretFileStore), replacing the interim NotOwned deferral.
+SEVEN review rounds (CodeRabbit + Codex + an independent adversarial Claude
+review, which was clean on all probed surfaces including plaintext
+containment and the order-pin); every finding fixed or refuted with a
+documented reason. What landed:
+
+- **TS-parity key custody, heavily hardened.** `load_key_file` /
+  `create_key_file` port `loadSecretDataKey`: minted on FIRST secret
+  capture, never over existing encrypted state (the sink asks the actor
+  `has_secret_state` and fails closed — a backup restored without its key
+  can never be silently stranded under a fresh key). The mint is a DURABLE
+  no-clobber publish: temp (0600) + fsync + HARD-LINK (a concurrent minter
+  can never replace a published key; losers adopt the winner), parent-dir
+  fsync failures fail the mint, 0700 key directory, canonical-dir
+  verification (`verify_key_dir`) on BOTH load and mint. Reads are
+  descriptor-bound (O_NOFOLLOW|O_NONBLOCK on unix via a unix-only libc dep;
+  reparse-refusal on Windows), bounded (4 KiB), with a VERIFIED
+  descriptor-bound chmod that fails closed if the mode stays lax. Every
+  buffer holding serialized key material zeroizes. The residual TOCTOU
+  depth (ancestor swap inside a syscall window) is documented ONCE as the
+  same openat/dirfd-class residual as the capture sink; codex's final
+  micro-refinement round was dispositioned per-finding on the PR.
+- **Domain:** `SecretFileStore::capture_secret` (framed derived ids tagged
+  capture-secret-write, reserved-order pin, TS summaries "Updated/Deleted
+  {basename}", origin local-file per the store's WRITE_ORIGINS);
+  `capture_secret_retire` is KEYLESS (delete never decrypts).
+  `SecretDiskIntent::{Materialize,AlreadyOnDisk}`: capture records the
+  COMPLETED materialization marker (never runnable — bytes came FROM disk),
+  deduped captures mark the confirmed tip, and capture retires record the
+  marker at the delete's generation so stale pending secret jobs can never
+  re-write retired plaintext. (The secret-aware decrypting EXECUTOR is not
+  yet in the Rust materializer — it lands with the composition driver.)
+- **Sink:** mirrors `readDiskSecretState` exactly (text rules, no media
+  heuristic, non-UTF-8 is UNTRACKED and retires the stale tip), canonical
+  secret names enforced both ways, apply-time absence confirmation on
+  retire; plaintext never lands in plaintext-store tables (asserted).
+- Gate: full-workspace PASS on every pushed head; final:
+  - 2026-07-19T20:32:39.700Z | run-rust-checks | win32/x64 | PASS | fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS cargo-deny=PASS cargo-audit=SKIP
+- Verdicts on merged head f1dd7c14: CodeRabbit APPROVED (+"Review finished",
+  zero findings on the final push), Codex non-blocking P2s dispositioned.
+- Next: C (composition driver: FilesActor + NativeWatcher + reconcile loop
+  into workspace open/close, policy-flip re-offer obligation, secret-aware
+  materializer executor) → D → E → full-soak → RPC-growth → GATE6 → R15
+  (ICE checkpoint — STOP).
