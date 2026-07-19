@@ -150,11 +150,11 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
             .create(parent)
             .map_err(|_| CryptoError::KeyFileMalformed)?;
     }
-    // DURABLE publish: temp (0600) + fsync + rename. The key file must
+    // DURABLE publish: temp (0600) + fsync + hard-link. The key file must
     // be durably on disk BEFORE any ciphertext is committed under it —
     // a crash that lost a visible-but-unflushed key would strand every
     // sealed snapshot, and a later restart would silently re-mint. The
-    // rename also means a partially written key can never be visible
+    // link-publish also means a partially written key can never be visible
     // at the final path.
     let temp = path.with_extension(format!("tmp-{}", std::process::id()));
     let written = (|| -> std::io::Result<()> {
@@ -167,7 +167,10 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
         }
         let mut file = options.open(&temp)?;
         use std::io::Write;
-        file.write_all(key.to_key_file().as_bytes())?;
+        // The serialized payload carries the key; it must zeroize on drop
+        // like every other buffer holding key material.
+        let payload = Zeroizing::new(key.to_key_file());
+        file.write_all(payload.as_bytes())?;
         file.sync_all()?;
         Ok(())
     })();
@@ -175,19 +178,41 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
         let _ = std::fs::remove_file(&temp);
         return Err(CryptoError::KeyFileMalformed);
     }
-    // Lost a race? Parse the winner's file, never clobber it. (One
-    // sink per open workspace is the only minter in practice; this is
-    // defense in depth.)
-    if path.exists() {
-        let _ = std::fs::remove_file(&temp);
-        let content = std::fs::read_to_string(&path).map_err(|_| CryptoError::KeyFileMalformed)?;
-        return SecretDataKey::parse_key_file(&content);
+    // NO-CLOBBER publish: `hard_link` fails atomically when the destination
+    // exists, so a concurrent minter can never REPLACE an already-published
+    // key (a replaced key would instantly orphan every row sealed under it);
+    // the losing racer adopts the winner instead. `rename` cannot give this
+    // guarantee — it replaces the destination on both Unix and Windows.
+    match std::fs::hard_link(&temp, &path) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&temp);
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(&temp);
+            let content = Zeroizing::new(
+                std::fs::read_to_string(&path).map_err(|_| CryptoError::KeyFileMalformed)?,
+            );
+            return SecretDataKey::parse_key_file(&content);
+        }
+        Err(_) => {
+            // Filesystems without hard links (FAT/exFAT): best-effort
+            // exists-check + rename. Non-atomic, documented — the engine's
+            // single-actor-per-workspace locking makes one minter the
+            // operating reality; this branch only serves exotic mounts.
+            if path.exists() {
+                let _ = std::fs::remove_file(&temp);
+                let content = Zeroizing::new(
+                    std::fs::read_to_string(&path).map_err(|_| CryptoError::KeyFileMalformed)?,
+                );
+                return SecretDataKey::parse_key_file(&content);
+            }
+            if std::fs::rename(&temp, &path).is_err() {
+                let _ = std::fs::remove_file(&temp);
+                return Err(CryptoError::KeyFileMalformed);
+            }
+        }
     }
-    if std::fs::rename(&temp, &path).is_err() {
-        let _ = std::fs::remove_file(&temp);
-        return Err(CryptoError::KeyFileMalformed);
-    }
-    // Durability of the RENAME itself: fsync the parent directory
+    // Durability of the PUBLISH itself: fsync the parent directory
     // where the platform allows it (std cannot open directories on
     // Windows; NTFS metadata journaling is the best effort there).
     #[cfg(unix)]
