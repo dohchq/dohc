@@ -136,6 +136,12 @@ impl StoreCaptureSink {
         if !metadata.file_type().is_file() {
             return Ok(CurrentContent::Untracked);
         }
+        // Between the capture cap and the SCAN cap (64 MiB) the scanner still
+        // lists the file, so a grow-past-capture-cap lands here and retires.
+        // PAST the scan cap the plan classifies it `retained_over_cap` and the
+        // sink is never called — deliberately NOT a retire: the ratified CAL-3
+        // delta (BEHAVIOR_DELTA.md §7.1) keeps last-known-good rather than
+        // false-deleting live user data behind an operational scan bound.
         if metadata.len() > MAX_CAPTURE_BINARY_BYTES {
             return Ok(CurrentContent::Untracked);
         }
@@ -259,6 +265,14 @@ impl CaptureSink for StoreCaptureSink {
             // `.dohc/files.toml` narrowed the path out of engine ownership:
             // retire any stale head (TS: "Stopped tracking by policy") so
             // opted-out content is never left stale-but-authoritative.
+            //
+            // KNOWN GAP, owned by the composition-driver sub-shard: this
+            // branch only runs when the diff emitted an op for the path. A
+            // policy flip on an UNCHANGED file emits none (`.dohc` is
+            // unwatched — policy edits generate no events, matching the TS
+            // oracle), so the driver must rebuild the controller with an
+            // empty manifest on a policy-snapshot change to re-offer every
+            // path through here.
             self.retire_head(path, false)?;
             return Ok(IngestOutcome::NotOwned);
         }

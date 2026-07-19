@@ -1169,6 +1169,10 @@ fn capture_retire_in_tx(
     if !version_exists(tx, &input.workspace_id, &input.version_id)? {
         return Err(DomainError::VersionNotFound);
     }
+    // Frame extended (head-scope discriminator) pre-cutover while capture is
+    // DORMANT: no store outside tests has recorded capture-retire requests
+    // (the sink passes request_id: None), and R15 resets shadow data, so no
+    // legacy-hash compatibility shim is owed.
     let payload_hash = hash_framed_fields(&[
         b"capture-retire",
         input.workspace_id.as_bytes(),
