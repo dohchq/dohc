@@ -1674,3 +1674,40 @@ documented, ratified reason. What landed:
   materialization job or skips it — decide against the TS oracle + the
   rollback-compensator invariants at store.rs:365-460), then B-secret → C →
   D → E → full-soak → RPC-growth → GATE6 → R15 (ICE checkpoint — STOP).
+
+## 2026-07-19 — Files-composition B-binary merged (#208): autonomous binary capture
+
+`capture_ingest_binary` + actor wiring + sink routing: binary content on disk
+now captures as a first-class BINHEAD binary head (replacing #205's interim
+deferral). Two bot rounds + an independent adversarial Claude review (clean:
+no P1/P2 across six probed surfaces). What landed:
+
+- The locked framed id scheme, now factored into ONE shared implementation
+  (`resolve_capture_object`) used by the text and binary primitives.
+- Capture is JOBLESS-in-effect but records a COMPLETED materialization job
+  marker ("these bytes are already on disk" — literally true). The marker
+  drives the materializer's staleness gate — three review-found regressions
+  killed: (1) a stale older pending job whose preimage matches the
+  just-captured bytes can no longer run and regress disk behind the head
+  (codex P1); (2) recapture-after-rollback reclaims the surviving marker row
+  via UPSERT with a documented remnant proof, instead of wedging on the
+  primary key; (3) DEDUPED captures mark the confirmed head's generation
+  (flipping the creating write's own still-pending job complete — its
+  postcondition was just verified), immunizing verified bytes.
+- The BINHEAD rollback compensator now restores disk for binary write
+  moments with NO job row (fail-safe arm; the marker makes it practically
+  unreachable) — previously a jobless rollback left disk/DB/manifest in
+  silent permanent divergence.
+- `WriteBinaryFile` restructured (moment_id, metadata_origin, author_json,
+  materialize: Option<Preimage>); the moments/snapshots/journal triple
+  extracted into shared `persist_binary_head_in_tx`; mirrored-resolve output
+  byte-identical ("sync" + Some(preimage)).
+- Sink: `CurrentContent::Binary(bytes)` captures for real; text→binary flips
+  replace the head in one transaction; receipts carry the scanner-equal
+  content identity so the manifest converges.
+- Gate: full-workspace PASS on every pushed head; final:
+  - 2026-07-19T18:06:39.604Z | run-rust-checks | win32/x64 | PASS | fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS cargo-deny=PASS cargo-audit=SKIP
+- Bots on merged head 0cf26191: Codex clean, CodeRabbit APPROVED (+"Review
+  finished", zero findings on the final push).
+- Next: B-secret (capture_secret via SecretFileStore, framed moment ids) →
+  C → D → E → full-soak → RPC-growth → GATE6 → R15 (ICE checkpoint — STOP).
