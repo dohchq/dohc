@@ -62,19 +62,20 @@ pub use merge::{
 };
 pub use normalize::NormalizedState;
 pub use records::{
-    CaptureIngest, CaptureRetire, CaptureRetireResult, CreateNamedVersion, DeleteResult,
-    DeleteTextFile, FileObjectRecord, ListMomentsQuery, MomentOp, MomentPage, MomentRecord,
-    RenameResult, RenameTextFile, RollbackTextFileMutation, SnapshotContent, SnapshotView,
-    TextSnapshot, VersionKind, VersionRecord, WriteResult, WriteText,
+    CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
+    CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord,
+    ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
+    RollbackTextFileMutation, SnapshotContent, SnapshotView, TextSnapshot, VersionKind,
+    VersionRecord, WriteResult, WriteText,
 };
 pub use secrets::{
     SecretDelete, SecretFileStat, SecretFileStore, SecretMomentRecord, SecretOp, SecretWrite,
     SecretWriteResult,
 };
 pub use store::{
-    MAX_TEXT_BYTES, VersionedTextStore, delete_text_in_tx, derive_capture_moment_id,
-    derive_capture_object_id, derive_capture_retire_moment_id, validate_delete_input,
-    validate_write_input, write_text_in_tx,
+    MAX_CAPTURE_BINARY_FILE_BYTES, MAX_TEXT_BYTES, VersionedTextStore, delete_text_in_tx,
+    derive_capture_moment_id, derive_capture_object_id, derive_capture_retire_moment_id,
+    validate_delete_input, validate_write_input, write_text_in_tx,
 };
 
 // Re-export the storage surface a domain caller needs on the common path.

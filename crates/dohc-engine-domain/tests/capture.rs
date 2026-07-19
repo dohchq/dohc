@@ -1,6 +1,6 @@
 use dohc_engine_domain::{
-    CaptureIngest, CaptureRetire, DomainError, ListMomentsQuery, NoFaults, RenameTextFile,
-    VersionedTextStore, derive_capture_moment_id, derive_capture_object_id,
+    CaptureIngest, CaptureIngestBinary, CaptureRetire, DomainError, ListMomentsQuery, NoFaults,
+    RenameTextFile, VersionedTextStore, derive_capture_moment_id, derive_capture_object_id,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
@@ -411,8 +411,10 @@ fn retire_only_if_text_head_never_deletes_a_binary_head() {
                     object_id: "bin-object-1".to_owned(),
                     path: "photo.png".to_owned(),
                     binary_sha256: sha.clone(),
-                    job_id: "binjob-1".to_owned(),
-                    preimage: Preimage::Absent,
+                    moment_id: "binjob-1".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    author_json: None,
+                    materialize: Some(Preimage::Absent),
                     now_ms: 10,
                 },
             )
@@ -439,4 +441,178 @@ fn retire_only_if_text_head_never_deletes_a_binary_head() {
         .capture_retire(&retire("photo.png", 30), &NO_FAULTS)
         .expect("full retire");
     assert!(result.retired.is_some());
+}
+
+fn ingest_binary(path: &str, bytes: &[u8], now_ms: i64) -> CaptureIngestBinary {
+    CaptureIngestBinary {
+        workspace_id: WS.to_owned(),
+        version_id: VERSION.to_owned(),
+        path: path.to_owned(),
+        bytes: bytes.to_vec(),
+        metadata_origin: "capture-test".to_owned(),
+        author_json: None,
+        now_ms,
+        request_id: None,
+    }
+}
+
+fn materialization_job_count(store: &EngineStore) -> i64 {
+    store
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM materialization_jobs", [], |row| {
+                row.get(0)
+            })
+        })
+        .expect("job count")
+}
+
+#[test]
+fn binary_capture_persists_a_jobless_binary_head_and_dedupes() {
+    use dohc_engine_storage::hex_sha256;
+
+    let (_scratch, mut store) = open_store();
+    let bytes = [0xffu8, 0x00, 0x01, 0x02];
+    let first = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("photo.png", &bytes, 10), &NO_FAULTS)
+        .expect("first binary capture");
+    assert!(!first.deduped);
+    assert_eq!(first.binary_sha256, hex_sha256(&bytes));
+
+    // Capture-from-disk must NOT enqueue a materialization job: the bytes came
+    // FROM disk (TS oracle parity — capture never writes disk).
+    assert_eq!(materialization_job_count(&store), 0);
+
+    // Content-equality no-op: the interleave-safety guarantee.
+    let second = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("photo.png", &bytes, 20), &NO_FAULTS)
+        .expect("equal binary capture");
+    assert!(second.deduped);
+    assert_eq!(second.moment_order, first.moment_order);
+    assert_eq!(moment_count(&mut store), 1);
+
+    // Changed bytes append one new moment on the same object.
+    let third = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("photo.png", &[0xaa, 0xbb], 30), &NO_FAULTS)
+        .expect("changed binary capture");
+    assert!(!third.deduped);
+    assert_eq!(third.object_id, first.object_id);
+    assert_eq!(moment_count(&mut store), 2);
+}
+
+#[test]
+fn binary_capture_replaces_a_text_head_and_text_recaptures_over_binary() {
+    let (_scratch, mut store) = open_store();
+    VersionedTextStore::new(&mut store)
+        .capture_ingest(&ingest("flip.md", "was text", 10), &NO_FAULTS)
+        .expect("seed text");
+    let flipped = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("flip.md", &[0xff, 0xfe], 20), &NO_FAULTS)
+        .expect("flip to binary");
+    assert!(!flipped.deduped);
+
+    // read_text fails closed on the binary head (BINHEAD contract).
+    let err = VersionedTextStore::new(&mut store)
+        .read_text(WS, VERSION, "flip.md")
+        .expect_err("binary head is not text");
+    assert!(matches!(err, DomainError::BinaryHeadNotText));
+
+    // And text capture flips it back on the SAME object.
+    let back = VersionedTextStore::new(&mut store)
+        .capture_ingest(&ingest("flip.md", "text again", 30), &NO_FAULTS)
+        .expect("flip back to text");
+    assert_eq!(back.moment.object_id, flipped.object_id);
+    let snapshot = VersionedTextStore::new(&mut store)
+        .read_text(WS, VERSION, "flip.md")
+        .expect("read text")
+        .expect("text head");
+    assert_eq!(snapshot.text, "text again");
+}
+
+#[test]
+fn binary_capture_request_id_replays_and_rejects_reuse() {
+    let (_scratch, mut store) = open_store();
+    let mut input = ingest_binary("img.png", &[1, 2, 3], 10);
+    input.request_id = Some("req-bin-1".to_owned());
+    let first = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&input, &NO_FAULTS)
+        .expect("first");
+    let replay = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&input, &NO_FAULTS)
+        .expect("replay");
+    assert!(replay.deduped);
+    assert_eq!(replay.moment_order, first.moment_order);
+    assert_eq!(moment_count(&mut store), 1);
+
+    let mut reused = ingest_binary("img.png", &[9, 9, 9], 20);
+    reused.request_id = Some("req-bin-1".to_owned());
+    let err = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&reused, &NO_FAULTS)
+        .expect_err("payload mismatch under a reused request id");
+    assert!(matches!(err, DomainError::IdempotencyKeyReuseMismatch));
+}
+
+#[test]
+fn binary_capture_over_cap_and_bad_paths_are_refused() {
+    let (_scratch, mut store) = open_store();
+    let oversized = vec![0u8; dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES + 1];
+    let err = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("big.bin", &oversized, 10), &NO_FAULTS)
+        .expect_err("over-cap bytes are refused");
+    assert!(matches!(err, DomainError::InvalidInput { .. }));
+
+    for bad in [".env", ".dohc/x.bin", "a\u{0}b.bin", "../escape.bin"] {
+        let err = VersionedTextStore::new(&mut store)
+            .capture_ingest_binary(&ingest_binary(bad, &[1], 10), &NO_FAULTS)
+            .expect_err("non-storable path refused");
+        assert!(matches!(err, DomainError::InvalidPath { .. }), "{bad}");
+    }
+}
+
+#[test]
+fn rollback_of_a_jobless_capture_binary_moment_still_restores_disk() {
+    use dohc_engine_domain::RollbackTextFileMutation;
+
+    let (_scratch, mut store) = open_store();
+    VersionedTextStore::new(&mut store)
+        .capture_ingest(&ingest("flip.md", "original text", 10), &NO_FAULTS)
+        .expect("seed text");
+    let flipped = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("flip.md", &[0xde, 0xad], 20), &NO_FAULTS)
+        .expect("binary capture");
+    assert_eq!(materialization_job_count(&store), 0, "capture is jobless");
+
+    VersionedTextStore::new(&mut store)
+        .rollback_text_file_mutation(
+            &RollbackTextFileMutation {
+                workspace_id: WS.to_owned(),
+                version_id: VERSION.to_owned(),
+                path: "flip.md".to_owned(),
+                mutation_moment_id: flipped.moment_id.clone(),
+                legacy_before_text: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("rollback the capture binary moment");
+
+    // The rolled-back head must be reconciled TO disk even though capture
+    // never enqueued a job — otherwise disk keeps the newer bytes while the
+    // reconcile manifest records them as captured, and the DB head silently
+    // diverges forever.
+    let restore_jobs: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs \
+                 WHERE job_id = ?1 AND status = 'pending'",
+                [format!("rollback-restore_{}", flipped.moment_id)],
+                |row| row.get(0),
+            )
+        })
+        .expect("restore job count");
+    assert_eq!(restore_jobs, 1, "the compensating restore must be enqueued");
+
+    let snapshot = VersionedTextStore::new(&mut store)
+        .read_text(WS, VERSION, "flip.md")
+        .expect("read text")
+        .expect("restored text head");
+    assert_eq!(snapshot.text, "original text");
 }

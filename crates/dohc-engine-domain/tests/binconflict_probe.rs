@@ -122,8 +122,10 @@ fn write_binary_head(store: &mut EngineStore, object_id: &str, path: &str, bytes
                     object_id: object_id.to_owned(),
                     path: path.to_owned(),
                     binary_sha256: sha.clone(),
-                    job_id: format!("binjob-{object_id}"),
-                    preimage: Preimage::Absent,
+                    moment_id: format!("binjob-{object_id}"),
+                    metadata_origin: "sync".to_owned(),
+                    author_json: None,
+                    materialize: Some(Preimage::Absent),
                     now_ms: 2_500,
                 },
             )

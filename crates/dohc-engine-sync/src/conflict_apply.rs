@@ -651,8 +651,10 @@ fn apply_mirrored_binary_write(
         object_id: mirrored_id(envelope, "object"),
         path: conflict.path.clone(),
         binary_sha256: sha256.to_owned(),
-        job_id: mirrored_id(envelope, "binary-materialize"),
-        preimage,
+        moment_id: mirrored_id(envelope, "binary-materialize"),
+        metadata_origin: "sync".to_owned(),
+        author_json: None,
+        materialize: Some(preimage),
         now_ms: envelope.recorded_at_ms,
     };
     // A genuine helper failure (object-id collision, missing version, a
