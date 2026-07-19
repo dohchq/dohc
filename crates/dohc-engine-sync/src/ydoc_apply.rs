@@ -74,9 +74,6 @@ pub fn apply_ydoc_envelope(
                 reason: "ydoc.update could not be applied",
             })
     })?;
-    if let ApplyOutcome::Applied(ReplicationApplyOutcome::Applied { seq, .. }) = &outcome {
-        replay_cache.advance(&key, &remote.bytes, *seq);
-    }
     if matches!(
         outcome,
         ApplyOutcome::Applied(ReplicationApplyOutcome::Applied { .. })

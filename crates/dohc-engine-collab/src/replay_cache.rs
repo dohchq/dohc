@@ -1,10 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use rusqlite::Connection;
 
 use crate::durable::reconstruct_for_replay_gate;
 use crate::replay_parity::{scan_v1, validate_replay_parity_cached, WireStructure};
 use crate::{CollabError, DocKey, Ydoc};
+
+/// Maximum number of reconstructed replay bases retained per cache.
+pub const MAX_REPLAY_CACHE_ENTRIES: usize = 64;
 
 pub struct CachedBase {
     base: Ydoc,
@@ -22,6 +25,7 @@ impl CachedBase {
 #[derive(Default)]
 pub struct ReplayBaseCache {
     bases: HashMap<DocKey, CachedBase>,
+    recency: VecDeque<DocKey>,
     hits: usize,
     misses: usize,
 }
@@ -43,6 +47,7 @@ impl ReplayBaseCache {
             .is_some_and(|cached| cached.head_update_seq == expected_seq);
         if hit {
             self.hits += 1;
+            self.mark_used(key);
             return self.bases.get(key).ok_or_else(cache_entry_missing);
         }
 
@@ -50,7 +55,7 @@ impl ReplayBaseCache {
         let base = reconstruct_for_replay_gate(conn, key)?;
         let base_full = base.encode_full_state();
         let base_structure = scan_v1(&base_full)?;
-        self.bases.insert(
+        self.insert(
             key.clone(),
             CachedBase {
                 base,
@@ -74,6 +79,7 @@ impl ReplayBaseCache {
 
     pub fn invalidate(&mut self, key: &DocKey) {
         self.bases.remove(key);
+        self.recency.retain(|cached_key| cached_key != key);
     }
 
     pub fn hit_count(&self) -> usize {
@@ -82,6 +88,21 @@ impl ReplayBaseCache {
 
     pub fn miss_count(&self) -> usize {
         self.misses
+    }
+
+    fn insert(&mut self, key: DocKey, base: CachedBase) {
+        self.bases.insert(key.clone(), base);
+        self.mark_used(&key);
+        if self.bases.len() > MAX_REPLAY_CACHE_ENTRIES {
+            if let Some(evicted) = self.recency.pop_front() {
+                self.bases.remove(&evicted);
+            }
+        }
+    }
+
+    fn mark_used(&mut self, key: &DocKey) {
+        self.recency.retain(|cached_key| cached_key != key);
+        self.recency.push_back(key.clone());
     }
 }
 

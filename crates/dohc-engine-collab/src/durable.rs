@@ -570,12 +570,7 @@ pub fn claim_base(
             base_snapshot_sha: base_sha,
         })
     })?;
-    if matches!(
-        outcome,
-        TxnOutcome::Committed(ClaimOutcome::Claimed { .. }) | TxnOutcome::Crashed { .. }
-    ) {
-        replay_cache.invalidate(key);
-    }
+    replay_cache.invalidate(key);
     Ok(outcome)
 }
 

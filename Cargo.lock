@@ -419,6 +419,7 @@ dependencies = [
  "dohc-engine-storage",
  "dohc-engine-sync",
  "dohc-engine-testkit",
+ "dohc-workspace-engine",
  "fs4",
  "rusqlite",
  "serde",

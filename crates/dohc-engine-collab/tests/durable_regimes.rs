@@ -10,7 +10,7 @@ use dohc_engine_collab::ContentKind;
 use dohc_engine_collab::{
     apply_remote_update, claim_base, close_session, ensure_marker, load_persisted, read_marker,
     record_local_update, settle, ClaimOutcome, CloseOutcome, CollabError, DocKey, LeaseRegistry,
-    Regime, RemoteUpdate, ReplicationApplyOutcome, Ydoc,
+    Regime, RemoteUpdate, ReplayBaseCache, ReplicationApplyOutcome, Ydoc,
 };
 use dohc_engine_storage::{NoFaults, TxnOutcome};
 
@@ -389,7 +389,7 @@ fn claiming_base_invalidates_a_seq_stable_replay_cache() {
         .expect("pre-claim update"),
     );
     let misses_before_claim = ts.replay_cache.miss_count();
-    committed(
+    let first_claim = committed(
         claim_base(
             &mut ts.store,
             &mut ts.replay_cache,
@@ -401,6 +401,7 @@ fn claiming_base_invalidates_a_seq_stable_replay_cache() {
         )
         .expect("claim"),
     );
+    assert!(matches!(first_claim, ClaimOutcome::Claimed { .. }));
     committed(
         record_local_update(
             &mut ts.store,
@@ -413,6 +414,158 @@ fn claiming_base_invalidates_a_seq_stable_replay_cache() {
         .expect("post-claim gate"),
     );
     assert_eq!(ts.replay_cache.miss_count(), misses_before_claim + 1);
+
+    let misses_before_resume = ts.replay_cache.miss_count();
+    let resumed = committed(
+        claim_base(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            ContentKind::Plaintext,
+            &base,
+            &NoFaults,
+            1_004,
+        )
+        .expect("resume"),
+    );
+    assert_eq!(resumed, ClaimOutcome::Resumed);
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            &base,
+            &NoFaults,
+            1_005,
+        )
+        .expect("post-resume gate"),
+    );
+    assert_eq!(ts.replay_cache.miss_count(), misses_before_resume + 1);
+}
+
+#[test]
+fn replay_base_cache_evicts_lru_and_reconstructs_cold_equivalently() {
+    let mut ts = fresh_store("replay-cache-lru");
+    let producer = Ydoc::wire();
+    let update = producer.plaintext_insert(0, "cached");
+    let mut keys = Vec::new();
+
+    for index in 0..dohc_engine_collab::replay_cache::MAX_REPLAY_CACHE_ENTRIES {
+        let key = DocKey::new("ws-1", "ver-1", format!("obj-{index}")).expect("bounded cache key");
+        seed_parents(&mut ts.store, &key, 2_000 + index as i64);
+        committed(
+            ensure_marker(
+                &mut ts.store,
+                &key,
+                ContentKind::Plaintext,
+                Regime::LocalOnly,
+                &NoFaults,
+                2_000 + index as i64,
+            )
+            .expect("marker"),
+        );
+        committed(
+            record_local_update(
+                &mut ts.store,
+                &mut ts.replay_cache,
+                &key,
+                &update,
+                &NoFaults,
+                3_000 + index as i64,
+            )
+            .expect("populate cache"),
+        );
+        keys.push(key);
+    }
+
+    let touched = keys.first().expect("first key");
+    let hits_before_touch = ts.replay_cache.hit_count();
+    let touched_outcome = committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            touched,
+            &update,
+            &NoFaults,
+            4_000,
+        )
+        .expect("touch cache entry"),
+    );
+    assert_eq!(ts.replay_cache.hit_count(), hits_before_touch + 1);
+
+    let extra_index = dohc_engine_collab::replay_cache::MAX_REPLAY_CACHE_ENTRIES;
+    let extra =
+        DocKey::new("ws-1", "ver-1", format!("obj-{extra_index}")).expect("extra cache key");
+    seed_parents(&mut ts.store, &extra, 4_001);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &extra,
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            &NoFaults,
+            4_001,
+        )
+        .expect("extra marker"),
+    );
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &extra,
+            &update,
+            &NoFaults,
+            4_001,
+        )
+        .expect("overflow cache"),
+    );
+
+    let hits_before_touched_reaccess = ts.replay_cache.hit_count();
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            touched,
+            &update,
+            &NoFaults,
+            4_002,
+        )
+        .expect("touched entry retained"),
+    );
+    assert_eq!(
+        ts.replay_cache.hit_count(),
+        hits_before_touched_reaccess + 1
+    );
+
+    let evicted = keys.get(1).expect("least recently used key");
+    let misses_before_evicted = ts.replay_cache.miss_count();
+    let evicted_outcome = committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            evicted,
+            &update,
+            &NoFaults,
+            4_003,
+        )
+        .expect("evicted cache reconstruct"),
+    );
+    assert_eq!(ts.replay_cache.miss_count(), misses_before_evicted + 1);
+
+    let mut cold_cache = ReplayBaseCache::new();
+    let cold_outcome = committed(
+        record_local_update(
+            &mut ts.store,
+            &mut cold_cache,
+            evicted,
+            &update,
+            &NoFaults,
+            4_004,
+        )
+        .expect("cold reconstruct"),
+    );
+    assert_eq!(evicted_outcome, cold_outcome);
+    assert_eq!(touched_outcome, cold_outcome);
 }
 
 // ---- replication: idempotent + echo-suppressed ------------------------------
