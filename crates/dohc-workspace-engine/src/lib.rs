@@ -139,16 +139,18 @@ impl EngineService {
                 .map(|(handle, open)| (handle.clone(), open.clone()))
         };
         if let Some((handle, open)) = existing {
-            // Only short-circuit on a LIVE binding; a bound-but-closed actor (its
-            // worker died) is stale — drop it and fall through to reopen.
-            if open.actor.lifecycle() != LifecycleState::Closed {
-                if open.workspace_id == params.workspace_id {
-                    return Ok(json!({ "workspace": handle }));
-                }
+            // The root's logical binding to a workspace id holds regardless of
+            // actor liveness: a different workspace id is always rejected.
+            if open.workspace_id != params.workspace_id {
                 return Err(wire(
                     ErrorCode::InvalidParams,
                     "workspace root is already bound to another workspace",
                 ));
+            }
+            // Same workspace: short-circuit only on a LIVE binding. A bound-but-
+            // closed actor (its worker died) is stale — drop it and reopen fresh.
+            if open.actor.lifecycle() != LifecycleState::Closed {
+                return Ok(json!({ "workspace": handle }));
             }
             lock(&self.handles).remove(&handle);
         }
