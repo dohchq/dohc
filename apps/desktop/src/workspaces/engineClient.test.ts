@@ -8,7 +8,9 @@ import {
   EngineFrameError,
   EngineRequestError,
   FrameDecoder,
+  FrameType,
   encodeFrame,
+  type EngineClientConnectOptions,
   type EngineClientConnection,
 } from "./engineClient";
 
@@ -23,12 +25,13 @@ const LIMITS = {
 
 function helloAck(
   limits: typeof LIMITS = LIMITS,
+  capabilities: string[] = ["core", "blobs"],
 ): Extract<Envelope, { type: "helloAck" }> {
   return {
     type: "helloAck",
     protocolVersion: 1,
     sessionGeneration: 7,
-    capabilities: ["core"],
+    capabilities,
     limits,
   };
 }
@@ -52,6 +55,20 @@ function envelopeFrame(
     0,
     Buffer.from(JSON.stringify(envelope), "utf8"),
     maxFrameBytes,
+  );
+}
+
+function blobChunkFrame(
+  streamId: number,
+  bytes: Buffer,
+  fin: boolean,
+  maxBlobChunkBytes = LIMITS.maxBlobChunkBytes,
+): Buffer {
+  return encodeFrame(
+    FrameType.BlobChunk,
+    fin ? 1 : 0,
+    { streamId, bytes },
+    maxBlobChunkBytes,
   );
 }
 
@@ -129,13 +146,17 @@ class FakePeerConnection implements EngineClientConnection {
   }
 }
 
-function client(peer: FakePeerConnection): EngineClient {
+function client(
+  peer: FakePeerConnection,
+  options: Partial<EngineClientConnectOptions> = {},
+): EngineClient {
   return new EngineClient(peer, {
     authToken: "parent-secret",
     protocolVersion: 1,
-    capabilities: ["core", "ydoc"],
+    capabilities: ["core", "ydoc", "blobs"],
     connectTimeoutMs: 5_000,
     maxFrameBytes: LIMITS.maxFrameBytes,
+    ...options,
   });
 }
 
@@ -224,13 +245,87 @@ describe("R03 frame codec", () => {
     );
   });
 
-  it("rejects deferred BlobChunk frames with a typed error", () => {
+  it("round-trips ordered multi-chunk BlobChunk frames and preserves FIN", () => {
+    const decoder = new FrameDecoder(128, 8);
+    const streamId = 0x0001_0203_0405_0607;
+    const first = Buffer.from("blob-");
+    const second = Buffer.from("bytes");
+    const firstFrame = blobChunkFrame(streamId, first, false, 8);
+    const finalFrame = blobChunkFrame(streamId, second, true, 8);
+
+    expect(firstFrame[4]).toBe(FrameType.BlobChunk);
+    expect(firstFrame[5]).toBe(0);
+    expect(finalFrame[5]).toBe(1);
+    expect(firstFrame.subarray(12, 20)).toEqual(
+      Buffer.from([0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01, 0x00]),
+    );
+
+    expect(
+      decoder.push(
+        Buffer.concat([firstFrame, finalFrame]),
+      ),
+    ).toEqual([
+      { kind: "blobChunk", streamId, fin: false, payload: first },
+      { kind: "blobChunk", streamId, fin: true, payload: second },
+    ]);
+    decoder.finish();
+  });
+
+  it("rejects over-limit BlobChunk bytes while encoding and decoding", () => {
+    expect(() => blobChunkFrame(9, Buffer.alloc(9), true, 8)).toThrowError(
+      expect.objectContaining<Partial<EngineFrameError>>({
+        code: "blob-chunk-too-large",
+      }),
+    );
+
+    const oversized = blobChunkFrame(9, Buffer.alloc(9), true, 9);
+    expect(() => new FrameDecoder(128, 8).push(oversized)).toThrowError(
+      expect.objectContaining<Partial<EngineFrameError>>({
+        code: "blob-chunk-too-large",
+      }),
+    );
+  });
+
+  it("rejects a short BlobChunk payload with a typed error", () => {
     const header = Buffer.alloc(12);
     header.write("DOP1", 0, "ascii");
     header[4] = 2;
-    header.writeUInt32LE(8, 8);
+    header.writeUInt32LE(7, 8);
     expect(() => new FrameDecoder(128).push(header)).toThrowError(
-      expect.objectContaining<Partial<EngineFrameError>>({ code: "unsupported-frame" }),
+      expect.objectContaining<Partial<EngineFrameError>>({
+        code: "blob-chunk-missing-stream-id",
+      }),
+    );
+  });
+
+  it("rejects non-byte BlobChunk flags while encoding", () => {
+    for (const flags of [Number.NaN, 0.5, 2 ** 32]) {
+      expect(() =>
+        encodeFrame(
+          FrameType.BlobChunk,
+          flags,
+          { streamId: 1, bytes: Buffer.alloc(0) },
+          8,
+        ),
+      ).toThrowError(
+        expect.objectContaining<Partial<EngineFrameError>>({
+          code: "invalid-flags",
+        }),
+      );
+    }
+  });
+
+  it("rejects a decoded BlobChunk stream id at 2^53", () => {
+    const frame = Buffer.alloc(20);
+    frame.write("DOP1", 0, "ascii");
+    frame[4] = FrameType.BlobChunk;
+    frame.writeUInt32LE(8, 8);
+    frame.writeBigUInt64LE(2n ** 53n, 12);
+
+    expect(() => new FrameDecoder(128).push(frame)).toThrowError(
+      expect.objectContaining<Partial<EngineFrameError>>({
+        code: "blob-stream-id-out-of-range",
+      }),
     );
   });
 });
@@ -276,7 +371,7 @@ describe("EngineClient", () => {
         type: "hello",
         protocolVersion: 1,
         authToken: "parent-secret",
-        capabilities: ["core", "ydoc"],
+        capabilities: ["core", "ydoc", "blobs"],
         lastSessionGeneration: null,
       },
     ]);
@@ -359,6 +454,670 @@ describe("EngineClient", () => {
     expect(first).toHaveBeenCalledTimes(1);
     expect(second).toHaveBeenCalledTimes(2);
     transport.close();
+  });
+
+  it("reassembles BlobChunk frames in order and dispatches only after FIN", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    void transport.sendRequest(request(4, "blob.reassembly")).catch(() => {});
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 27,
+      totalBytes: 11,
+      sha256: null,
+    });
+
+    peer.sendRaw(blobChunkFrame(27, Buffer.from("hello "), false));
+    expect(onBlob).not.toHaveBeenCalled();
+    peer.sendRaw(blobChunkFrame(27, Buffer.from("world"), true));
+
+    expect(onBlob).toHaveBeenCalledOnce();
+    expect(onBlob).toHaveBeenCalledWith({
+      requestId: 4,
+      streamId: 27,
+      totalBytes: 11,
+      sha256: null,
+      bytes: Buffer.from("hello world"),
+    });
+    transport.close();
+  });
+
+  it("maps a completed blob wire request id back to the caller id", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    let wireId = 0;
+    peer.onEnvelope = (envelope) => {
+      if (envelope.type === "request") wireId = envelope.id;
+    };
+    const operation = transport.sendRequest(request(9_001, "blob.with.adapter.id"));
+
+    peer.send({
+      type: "blobStart",
+      requestId: wireId,
+      streamId: 26,
+      totalBytes: 1,
+      sha256: null,
+    });
+    peer.sendRaw(blobChunkFrame(26, Buffer.from("x"), true));
+
+    expect(onBlob).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: 9_001 }),
+    );
+    peer.send({ type: "response", id: wireId, result: "done" });
+    await expect(operation).resolves.toEqual({ id: 9_001, result: "done" });
+    transport.close();
+  });
+
+  it("preserves the caller id when the response resolves before the final chunk", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    let wireId = 0;
+    peer.onEnvelope = (envelope) => {
+      if (envelope.type === "request") wireId = envelope.id;
+    };
+    const operation = transport.sendRequest(request(9_002, "blob.after.response"));
+
+    peer.send({
+      type: "blobStart",
+      requestId: wireId,
+      streamId: 28,
+      totalBytes: 1,
+      sha256: null,
+    });
+    peer.send({ type: "response", id: wireId, result: "done" });
+    await expect(operation).resolves.toEqual({ id: 9_002, result: "done" });
+    peer.sendRaw(blobChunkFrame(28, Buffer.from("x"), true));
+
+    expect(onBlob).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: 9_002 }),
+    );
+    transport.close();
+  });
+
+  it("rejects blob streams when the session did not negotiate the blobs capability", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.send(helloAck(LIMITS, ["core"]));
+    await transport.ready();
+    const pending = transport.sendRequest(request(11, "await.no.capability"));
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 60,
+      totalBytes: 1,
+      sha256: null,
+    });
+
+    await expect(pending).rejects.toMatchObject({ code: "protocol-error" });
+  });
+
+  it("rejects blob streams the client did not request even if the ack offers them", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { capabilities: ["core"] });
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(15, "await.unrequested"));
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 62,
+      totalBytes: 1,
+      sha256: null,
+    });
+
+    await expect(pending).rejects.toMatchObject({ code: "protocol-error" });
+  });
+
+  it("rejects a blobStart that references an unknown request", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(16, "await.unknown.request"));
+    peer.send({
+      type: "blobStart",
+      requestId: 99,
+      streamId: 63,
+      totalBytes: 1,
+      sha256: null,
+    });
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "unknown-blob-request" },
+    });
+  });
+
+  it("caps buffered chunks across all streams", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(17, "await.global.chunks"));
+    const oneByte = Buffer.from("x");
+    // Two streams at exactly the per-stream cap (4096 each) fill the global cap
+    // (8192); a third stream's FIRST chunk then trips the global check while
+    // its own per-stream count is zero.
+    for (const streamId of [70, 71, 72]) {
+      peer.send({
+        type: "blobStart",
+        requestId: 1,
+        streamId,
+        totalBytes: null,
+        sha256: null,
+      });
+    }
+    for (const streamId of [70, 71]) {
+      const flood: Buffer[] = [];
+      for (let i = 0; i < 4096; i++) {
+        flood.push(blobChunkFrame(streamId, oneByte, false));
+      }
+      peer.sendRaw(Buffer.concat(flood));
+    }
+    peer.sendRaw(blobChunkFrame(72, oneByte, false));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "blob-backpressure-exceeded" },
+    });
+  });
+
+  it("accepts blob chunks larger than the negotiated control-frame limit", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.send(
+      helloAck({
+        ...LIMITS,
+        maxFrameBytes: 64 * 1024,
+        maxBlobChunkBytes: 256 * 1024,
+      }),
+    );
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    void transport.sendRequest(request(12, "blob.large.chunk")).catch(() => {});
+    // Larger than maxFrameBytes (control-frame bound) but within the blob bound.
+    const bytes = Buffer.alloc(100_000, 7);
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 61,
+      totalBytes: bytes.length,
+      sha256: null,
+    });
+    peer.sendRaw(blobChunkFrame(61, bytes, true, 256 * 1024));
+
+    expect(onBlob).toHaveBeenCalledWith(
+      expect.objectContaining({ streamId: 61, bytes }),
+    );
+    transport.close();
+  });
+
+  it("aborts decoding the rest of a coalesced buffer when onFrame returns false", () => {
+    const decoder = new FrameDecoder();
+    const frame = encodeFrame(FrameType.Control, 0, Buffer.from("{}"));
+    const seen = vi.fn(() => false);
+
+    decoder.push(Buffer.concat([frame, frame, frame]), seen);
+
+    expect(seen).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts matching blob SHA-256 and rejects a digest mismatch", async () => {
+    const digest =
+      "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    const matchingPeer = new FakePeerConnection();
+    const matching = client(matchingPeer);
+    matchingPeer.acknowledge();
+    await matching.ready();
+    const onBlob = vi.fn();
+    matching.onBlob(onBlob);
+    void matching.sendRequest(request(13, "blob.sha.match")).catch(() => {});
+    matchingPeer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 31,
+      totalBytes: 5,
+      sha256: digest,
+    });
+    matchingPeer.sendRaw(blobChunkFrame(31, Buffer.from("hello"), true));
+    expect(onBlob).toHaveBeenCalledOnce();
+    matching.close();
+
+    const mismatchPeer = new FakePeerConnection();
+    const mismatch = client(mismatchPeer);
+    mismatchPeer.acknowledge();
+    await mismatch.ready();
+    const pending = mismatch.sendRequest(request(2, "await.bad.blob"));
+    mismatchPeer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 32,
+      totalBytes: 5,
+      sha256: "0".repeat(64),
+    });
+    mismatchPeer.sendRaw(blobChunkFrame(32, Buffer.from("hello"), true));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "blob-digest-mismatch" },
+    });
+  });
+
+  it("clamps a peer's huge blob chunk limit to the client cap", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { maxBlobChunkBytes: 4 });
+    peer.send(
+      helloAck({
+        ...LIMITS,
+        maxBlobChunkBytes: 0xffff_ffff,
+      }),
+    );
+    await transport.ready();
+    const pending = transport.sendRequest(request(3, "await.oversized.chunk"));
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 33,
+      totalBytes: 5,
+      sha256: null,
+    });
+    peer.sendRaw(blobChunkFrame(33, Buffer.from("12345"), true, 5));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "blob-chunk-too-large" },
+    });
+  });
+
+  it("rejects a flood of concurrent never-final blob streams", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(4, "await.stream.flood"));
+
+    for (let streamId = 1; streamId <= 65; streamId += 1) {
+      peer.send({
+        type: "blobStart",
+        requestId: 1,
+        streamId,
+        totalBytes: null,
+        sha256: null,
+      });
+    }
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "too-many-blob-streams" },
+    });
+  });
+
+  it("enforces a global buffered blob byte budget", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { maxBlobBytes: 5 });
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(5, "await.blob.backpressure"));
+    for (const streamId of [34, 35]) {
+      peer.send({
+        type: "blobStart",
+        requestId: 1,
+        streamId,
+        totalBytes: 5,
+        sha256: null,
+      });
+    }
+    peer.sendRaw(blobChunkFrame(34, Buffer.from("123"), false));
+    peer.sendRaw(blobChunkFrame(35, Buffer.from("456"), false));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "blob-backpressure-exceeded" },
+    });
+  });
+
+  it("caps buffered chunk count per stream to bound tiny-chunk floods", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(7, "await.blob.chunkflood"));
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 51,
+      totalBytes: null,
+      sha256: null,
+    });
+    // One coalesced data event carrying 4097 one-byte chunks — under the byte
+    // budget (64MB default) but past the per-stream chunk cap. The inline decode
+    // path must halt mid-buffer rather than materialize the whole batch first.
+    const oneByte = Buffer.from("x");
+    const flood: Buffer[] = [];
+    for (let i = 0; i <= 4096; i++) {
+      flood.push(blobChunkFrame(51, oneByte, false));
+    }
+    peer.sendRaw(Buffer.concat(flood));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "blob-backpressure-exceeded" },
+    });
+  });
+
+  it("drops a failed request's blob streams so a late FIN cannot dispatch", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    const failing = transport.sendRequest(request(18, "await.request.error"));
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 80,
+      totalBytes: 11,
+      sha256: null,
+    });
+    peer.sendRaw(blobChunkFrame(80, Buffer.from("hello "), false));
+    peer.send({
+      type: "error",
+      id: 1,
+      error: { code: "INTERNAL", message: "nope", retry: "no" },
+    });
+    await expect(failing).rejects.toMatchObject({ code: "wire-error" });
+
+    const witness = transport.sendRequest(request(19, "await.late.fin"));
+    peer.sendRaw(blobChunkFrame(80, Buffer.from("world"), true));
+
+    expect(onBlob).not.toHaveBeenCalled();
+    await expect(witness).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "unknown-blob-stream" },
+    });
+  });
+
+  it("fails the handshake on malformed helloAck capabilities", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.send(
+      helloAck(LIMITS, "not-blobs" as unknown as string[]),
+    );
+
+    await expect(transport.ready()).rejects.toMatchObject({
+      code: "handshake-failed",
+    });
+  });
+
+  it("clamps the local chunk cap to the blob budget", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, {
+      maxBlobBytes: 5,
+      maxBlobChunkBytes: 1024 * 1024,
+    });
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(20, "await.clamped.cap"));
+    // 10 bytes exceeds the blob budget (5), so the decode-level bound must trip
+    // even though the requested chunk cap was 1 MiB.
+    peer.sendRaw(blobChunkFrame(81, Buffer.alloc(10), true));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "blob-chunk-too-large" },
+    });
+  });
+
+  it("rejects a duplicate blobStart for a still-active stream", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(6, "await.live.duplicate"));
+    const start = {
+      type: "blobStart" as const,
+      requestId: 1,
+      streamId: 36,
+      totalBytes: 0,
+      sha256: null,
+    };
+    peer.send(start);
+    peer.send(start);
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "duplicate-blob-stream" },
+    });
+  });
+
+  it("accepts unique blob stream ids announced out of order", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    void transport.sendRequest(request(6, "await.out.of.order")).catch(() => {});
+    // A higher id announced before a lower one is valid: ids are unique, not
+    // ordered. Neither should tear down the session.
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 10,
+      totalBytes: 1,
+      sha256: null,
+    });
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 9,
+      totalBytes: 1,
+      sha256: null,
+    });
+    peer.sendRaw(blobChunkFrame(10, Buffer.from("a"), true));
+    peer.sendRaw(blobChunkFrame(9, Buffer.from("b"), true));
+
+    expect(onBlob).toHaveBeenCalledTimes(2);
+    transport.close();
+  });
+
+  it("rejects invalid and over-limit blobStart totalBytes", async () => {
+    // 1.5 is a JSON-representable non-integer (unlike NaN, which serializes to
+    // null), so it exercises the invalid-integer guard through the real wire.
+    for (const [streamId, totalBytes, code] of [
+      [40, -1, "invalid-blob-start"],
+      [41, 1.5, "invalid-blob-start"],
+      [46, 6, "blob-too-large"],
+    ] as const) {
+      const peer = new FakePeerConnection();
+      const transport = client(peer, { maxBlobBytes: 5 });
+      peer.acknowledge();
+      await transport.ready();
+      const pending = transport.sendRequest(request(8, "await.invalid.start"));
+      peer.send({
+        type: "blobStart",
+        requestId: 1,
+        streamId,
+        totalBytes,
+        sha256: null,
+      });
+      await expect(pending).rejects.toMatchObject({
+        code: "protocol-error",
+        cause: { code },
+      });
+    }
+  });
+
+  it("rejects FIN before the announced blob size is reached", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(9, "await.short.blob"));
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 49,
+      totalBytes: 5,
+      sha256: null,
+    });
+    peer.sendRaw(blobChunkFrame(49, Buffer.from("1234"), true));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "blob-size-mismatch" },
+    });
+  });
+
+  it("rejects empty non-final chunks and accepts an empty final chunk", async () => {
+    const emptyPeer = new FakePeerConnection();
+    const empty = client(emptyPeer);
+    emptyPeer.acknowledge();
+    await empty.ready();
+    const pending = empty.sendRequest(request(10, "await.empty.chunk"));
+    emptyPeer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 50,
+      totalBytes: null,
+      sha256: null,
+    });
+    emptyPeer.sendRaw(blobChunkFrame(50, Buffer.alloc(0), false));
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "empty-blob-chunk" },
+    });
+
+    const finalPeer = new FakePeerConnection();
+    const final = client(finalPeer);
+    finalPeer.acknowledge();
+    await final.ready();
+    const onBlob = vi.fn();
+    final.onBlob(onBlob);
+    void final.sendRequest(request(14, "blob.empty.final")).catch(() => {});
+    finalPeer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 51,
+      totalBytes: 0,
+      sha256: null,
+    });
+    finalPeer.sendRaw(blobChunkFrame(51, Buffer.alloc(0), true));
+    expect(onBlob).toHaveBeenCalledWith(
+      expect.objectContaining({ bytes: Buffer.alloc(0) }),
+    );
+    final.close();
+  });
+
+  it("rejects a BlobChunk arriving before helloAck", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.sendRaw(blobChunkFrame(52, Buffer.alloc(0), true));
+
+    await expect(transport.ready()).rejects.toMatchObject({
+      code: "protocol-error",
+    });
+  });
+
+  it("terminally rejects a BlobChunk stream over its announced total", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(5, "await.blob"));
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 28,
+      totalBytes: 4,
+      sha256: null,
+    });
+    peer.sendRaw(blobChunkFrame(28, Buffer.from("12345"), true));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "blob-too-large" },
+    });
+  });
+
+  it("terminally rejects a BlobChunk over the negotiated chunk limit", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.send(
+      helloAck({
+        ...LIMITS,
+        maxBlobChunkBytes: 4,
+      }),
+    );
+    await transport.ready();
+    const pending = transport.sendRequest(request(6, "await.blob"));
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 30,
+      totalBytes: 5,
+      sha256: null,
+    });
+    peer.sendRaw(blobChunkFrame(30, Buffer.from("12345"), true, 5));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "blob-chunk-too-large" },
+    });
+  });
+
+  it("terminally rejects a BlobChunk for an unknown stream id", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(6, "await.blob"));
+    peer.sendRaw(blobChunkFrame(404, Buffer.from("orphan"), true));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "unknown-blob-stream" },
+    });
+  });
+
+  it("terminally rejects duplicate FIN for a completed BlobChunk stream", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    transport.onBlob(() => undefined);
+    void transport.sendRequest(request(7, "blob.then.finish")).catch(() => {});
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 29,
+      totalBytes: 1,
+      sha256: null,
+    });
+    peer.sendRaw(blobChunkFrame(29, Buffer.from("x"), true));
+    const pending = transport.sendRequest(request(8, "after.blob"));
+    // The completed stream is gone; a late FIN is an unknown stream (fail-closed
+    // teardown), with no per-id completed set retained.
+    peer.sendRaw(blobChunkFrame(29, Buffer.alloc(0), true));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "unknown-blob-stream" },
+    });
   });
 
   it("does not resurrect or dispatch after a pre-ready error in the same chunk", async () => {

@@ -3,6 +3,7 @@
 // only through createEngineClient, and the later cutover owns that wiring.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash } from "node:crypto";
 import { Duplex } from "node:stream";
 import { TextDecoder } from "node:util";
 import type {
@@ -13,11 +14,28 @@ import type {
   Response,
   WireError,
 } from "@dohc/workspace-engine-client";
+import type { BlobStart } from "../../../../packages/workspace-engine-client/src/ydoc/generated/BlobStart";
 
 const FRAME_MAGIC = Buffer.from("DOP1", "ascii");
 const FRAME_HEADER_BYTES = 12;
+const BLOB_STREAM_ID_BYTES = 8;
+const BLOB_FIN_FLAG = 0b0000_0001;
 const MAX_U32 = 0xffff_ffff;
+const MAX_WIRE_INTEGER = Number.MAX_SAFE_INTEGER;
 const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_BLOB_CHUNK_BYTES = 256 * 1024;
+const DEFAULT_MAX_BLOB_BYTES = 64 * 1024 * 1024;
+const MAX_CONCURRENT_BLOB_STREAMS = 64;
+// Global cap on retained chunk Buffers across all streams, so tiny-chunk floods
+// spread over many streams cannot amplify object overhead past the byte budget.
+const MAX_BUFFERED_BLOB_CHUNKS = 8192;
+// Bounds retained per-chunk object overhead so a tiny-chunk flood cannot amplify
+// memory past the byte budget. A max-size blob at the default chunk size is ~256
+// chunks, so this leaves ample headroom for legitimate chunking.
+const MAX_BLOB_CHUNKS_PER_STREAM = 4096;
+// Blob streaming gates on this negotiated hello/helloAck capability, never on
+// frame sniffing (ENGINE_PROTOCOL.md row 13).
+const BLOB_CAPABILITY = "blobs";
 // Leaves headroom for handshake and small control envelopes.
 const MIN_NEGOTIABLE_MAX_FRAME_BYTES = 64 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
@@ -28,15 +46,24 @@ export const enum FrameType {
   BlobChunk = 2,
 }
 
-export type Frame = { kind: "control"; payload: Buffer };
+export type Frame =
+  | { kind: "control"; payload: Buffer }
+  | { kind: "blobChunk"; streamId: number; fin: boolean; payload: Buffer };
+
+export interface BlobChunkPayload {
+  readonly streamId: number;
+  readonly bytes: Buffer;
+}
 
 export type FrameCodecErrorCode =
   | "bad-magic"
+  | "blob-chunk-missing-stream-id"
+  | "blob-chunk-too-large"
+  | "blob-stream-id-out-of-range"
   | "frame-too-large"
   | "invalid-flags"
   | "non-zero-reserved"
   | "truncated-frame"
-  | "unsupported-frame"
   | "unknown-frame-type";
 
 export class FrameCodecError extends Error {
@@ -50,15 +77,32 @@ export class FrameCodecError extends Error {
 }
 
 export function encodeFrame(
-  type: FrameType,
+  type: FrameType.Control,
   flags: number,
   payload: Buffer,
-  maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
+  maxFrameBytes?: number,
+): Buffer;
+export function encodeFrame(
+  type: FrameType.BlobChunk,
+  flags: number,
+  payload: BlobChunkPayload,
+  maxBlobChunkBytes?: number,
+): Buffer;
+export function encodeFrame(
+  type: FrameType,
+  flags: number,
+  payload: Buffer | BlobChunkPayload,
+  maxPayloadBytes?: number,
 ): Buffer {
+  const payloadLimit =
+    maxPayloadBytes ??
+    (type === FrameType.BlobChunk
+      ? DEFAULT_MAX_BLOB_CHUNK_BYTES
+      : DEFAULT_MAX_FRAME_BYTES);
   if (
-    !Number.isSafeInteger(maxFrameBytes) ||
-    maxFrameBytes < 0 ||
-    maxFrameBytes > MAX_U32
+    !Number.isSafeInteger(payloadLimit) ||
+    payloadLimit < 0 ||
+    payloadLimit > MAX_U32
   ) {
     throw new FrameCodecError(
       "frame-too-large",
@@ -66,10 +110,45 @@ export function encodeFrame(
     );
   }
   if (type === FrameType.BlobChunk) {
-    throw new FrameCodecError(
-      "unsupported-frame",
-      "BlobChunk streaming is deferred and is not supported by this adapter build.",
-    );
+    if (Buffer.isBuffer(payload)) {
+      throw new FrameCodecError(
+        "blob-chunk-missing-stream-id",
+        "BlobChunk encoding requires a stream id and raw bytes.",
+      );
+    }
+    if (
+      !Number.isSafeInteger(payload.streamId) ||
+      payload.streamId < 0 ||
+      payload.streamId > MAX_WIRE_INTEGER
+    ) {
+      throw new FrameCodecError(
+        "blob-stream-id-out-of-range",
+        "BlobChunk stream id must be a non-negative wire integer.",
+      );
+    }
+    if (flags !== 0 && flags !== BLOB_FIN_FLAG) {
+      throw new FrameCodecError(
+        "invalid-flags",
+        "BlobChunk frames only support the FIN flag.",
+      );
+    }
+    if (payload.bytes.length > payloadLimit) {
+      throw new FrameCodecError(
+        "blob-chunk-too-large",
+        `Blob chunk is ${payload.bytes.length} bytes; maximum is ${payloadLimit}.`,
+      );
+    }
+    const payloadLength = BLOB_STREAM_ID_BYTES + payload.bytes.length;
+    if (payloadLength > MAX_U32) {
+      throw new FrameCodecError(
+        "frame-too-large",
+        `BlobChunk frame payload is ${payloadLength} bytes; maximum is ${MAX_U32}.`,
+      );
+    }
+    const frame = beginFrame(type, flags, payloadLength);
+    frame.writeBigUInt64LE(BigInt(payload.streamId), FRAME_HEADER_BYTES);
+    payload.bytes.copy(frame, FRAME_HEADER_BYTES + BLOB_STREAM_ID_BYTES);
+    return frame;
   }
   if (type !== FrameType.Control) {
     throw new FrameCodecError("unknown-frame-type", `Unknown frame type: ${type}.`);
@@ -80,20 +159,31 @@ export function encodeFrame(
       "Control frames must have zero flags.",
     );
   }
-  if (payload.length > maxFrameBytes || payload.length > MAX_U32) {
+  if (!Buffer.isBuffer(payload)) {
+    throw new FrameCodecError(
+      "truncated-frame",
+      "Control frame payload must be a Buffer.",
+    );
+  }
+  if (payload.length > payloadLimit || payload.length > MAX_U32) {
     throw new FrameCodecError(
       "frame-too-large",
-      `Control frame payload is ${payload.length} bytes; maximum is ${maxFrameBytes}.`,
+      `Control frame payload is ${payload.length} bytes; maximum is ${payloadLimit}.`,
     );
   }
 
-  const frame = Buffer.allocUnsafe(FRAME_HEADER_BYTES + payload.length);
+  const frame = beginFrame(type, flags, payload.length);
+  payload.copy(frame, FRAME_HEADER_BYTES);
+  return frame;
+}
+
+function beginFrame(type: FrameType, flags: number, payloadLength: number): Buffer {
+  const frame = Buffer.allocUnsafe(FRAME_HEADER_BYTES + payloadLength);
   FRAME_MAGIC.copy(frame, 0);
   frame[4] = type;
   frame[5] = flags;
   frame.writeUInt16LE(0, 6);
-  frame.writeUInt32LE(payload.length, 8);
-  payload.copy(frame, FRAME_HEADER_BYTES);
+  frame.writeUInt32LE(payloadLength, 8);
   return frame;
 }
 
@@ -102,10 +192,16 @@ export class FrameDecoder {
   private headerBytes = 0;
   private payload: Buffer | null = null;
   private payloadBytes = 0;
+  private frameType: FrameType | null = null;
+  private frameFlags = 0;
   private poisoned: FrameCodecError | null = null;
 
-  constructor(private maxFrameBytes = DEFAULT_MAX_FRAME_BYTES) {
+  constructor(
+    private maxFrameBytes = DEFAULT_MAX_FRAME_BYTES,
+    private maxBlobChunkBytes = DEFAULT_MAX_BLOB_CHUNK_BYTES,
+  ) {
     this.assertValidLimit(maxFrameBytes);
+    this.assertValidLimit(maxBlobChunkBytes);
   }
 
   setMaxFrameBytes(maxFrameBytes: number): void {
@@ -114,15 +210,35 @@ export class FrameDecoder {
     this.maxFrameBytes = maxFrameBytes;
   }
 
-  push(chunk: Uint8Array): Frame[] {
+  setLimits(maxFrameBytes: number, maxBlobChunkBytes: number): void {
+    this.assertHealthy();
+    this.assertValidLimit(maxFrameBytes);
+    this.assertValidLimit(maxBlobChunkBytes);
+    this.maxFrameBytes = maxFrameBytes;
+    this.maxBlobChunkBytes = maxBlobChunkBytes;
+  }
+
+  // onFrame lets the caller process each frame inline as it is decoded, so a
+  // per-stream cap can halt a coalesced flood mid-buffer instead of letting the
+  // whole batch materialize first. It is invoked OUTSIDE the decode try/catch so
+  // a consumer error propagates verbatim rather than being poisoned into a
+  // generic codec error. Returning false aborts decoding of the remaining bytes
+  // (used when the client closes mid-buffer; the tail is discarded).
+  push(chunk: Uint8Array, onFrame?: (frame: Frame) => boolean | void): Frame[] {
     this.assertHealthy();
     const frames: Frame[] = [];
+    let aborted = false;
+    const emit = (frame: Frame): void => {
+      if (onFrame) aborted = onFrame(frame) === false;
+      else frames.push(frame);
+    };
     const bytes = Buffer.isBuffer(chunk)
       ? chunk
       : Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
     let offset = 0;
-    try {
-      while (offset < bytes.length) {
+    while (offset < bytes.length) {
+      let frame: Frame | null = null;
+      try {
         if (this.headerBytes < FRAME_HEADER_BYTES) {
           const count = Math.min(
             FRAME_HEADER_BYTES - this.headerBytes,
@@ -134,12 +250,12 @@ export class FrameDecoder {
           if (this.headerBytes < FRAME_HEADER_BYTES) break;
           this.beginPayload();
           if (this.payload?.length === 0) {
-            frames.push({ kind: "control", payload: Buffer.alloc(0) });
+            frame = this.completeFrame();
             this.resetFrame();
           }
         }
 
-        if (this.payload !== null && this.payload.length > 0) {
+        if (frame === null && this.payload !== null && this.payload.length > 0) {
           const count = Math.min(
             this.payload.length - this.payloadBytes,
             bytes.length - offset,
@@ -148,15 +264,19 @@ export class FrameDecoder {
           this.payloadBytes += count;
           offset += count;
           if (this.payloadBytes === this.payload.length) {
-            frames.push({ kind: "control", payload: this.payload });
+            frame = this.completeFrame();
             this.resetFrame();
           }
         }
+      } catch (error) {
+        throw this.poison(error);
       }
-      return frames;
-    } catch (error) {
-      throw this.poison(error);
+      if (frame !== null) {
+        emit(frame);
+        if (aborted) break;
+      }
     }
+    return frames;
   }
 
   finish(): Frame[] {
@@ -182,35 +302,75 @@ export class FrameDecoder {
         "Frame reserved bytes must be zero.",
       );
     }
-    if (type === FrameType.BlobChunk) {
-      throw new FrameCodecError(
-        "unsupported-frame",
-        "BlobChunk streaming is deferred and is not supported by this adapter build.",
-      );
-    }
-    if (type !== FrameType.Control) {
+    if (type !== FrameType.Control && type !== FrameType.BlobChunk) {
       throw new FrameCodecError(
         "unknown-frame-type",
         `Unknown frame type: ${type}.`,
       );
     }
-    if (flags !== 0) {
-      throw new FrameCodecError(
-        "invalid-flags",
-        "Control frames must have zero flags.",
-      );
-    }
     const payloadLength = this.header.readUInt32LE(8);
-    if (payloadLength > this.maxFrameBytes) {
-      throw new FrameCodecError(
-        "frame-too-large",
-        `Control frame payload is ${payloadLength} bytes; maximum is ${this.maxFrameBytes}.`,
-      );
+    if (type === FrameType.Control) {
+      if (flags !== 0) {
+        throw new FrameCodecError(
+          "invalid-flags",
+          "Control frames must have zero flags.",
+        );
+      }
+      if (payloadLength > this.maxFrameBytes) {
+        throw new FrameCodecError(
+          "frame-too-large",
+          `Control frame payload is ${payloadLength} bytes; maximum is ${this.maxFrameBytes}.`,
+        );
+      }
+    } else {
+      if ((flags & ~BLOB_FIN_FLAG) !== 0) {
+        throw new FrameCodecError(
+          "invalid-flags",
+          "BlobChunk frames only support the FIN flag.",
+        );
+      }
+      if (payloadLength < BLOB_STREAM_ID_BYTES) {
+        throw new FrameCodecError(
+          "blob-chunk-missing-stream-id",
+          `BlobChunk payload is ${payloadLength} bytes; stream id requires ${BLOB_STREAM_ID_BYTES}.`,
+        );
+      }
+      const chunkBytes = payloadLength - BLOB_STREAM_ID_BYTES;
+      if (chunkBytes > this.maxBlobChunkBytes) {
+        throw new FrameCodecError(
+          "blob-chunk-too-large",
+          `Blob chunk is ${chunkBytes} bytes; maximum is ${this.maxBlobChunkBytes}.`,
+        );
+      }
     }
     // Header-derived bounds are now proven, so this is the first point at
     // which allocating the peer-advertised payload is safe.
     this.payload = Buffer.allocUnsafe(payloadLength);
     this.payloadBytes = 0;
+    this.frameType = type;
+    this.frameFlags = flags;
+  }
+
+  private completeFrame(): Frame {
+    if (this.payload === null || this.frameType === null) {
+      throw new FrameCodecError("truncated-frame", "Frame payload is incomplete.");
+    }
+    if (this.frameType === FrameType.Control) {
+      return { kind: "control", payload: this.payload };
+    }
+    const streamId = this.payload.readBigUInt64LE(0);
+    if (streamId > BigInt(MAX_WIRE_INTEGER)) {
+      throw new FrameCodecError(
+        "blob-stream-id-out-of-range",
+        "BlobChunk stream id exceeds the wire-integer bound.",
+      );
+    }
+    return {
+      kind: "blobChunk",
+      streamId: Number(streamId),
+      fin: (this.frameFlags & BLOB_FIN_FLAG) !== 0,
+      payload: this.payload.subarray(BLOB_STREAM_ID_BYTES),
+    };
   }
 
   private assertHealthy(): void {
@@ -231,6 +391,8 @@ export class FrameDecoder {
     this.headerBytes = 0;
     this.payload = null;
     this.payloadBytes = 0;
+    this.frameType = null;
+    this.frameFlags = 0;
   }
 
   private assertValidLimit(maxFrameBytes: number): void {
@@ -286,6 +448,30 @@ export class EngineRequestError extends EngineClientError {
   }
 }
 
+export type BlobStreamErrorCode =
+  | "blob-backpressure-exceeded"
+  | "blob-digest-mismatch"
+  | "blob-size-mismatch"
+  | "blob-too-large"
+  | "duplicate-blob-stream"
+  | "empty-blob-chunk"
+  | "invalid-blob-start"
+  | "too-many-blob-streams"
+  | "unknown-blob-request"
+  | "unknown-blob-stream";
+
+export class BlobStreamError extends Error {
+  readonly code: BlobStreamErrorCode;
+
+  constructor(code: BlobStreamErrorCode, message: string) {
+    super(message);
+    this.name = "BlobStreamError";
+    this.code = code;
+  }
+}
+
+export type CompletedBlob = BlobStart & { readonly bytes: Buffer };
+
 export interface EngineClientSpawnOptions {
   command: string;
   args?: string[];
@@ -296,6 +482,8 @@ export interface EngineClientSpawnOptions {
   capabilities: string[];
   connectTimeoutMs?: number;
   maxFrameBytes?: number;
+  maxBlobChunkBytes?: number;
+  maxBlobBytes?: number;
   onStderr?: (text: string) => void;
 }
 
@@ -305,6 +493,8 @@ export interface EngineClientConnectOptions {
   capabilities: string[];
   connectTimeoutMs?: number;
   maxFrameBytes?: number;
+  maxBlobChunkBytes?: number;
+  maxBlobBytes?: number;
 }
 
 export interface EngineClientConnection {
@@ -324,11 +514,23 @@ interface PendingRequest {
   readonly reject: (error: EngineClientError) => void;
 }
 
+interface PendingBlob {
+  readonly start: BlobStart;
+  // Captured when the stream is announced so response/chunk ordering cannot
+  // change the blob's request identity after resolveResponse clears pending.
+  readonly callerRequestId: number;
+  readonly chunks: Buffer[];
+  receivedBytes: number;
+}
+
 type HelloAckEnvelope = Extract<Envelope, { type: "helloAck" }>;
 
 export class EngineClient implements EngineTransport {
   private readonly decoder: FrameDecoder;
   private readonly eventHandlers = new Set<(event: Event) => void>();
+  private readonly blobHandlers = new Set<(blob: CompletedBlob) => void>();
+  private readonly blobStreams = new Map<number, PendingBlob>();
+  private bufferedBlobChunks = 0;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly textDecoder = new TextDecoder("utf-8", { fatal: true });
   private readonly readyPromise: Promise<EngineClient>;
@@ -338,6 +540,10 @@ export class EngineClient implements EngineTransport {
   private readyState = false;
   private closed = false;
   private maxFrameBytes: number;
+  private maxBlobChunkBytes: number;
+  private readonly maxBlobChunkBytesCap: number;
+  private readonly maxBlobBytes: number;
+  private bufferedBlobBytes = 0;
   private connectTimer: ReturnType<typeof setTimeout> | undefined;
   helloAck: HelloAckEnvelope | undefined;
 
@@ -348,7 +554,42 @@ export class EngineClient implements EngineTransport {
   ) {
     this.maxFrameBytes =
       connectOptions.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
-    this.decoder = new FrameDecoder(this.maxFrameBytes);
+    this.maxBlobChunkBytesCap =
+      connectOptions.maxBlobChunkBytes ?? DEFAULT_MAX_BLOB_CHUNK_BYTES;
+    if (
+      !Number.isSafeInteger(this.maxBlobChunkBytesCap) ||
+      this.maxBlobChunkBytesCap < 0 ||
+      this.maxBlobChunkBytesCap > MAX_U32
+    ) {
+      throw new FrameCodecError(
+        "blob-chunk-too-large",
+        "Maximum blob chunk bytes must be an unsigned 32-bit integer.",
+      );
+    }
+    this.maxBlobBytes = connectOptions.maxBlobBytes ?? DEFAULT_MAX_BLOB_BYTES;
+    if (
+      !Number.isSafeInteger(this.maxBlobBytes) ||
+      this.maxBlobBytes < 0 ||
+      this.maxBlobBytes > DEFAULT_MAX_BLOB_BYTES
+    ) {
+      throw new BlobStreamError(
+        "blob-too-large",
+        `Maximum blob bytes must be between 0 and ${DEFAULT_MAX_BLOB_BYTES}.`,
+      );
+    }
+    // maxFrameBytes bounds control-frame payloads only; blob chunks are bounded
+    // solely by maxBlobChunkBytes, matching the Rust decoder — and a chunk can
+    // never exceed a whole blob, so the local cap is clamped to the blob budget
+    // before it seeds the decoder's pre-negotiation allocation bound.
+    this.maxBlobChunkBytesCap = Math.min(
+      this.maxBlobChunkBytesCap,
+      this.maxBlobBytes,
+    );
+    this.maxBlobChunkBytes = this.maxBlobChunkBytesCap;
+    this.decoder = new FrameDecoder(
+      this.maxFrameBytes,
+      this.maxBlobChunkBytes,
+    );
     this.readyPromise = new Promise<EngineClient>((resolve, reject) => {
       this.readyResolve = resolve;
       this.readyReject = reject;
@@ -428,6 +669,11 @@ export class EngineClient implements EngineTransport {
     return () => this.eventHandlers.delete(handler);
   }
 
+  onBlob(handler: (blob: CompletedBlob) => void): () => void {
+    this.blobHandlers.add(handler);
+    return () => this.blobHandlers.delete(handler);
+  }
+
   close(): void {
     if (this.closed) return;
     this.fail(new EngineClientError("closed", "The engine client was closed."));
@@ -450,10 +696,11 @@ export class EngineClient implements EngineTransport {
 
   private readonly handleData = (chunk: Buffer | Uint8Array): void => {
     try {
-      for (const frame of this.decoder.push(chunk)) {
-        if (this.closed) break;
+      this.decoder.push(chunk, (frame) => {
+        if (this.closed) return false;
         this.receiveFrame(frame);
-      }
+        return !this.closed;
+      });
     } catch (cause) {
       this.fail(
         new EngineClientError("protocol-error", "Engine frame decoding failed.", {
@@ -480,6 +727,23 @@ export class EngineClient implements EngineTransport {
   };
 
   private receiveFrame(frame: Frame): void {
+    if (frame.kind === "blobChunk") {
+      if (!this.readyState) {
+        throw new EngineClientError(
+          "protocol-error",
+          "Received BlobChunk before helloAck.",
+        );
+      }
+      this.assertBlobCapability();
+      if (frame.payload.length > this.maxBlobChunkBytes) {
+        throw new FrameCodecError(
+          "blob-chunk-too-large",
+          `Blob chunk is ${frame.payload.length} bytes; negotiated maximum is ${this.maxBlobChunkBytes}.`,
+        );
+      }
+      this.receiveBlobChunk(frame);
+      return;
+    }
     if (this.readyState && frame.payload.length > this.maxFrameBytes) {
       throw new EngineClientError(
         "protocol-error",
@@ -549,6 +813,9 @@ export class EngineClient implements EngineTransport {
           }
         }
         return;
+      case "blobStart":
+        this.receiveBlobStart(envelope);
+        return;
       case "batch": {
         const maxBatchLen = this.helloAck?.limits.maxBatchLen;
         if (
@@ -605,16 +872,221 @@ export class EngineClient implements EngineTransport {
       );
       return;
     }
+    if (
+      !Number.isSafeInteger(envelope.limits.maxBlobChunkBytes) ||
+      envelope.limits.maxBlobChunkBytes < 0 ||
+      envelope.limits.maxBlobChunkBytes > MAX_U32
+    ) {
+      this.fail(
+        new EngineClientError(
+          "handshake-failed",
+          "Engine advertised an invalid maximum blob chunk size.",
+        ),
+      );
+      return;
+    }
+    // Inbound JSON is only cast to Envelope; a non-array here would make the
+    // capability gate a String.prototype.includes call.
+    if (
+      !Array.isArray(envelope.capabilities) ||
+      !envelope.capabilities.every((cap) => typeof cap === "string")
+    ) {
+      this.fail(
+        new EngineClientError(
+          "handshake-failed",
+          "Engine acknowledged malformed capabilities.",
+        ),
+      );
+      return;
+    }
     this.maxFrameBytes = Math.min(
       this.maxFrameBytes,
       envelope.limits.maxFrameBytes,
     );
-    this.decoder.setMaxFrameBytes(this.maxFrameBytes);
+    this.maxBlobChunkBytes = Math.min(
+      this.maxBlobChunkBytesCap,
+      envelope.limits.maxBlobChunkBytes,
+    );
+    this.decoder.setLimits(
+      this.maxFrameBytes,
+      this.maxBlobChunkBytes,
+    );
     this.helloAck = envelope;
     this.readyState = true;
     if (this.connectTimer !== undefined) clearTimeout(this.connectTimer);
     this.connectTimer = undefined;
     this.readyResolve(this);
+  }
+
+  private receiveBlobStart(start: BlobStart): void {
+    this.assertBlobCapability();
+    if (
+      !Number.isSafeInteger(start.requestId) ||
+      start.requestId < 0 ||
+      !Number.isSafeInteger(start.streamId) ||
+      start.streamId < 0 ||
+      (start.totalBytes !== undefined &&
+        start.totalBytes !== null &&
+        (!Number.isSafeInteger(start.totalBytes) || start.totalBytes < 0))
+    ) {
+      throw new BlobStreamError(
+        "invalid-blob-start",
+        "blobStart contains an invalid wire integer.",
+      );
+    }
+    // Stream ids are unique per session generation but NOT ordered — concurrent
+    // handlers may announce them out of order. Reject only an id that is still
+    // active (a live reassembly collision); a completed id is gone from the map
+    // and a reuse simply starts a fresh stream bound to its own known request.
+    if (this.blobStreams.has(start.streamId)) {
+      throw new BlobStreamError(
+        "duplicate-blob-stream",
+        `Blob stream ${start.streamId} is already active.`,
+      );
+    }
+    if (this.blobStreams.size >= MAX_CONCURRENT_BLOB_STREAMS) {
+      throw new BlobStreamError(
+        "too-many-blob-streams",
+        `At most ${MAX_CONCURRENT_BLOB_STREAMS} blob streams may be active.`,
+      );
+    }
+    if (
+      start.totalBytes !== undefined &&
+      start.totalBytes !== null &&
+      start.totalBytes > this.maxBlobBytes
+    ) {
+      throw new BlobStreamError(
+        "blob-too-large",
+        `Blob stream ${start.streamId} announces ${start.totalBytes} bytes; maximum is ${this.maxBlobBytes}.`,
+      );
+    }
+    if (
+      start.sha256 !== undefined &&
+      start.sha256 !== null &&
+      (typeof start.sha256 !== "string" ||
+        !/^[0-9a-f]{64}$/.test(start.sha256))
+    ) {
+      throw new BlobStreamError(
+        "invalid-blob-start",
+        "blobStart.sha256 must be a lowercase SHA-256 hex digest.",
+      );
+    }
+    const pendingEntry = this.pending.get(start.requestId);
+    if (!pendingEntry) {
+      throw new BlobStreamError(
+        "unknown-blob-request",
+        `Blob stream ${start.streamId} references unknown request ${start.requestId}.`,
+      );
+    }
+    this.blobStreams.set(start.streamId, {
+      start,
+      callerRequestId: pendingEntry.callerId,
+      chunks: [],
+      receivedBytes: 0,
+    });
+  }
+
+  private assertBlobCapability(): void {
+    // Capabilities are intersection-negotiated: blob streaming requires that the
+    // client requested it AND the engine acknowledged it.
+    if (
+      !this.connectOptions.capabilities.includes(BLOB_CAPABILITY) ||
+      !this.helloAck?.capabilities.includes(BLOB_CAPABILITY)
+    ) {
+      throw new EngineClientError(
+        "protocol-error",
+        `Blob streaming requires the "${BLOB_CAPABILITY}" capability, which this session did not negotiate.`,
+      );
+    }
+  }
+
+  private receiveBlobChunk(
+    frame: Extract<Frame, { kind: "blobChunk" }>,
+  ): void {
+    const stream = this.blobStreams.get(frame.streamId);
+    if (!stream) {
+      throw new BlobStreamError(
+        "unknown-blob-stream",
+        `Blob stream ${frame.streamId} was not announced by blobStart.`,
+      );
+    }
+    if (frame.payload.length === 0 && !frame.fin) {
+      throw new BlobStreamError(
+        "empty-blob-chunk",
+        `Blob stream ${frame.streamId} received an empty non-final chunk.`,
+      );
+    }
+    const receivedBytes = stream.receivedBytes + frame.payload.length;
+    const announcedBytes = stream.start.totalBytes ?? this.maxBlobBytes;
+    if (receivedBytes > announcedBytes || receivedBytes > this.maxBlobBytes) {
+      throw new BlobStreamError(
+        "blob-too-large",
+        `Blob stream ${frame.streamId} exceeded its ${Math.min(announcedBytes, this.maxBlobBytes)} byte bound.`,
+      );
+    }
+    if (this.bufferedBlobBytes + frame.payload.length > this.maxBlobBytes) {
+      throw new BlobStreamError(
+        "blob-backpressure-exceeded",
+        `Buffered blob bytes exceed the ${this.maxBlobBytes} byte global budget.`,
+      );
+    }
+    if (stream.chunks.length >= MAX_BLOB_CHUNKS_PER_STREAM) {
+      throw new BlobStreamError(
+        "blob-backpressure-exceeded",
+        `Blob stream ${frame.streamId} exceeded ${MAX_BLOB_CHUNKS_PER_STREAM} buffered chunks.`,
+      );
+    }
+    if (this.bufferedBlobChunks >= MAX_BUFFERED_BLOB_CHUNKS) {
+      throw new BlobStreamError(
+        "blob-backpressure-exceeded",
+        `Buffered blob chunks exceed the ${MAX_BUFFERED_BLOB_CHUNKS} global cap.`,
+      );
+    }
+    stream.chunks.push(frame.payload);
+    stream.receivedBytes = receivedBytes;
+    this.bufferedBlobBytes += frame.payload.length;
+    this.bufferedBlobChunks += 1;
+    if (!frame.fin) return;
+    if (
+      stream.start.totalBytes !== undefined &&
+      stream.start.totalBytes !== null &&
+      receivedBytes !== stream.start.totalBytes
+    ) {
+      throw new BlobStreamError(
+        "blob-size-mismatch",
+        `Blob stream ${frame.streamId} ended at ${receivedBytes} bytes; expected ${stream.start.totalBytes}.`,
+      );
+    }
+
+    const bytes = Buffer.concat(stream.chunks, receivedBytes);
+    if (
+      stream.start.sha256 !== undefined &&
+      stream.start.sha256 !== null &&
+      createHash("sha256").update(bytes).digest("hex") !== stream.start.sha256
+    ) {
+      throw new BlobStreamError(
+        "blob-digest-mismatch",
+        `Blob stream ${frame.streamId} does not match its announced SHA-256.`,
+      );
+    }
+
+    this.blobStreams.delete(frame.streamId);
+    this.bufferedBlobBytes -= receivedBytes;
+    this.bufferedBlobChunks -= stream.chunks.length;
+    const blob: CompletedBlob = {
+      requestId: stream.callerRequestId,
+      streamId: stream.start.streamId,
+      totalBytes: stream.start.totalBytes,
+      sha256: stream.start.sha256,
+      bytes,
+    };
+    for (const handler of this.blobHandlers) {
+      try {
+        handler(blob);
+      } catch {
+        // Blob subscribers are observer boundaries, like event subscribers.
+      }
+    }
   }
 
   private resolveResponse(response: Response): void {
@@ -648,6 +1120,14 @@ export class EngineClient implements EngineTransport {
       );
     }
     this.pending.delete(id);
+    // A failed request's announced blob streams are dead: free their budget and
+    // drop them so a late FIN cannot dispatch a blob the caller saw fail.
+    for (const [streamId, stream] of this.blobStreams) {
+      if (stream.start.requestId !== id) continue;
+      this.bufferedBlobBytes -= stream.receivedBytes;
+      this.bufferedBlobChunks -= stream.chunks.length;
+      this.blobStreams.delete(streamId);
+    }
     pending.reject(new EngineRequestError(pending.callerId, wireError));
   }
 
@@ -683,6 +1163,9 @@ export class EngineClient implements EngineTransport {
     this.readyReject(error);
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
+    this.blobStreams.clear();
+    this.bufferedBlobBytes = 0;
+    this.bufferedBlobChunks = 0;
     try {
       this.terminate();
     } catch {
