@@ -18,8 +18,8 @@ use dohc_engine_protocol::{
     wire::{Request, Response, WorkspaceHandle},
 };
 use dohc_engine_runtime::{
-    ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, NoFaults, RuntimeError,
-    SearchError, SearchSurface, WorkspaceSupervisor,
+    ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, LifecycleState, NoFaults,
+    RuntimeError, SearchError, SearchSurface, WorkspaceSupervisor,
 };
 use dohc_engine_sync::{ReplicationEnvelope, SyncError};
 use serde::Deserialize;
@@ -58,8 +58,12 @@ impl Default for EngineService {
 
 impl EngineService {
     pub fn new() -> Self {
+        Self::with_supervisor(WorkspaceSupervisor::global())
+    }
+
+    fn with_supervisor(supervisor: &'static WorkspaceSupervisor) -> Self {
         EngineService {
-            supervisor: WorkspaceSupervisor::global(),
+            supervisor,
             handles: Mutex::new(HashMap::new()),
             open_lock: tokio::sync::Mutex::new(()),
             next_handle: std::sync::atomic::AtomicU64::new(1),
@@ -116,7 +120,7 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: WorkspaceOpenParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
-        let _serial = tokio::select! {
+        let _open_serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(wire(ErrorCode::Cancelled, "workspace open cancelled while queued"));
@@ -127,17 +131,28 @@ impl EngineService {
             shadow_fence::validate_shadow_root(PathBuf::from(&params.root_dir).as_path())
                 .map_err(map_shadow_fence)?;
         let root = validated.root;
-        if let Some((handle, open)) = lock(&self.handles)
-            .iter()
-            .find(|(_, open)| open.root == root)
-        {
-            if open.workspace_id == params.workspace_id {
+        let existing = {
+            let guard = lock(&self.handles);
+            guard
+                .iter()
+                .find(|(_, open)| open.root == root)
+                .map(|(handle, open)| (handle.clone(), open.clone()))
+        };
+        if let Some((handle, open)) = existing {
+            // The root's logical binding to a workspace id holds regardless of
+            // actor liveness: a different workspace id is always rejected.
+            if open.workspace_id != params.workspace_id {
+                return Err(wire(
+                    ErrorCode::InvalidParams,
+                    "workspace root is already bound to another workspace",
+                ));
+            }
+            // Same workspace: short-circuit only on a LIVE binding. A bound-but-
+            // closed actor (its worker died) is stale — drop it and reopen fresh.
+            if open.actor.lifecycle() != LifecycleState::Closed {
                 return Ok(json!({ "workspace": handle }));
             }
-            return Err(wire(
-                ErrorCode::InvalidParams,
-                "workspace root is already bound to another workspace",
-            ));
+            lock(&self.handles).remove(&handle);
         }
         if lock(&self.handles).len() >= MAX_OPEN_HANDLES {
             return Err(wire(
@@ -185,12 +200,37 @@ impl EngineService {
 
     async fn workspace_close(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
         let handle = handle.ok_or_else(workspace_unavailable)?;
-        let open = lock(&self.handles)
-            .remove(&handle)
-            .ok_or_else(workspace_unavailable)?;
         let supervisor = self.supervisor;
-        let db_path = open.db_path;
-        let closed = tokio::task::spawn_blocking(move || supervisor.close(&db_path))
+        // Hold open_lock only across the handle removal and the synchronous
+        // begin_close, so a workspace_open already waiting on `handles` cannot
+        // slip in after the removal and reach supervisor.open before the global
+        // Closing marker is installed. Once begin_close has marked Closing, the
+        // lock is released — the marker (not this lock) serializes reopen, and
+        // the detached finish stays cancellation-safe.
+        let closing = {
+            let _serial = self.open_lock.lock().await;
+            let db_path = {
+                let guard = lock(&self.handles);
+                guard
+                    .get(&handle)
+                    .ok_or_else(workspace_unavailable)?
+                    .db_path
+                    .clone()
+            };
+            // Install the GLOBAL Closing marker BEFORE removing the handle, so a
+            // workspace_open on another EngineService (which does not take this
+            // service's open_lock) observes Closing at supervisor.open and waits
+            // for a fresh actor instead of the one being torn down.
+            let closing = supervisor.begin_close(&db_path).map_err(map_runtime)?;
+            lock(&self.handles).remove(&handle);
+            closing
+        };
+        let closed = closing.is_some();
+        let close_task = tokio::task::spawn_blocking(move || match closing {
+            Some(closing) => closing.finish(),
+            None => Ok(()),
+        });
+        close_task
             .await
             .map_err(|_| wire(ErrorCode::Internal, "workspace close task failed"))?
             .map_err(map_runtime)?;
@@ -952,7 +992,11 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dohc_engine_runtime::{CompoundWrite, FaultInjector, FaultPoint, LifecycleState};
+    use dohc_engine_testkit::{GateFaults, ScratchDir};
     use std::time::Duration;
+
+    const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[test]
     fn runtime_error_mapping_separates_corruption_from_bad_input() {
@@ -1032,5 +1076,248 @@ mod tests {
             .expect_err("cancelled queued open must fail");
         assert_eq!(result.code, ErrorCode::Cancelled);
         drop(held);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_workspace_close_keeps_reopen_serialized_until_actor_is_closed() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = Arc::new(EngineService::with_supervisor(supervisor));
+        let baseline = supervisor.actor_count();
+        let open_params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "cancelled-close"
+        });
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), open_params.clone())
+            .await
+            .expect("initial workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        let actor = lock(&service.handles)
+            .get(&handle)
+            .expect("open workspace")
+            .actor
+            .clone();
+
+        let gate = GateFaults::at(FaultPoint::StorageBeforePersist);
+        let gate_faults: Arc<dyn FaultInjector> = gate.clone();
+        let held_write = tokio::spawn(async move {
+            actor
+                .write_async(
+                    CompoundWrite {
+                        request_id: "hold-close".to_owned(),
+                        doc_id: "held".to_owned(),
+                        body: "held".to_owned(),
+                        op_kind: "text.write".to_owned(),
+                        now_ms: 1,
+                    },
+                    gate_faults,
+                )
+                .await
+        });
+        let gate_wait = gate.clone();
+        tokio::task::spawn_blocking(move || gate_wait.wait_until_reached())
+            .await
+            .expect("gate wait task");
+
+        let closing_service = Arc::clone(&service);
+        let closing_handle = handle.clone();
+        let closing =
+            tokio::spawn(
+                async move { closing_service.workspace_close(Some(closing_handle)).await },
+            );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while lock(&service.handles).contains_key(&handle) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("close removed the handle within the deadline");
+        closing.abort();
+        assert!(
+            closing
+                .await
+                .expect_err("close request was cancelled")
+                .is_cancelled()
+        );
+
+        let reopening_service = Arc::clone(&service);
+        let mut reopening = tokio::spawn(async move {
+            reopening_service
+                .workspace_open(&RequestContext::unbounded(), open_params)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut reopening)
+                .await
+                .is_err(),
+            "reopen must wait for the detached close"
+        );
+        gate.release();
+        held_write
+            .await
+            .expect("held write task")
+            .expect("held write");
+
+        let reopened = tokio::time::timeout(Duration::from_secs(10), reopening)
+            .await
+            .expect("reopen completed within the deadline")
+            .expect("reopen task")
+            .expect("workspace reopen");
+        let reopened_handle: WorkspaceHandle =
+            serde_json::from_value(reopened["workspace"].clone()).expect("reopened handle");
+        let reopened_actor = lock(&service.handles)
+            .get(&reopened_handle)
+            .expect("reopened workspace")
+            .actor
+            .clone();
+        assert_eq!(reopened_actor.lifecycle(), LifecycleState::Ready);
+        assert_eq!(supervisor.actor_count(), baseline + 1);
+
+        service
+            .workspace_close(Some(reopened_handle))
+            .await
+            .expect("final workspace close");
+        assert_eq!(supervisor.actor_count(), baseline);
+    }
+
+    #[tokio::test]
+    async fn two_services_share_close_reopen_serialization_for_one_root() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service_a = Arc::new(EngineService::with_supervisor(supervisor));
+        let service_b = Arc::new(EngineService::with_supervisor(supervisor));
+        let baseline = supervisor.actor_count();
+        let open_params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "two-services"
+        });
+        let opened = service_a
+            .workspace_open(&RequestContext::unbounded(), open_params.clone())
+            .await
+            .expect("service A workspace open");
+        let handle_a: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("service A handle");
+
+        let closing_service = Arc::clone(&service_a);
+        let closing =
+            tokio::spawn(async move { closing_service.workspace_close(Some(handle_a)).await });
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !lock(&service_a.handles).is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("service A close removed its handle");
+        let opening_service = Arc::clone(&service_b);
+        let opening = tokio::spawn(async move {
+            opening_service
+                .workspace_open(&RequestContext::unbounded(), open_params)
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(10), closing)
+            .await
+            .expect("service A close completed within the deadline")
+            .expect("service A close task")
+            .expect("service A close");
+        let reopened = tokio::time::timeout(Duration::from_secs(10), opening)
+            .await
+            .expect("service B open completed within the deadline")
+            .expect("service B open task")
+            .expect("service B reopen");
+        let handle_b: WorkspaceHandle =
+            serde_json::from_value(reopened["workspace"].clone()).expect("service B handle");
+        let actor_b = lock(&service_b.handles)
+            .get(&handle_b)
+            .expect("service B workspace")
+            .actor
+            .clone();
+        assert_eq!(actor_b.lifecycle(), LifecycleState::Ready);
+        assert_eq!(supervisor.actor_count(), baseline + 1);
+
+        service_b
+            .workspace_close(Some(handle_b))
+            .await
+            .expect("service B close");
+        assert_eq!(supervisor.actor_count(), baseline);
+    }
+
+    #[tokio::test]
+    async fn interleaved_workspace_reopens_return_live_actors_without_leaks() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        // Isolated supervisor so the actor-count baseline can't race other tests
+        // sharing the process-global one.
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = Arc::new(EngineService::with_supervisor(supervisor));
+        let baseline = service.supervisor.actor_count();
+        let open_params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "open-close-race"
+        });
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), open_params.clone())
+            .await
+            .expect("initial workspace open");
+        let mut handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+
+        for _ in 0..128 {
+            let closing_service = Arc::clone(&service);
+            let closing_handle = handle.clone();
+            let closing =
+                tokio::spawn(
+                    async move { closing_service.workspace_close(Some(closing_handle)).await },
+                );
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while lock(&service.handles).contains_key(&handle) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("close removed the handle within the deadline");
+
+            let opening_service = Arc::clone(&service);
+            let iteration_params = open_params.clone();
+            let opening = tokio::spawn(async move {
+                opening_service
+                    .workspace_open(&RequestContext::unbounded(), iteration_params)
+                    .await
+            });
+            closing
+                .await
+                .expect("close task completed")
+                .expect("workspace close");
+            let reopened = opening
+                .await
+                .expect("open task completed")
+                .expect("workspace reopen");
+            handle = serde_json::from_value(reopened["workspace"].clone())
+                .expect("reopened workspace handle");
+            service
+                .conflicts_list(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    json!({}),
+                )
+                .await
+                .expect("reopened actor is live");
+        }
+
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("final workspace close");
+        assert_eq!(service.supervisor.actor_count(), baseline);
     }
 }
