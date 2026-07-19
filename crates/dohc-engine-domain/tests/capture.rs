@@ -1,4 +1,3 @@
-use dohc_engine_domain::store::text_blob_sha256;
 use dohc_engine_domain::{
     CaptureIngest, CaptureRetire, ListMomentsQuery, NoFaults, VersionedTextStore,
     derive_capture_moment_id,
@@ -134,7 +133,72 @@ fn content_revert_gets_a_third_distinct_moment() {
 }
 
 #[test]
-fn retire_removes_the_head_and_unknown_path_is_a_clean_no_op() {
+fn retire_then_recapture_reuses_the_object_and_appends_new_history() {
+    let (_scratch, mut store) = open_store();
+    let mut versions = VersionedTextStore::new(&mut store);
+    let first = versions
+        .capture_ingest(&ingest("a.md", "X", 10), &NO_FAULTS)
+        .expect("first capture");
+    let retired = versions
+        .capture_retire(&retire("a.md", 20), &NO_FAULTS)
+        .expect("retire")
+        .retired
+        .expect("live path retired");
+    let recreated = versions
+        .capture_ingest(&ingest("a.md", "X", 30), &NO_FAULTS)
+        .expect("recapture");
+
+    assert_eq!(recreated.snapshot.object_id, first.snapshot.object_id);
+    assert!(!recreated.deduped);
+    assert_ne!(first.moment.moment_id, retired.moment.moment_id);
+    assert_ne!(first.moment.moment_id, recreated.moment.moment_id);
+    assert_ne!(retired.moment.moment_id, recreated.moment.moment_id);
+    assert_eq!(
+        first.moment.moment_id,
+        derive_capture_moment_id(WS, &first.snapshot.object_id, first.moment.moment_order)
+    );
+    assert_eq!(
+        retired.moment.moment_id,
+        derive_capture_moment_id(WS, &first.snapshot.object_id, retired.moment.moment_order)
+    );
+    assert_eq!(
+        recreated.moment.moment_id,
+        derive_capture_moment_id(WS, &first.snapshot.object_id, recreated.moment.moment_order)
+    );
+    assert_eq!(recreated.snapshot.text, "X");
+    assert_eq!(moment_count(&mut store), 3);
+
+    let readable = VersionedTextStore::new(&mut store)
+        .read_text(WS, VERSION, "a.md")
+        .expect("read recaptured path")
+        .expect("recaptured path exists");
+    assert_eq!(readable.text, "X");
+}
+
+#[test]
+fn object_ids_are_scoped_between_workspaces_in_one_store() {
+    const OTHER_WS: &str = "ws-capture-other";
+
+    let (_scratch, mut store) = open_store();
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(OTHER_WS, VERSION, 2, &NO_FAULTS)
+        .expect("ensure other workspace");
+
+    let first = VersionedTextStore::new(&mut store)
+        .capture_ingest(&ingest("same.md", "first", 10), &NO_FAULTS)
+        .expect("first workspace capture");
+    let mut other = ingest("same.md", "second", 20);
+    other.workspace_id = OTHER_WS.to_owned();
+    let second = VersionedTextStore::new(&mut store)
+        .capture_ingest(&other, &NO_FAULTS)
+        .expect("second workspace capture");
+
+    assert_ne!(first.snapshot.object_id, second.snapshot.object_id);
+    assert_eq!(first.snapshot.path, second.snapshot.path);
+}
+
+#[test]
+fn retire_removes_the_head_and_repeated_or_unknown_paths_are_clean_no_ops() {
     let (_scratch, mut store) = open_store();
     let mut versions = VersionedTextStore::new(&mut store);
     versions
@@ -151,8 +215,14 @@ fn retire_removes_the_head_and_unknown_path_is_a_clean_no_op() {
             .is_none()
     );
 
+    let repeated = versions
+        .capture_retire(&retire("a.md", 30), &NO_FAULTS)
+        .expect("repeated retire");
+    assert!(repeated.retired.is_none());
+    assert!(!repeated.deduped);
+
     let missing = versions
-        .capture_retire(&retire("missing.md", 30), &NO_FAULTS)
+        .capture_retire(&retire("missing.md", 40), &NO_FAULTS)
         .expect("unknown retire");
     assert!(missing.retired.is_none());
     assert!(!missing.deduped);
@@ -160,22 +230,16 @@ fn retire_removes_the_head_and_unknown_path_is_a_clean_no_op() {
 
 #[test]
 fn moment_id_derivation_is_deterministic_for_equal_inputs() {
-    let content_sha256 = text_blob_sha256("content");
-    let first = derive_capture_moment_id(
-        "version",
-        "object-id",
-        &content_sha256,
-        Some("before-moment"),
-    );
-    let second = derive_capture_moment_id(
-        "version",
-        "object-id",
-        &content_sha256,
-        Some("before-moment"),
-    );
+    let first = derive_capture_moment_id("workspace", "object-id", 42);
+    let second = derive_capture_moment_id("workspace", "object-id", 42);
 
     assert_eq!(first, second);
     assert_eq!(first.len(), "moment-".len() + 64);
+    assert_ne!(
+        first,
+        derive_capture_moment_id("workspace", "object-id", 43)
+    );
+    assert_ne!(first, derive_capture_moment_id("other", "object-id", 42));
 }
 
 #[test]
@@ -186,8 +250,10 @@ fn request_ids_replay_ingest_and_retire_exactly_once() {
     let first = VersionedTextStore::new(&mut store)
         .capture_ingest(&write, &NO_FAULTS)
         .expect("first capture");
+    let mut write_replay = write.clone();
+    write_replay.now_ms = 999;
     let replay = VersionedTextStore::new(&mut store)
-        .capture_ingest(&write, &NO_FAULTS)
+        .capture_ingest(&write_replay, &NO_FAULTS)
         .expect("capture replay");
     assert!(replay.deduped);
     assert_eq!(replay.moment.moment_id, first.moment.moment_id);
@@ -197,9 +263,12 @@ fn request_ids_replay_ingest_and_retire_exactly_once() {
     let first_delete = VersionedTextStore::new(&mut store)
         .capture_retire(&delete, &NO_FAULTS)
         .expect("first retire");
+    let mut delete_replay = delete.clone();
+    delete_replay.now_ms = 1_999;
     let replay_delete = VersionedTextStore::new(&mut store)
-        .capture_retire(&delete, &NO_FAULTS)
+        .capture_retire(&delete_replay, &NO_FAULTS)
         .expect("retire replay");
     assert!(replay_delete.deduped);
     assert_eq!(replay_delete.retired, first_delete.retired);
+    assert_eq!(moment_count(&mut store), 2);
 }

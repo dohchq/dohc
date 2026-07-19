@@ -1065,13 +1065,16 @@ fn capture_ingest_in_tx(
     {
         Some(object_id) => object_id,
         None => {
-            let object_id = derive_capture_object_id(&input.version_id, &input.path);
-            tx.execute(
-                "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
-                 VALUES (?1, ?2, ?3)",
-                params![input.workspace_id, object_id, input.now_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
+            let object_id =
+                derive_capture_object_id(&input.workspace_id, &input.version_id, &input.path);
+            if !object_exists(tx, &input.workspace_id, &object_id)? {
+                tx.execute(
+                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                     VALUES (?1, ?2, ?3)",
+                    params![input.workspace_id, object_id, input.now_ms],
+                )
+                .map_err(DomainError::sql_persist)?;
+            }
             tx.execute(
                 "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
                  VALUES (?1, ?2, ?3, ?4)",
@@ -1098,14 +1101,8 @@ fn capture_ingest_in_tx(
         return Ok(result);
     }
 
-    let moment_id = derive_capture_moment_id(
-        &input.version_id,
-        &object_id,
-        &content_sha256,
-        before
-            .as_ref()
-            .map(|snapshot| snapshot.latest_moment_id.as_str()),
-    );
+    let next_order = next_moment_order(tx)?;
+    let moment_id = derive_capture_moment_id(&input.workspace_id, &object_id, next_order);
     let write = WriteText {
         workspace_id: input.workspace_id.clone(),
         version_id: input.version_id.clone(),
@@ -1119,6 +1116,7 @@ fn capture_ingest_in_tx(
         request_id: None,
     };
     let result = write_text_in_tx(tx, &write)?;
+    debug_assert_eq!(result.moment.moment_order, next_order);
     record_request(
         tx,
         input.request_id.as_deref(),
@@ -1178,10 +1176,8 @@ fn capture_retire_in_tx(
             deduped: false,
         });
     };
-    let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?
-        .ok_or(DomainError::FileNotFound)?;
-    let moment_id =
-        derive_capture_retire_moment_id(&input.version_id, &object_id, &before.latest_moment_id);
+    let next_order = next_moment_order(tx)?;
+    let moment_id = derive_capture_retire_moment_id(&input.workspace_id, &object_id, next_order);
     let delete = DeleteTextFile {
         workspace_id: input.workspace_id.clone(),
         version_id: input.version_id.clone(),
@@ -1192,6 +1188,7 @@ fn capture_retire_in_tx(
         now_ms: input.now_ms,
     };
     let result = delete_text_in_tx(tx, &delete)?;
+    debug_assert_eq!(result.moment.moment_order, next_order);
     record_request(
         tx,
         input.request_id.as_deref(),
@@ -2820,39 +2817,36 @@ pub fn text_blob_sha256(text: &str) -> String {
     hex(&hasher.finalize())
 }
 
-/// Derive the stable object id for a newly captured version-local path.
-pub fn derive_capture_object_id(version_id: &str, path: &str) -> String {
-    format!("object-{}", hash_joined(&[version_id, path]))
+/// Derive the stable workspace-scoped object id for a captured version-local
+/// path: `object-` plus lowercase-hex SHA-256 over the NUL-separated
+/// `workspace_id`, `version_id`, and `path` fields.
+pub fn derive_capture_object_id(workspace_id: &str, version_id: &str, path: &str) -> String {
+    format!("object-{}", hash_joined(&[workspace_id, version_id, path]))
 }
 
-/// Derive a capture write moment id from its complete history edge.
+/// Derive a capture moment id from its workspace, object, and next monotonic
+/// moment order: `moment-` plus lowercase-hex SHA-256 over those NUL-separated
+/// fields. The store allocates the same order inside the caller-owned write
+/// transaction, so delete/recreate cycles never reuse an id.
 pub fn derive_capture_moment_id(
-    version_id: &str,
+    workspace_id: &str,
     object_id: &str,
-    content_sha256: &str,
-    before_latest_moment_id: Option<&str>,
+    next_moment_order: i64,
 ) -> String {
     format!(
         "moment-{}",
-        hash_joined(&[
-            version_id,
-            object_id,
-            content_sha256,
-            before_latest_moment_id.unwrap_or_default(),
-        ])
+        hash_joined(&[workspace_id, object_id, &next_moment_order.to_string()])
     )
 }
 
-/// Derive a capture delete moment id from its complete history edge.
+/// Derive a capture delete moment id with the same order-based scheme as a
+/// capture write.
 pub fn derive_capture_retire_moment_id(
-    version_id: &str,
+    workspace_id: &str,
     object_id: &str,
-    before_latest_moment_id: &str,
+    next_moment_order: i64,
 ) -> String {
-    format!(
-        "moment-{}",
-        hash_joined(&[version_id, object_id, "DELETE", before_latest_moment_id])
-    )
+    derive_capture_moment_id(workspace_id, object_id, next_moment_order)
 }
 
 fn hash_joined(fields: &[&str]) -> String {
