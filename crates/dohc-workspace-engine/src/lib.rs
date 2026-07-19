@@ -189,12 +189,20 @@ impl EngineService {
 
     async fn workspace_close(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
         let handle = handle.ok_or_else(workspace_unavailable)?;
-        let open = lock(&self.handles)
-            .remove(&handle)
-            .ok_or_else(workspace_unavailable)?;
         let supervisor = self.supervisor;
-        let db_path = open.db_path;
-        let closing = supervisor.begin_close(&db_path).map_err(map_runtime)?;
+        // Hold open_lock only across the handle removal and the synchronous
+        // begin_close, so a workspace_open already waiting on `handles` cannot
+        // slip in after the removal and reach supervisor.open before the global
+        // Closing marker is installed. Once begin_close has marked Closing, the
+        // lock is released — the marker (not this lock) serializes reopen, and
+        // the detached finish stays cancellation-safe.
+        let closing = {
+            let _serial = self.open_lock.lock().await;
+            let open = lock(&self.handles)
+                .remove(&handle)
+                .ok_or_else(workspace_unavailable)?;
+            supervisor.begin_close(&open.db_path).map_err(map_runtime)?
+        };
         let closed = closing.is_some();
         let close_task = tokio::task::spawn_blocking(move || match closing {
             Some(closing) => closing.finish(),
