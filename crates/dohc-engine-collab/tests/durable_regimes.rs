@@ -54,7 +54,17 @@ fn local_only_close_prunes_the_cache() {
     let doc = Ydoc::wire();
     for i in 0..3 {
         let d = doc.plaintext_insert((i * 2) as u32, "ab");
-        committed(record_local_update(&mut ts.store, &key, &d, &NoFaults, 1_000).expect("rec"));
+        committed(
+            record_local_update(
+                &mut ts.store,
+                &mut ts.replay_cache,
+                &key,
+                &d,
+                &NoFaults,
+                1_000,
+            )
+            .expect("rec"),
+        );
     }
     assert_eq!(count(&ts.store, "ydoc_updates", &key), 3);
 
@@ -99,6 +109,7 @@ fn replicated_close_never_prunes_the_lineage() {
     let claim = committed(
         claim_base(
             &mut ts.store,
+            &mut ts.replay_cache,
             &key,
             ContentKind::Plaintext,
             &base,
@@ -108,7 +119,17 @@ fn replicated_close_never_prunes_the_lineage() {
         .expect("base"),
     );
     assert!(matches!(claim, ClaimOutcome::Claimed { .. }));
-    committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            &delta,
+            &NoFaults,
+            1_100,
+        )
+        .expect("rec"),
+    );
 
     let before = load_persisted(&ts.store, &key)
         .expect("load")
@@ -164,6 +185,7 @@ fn local_to_shared_transition_keeps_the_base() {
     committed(
         claim_base(
             &mut ts.store,
+            &mut ts.replay_cache,
             &key,
             ContentKind::Plaintext,
             &base,
@@ -220,7 +242,17 @@ fn append_self_bounds_the_log_at_threshold() {
     let doc = Ydoc::wire();
     for i in 0..(threshold + 1) {
         let d = doc.plaintext_insert(i as u32, "x");
-        committed(record_local_update(&mut ts.store, &key, &d, &NoFaults, 1_000 + i).expect("rec"));
+        committed(
+            record_local_update(
+                &mut ts.store,
+                &mut ts.replay_cache,
+                &key,
+                &d,
+                &NoFaults,
+                1_000 + i,
+            )
+            .expect("rec"),
+        );
     }
     // The log folded itself: far fewer than threshold+1 update rows remain, and a
     // snapshot exists.
@@ -258,6 +290,7 @@ fn base_is_claimed_exactly_once() {
     let first = committed(
         claim_base(
             &mut ts.store,
+            &mut ts.replay_cache,
             &key,
             ContentKind::Plaintext,
             &base,
@@ -290,6 +323,7 @@ fn base_is_claimed_exactly_once() {
     let second = committed(
         claim_base(
             &mut ts.store,
+            &mut ts.replay_cache,
             &key,
             ContentKind::Plaintext,
             &other_base,
@@ -325,6 +359,62 @@ fn base_is_claimed_exactly_once() {
     assert_eq!(base_sha_now, first_sha, "first base survives");
 }
 
+#[test]
+fn claiming_base_invalidates_a_seq_stable_replay_cache() {
+    let mut ts = fresh_store("claim-cache-invalidate");
+    let key = test_key();
+    seed_parents(&mut ts.store, &key, 1_000);
+    committed(
+        ensure_marker(
+            &mut ts.store,
+            &key,
+            ContentKind::Plaintext,
+            Regime::Replicated,
+            &NoFaults,
+            1_000,
+        )
+        .expect("marker"),
+    );
+    let producer = Ydoc::wire();
+    let base = producer.plaintext_insert(0, "base");
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            &base,
+            &NoFaults,
+            1_001,
+        )
+        .expect("pre-claim update"),
+    );
+    let misses_before_claim = ts.replay_cache.miss_count();
+    committed(
+        claim_base(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            ContentKind::Plaintext,
+            &base,
+            &NoFaults,
+            1_002,
+        )
+        .expect("claim"),
+    );
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            &base,
+            &NoFaults,
+            1_003,
+        )
+        .expect("post-claim gate"),
+    );
+    assert_eq!(ts.replay_cache.miss_count(), misses_before_claim + 1);
+}
+
 // ---- replication: idempotent + echo-suppressed ------------------------------
 
 #[test]
@@ -336,6 +426,7 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
     committed(
         claim_base(
             &mut ts.store,
+            &mut ts.replay_cache,
             &key,
             ContentKind::Plaintext,
             &base,
@@ -352,7 +443,15 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
     };
     // First apply: journaled, echo-suppressed (never re-emitted).
     let first = committed(
-        apply_remote_update(&mut ts.store, &key, &remote, &NoFaults, 1_100).expect("apply"),
+        apply_remote_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            &remote,
+            &NoFaults,
+            1_100,
+        )
+        .expect("apply"),
     );
     let seq = match first {
         ReplicationApplyOutcome::Applied { seq, emit_outbound } => {
@@ -363,7 +462,15 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
     };
     // Redelivery of the same bytes is an idempotent no-op (content-addressed).
     let again = committed(
-        apply_remote_update(&mut ts.store, &key, &remote, &NoFaults, 1_200).expect("apply2"),
+        apply_remote_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            &remote,
+            &NoFaults,
+            1_200,
+        )
+        .expect("apply2"),
     );
     assert_eq!(
         again,
@@ -407,6 +514,7 @@ fn local_edit_on_replicated_lineage_requests_broadcast() {
     committed(
         claim_base(
             &mut ts.store,
+            &mut ts.replay_cache,
             &key,
             ContentKind::Plaintext,
             &base,
@@ -415,8 +523,17 @@ fn local_edit_on_replicated_lineage_requests_broadcast() {
         )
         .expect("base"),
     );
-    let out =
-        committed(record_local_update(&mut ts.store, &key, &delta, &NoFaults, 1_100).expect("rec"));
+    let out = committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            &delta,
+            &NoFaults,
+            1_100,
+        )
+        .expect("rec"),
+    );
     assert!(
         out.emit_outbound,
         "a new local edit on a replicated lineage broadcasts"
@@ -444,8 +561,17 @@ fn replicated_edit_before_base_is_not_broadcast() {
     );
     let doc = Ydoc::wire();
     let d = doc.plaintext_insert(0, "premature");
-    let out =
-        committed(record_local_update(&mut ts.store, &key, &d, &NoFaults, 1_100).expect("rec"));
+    let out = committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            &d,
+            &NoFaults,
+            1_100,
+        )
+        .expect("rec"),
+    );
     assert!(
         !out.emit_outbound,
         "no broadcast before the base is claimed"
@@ -474,7 +600,17 @@ fn resettle_of_edited_doc_expects_prior_content_preimage() {
     );
     let doc = Ydoc::wire();
     let d1 = doc.plaintext_insert(0, "first");
-    committed(record_local_update(&mut ts.store, &key, &d1, &NoFaults, 1_000).expect("rec1"));
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            &d1,
+            &NoFaults,
+            1_000,
+        )
+        .expect("rec1"),
+    );
     let s1 = committed(settle(&mut ts.store, &key, "n.md", &NoFaults, 5_000).expect("settle1"));
     let j1 = ts
         .store
@@ -489,7 +625,17 @@ fn resettle_of_edited_doc_expects_prior_content_preimage() {
 
     // Edit and re-settle: the new job must expect the FIRST content as preimage.
     let d2 = doc.plaintext_insert(5, " second");
-    committed(record_local_update(&mut ts.store, &key, &d2, &NoFaults, 6_000).expect("rec2"));
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            &d2,
+            &NoFaults,
+            6_000,
+        )
+        .expect("rec2"),
+    );
     let s2 = committed(settle(&mut ts.store, &key, "n.md", &NoFaults, 7_000).expect("settle2"));
     assert!(!s2.deduped, "changed content is a new job");
     let j2 = ts
@@ -529,7 +675,14 @@ fn truncated_update_is_rejected_and_never_journaled() {
     let mut rejected = 0;
     for cut in 1..good.len() {
         let truncated = &good[..cut];
-        match record_local_update(&mut ts.store, &key, truncated, &NoFaults, 1_000) {
+        match record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            truncated,
+            &NoFaults,
+            1_000,
+        ) {
             Err(_) => rejected += 1,
             Ok(TxnOutcome::Committed(app)) => {
                 // If yrs happened to accept a prefix as a valid (different)
@@ -544,12 +697,29 @@ fn truncated_update_is_rejected_and_never_journaled() {
     assert!(rejected > 0, "truncated prefixes must be rejected");
     // The empty update is rejected too.
     assert!(matches!(
-        record_local_update(&mut ts.store, &key, &[], &NoFaults, 1_000),
+        record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            &[],
+            &NoFaults,
+            1_000
+        ),
         Err(CollabError::EmptyUpdate)
     ));
     // The genuine update still lands cleanly afterward (rejection left no torn
     // state).
-    committed(record_local_update(&mut ts.store, &key, &good, &NoFaults, 1_000).expect("good"));
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            &good,
+            &NoFaults,
+            1_000,
+        )
+        .expect("good"),
+    );
     let persisted = load_persisted(&ts.store, &key).expect("load").expect("m");
     assert_eq!(
         persisted.doc.plaintext_string(),
@@ -591,8 +761,14 @@ fn yrs_abort_witness_is_rejected_fail_closed_on_both_ingestion_paths() {
         )
         .expect("marker"),
     );
-    let local_result =
-        record_local_update(&mut local.store, &local_key, &WITNESS, &NoFaults, 1_000);
+    let local_result = record_local_update(
+        &mut local.store,
+        &mut local.replay_cache,
+        &local_key,
+        &WITNESS,
+        &NoFaults,
+        1_000,
+    );
     assert!(
         local_result.is_err(),
         "the witness must be rejected fail-closed on the local edit path, not journaled: {local_result:?}"
@@ -627,6 +803,7 @@ fn yrs_abort_witness_is_rejected_fail_closed_on_both_ingestion_paths() {
     };
     let remote_result = apply_remote_update(
         &mut remote.store,
+        &mut remote.replay_cache,
         &remote_key,
         &remote_update,
         &NoFaults,
@@ -705,7 +882,17 @@ fn settle_projects_and_enqueues_an_idempotent_job() {
     );
     let doc = Ydoc::wire();
     let d = doc.plaintext_insert(0, "the settled markdown body");
-    committed(record_local_update(&mut ts.store, &key, &d, &NoFaults, 1_000).expect("rec"));
+    committed(
+        record_local_update(
+            &mut ts.store,
+            &mut ts.replay_cache,
+            &key,
+            &d,
+            &NoFaults,
+            1_000,
+        )
+        .expect("rec"),
+    );
 
     let first =
         committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 5_000).expect("settle"));
@@ -743,6 +930,7 @@ mod crash {
         let key = test_key();
         {
             let mut store = open_at(&dir, 1_000);
+            let mut replay_cache = dohc_engine_collab::ReplayBaseCache::new();
             seed_parents(&mut store, &key, 1_000);
             committed(
                 ensure_marker(
@@ -759,19 +947,29 @@ mod crash {
             let update = doc.plaintext_insert(0, "committed-but-unacked");
             // Kill after the durable commit but before the ack.
             let faults = OneShotCrash::at(FaultPoint::StorageAfterCommitBeforeAck);
-            let out = record_local_update(&mut store, &key, &update, &faults, 1_000).expect("rec");
+            let out =
+                record_local_update(&mut store, &mut replay_cache, &key, &update, &faults, 1_000)
+                    .expect("rec");
             assert_eq!(out, TxnOutcome::Crashed { committed: true });
             // Reopen (dropping `store` closes the connection; the file stays).
             drop(store);
             let mut store = reopen(&dir);
+            let mut replay_cache = dohc_engine_collab::ReplayBaseCache::new();
             assert_eq!(
                 count(&store, "ydoc_updates", &key),
                 1,
                 "append durable after reopen"
             );
             // The retry is exactly-once (content-addressed dedup), never a dup.
-            let retry =
-                record_local_update(&mut store, &key, &update, &NoFaults, 1_000).expect("retry");
+            let retry = record_local_update(
+                &mut store,
+                &mut replay_cache,
+                &key,
+                &update,
+                &NoFaults,
+                1_000,
+            )
+            .expect("retry");
             assert!(
                 matches!(retry, TxnOutcome::Committed(a) if a.deduped),
                 "retry deduped"
@@ -791,6 +989,7 @@ mod crash {
         let key = test_key();
         {
             let mut store = open_at(&dir, 1_000);
+            let mut replay_cache = dohc_engine_collab::ReplayBaseCache::new();
             seed_parents(&mut store, &key, 1_000);
             committed(
                 ensure_marker(
@@ -806,13 +1005,23 @@ mod crash {
             let doc = Ydoc::wire();
             let update = doc.plaintext_insert(0, "rolled-back");
             let faults = OneShotCrash::at(FaultPoint::StorageBeforePersist);
-            let out = record_local_update(&mut store, &key, &update, &faults, 1_000).expect("rec");
+            let out =
+                record_local_update(&mut store, &mut replay_cache, &key, &update, &faults, 1_000)
+                    .expect("rec");
             assert_eq!(out, TxnOutcome::Crashed { committed: false });
             drop(store);
             let mut store = reopen(&dir);
+            let mut replay_cache = dohc_engine_collab::ReplayBaseCache::new();
             assert_eq!(count(&store, "ydoc_updates", &key), 0, "nothing journaled");
-            let retry =
-                record_local_update(&mut store, &key, &update, &NoFaults, 1_000).expect("retry");
+            let retry = record_local_update(
+                &mut store,
+                &mut replay_cache,
+                &key,
+                &update,
+                &NoFaults,
+                1_000,
+            )
+            .expect("retry");
             assert!(matches!(retry, TxnOutcome::Committed(a) if !a.deduped));
             assert_eq!(count(&store, "ydoc_updates", &key), 1);
         }
@@ -825,6 +1034,7 @@ mod crash {
         let key = test_key();
         {
             let mut store = open_at(&dir, 1_000);
+            let mut replay_cache = dohc_engine_collab::ReplayBaseCache::new();
             seed_parents(&mut store, &key, 1_000);
             committed(
                 ensure_marker(
@@ -839,7 +1049,10 @@ mod crash {
             );
             let doc = Ydoc::wire();
             let d = doc.plaintext_insert(0, "settle-once");
-            committed(record_local_update(&mut store, &key, &d, &NoFaults, 1_000).expect("rec"));
+            committed(
+                record_local_update(&mut store, &mut replay_cache, &key, &d, &NoFaults, 1_000)
+                    .expect("rec"),
+            );
             let faults = OneShotCrash::at(FaultPoint::StorageAfterCommitBeforeAck);
             let out = settle(&mut store, &key, "n.md", &faults, 5_000).expect("settle");
             assert_eq!(out, TxnOutcome::Crashed { committed: true });

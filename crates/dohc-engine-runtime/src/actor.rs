@@ -29,7 +29,7 @@
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
 use crate::search::{SearchResult, search_workspace};
-use dohc_engine_collab::{AppendOutcome, ContentKind, DocKey, Regime};
+use dohc_engine_collab::{AppendOutcome, ContentKind, DocKey, Regime, ReplayBaseCache};
 use dohc_engine_domain::{
     ResolveTextConflict, ResolveTextConflictResult, TextConflict, TextSnapshot, VersionedTextStore,
     WriteResult, WriteText, insert_text_conflict_if_absent,
@@ -783,6 +783,7 @@ fn worker_main(
             return;
         }
     };
+    let mut replay_cache = ReplayBaseCache::new();
     // Publish Ready *before* acking the open, so a caller that observes the
     // successful open also observes Ready.
     state.store(LifecycleState::Ready.as_u8(), Ordering::Release);
@@ -860,6 +861,7 @@ fn worker_main(
             } => {
                 let outcome = ydoc_apply_on_store(
                     &mut store,
+                    &mut replay_cache,
                     &key,
                     content_kind,
                     &update,
@@ -967,8 +969,10 @@ fn worker_main(
     drop(store);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ydoc_apply_on_store(
     store: &mut EngineStore,
+    replay_cache: &mut ReplayBaseCache,
     key: &DocKey,
     content_kind: ContentKind,
     update: &[u8],
@@ -981,6 +985,7 @@ fn ydoc_apply_on_store(
     }
     match dohc_engine_collab::record_local_update_creating_marker(
         store,
+        replay_cache,
         key,
         content_kind,
         Regime::Replicated,

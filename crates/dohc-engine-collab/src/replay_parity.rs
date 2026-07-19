@@ -107,7 +107,7 @@ enum ClockIdentity {
 }
 
 #[derive(Default)]
-struct WireStructure {
+pub(crate) struct WireStructure {
     unsafe_boundaries: BTreeSet<ID>,
     insertion_boundaries: Vec<ID>,
     deletion_boundaries: Vec<ID>,
@@ -223,6 +223,23 @@ pub fn validate_replay_parity(base: &Ydoc, candidate: &[u8]) -> Result<(), Colla
     }
 }
 
+pub(crate) fn validate_replay_parity_cached(
+    base: &Ydoc,
+    base_full: &[u8],
+    base_structure: &WireStructure,
+    candidate: &[u8],
+) -> Result<(), CollabError> {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        validate_replay_parity_cached_inner(base, base_full, base_structure, candidate)
+    }));
+    match outcome {
+        Ok(result) => result,
+        Err(_) => Err(CollabError::ReplayParityViolation {
+            reason: "replay validation failed to complete; rejected fail-closed".to_owned(),
+        }),
+    }
+}
+
 fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<(), CollabError> {
     #[cfg(test)]
     if PANIC_INJECT.with(std::cell::Cell::get) {
@@ -238,6 +255,43 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<(), Col
     Ydoc::validate_update(candidate)?;
     let base_full = base.encode_full_state();
     let base_structure = scan_v1(&base_full)?;
+    validate_replay_parity_prevalidated(
+        base,
+        &base_full,
+        &base_structure,
+        candidate,
+        candidate_structure,
+    )
+}
+
+fn validate_replay_parity_cached_inner(
+    base: &Ydoc,
+    base_full: &[u8],
+    base_structure: &WireStructure,
+    candidate: &[u8],
+) -> Result<(), CollabError> {
+    #[cfg(test)]
+    if PANIC_INJECT.with(std::cell::Cell::get) {
+        panic!("injected replay-gate unwind for fail-closed test");
+    }
+    let candidate_structure = scan_v1(candidate)?;
+    Ydoc::validate_update(candidate)?;
+    validate_replay_parity_prevalidated(
+        base,
+        base_full,
+        base_structure,
+        candidate,
+        candidate_structure,
+    )
+}
+
+fn validate_replay_parity_prevalidated(
+    base: &Ydoc,
+    base_full: &[u8],
+    base_structure: &WireStructure,
+    candidate: &[u8],
+    candidate_structure: WireStructure,
+) -> Result<(), CollabError> {
     let pending_bytes = base.pending_update_v1();
     let pending_structure = match &pending_bytes {
         Some(bytes) => scan_v1(bytes)?,
@@ -322,7 +376,7 @@ fn validate_replay_parity_inner(base: &Ydoc, candidate: &[u8]) -> Result<(), Col
     // reads only the scratch doc's state vector and re-encoded pending bytes
     // (both O(pending), never a full diff against a foreign state vector).
     let scratch = Ydoc::wire();
-    scratch.apply(&base_full)?;
+    scratch.apply(base_full)?;
     if let Some(pending) = &pending_bytes {
         scratch.apply(pending)?;
     }
@@ -775,7 +829,7 @@ fn safe_read_id(decoder: &mut DecoderV1<'_>) -> Result<ID, CollabError> {
 /// is a thin public wrapper around it, and every caller in this module that
 /// used to call `Update::decode_v1`/`Ydoc::validate_update` on untrusted bytes
 /// now calls this (or the wrapper) FIRST.
-fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
+pub(crate) fn scan_v1(bytes: &[u8]) -> Result<WireStructure, CollabError> {
     let mut decoder = DecoderV1::from(bytes);
     let mut structure = WireStructure::default();
     let clients_len: u32 = decoder.read_var().map_err(parity_decode_error)?;

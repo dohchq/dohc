@@ -28,7 +28,7 @@ use crate::durable::{
 };
 use crate::error::CollabError;
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
-use crate::DocKey;
+use crate::{DocKey, ReplayBaseCache};
 
 /// Who produced an update — the actor tag journaled into `ydoc_updates`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,14 +91,18 @@ pub enum ReplicationApplyOutcome {
 /// includes the remote edit.
 pub fn apply_remote_update(
     store: &mut EngineStore,
+    replay_cache: &mut ReplayBaseCache,
     key: &DocKey,
     remote: &RemoteUpdate,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<ReplicationApplyOutcome>, CollabError> {
     let outcome = store.write_with(faults, |tx| {
-        apply_remote_update_in_transaction(tx, key, remote, now_ms)
+        apply_remote_update_in_transaction(tx, replay_cache, key, remote, now_ms)
     })?;
+    if let TxnOutcome::Committed(ReplicationApplyOutcome::Applied { seq, .. }) = &outcome {
+        replay_cache.advance(key, &remote.bytes, *seq);
+    }
     // Self-bound the log: a genuinely-applied remote update folds the log once it
     // grows past the threshold (a replicated fold keeps a full-state snapshot,
     // never prunes — peers still bootstrap). A dedup/crash does nothing.
@@ -119,6 +123,7 @@ pub fn apply_remote_update(
 /// updates are durably parked; the parity gate rejects only proven divergence.
 pub fn apply_remote_update_in_transaction(
     tx: &Transaction<'_>,
+    replay_cache: &mut ReplayBaseCache,
     key: &DocKey,
     remote: &RemoteUpdate,
     now_ms: i64,
@@ -142,8 +147,8 @@ pub fn apply_remote_update_in_transaction(
             reason: "remote update applied to a non-replicated lineage",
         });
     }
-    let base = load_for_replay_gate(tx, key)?;
-    crate::validate_replay_parity(&base, &remote.bytes)?;
+    let base = load_for_replay_gate(tx, replay_cache, key, marker.head_update_seq)?;
+    base.validate(&remote.bytes)?;
     if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
         return Ok(ReplicationApplyOutcome::Deduped { seq: existing });
     }

@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use base64::Engine as _;
-use dohc_engine_collab::{CollabError, DocKey};
+use dohc_engine_collab::{CollabError, DocKey, ReplayBaseCache};
 use dohc_engine_storage::{
     EngineStore, FaultAction, FaultInjector, FaultPoint, NoFaults, TxnOutcome,
 };
@@ -15,6 +15,7 @@ use serde::Deserialize;
 /// A temp engine.db that removes itself on drop.
 pub struct TempStore {
     pub store: EngineStore,
+    pub replay_cache: ReplayBaseCache,
     dir: PathBuf,
 }
 
@@ -50,7 +51,11 @@ pub fn unique_dir(tag: &str) -> PathBuf {
 pub fn fresh_store(tag: &str) -> TempStore {
     let dir = unique_dir(tag);
     let store = EngineStore::open(&dir.join("engine.db"), 1_000).expect("open store");
-    TempStore { store, dir }
+    TempStore {
+        store,
+        replay_cache: ReplayBaseCache::new(),
+        dir,
+    }
 }
 
 /// Open a store at an explicit dir (crash tests manage the dir lifetime by hand

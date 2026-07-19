@@ -26,6 +26,7 @@ pub mod durable;
 pub mod error;
 pub mod lease;
 pub mod limits;
+pub mod replay_cache;
 pub mod replay_parity;
 pub mod replication;
 pub mod ydoc;
@@ -37,6 +38,7 @@ pub use durable::{
 };
 pub use error::CollabError;
 pub use lease::{Lease, LeaseRegistry};
+pub use replay_cache::ReplayBaseCache;
 pub use replay_parity::validate_replay_parity;
 pub use replication::{
     apply_remote_update, apply_remote_update_in_transaction, RemoteUpdate, ReplicationApplyOutcome,

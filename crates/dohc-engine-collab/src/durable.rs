@@ -22,6 +22,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use crate::error::CollabError;
 use crate::limits::{DEFAULT_COMPACTION_THRESHOLD, MAX_PROJECTION_BYTES, MAX_YDOC_UPDATE_BYTES};
+use crate::replay_cache::{CachedBase, ReplayBaseCache};
 use crate::ydoc::{ContentKind, Projection, Ydoc};
 use crate::DocKey;
 
@@ -262,6 +263,7 @@ pub fn ensure_marker(
 /// still keeps a finite log (the "everything bounded" invariant).
 pub fn record_local_update(
     store: &mut EngineStore,
+    replay_cache: &mut ReplayBaseCache,
     key: &DocKey,
     update: &[u8],
     faults: &dyn FaultInjector,
@@ -272,8 +274,13 @@ pub fn record_local_update(
 
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
         let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
-        append_local_update(tx, key, &marker, update, &sha, now_ms)
+        append_local_update(tx, replay_cache, key, &marker, update, &sha, now_ms)
     })?;
+    if let TxnOutcome::Committed(app) = &outcome {
+        if !app.deduped {
+            replay_cache.advance(key, update, app.seq);
+        }
+    }
     self_bound_log(store, key, &outcome, faults, now_ms)?;
     Ok(outcome)
 }
@@ -281,8 +288,10 @@ pub fn record_local_update(
 /// Create a marker when needed and append a locally-produced update in one
 /// transaction. Validation, replay parity, blob storage, journal append, and
 /// first-marker creation therefore share one rollback boundary.
+#[allow(clippy::too_many_arguments)]
 pub fn record_local_update_creating_marker(
     store: &mut EngineStore,
+    replay_cache: &mut ReplayBaseCache,
     key: &DocKey,
     content_kind: ContentKind,
     regime: Regime,
@@ -325,22 +334,28 @@ pub fn record_local_update_creating_marker(
             }
         };
         let sha = crate::hex_sha256(update);
-        append_local_update(tx, key, &marker, update, &sha, now_ms)
+        append_local_update(tx, replay_cache, key, &marker, update, &sha, now_ms)
     })?;
+    if let TxnOutcome::Committed(app) = &outcome {
+        if !app.deduped {
+            replay_cache.advance(key, update, app.seq);
+        }
+    }
     self_bound_log(store, key, &outcome, faults, now_ms)?;
     Ok(outcome)
 }
 
 fn append_local_update(
     conn: &Connection,
+    replay_cache: &mut ReplayBaseCache,
     key: &DocKey,
     marker: &Marker,
     update: &[u8],
     sha: &str,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
-    let base = load_for_replay_gate(conn, key)?;
-    crate::validate_replay_parity(&base, update)?;
+    let base = load_for_replay_gate(conn, replay_cache, key, marker.head_update_seq)?;
+    base.validate(update)?;
     if let Some(existing) = blob_seq_in_log(conn, key, sha)? {
         return Ok(AppendOutcome {
             seq: existing,
@@ -477,6 +492,7 @@ pub fn maybe_compact(
 /// base and returns [`ClaimOutcome::Resumed`] (emitting no second base).
 pub fn claim_base(
     store: &mut EngineStore,
+    replay_cache: &mut ReplayBaseCache,
     key: &DocKey,
     content_kind: ContentKind,
     base_bytes: &[u8],
@@ -491,7 +507,7 @@ pub fn claim_base(
         doc.encode_state_vector()
     };
 
-    store.write_with(faults, |tx| {
+    let outcome = store.write_with(faults, |tx| -> Result<ClaimOutcome, CollabError> {
         // Upsert the marker first (FK parent for the snapshot), stamping the
         // replicated regime + content kind. In the INDIVIDUAL-FIRST flow the
         // marker already exists as `local-only` (created by `ensure_marker`), so
@@ -553,7 +569,14 @@ pub fn claim_base(
         Ok(ClaimOutcome::Claimed {
             base_snapshot_sha: base_sha,
         })
-    })
+    })?;
+    if matches!(
+        outcome,
+        TxnOutcome::Committed(ClaimOutcome::Claimed { .. }) | TxnOutcome::Crashed { .. }
+    ) {
+        replay_cache.invalidate(key);
+    }
+    Ok(outcome)
 }
 
 /// Settle: project the reconstructed Y.Doc to markdown (with provenance),
@@ -722,7 +745,11 @@ pub fn close_session(
             return Err(CollabError::UnsettledClose);
         }
     }
-    // Prune the CRDT cache to nothing, keep the marker.
+    // Prune the CRDT cache to nothing, keep the marker. This mutates base
+    // content and resets head_update_seq to 0 but takes no ReplayBaseCache: the
+    // actor worker never drives close through a live cache, and a reset to seq 0
+    // makes any stale entry (seq > 0) miss. If close is ever routed through a
+    // shared cache, invalidate here (as claim_base does).
     store.write_with(faults, |tx| {
         let removed_updates = tx
             .execute(
@@ -781,7 +808,19 @@ pub(crate) fn validate_update_bytes(update: &[u8]) -> Result<(), CollabError> {
 /// Reconstruct a lineage from the caller's connection/transaction for the
 /// replay-parity gate. Keeping this read inside the write transaction makes the
 /// checked base exactly the base that the append will extend.
-pub(crate) fn load_for_replay_gate(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError> {
+pub(crate) fn load_for_replay_gate<'a>(
+    conn: &Connection,
+    replay_cache: &'a mut ReplayBaseCache,
+    key: &DocKey,
+    expected_seq: i64,
+) -> Result<&'a CachedBase, CollabError> {
+    replay_cache.get_or_reconstruct(conn, key, expected_seq)
+}
+
+pub(crate) fn reconstruct_for_replay_gate(
+    conn: &Connection,
+    key: &DocKey,
+) -> Result<Ydoc, CollabError> {
     query_marker(conn, key)?.ok_or(CollabError::NoMarker)?;
     let snapshot = latest_snapshot(conn, key)?;
     let from_seq = snapshot.as_ref().map_or(0, |(seq, _)| *seq);

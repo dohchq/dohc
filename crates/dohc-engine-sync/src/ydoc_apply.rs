@@ -1,7 +1,7 @@
 use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
 use dohc_engine_collab::{
-    DocKey, RemoteUpdate, ReplicationApplyOutcome, apply_remote_update_in_transaction,
-    maybe_compact,
+    DocKey, RemoteUpdate, ReplayBaseCache, ReplicationApplyOutcome,
+    apply_remote_update_in_transaction, maybe_compact,
 };
 use dohc_engine_storage::{EngineStore, FaultInjector};
 use rusqlite::OptionalExtension;
@@ -66,14 +66,17 @@ pub fn apply_ydoc_envelope(
         origin_seq: envelope.origin_seq,
         bytes,
     };
+    let mut replay_cache = ReplayBaseCache::new();
     let outcome = crate::apply_envelope_with(store, envelope, faults, |tx, op| {
         let _ = payload.is_base_state;
-        apply_remote_update_in_transaction(tx, &key, &remote, op.recorded_at_ms).map_err(|_| {
-            SyncError::InvalidInput {
+        apply_remote_update_in_transaction(tx, &mut replay_cache, &key, &remote, op.recorded_at_ms)
+            .map_err(|_| SyncError::InvalidInput {
                 reason: "ydoc.update could not be applied",
-            }
-        })
+            })
     })?;
+    if let ApplyOutcome::Applied(ReplicationApplyOutcome::Applied { seq, .. }) = &outcome {
+        replay_cache.advance(&key, &remote.bytes, *seq);
+    }
     if matches!(
         outcome,
         ApplyOutcome::Applied(ReplicationApplyOutcome::Applied { .. })
