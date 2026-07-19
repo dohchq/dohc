@@ -38,6 +38,9 @@ harness = []
 
 [dev-dependencies]
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
+# Self-dependency so integration tests (tests/shadow_replay.rs) compile the
+# library with the harness-only marker writers; production builds never do.
+dohc-workspace-engine = { path = ".", features = ["harness"] }
 yrs = "=0.27.3"
 
 [lints]
