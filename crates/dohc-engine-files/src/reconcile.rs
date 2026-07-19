@@ -428,6 +428,11 @@ impl ReconcileController {
         }
         let applied: BTreeSet<&str> = result.applied_paths.iter().map(String::as_str).collect();
         let not_owned: BTreeSet<&str> = result.not_owned_paths.iter().map(String::as_str).collect();
+        let captured: std::collections::BTreeMap<&str, (u64, &str)> = result
+            .captured
+            .iter()
+            .map(|c| (c.path.as_str(), (c.size, c.sha256.as_str())))
+            .collect();
         let mut next = self.manifest.clone();
         for op in &plan.ops {
             if not_owned.contains(op.path()) {
@@ -440,13 +445,16 @@ impl ReconcileController {
             match op {
                 CaptureOp::Ingest {
                     path, size, sha256, ..
-                } => next.insert(
-                    path.clone(),
-                    ManifestEntry {
-                        size: *size,
-                        sha256: sha256.clone(),
-                    },
-                ),
+                } => {
+                    // A re-reading sink can persist newer bytes than the scan
+                    // hashed; record what was ACTUALLY captured so a later
+                    // revert to the scan-time bytes still diffs as a change.
+                    let (size, sha256) = captured
+                        .get(path.as_str())
+                        .map(|(size, sha)| (*size, (*sha).to_owned()))
+                        .unwrap_or_else(|| (*size, sha256.clone()));
+                    next.insert(path.clone(), ManifestEntry { size, sha256 });
+                }
                 CaptureOp::Retire { path } => next.remove(path),
             }
         }

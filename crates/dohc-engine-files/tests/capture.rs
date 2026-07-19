@@ -15,13 +15,16 @@ struct IdempotentSink {
     calls: Vec<String>,
     fail: BTreeSet<String>,
     not_owned: BTreeSet<String>,
+    /// Report THIS sha for a path instead of the plan's (models a re-reading
+    /// sink that captured newer bytes than the scan hashed).
+    reread_sha: BTreeMap<String, String>,
 }
 
 impl CaptureSink for IdempotentSink {
     fn ingest(
         &mut self,
         path: &str,
-        _size: u64,
+        size: u64,
         sha256: &str,
         _media_type: &str,
         _reason: IngestReason,
@@ -34,11 +37,19 @@ impl CaptureSink for IdempotentSink {
             self.content.remove(path);
             return Ok(IngestOutcome::NotOwned);
         }
-        if self.content.get(path).map(String::as_str) != Some(sha256) {
-            self.content.insert(path.to_owned(), sha256.to_owned());
+        let actual = self
+            .reread_sha
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| sha256.to_owned());
+        if self.content.get(path) != Some(&actual) {
+            self.content.insert(path.to_owned(), actual.clone());
             self.moments += 1;
         }
-        Ok(IngestOutcome::Captured)
+        Ok(IngestOutcome::Captured {
+            size,
+            sha256: actual,
+        })
     }
 
     fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
@@ -145,6 +156,41 @@ fn not_owned_ingest_is_acknowledged_but_forgotten_by_the_manifest() {
     );
     apply_then_ack(&mut controller, &retry, &mut sink, &NoFaults).expect("retry ack");
     assert!(controller.tracks_path("opted-out.md"));
+}
+
+#[test]
+fn manifest_records_the_bytes_actually_captured_not_the_scan_hash() {
+    let ws = Scratch::new();
+    ws.write("raced.md", b"scan-time bytes");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let plan = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare"),
+    );
+    // The sink re-reads and captures NEWER bytes than the scan hashed.
+    let mut sink = IdempotentSink {
+        reread_sha: BTreeMap::from([("raced.md".to_owned(), "sha-of-newer-bytes".to_owned())]),
+        ..IdempotentSink::default()
+    };
+    apply_then_ack(&mut controller, &plan, &mut sink, &NoFaults).expect("ack");
+    assert!(!controller.is_dirty());
+
+    // The disk still holds the scan-time bytes: against a manifest that had
+    // recorded the stale scan hash this would diff clean and the newer
+    // captured bytes would silently stay authoritative forever.
+    controller.mark_dirty();
+    let retry = completed(
+        controller
+            .reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
+            .expect("retry prepare"),
+    );
+    assert!(
+        matches!(retry.ops.as_slice(), [CaptureOp::Ingest { path, .. }] if path == "raced.md"),
+        "manifest must have recorded the captured hash so the on-disk bytes re-ingest: {:?}",
+        retry.ops
+    );
 }
 
 #[test]

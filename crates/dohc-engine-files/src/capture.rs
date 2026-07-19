@@ -32,11 +32,16 @@ pub struct CaptureError {
 }
 
 /// How a sink disposed of a planned ingest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngestOutcome {
-    /// The observed content was captured; the manifest records the plan's
-    /// hash so an unchanged file is not re-ingested.
-    Captured,
+    /// The observed content was captured. The sink reports the size and
+    /// lowercase-hex sha256 of the bytes it ACTUALLY persisted — the manifest
+    /// must record those, not the plan's scan-time observation: a re-reading
+    /// sink can capture newer bytes than the scan hashed (rapid writes
+    /// coalescing, or a change landing before the watcher was live), and a
+    /// manifest recording the stale scan hash would silently skip the
+    /// re-ingest if the file later reverted to those exact bytes.
+    Captured { size: u64, sha256: String },
     /// The path is durably NOT engine-owned (policy-untracked, no longer
     /// engine-ownable content, or an unsafe name). The op is acknowledged —
     /// the disposition is settled, not retryable — but the manifest must
@@ -44,6 +49,14 @@ pub enum IngestOutcome {
     /// ownership change (policy widened, content became ownable) re-ingests
     /// on the next scan instead of reading as already-captured.
     NotOwned,
+}
+
+/// The actual content identity an applied ingest persisted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedIngest {
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
 }
 
 /// The narrow downstream contract. Each call is one idempotent domain
@@ -67,6 +80,9 @@ pub struct CaptureApplyResult {
     /// Paths safe for the controller to acknowledge as applied (captured
     /// ingests and completed retires).
     pub applied_paths: Vec<String>,
+    /// The actual content identity of each applied ingest, in plan order.
+    /// The manifest records THESE, never the plan's scan-time hash.
+    pub captured: Vec<CapturedIngest>,
     /// Ingest paths the sink settled as [`IngestOutcome::NotOwned`]. They are
     /// acknowledged, but the controller manifest drops them instead of
     /// recording the plan's hash.
@@ -107,9 +123,15 @@ pub fn apply_reconcile_plan(
     faults: &dyn FaultInjector,
 ) -> CaptureApplyResult {
     let mut applied_paths = Vec::with_capacity(plan.ops.len());
+    let mut captured = Vec::new();
     let mut not_owned_paths = Vec::new();
     let mut failed_applies = Vec::new();
     for op in &plan.ops {
+        enum Applied {
+            Ingested { size: u64, sha256: String },
+            Retired,
+            NotOwned,
+        }
         let outcome = match op {
             CaptureOp::Ingest {
                 path,
@@ -117,8 +139,16 @@ pub fn apply_reconcile_plan(
                 sha256,
                 media_type,
                 reason,
-            } => sink.ingest(path, *size, sha256, media_type, *reason),
-            CaptureOp::Retire { path } => sink.retire(path).map(|()| IngestOutcome::Captured),
+            } => {
+                sink.ingest(path, *size, sha256, media_type, *reason)
+                    .map(|outcome| match outcome {
+                        IngestOutcome::Captured { size, sha256 } => {
+                            Applied::Ingested { size, sha256 }
+                        }
+                        IngestOutcome::NotOwned => Applied::NotOwned,
+                    })
+            }
+            CaptureOp::Retire { path } => sink.retire(path).map(|()| Applied::Retired),
         };
         let Ok(outcome) = outcome else {
             failed_applies.push(op.path().to_owned());
@@ -127,6 +157,7 @@ pub fn apply_reconcile_plan(
         if should_crash(faults) {
             return CaptureApplyResult {
                 applied_paths,
+                captured,
                 not_owned_paths,
                 failed_applies,
                 crashed_after_apply: Some(op.path().to_owned()),
@@ -134,13 +165,22 @@ pub fn apply_reconcile_plan(
             };
         }
         match outcome {
-            IngestOutcome::Captured => applied_paths.push(op.path().to_owned()),
-            IngestOutcome::NotOwned => not_owned_paths.push(op.path().to_owned()),
+            Applied::Ingested { size, sha256 } => {
+                applied_paths.push(op.path().to_owned());
+                captured.push(CapturedIngest {
+                    path: op.path().to_owned(),
+                    size,
+                    sha256,
+                });
+            }
+            Applied::Retired => applied_paths.push(op.path().to_owned()),
+            Applied::NotOwned => not_owned_paths.push(op.path().to_owned()),
         }
     }
     let degraded = plan.degraded || !failed_applies.is_empty();
     CaptureApplyResult {
         applied_paths,
+        captured,
         not_owned_paths,
         failed_applies,
         crashed_after_apply: None,

@@ -17,12 +17,15 @@ impl CaptureSink for AcceptAll {
     fn ingest(
         &mut self,
         _path: &str,
-        _size: u64,
-        _sha256: &str,
+        size: u64,
+        sha256: &str,
         _media_type: &str,
         _reason: IngestReason,
     ) -> Result<IngestOutcome, CaptureError> {
-        Ok(IngestOutcome::Captured)
+        Ok(IngestOutcome::Captured {
+            size,
+            sha256: sha256.to_owned(),
+        })
     }
 
     fn retire(&mut self, _path: &str) -> Result<(), CaptureError> {
