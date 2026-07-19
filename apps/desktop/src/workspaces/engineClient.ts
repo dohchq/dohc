@@ -26,7 +26,9 @@ const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_BLOB_CHUNK_BYTES = 256 * 1024;
 const DEFAULT_MAX_BLOB_BYTES = 64 * 1024 * 1024;
 const MAX_CONCURRENT_BLOB_STREAMS = 64;
-const MAX_COMPLETED_BLOB_STREAM_IDS = 64;
+// Global cap on retained chunk Buffers across all streams, so tiny-chunk floods
+// spread over many streams cannot amplify object overhead past the byte budget.
+const MAX_BUFFERED_BLOB_CHUNKS = 8192;
 // Bounds retained per-chunk object overhead so a tiny-chunk flood cannot amplify
 // memory past the byte budget. A max-size blob at the default chunk size is ~256
 // chunks, so this leaves ample headroom for legitimate chunking.
@@ -451,11 +453,11 @@ export type BlobStreamErrorCode =
   | "blob-digest-mismatch"
   | "blob-size-mismatch"
   | "blob-too-large"
-  | "duplicate-blob-fin"
   | "duplicate-blob-stream"
   | "empty-blob-chunk"
   | "invalid-blob-start"
   | "too-many-blob-streams"
+  | "unknown-blob-request"
   | "unknown-blob-stream";
 
 export class BlobStreamError extends Error {
@@ -528,8 +530,11 @@ export class EngineClient implements EngineTransport {
   private readonly eventHandlers = new Set<(event: Event) => void>();
   private readonly blobHandlers = new Set<(blob: CompletedBlob) => void>();
   private readonly blobStreams = new Map<number, PendingBlob>();
-  private readonly completedBlobStreams = new Set<number>();
-  private readonly completedBlobStreamOrder: number[] = [];
+  // Stream ids are unique per session generation and announced in allocation
+  // order, so full-session uniqueness reduces to a monotonicity check — O(1)
+  // memory with no evictable completed-id set.
+  private highestBlobStreamId = -1;
+  private bufferedBlobChunks = 0;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly textDecoder = new TextDecoder("utf-8", { fatal: true });
   private readonly readyPromise: Promise<EngineClient>;
@@ -913,13 +918,10 @@ export class EngineClient implements EngineTransport {
         "blobStart contains an invalid wire integer.",
       );
     }
-    if (
-      this.blobStreams.has(start.streamId) ||
-      this.completedBlobStreams.has(start.streamId)
-    ) {
+    if (start.streamId <= this.highestBlobStreamId) {
       throw new BlobStreamError(
         "duplicate-blob-stream",
-        `Blob stream ${start.streamId} has already been announced.`,
+        `Blob stream ${start.streamId} does not increase on ${this.highestBlobStreamId}; stream ids are unique and announced in order.`,
       );
     }
     if (this.blobStreams.size >= MAX_CONCURRENT_BLOB_STREAMS) {
@@ -949,17 +951,29 @@ export class EngineClient implements EngineTransport {
         "blobStart.sha256 must be a lowercase SHA-256 hex digest.",
       );
     }
+    const pendingEntry = this.pending.get(start.requestId);
+    if (!pendingEntry) {
+      throw new BlobStreamError(
+        "unknown-blob-request",
+        `Blob stream ${start.streamId} references unknown request ${start.requestId}.`,
+      );
+    }
+    this.highestBlobStreamId = start.streamId;
     this.blobStreams.set(start.streamId, {
       start,
-      callerRequestId:
-        this.pending.get(start.requestId)?.callerId ?? start.requestId,
+      callerRequestId: pendingEntry.callerId,
       chunks: [],
       receivedBytes: 0,
     });
   }
 
   private assertBlobCapability(): void {
-    if (!this.helloAck?.capabilities.includes(BLOB_CAPABILITY)) {
+    // Capabilities are intersection-negotiated: blob streaming requires that the
+    // client requested it AND the engine acknowledged it.
+    if (
+      !this.connectOptions.capabilities.includes(BLOB_CAPABILITY) ||
+      !this.helloAck?.capabilities.includes(BLOB_CAPABILITY)
+    ) {
       throw new EngineClientError(
         "protocol-error",
         `Blob streaming requires the "${BLOB_CAPABILITY}" capability, which this session did not negotiate.`,
@@ -970,12 +984,6 @@ export class EngineClient implements EngineTransport {
   private receiveBlobChunk(
     frame: Extract<Frame, { kind: "blobChunk" }>,
   ): void {
-    if (this.completedBlobStreams.has(frame.streamId)) {
-      throw new BlobStreamError(
-        frame.fin ? "duplicate-blob-fin" : "unknown-blob-stream",
-        `Blob stream ${frame.streamId} already terminated with FIN.`,
-      );
-    }
     const stream = this.blobStreams.get(frame.streamId);
     if (!stream) {
       throw new BlobStreamError(
@@ -1009,9 +1017,16 @@ export class EngineClient implements EngineTransport {
         `Blob stream ${frame.streamId} exceeded ${MAX_BLOB_CHUNKS_PER_STREAM} buffered chunks.`,
       );
     }
+    if (this.bufferedBlobChunks >= MAX_BUFFERED_BLOB_CHUNKS) {
+      throw new BlobStreamError(
+        "blob-backpressure-exceeded",
+        `Buffered blob chunks exceed the ${MAX_BUFFERED_BLOB_CHUNKS} global cap.`,
+      );
+    }
     stream.chunks.push(frame.payload);
     stream.receivedBytes = receivedBytes;
     this.bufferedBlobBytes += frame.payload.length;
+    this.bufferedBlobChunks += 1;
     if (!frame.fin) return;
     if (
       stream.start.totalBytes !== undefined &&
@@ -1038,7 +1053,7 @@ export class EngineClient implements EngineTransport {
 
     this.blobStreams.delete(frame.streamId);
     this.bufferedBlobBytes -= receivedBytes;
-    this.rememberCompletedBlobStream(frame.streamId);
+    this.bufferedBlobChunks -= stream.chunks.length;
     const blob: CompletedBlob = {
       requestId: stream.callerRequestId,
       streamId: stream.start.streamId,
@@ -1053,16 +1068,6 @@ export class EngineClient implements EngineTransport {
         // Blob subscribers are observer boundaries, like event subscribers.
       }
     }
-  }
-
-  private rememberCompletedBlobStream(streamId: number): void {
-    this.completedBlobStreams.add(streamId);
-    this.completedBlobStreamOrder.push(streamId);
-    if (this.completedBlobStreamOrder.length <= MAX_COMPLETED_BLOB_STREAM_IDS) {
-      return;
-    }
-    const expired = this.completedBlobStreamOrder.shift();
-    if (expired !== undefined) this.completedBlobStreams.delete(expired);
   }
 
   private resolveResponse(response: Response): void {
@@ -1132,9 +1137,8 @@ export class EngineClient implements EngineTransport {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
     this.blobStreams.clear();
-    this.completedBlobStreams.clear();
-    this.completedBlobStreamOrder.length = 0;
     this.bufferedBlobBytes = 0;
+    this.bufferedBlobChunks = 0;
     try {
       this.terminate();
     } catch {

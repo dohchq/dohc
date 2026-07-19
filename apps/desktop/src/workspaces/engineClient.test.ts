@@ -153,7 +153,7 @@ function client(
   return new EngineClient(peer, {
     authToken: "parent-secret",
     protocolVersion: 1,
-    capabilities: ["core", "ydoc"],
+    capabilities: ["core", "ydoc", "blobs"],
     connectTimeoutMs: 5_000,
     maxFrameBytes: LIMITS.maxFrameBytes,
     ...options,
@@ -371,7 +371,7 @@ describe("EngineClient", () => {
         type: "hello",
         protocolVersion: 1,
         authToken: "parent-secret",
-        capabilities: ["core", "ydoc"],
+        capabilities: ["core", "ydoc", "blobs"],
         lastSessionGeneration: null,
       },
     ]);
@@ -463,9 +463,10 @@ describe("EngineClient", () => {
     await transport.ready();
     const onBlob = vi.fn();
     transport.onBlob(onBlob);
+    void transport.sendRequest(request(4, "blob.reassembly")).catch(() => {});
     peer.send({
       type: "blobStart",
-      requestId: 4,
+      requestId: 1,
       streamId: 27,
       totalBytes: 11,
       sha256: null,
@@ -563,6 +564,77 @@ describe("EngineClient", () => {
     await expect(pending).rejects.toMatchObject({ code: "protocol-error" });
   });
 
+  it("rejects blob streams the client did not request even if the ack offers them", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { capabilities: ["core"] });
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(15, "await.unrequested"));
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 62,
+      totalBytes: 1,
+      sha256: null,
+    });
+
+    await expect(pending).rejects.toMatchObject({ code: "protocol-error" });
+  });
+
+  it("rejects a blobStart that references an unknown request", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(16, "await.unknown.request"));
+    peer.send({
+      type: "blobStart",
+      requestId: 99,
+      streamId: 63,
+      totalBytes: 1,
+      sha256: null,
+    });
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "unknown-blob-request" },
+    });
+  });
+
+  it("caps buffered chunks across all streams", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(17, "await.global.chunks"));
+    const oneByte = Buffer.from("x");
+    // Two streams at exactly the per-stream cap (4096 each) fill the global cap
+    // (8192); a third stream's FIRST chunk then trips the global check while
+    // its own per-stream count is zero.
+    for (const streamId of [70, 71, 72]) {
+      peer.send({
+        type: "blobStart",
+        requestId: 1,
+        streamId,
+        totalBytes: null,
+        sha256: null,
+      });
+    }
+    for (const streamId of [70, 71]) {
+      const flood: Buffer[] = [];
+      for (let i = 0; i < 4096; i++) {
+        flood.push(blobChunkFrame(streamId, oneByte, false));
+      }
+      peer.sendRaw(Buffer.concat(flood));
+    }
+    peer.sendRaw(blobChunkFrame(72, oneByte, false));
+
+    await expect(pending).rejects.toMatchObject({
+      code: "protocol-error",
+      cause: { code: "blob-backpressure-exceeded" },
+    });
+  });
+
   it("accepts blob chunks larger than the negotiated control-frame limit", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);
@@ -576,6 +648,7 @@ describe("EngineClient", () => {
     await transport.ready();
     const onBlob = vi.fn();
     transport.onBlob(onBlob);
+    void transport.sendRequest(request(12, "blob.large.chunk")).catch(() => {});
     // Larger than maxFrameBytes (control-frame bound) but within the blob bound.
     const bytes = Buffer.alloc(100_000, 7);
     peer.send({
@@ -612,6 +685,7 @@ describe("EngineClient", () => {
     await matching.ready();
     const onBlob = vi.fn();
     matching.onBlob(onBlob);
+    void matching.sendRequest(request(13, "blob.sha.match")).catch(() => {});
     matchingPeer.send({
       type: "blobStart",
       requestId: 1,
@@ -854,9 +928,10 @@ describe("EngineClient", () => {
     await final.ready();
     const onBlob = vi.fn();
     final.onBlob(onBlob);
+    void final.sendRequest(request(14, "blob.empty.final")).catch(() => {});
     finalPeer.send({
       type: "blobStart",
-      requestId: 11,
+      requestId: 1,
       streamId: 51,
       totalBytes: 0,
       sha256: null,
@@ -945,20 +1020,23 @@ describe("EngineClient", () => {
     peer.acknowledge();
     await transport.ready();
     transport.onBlob(() => undefined);
+    void transport.sendRequest(request(7, "blob.then.finish")).catch(() => {});
     peer.send({
       type: "blobStart",
-      requestId: 7,
+      requestId: 1,
       streamId: 29,
       totalBytes: 1,
       sha256: null,
     });
     peer.sendRaw(blobChunkFrame(29, Buffer.from("x"), true));
-    const pending = transport.sendRequest(request(7, "after.blob"));
+    const pending = transport.sendRequest(request(8, "after.blob"));
+    // The completed stream is gone; a late FIN is an unknown stream (fail-closed
+    // teardown), with no per-id completed set retained.
     peer.sendRaw(blobChunkFrame(29, Buffer.alloc(0), true));
 
     await expect(pending).rejects.toMatchObject({
       code: "protocol-error",
-      cause: { code: "duplicate-blob-fin" },
+      cause: { code: "unknown-blob-stream" },
     });
   });
 
