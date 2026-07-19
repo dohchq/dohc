@@ -397,6 +397,7 @@ version = "0.1.0"
 dependencies = [
  "dohc-engine-collab",
  "dohc-engine-protocol",
+ "dohc-engine-runtime",
  "dohc-engine-storage",
  "dohc-engine-sync",
  "dohc-engine-testkit",
