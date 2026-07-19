@@ -27,7 +27,7 @@ const RETIRE_FAILED: CaptureError = CaptureError {
     reason: "capture retire failed",
 };
 const ESCAPES_ROOT: CaptureError = CaptureError {
-    reason: "capture path did not resolve inside the workspace root",
+    reason: "capture path did not resolve through real ancestors inside the workspace root",
 };
 const RETIRE_RACED: CaptureError = CaptureError {
     reason: "retire refused: a regular file reappeared at the path",
@@ -110,7 +110,7 @@ impl StoreCaptureSink {
     /// candidate hardening for the composition driver.
     fn read_current(&self, path: &str, media_type: &str) -> Result<CurrentContent, CaptureError> {
         let absolute = self.shadow_root.join(path);
-        match contained_parent(&self.shadow_root, &absolute) {
+        match contained_parent(&self.shadow_root, path) {
             Containment::Contained => {}
             Containment::Absent => return Ok(CurrentContent::Untracked),
             Containment::Escaped => return Err(ESCAPES_ROOT),
@@ -131,7 +131,7 @@ impl StoreCaptureSink {
             NoFollowOpen::Refused | NoFollowOpen::Absent => return Ok(CurrentContent::Untracked),
             NoFollowOpen::Failed => return Err(READ_FAILED),
         };
-        verify_opened_containment(&self.shadow_root, &absolute, &file)?;
+        verify_opened_containment(&self.shadow_root, path, &file)?;
         let metadata = file.metadata().map_err(|_| READ_FAILED)?;
         if !metadata.file_type().is_file() {
             return Ok(CurrentContent::Untracked);
@@ -332,7 +332,7 @@ impl CaptureSink for StoreCaptureSink {
                 // verdict must never be based on an off-root file reached
                 // through a symlinked ancestor. A missing parent confirms the
                 // tracked file gone; an escape retains last-known-good.
-                match contained_parent(&self.shadow_root, &absolute) {
+                match contained_parent(&self.shadow_root, path) {
                     Containment::Contained => {}
                     Containment::Absent => return self.retire_head(path, false),
                     Containment::Escaped => return Err(ESCAPES_ROOT),
@@ -383,10 +383,27 @@ enum Containment {
     Escaped,
 }
 
-/// A symlinked ancestor directory must never carry a capture read outside the
-/// workspace root: the resolved parent has to stay under the resolved root.
-/// Unresolvable-for-any-other-reason fails CLOSED as an escape.
-fn contained_parent(root: &Path, absolute: &Path) -> Containment {
+/// The canonical location `rel_path` would have if NO ancestor were a
+/// symlink: the canonical root joined with the lexical segments. Any symlink
+/// anywhere in the chain — even one resolving INSIDE the root — makes the
+/// real canonical path differ from this, which is exactly the scanner-parity
+/// rule (the `Scanner` never descends symlinked directories, so the sink must
+/// never read through one either).
+fn expected_absolute(real_root: &Path, rel_path: &str) -> PathBuf {
+    let mut out = real_root.to_path_buf();
+    for segment in rel_path.split('/') {
+        out.push(segment);
+    }
+    out
+}
+
+/// Ancestor guard: the canonicalized parent must EQUAL the canonical root
+/// joined with the lexical parent segments — not merely resolve somewhere
+/// under the root. Strict equality rejects a symlinked ancestor regardless of
+/// where it points (off-root exfiltration AND in-root aliasing).
+/// Unresolvable-for-any-other-reason fails CLOSED as a refusal.
+fn contained_parent(root: &Path, rel_path: &str) -> Containment {
+    let absolute = root.join(rel_path);
     let Some(parent) = absolute.parent() else {
         return Containment::Escaped;
     };
@@ -398,7 +415,8 @@ fn contained_parent(root: &Path, absolute: &Path) -> Containment {
     let Ok(real_root) = root.canonicalize() else {
         return Containment::Escaped;
     };
-    if real_parent.starts_with(&real_root) {
+    let parent_rel = rel_path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
+    if real_parent == expected_absolute(&real_root, parent_rel) {
         Containment::Contained
     } else {
         Containment::Escaped
@@ -406,18 +424,16 @@ fn contained_parent(root: &Path, absolute: &Path) -> Containment {
 }
 
 /// Post-open containment recheck: re-resolve the OPENED path and require it
-/// still under the root. Catches an ancestor directory swapped to a symlink
-/// between the pre-open containment check and the open. On Unix the opened
-/// descriptor's (dev, ino) must also match the re-resolved path, so a
-/// swap-back cannot hide a foreign descriptor.
-fn verify_opened_containment(
-    root: &Path,
-    absolute: &Path,
-    file: &File,
-) -> Result<(), CaptureError> {
+/// EQUAL to its lexical location under the canonical root (same strict rule
+/// as [`contained_parent`]). Catches an ancestor swapped to a symlink between
+/// the pre-open check and the open. On Unix the opened descriptor's
+/// (dev, ino) must also match the re-resolved path, so a swap-back cannot
+/// hide a foreign descriptor.
+fn verify_opened_containment(root: &Path, rel_path: &str, file: &File) -> Result<(), CaptureError> {
+    let absolute = root.join(rel_path);
     let real = absolute.canonicalize().map_err(|_| ESCAPES_ROOT)?;
     let real_root = root.canonicalize().map_err(|_| ESCAPES_ROOT)?;
-    if !real.starts_with(&real_root) {
+    if real != expected_absolute(&real_root, rel_path) {
         return Err(ESCAPES_ROOT);
     }
     #[cfg(unix)]
@@ -857,6 +873,33 @@ mod tests {
         drop(sink);
         supervisor.close(&db).expect("close actor");
         assert_eq!(moment_count(&db, "linkdir/leak.md"), 0);
+    }
+
+    #[test]
+    fn symlinked_directory_inside_the_root_is_refused_for_scanner_parity() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), "real/x.md", b"real content");
+
+        // An ancestor symlink that resolves INSIDE the workspace still aliases
+        // content under a path the scanner would never enumerate (the scanner
+        // skips symlinked dirs), so the sink must refuse it — strict-equality
+        // containment, not merely under-root.
+        let made = try_symlink_dir(&scratch.path().join("alias"), &scratch.path().join("real"));
+        if made {
+            assert_eq!(ingest(&mut sink, "alias/x.md"), Err(ESCAPES_ROOT));
+        } else {
+            eprintln!("note: dir symlink unavailable on this host; asserting the absent path");
+            assert_eq!(
+                ingest(&mut sink, "alias/x.md").expect("absent"),
+                IngestOutcome::NotOwned
+            );
+        }
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(moment_count(&db, "alias/x.md"), 0);
     }
 
     #[test]
