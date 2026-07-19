@@ -1478,3 +1478,74 @@ source of truth every orchestrator session loads first).
 - Wave 5 remaining pre-cutover: R13b-rest, remaining obligations (A2 display
   enum, gate-perf, R14-deferred, fuzz coverage, shadow_fence harness-writer
   gating), then GATE6, then R15 (ICE checkpoint — STOP).
+
+## 2026-07-19 — obligation sweep: BlobChunk (#196), A2 (#197), fence (#198), fuzz (#199) merged
+
+Four obligations discharged plus one verified-resolved. All dormant / test-only;
+no live TS behavior change.
+
+- **BlobChunk (#196, R13b-rest piece)** — real BlobChunk (frame type 2) streaming
+  in the import-dead `apps/desktop/src/workspaces/engineClient.ts`, replacing the
+  deferred `unsupported-frame` rejections. It parses untrusted peer bytes, so it
+  went through 8 adversarial review rounds; every finding was a genuine
+  hostile-input DoS or correctness bug, all fixed: clamp the negotiated
+  `maxBlobChunkBytes` to a client cap (no peer-forced multi-GB alloc); per-stream,
+  concurrent-stream, aggregate-byte, aggregate-chunk, and global-chunk caps
+  (tiny-chunk floods can't amplify object overhead); enforce the cap DURING decode
+  (inline `onFrame`, halts a coalesced flood mid-buffer); SHA-256 verify before
+  dispatch; caller-id captured at blobStart (ordering-proof); intersection
+  capability gate (`blobs` requested AND acked); reject empty non-final chunks,
+  unknown-request streams, and out-of-order handling corrected to unique-not-
+  ordered (active-only duplicate check — no completed-id set to leak or evict);
+  abort-on-close; drop a failed request's streams. 50/50 vitest + tsc. Codex
+  clean; CodeRabbit approved through round 5 then rate-limited — merged on the
+  Codex-clean head plus this rationale.
+- **A2 (#197)** — DISCHARGED. `SnapshotContent::{Text,Binary}` + `SnapshotView`
+  replace the text-only `TextSnapshot` projection on the display/diff surfaces
+  (`list_snapshots`, `list_fork_base_snapshots`, `compare_version_files`), so
+  binary-vs-binary revisions are honest in diffs instead of empty-text masquerades;
+  `compare_text_file_versions` fails closed on binary heads. Review added a
+  symmetric fail-closed guard on the text branch (missing blob -> `StateCorrupt`).
+  Display-only, zero authority consumers (authority paths keep the fail-closed
+  in-db compare + binary-aware selects).
+- **shadow_fence (#198)** — DISCHARGED. `write_shadow_marker_for_harness` was
+  plain `pub`; production daemon code could manufacture shadow markers (defeating
+  the fence). Gated `#[cfg(any(test, feature = "harness"))]` (matching
+  `write_rehearsal_token_for_harness`), with a self dev-dependency so
+  `tests/shadow_replay.rs` still compiles under the default gate.
+- **fuzz coverage (#199)** — DISCHARGED. Audit confirmed the 3 cutover-blocking
+  fuzz families (framing, ydoc ingestion, replication envelopes) + secrets are
+  covered and gate-run. Added the two residual untrusted parsers as proptest
+  surfaces (`fuzz/dohc-fuzz-targets/tests/{policy_parse,migration_open}.rs`):
+  policy TOML/glob parsing and corrupted-DB-bytes-vs-open/migrate. No cargo-fuzz
+  (windows-msvc), run by `cargo test --workspace`.
+- **flaky Windows materializer test** — VERIFIED-RESOLVED, no change. No `#[ignore]`d
+  or flaky-marked test exists workspace-wide; the only "flaky" symbol is
+  `FlakyReplacer`, an intentional fault-injection double in
+  `testkit/tests/materialize.rs` that proves the rename-over-open-file
+  retry/backoff/fail-closed pipeline. `test --workspace` has been green across
+  every gate run this session.
+
+### R13b-rest — NARROWED (PROPOSED scope decision, needs ICE confirmation at R15)
+Scoping found the composed R13 daemon (`crates/dohc-workspace-engine/src/lib.rs`)
+exposes only 8 wire methods: `workspace.open/close`, `versionedText.write/read`,
+`ydoc.apply`, `conflicts.list/open/resolve`, `search.query`. There is NO RPC
+surface yet for chats, secrets, shares/replication, share-channels, or blob
+capture — so R13b-rest's remaining owned surfaces (cli, mcp, sharedView,
+sharedChannels, shareMounts, workspaceEngineCapture) cannot be wired to real,
+exercisable behavior; wiring them now would be un-validatable scaffold, and
+growing those RPCs is R13-dispatcher territory, not this shard. PROPOSAL: R13b-rest
+delivers BlobChunk now (done, #196) and its remaining surfaces are deferred until
+the daemon dispatcher grows the needed methods (a later R13-follow-up / part of
+R15 wiring). Flagged for Ice at the R15 checkpoint.
+
+Ownership gaps (unowned `@dohc/workspace-engine` consumers found by the shard-open
+import scan, to fold into SHARDS on the next refinement):
+`apps/desktop/src/agents/{chatDispatchService,runnerThreadContext}.ts`,
+`apps/desktop/src/collab/ydocEngineProviderSession.ts` (the LIVE sibling),
+`apps/desktop/src/ipc/engineHistoryIpc.ts`,
+`apps/desktop/src/workspaces/{chatBookmarkProjectionWrite,dmChats,workspaceEnginePolicyFile}.ts`.
+
+- Wave 5 remaining pre-cutover: R13b-rest rest (ICE scope decision), gate-perf
+  redesign, R14-deferred (WatcherUnavailable prod wiring, open-after-close race,
+  soak runner), then GATE6, then R15 (ICE checkpoint — STOP).
