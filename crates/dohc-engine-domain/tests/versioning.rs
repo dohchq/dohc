@@ -5,7 +5,7 @@
 
 use dohc_engine_domain::{
     CreateNamedVersion, DeleteTextFile, ListMomentsQuery, MomentOp, NoFaults, RenameTextFile,
-    RollbackTextFileMutation, VersionKind, VersionedTextStore, WriteText,
+    RollbackTextFileMutation, SnapshotContent, VersionKind, VersionedTextStore, WriteText,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
@@ -549,7 +549,12 @@ fn cross_version_fork_records_source_version_latest_moment() {
     );
     let base = vt.list_fork_base_snapshots(WS, "feat2").expect("fork base");
     assert_eq!(base.len(), 1);
-    assert_eq!(base[0].text, "v1");
+    assert_eq!(
+        base[0].content,
+        SnapshotContent::Text {
+            text: "v1".to_owned()
+        }
+    );
 }
 
 // oracle: list-versions is ordered by (created_at_ms, name, version_id).

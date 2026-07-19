@@ -1,7 +1,8 @@
 //! Domain records and operation inputs for the versioning slice.
 //!
 //! Identity discipline: a [`VersionRecord`] is a named line of history; a
-//! [`TextSnapshot`]/[`MomentRecord`] carries a STABLE `object_id` that is the
+//! [`SnapshotView`]/[`TextSnapshot`]/[`MomentRecord`] carries a STABLE
+//! `object_id` that is the
 //! durable identity, and a `path` that is only an alias onto it (plan §Target
 //! architecture). Ids that carry identity (`version_id`, `object_id`,
 //! `moment_id`) are caller-supplied so operation traces are deterministic
@@ -85,6 +86,26 @@ pub struct TextSnapshot {
     pub path: String,
     pub text: String,
     pub blob_sha256: String,
+    pub updated_at_ms: i64,
+    pub latest_moment_id: String,
+    pub metadata_origin: String,
+}
+
+/// The content exposed by a snapshot display view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotContent {
+    Text { text: String },
+    Binary { sha256: String },
+}
+
+/// The materialized current state of an object within a version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotView {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub object_id: String,
+    pub path: String,
+    pub content: SnapshotContent,
     pub updated_at_ms: i64,
     pub latest_moment_id: String,
     pub metadata_origin: String,

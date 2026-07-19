@@ -18,7 +18,8 @@ use crate::error::DomainError;
 use crate::records::{
     CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord, ListMomentsQuery, MomentOp,
     MomentPage, MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation,
-    SnapshotRecord, TextSnapshot, VersionKind, VersionRecord, WriteResult, WriteText,
+    SnapshotContent, SnapshotRecord, SnapshotView, TextSnapshot, VersionKind, VersionRecord,
+    WriteResult, WriteText,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
@@ -605,24 +606,19 @@ impl<'a> VersionedTextStore<'a> {
         })
     }
 
-    /// List every text snapshot in `version`, ordered by path.
+    /// List every snapshot in `version`, ordered by path.
     pub fn list_snapshots(
         &self,
         workspace_id: &str,
         version_id: &str,
-    ) -> Result<Vec<TextSnapshot>, DomainError> {
-        Ok(self
-            .list_snapshot_records(workspace_id, version_id)?
+    ) -> Result<Vec<SnapshotView>, DomainError> {
+        self.list_snapshot_records(workspace_id, version_id)?
             .iter()
-            .map(snapshot_text_view)
-            .collect())
+            .map(snapshot_view)
+            .collect()
     }
 
-    /// Content-aware snapshot records for `version`, ordered by path. Unlike
-    /// [`Self::list_snapshots`], this preserves `content_kind`/`binary_sha256`
-    /// so a binary head is never flattened into the empty-text projection — the
-    /// differential/normalize surface consumes this so text-vs-binary is never
-    /// masked.
+    /// Durable snapshot records for `version`, ordered by path.
     pub(crate) fn list_snapshot_records(
         &self,
         workspace_id: &str,
@@ -662,12 +658,11 @@ impl<'a> VersionedTextStore<'a> {
         &self,
         workspace_id: &str,
         version_id: &str,
-    ) -> Result<Vec<TextSnapshot>, DomainError> {
-        Ok(self
-            .list_fork_base_records(workspace_id, version_id)?
+    ) -> Result<Vec<SnapshotView>, DomainError> {
+        self.list_fork_base_records(workspace_id, version_id)?
             .iter()
-            .map(snapshot_text_view)
-            .collect())
+            .map(snapshot_view)
+            .collect()
     }
 
     /// Content-aware fork-base records for `version` (see
@@ -1700,14 +1695,44 @@ fn upsert_snapshot(conn: &Connection, snapshot: &SnapshotRecord) -> Result<(), D
     Ok(())
 }
 
-/// Project a [`SnapshotRecord`] into the text-compatibility [`TextSnapshot`].
-///
-/// BINARY-HEAD FOOTGUN: a binary head maps to `text: ""` with `blob_sha256` set
-/// to the record's BINARY sha (`binary_sha256`, a `binary_blobs` ref — NOT a
-/// `blobs` text ref). The empty `text` is therefore ambiguous: it does not mean
-/// "empty text file". This view drops `content_kind`, so a caller that needs to
-/// tell a binary head apart from an empty text file must read `content_kind`
-/// from the `SnapshotRecord` directly rather than trusting this projection.
+fn snapshot_view(snapshot: &SnapshotRecord) -> Result<SnapshotView, DomainError> {
+    let content = match snapshot.content_kind.as_str() {
+        "text" => {
+            if snapshot.blob_sha256.is_none() {
+                return Err(DomainError::StateCorrupt {
+                    reason: "text snapshot is missing its blob",
+                });
+            }
+            SnapshotContent::Text {
+                text: snapshot.text.clone(),
+            }
+        }
+        "binary" => SnapshotContent::Binary {
+            sha256: snapshot
+                .binary_sha256
+                .clone()
+                .ok_or(DomainError::StateCorrupt {
+                    reason: "binary snapshot is missing its blob",
+                })?,
+        },
+        _ => {
+            return Err(DomainError::StateCorrupt {
+                reason: "snapshot has an unknown content kind",
+            });
+        }
+    };
+    Ok(SnapshotView {
+        workspace_id: snapshot.workspace_id.clone(),
+        version_id: snapshot.version_id.clone(),
+        object_id: snapshot.object_id.clone(),
+        path: snapshot.path.clone(),
+        content,
+        updated_at_ms: snapshot.updated_at_ms,
+        latest_moment_id: snapshot.latest_moment_id.clone(),
+        metadata_origin: snapshot.metadata_origin.clone(),
+    })
+}
+
 fn snapshot_text_view(snapshot: &SnapshotRecord) -> TextSnapshot {
     TextSnapshot {
         workspace_id: snapshot.workspace_id.clone(),
