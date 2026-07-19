@@ -283,6 +283,7 @@ dependencies = [
  "aes-gcm",
  "base64",
  "getrandom 0.2.17",
+ "libc",
  "scrypt",
  "serde",
  "serde_json",
@@ -341,6 +342,7 @@ name = "dohc-engine-runtime"
 version = "0.1.0"
 dependencies = [
  "dohc-engine-collab",
+ "dohc-engine-crypto",
  "dohc-engine-domain",
  "dohc-engine-storage",
  "dohc-engine-sync",

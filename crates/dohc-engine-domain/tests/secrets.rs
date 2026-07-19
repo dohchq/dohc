@@ -4,7 +4,9 @@
 //! TS-written-ciphertext-decrypts-in-Rust cross-engine check.
 
 use dohc_engine_crypto::{SecretDataKey, aead};
-use dohc_engine_domain::{NoFaults, SecretFileStore, SecretOp, SecretWrite, VersionedTextStore};
+use dohc_engine_domain::{
+    NoFaults, SecretDiskIntent, SecretFileStore, SecretOp, SecretWrite, VersionedTextStore,
+};
 use dohc_engine_storage::{EngineStore, FaultPoint};
 use dohc_engine_testkit::harness::wal_sidecar;
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -46,6 +48,7 @@ fn write(
                 metadata_summary: Some("Updated .env".to_owned()),
                 metadata_correlation_id: None,
                 now_ms,
+                disk_intent: SecretDiskIntent::Materialize,
             },
             &NO_FAULTS,
         )
@@ -73,6 +76,7 @@ fn secret_write_and_delete_refuse_non_secret_paths() {
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms: 10,
+                disk_intent: SecretDiskIntent::Materialize,
             },
             &NO_FAULTS,
         )
@@ -87,6 +91,7 @@ fn secret_write_and_delete_refuse_non_secret_paths() {
                 path: "notes/ordinary.md".to_owned(),
                 moment_id: "sm-non-secret-delete".to_owned(),
                 metadata_origin: "api".to_owned(),
+                metadata_summary: None,
                 now_ms: 11,
             },
             &NO_FAULTS,
@@ -109,6 +114,7 @@ fn secret_write_debug_redacts_cleartext() {
         metadata_summary: None,
         metadata_correlation_id: None,
         now_ms: 1,
+        disk_intent: SecretDiskIntent::Materialize,
     };
     let rendered = format!("{w:?}");
     assert!(
@@ -174,6 +180,7 @@ fn committed_write_retry_with_same_moment_id_is_idempotent_not_duplicate() {
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms: 11,
+                disk_intent: SecretDiskIntent::Materialize,
             },
             &NO_FAULTS,
         )
@@ -192,6 +199,7 @@ fn committed_write_retry_with_same_moment_id_is_idempotent_not_duplicate() {
             metadata_summary: None,
             metadata_correlation_id: None,
             now_ms: 12,
+            disk_intent: SecretDiskIntent::Materialize,
         },
         &NO_FAULTS,
     );
@@ -306,6 +314,7 @@ fn crash_before_persist_rolls_back_secret_write() {
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms: 10,
+                disk_intent: SecretDiskIntent::Materialize,
             },
             faults.as_ref(),
         );
@@ -342,6 +351,7 @@ fn crash_after_commit_is_durable() {
                 metadata_summary: None,
                 metadata_correlation_id: None,
                 now_ms: 10,
+                disk_intent: SecretDiskIntent::Materialize,
             },
             faults.as_ref(),
         );
@@ -482,6 +492,7 @@ fn delete_removes_the_tip() {
                     path: ".env".to_owned(),
                     moment_id: "sm2".to_owned(),
                     metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
                     now_ms: 11,
                 },
                 &NO_FAULTS,
@@ -571,4 +582,169 @@ fn hex(s: &str) -> Vec<u8> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
         .collect()
+}
+
+#[test]
+fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
+    use dohc_engine_domain::{CaptureSecret, CaptureSecretRetire, capture_secret_retire};
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_version(&db, WS);
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    let key = key();
+
+    let first = SecretFileStore::new(&mut store, &key)
+        .capture_secret(
+            &CaptureSecret {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: ".env".to_owned(),
+                text: "TOKEN=alpha".to_owned(),
+                metadata_origin: "local-file".to_owned(),
+                now_ms: 10,
+            },
+            &NO_FAULTS,
+        )
+        .expect("first capture");
+    assert!(first.changed);
+    let moment = first.moment.expect("moment");
+    assert!(moment.moment_id.starts_with("moment-"));
+    assert_eq!(
+        moment.metadata_summary.as_deref(),
+        Some("Updated .env"),
+        "TS-parity capture summary"
+    );
+
+    // Capture records a COMPLETED marker, never a runnable job.
+    let (pending, complete): (i64, i64) = store
+        .read_with(|conn| {
+            let pending = conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )?;
+            let complete = conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs WHERE status = 'complete'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((pending, complete))
+        })
+        .expect("job counts");
+    assert_eq!(pending, 0, "capture never enqueues runnable work");
+    assert_eq!(complete, 1, "capture records the completed marker");
+
+    // Content-equality dedupe: no new moment, marker refreshed not duplicated.
+    let deduped = SecretFileStore::new(&mut store, &key)
+        .capture_secret(
+            &CaptureSecret {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: ".env".to_owned(),
+                text: "TOKEN=alpha".to_owned(),
+                metadata_origin: "local-file".to_owned(),
+                now_ms: 20,
+            },
+            &NO_FAULTS,
+        )
+        .expect("deduped capture");
+    assert!(!deduped.changed);
+
+    // KEYLESS retire with a derived id removes the tip.
+    let retired = capture_secret_retire(
+        &mut store,
+        &CaptureSecretRetire {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: ".env".to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            now_ms: 30,
+        },
+        &NO_FAULTS,
+    )
+    .expect("keyless retire");
+    let retire_moment = retired.expect("retire recorded a moment");
+    assert!(retire_moment.moment_id.starts_with("moment-"));
+    assert_ne!(retire_moment.moment_id, moment.moment_id);
+
+    // Idempotent: an absent tip is a clean no-op.
+    let absent = capture_secret_retire(
+        &mut store,
+        &CaptureSecretRetire {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: ".env".to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            now_ms: 40,
+        },
+        &NO_FAULTS,
+    )
+    .expect("no-op retire");
+    assert!(absent.is_none());
+}
+
+#[test]
+fn capture_retire_supersedes_a_stale_pending_secret_job() {
+    use dohc_engine_domain::{CaptureSecretRetire, capture_secret_retire};
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_version(&db, WS);
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    let key = key();
+
+    // A Materialize-intent write leaves a PENDING secret job.
+    write(&mut store, &key, ".env", "TOKEN=alpha", "sm-1", 10);
+    let pending_before: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("count");
+    assert_eq!(pending_before, 1);
+
+    // Capture retire (plaintext gone from disk) must record a completed
+    // marker at the delete's generation so the stale pending job can never
+    // later re-write the retired plaintext.
+    capture_secret_retire(
+        &mut store,
+        &CaptureSecretRetire {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: ".env".to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            now_ms: 20,
+        },
+        &NO_FAULTS,
+    )
+    .expect("capture retire")
+    .expect("tip existed");
+
+    // The marker's generation must EXCEED the stale pending job's (secret
+    // orders are 0-based) so the staleness gate supersedes it on drain.
+    let (pending_gen, marker_gen): (i64, i64) = store
+        .read_with(|conn| {
+            let pending = conn.query_row(
+                "SELECT target_generation FROM materialization_jobs \
+                 WHERE status = 'pending' AND target_path = '.env'",
+                [],
+                |row| row.get(0),
+            )?;
+            let marker = conn.query_row(
+                "SELECT target_generation FROM materialization_jobs \
+                 WHERE status = 'complete' AND target_path = '.env'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((pending, marker))
+        })
+        .expect("marker rows");
+    assert!(
+        marker_gen > pending_gen,
+        "the marker's generation ({marker_gen}) must exceed the stale pending job's ({pending_gen})"
+    );
 }

@@ -36,6 +36,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW | O_NONBLOCK for the key file's swap-proof, unblockable open.
+libc = "0.2"
+
 [dev-dependencies]
 # Base64 alphabet checks in tests only; production base64 is hand-rolled in
 # `base64.rs` to reproduce Node Buffer's forgiving-decode semantics exactly.

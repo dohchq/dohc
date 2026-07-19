@@ -13,6 +13,7 @@ fault-injection = ["dohc-engine-storage/fault-injection"]
 
 [dependencies]
 dohc-engine-storage = { path = "../dohc-engine-storage" }
+dohc-engine-crypto = { path = "../dohc-engine-crypto" }
 dohc-engine-domain = { path = "../dohc-engine-domain" }
 dohc-engine-collab = { path = "../dohc-engine-collab" }
 dohc-engine-sync = { path = "../dohc-engine-sync" }
