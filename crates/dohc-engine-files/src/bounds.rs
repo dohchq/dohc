@@ -5,6 +5,11 @@
 
 use std::num::NonZeroUsize;
 
+/// Maximum UTF-8 text payload owned by workspace capture. This mirrors
+/// `MAX_HISTORY_TEXT_SNAPSHOT_BYTES` in the dormant TypeScript oracle; the
+/// larger [`ScanBounds::max_file_bytes`] remains the generic scan/hash ceiling.
+pub const MAX_CAPTURE_TEXT_BYTES: u64 = 128 * 1024;
+
 /// What to do when a file exceeds [`ScanBounds::max_file_bytes`]. The TS capture
 /// path is tolerant — an over-cap file is skipped from the tracked listing, not
 /// a hard failure (`workspaceEngineCapture.ts` demotes/skips over-cap content) —

@@ -45,7 +45,7 @@ pub mod scan;
 pub mod watch;
 
 pub use actor::{FilesActor, FilesHandle, FilesStats, LifecycleState};
-pub use bounds::{OverCapPolicy, ScanBounds, ScanBoundsBuilder};
+pub use bounds::{MAX_CAPTURE_TEXT_BYTES, OverCapPolicy, ScanBounds, ScanBoundsBuilder};
 pub use capture::{
     CaptureApplyResult, CaptureError, CaptureSink, apply_reconcile_plan, apply_then_ack,
 };

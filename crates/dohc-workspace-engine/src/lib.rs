@@ -2,8 +2,11 @@
 
 #![forbid(unsafe_code)]
 
+pub mod capture_sink;
 pub mod cutover_rehearse;
 pub mod shadow_fence;
+
+pub use capture_sink::StoreCaptureSink;
 
 use base64::Engine as _;
 use dohc_engine_collab::{CollabError, ContentKind, DocKey};
