@@ -47,6 +47,44 @@ pub struct WorkspaceSupervisor {
     ready: Condvar,
 }
 
+/// An actor removed from the registry while its `Closing` marker remains held.
+/// Dropping the operation finishes the close before releasing the marker.
+pub struct WorkspaceClose<'a> {
+    supervisor: &'a WorkspaceSupervisor,
+    identity: EngineDbIdentity,
+    actor: Option<WorkspaceActor>,
+    marker_active: bool,
+}
+
+impl WorkspaceClose<'_> {
+    /// Close the actor and release its registry marker.
+    pub fn finish(mut self) -> Result<(), RuntimeError> {
+        let close_result = match self.actor.take() {
+            Some(mut actor) => actor.close(),
+            None => Ok(()),
+        };
+        self.clear_marker();
+        close_result
+    }
+
+    fn clear_marker(&mut self) {
+        if self.marker_active {
+            self.supervisor
+                .clear_markers(std::slice::from_ref(&self.identity));
+            self.marker_active = false;
+        }
+    }
+}
+
+impl Drop for WorkspaceClose<'_> {
+    fn drop(&mut self) {
+        if let Some(mut actor) = self.actor.take() {
+            let _ = actor.close();
+        }
+        self.clear_marker();
+    }
+}
+
 impl Default for WorkspaceSupervisor {
     fn default() -> Self {
         WorkspaceSupervisor::new()
@@ -169,14 +207,13 @@ impl WorkspaceSupervisor {
         self.finalize_reservation(identity, spawned)
     }
 
-    /// Close the actor for `db_path`, if open. Returns whether one was closed.
+    /// Remove the actor for `db_path` and synchronously mark its slot `Closing`.
     ///
-    /// The identity is kept reserved (a `Closing` marker) while the connection
-    /// is released outside the lock, so a concurrent `open` cannot spawn a
-    /// replacement writer before the old one is actually gone.
-    pub fn close(&self, db_path: &Path) -> Result<bool, RuntimeError> {
+    /// The returned operation owns the actor and marker. It may be moved to a
+    /// blocking task; dropping it still closes the actor before waking waiters.
+    pub fn begin_close(&self, db_path: &Path) -> Result<Option<WorkspaceClose<'_>>, RuntimeError> {
         let Some(identity) = EngineDbIdentity::resolve_existing_opt(db_path)? else {
-            return Ok(false);
+            return Ok(None);
         };
         let actor = {
             let mut guard = lock(&self.registry);
@@ -191,12 +228,23 @@ impl WorkspaceSupervisor {
                 _ => None,
             }
         };
-        let Some(mut actor) = actor else {
+        let Some(actor) = actor else {
+            return Ok(None);
+        };
+        Ok(Some(WorkspaceClose {
+            supervisor: self,
+            identity,
+            actor: Some(actor),
+            marker_active: true,
+        }))
+    }
+
+    /// Close the actor for `db_path`, if open. Returns whether one was closed.
+    pub fn close(&self, db_path: &Path) -> Result<bool, RuntimeError> {
+        let Some(closing) = self.begin_close(db_path)? else {
             return Ok(false);
         };
-        let close_result = actor.close();
-        self.clear_markers(std::slice::from_ref(&identity));
-        close_result.map(|()| true)
+        closing.finish().map(|()| true)
     }
 
     /// Close every open actor.
