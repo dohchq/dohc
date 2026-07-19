@@ -765,8 +765,10 @@ fn binary_overwrite_of_indexed_text_is_no_longer_searchable() {
                     object_id: "obj-notes".to_owned(),
                     path: "notes/plan.md".to_owned(),
                     binary_sha256: sha,
-                    job_id: "bin-overwrite".to_owned(),
-                    preimage: Preimage::Absent,
+                    moment_id: "bin-overwrite".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    author_json: None,
+                    materialize: Some(Preimage::Absent),
                     now_ms: 40,
                 },
             )?;

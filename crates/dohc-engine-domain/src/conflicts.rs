@@ -251,8 +251,19 @@ pub struct WriteBinaryFile {
     pub object_id: String,
     pub path: String,
     pub binary_sha256: String,
-    pub job_id: String,
-    pub preimage: Preimage,
+    /// The moment id for this write. When `materialize` is set it doubles as
+    /// the materialization job id (the moment/job generation-sharing BINHEAD
+    /// contract).
+    pub moment_id: String,
+    /// Provenance recorded on the moment and snapshot. Mirrored resolve
+    /// passes `"sync"` (the historical hardcode); capture passes `"capture"`.
+    pub metadata_origin: String,
+    pub author_json: Option<String>,
+    /// `Some(preimage)`: enqueue a materialization job sharing the moment's
+    /// generation (mirrored resolve — the bytes must REACH disk). `None`: no
+    /// job (capture — the bytes CAME FROM disk; matching the TS oracle, which
+    /// never writes disk on capture).
+    pub materialize: Option<Preimage>,
     pub now_ms: i64,
 }
 
@@ -781,7 +792,7 @@ pub fn write_binary_file_in_tx(
     validate_path_like_id(&input.workspace_id, "workspace id must not be empty")?;
     validate_path_like_id(&input.version_id, "version id must not be empty")?;
     validate_path_like_id(&input.object_id, "object id must not be empty")?;
-    validate_path_like_id(&input.job_id, "materialization job id must not be empty")?;
+    validate_path_like_id(&input.moment_id, "moment id must not be empty")?;
     if !has_binary_blob(tx, &input.binary_sha256)? {
         return Err(DomainError::InvalidInput {
             reason: "binary file write references a missing binary blob",
@@ -798,14 +809,14 @@ pub fn write_binary_file_in_tx(
     if version_exists.is_none() {
         return Err(DomainError::VersionNotFound);
     }
-    // The moment id (== job_id) must be unique. Precheck and return a VALIDATION
+    // The moment id must be unique. Precheck and return a VALIDATION
     // error (`DuplicateMomentId`) rather than letting the `INSERT INTO moments`
     // hit the UNIQUE constraint and surface as `Storage(PersistFailed)`. On the
     // mirrored-resolve path a Storage error is treated as FATAL by
     // `apply_within_savepoint` (retries forever), whereas a validation rejection
     // acks-and-defers — mirroring `write_text_in_tx`, which prechecks the same
     // way so a colliding id never poison-pills replication.
-    if moment_exists(tx, &input.workspace_id, &input.job_id)? {
+    if moment_exists(tx, &input.workspace_id, &input.moment_id)? {
         return Err(DomainError::DuplicateMomentId);
     }
 
@@ -891,6 +902,62 @@ pub fn write_binary_file_in_tx(
         (input.object_id.clone(), None)
     };
 
+    let moment_order = persist_binary_head_in_tx(
+        tx,
+        &PersistBinaryHead {
+            workspace_id: &input.workspace_id,
+            version_id: &input.version_id,
+            object_id: &object_id,
+            path: &input.path,
+            binary_sha256: &input.binary_sha256,
+            moment_id: &input.moment_id,
+            metadata_origin: &input.metadata_origin,
+            author_json: input.author_json.as_deref(),
+            now_ms: input.now_ms,
+        },
+        before,
+    )?;
+    if let Some(preimage) = &input.materialize {
+        enqueue_job(
+            tx,
+            &MaterializationJobSpec {
+                job_id: input.moment_id.clone(),
+                target_path: input.path.clone(),
+                content_sha256: input.binary_sha256.clone(),
+                preimage: preimage.clone(),
+                target_generation: moment_order,
+                now_ms: input.now_ms,
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+/// The durable-head triple every verified binary write appends: one moment,
+/// one current snapshot (upsert), one replication-journal record. Shared by
+/// the mirrored-resolve writer ([`write_binary_file_in_tx`], which follows it
+/// with a materialization job) and the capture-ingest path (which must NOT
+/// materialize — its bytes came FROM disk). Returns the committed moment
+/// order so callers can pin reserved-order invariants.
+pub struct PersistBinaryHead<'a> {
+    pub workspace_id: &'a str,
+    pub version_id: &'a str,
+    pub object_id: &'a str,
+    pub path: &'a str,
+    pub binary_sha256: &'a str,
+    pub moment_id: &'a str,
+    pub metadata_origin: &'a str,
+    pub author_json: Option<&'a str>,
+    pub now_ms: i64,
+}
+
+#[doc(hidden)]
+pub fn persist_binary_head_in_tx(
+    tx: &Transaction<'_>,
+    head: &PersistBinaryHead<'_>,
+    before: Option<(String, Option<String>, Option<String>, String)>,
+) -> Result<i64, DomainError> {
     let moment_order = next_moment_order(tx)?;
     let (
         before_present,
@@ -917,20 +984,22 @@ pub fn write_binary_file_in_tx(
              before_content_kind, before_binary_sha256
          ) VALUES (
              ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'write', NULL, ?8,
-             ?9, ?10, 'sync', NULL, NULL, 'binary', ?11, ?12, ?13
+             ?9, ?10, ?11, ?12, NULL, 'binary', ?13, ?14, ?15
          )",
         params![
-            input.workspace_id,
+            head.workspace_id,
             moment_order,
-            input.job_id,
-            input.version_id,
-            object_id,
-            input.path,
-            input.now_ms,
+            head.moment_id,
+            head.version_id,
+            head.object_id,
+            head.path,
+            head.now_ms,
             before_present,
             before_blob_sha256,
             before_latest_moment_id,
-            input.binary_sha256,
+            head.metadata_origin,
+            head.author_json,
+            head.binary_sha256,
             before_content_kind,
             before_binary_sha256,
         ],
@@ -940,7 +1009,7 @@ pub fn write_binary_file_in_tx(
         "INSERT INTO snapshots (
              workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
              latest_moment_id, metadata_origin, content_kind, binary_sha256
-         ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, 'sync', 'binary', ?7)
+         ) VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, 'binary', ?8)
          ON CONFLICT(workspace_id, version_id, object_id) DO UPDATE SET
              path = excluded.path,
              blob_sha256 = NULL,
@@ -950,35 +1019,24 @@ pub fn write_binary_file_in_tx(
              content_kind = excluded.content_kind,
              binary_sha256 = excluded.binary_sha256",
         params![
-            input.workspace_id,
-            input.version_id,
-            object_id,
-            input.path,
-            input.now_ms,
-            input.job_id,
-            input.binary_sha256,
+            head.workspace_id,
+            head.version_id,
+            head.object_id,
+            head.path,
+            head.now_ms,
+            head.moment_id,
+            head.metadata_origin,
+            head.binary_sha256,
         ],
     )
     .map_err(DomainError::sql_persist)?;
     tx.execute(
         "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
          VALUES (?1, 'moment.append', ?2)",
-        params![object_id, input.now_ms],
+        params![head.object_id, head.now_ms],
     )
     .map_err(DomainError::sql_persist)?;
-    enqueue_job(
-        tx,
-        &MaterializationJobSpec {
-            job_id: input.job_id.clone(),
-            target_path: input.path.clone(),
-            content_sha256: input.binary_sha256.clone(),
-            preimage: input.preimage.clone(),
-            target_generation: moment_order,
-            now_ms: input.now_ms,
-        },
-    )?;
-
-    Ok(())
+    Ok(moment_order)
 }
 
 fn write_input(
@@ -1647,8 +1705,10 @@ mod tests {
                         object_id: "shared-object".to_owned(),
                         path: "doc.md".to_owned(),
                         binary_sha256: sha.clone(),
-                        job_id: "job-a".to_owned(),
-                        preimage: Preimage::Absent,
+                        moment_id: "job-a".to_owned(),
+                        metadata_origin: "sync".to_owned(),
+                        author_json: None,
+                        materialize: Some(Preimage::Absent),
                         now_ms: 10,
                     },
                 )?;
@@ -1666,8 +1726,10 @@ mod tests {
                         object_id: "shared-object".to_owned(),
                         path: "doc.md".to_owned(),
                         binary_sha256: sha.clone(),
-                        job_id: "job-b".to_owned(),
-                        preimage: Preimage::Absent,
+                        moment_id: "job-b".to_owned(),
+                        metadata_origin: "sync".to_owned(),
+                        author_json: None,
+                        materialize: Some(Preimage::Absent),
                         now_ms: 11,
                     },
                 )
@@ -1702,8 +1764,10 @@ mod tests {
                         object_id: "binary-object".to_owned(),
                         path: "image.bin".to_owned(),
                         binary_sha256: sha.clone(),
-                        job_id: "binary-moment".to_owned(),
-                        preimage: Preimage::Absent,
+                        moment_id: "binary-moment".to_owned(),
+                        metadata_origin: "sync".to_owned(),
+                        author_json: None,
+                        materialize: Some(Preimage::Absent),
                         now_ms: 10,
                     },
                 )

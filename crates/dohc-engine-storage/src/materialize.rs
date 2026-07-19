@@ -130,6 +130,59 @@ pub fn enqueue_delete_job(
     enqueue_operation(tx, spec, MaterializationOperation::Delete)
 }
 
+/// Record a write job that is ALREADY satisfied on disk, as `'complete'`.
+/// Capture uses this: its bytes came FROM the file, so nothing must ever run —
+/// but the completed-generation marker is what lets the materializer's
+/// staleness gate supersede an OLDER still-pending job for the same path.
+/// Without it, a stale pending job whose preimage matches the just-captured
+/// disk bytes could later run and regress disk behind the captured head.
+///
+/// UPSERT, deliberately, for the two legitimate same-id cases:
+/// - A rolled-back capture leaves its completed marker behind while the
+///   moment's deletion frees its order; the NEXT capture of the path derives
+///   the same moment/job id and must reclaim the row (the fresh moment insert
+///   succeeding proves the id was free in `moments`, so a surviving job row
+///   is a dead remnant, never a live unrelated job).
+/// - A deduped capture confirms a head whose creating write's OWN job may
+///   still be pending (its content is by construction the head's sha — the
+///   very bytes just verified on disk); flipping it complete records reality
+///   and immunizes the path against older stale pending jobs.
+pub fn record_completed_job(
+    tx: &Transaction<'_>,
+    spec: &MaterializationJobSpec,
+) -> Result<(), StorageError> {
+    let (present, preimage_sha): (i64, Option<&str>) = match &spec.preimage {
+        Preimage::Absent => (0, None),
+        Preimage::Present(sha) => (1, Some(sha.as_str())),
+    };
+    tx.execute(
+        "INSERT INTO materialization_jobs \
+         (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
+          target_generation, status, created_at_ms, completed_at_ms, operation) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'complete', ?7, ?7, 'write') \
+         ON CONFLICT(job_id) DO UPDATE SET \
+             target_path = excluded.target_path, \
+             content_sha256 = excluded.content_sha256, \
+             preimage_present = excluded.preimage_present, \
+             preimage_sha256 = excluded.preimage_sha256, \
+             target_generation = excluded.target_generation, \
+             status = 'complete', \
+             completed_at_ms = excluded.completed_at_ms, \
+             operation = 'write'",
+        rusqlite::params![
+            spec.job_id,
+            spec.target_path,
+            spec.content_sha256,
+            present,
+            preimage_sha,
+            spec.target_generation,
+            spec.now_ms,
+        ],
+    )
+    .map_err(StorageError::persist)?;
+    Ok(())
+}
+
 fn enqueue_operation(
     tx: &Transaction<'_>,
     spec: &MaterializationJobSpec,

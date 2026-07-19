@@ -227,6 +227,34 @@ pub struct CaptureIngest {
     pub request_id: Option<String>,
 }
 
+/// Inputs to [`crate::VersionedTextStore::capture_ingest_binary`]: the
+/// autonomous BINARY capture-write primitive. Ids are derived internally via
+/// the same length-framed scheme as text capture; the bytes are persisted as
+/// a BINHEAD binary head with NO materialization job (they came FROM disk).
+#[derive(Debug, Clone)]
+pub struct CaptureIngestBinary {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub path: String,
+    pub bytes: Vec<u8>,
+    pub metadata_origin: String,
+    pub author_json: Option<String>,
+    pub now_ms: i64,
+    pub request_id: Option<String>,
+}
+
+/// Result of [`crate::VersionedTextStore::capture_ingest_binary`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureIngestBinaryResult {
+    pub object_id: String,
+    pub moment_id: String,
+    pub moment_order: i64,
+    /// Lowercase-hex sha256 of the persisted bytes.
+    pub binary_sha256: String,
+    /// Content-equality no-op: the head already held exactly these bytes.
+    pub deduped: bool,
+}
+
 /// Inputs to [`crate::VersionedTextStore::capture_retire`].
 #[derive(Debug, Clone)]
 pub struct CaptureRetire {

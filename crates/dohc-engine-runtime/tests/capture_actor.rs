@@ -213,3 +213,57 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
     assert_eq!((cancelled_snapshots, cancelled_moments), (0, 0));
     assert_eq!((retained_snapshots, retained_moments), (1, 1));
 }
+
+#[tokio::test]
+async fn binary_capture_round_trips_through_the_actor_both_ways() {
+    use dohc_engine_runtime::CaptureIngestBinary;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor");
+    let input = |bytes: &[u8], now_ms: i64| CaptureIngestBinary {
+        workspace_id: "ws-actor-capture-bin".to_owned(),
+        version_id: "main".to_owned(),
+        path: "photo.png".to_owned(),
+        bytes: bytes.to_vec(),
+        metadata_origin: "actor-test".to_owned(),
+        author_json: None,
+        now_ms,
+        request_id: None,
+    };
+
+    let written = handle
+        .capture_ingest_binary(
+            input(&[0xff, 0x00], 10),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("async binary capture");
+    assert!(!written.deduped);
+
+    // Content-equality dedupe through the actor (the blocking variant is
+    // exercised end-to-end by the capture-sink tests, which run outside a
+    // tokio runtime as the real reconcile driver will).
+    let deduped = handle
+        .capture_ingest_binary(
+            input(&[0xff, 0x00], 20),
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("equal binary capture");
+    assert!(deduped.deduped);
+    assert_eq!(deduped.moment_order, written.moment_order);
+
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let err = handle
+        .capture_ingest_binary(input(&[1], 30), Arc::new(NoFaults), cancelled)
+        .await
+        .expect_err("pre-cancelled binary capture is refused");
+    assert!(matches!(err, RuntimeError::Cancelled));
+
+    supervisor.close(&db).expect("close actor");
+}

@@ -1,6 +1,6 @@
 use dohc_engine_domain::{
-    CaptureIngest, CaptureRetire, DomainError, ListMomentsQuery, NoFaults, RenameTextFile,
-    VersionedTextStore, derive_capture_moment_id, derive_capture_object_id,
+    CaptureIngest, CaptureIngestBinary, CaptureRetire, DomainError, ListMomentsQuery, NoFaults,
+    RenameTextFile, VersionedTextStore, derive_capture_moment_id, derive_capture_object_id,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
@@ -411,8 +411,10 @@ fn retire_only_if_text_head_never_deletes_a_binary_head() {
                     object_id: "bin-object-1".to_owned(),
                     path: "photo.png".to_owned(),
                     binary_sha256: sha.clone(),
-                    job_id: "binjob-1".to_owned(),
-                    preimage: Preimage::Absent,
+                    moment_id: "binjob-1".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    author_json: None,
+                    materialize: Some(Preimage::Absent),
                     now_ms: 10,
                 },
             )
@@ -439,4 +441,394 @@ fn retire_only_if_text_head_never_deletes_a_binary_head() {
         .capture_retire(&retire("photo.png", 30), &NO_FAULTS)
         .expect("full retire");
     assert!(result.retired.is_some());
+}
+
+fn ingest_binary(path: &str, bytes: &[u8], now_ms: i64) -> CaptureIngestBinary {
+    CaptureIngestBinary {
+        workspace_id: WS.to_owned(),
+        version_id: VERSION.to_owned(),
+        path: path.to_owned(),
+        bytes: bytes.to_vec(),
+        metadata_origin: "capture-test".to_owned(),
+        author_json: None,
+        now_ms,
+        request_id: None,
+    }
+}
+
+fn job_count_by_status(store: &EngineStore, status: &str) -> i64 {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs WHERE status = ?1",
+                [status],
+                |row| row.get(0),
+            )
+        })
+        .expect("job count")
+}
+
+#[test]
+fn binary_capture_persists_a_jobless_binary_head_and_dedupes() {
+    use dohc_engine_storage::hex_sha256;
+
+    let (_scratch, mut store) = open_store();
+    let bytes = [0xffu8, 0x00, 0x01, 0x02];
+    let first = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("photo.png", &bytes, 10), &NO_FAULTS)
+        .expect("first binary capture");
+    assert!(!first.deduped);
+    assert_eq!(first.binary_sha256, hex_sha256(&bytes));
+
+    // Capture-from-disk must never enqueue a RUNNABLE job (the bytes came
+    // FROM disk — TS oracle parity: capture never writes disk), but it records
+    // a COMPLETED marker so the materializer's staleness gate supersedes any
+    // older still-pending job for the path.
+    assert_eq!(job_count_by_status(&store, "pending"), 0);
+    assert_eq!(job_count_by_status(&store, "complete"), 1);
+
+    // Content-equality no-op: the interleave-safety guarantee.
+    let second = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("photo.png", &bytes, 20), &NO_FAULTS)
+        .expect("equal binary capture");
+    assert!(second.deduped);
+    assert_eq!(second.moment_order, first.moment_order);
+    assert_eq!(moment_count(&mut store), 1);
+
+    // Changed bytes append one new moment on the same object.
+    let third = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("photo.png", &[0xaa, 0xbb], 30), &NO_FAULTS)
+        .expect("changed binary capture");
+    assert!(!third.deduped);
+    assert_eq!(third.object_id, first.object_id);
+    assert_eq!(moment_count(&mut store), 2);
+}
+
+#[test]
+fn binary_capture_replaces_a_text_head_and_text_recaptures_over_binary() {
+    let (_scratch, mut store) = open_store();
+    VersionedTextStore::new(&mut store)
+        .capture_ingest(&ingest("flip.md", "was text", 10), &NO_FAULTS)
+        .expect("seed text");
+    let flipped = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("flip.md", &[0xff, 0xfe], 20), &NO_FAULTS)
+        .expect("flip to binary");
+    assert!(!flipped.deduped);
+
+    // read_text fails closed on the binary head (BINHEAD contract).
+    let err = VersionedTextStore::new(&mut store)
+        .read_text(WS, VERSION, "flip.md")
+        .expect_err("binary head is not text");
+    assert!(matches!(err, DomainError::BinaryHeadNotText));
+
+    // And text capture flips it back on the SAME object.
+    let back = VersionedTextStore::new(&mut store)
+        .capture_ingest(&ingest("flip.md", "text again", 30), &NO_FAULTS)
+        .expect("flip back to text");
+    assert_eq!(back.moment.object_id, flipped.object_id);
+    let snapshot = VersionedTextStore::new(&mut store)
+        .read_text(WS, VERSION, "flip.md")
+        .expect("read text")
+        .expect("text head");
+    assert_eq!(snapshot.text, "text again");
+}
+
+#[test]
+fn binary_capture_request_id_replays_and_rejects_reuse() {
+    let (_scratch, mut store) = open_store();
+    let mut input = ingest_binary("img.png", &[1, 2, 3], 10);
+    input.request_id = Some("req-bin-1".to_owned());
+    let first = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&input, &NO_FAULTS)
+        .expect("first");
+    let replay = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&input, &NO_FAULTS)
+        .expect("replay");
+    assert!(replay.deduped);
+    assert_eq!(replay.moment_order, first.moment_order);
+    assert_eq!(moment_count(&mut store), 1);
+
+    let mut reused = ingest_binary("img.png", &[9, 9, 9], 20);
+    reused.request_id = Some("req-bin-1".to_owned());
+    let err = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&reused, &NO_FAULTS)
+        .expect_err("payload mismatch under a reused request id");
+    assert!(matches!(err, DomainError::IdempotencyKeyReuseMismatch));
+}
+
+#[test]
+fn binary_capture_over_cap_and_bad_paths_are_refused() {
+    let (_scratch, mut store) = open_store();
+    let oversized = vec![0u8; dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES + 1];
+    let err = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("big.bin", &oversized, 10), &NO_FAULTS)
+        .expect_err("over-cap bytes are refused");
+    assert!(matches!(err, DomainError::InvalidInput { .. }));
+
+    for bad in [".env", ".dohc/x.bin", "a\u{0}b.bin", "../escape.bin"] {
+        let err = VersionedTextStore::new(&mut store)
+            .capture_ingest_binary(&ingest_binary(bad, &[1], 10), &NO_FAULTS)
+            .expect_err("non-storable path refused");
+        assert!(matches!(err, DomainError::InvalidPath { .. }), "{bad}");
+    }
+}
+
+#[test]
+fn rollback_of_a_capture_binary_moment_still_restores_disk() {
+    use dohc_engine_domain::RollbackTextFileMutation;
+
+    let (_scratch, mut store) = open_store();
+    VersionedTextStore::new(&mut store)
+        .capture_ingest(&ingest("flip.md", "original text", 10), &NO_FAULTS)
+        .expect("seed text");
+    let flipped = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("flip.md", &[0xde, 0xad], 20), &NO_FAULTS)
+        .expect("binary capture");
+    assert_eq!(
+        job_count_by_status(&store, "pending"),
+        0,
+        "capture never enqueues runnable work"
+    );
+
+    VersionedTextStore::new(&mut store)
+        .rollback_text_file_mutation(
+            &RollbackTextFileMutation {
+                workspace_id: WS.to_owned(),
+                version_id: VERSION.to_owned(),
+                path: "flip.md".to_owned(),
+                mutation_moment_id: flipped.moment_id.clone(),
+                legacy_before_text: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("rollback the capture binary moment");
+
+    // The rolled-back head must be reconciled TO disk even though capture
+    // never enqueued a job — otherwise disk keeps the newer bytes while the
+    // reconcile manifest records them as captured, and the DB head silently
+    // diverges forever.
+    let restore_jobs: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs \
+                 WHERE job_id = ?1 AND status = 'pending'",
+                [format!("rollback-restore_{}", flipped.moment_id)],
+                |row| row.get(0),
+            )
+        })
+        .expect("restore job count");
+    assert_eq!(restore_jobs, 1, "the compensating restore must be enqueued");
+
+    let snapshot = VersionedTextStore::new(&mut store)
+        .read_text(WS, VERSION, "flip.md")
+        .expect("read text")
+        .expect("restored text head");
+    assert_eq!(snapshot.text, "original text");
+}
+
+#[test]
+fn capture_supersedes_an_older_pending_materialization_job() {
+    use dohc_engine_domain::{WriteBinaryFile, write_binary_file_in_tx};
+    use dohc_engine_files::{
+        DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs,
+    };
+    use dohc_engine_storage::{Preimage, hex_sha256, put_binary_blob};
+
+    let (scratch, mut store) = open_store();
+    let disk_bytes = b"bytes the user wrote";
+    let stale_bytes = b"stale resolve content";
+    std::fs::write(scratch.path().join("doc.bin"), disk_bytes).expect("seed disk");
+
+    // An older mirrored-resolve write enqueues a PENDING job whose preimage
+    // matches the CURRENT disk bytes (the exact codex-review scenario).
+    let stale_sha = hex_sha256(stale_bytes);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            put_binary_blob(tx, stale_bytes).map_err(DomainError::from)?;
+            write_binary_file_in_tx(
+                tx,
+                &WriteBinaryFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: VERSION.to_owned(),
+                    object_id: "resolve-object".to_owned(),
+                    path: "doc.bin".to_owned(),
+                    binary_sha256: stale_sha.clone(),
+                    moment_id: "resolve-moment".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    author_json: None,
+                    materialize: Some(Preimage::Present(hex_sha256(disk_bytes))),
+                    now_ms: 10,
+                },
+            )
+        })
+        .expect("older resolve write with pending job");
+
+    // The user's on-disk bytes are captured at a NEWER generation.
+    VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("doc.bin", disk_bytes, 20), &NO_FAULTS)
+        .expect("capture the live disk bytes");
+
+    // Draining the materializer must SUPERSEDE the stale job — never regress
+    // disk behind the captured head.
+    let results = run_pending_jobs(
+        &store,
+        scratch.path(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        200,
+        &NO_FAULTS,
+    )
+    .expect("drain");
+    let stale = results
+        .iter()
+        .find(|result| result.job_id == "resolve-moment")
+        .expect("stale job drained");
+    assert!(
+        matches!(stale.outcome, JobOutcome::Superseded),
+        "stale job must be superseded, got {:?}",
+        stale.outcome
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join("doc.bin")).expect("read disk"),
+        disk_bytes,
+        "disk must keep the captured bytes"
+    );
+}
+
+#[test]
+fn recapture_after_rollback_reclaims_the_marker_row() {
+    use dohc_engine_domain::RollbackTextFileMutation;
+
+    let (_scratch, mut store) = open_store();
+    let first = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("doc.bin", &[0x01, 0x02], 10), &NO_FAULTS)
+        .expect("first capture");
+
+    VersionedTextStore::new(&mut store)
+        .rollback_text_file_mutation(
+            &RollbackTextFileMutation {
+                workspace_id: WS.to_owned(),
+                version_id: VERSION.to_owned(),
+                path: "doc.bin".to_owned(),
+                mutation_moment_id: first.moment_id.clone(),
+                legacy_before_text: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("rollback the capture");
+
+    // The rollback deletes the moment (freeing its order) but the COMPLETED
+    // marker row survives. Recapturing the path derives the SAME moment/job id
+    // and must reclaim the row instead of failing on the primary key — a
+    // recapture that cannot restore the head would wedge the path forever.
+    let second = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("doc.bin", &[0x03, 0x04], 20), &NO_FAULTS)
+        .expect("recapture after rollback must not collide with the stale marker");
+    assert!(!second.deduped);
+    assert_eq!(second.moment_order, first.moment_order, "order was reused");
+    assert_eq!(second.moment_id, first.moment_id, "derived id was reused");
+
+    let marker: (String, i64) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT content_sha256, target_generation FROM materialization_jobs \
+                 WHERE job_id = ?1 AND status = 'complete'",
+                [second.moment_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+        })
+        .expect("reclaimed marker");
+    assert_eq!(
+        marker.0, second.binary_sha256,
+        "marker carries the NEW bytes"
+    );
+    assert_eq!(marker.1, second.moment_order);
+}
+
+#[test]
+fn deduped_capture_marks_the_confirmed_head_as_materialized() {
+    use dohc_engine_domain::{WriteBinaryFile, write_binary_file_in_tx};
+    use dohc_engine_files::{
+        DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs,
+    };
+    use dohc_engine_storage::{Preimage, hex_sha256, put_binary_blob};
+
+    let (scratch, mut store) = open_store();
+    let live_bytes = b"bytes on disk and in the head";
+    let stale_bytes = b"older stale content";
+    std::fs::write(scratch.path().join("doc.bin"), live_bytes).expect("seed disk");
+
+    // Two sequential resolve writes to the SAME path leave an OLDER pending
+    // job (stale bytes, preimage matching the current disk) beneath the head
+    // whose own newer job is also still pending.
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            put_binary_blob(tx, stale_bytes).map_err(DomainError::from)?;
+            write_binary_file_in_tx(
+                tx,
+                &WriteBinaryFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: VERSION.to_owned(),
+                    object_id: "doc-object".to_owned(),
+                    path: "doc.bin".to_owned(),
+                    binary_sha256: hex_sha256(stale_bytes),
+                    moment_id: "old-moment".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    author_json: None,
+                    materialize: Some(Preimage::Present(hex_sha256(live_bytes))),
+                    now_ms: 5,
+                },
+            )?;
+            put_binary_blob(tx, live_bytes).map_err(DomainError::from)?;
+            write_binary_file_in_tx(
+                tx,
+                &WriteBinaryFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: VERSION.to_owned(),
+                    object_id: "doc-object".to_owned(),
+                    path: "doc.bin".to_owned(),
+                    binary_sha256: hex_sha256(live_bytes),
+                    moment_id: "live-moment".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    author_json: None,
+                    materialize: Some(Preimage::Present(hex_sha256(live_bytes))),
+                    now_ms: 10,
+                },
+            )
+        })
+        .expect("two resolve writes with pending jobs");
+
+    // Capture observes bytes equal to the head: a DEDUPED no-op for history,
+    // but it must still mark the confirmed head as materialized so the stale
+    // job cannot run first and regress the verified disk bytes.
+    let deduped = VersionedTextStore::new(&mut store)
+        .capture_ingest_binary(&ingest_binary("doc.bin", live_bytes, 20), &NO_FAULTS)
+        .expect("deduped capture");
+    assert!(deduped.deduped);
+
+    let results = run_pending_jobs(
+        &store,
+        scratch.path(),
+        DurabilityPolicy::none(),
+        &StdReplacer,
+        &NoBackoff,
+        200,
+        &NO_FAULTS,
+    )
+    .expect("drain");
+    let stale = results
+        .iter()
+        .find(|result| result.job_id == "old-moment")
+        .expect("stale job drained");
+    assert!(
+        matches!(stale.outcome, JobOutcome::Superseded),
+        "stale job must be superseded by the dedupe marker, got {:?}",
+        stale.outcome
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join("doc.bin")).expect("read disk"),
+        live_bytes,
+        "disk must keep the confirmed bytes"
+    );
 }

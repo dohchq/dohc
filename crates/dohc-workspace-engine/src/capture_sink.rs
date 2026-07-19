@@ -10,7 +10,9 @@ use dohc_engine_files::{
 use dohc_engine_runtime::search::{
     FilesPolicyRule, read_engine_search_policy, resolve_effective_policy,
 };
-use dohc_engine_runtime::{ActorHandle, CaptureIngest, CaptureRetire, NoFaults, RuntimeError};
+use dohc_engine_runtime::{
+    ActorHandle, CaptureIngest, CaptureIngestBinary, CaptureRetire, NoFaults, RuntimeError,
+};
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -22,6 +24,9 @@ const READ_FAILED: CaptureError = CaptureError {
 };
 const INGEST_FAILED: CaptureError = CaptureError {
     reason: "capture text ingest failed",
+};
+const BINARY_INGEST_FAILED: CaptureError = CaptureError {
+    reason: "capture binary ingest failed",
 };
 const RETIRE_FAILED: CaptureError = CaptureError {
     reason: "capture retire failed",
@@ -145,18 +150,19 @@ impl StoreCaptureSink {
         if metadata.len() > MAX_CAPTURE_BINARY_BYTES {
             return Ok(CurrentContent::Untracked);
         }
-        if !is_text_media_type(media_type, path) {
-            // Non-text media is engine-ownable BINARY content: the TS oracle
-            // routes it to the binary store before any UTF-8 sniffing, so a
-            // UTF-8-clean `.png` must never land in the plaintext store.
-            return Ok(CurrentContent::Binary);
-        }
+        let text_media = is_text_media_type(media_type, path);
         let mut bytes = Vec::with_capacity(metadata.len() as usize);
         file.take(MAX_CAPTURE_BINARY_BYTES.saturating_add(1))
             .read_to_end(&mut bytes)
             .map_err(|_| READ_FAILED)?;
         if bytes.len() as u64 > MAX_CAPTURE_BINARY_BYTES {
             return Ok(CurrentContent::Untracked);
+        }
+        if !text_media {
+            // Non-text media is engine-ownable BINARY content: the TS oracle
+            // routes it to the binary store before any UTF-8 sniffing, so a
+            // UTF-8-clean `.png` must never land in the plaintext store.
+            return Ok(CurrentContent::Binary(bytes));
         }
         match String::from_utf8(bytes) {
             Ok(text) if text.len() as u64 > MAX_CAPTURE_TEXT_BYTES => {
@@ -168,7 +174,7 @@ impl StoreCaptureSink {
             Ok(text) => Ok(CurrentContent::Text(text)),
             // A text-suffixed path can be binary in disguise (invalid UTF-8);
             // the store accepts that as binary up to the binary cap.
-            Err(_) => Ok(CurrentContent::Binary),
+            Err(err) => Ok(CurrentContent::Binary(err.into_bytes())),
         }
     }
 
@@ -198,6 +204,31 @@ impl StoreCaptureSink {
                 Ok(DomainIngest::NameRefused)
             }
             Err(_) => Err(INGEST_FAILED),
+        }
+    }
+
+    fn ingest_binary(&self, path: &str, bytes: Vec<u8>) -> Result<DomainIngest, CaptureError> {
+        match self.actor.capture_ingest_binary_blocking(
+            CaptureIngestBinary {
+                workspace_id: self.workspace_id.clone(),
+                version_id: self.version_id.clone(),
+                path: path.to_owned(),
+                bytes,
+                metadata_origin: CAPTURE_METADATA_ORIGIN.to_owned(),
+                author_json: self.author_json.clone(),
+                now_ms: self.now_ms,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+        ) {
+            Ok(_) => Ok(DomainIngest::Persisted),
+            // Same settled-refusal rule as text: the store's admission gate is
+            // stricter than the scan floor, and a refused name can never
+            // succeed on retry.
+            Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
+                Ok(DomainIngest::NameRefused)
+            }
+            Err(_) => Err(BINARY_INGEST_FAILED),
         }
     }
 
@@ -297,21 +328,18 @@ impl CaptureSink for StoreCaptureSink {
                 self.retire_head(path, false)?;
                 Ok(IngestOutcome::NotOwned)
             }
-            CurrentContent::Binary => {
-                // A path that WAS text and became binary must not keep the old
-                // text authoritative while binary capture is deferred to the
-                // binary sub-shard. NotOwned (not a failure): failing the op
-                // would leave the manifest holding the RETIRED text's hash, so
-                // a later edit back to those exact bytes would diff clean and
-                // never restore the head — a silent lost capture. Forgetting
-                // the path instead re-offers it on every later scan, which is
-                // also what lets binary capture pick it up once it lands.
-                //
-                // only_if_text_head: a LIVE binary head (mirrored resolve, or
-                // the binary sub-shard once it lands) is not this plaintext
-                // sink's to delete — the retire is a no-op for it.
-                self.retire_head(path, true)?;
-                Ok(IngestOutcome::NotOwned)
+            CurrentContent::Binary(bytes) => {
+                // Engine-ownable binary content persists as a BINHEAD binary
+                // head (a text->binary flip replaces the text head in the
+                // same transaction — no separate retire). The receipt carries
+                // the bytes' identity, which equals the scanner's hash of the
+                // same file bytes.
+                let size = bytes.len() as u64;
+                let sha256 = sha256_hex(&bytes);
+                match self.ingest_binary(path, bytes)? {
+                    DomainIngest::Persisted => Ok(IngestOutcome::Captured { size, sha256 }),
+                    DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
+                }
             }
         }
     }
@@ -367,8 +395,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 enum CurrentContent {
     Text(String),
-    /// Present, engine-ownable binary bytes (capture deferred to B-binary).
-    Binary,
+    /// Present, engine-ownable binary bytes.
+    Binary(Vec<u8>),
     /// Absent, or present but not engine-ownable at this path.
     Untracked,
 }
@@ -555,6 +583,27 @@ mod tests {
             .expect("read captured text")
     }
 
+    /// The current binary head's sha256 for `path`, if the head is binary.
+    fn binary_head(db: &Path, path: &str) -> Option<String> {
+        use rusqlite::OptionalExtension;
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT s.binary_sha256 FROM snapshots s \
+                     JOIN path_aliases a ON a.workspace_id = s.workspace_id \
+                       AND a.version_id = s.version_id AND a.object_id = s.object_id \
+                     WHERE s.workspace_id = ?1 AND a.path = ?2 \
+                       AND s.content_kind = 'binary'",
+                    [WORKSPACE_ID, path],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+            })
+            .expect("binary head query")
+            .flatten()
+    }
+
     fn moment_count(db: &Path, path: &str) -> i64 {
         let store = EngineStore::open(db, 100).expect("reopen store");
         store
@@ -651,13 +700,13 @@ mod tests {
             ingest(&mut sink, ".dohc/ignored.md").expect("ignored path"),
             IngestOutcome::NotOwned
         );
-        // Deferrals settle as NotOwned: the manifest forgets the path, so
-        // every later scan re-offers it to the follow-up binary/secret
-        // sub-shards; nothing is recorded as captured meanwhile.
-        assert_eq!(
-            ingest(&mut sink, "binary.md").expect("deferred binary"),
-            IngestOutcome::NotOwned
-        );
+        // Binary content is now CAPTURED as a BINHEAD binary head; the
+        // secret deferral still settles as NotOwned (the manifest forgets the
+        // path, so every later scan re-offers it to the secret sub-shard).
+        assert!(matches!(
+            ingest(&mut sink, "binary.md").expect("binary capture"),
+            IngestOutcome::Captured { .. }
+        ));
         assert_eq!(
             ingest(&mut sink, ".env").expect("deferred secret"),
             IngestOutcome::NotOwned
@@ -667,7 +716,8 @@ mod tests {
         drop(sink);
         supervisor.close(&db).expect("close actor");
         assert_eq!(moment_count(&db, ".dohc/ignored.md"), 0);
-        assert_eq!(moment_count(&db, "binary.md"), 0);
+        assert_eq!(moment_count(&db, "binary.md"), 1);
+        assert!(binary_head(&db, "binary.md").is_some());
         assert_eq!(moment_count(&db, ".env"), 0);
     }
 
@@ -691,7 +741,7 @@ mod tests {
     }
 
     #[test]
-    fn text_media_that_turns_binary_retires_the_stale_text_head() {
+    fn text_media_that_turns_binary_replaces_the_text_head() {
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor = WorkspaceSupervisor::new();
         let (db, mut sink) = sink_for(&scratch, &supervisor);
@@ -699,15 +749,23 @@ mod tests {
         ingest(&mut sink, "flip.md").expect("seed ingest");
         write_file(scratch.path(), "flip.md", &[0xff, 0xfe, 0x00]);
 
+        let flipped = ingest(&mut sink, "flip.md").expect("binary capture");
         assert_eq!(
-            ingest(&mut sink, "flip.md").expect("deferred binary"),
-            IngestOutcome::NotOwned
+            flipped,
+            IngestOutcome::Captured {
+                size: 3,
+                sha256: sha256_hex(&[0xff, 0xfe, 0x00]),
+            }
         );
 
         drop(sink);
         supervisor.close(&db).expect("close actor");
-        // The stale text must not stay authoritative while binary is deferred.
-        assert!(snapshot(&db, "flip.md").is_none());
+        // One transition: the binary head replaced the text head atomically.
+        assert_eq!(
+            binary_head(&db, "flip.md").as_deref(),
+            Some(sha256_hex(&[0xff, 0xfe, 0x00]).as_str())
+        );
+        assert_eq!(moment_count(&db, "flip.md"), 2);
     }
 
     #[test]
@@ -719,15 +777,23 @@ mod tests {
         // would capture this as text.
         write_file(scratch.path(), "photo.png", b"plain ascii bytes");
 
-        assert_eq!(
-            ingest_as(&mut sink, "photo.png", "image/png").expect("deferred binary"),
-            IngestOutcome::NotOwned
-        );
+        assert!(matches!(
+            ingest_as(&mut sink, "photo.png", "image/png").expect("binary capture"),
+            IngestOutcome::Captured { .. }
+        ));
+        // Content-equality dedupe holds for binary too.
+        assert!(matches!(
+            ingest_as(&mut sink, "photo.png", "image/png").expect("equal binary"),
+            IngestOutcome::Captured { .. }
+        ));
 
         drop(sink);
         supervisor.close(&db).expect("close actor");
-        assert!(snapshot(&db, "photo.png").is_none());
-        assert_eq!(moment_count(&db, "photo.png"), 0);
+        assert_eq!(
+            binary_head(&db, "photo.png").as_deref(),
+            Some(sha256_hex(b"plain ascii bytes").as_str())
+        );
+        assert_eq!(moment_count(&db, "photo.png"), 1, "equal re-ingest deduped");
     }
 
     #[test]
@@ -1057,19 +1123,19 @@ mod tests {
         apply_then_ack(&mut controller, &plan, &mut sink, &FilesNoFaults).expect("seed ack");
         assert!(controller.tracks_path("flip.md"));
 
-        // Flip to binary: the head retires and the manifest must FORGET the
-        // path (recording anything would leave the old text hash behind).
+        // Flip to binary: the binary head is CAPTURED and the manifest
+        // records the binary bytes' hash.
         write_file(scratch.path(), "flip.md", &[0xff, 0xfe, 0x00]);
         controller.mark_dirty();
         let plan = reconcile(&mut controller);
         apply_then_ack(&mut controller, &plan, &mut sink, &FilesNoFaults).expect("flip ack");
         assert!(
-            !controller.tracks_path("flip.md"),
-            "a deferred binary flip must not keep the retired text's manifest entry"
+            controller.tracks_path("flip.md"),
+            "a captured binary flip records the binary hash"
         );
 
-        // Revert to the EXACT original bytes. If the manifest had kept the old
-        // hash, this scan would diff clean and the head would stay lost.
+        // Revert to the EXACT original text bytes: the manifest holds the
+        // binary hash, so this diffs as a change and re-ingests as text.
         write_file(scratch.path(), "flip.md", b"same bytes");
         controller.mark_dirty();
         let plan = reconcile(&mut controller);

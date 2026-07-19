@@ -16,10 +16,11 @@
 
 use crate::error::DomainError;
 use crate::records::{
-    CaptureIngest, CaptureRetire, CaptureRetireResult, CreateNamedVersion, DeleteResult,
-    DeleteTextFile, FileObjectRecord, ListMomentsQuery, MomentOp, MomentPage, MomentRecord,
-    RenameResult, RenameTextFile, RollbackTextFileMutation, SnapshotContent, SnapshotRecord,
-    SnapshotView, TextSnapshot, VersionKind, VersionRecord, WriteResult, WriteText,
+    CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
+    CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord,
+    ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
+    RollbackTextFileMutation, SnapshotContent, SnapshotRecord, SnapshotView, TextSnapshot,
+    VersionKind, VersionRecord, WriteResult, WriteText,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
@@ -156,6 +157,24 @@ impl<'a> VersionedTextStore<'a> {
         let outcome = self
             .store
             .write_with(faults, |tx| capture_ingest_in_tx(tx, input))?;
+        committed(outcome)
+    }
+
+    /// Autonomous BINARY capture ingest: same derived-id scheme and
+    /// idempotency posture as [`VersionedTextStore::capture_ingest`], but the
+    /// content persists as a BINHEAD binary head (moment + snapshot with
+    /// `content_kind = 'binary'`) and NO materialization job is enqueued —
+    /// the bytes came FROM disk, matching the TS oracle, which never writes
+    /// disk on capture. Content-equality (same `binary_sha256` head) is a
+    /// deduped no-op.
+    pub fn capture_ingest_binary(
+        &mut self,
+        input: &CaptureIngestBinary,
+        faults: &dyn FaultInjector,
+    ) -> Result<CaptureIngestBinaryResult, DomainError> {
+        let outcome = self
+            .store
+            .write_with(faults, |tx| capture_ingest_binary_in_tx(tx, input))?;
         committed(outcome)
     }
 
@@ -436,25 +455,47 @@ impl<'a> VersionedTextStore<'a> {
                     )
                     .optional()
                     .map_err(DomainError::sql_corrupt)?;
-                // Only act when the job's content is exactly this write's bytes —
-                // never cancel/compensate against an unrelated same-id job.
-                if let Some((status, generation, written_sha256)) = job
-                    && written_sha256.as_str() == written_moment_sha
-                {
-                    enqueue_binary_rollback_restore(
-                        tx,
-                        input,
-                        &prep.before,
-                        generation,
-                        &written_sha256,
-                        prep.moment.recorded_at_ms,
-                    )?;
-                    if status == "pending" {
-                        tx.execute(
-                            "DELETE FROM materialization_jobs WHERE job_id = ?1",
-                            params![input.mutation_moment_id],
-                        )
-                        .map_err(DomainError::sql_persist)?;
+                match job {
+                    // Only cancel/compensate against a job whose content is
+                    // exactly this write's bytes — never an unrelated
+                    // same-id job.
+                    Some((status, generation, written_sha256))
+                        if written_sha256.as_str() == written_moment_sha =>
+                    {
+                        enqueue_binary_rollback_restore(
+                            tx,
+                            input,
+                            &prep.before,
+                            generation,
+                            &written_sha256,
+                            prep.moment.recorded_at_ms,
+                        )?;
+                        if status == "pending" {
+                            tx.execute(
+                                "DELETE FROM materialization_jobs WHERE job_id = ?1",
+                                params![input.mutation_moment_id],
+                            )
+                            .map_err(DomainError::sql_persist)?;
+                        }
+                    }
+                    Some(_) => {}
+                    // No job at all: a CAPTURE-origin binary write (its bytes
+                    // came FROM disk, so nothing was ever enqueued). The
+                    // rolled-back head still must be reconciled TO disk —
+                    // without a restore, disk keeps the newer bytes while the
+                    // reconcile manifest records them as already captured, so
+                    // the DB head would silently diverge forever. Restore
+                    // against the write's own generation (the same peer rule
+                    // BINHEAD uses for its compensators).
+                    None => {
+                        enqueue_binary_rollback_restore(
+                            tx,
+                            input,
+                            &prep.before,
+                            prep.moment.moment_order,
+                            written_moment_sha,
+                            prep.moment.recorded_at_ms,
+                        )?;
                     }
                 }
             }
@@ -1068,49 +1109,13 @@ fn capture_ingest_in_tx(
         return reconstruct_capture_write(tx, &input.workspace_id, recorded.result_seq);
     }
 
-    let mut reserved_moment_order = None;
-    let object_id = match alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?
-    {
-        Some(object_id) => object_id,
-        None => {
-            let derived_object_id =
-                derive_capture_object_id(&input.workspace_id, &input.version_id, &input.path);
-            let object_id = if !object_exists(tx, &input.workspace_id, &derived_object_id)? {
-                tx.execute(
-                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
-                     VALUES (?1, ?2, ?3)",
-                    params![input.workspace_id, derived_object_id, input.now_ms],
-                )
-                .map_err(DomainError::sql_persist)?;
-                derived_object_id
-            } else if !object_has_live_alias(tx, &input.workspace_id, &derived_object_id)? {
-                derived_object_id
-            } else {
-                let next_order = next_moment_order(tx)?;
-                let disambiguated_object_id = derive_disambiguated_capture_object_id(
-                    &input.workspace_id,
-                    &input.version_id,
-                    &input.path,
-                    next_order,
-                );
-                tx.execute(
-                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
-                     VALUES (?1, ?2, ?3)",
-                    params![input.workspace_id, disambiguated_object_id, input.now_ms],
-                )
-                .map_err(DomainError::sql_persist)?;
-                reserved_moment_order = Some(next_order);
-                disambiguated_object_id
-            };
-            tx.execute(
-                "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![input.workspace_id, input.version_id, input.path, object_id],
-            )
-            .map_err(DomainError::sql_persist)?;
-            object_id
-        }
-    };
+    let (object_id, reserved_moment_order) = resolve_capture_object(
+        tx,
+        &input.workspace_id,
+        &input.version_id,
+        &input.path,
+        input.now_ms,
+    )?;
     let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
     let content_sha256 = text_blob_sha256(&input.text);
     if let Some(before) = &before
@@ -1271,6 +1276,225 @@ fn capture_retire_in_tx(
     Ok(CaptureRetireResult {
         retired: Some(result),
         deduped: false,
+    })
+}
+
+/// Maximum binary payload a capture ingest may persist. Mirrors
+/// `MAX_VERSIONED_BINARY_FILE_BYTES` (`versionedTextStore.ts`) and the files
+/// crate's `MAX_CAPTURE_BINARY_BYTES`; the storage blob cap (64 MiB) stays
+/// the generic ceiling for non-capture writers.
+pub const MAX_CAPTURE_BINARY_FILE_BYTES: usize = 5 * 1024 * 1024;
+
+fn capture_ingest_binary_in_tx(
+    tx: &Transaction<'_>,
+    input: &CaptureIngestBinary,
+) -> Result<CaptureIngestBinaryResult, DomainError> {
+    use crate::conflicts::{PersistBinaryHead, persist_binary_head_in_tx};
+
+    non_empty(&input.workspace_id, "workspace_id")?;
+    non_empty(&input.version_id, "version_id")?;
+    let path = validate_plaintext_storable_path(&input.path)?;
+    if input.bytes.len() > MAX_CAPTURE_BINARY_FILE_BYTES {
+        return Err(DomainError::InvalidInput {
+            reason: "binary bytes exceed the capture cap",
+        });
+    }
+    if !version_exists(tx, &input.workspace_id, &input.version_id)? {
+        return Err(DomainError::VersionNotFound);
+    }
+    let binary_sha256 = dohc_engine_storage::hex_sha256(&input.bytes);
+    let (author_kind, author_json) = match input.author_json.as_deref() {
+        Some(author_json) => (b"some".as_slice(), author_json.as_bytes()),
+        None => (b"none".as_slice(), b"".as_slice()),
+    };
+    let payload_hash = hash_framed_fields(&[
+        b"capture-ingest-binary",
+        input.workspace_id.as_bytes(),
+        input.version_id.as_bytes(),
+        path.as_bytes(),
+        binary_sha256.as_bytes(),
+        input.metadata_origin.as_bytes(),
+        author_kind,
+        author_json,
+    ]);
+    if let Some(request_id) = &input.request_id
+        && let Some(recorded) = lookup_request(tx, request_id)?
+    {
+        if recorded.payload_hash != payload_hash {
+            return Err(DomainError::IdempotencyKeyReuseMismatch);
+        }
+        return reconstruct_capture_binary(tx, &input.workspace_id, recorded.result_seq);
+    }
+
+    let (object_id, reserved_moment_order) = resolve_capture_object(
+        tx,
+        &input.workspace_id,
+        &input.version_id,
+        &path,
+        input.now_ms,
+    )?;
+    let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
+    if let Some(before) = &before {
+        // Fail closed on partial head identity, mirroring the binary writer.
+        match before.content_kind.as_str() {
+            "text" if before.blob_sha256.is_some() => {}
+            "binary" if before.binary_sha256.is_some() => {}
+            "text" => {
+                return Err(DomainError::StateCorrupt {
+                    reason: "text snapshot is missing its blob",
+                });
+            }
+            "binary" => {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary snapshot is missing its blob",
+                });
+            }
+            _ => {
+                return Err(DomainError::StateCorrupt {
+                    reason: "snapshot has an unknown content kind",
+                });
+            }
+        }
+        if before.content_kind == "binary"
+            && before.binary_sha256.as_deref() == Some(binary_sha256.as_str())
+        {
+            // Content-equality no-op: the interleave-safety guarantee.
+            let result_sha = binary_sha256.clone();
+            let moment = get_moment(tx, &input.workspace_id, &before.latest_moment_id)?.ok_or(
+                DomainError::StateCorrupt {
+                    reason: "snapshot points at a missing moment",
+                },
+            )?;
+            // The head's bytes are VERIFIED on disk right now, so record the
+            // head generation as materialized (upsert: the creating write's
+            // own job may still be pending — its content is this same sha —
+            // and flipping it complete both records reality and lets the
+            // staleness gate supersede any OLDER pending job that could
+            // otherwise regress disk behind the confirmed head).
+            dohc_engine_storage::record_completed_job(
+                tx,
+                &MaterializationJobSpec {
+                    job_id: moment.moment_id.clone(),
+                    target_path: path.clone(),
+                    content_sha256: result_sha.clone(),
+                    preimage: Preimage::Present(result_sha.clone()),
+                    target_generation: moment.moment_order,
+                    now_ms: input.now_ms,
+                },
+            )?;
+            let result = CaptureIngestBinaryResult {
+                object_id: object_id.clone(),
+                moment_id: moment.moment_id.clone(),
+                moment_order: moment.moment_order,
+                binary_sha256: result_sha,
+                deduped: true,
+            };
+            record_request(
+                tx,
+                input.request_id.as_deref(),
+                &payload_hash,
+                result.moment_order,
+                input.now_ms,
+            )?;
+            return Ok(result);
+        }
+    }
+
+    put_binary_blob(tx, &input.bytes)?;
+    let next_order = match reserved_moment_order {
+        Some(next_order) => next_order,
+        None => next_moment_order(tx)?,
+    };
+    let moment_id = derive_capture_moment_id(&input.workspace_id, &object_id, next_order);
+    if moment_exists(tx, &input.workspace_id, &moment_id)? {
+        return Err(DomainError::DuplicateMomentId);
+    }
+    let before_head = before.map(|before| {
+        (
+            before.content_kind,
+            before.blob_sha256,
+            before.binary_sha256,
+            before.latest_moment_id,
+        )
+    });
+    let moment_order = persist_binary_head_in_tx(
+        tx,
+        &PersistBinaryHead {
+            workspace_id: &input.workspace_id,
+            version_id: &input.version_id,
+            object_id: &object_id,
+            path: &path,
+            binary_sha256: &binary_sha256,
+            moment_id: &moment_id,
+            metadata_origin: &input.metadata_origin,
+            author_json: input.author_json.as_deref(),
+            now_ms: input.now_ms,
+        },
+        before_head,
+    )?;
+    if moment_order != next_order {
+        return Err(DomainError::StateCorrupt {
+            reason: "capture moment order diverged from reserved order",
+        });
+    }
+    // Disk ALREADY holds these bytes, so record the materialization as a
+    // COMPLETED job (never runnable). The marker is what the materializer's
+    // staleness gate reads: an OLDER still-pending job for this path — whose
+    // preimage may match the very bytes just captured — is superseded instead
+    // of later running and regressing disk behind this head.
+    dohc_engine_storage::record_completed_job(
+        tx,
+        &MaterializationJobSpec {
+            job_id: moment_id.clone(),
+            target_path: path.clone(),
+            content_sha256: binary_sha256.clone(),
+            preimage: Preimage::Present(binary_sha256.clone()),
+            target_generation: moment_order,
+            now_ms: input.now_ms,
+        },
+    )?;
+    record_request(
+        tx,
+        input.request_id.as_deref(),
+        &payload_hash,
+        moment_order,
+        input.now_ms,
+    )?;
+    Ok(CaptureIngestBinaryResult {
+        object_id,
+        moment_id,
+        moment_order,
+        binary_sha256,
+        deduped: false,
+    })
+}
+
+fn reconstruct_capture_binary(
+    conn: &Connection,
+    workspace_id: &str,
+    moment_order: i64,
+) -> Result<CaptureIngestBinaryResult, DomainError> {
+    let moment =
+        moment_by_order(conn, workspace_id, moment_order)?.ok_or(DomainError::StateCorrupt {
+            reason: "deduped capture has no moment",
+        })?;
+    if moment.after_content_kind != "binary" {
+        return Err(DomainError::StateCorrupt {
+            reason: "deduped binary capture points at non-binary content",
+        });
+    }
+    let binary_sha256 = moment
+        .after_binary_sha256
+        .clone()
+        .ok_or(DomainError::StateCorrupt {
+            reason: "deduped binary capture moment has no binary blob",
+        })?;
+    Ok(CaptureIngestBinaryResult {
+        object_id: moment.object_id,
+        moment_id: moment.moment_id,
+        moment_order: moment.moment_order,
+        binary_sha256,
+        deduped: true,
     })
 }
 
@@ -1460,6 +1684,64 @@ fn reconstruct_write(conn: &Connection, input: &WriteText) -> Result<WriteResult
         },
     )?;
     write_result_from_moment(conn, &input.workspace_id, moment, true)
+}
+
+/// The ONE locked implementation of autonomous capture's object/alias
+/// resolution, shared by the text and binary primitives so the length-framed,
+/// security-sensitive id scheme can never silently diverge between them:
+/// reuse a live alias; else derive the framed object id and reuse it ONLY when
+/// it has no live alias anywhere; else mint an order-disambiguated id, with
+/// that reserved order returned so the caller can pin it against the moment
+/// the write actually persists.
+fn resolve_capture_object(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+    now_ms: i64,
+) -> Result<(String, Option<i64>), DomainError> {
+    let mut reserved_moment_order = None;
+    let object_id = match alias_object_id(tx, workspace_id, version_id, path)? {
+        Some(object_id) => object_id,
+        None => {
+            let derived_object_id = derive_capture_object_id(workspace_id, version_id, path);
+            let object_id = if !object_exists(tx, workspace_id, &derived_object_id)? {
+                tx.execute(
+                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                     VALUES (?1, ?2, ?3)",
+                    params![workspace_id, derived_object_id, now_ms],
+                )
+                .map_err(DomainError::sql_persist)?;
+                derived_object_id
+            } else if !object_has_live_alias(tx, workspace_id, &derived_object_id)? {
+                derived_object_id
+            } else {
+                let next_order = next_moment_order(tx)?;
+                let disambiguated_object_id = derive_disambiguated_capture_object_id(
+                    workspace_id,
+                    version_id,
+                    path,
+                    next_order,
+                );
+                tx.execute(
+                    "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                     VALUES (?1, ?2, ?3)",
+                    params![workspace_id, disambiguated_object_id, now_ms],
+                )
+                .map_err(DomainError::sql_persist)?;
+                reserved_moment_order = Some(next_order);
+                disambiguated_object_id
+            };
+            tx.execute(
+                "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![workspace_id, version_id, path, object_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+            object_id
+        }
+    };
+    Ok((object_id, reserved_moment_order))
 }
 
 fn reconstruct_capture_write(

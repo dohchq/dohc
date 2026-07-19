@@ -59,8 +59,10 @@ fn binary_head_is_excluded_from_file_fts_and_rebuild_does_not_crash() {
                     object_id: "obj-asset".to_owned(),
                     path: "uniquebinaryname.md".to_owned(),
                     binary_sha256: sha,
-                    job_id: "bin-job".to_owned(),
-                    preimage: Preimage::Absent,
+                    moment_id: "bin-job".to_owned(),
+                    metadata_origin: "sync".to_owned(),
+                    author_json: None,
+                    materialize: Some(Preimage::Absent),
                     now_ms: 3,
                 },
             )
