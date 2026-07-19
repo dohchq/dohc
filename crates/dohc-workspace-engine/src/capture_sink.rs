@@ -1,6 +1,6 @@
 //! Dormant files-reconcile adapter for the actor-owned capture primitives.
 
-use dohc_engine_crypto::{SecretDataKey, load_or_create_key_file};
+use dohc_engine_crypto::{SecretDataKey, create_key_file, load_key_file};
 use dohc_engine_domain::DomainError;
 use dohc_engine_files::media::is_text_media_type;
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
@@ -105,8 +105,25 @@ impl StoreCaptureSink {
 
     fn ensure_secret_key(&mut self) -> Result<&SecretDataKey, CaptureError> {
         if self.secret_key.is_none() {
-            let key =
-                load_or_create_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)?;
+            let key = match load_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)? {
+                Some(key) => key,
+                None => {
+                    // NEVER mint over existing encrypted state: a missing key
+                    // file with live secret rows (a backup restored without
+                    // the key, an accidental deletion) must fail closed and
+                    // stay dirty for retry — silently minting would strand
+                    // the whole history under a fresh key (TS parity:
+                    // `loadSecretDataKey` checks protected rows first).
+                    let has_state = self
+                        .actor
+                        .secret_state_exists_blocking(self.workspace_id.clone())
+                        .map_err(|_| SECRET_KEY_UNAVAILABLE)?;
+                    if has_state {
+                        return Err(SECRET_KEY_UNAVAILABLE);
+                    }
+                    create_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)?
+                }
+            };
             self.secret_key = Some(key);
         }
         Ok(self.secret_key.as_ref().expect("key just ensured"))
@@ -400,8 +417,15 @@ impl CaptureSink for StoreCaptureSink {
             (PathClassification::Ignored, _) => return Ok(IngestOutcome::NotOwned),
             // Secret paths route to the ENCRYPTED store, never the plaintext
             // one (the secret floor outranks policy — `.dohc` files can never
-            // unmark it).
-            (PathClassification::Secret, _) => return self.ingest_secret(path),
+            // unmark it). Same canonical-key rule as the tracked branch: a
+            // scanned name that normalizes differently (a literal `%2eenv`)
+            // must not create encrypted heads under an aliased key.
+            (PathClassification::Secret, normalized) => {
+                if normalized.as_deref() != Some(path) {
+                    return Ok(IngestOutcome::NotOwned);
+                }
+                return self.ingest_secret(path);
+            }
             (PathClassification::Tracked, normalized) => normalized.ok_or(INGEST_FAILED)?,
         };
         // The domain stores under the CANONICAL relative path. A scanned disk
@@ -468,7 +492,11 @@ impl CaptureSink for StoreCaptureSink {
     fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
         match classify_engine_file_path_normalized(path) {
             (PathClassification::Ignored, _) => Ok(()),
-            (PathClassification::Secret, _) => {
+            (PathClassification::Secret, normalized) => {
+                // Nothing was ever stored under a non-canonical literal name.
+                if normalized.as_deref() != Some(path) {
+                    return Ok(());
+                }
                 // Apply-time absence confirmation, then the KEYLESS secret
                 // retire (a delete never decrypts). Mirrors the text arm's
                 // reappearance refusal.
@@ -1382,5 +1410,54 @@ mod tests {
         drop(sink);
         supervisor.close(&db).expect("close actor");
         assert_eq!(secret_tip_len(&db, ".env"), Some(11), "tip retained");
+    }
+
+    #[test]
+    fn missing_key_over_existing_secret_state_fails_closed_instead_of_reminting() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        write_file(scratch.path(), ".env", b"TOKEN=alpha");
+        ingest(&mut sink, ".env").expect("seed secret");
+        drop(sink);
+
+        // A backup restored without the key file / accidental deletion.
+        std::fs::remove_file(scratch.path().join(".dohc/engine/secret.key")).expect("lose key");
+
+        let actor = supervisor.open(&db, 1).expect("reopen actor");
+        let mut fresh =
+            StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 30, None);
+        write_file(scratch.path(), ".env", b"TOKEN=changed");
+        let err = ingest(&mut fresh, ".env").expect_err("must not mint over live secret state");
+        assert_eq!(err.reason, "workspace secret key unavailable");
+        assert!(
+            !scratch.path().join(".dohc/engine/secret.key").exists(),
+            "no fresh key was minted over the orphaned history"
+        );
+
+        drop(fresh);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(secret_tip_len(&db, ".env"), Some(11), "tip retained");
+    }
+
+    #[test]
+    fn non_canonical_secret_names_are_refused_both_ways() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        // A literal on-disk `%2eenv` decodes to the durable key `.env`;
+        // capturing it would create an encrypted head under an aliased key.
+        write_file(scratch.path(), "%2eenv", b"TOKEN=evil");
+
+        assert_eq!(
+            ingest(&mut sink, "%2eenv").expect("refused, settled"),
+            IngestOutcome::NotOwned
+        );
+        sink.retire("%2eenv").expect("refused retire is a no-op");
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(secret_tip_len(&db, ".env"), None);
+        assert_eq!(secret_tip_len(&db, "%2eenv"), None);
     }
 }

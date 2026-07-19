@@ -36,7 +36,7 @@ use dohc_engine_domain::{
     CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ResolveTextConflict,
     ResolveTextConflictResult, SecretFileStore, SecretMomentRecord, SecretWriteResult,
     TextConflict, TextSnapshot, VersionedTextStore, WriteResult, WriteText, capture_secret_retire,
-    insert_text_conflict_if_absent,
+    has_secret_state, insert_text_conflict_if_absent,
 };
 use dohc_engine_storage::{
     CompoundWrite, Document, EngineStore, FaultInjector, StorageError, TxnOutcome, WriteOutcome,
@@ -178,6 +178,10 @@ enum Command {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<SecretMomentRecord>, RuntimeError>>,
+    },
+    SecretStateExists {
+        workspace_id: String,
+        reply: oneshot::Sender<Result<bool, RuntimeError>>,
     },
     CaptureRetire {
         input: CaptureRetire,
@@ -552,6 +556,24 @@ impl ActorHandle {
                 input,
                 faults,
                 token: CancellationToken::new(),
+                reply,
+            })
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Whether the workspace holds ANY encrypted secret state. The capture
+    /// layer consults this before ever MINTING a data key: a missing key file
+    /// over live secret rows must fail closed, never silently strand the
+    /// history under a fresh key.
+    pub fn secret_state_exists_blocking(&self, workspace_id: String) -> Result<bool, RuntimeError> {
+        debug_assert_sync_context();
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::SecretStateExists {
+                workspace_id,
                 reply,
             })
             .map_err(|_| RuntimeError::ActorUnavailable)?;
@@ -1117,6 +1139,14 @@ fn worker_main(
             } => {
                 let outcome =
                     capture_secret_retire_on_store(&mut store, &input, faults.as_ref(), &token);
+                let _ = reply.send(outcome);
+            }
+            Command::SecretStateExists {
+                workspace_id,
+                reply,
+            } => {
+                let outcome =
+                    has_secret_state(&mut store, &workspace_id).map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::CaptureRetire {

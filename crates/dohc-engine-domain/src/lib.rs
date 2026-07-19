@@ -72,7 +72,7 @@ pub use secrets::{
     CaptureSecret, CaptureSecretRetire, SecretDelete, SecretDiskIntent, SecretFileStat,
     SecretFileStore, SecretMomentRecord, SecretOp, SecretWrite, SecretWriteResult,
     capture_secret_retire, delete_secret_file_keyless, derive_capture_secret_moment_id,
-    derive_capture_secret_retire_moment_id,
+    derive_capture_secret_retire_moment_id, has_secret_state,
 };
 pub use store::{
     MAX_CAPTURE_BINARY_FILE_BYTES, MAX_TEXT_BYTES, VersionedTextStore, delete_text_in_tx,

@@ -44,6 +44,6 @@ pub use aead::{
 pub use error::CryptoError;
 pub use key::{
     SECRET_KEY_BYTES, SECRET_KEY_FILE_PREFIX, SECRET_KEY_FILE_RELATIVE, SecretDataKey,
-    load_or_create_key_file,
+    create_key_file, load_key_file, load_or_create_key_file,
 };
 pub use secret::SecretPlaintext;

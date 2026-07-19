@@ -95,40 +95,106 @@ pub const SECRET_KEY_FILE_RELATIVE: &str = ".dohc/engine/secret.key";
 /// CLOSED (`key-corrupt`) — dohc never regenerates a key over an existing
 /// file, because that would silently orphan every sealed snapshot.
 pub fn load_or_create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoError> {
+    match load_key_file(root)? {
+        Some(key) => Ok(key),
+        None => create_key_file(root),
+    }
+}
+
+/// Load the workspace data key, returning `Ok(None)` when no key file exists.
+/// A present-but-malformed/unreadable file fails CLOSED. On a successful load
+/// the file's permissions are re-tightened to 0600 (Unix; TS parity —
+/// `secretFileStore.ts` chmods existing key files after read, so a restored
+/// or hand-copied key never stays world-readable).
+pub fn load_key_file(root: &std::path::Path) -> Result<Option<SecretDataKey>, CryptoError> {
     let path = root.join(SECRET_KEY_FILE_RELATIVE);
     match std::fs::read_to_string(&path) {
-        Ok(content) => SecretDataKey::parse_key_file(&content),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let key = SecretDataKey::generate()?;
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent).map_err(|_| CryptoError::KeyFileMalformed)?;
-            }
-            // create_new: if another writer won the race, fall back to
-            // PARSING the winner's file rather than clobbering it.
-            let mut options = std::fs::OpenOptions::new();
-            options.write(true).create_new(true);
+        Ok(content) => {
+            let key = SecretDataKey::parse_key_file(&content)?;
             #[cfg(unix)]
             {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
             }
-            match options.open(&path) {
-                Ok(mut file) => {
-                    use std::io::Write;
-                    file.write_all(key.to_key_file().as_bytes())
-                        .map_err(|_| CryptoError::KeyFileMalformed)?;
-                    Ok(key)
-                }
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let content = std::fs::read_to_string(&path)
-                        .map_err(|_| CryptoError::KeyFileMalformed)?;
-                    SecretDataKey::parse_key_file(&content)
-                }
-                Err(_) => Err(CryptoError::KeyFileMalformed),
-            }
+            Ok(Some(key))
         }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(_) => Err(CryptoError::KeyFileMalformed),
     }
+}
+
+/// Mint and durably publish a fresh workspace data key. CALLER CONTRACT: only
+/// invoke when the workspace has NO existing secret state — minting over
+/// orphaned ciphertext would strand it silently; the capture layer checks the
+/// encrypted store first and fails closed instead (TS parity:
+/// `loadSecretDataKey` checks protected rows before its create branch).
+pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoError> {
+    let path = root.join(SECRET_KEY_FILE_RELATIVE);
+    let key = SecretDataKey::generate()?;
+    if let Some(parent) = path.parent() {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        // The key's directory must not advertise its existence to
+        // other local users (the file itself is 0600 below).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(parent)
+            .map_err(|_| CryptoError::KeyFileMalformed)?;
+    }
+    // DURABLE publish: temp (0600) + fsync + rename. The key file must
+    // be durably on disk BEFORE any ciphertext is committed under it —
+    // a crash that lost a visible-but-unflushed key would strand every
+    // sealed snapshot, and a later restart would silently re-mint. The
+    // rename also means a partially written key can never be visible
+    // at the final path.
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    let written = (|| -> std::io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
+        use std::io::Write;
+        file.write_all(key.to_key_file().as_bytes())?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return Err(CryptoError::KeyFileMalformed);
+    }
+    // Lost a race? Parse the winner's file, never clobber it. (One
+    // sink per open workspace is the only minter in practice; this is
+    // defense in depth.)
+    if path.exists() {
+        let _ = std::fs::remove_file(&temp);
+        let content = std::fs::read_to_string(&path).map_err(|_| CryptoError::KeyFileMalformed)?;
+        return SecretDataKey::parse_key_file(&content);
+    }
+    if std::fs::rename(&temp, &path).is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return Err(CryptoError::KeyFileMalformed);
+    }
+    // Durability of the RENAME itself: fsync the parent directory
+    // where the platform allows it (std cannot open directories on
+    // Windows; NTFS metadata journaling is the best effort there).
+    #[cfg(unix)]
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = std::fs::File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
+    // Return what is DURABLY at the path — under any interleaving the
+    // published file is the single source of truth.
+    let content = std::fs::read_to_string(&path).map_err(|_| CryptoError::KeyFileMalformed)?;
+    SecretDataKey::parse_key_file(&content)
 }
 
 #[cfg(test)]
@@ -217,6 +283,26 @@ mod tests {
         std::fs::write(&file, "garbage").unwrap();
         assert!(load_or_create_key_file(&dir).is_err());
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_retightens_lax_permissions_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "dohc-keyperm-test-{}-{:x}",
+            std::process::id(),
+            std::ptr::from_ref(&()) as usize
+        ));
+        let key = create_key_file(&dir).expect("mint");
+        let path = dir.join(SECRET_KEY_FILE_RELATIVE);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let loaded = load_key_file(&dir).expect("load").expect("present");
+        assert_eq!(loaded, key);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a restored/hand-copied key is re-tightened");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

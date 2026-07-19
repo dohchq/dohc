@@ -677,6 +677,15 @@ pub fn delete_secret_file_keyless(
     input: &SecretDelete,
     faults: &dyn FaultInjector,
 ) -> Result<Option<SecretMomentRecord>, DomainError> {
+    delete_secret_file_inner(store, input, faults, false)
+}
+
+fn delete_secret_file_inner(
+    store: &mut EngineStore,
+    input: &SecretDelete,
+    faults: &dyn FaultInjector,
+    supersede_materialization: bool,
+) -> Result<Option<SecretMomentRecord>, DomainError> {
     non_empty(&input.workspace_id, "workspace_id")?;
     non_empty(&input.version_id, "version_id")?;
     non_empty(&input.moment_id, "moment_id")?;
@@ -718,6 +727,39 @@ pub fn delete_secret_file_keyless(
     let outcome = store.write_with(faults, |tx| {
         let moment_order = next_secret_moment_order(tx, ws)?;
         insert_moment(tx, &record, moment_order, None)?;
+        if supersede_materialization {
+            // Capture retire: the on-disk plaintext is GONE, so record the
+            // delete's generation as a completed marker (anchored to the
+            // outgoing tip's ciphertext blob — deletes carry no bytes of
+            // their own). Without it, an older still-pending secret job for
+            // this path could later re-write the retired plaintext to disk.
+            let tip_sha: Option<String> = tx
+                .query_row(
+                    "SELECT ciphertext_base64 FROM secret_files                      WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+                    params![ws, input.version_id, input.path],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?
+                .map(|ciphertext_base64| {
+                    dohc_engine_storage::hex_sha256(&dohc_engine_crypto::base64::forgiving_decode(
+                        &ciphertext_base64,
+                    ))
+                });
+            if let Some(content_sha256) = tip_sha {
+                dohc_engine_storage::record_completed_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: format!("secret-mat_{}", input.moment_id),
+                        target_path: input.path.clone(),
+                        content_sha256,
+                        preimage: Preimage::Absent,
+                        target_generation: moment_order,
+                        now_ms: input.now_ms,
+                    },
+                )?;
+            }
+        }
         tx.execute(
             "DELETE FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
             params![ws, input.version_id, input.path],
@@ -754,7 +796,7 @@ pub fn capture_secret_retire(
         &input.path,
         reserved,
     );
-    let result = delete_secret_file_keyless(
+    let result = delete_secret_file_inner(
         store,
         &SecretDelete {
             workspace_id: input.workspace_id.clone(),
@@ -765,6 +807,7 @@ pub fn capture_secret_retire(
             now_ms: input.now_ms,
         },
         faults,
+        true,
     )?;
     if let Some(moment) = &result
         && moment.moment_order != reserved
@@ -817,6 +860,23 @@ pub fn derive_capture_secret_retire_moment_id(
             order.as_bytes(),
         ])
     )
+}
+
+/// Whether the workspace holds ANY encrypted secret state (moments or tips).
+/// The capture layer consults this before ever MINTING a key: a missing key
+/// file over live secret rows (a backup restored without the key, an
+/// accidental deletion) must fail closed, not silently strand the history
+/// under a fresh key.
+pub fn has_secret_state(store: &mut EngineStore, workspace_id: &str) -> Result<bool, DomainError> {
+    let ws = workspace_id.to_owned();
+    store.read_with(move |conn| {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM secret_moments WHERE workspace_id = ?1)              OR EXISTS(SELECT 1 FROM secret_files WHERE workspace_id = ?1)",
+            [ws.as_str()],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(DomainError::sql_corrupt)
+    })
 }
 
 /// Read the encrypted tip for a secret path. Free-standing (no key borrow) so

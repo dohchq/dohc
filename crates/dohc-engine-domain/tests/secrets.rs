@@ -681,3 +681,68 @@ fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
     .expect("no-op retire");
     assert!(absent.is_none());
 }
+
+#[test]
+fn capture_retire_supersedes_a_stale_pending_secret_job() {
+    use dohc_engine_domain::{CaptureSecretRetire, capture_secret_retire};
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_version(&db, WS);
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    let key = key();
+
+    // A Materialize-intent write leaves a PENDING secret job.
+    write(&mut store, &key, ".env", "TOKEN=alpha", "sm-1", 10);
+    let pending_before: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs WHERE status = 'pending'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("count");
+    assert_eq!(pending_before, 1);
+
+    // Capture retire (plaintext gone from disk) must record a completed
+    // marker at the delete's generation so the stale pending job can never
+    // later re-write the retired plaintext.
+    capture_secret_retire(
+        &mut store,
+        &CaptureSecretRetire {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: ".env".to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            now_ms: 20,
+        },
+        &NO_FAULTS,
+    )
+    .expect("capture retire")
+    .expect("tip existed");
+
+    // The marker's generation must EXCEED the stale pending job's (secret
+    // orders are 0-based) so the staleness gate supersedes it on drain.
+    let (pending_gen, marker_gen): (i64, i64) = store
+        .read_with(|conn| {
+            let pending = conn.query_row(
+                "SELECT target_generation FROM materialization_jobs \
+                 WHERE status = 'pending' AND target_path = '.env'",
+                [],
+                |row| row.get(0),
+            )?;
+            let marker = conn.query_row(
+                "SELECT target_generation FROM materialization_jobs \
+                 WHERE status = 'complete' AND target_path = '.env'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok::<_, rusqlite::Error>((pending, marker))
+        })
+        .expect("marker rows");
+    assert!(
+        marker_gen > pending_gen,
+        "the marker's generation ({marker_gen}) must exceed the stale pending job's ({pending_gen})"
+    );
+}
