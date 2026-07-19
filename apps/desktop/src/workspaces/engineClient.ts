@@ -530,10 +530,6 @@ export class EngineClient implements EngineTransport {
   private readonly eventHandlers = new Set<(event: Event) => void>();
   private readonly blobHandlers = new Set<(blob: CompletedBlob) => void>();
   private readonly blobStreams = new Map<number, PendingBlob>();
-  // Stream ids are unique per session generation and announced in allocation
-  // order, so full-session uniqueness reduces to a monotonicity check — O(1)
-  // memory with no evictable completed-id set.
-  private highestBlobStreamId = -1;
   private bufferedBlobChunks = 0;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -938,10 +934,14 @@ export class EngineClient implements EngineTransport {
         "blobStart contains an invalid wire integer.",
       );
     }
-    if (start.streamId <= this.highestBlobStreamId) {
+    // Stream ids are unique per session generation but NOT ordered — concurrent
+    // handlers may announce them out of order. Reject only an id that is still
+    // active (a live reassembly collision); a completed id is gone from the map
+    // and a reuse simply starts a fresh stream bound to its own known request.
+    if (this.blobStreams.has(start.streamId)) {
       throw new BlobStreamError(
         "duplicate-blob-stream",
-        `Blob stream ${start.streamId} does not increase on ${this.highestBlobStreamId}; stream ids are unique and announced in order.`,
+        `Blob stream ${start.streamId} is already active.`,
       );
     }
     if (this.blobStreams.size >= MAX_CONCURRENT_BLOB_STREAMS) {
@@ -978,7 +978,6 @@ export class EngineClient implements EngineTransport {
         `Blob stream ${start.streamId} references unknown request ${start.requestId}.`,
       );
     }
-    this.highestBlobStreamId = start.streamId;
     this.blobStreams.set(start.streamId, {
       start,
       callerRequestId: pendingEntry.callerId,

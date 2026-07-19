@@ -883,12 +883,12 @@ describe("EngineClient", () => {
     });
   });
 
-  it("rejects duplicate blobStart ids while live and after completion", async () => {
-    const livePeer = new FakePeerConnection();
-    const live = client(livePeer);
-    livePeer.acknowledge();
-    await live.ready();
-    const livePending = live.sendRequest(request(6, "await.live.duplicate"));
+  it("rejects a duplicate blobStart for a still-active stream", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const pending = transport.sendRequest(request(6, "await.live.duplicate"));
     const start = {
       type: "blobStart" as const,
       requestId: 1,
@@ -896,27 +896,43 @@ describe("EngineClient", () => {
       totalBytes: 0,
       sha256: null,
     };
-    livePeer.send(start);
-    livePeer.send(start);
-    await expect(livePending).rejects.toMatchObject({
+    peer.send(start);
+    peer.send(start);
+    await expect(pending).rejects.toMatchObject({
       code: "protocol-error",
       cause: { code: "duplicate-blob-stream" },
     });
+  });
 
-    const completedPeer = new FakePeerConnection();
-    const completed = client(completedPeer);
-    completedPeer.acknowledge();
-    await completed.ready();
-    const completedPending = completed.sendRequest(
-      request(7, "await.completed.duplicate"),
-    );
-    completedPeer.send({ ...start, streamId: 37 });
-    completedPeer.sendRaw(blobChunkFrame(37, Buffer.alloc(0), true));
-    completedPeer.send({ ...start, streamId: 37 });
-    await expect(completedPending).rejects.toMatchObject({
-      code: "protocol-error",
-      cause: { code: "duplicate-blob-stream" },
+  it("accepts unique blob stream ids announced out of order", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    void transport.sendRequest(request(6, "await.out.of.order")).catch(() => {});
+    // A higher id announced before a lower one is valid: ids are unique, not
+    // ordered. Neither should tear down the session.
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 10,
+      totalBytes: 1,
+      sha256: null,
     });
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 9,
+      totalBytes: 1,
+      sha256: null,
+    });
+    peer.sendRaw(blobChunkFrame(10, Buffer.from("a"), true));
+    peer.sendRaw(blobChunkFrame(9, Buffer.from("b"), true));
+
+    expect(onBlob).toHaveBeenCalledTimes(2);
+    transport.close();
   });
 
   it("rejects invalid and over-limit blobStart totalBytes", async () => {
