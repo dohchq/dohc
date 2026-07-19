@@ -3,6 +3,7 @@
 // only through createEngineClient, and the later cutover owns that wiring.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash } from "node:crypto";
 import { Duplex } from "node:stream";
 import { TextDecoder } from "node:util";
 import type {
@@ -24,6 +25,8 @@ const MAX_WIRE_INTEGER = Number.MAX_SAFE_INTEGER;
 const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_BLOB_CHUNK_BYTES = 256 * 1024;
 const DEFAULT_MAX_BLOB_BYTES = 64 * 1024 * 1024;
+const MAX_CONCURRENT_BLOB_STREAMS = 64;
+const MAX_COMPLETED_BLOB_STREAM_IDS = 64;
 // Leaves headroom for handshake and small control envelopes.
 const MIN_NEGOTIABLE_MAX_FRAME_BYTES = 64 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
@@ -114,7 +117,7 @@ export function encodeFrame(
         "BlobChunk stream id must be a non-negative wire integer.",
       );
     }
-    if ((flags & ~BLOB_FIN_FLAG) !== 0) {
+    if (flags !== 0 && flags !== BLOB_FIN_FLAG) {
       throw new FrameCodecError(
         "invalid-flags",
         "BlobChunk frames only support the FIN flag.",
@@ -421,11 +424,15 @@ export class EngineRequestError extends EngineClientError {
 }
 
 export type BlobStreamErrorCode =
+  | "blob-backpressure-exceeded"
+  | "blob-digest-mismatch"
   | "blob-size-mismatch"
   | "blob-too-large"
   | "duplicate-blob-fin"
   | "duplicate-blob-stream"
+  | "empty-blob-chunk"
   | "invalid-blob-start"
+  | "too-many-blob-streams"
   | "unknown-blob-stream";
 
 export class BlobStreamError extends Error {
@@ -450,6 +457,7 @@ export interface EngineClientSpawnOptions {
   capabilities: string[];
   connectTimeoutMs?: number;
   maxFrameBytes?: number;
+  maxBlobChunkBytes?: number;
   maxBlobBytes?: number;
   onStderr?: (text: string) => void;
 }
@@ -460,6 +468,7 @@ export interface EngineClientConnectOptions {
   capabilities: string[];
   connectTimeoutMs?: number;
   maxFrameBytes?: number;
+  maxBlobChunkBytes?: number;
   maxBlobBytes?: number;
 }
 
@@ -494,6 +503,7 @@ export class EngineClient implements EngineTransport {
   private readonly blobHandlers = new Set<(blob: CompletedBlob) => void>();
   private readonly blobStreams = new Map<number, PendingBlob>();
   private readonly completedBlobStreams = new Set<number>();
+  private readonly completedBlobStreamOrder: number[] = [];
   private readonly pending = new Map<number, PendingRequest>();
   private readonly textDecoder = new TextDecoder("utf-8", { fatal: true });
   private readonly readyPromise: Promise<EngineClient>;
@@ -503,8 +513,10 @@ export class EngineClient implements EngineTransport {
   private readyState = false;
   private closed = false;
   private maxFrameBytes: number;
-  private maxBlobChunkBytes = DEFAULT_MAX_BLOB_CHUNK_BYTES;
+  private maxBlobChunkBytes: number;
+  private readonly maxBlobChunkBytesCap: number;
   private readonly maxBlobBytes: number;
+  private bufferedBlobBytes = 0;
   private connectTimer: ReturnType<typeof setTimeout> | undefined;
   helloAck: HelloAckEnvelope | undefined;
 
@@ -515,6 +527,22 @@ export class EngineClient implements EngineTransport {
   ) {
     this.maxFrameBytes =
       connectOptions.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
+    this.maxBlobChunkBytesCap =
+      connectOptions.maxBlobChunkBytes ?? DEFAULT_MAX_BLOB_CHUNK_BYTES;
+    if (
+      !Number.isSafeInteger(this.maxBlobChunkBytesCap) ||
+      this.maxBlobChunkBytesCap < 0 ||
+      this.maxBlobChunkBytesCap > MAX_U32
+    ) {
+      throw new FrameCodecError(
+        "blob-chunk-too-large",
+        "Maximum blob chunk bytes must be an unsigned 32-bit integer.",
+      );
+    }
+    this.maxBlobChunkBytes = Math.min(
+      this.maxBlobChunkBytesCap,
+      this.maxFrameBytes,
+    );
     this.maxBlobBytes = connectOptions.maxBlobBytes ?? DEFAULT_MAX_BLOB_BYTES;
     if (
       !Number.isSafeInteger(this.maxBlobBytes) ||
@@ -526,7 +554,10 @@ export class EngineClient implements EngineTransport {
         `Maximum blob bytes must be between 0 and ${DEFAULT_MAX_BLOB_BYTES}.`,
       );
     }
-    this.decoder = new FrameDecoder(this.maxFrameBytes);
+    this.decoder = new FrameDecoder(
+      this.maxFrameBytes,
+      this.maxBlobChunkBytes,
+    );
     this.readyPromise = new Promise<EngineClient>((resolve, reject) => {
       this.readyResolve = resolve;
       this.readyReject = reject;
@@ -824,7 +855,11 @@ export class EngineClient implements EngineTransport {
       this.maxFrameBytes,
       envelope.limits.maxFrameBytes,
     );
-    this.maxBlobChunkBytes = envelope.limits.maxBlobChunkBytes;
+    this.maxBlobChunkBytes = Math.min(
+      this.maxBlobChunkBytesCap,
+      envelope.limits.maxBlobChunkBytes,
+      this.maxFrameBytes,
+    );
     this.decoder.setLimits(
       this.maxFrameBytes,
       this.maxBlobChunkBytes,
@@ -860,6 +895,12 @@ export class EngineClient implements EngineTransport {
         `Blob stream ${start.streamId} has already been announced.`,
       );
     }
+    if (this.blobStreams.size >= MAX_CONCURRENT_BLOB_STREAMS) {
+      throw new BlobStreamError(
+        "too-many-blob-streams",
+        `At most ${MAX_CONCURRENT_BLOB_STREAMS} blob streams may be active.`,
+      );
+    }
     if (
       start.totalBytes !== undefined &&
       start.totalBytes !== null &&
@@ -868,6 +909,17 @@ export class EngineClient implements EngineTransport {
       throw new BlobStreamError(
         "blob-too-large",
         `Blob stream ${start.streamId} announces ${start.totalBytes} bytes; maximum is ${this.maxBlobBytes}.`,
+      );
+    }
+    if (
+      start.sha256 !== undefined &&
+      start.sha256 !== null &&
+      (typeof start.sha256 !== "string" ||
+        !/^[0-9a-f]{64}$/.test(start.sha256))
+    ) {
+      throw new BlobStreamError(
+        "invalid-blob-start",
+        "blobStart.sha256 must be a lowercase SHA-256 hex digest.",
       );
     }
     this.blobStreams.set(start.streamId, {
@@ -893,6 +945,12 @@ export class EngineClient implements EngineTransport {
         `Blob stream ${frame.streamId} was not announced by blobStart.`,
       );
     }
+    if (frame.payload.length === 0 && !frame.fin) {
+      throw new BlobStreamError(
+        "empty-blob-chunk",
+        `Blob stream ${frame.streamId} received an empty non-final chunk.`,
+      );
+    }
     const receivedBytes = stream.receivedBytes + frame.payload.length;
     const announcedBytes = stream.start.totalBytes ?? this.maxBlobBytes;
     if (receivedBytes > announcedBytes || receivedBytes > this.maxBlobBytes) {
@@ -901,8 +959,15 @@ export class EngineClient implements EngineTransport {
         `Blob stream ${frame.streamId} exceeded its ${Math.min(announcedBytes, this.maxBlobBytes)} byte bound.`,
       );
     }
+    if (this.bufferedBlobBytes + frame.payload.length > this.maxBlobBytes) {
+      throw new BlobStreamError(
+        "blob-backpressure-exceeded",
+        `Buffered blob bytes exceed the ${this.maxBlobBytes} byte global budget.`,
+      );
+    }
     stream.chunks.push(frame.payload);
     stream.receivedBytes = receivedBytes;
+    this.bufferedBlobBytes += frame.payload.length;
     if (!frame.fin) return;
     if (
       stream.start.totalBytes !== undefined &&
@@ -915,14 +980,29 @@ export class EngineClient implements EngineTransport {
       );
     }
 
+    const bytes = Buffer.concat(stream.chunks, receivedBytes);
+    if (
+      stream.start.sha256 !== undefined &&
+      stream.start.sha256 !== null &&
+      createHash("sha256").update(bytes).digest("hex") !== stream.start.sha256
+    ) {
+      throw new BlobStreamError(
+        "blob-digest-mismatch",
+        `Blob stream ${frame.streamId} does not match its announced SHA-256.`,
+      );
+    }
+
     this.blobStreams.delete(frame.streamId);
-    this.completedBlobStreams.add(frame.streamId);
+    this.bufferedBlobBytes -= receivedBytes;
+    this.rememberCompletedBlobStream(frame.streamId);
     const blob: CompletedBlob = {
-      requestId: stream.start.requestId,
+      requestId:
+        this.pending.get(stream.start.requestId)?.callerId ??
+        stream.start.requestId,
       streamId: stream.start.streamId,
       totalBytes: stream.start.totalBytes,
       sha256: stream.start.sha256,
-      bytes: Buffer.concat(stream.chunks, receivedBytes),
+      bytes,
     };
     for (const handler of this.blobHandlers) {
       try {
@@ -931,6 +1011,16 @@ export class EngineClient implements EngineTransport {
         // Blob subscribers are observer boundaries, like event subscribers.
       }
     }
+  }
+
+  private rememberCompletedBlobStream(streamId: number): void {
+    this.completedBlobStreams.add(streamId);
+    this.completedBlobStreamOrder.push(streamId);
+    if (this.completedBlobStreamOrder.length <= MAX_COMPLETED_BLOB_STREAM_IDS) {
+      return;
+    }
+    const expired = this.completedBlobStreamOrder.shift();
+    if (expired !== undefined) this.completedBlobStreams.delete(expired);
   }
 
   private resolveResponse(response: Response): void {
@@ -1001,6 +1091,8 @@ export class EngineClient implements EngineTransport {
     this.pending.clear();
     this.blobStreams.clear();
     this.completedBlobStreams.clear();
+    this.completedBlobStreamOrder.length = 0;
+    this.bufferedBlobBytes = 0;
     try {
       this.terminate();
     } catch {
