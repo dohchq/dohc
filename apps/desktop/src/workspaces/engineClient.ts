@@ -31,6 +31,9 @@ const MAX_COMPLETED_BLOB_STREAM_IDS = 64;
 // memory past the byte budget. A max-size blob at the default chunk size is ~256
 // chunks, so this leaves ample headroom for legitimate chunking.
 const MAX_BLOB_CHUNKS_PER_STREAM = 4096;
+// Blob streaming gates on this negotiated hello/helloAck capability, never on
+// frame sniffing (ENGINE_PROTOCOL.md row 13).
+const BLOB_CAPABILITY = "blobs";
 // Leaves headroom for handshake and small control envelopes.
 const MIN_NEGOTIABLE_MAX_FRAME_BYTES = 64 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
@@ -217,12 +220,14 @@ export class FrameDecoder {
   // per-stream cap can halt a coalesced flood mid-buffer instead of letting the
   // whole batch materialize first. It is invoked OUTSIDE the decode try/catch so
   // a consumer error propagates verbatim rather than being poisoned into a
-  // generic codec error.
-  push(chunk: Uint8Array, onFrame?: (frame: Frame) => void): Frame[] {
+  // generic codec error. Returning false aborts decoding of the remaining bytes
+  // (used when the client closes mid-buffer; the tail is discarded).
+  push(chunk: Uint8Array, onFrame?: (frame: Frame) => boolean | void): Frame[] {
     this.assertHealthy();
     const frames: Frame[] = [];
+    let aborted = false;
     const emit = (frame: Frame): void => {
-      if (onFrame) onFrame(frame);
+      if (onFrame) aborted = onFrame(frame) === false;
       else frames.push(frame);
     };
     const bytes = Buffer.isBuffer(chunk)
@@ -264,7 +269,10 @@ export class FrameDecoder {
       } catch (error) {
         throw this.poison(error);
       }
-      if (frame !== null) emit(frame);
+      if (frame !== null) {
+        emit(frame);
+        if (aborted) break;
+      }
     }
     return frames;
   }
@@ -506,6 +514,9 @@ interface PendingRequest {
 
 interface PendingBlob {
   readonly start: BlobStart;
+  // Captured when the stream is announced so response/chunk ordering cannot
+  // change the blob's request identity after resolveResponse clears pending.
+  readonly callerRequestId: number;
   readonly chunks: Buffer[];
   receivedBytes: number;
 }
@@ -554,10 +565,9 @@ export class EngineClient implements EngineTransport {
         "Maximum blob chunk bytes must be an unsigned 32-bit integer.",
       );
     }
-    this.maxBlobChunkBytes = Math.min(
-      this.maxBlobChunkBytesCap,
-      this.maxFrameBytes,
-    );
+    // maxFrameBytes bounds control-frame payloads only; blob chunks are bounded
+    // solely by maxBlobChunkBytes, matching the Rust decoder.
+    this.maxBlobChunkBytes = this.maxBlobChunkBytesCap;
     this.maxBlobBytes = connectOptions.maxBlobBytes ?? DEFAULT_MAX_BLOB_BYTES;
     if (
       !Number.isSafeInteger(this.maxBlobBytes) ||
@@ -680,8 +690,9 @@ export class EngineClient implements EngineTransport {
   private readonly handleData = (chunk: Buffer | Uint8Array): void => {
     try {
       this.decoder.push(chunk, (frame) => {
-        if (this.closed) return;
+        if (this.closed) return false;
         this.receiveFrame(frame);
+        return !this.closed;
       });
     } catch (cause) {
       this.fail(
@@ -716,6 +727,7 @@ export class EngineClient implements EngineTransport {
           "Received BlobChunk before helloAck.",
         );
       }
+      this.assertBlobCapability();
       if (frame.payload.length > this.maxBlobChunkBytes) {
         throw new FrameCodecError(
           "blob-chunk-too-large",
@@ -873,7 +885,6 @@ export class EngineClient implements EngineTransport {
     this.maxBlobChunkBytes = Math.min(
       this.maxBlobChunkBytesCap,
       envelope.limits.maxBlobChunkBytes,
-      this.maxFrameBytes,
     );
     this.decoder.setLimits(
       this.maxFrameBytes,
@@ -887,6 +898,7 @@ export class EngineClient implements EngineTransport {
   }
 
   private receiveBlobStart(start: BlobStart): void {
+    this.assertBlobCapability();
     if (
       !Number.isSafeInteger(start.requestId) ||
       start.requestId < 0 ||
@@ -939,9 +951,20 @@ export class EngineClient implements EngineTransport {
     }
     this.blobStreams.set(start.streamId, {
       start,
+      callerRequestId:
+        this.pending.get(start.requestId)?.callerId ?? start.requestId,
       chunks: [],
       receivedBytes: 0,
     });
+  }
+
+  private assertBlobCapability(): void {
+    if (!this.helloAck?.capabilities.includes(BLOB_CAPABILITY)) {
+      throw new EngineClientError(
+        "protocol-error",
+        `Blob streaming requires the "${BLOB_CAPABILITY}" capability, which this session did not negotiate.`,
+      );
+    }
   }
 
   private receiveBlobChunk(
@@ -1017,9 +1040,7 @@ export class EngineClient implements EngineTransport {
     this.bufferedBlobBytes -= receivedBytes;
     this.rememberCompletedBlobStream(frame.streamId);
     const blob: CompletedBlob = {
-      requestId:
-        this.pending.get(stream.start.requestId)?.callerId ??
-        stream.start.requestId,
+      requestId: stream.callerRequestId,
       streamId: stream.start.streamId,
       totalBytes: stream.start.totalBytes,
       sha256: stream.start.sha256,

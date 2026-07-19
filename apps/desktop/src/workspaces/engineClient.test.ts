@@ -25,12 +25,13 @@ const LIMITS = {
 
 function helloAck(
   limits: typeof LIMITS = LIMITS,
+  capabilities: string[] = ["core", "blobs"],
 ): Extract<Envelope, { type: "helloAck" }> {
   return {
     type: "helloAck",
     protocolVersion: 1,
     sessionGeneration: 7,
-    capabilities: ["core"],
+    capabilities,
     limits,
   };
 }
@@ -513,6 +514,93 @@ describe("EngineClient", () => {
     peer.send({ type: "response", id: wireId, result: "done" });
     await expect(operation).resolves.toEqual({ id: 9_001, result: "done" });
     transport.close();
+  });
+
+  it("preserves the caller id when the response resolves before the final chunk", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.acknowledge();
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    let wireId = 0;
+    peer.onEnvelope = (envelope) => {
+      if (envelope.type === "request") wireId = envelope.id;
+    };
+    const operation = transport.sendRequest(request(9_002, "blob.after.response"));
+
+    peer.send({
+      type: "blobStart",
+      requestId: wireId,
+      streamId: 28,
+      totalBytes: 1,
+      sha256: null,
+    });
+    peer.send({ type: "response", id: wireId, result: "done" });
+    await expect(operation).resolves.toEqual({ id: 9_002, result: "done" });
+    peer.sendRaw(blobChunkFrame(28, Buffer.from("x"), true));
+
+    expect(onBlob).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: 9_002 }),
+    );
+    transport.close();
+  });
+
+  it("rejects blob streams when the session did not negotiate the blobs capability", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.send(helloAck(LIMITS, ["core"]));
+    await transport.ready();
+    const pending = transport.sendRequest(request(11, "await.no.capability"));
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 60,
+      totalBytes: 1,
+      sha256: null,
+    });
+
+    await expect(pending).rejects.toMatchObject({ code: "protocol-error" });
+  });
+
+  it("accepts blob chunks larger than the negotiated control-frame limit", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer);
+    peer.send(
+      helloAck({
+        ...LIMITS,
+        maxFrameBytes: 64 * 1024,
+        maxBlobChunkBytes: 256 * 1024,
+      }),
+    );
+    await transport.ready();
+    const onBlob = vi.fn();
+    transport.onBlob(onBlob);
+    // Larger than maxFrameBytes (control-frame bound) but within the blob bound.
+    const bytes = Buffer.alloc(100_000, 7);
+    peer.send({
+      type: "blobStart",
+      requestId: 1,
+      streamId: 61,
+      totalBytes: bytes.length,
+      sha256: null,
+    });
+    peer.sendRaw(blobChunkFrame(61, bytes, true, 256 * 1024));
+
+    expect(onBlob).toHaveBeenCalledWith(
+      expect.objectContaining({ streamId: 61, bytes }),
+    );
+    transport.close();
+  });
+
+  it("aborts decoding the rest of a coalesced buffer when onFrame returns false", () => {
+    const decoder = new FrameDecoder();
+    const frame = encodeFrame(FrameType.Control, 0, Buffer.from("{}"));
+    const seen = vi.fn(() => false);
+
+    decoder.push(Buffer.concat([frame, frame, frame]), seen);
+
+    expect(seen).toHaveBeenCalledTimes(1);
   });
 
   it("accepts matching blob SHA-256 and rejects a digest mismatch", async () => {
