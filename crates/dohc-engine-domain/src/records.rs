@@ -214,6 +214,29 @@ pub struct WriteText {
     pub request_id: Option<String>,
 }
 
+/// Inputs to [`crate::VersionedTextStore::capture_ingest`].
+#[derive(Debug, Clone)]
+pub struct CaptureIngest {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub path: String,
+    pub text: String,
+    pub metadata_origin: String,
+    pub author_json: Option<String>,
+    pub now_ms: i64,
+    pub request_id: Option<String>,
+}
+
+/// Inputs to [`crate::VersionedTextStore::capture_retire`].
+#[derive(Debug, Clone)]
+pub struct CaptureRetire {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub path: String,
+    pub now_ms: i64,
+    pub request_id: Option<String>,
+}
+
 /// Inputs to [`crate::VersionedTextStore::delete_text_file`].
 #[derive(Debug, Clone)]
 pub struct DeleteTextFile {
@@ -266,7 +289,7 @@ pub struct CreateNamedVersion {
 pub struct WriteResult {
     pub snapshot: TextSnapshot,
     pub moment: MomentRecord,
-    /// True when the write replayed a previously-recorded request (exactly-once).
+    /// True when no new moment was needed (request replay or equal content).
     pub deduped: bool,
 }
 
@@ -276,6 +299,15 @@ pub struct DeleteResult {
     pub object: FileObjectRecord,
     pub before: TextSnapshot,
     pub moment: MomentRecord,
+}
+
+/// The result of [`crate::VersionedTextStore::capture_retire`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureRetireResult {
+    /// The canonical delete result, or `None` when the path was not present.
+    pub retired: Option<DeleteResult>,
+    /// True when a committed request or an already-absent path was replayed.
+    pub deduped: bool,
 }
 
 /// The result of a successful [`crate::VersionedTextStore::rename_text_file`].

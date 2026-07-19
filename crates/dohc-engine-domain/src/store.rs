@@ -16,10 +16,10 @@
 
 use crate::error::DomainError;
 use crate::records::{
-    CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord, ListMomentsQuery, MomentOp,
-    MomentPage, MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation,
-    SnapshotContent, SnapshotRecord, SnapshotView, TextSnapshot, VersionKind, VersionRecord,
-    WriteResult, WriteText,
+    CaptureIngest, CaptureRetire, CaptureRetireResult, CreateNamedVersion, DeleteResult,
+    DeleteTextFile, FileObjectRecord, ListMomentsQuery, MomentOp, MomentPage, MomentRecord,
+    RenameResult, RenameTextFile, RollbackTextFileMutation, SnapshotContent, SnapshotRecord,
+    SnapshotView, TextSnapshot, VersionKind, VersionRecord, WriteResult, WriteText,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
@@ -135,6 +135,39 @@ impl<'a> VersionedTextStore<'a> {
         let outcome = self
             .store
             .write_with(faults, |tx| write_text_in_tx(tx, input))?;
+        committed(outcome)
+    }
+
+    /// Capture a text file without caller-supplied object or moment ids.
+    ///
+    /// New objects use the full 64-character lowercase SHA-256 hex digest in
+    /// `object-<sha256(version_id || NUL || normalized_path)>`. Write moments
+    /// use `moment-<sha256(version_id || NUL || object_id || NUL ||
+    /// content_sha256 || NUL || before_latest_moment_id_or_empty)>`. Thus ids
+    /// are deterministic per history edge, stable across retries, and a revert
+    /// receives a different moment id from the earlier equal-content write.
+    /// Retires use `moment-<sha256(version_id || NUL || object_id || NUL ||
+    /// "DELETE" || NUL || before_latest_moment_id)>`, also with the full digest.
+    pub fn capture_ingest(
+        &mut self,
+        input: &CaptureIngest,
+        faults: &dyn FaultInjector,
+    ) -> Result<WriteResult, DomainError> {
+        let outcome = self
+            .store
+            .write_with(faults, |tx| capture_ingest_in_tx(tx, input))?;
+        committed(outcome)
+    }
+
+    /// Retire a captured path, returning an absent result when it is untracked.
+    pub fn capture_retire(
+        &mut self,
+        input: &CaptureRetire,
+        faults: &dyn FaultInjector,
+    ) -> Result<CaptureRetireResult, DomainError> {
+        let outcome = self
+            .store
+            .write_with(faults, |tx| capture_retire_in_tx(tx, input))?;
         committed(outcome)
     }
 
@@ -944,6 +977,7 @@ enum ForkPrep {
 /// A prior request recovered from the idempotency ledger.
 pub(crate) struct RecordedRequest {
     pub(crate) payload_hash: String,
+    pub(crate) result_seq: i64,
 }
 
 // ============================================================================
@@ -984,6 +1018,191 @@ fn normalized_delete_input(input: &DeleteTextFile) -> Result<DeleteTextFile, Dom
 #[doc(hidden)]
 pub fn validate_delete_input(input: &DeleteTextFile) -> Result<(), DomainError> {
     normalized_delete_input(input).map(|_| ())
+}
+
+fn normalized_capture_ingest(input: &CaptureIngest) -> Result<CaptureIngest, DomainError> {
+    non_empty(&input.workspace_id, "workspace_id")?;
+    non_empty(&input.version_id, "version_id")?;
+    let mut normalized = input.clone();
+    normalized.path = validate_plaintext_storable_path(&input.path)?;
+    validate_text(&normalized.text)?;
+    Ok(normalized)
+}
+
+fn normalized_capture_retire(input: &CaptureRetire) -> Result<CaptureRetire, DomainError> {
+    non_empty(&input.workspace_id, "workspace_id")?;
+    non_empty(&input.version_id, "version_id")?;
+    let mut normalized = input.clone();
+    normalized.path = validate_addressable_plaintext_path(&input.path)?;
+    Ok(normalized)
+}
+
+fn capture_ingest_in_tx(
+    tx: &Transaction<'_>,
+    input: &CaptureIngest,
+) -> Result<WriteResult, DomainError> {
+    let input = normalized_capture_ingest(input)?;
+    if !version_exists(tx, &input.workspace_id, &input.version_id)? {
+        return Err(DomainError::VersionNotFound);
+    }
+    let payload_hash = hash_fields(&[
+        b"capture-ingest",
+        input.workspace_id.as_bytes(),
+        input.version_id.as_bytes(),
+        input.path.as_bytes(),
+        input.text.as_bytes(),
+    ]);
+    if let Some(request_id) = &input.request_id
+        && let Some(recorded) = lookup_request(tx, request_id)?
+    {
+        if recorded.payload_hash != payload_hash {
+            return Err(DomainError::IdempotencyKeyReuseMismatch);
+        }
+        return reconstruct_capture_write(tx, &input.workspace_id, recorded.result_seq);
+    }
+
+    let object_id = match alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?
+    {
+        Some(object_id) => object_id,
+        None => {
+            let object_id = derive_capture_object_id(&input.version_id, &input.path);
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
+                 VALUES (?1, ?2, ?3)",
+                params![input.workspace_id, object_id, input.now_ms],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.execute(
+                "INSERT INTO path_aliases (workspace_id, version_id, path, object_id) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![input.workspace_id, input.version_id, input.path, object_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+            object_id
+        }
+    };
+    let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
+    let content_sha256 = text_blob_sha256(&input.text);
+    if let Some(before) = &before
+        && before.content_kind == "text"
+        && before.blob_sha256.as_deref() == Some(content_sha256.as_str())
+    {
+        let result = write_result_for_existing_head(tx, before)?;
+        record_request(
+            tx,
+            input.request_id.as_deref(),
+            &payload_hash,
+            result.moment.moment_order,
+            input.now_ms,
+        )?;
+        return Ok(result);
+    }
+
+    let moment_id = derive_capture_moment_id(
+        &input.version_id,
+        &object_id,
+        &content_sha256,
+        before
+            .as_ref()
+            .map(|snapshot| snapshot.latest_moment_id.as_str()),
+    );
+    let write = WriteText {
+        workspace_id: input.workspace_id.clone(),
+        version_id: input.version_id.clone(),
+        object_id,
+        path: input.path.clone(),
+        text: input.text.clone(),
+        moment_id,
+        metadata_origin: input.metadata_origin.clone(),
+        author_json: input.author_json.clone(),
+        now_ms: input.now_ms,
+        request_id: None,
+    };
+    let result = write_text_in_tx(tx, &write)?;
+    record_request(
+        tx,
+        input.request_id.as_deref(),
+        &payload_hash,
+        result.moment.moment_order,
+        input.now_ms,
+    )?;
+    Ok(result)
+}
+
+fn capture_retire_in_tx(
+    tx: &Transaction<'_>,
+    input: &CaptureRetire,
+) -> Result<CaptureRetireResult, DomainError> {
+    let input = normalized_capture_retire(input)?;
+    if !version_exists(tx, &input.workspace_id, &input.version_id)? {
+        return Err(DomainError::VersionNotFound);
+    }
+    let payload_hash = hash_fields(&[
+        b"capture-retire",
+        input.workspace_id.as_bytes(),
+        input.version_id.as_bytes(),
+        input.path.as_bytes(),
+    ]);
+    if let Some(request_id) = &input.request_id
+        && let Some(recorded) = lookup_request(tx, request_id)?
+    {
+        if recorded.payload_hash != payload_hash {
+            return Err(DomainError::IdempotencyKeyReuseMismatch);
+        }
+        let retired = if recorded.result_seq == 0 {
+            None
+        } else {
+            Some(reconstruct_capture_delete(
+                tx,
+                &input.workspace_id,
+                recorded.result_seq,
+            )?)
+        };
+        return Ok(CaptureRetireResult {
+            retired,
+            deduped: true,
+        });
+    }
+
+    let Some(object_id) = alias_object_id(tx, &input.workspace_id, &input.version_id, &input.path)?
+    else {
+        record_request(
+            tx,
+            input.request_id.as_deref(),
+            &payload_hash,
+            0,
+            input.now_ms,
+        )?;
+        return Ok(CaptureRetireResult {
+            retired: None,
+            deduped: false,
+        });
+    };
+    let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?
+        .ok_or(DomainError::FileNotFound)?;
+    let moment_id =
+        derive_capture_retire_moment_id(&input.version_id, &object_id, &before.latest_moment_id);
+    let delete = DeleteTextFile {
+        workspace_id: input.workspace_id.clone(),
+        version_id: input.version_id.clone(),
+        path: input.path,
+        moment_id,
+        metadata_origin: "capture".to_owned(),
+        author_json: None,
+        now_ms: input.now_ms,
+    };
+    let result = delete_text_in_tx(tx, &delete)?;
+    record_request(
+        tx,
+        input.request_id.as_deref(),
+        &payload_hash,
+        result.moment.moment_order,
+        input.now_ms,
+    )?;
+    Ok(CaptureRetireResult {
+        retired: Some(result),
+        deduped: false,
+    })
 }
 
 /// Apply an R05 text write inside a caller-owned compound transaction. R06
@@ -1171,6 +1390,39 @@ fn reconstruct_write(conn: &Connection, input: &WriteText) -> Result<WriteResult
             reason: "deduped write has no moment",
         },
     )?;
+    write_result_from_moment(conn, &input.workspace_id, moment, true)
+}
+
+fn reconstruct_capture_write(
+    conn: &Connection,
+    workspace_id: &str,
+    moment_order: i64,
+) -> Result<WriteResult, DomainError> {
+    let moment =
+        moment_by_order(conn, workspace_id, moment_order)?.ok_or(DomainError::StateCorrupt {
+            reason: "deduped capture has no moment",
+        })?;
+    write_result_from_moment(conn, workspace_id, moment, true)
+}
+
+fn write_result_for_existing_head(
+    conn: &Connection,
+    snapshot: &SnapshotRecord,
+) -> Result<WriteResult, DomainError> {
+    let moment = get_moment(conn, &snapshot.workspace_id, &snapshot.latest_moment_id)?.ok_or(
+        DomainError::StateCorrupt {
+            reason: "snapshot points at a missing moment",
+        },
+    )?;
+    write_result_from_moment(conn, &snapshot.workspace_id, moment, true)
+}
+
+fn write_result_from_moment(
+    conn: &Connection,
+    workspace_id: &str,
+    moment: MomentRecord,
+    deduped: bool,
+) -> Result<WriteResult, DomainError> {
     if moment.after_content_kind != "text" {
         return Err(DomainError::StateCorrupt {
             reason: "deduped text write points at non-text content",
@@ -1187,7 +1439,7 @@ fn reconstruct_write(conn: &Connection, input: &WriteText) -> Result<WriteResult
     })?;
     Ok(WriteResult {
         snapshot: TextSnapshot {
-            workspace_id: input.workspace_id.clone(),
+            workspace_id: workspace_id.to_owned(),
             version_id: moment.version_id.clone(),
             object_id: moment.object_id.clone(),
             path: moment.path.clone(),
@@ -1198,7 +1450,7 @@ fn reconstruct_write(conn: &Connection, input: &WriteText) -> Result<WriteResult
             metadata_origin: moment.metadata_origin.clone(),
         },
         moment,
-        deduped: true,
+        deduped,
     })
 }
 
@@ -1291,6 +1543,81 @@ pub fn delete_text_in_tx(
             author_json: input.author_json.clone(),
             sync_record_only: false,
         },
+    })
+}
+
+fn reconstruct_capture_delete(
+    conn: &Connection,
+    workspace_id: &str,
+    moment_order: i64,
+) -> Result<DeleteResult, DomainError> {
+    let moment =
+        moment_by_order(conn, workspace_id, moment_order)?.ok_or(DomainError::StateCorrupt {
+            reason: "deduped capture retire has no moment",
+        })?;
+    if moment.operation != MomentOp::Delete || !moment.before_present {
+        return Err(DomainError::StateCorrupt {
+            reason: "deduped capture retire points at a non-delete moment",
+        });
+    }
+    let object = get_file_object(conn, workspace_id, &moment.object_id)?.ok_or(
+        DomainError::StateCorrupt {
+            reason: "deduped capture retire points at a missing object",
+        },
+    )?;
+    let producer_id =
+        moment
+            .before_latest_moment_id
+            .as_deref()
+            .ok_or(DomainError::StateCorrupt {
+                reason: "deduped capture retire has no preimage producer",
+            })?;
+    let producer =
+        get_moment(conn, workspace_id, producer_id)?.ok_or(DomainError::StateCorrupt {
+            reason: "deduped capture retire preimage producer is missing",
+        })?;
+    let (text, blob_sha256) = match moment.before_content_kind.as_str() {
+        "text" => {
+            let sha = moment
+                .before_blob_sha256
+                .clone()
+                .ok_or(DomainError::StateCorrupt {
+                    reason: "deduped capture retire has no text preimage",
+                })?;
+            let text = blob_text(conn, &sha)?.ok_or(DomainError::StateCorrupt {
+                reason: "deduped capture retire preimage blob is missing",
+            })?;
+            (text, sha)
+        }
+        "binary" => (
+            String::new(),
+            moment
+                .before_binary_sha256
+                .clone()
+                .ok_or(DomainError::StateCorrupt {
+                    reason: "deduped capture retire has no binary preimage",
+                })?,
+        ),
+        _ => {
+            return Err(DomainError::StateCorrupt {
+                reason: "deduped capture retire has an unknown preimage kind",
+            });
+        }
+    };
+    Ok(DeleteResult {
+        object,
+        before: TextSnapshot {
+            workspace_id: workspace_id.to_owned(),
+            version_id: moment.version_id.clone(),
+            object_id: moment.object_id.clone(),
+            path: moment.path.clone(),
+            text,
+            blob_sha256,
+            updated_at_ms: producer.recorded_at_ms,
+            latest_moment_id: producer.moment_id,
+            metadata_origin: producer.metadata_origin,
+        },
+        moment,
     })
 }
 
@@ -2279,16 +2606,36 @@ fn get_moment(
     row.transpose()
 }
 
+fn moment_by_order(
+    conn: &Connection,
+    workspace_id: &str,
+    moment_order: i64,
+) -> Result<Option<MomentRecord>, DomainError> {
+    let moment_id = conn
+        .query_row(
+            "SELECT moment_id FROM moments WHERE workspace_id = ?1 AND moment_order = ?2",
+            params![workspace_id, moment_order],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    match moment_id {
+        Some(moment_id) => get_moment(conn, workspace_id, &moment_id),
+        None => Ok(None),
+    }
+}
+
 pub(crate) fn lookup_request(
     conn: &Connection,
     request_id: &str,
 ) -> Result<Option<RecordedRequest>, DomainError> {
     conn.query_row(
-        "SELECT payload_hash FROM engine_requests WHERE request_id = ?1",
+        "SELECT payload_hash, result_seq FROM engine_requests WHERE request_id = ?1",
         params![request_id],
         |row| {
             Ok(RecordedRequest {
                 payload_hash: row.get(0)?,
+                result_seq: row.get(1)?,
             })
         },
     )
@@ -2470,6 +2817,52 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
 pub fn text_blob_sha256(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
+    hex(&hasher.finalize())
+}
+
+/// Derive the stable object id for a newly captured version-local path.
+pub fn derive_capture_object_id(version_id: &str, path: &str) -> String {
+    format!("object-{}", hash_joined(&[version_id, path]))
+}
+
+/// Derive a capture write moment id from its complete history edge.
+pub fn derive_capture_moment_id(
+    version_id: &str,
+    object_id: &str,
+    content_sha256: &str,
+    before_latest_moment_id: Option<&str>,
+) -> String {
+    format!(
+        "moment-{}",
+        hash_joined(&[
+            version_id,
+            object_id,
+            content_sha256,
+            before_latest_moment_id.unwrap_or_default(),
+        ])
+    )
+}
+
+/// Derive a capture delete moment id from its complete history edge.
+pub fn derive_capture_retire_moment_id(
+    version_id: &str,
+    object_id: &str,
+    before_latest_moment_id: &str,
+) -> String {
+    format!(
+        "moment-{}",
+        hash_joined(&[version_id, object_id, "DELETE", before_latest_moment_id])
+    )
+}
+
+fn hash_joined(fields: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for (index, field) in fields.iter().enumerate() {
+        if index != 0 {
+            hasher.update([0u8]);
+        }
+        hasher.update(field.as_bytes());
+    }
     hex(&hasher.finalize())
 }
 
