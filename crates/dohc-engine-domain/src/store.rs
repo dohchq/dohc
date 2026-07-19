@@ -1697,9 +1697,16 @@ fn upsert_snapshot(conn: &Connection, snapshot: &SnapshotRecord) -> Result<(), D
 
 fn snapshot_view(snapshot: &SnapshotRecord) -> Result<SnapshotView, DomainError> {
     let content = match snapshot.content_kind.as_str() {
-        "text" => SnapshotContent::Text {
-            text: snapshot.text.clone(),
-        },
+        "text" => {
+            if snapshot.blob_sha256.is_none() {
+                return Err(DomainError::StateCorrupt {
+                    reason: "text snapshot is missing its blob",
+                });
+            }
+            SnapshotContent::Text {
+                text: snapshot.text.clone(),
+            }
+        }
         "binary" => SnapshotContent::Binary {
             sha256: snapshot
                 .binary_sha256
