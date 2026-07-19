@@ -34,9 +34,9 @@ mod common;
 
 use common::Scratch;
 use dohc_engine_files::{
-    CancellationToken, CaptureError, CaptureOp, CaptureSink, IngestReason, ManifestEntry,
-    PathClassification, ReconcileController, ReconcileRun, ScanBounds, ScanListing, ScanManifest,
-    ScanOutcome, Scanner, apply_then_ack, classify_engine_file_path, diff_scans,
+    CancellationToken, CaptureError, CaptureOp, CaptureSink, IngestOutcome, IngestReason,
+    ManifestEntry, PathClassification, ReconcileController, ReconcileRun, ScanBounds, ScanListing,
+    ScanManifest, ScanOutcome, Scanner, apply_then_ack, classify_engine_file_path, diff_scans,
 };
 use dohc_engine_storage::NoFaults;
 use serde::Deserialize;
@@ -344,12 +344,15 @@ impl CaptureSink for AcceptAll {
     fn ingest(
         &mut self,
         _path: &str,
-        _size: u64,
-        _sha256: &str,
+        size: u64,
+        sha256: &str,
         _media_type: &str,
         _reason: IngestReason,
-    ) -> Result<(), CaptureError> {
-        Ok(())
+    ) -> Result<IngestOutcome, CaptureError> {
+        Ok(IngestOutcome::Captured {
+            size,
+            sha256: sha256.to_owned(),
+        })
     }
 
     fn retire(&mut self, _path: &str) -> Result<(), CaptureError> {

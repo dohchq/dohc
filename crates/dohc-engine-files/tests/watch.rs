@@ -2,8 +2,8 @@ mod common;
 
 use common::Scratch;
 use dohc_engine_files::{
-    CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesHandle, IngestReason,
-    NativeWatcher, ReconcileRun, ScanBounds, WATCH_HARD_DEADLINE, WATCH_SETTLE,
+    CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesHandle, IngestOutcome,
+    IngestReason, NativeWatcher, ReconcileRun, ScanBounds, WATCH_HARD_DEADLINE, WATCH_SETTLE,
     apply_reconcile_plan,
 };
 use dohc_engine_storage::NoFaults;
@@ -17,12 +17,15 @@ impl CaptureSink for AcceptAll {
     fn ingest(
         &mut self,
         _path: &str,
-        _size: u64,
-        _sha256: &str,
+        size: u64,
+        sha256: &str,
         _media_type: &str,
         _reason: IngestReason,
-    ) -> Result<(), CaptureError> {
-        Ok(())
+    ) -> Result<IngestOutcome, CaptureError> {
+        Ok(IngestOutcome::Captured {
+            size,
+            sha256: sha256.to_owned(),
+        })
     }
 
     fn retire(&mut self, _path: &str) -> Result<(), CaptureError> {

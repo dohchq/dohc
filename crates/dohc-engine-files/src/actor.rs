@@ -93,8 +93,9 @@ enum Command {
         reply: oneshot::Sender<FilesStats>,
     },
     AcknowledgeCapture {
-        plan: ReconcilePlan,
-        result: CaptureApplyResult,
+        // Boxed: the receipt (plan + result) dwarfs every other command and
+        // would otherwise size the whole channel slot.
+        receipt: Box<(ReconcilePlan, CaptureApplyResult)>,
         reply: oneshot::Sender<Result<(), FilesError>>,
     },
     Close,
@@ -341,8 +342,7 @@ impl FilesHandle {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::AcknowledgeCapture {
-                plan,
-                result,
+                receipt: Box::new((plan, result)),
                 reply,
             })
             .await
@@ -465,16 +465,9 @@ fn worker_main(
                     hashed: gauge.hashed(),
                 });
             }
-            Command::AcknowledgeCapture {
-                plan,
-                result,
-                reply,
-            } => {
-                let _ = reply.send(controller.acknowledge_capture(
-                    &plan,
-                    &result.applied_paths,
-                    &result.failed_applies,
-                ));
+            Command::AcknowledgeCapture { receipt, reply } => {
+                let (plan, result) = &*receipt;
+                let _ = reply.send(controller.acknowledge_capture(plan, result));
             }
             Command::Close => {
                 state.store(LifecycleState::Draining.as_u8(), Ordering::Release);

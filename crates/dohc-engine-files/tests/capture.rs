@@ -2,8 +2,8 @@ mod common;
 
 use common::Scratch;
 use dohc_engine_files::{
-    CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesError, IngestReason,
-    ReconcileController, ReconcileRun, ScanBounds, Scanner, apply_then_ack,
+    CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesError, IngestOutcome,
+    IngestReason, ReconcileController, ReconcileRun, ScanBounds, Scanner, apply_then_ack,
 };
 use dohc_engine_storage::NoFaults;
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,26 +14,42 @@ struct IdempotentSink {
     moments: usize,
     calls: Vec<String>,
     fail: BTreeSet<String>,
+    not_owned: BTreeSet<String>,
+    /// Report THIS sha for a path instead of the plan's (models a re-reading
+    /// sink that captured newer bytes than the scan hashed).
+    reread_sha: BTreeMap<String, String>,
 }
 
 impl CaptureSink for IdempotentSink {
     fn ingest(
         &mut self,
         path: &str,
-        _size: u64,
+        size: u64,
         sha256: &str,
         _media_type: &str,
         _reason: IngestReason,
-    ) -> Result<(), CaptureError> {
+    ) -> Result<IngestOutcome, CaptureError> {
         self.calls.push(path.to_owned());
         if self.fail.contains(path) {
             return Err(CaptureError { reason: "injected" });
         }
-        if self.content.get(path).map(String::as_str) != Some(sha256) {
-            self.content.insert(path.to_owned(), sha256.to_owned());
+        if self.not_owned.contains(path) {
+            self.content.remove(path);
+            return Ok(IngestOutcome::NotOwned);
+        }
+        let actual = self
+            .reread_sha
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| sha256.to_owned());
+        if self.content.get(path) != Some(&actual) {
+            self.content.insert(path.to_owned(), actual.clone());
             self.moments += 1;
         }
-        Ok(())
+        Ok(IngestOutcome::Captured {
+            size,
+            sha256: actual,
+        })
     }
 
     fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
@@ -87,6 +103,124 @@ fn failed_apply_keeps_prior_manifest_entry_and_continues_the_batch() {
             .expect("retry prepare"),
     );
     assert!(matches!(retry.ops.as_slice(), [CaptureOp::Ingest { path, .. }] if path == "a.md"));
+}
+
+#[test]
+fn not_owned_ingest_is_acknowledged_but_forgotten_by_the_manifest() {
+    let ws = Scratch::new();
+    ws.write("owned.md", b"owned");
+    ws.write("opted-out.md", b"private");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let plan = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare"),
+    );
+    let mut sink = IdempotentSink {
+        not_owned: BTreeSet::from(["opted-out.md".to_owned()]),
+        ..IdempotentSink::default()
+    };
+    let result = apply_then_ack(&mut controller, &plan, &mut sink, &NoFaults).expect("ack");
+
+    assert_eq!(result.applied_paths, ["owned.md"]);
+    assert_eq!(result.not_owned_paths, ["opted-out.md"]);
+    assert!(result.failed_applies.is_empty());
+    assert!(
+        !result.degraded,
+        "a settled not-owned path is not a failure"
+    );
+    assert!(
+        !controller.is_dirty(),
+        "the disposition is settled, not retried"
+    );
+    assert!(controller.tracks_path("owned.md"));
+    assert!(
+        !controller.tracks_path("opted-out.md"),
+        "a not-owned path must never read as already-captured"
+    );
+
+    // Ownership returns (policy widened / content became ownable): the next
+    // dirty reconcile must re-emit the ingest because the manifest forgot it.
+    sink.not_owned.clear();
+    controller.mark_dirty();
+    let retry = completed(
+        controller
+            .reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
+            .expect("retry prepare"),
+    );
+    assert!(
+        matches!(retry.ops.as_slice(), [CaptureOp::Ingest { path, .. }] if path == "opted-out.md"),
+        "unchanged bytes must re-ingest once ownership returns: {:?}",
+        retry.ops
+    );
+    apply_then_ack(&mut controller, &retry, &mut sink, &NoFaults).expect("retry ack");
+    assert!(controller.tracks_path("opted-out.md"));
+}
+
+#[test]
+fn manifest_records_the_bytes_actually_captured_not_the_scan_hash() {
+    let ws = Scratch::new();
+    ws.write("raced.md", b"scan-time bytes");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let plan = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare"),
+    );
+    // The sink re-reads and captures NEWER bytes than the scan hashed.
+    let mut sink = IdempotentSink {
+        reread_sha: BTreeMap::from([("raced.md".to_owned(), "sha-of-newer-bytes".to_owned())]),
+        ..IdempotentSink::default()
+    };
+    apply_then_ack(&mut controller, &plan, &mut sink, &NoFaults).expect("ack");
+    assert!(!controller.is_dirty());
+
+    // The disk still holds the scan-time bytes: against a manifest that had
+    // recorded the stale scan hash this would diff clean and the newer
+    // captured bytes would silently stay authoritative forever.
+    controller.mark_dirty();
+    let retry = completed(
+        controller
+            .reconcile_if_dirty(&scanner, ws.path(), &CancellationToken::new())
+            .expect("retry prepare"),
+    );
+    assert!(
+        matches!(retry.ops.as_slice(), [CaptureOp::Ingest { path, .. }] if path == "raced.md"),
+        "manifest must have recorded the captured hash so the on-disk bytes re-ingest: {:?}",
+        retry.ops
+    );
+}
+
+#[test]
+fn previously_captured_path_that_turns_not_owned_is_dropped_from_the_manifest() {
+    let ws = Scratch::new();
+    ws.write("was-owned.md", b"v1");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let baseline = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("baseline prepare"),
+    );
+    let mut sink = IdempotentSink::default();
+    apply_then_ack(&mut controller, &baseline, &mut sink, &NoFaults).expect("baseline ack");
+    assert!(controller.tracks_path("was-owned.md"));
+
+    ws.write("was-owned.md", b"v2");
+    sink.not_owned.insert("was-owned.md".to_owned());
+    let plan = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare"),
+    );
+    apply_then_ack(&mut controller, &plan, &mut sink, &NoFaults).expect("ack");
+    assert!(
+        !controller.tracks_path("was-owned.md"),
+        "the stale captured entry must not survive a not-owned disposition"
+    );
+    assert!(!controller.is_dirty());
 }
 
 #[test]

@@ -408,13 +408,17 @@ impl ReconcileController {
         self.reconcile(scanner, root, token)
     }
 
-    /// Advance the manifest only for successfully applied paths. Called by the
-    /// capture module after the sink phase; stale receipts fail closed.
+    /// Advance the manifest only for acknowledged paths. Called by the capture
+    /// module after the sink phase; stale receipts fail closed. Applied ingests
+    /// record the plan's hash, applied retires remove the path, and
+    /// [`IngestOutcome::NotOwned`](crate::capture::IngestOutcome) dispositions
+    /// FORGET the path — a not-owned path must never read as already-captured,
+    /// or a later ownership change (policy widened, content became ownable
+    /// again) would silently skip its re-ingest.
     pub(crate) fn acknowledge_capture(
         &mut self,
         plan: &ReconcilePlan,
-        applied_paths: &[String],
-        failed_applies: &[String],
+        result: &crate::capture::CaptureApplyResult,
     ) -> Result<(), FilesError> {
         if !self.outstanding
             || plan.from_generation != self.generation
@@ -422,29 +426,49 @@ impl ReconcileController {
         {
             return Err(FilesError::StaleReconcilePlan);
         }
-        let applied: BTreeSet<&str> = applied_paths.iter().map(String::as_str).collect();
+        let applied: BTreeSet<&str> = result.applied_paths.iter().map(String::as_str).collect();
+        let not_owned: BTreeSet<&str> = result.not_owned_paths.iter().map(String::as_str).collect();
+        let captured: std::collections::BTreeMap<&str, (u64, &str)> = result
+            .captured
+            .iter()
+            .map(|c| (c.path.as_str(), (c.size, c.sha256.as_str())))
+            .collect();
         let mut next = self.manifest.clone();
         for op in &plan.ops {
+            if not_owned.contains(op.path()) {
+                next.remove(op.path());
+                continue;
+            }
             if !applied.contains(op.path()) {
                 continue;
             }
             match op {
-                CaptureOp::Ingest {
-                    path, size, sha256, ..
-                } => next.insert(
-                    path.clone(),
-                    ManifestEntry {
-                        size: *size,
-                        sha256: sha256.clone(),
-                    },
-                ),
+                CaptureOp::Ingest { path, .. } => {
+                    // A re-reading sink can persist newer bytes than the scan
+                    // hashed; record what was ACTUALLY captured so a later
+                    // revert to the scan-time bytes still diffs as a change.
+                    // A receipt claiming an applied ingest WITHOUT its captured
+                    // identity is malformed — falling back to the scan hash
+                    // would recreate the exact lost-capture bug this exists to
+                    // prevent, so it fails closed before any state advances.
+                    let Some((size, sha)) = captured.get(path.as_str()) else {
+                        return Err(FilesError::InvalidCaptureReceipt { path: path.clone() });
+                    };
+                    next.insert(
+                        path.clone(),
+                        ManifestEntry {
+                            size: *size,
+                            sha256: (*sha).to_owned(),
+                        },
+                    );
+                }
                 CaptureOp::Retire { path } => next.remove(path),
             }
         }
         self.manifest = next;
         self.generation = plan.to_generation;
         self.outstanding = false;
-        self.update_degraded_retry_state(plan, failed_applies);
+        self.update_degraded_retry_state(plan, &result.failed_applies);
         Ok(())
     }
 

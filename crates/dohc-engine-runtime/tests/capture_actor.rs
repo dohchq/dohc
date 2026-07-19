@@ -39,6 +39,7 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
                 path: "notes/a.md".to_owned(),
                 now_ms: 20,
                 request_id: Some("actor-retire-request".to_owned()),
+                only_if_text_head: false,
             },
             Arc::new(NoFaults),
         )
@@ -81,6 +82,7 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
                 path: "notes/async.md".to_owned(),
                 now_ms: 20,
                 request_id: Some("actor-async-retire-request".to_owned()),
+                only_if_text_head: false,
             },
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -149,6 +151,7 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
                 path: "notes/retained.md".to_owned(),
                 now_ms: 40,
                 request_id: None,
+                only_if_text_head: false,
             },
             Arc::new(NoFaults),
             cancelled,

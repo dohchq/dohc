@@ -29,6 +29,7 @@ fn retire(path: &str, now_ms: i64) -> CaptureRetire {
         path: path.to_owned(),
         now_ms,
         request_id: None,
+        only_if_text_head: false,
     }
 }
 
@@ -389,4 +390,53 @@ fn request_id_reuse_with_changed_capture_provenance_is_rejected() {
 
     assert!(matches!(error, DomainError::IdempotencyKeyReuseMismatch));
     assert_eq!(moment_count(&mut store), 1);
+}
+
+#[test]
+fn retire_only_if_text_head_never_deletes_a_binary_head() {
+    use dohc_engine_domain::{WriteBinaryFile, write_binary_file_in_tx};
+    use dohc_engine_storage::{Preimage, hex_sha256, put_binary_blob};
+
+    let (_scratch, mut store) = open_store();
+    let bytes = [0xffu8, 0x00, 0xfe];
+    let sha = hex_sha256(&bytes);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            put_binary_blob(tx, &bytes).map_err(DomainError::from)?;
+            write_binary_file_in_tx(
+                tx,
+                &WriteBinaryFile {
+                    workspace_id: WS.to_owned(),
+                    version_id: VERSION.to_owned(),
+                    object_id: "bin-object-1".to_owned(),
+                    path: "photo.png".to_owned(),
+                    binary_sha256: sha.clone(),
+                    job_id: "binjob-1".to_owned(),
+                    preimage: Preimage::Absent,
+                    now_ms: 10,
+                },
+            )
+        })
+        .expect("binary head");
+
+    // The plaintext sink's text-only retire must be a no-op on a live binary
+    // head — the binary owner's state is not the text plane's to delete.
+    let result = VersionedTextStore::new(&mut store)
+        .capture_retire(
+            &CaptureRetire {
+                only_if_text_head: true,
+                ..retire("photo.png", 20)
+            },
+            &NO_FAULTS,
+        )
+        .expect("text-only retire settles as a no-op");
+    assert!(result.retired.is_none());
+    assert!(!result.deduped);
+
+    // The unconditional retire still owns the full lifecycle (file gone from
+    // disk retires whatever head remains).
+    let result = VersionedTextStore::new(&mut store)
+        .capture_retire(&retire("photo.png", 30), &NO_FAULTS)
+        .expect("full retire");
+    assert!(result.retired.is_some());
 }

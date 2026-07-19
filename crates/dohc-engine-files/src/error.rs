@@ -76,6 +76,12 @@ pub enum FilesError {
     /// The native watcher could not be created, attached, or joined.
     #[error("native workspace watcher is unavailable: {reason}")]
     WatcherUnavailable { reason: &'static str },
+
+    /// A capture receipt claimed an applied ingest without reporting the
+    /// captured content identity. Recording the scan-time hash instead would
+    /// recreate the rapid-write lost-capture bug, so the ack fails closed.
+    #[error("capture receipt is missing the captured identity for applied ingest: {path}")]
+    InvalidCaptureReceipt { path: String },
 }
 
 impl FilesError {
@@ -102,6 +108,7 @@ impl FilesError {
             FilesError::DeadlineExceeded => "deadline-exceeded",
             FilesError::StaleReconcilePlan => "stale-reconcile-plan",
             FilesError::WatcherUnavailable { .. } => "watcher-unavailable",
+            FilesError::InvalidCaptureReceipt { .. } => "invalid-capture-receipt",
         }
     }
 }
