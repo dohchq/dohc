@@ -1,6 +1,7 @@
 use dohc_engine_runtime::{
     CancellationToken, CaptureIngest, CaptureRetire, NoFaults, RuntimeError, WorkspaceSupervisor,
 };
+use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
 use std::sync::Arc;
 
@@ -88,6 +89,24 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
         .expect("async retire");
     assert!(retired.retired.is_some());
 
+    let retained = handle
+        .capture_ingest(
+            CaptureIngest {
+                workspace_id: "ws-actor-async-capture".to_owned(),
+                version_id: "main".to_owned(),
+                path: "notes/retained.md".to_owned(),
+                text: "must survive cancelled retire".to_owned(),
+                metadata_origin: "actor-test".to_owned(),
+                author_json: None,
+                now_ms: 25,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("capture retained path");
+
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     let error = handle
@@ -109,5 +128,85 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
         .expect_err("pre-cancelled capture must fail");
     assert!(matches!(error, RuntimeError::Cancelled));
 
+    let cancelled_read = handle
+        .versioned_text_read(
+            "ws-actor-async-capture".to_owned(),
+            "main".to_owned(),
+            "notes/cancelled.md".to_owned(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("read cancelled ingest path");
+    assert!(cancelled_read.is_none());
+
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let error = handle
+        .capture_retire(
+            CaptureRetire {
+                workspace_id: "ws-actor-async-capture".to_owned(),
+                version_id: "main".to_owned(),
+                path: "notes/retained.md".to_owned(),
+                now_ms: 40,
+                request_id: None,
+            },
+            Arc::new(NoFaults),
+            cancelled,
+        )
+        .await
+        .expect_err("pre-cancelled retire must fail");
+    assert!(matches!(error, RuntimeError::Cancelled));
+
+    let retained_read = handle
+        .versioned_text_read(
+            "ws-actor-async-capture".to_owned(),
+            "main".to_owned(),
+            "notes/retained.md".to_owned(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("read retained path")
+        .expect("retained path must remain present");
+    assert_eq!(retained_read, retained.snapshot);
+
     supervisor.close(&db).expect("close actor");
+
+    let store = EngineStore::open(&db, 50).expect("reopen store");
+    let (cancelled_snapshots, cancelled_moments, retained_snapshots, retained_moments): (
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots WHERE workspace_id = ?1 \
+                     AND version_id = ?2 AND path = ?3",
+                    ["ws-actor-async-capture", "main", "notes/cancelled.md"],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE workspace_id = ?1 \
+                     AND version_id = ?2 AND path = ?3",
+                    ["ws-actor-async-capture", "main", "notes/cancelled.md"],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots WHERE workspace_id = ?1 \
+                     AND version_id = ?2 AND path = ?3",
+                    ["ws-actor-async-capture", "main", "notes/retained.md"],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE workspace_id = ?1 \
+                     AND version_id = ?2 AND path = ?3",
+                    ["ws-actor-async-capture", "main", "notes/retained.md"],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("capture persistence counts");
+    assert_eq!((cancelled_snapshots, cancelled_moments), (0, 0));
+    assert_eq!((retained_snapshots, retained_moments), (1, 1));
 }

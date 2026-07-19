@@ -1357,6 +1357,15 @@ CREATE INDEX idx_moments_object_order ON moments(workspace_id, object_id, moment
 /// The `id` of the binary-head migration.
 pub(crate) const BINARY_HEAD_MIGRATION_ID: &str = "v1-binary-head";
 
+/// Ordinal 11. Supports capture reconciliation's reverse alias lookup without
+/// scanning every alias in the workspace for each newly discovered file.
+const V1_PATH_ALIASES_OBJECT_INDEX_DDL: &str = "\
+CREATE INDEX idx_path_aliases_workspace_object ON path_aliases(workspace_id, object_id);
+";
+
+/// The `id` of the reverse path-alias lookup migration.
+pub(crate) const PATH_ALIASES_OBJECT_INDEX_MIGRATION_ID: &str = "v1-path-aliases-object-index";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1435,6 +1444,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: BINARY_HEAD_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_BINARY_HEAD_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 11,
+        id: PATH_ALIASES_OBJECT_INDEX_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_PATH_ALIASES_OBJECT_INDEX_DDL,
         sets_user_version: None,
     },
 ];
@@ -1744,11 +1760,11 @@ mod tests {
     // waiting for a real future schema change.
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     fn two_migrations() -> Vec<Migration> {
-        // The frozen list now ends at ordinal 10 (binary heads), so a
-        // synthetic probe appends at ordinal 11.
+        // The frozen list now ends at ordinal 11 (reverse alias lookup), so a
+        // synthetic probe appends at ordinal 12.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 11,
+            ordinal: 12,
             id: "r04-probe",
             kind: MigrationKind::Transactional,
             sql: M2_SQL,
@@ -1757,7 +1773,7 @@ mod tests {
         v
     }
 
-    /// Count of frozen baseline migrations through the binary-head rebuild.
+    /// Count of frozen baseline migrations through the reverse alias index.
     const BASELINE_COUNT: u32 = BASELINE_MIGRATIONS.len() as u32;
 
     #[test]
@@ -1886,7 +1902,7 @@ mod tests {
             .expect("pre-R06 table probe");
         assert!(before.is_none());
 
-        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults)
             .expect("apply R06, shadow fence, binary conflict sides, and binary head");
         assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 4 });
         let objects: i64 = conn
@@ -2257,21 +2273,68 @@ mod tests {
     }
 
     #[test]
-    fn fresh_store_reaches_binary_head_migration() {
+    fn fresh_store_reaches_path_aliases_object_index_migration() {
         let dir = tempdir();
         let path = dir.join("engine.db");
         let ctx = MigrationContext::current(1_900);
         let mut conn = open_bare(&path);
 
         let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("apply baseline through binary heads");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 11 });
+            .expect("apply baseline through reverse alias index");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 12 });
         let max_ordinal: i64 = conn
             .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
                 row.get(0)
             })
             .expect("latest migration ordinal");
-        assert_eq!(max_ordinal, 10);
+        assert_eq!(max_ordinal, 11);
+        let index_present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' \
+                 AND name = 'idx_path_aliases_workspace_object'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("reverse alias index");
+        assert_eq!(index_present, 1);
+    }
+
+    #[test]
+    fn path_aliases_object_index_migration_upgrades_existing_store() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(1_900);
+        let mut conn = open_bare(&path);
+
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults)
+            .expect("migrate through ordinal 10");
+        let before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' \
+                 AND name = 'idx_path_aliases_workspace_object'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("index absent before ordinal 11");
+        assert_eq!(before, 0);
+
+        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("apply reverse alias index migration");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+        let columns: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_index_info('idx_path_aliases_workspace_object') ORDER BY seqno")
+            .expect("prepare reverse alias index columns")
+            .query_map([], |row| row.get(0))
+            .expect("query reverse alias index columns")
+            .collect::<rusqlite::Result<_>>()
+            .expect("collect reverse alias index columns");
+        assert_eq!(columns, ["workspace_id", "object_id"]);
+        let max_ordinal: i64 = conn
+            .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("latest migration ordinal");
+        assert_eq!(max_ordinal, 11);
     }
 
     #[test]
@@ -2328,7 +2391,7 @@ mod tests {
         let before_fork_bases = dump_table_rows(&conn, "fork_base_snapshots");
         let before_moments = dump_table_rows(&conn, "moments");
 
-        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults)
             .expect("apply binary-head migration");
         assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
 
@@ -2437,7 +2500,7 @@ mod tests {
         conn.pragma_update(None, "foreign_keys", true)
             .expect("re-enable foreign keys");
 
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults)
             .expect_err("dangling blob reference must abort all three rebuilds");
         for (table, column) in [
             ("snapshots", "content_kind"),
@@ -2488,7 +2551,7 @@ mod tests {
             [],
         )
         .expect("restore missing blob");
-        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults)
             .expect("remediated store migrates cleanly");
         assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
     }
@@ -2503,7 +2566,7 @@ mod tests {
         let mut conn = open_bare(path);
         conn.pragma_update(None, "foreign_keys", true)
             .expect("enable foreign keys");
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults)
             .expect("migrate to ordinal 10");
         conn.execute_batch(
             "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
@@ -2648,7 +2711,7 @@ mod tests {
                  VALUES ('ws', 1, 'm', 'main', 'obj', 'p', 3, 'write', 'b', 1, 'user');",
             )
             .expect("seed v9");
-        run_migrations(&mut migrated, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("to v10");
+        run_migrations(&mut migrated, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults).expect("to v10");
 
         // foreign_key_check must be clean.
         let fk_violations: i64 = migrated
@@ -2667,7 +2730,7 @@ mod tests {
         fresh
             .pragma_update(None, "foreign_keys", true)
             .expect("fk on");
-        run_migrations(&mut fresh, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("fresh v10");
+        run_migrations(&mut fresh, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults).expect("fresh v10");
 
         for table in ["snapshots", "fork_base_snapshots", "moments"] {
             // Column definitions (name, type, notnull, dflt, pk) must match.
@@ -2752,10 +2815,10 @@ mod tests {
         let mut conn = open_bare(&path);
         conn.pragma_update(None, "foreign_keys", true)
             .expect("fk on");
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("to v10");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults).expect("to v10");
         let before = dump_table_rows(&conn, "moments");
-        let rerun =
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("rerun no-op");
+        let rerun = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults)
+            .expect("rerun no-op");
         assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });
         assert_eq!(dump_table_rows(&conn, "moments"), before);
         let max_ordinal: i64 = conn
@@ -2789,7 +2852,7 @@ mod tests {
              ) VALUES ('ws', 1, 'm', 'main', 'obj', 'p', 3, 'write', 'b', 1, 'user');",
         )
         .expect("seed moment with NULL author_json/sync_record_only/before_blob_sha256");
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("v10");
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults).expect("v10");
         let (author, sync_only, before_blob): (Option<String>, Option<i64>, Option<String>) = conn
             .query_row(
                 "SELECT author_json, sync_record_only, before_blob_sha256 FROM moments WHERE moment_id='m'",
@@ -2880,10 +2943,10 @@ mod tests {
         // (3), the search migration (4), the moment-link migration (5), the
         // sync migration (6), conflicts migration (7), shadow-clone migration
         // (8), binary-conflict-sides migration (9), binary-head migration (10),
-        // AND the probe (11).
+        // reverse alias index migration (11), AND the probe (12).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 11 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 12 });
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -2980,7 +3043,7 @@ mod tests {
         }
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 11,
+            ordinal: 12,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
@@ -2998,7 +3061,7 @@ mod tests {
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();
         changed.push(Migration {
-            ordinal: 11,
+            ordinal: 12,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
@@ -3018,7 +3081,7 @@ mod tests {
         // baseline first (transactional), then a non-transactional idempotent step.
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 11,
+            ordinal: 12,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",

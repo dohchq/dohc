@@ -371,12 +371,21 @@ fn request_id_reuse_with_changed_capture_provenance_is_rejected() {
         .capture_ingest(&first, &NO_FAULTS)
         .expect("first capture");
 
-    let mut changed = first;
+    let mut changed = first.clone();
     changed.metadata_origin = "different-origin".to_owned();
     changed.now_ms = 20;
     let error = VersionedTextStore::new(&mut store)
         .capture_ingest(&changed, &NO_FAULTS)
         .expect_err("changed provenance must not replay");
+
+    assert!(matches!(error, DomainError::IdempotencyKeyReuseMismatch));
+
+    let mut changed_author = first;
+    changed_author.author_json = Some(r#"{"name":"different-author"}"#.to_owned());
+    changed_author.now_ms = 30;
+    let error = VersionedTextStore::new(&mut store)
+        .capture_ingest(&changed_author, &NO_FAULTS)
+        .expect_err("changed author provenance must not replay");
 
     assert!(matches!(error, DomainError::IdempotencyKeyReuseMismatch));
     assert_eq!(moment_count(&mut store), 1);

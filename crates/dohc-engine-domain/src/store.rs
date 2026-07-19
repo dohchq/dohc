@@ -1146,7 +1146,11 @@ fn capture_ingest_in_tx(
         request_id: None,
     };
     let result = write_text_in_tx(tx, &write)?;
-    debug_assert_eq!(result.moment.moment_order, next_order);
+    if result.moment.moment_order != next_order {
+        return Err(DomainError::StateCorrupt {
+            reason: "capture moment order diverged from reserved order",
+        });
+    }
     record_request(
         tx,
         input.request_id.as_deref(),
@@ -1221,7 +1225,11 @@ fn capture_retire_in_tx(
         now_ms: input.now_ms,
     };
     let result = delete_text_in_tx(tx, &delete)?;
-    debug_assert_eq!(result.moment.moment_order, next_order);
+    if result.moment.moment_order != next_order {
+        return Err(DomainError::StateCorrupt {
+            reason: "capture moment order diverged from reserved order",
+        });
+    }
     record_request(
         tx,
         input.request_id.as_deref(),
