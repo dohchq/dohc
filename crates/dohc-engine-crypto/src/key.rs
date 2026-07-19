@@ -101,11 +101,30 @@ pub fn load_or_create_key_file(root: &std::path::Path) -> Result<SecretDataKey, 
     }
 }
 
+/// A key file is ~60 bytes; anything past this bound is not a key file and
+/// must fail closed BEFORE buffering (a planted multi-GB `secret.key` must
+/// not balloon memory just to fail the parse).
+const MAX_KEY_FILE_BYTES: u64 = 4096;
+
+/// Read up to the bound from an already-opened, already-validated descriptor.
+fn read_bounded(file: &mut std::fs::File) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut content = String::new();
+    file.take(MAX_KEY_FILE_BYTES.saturating_add(1))
+        .read_to_string(&mut content)?;
+    if content.len() as u64 > MAX_KEY_FILE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "secret key file exceeds the key-file bound",
+        ));
+    }
+    Ok(content)
+}
+
 /// Read the key file WITHOUT following a symlink at the leaf, bound to the
 /// opened descriptor. Serves the publish read-backs; `load_key_file` opens
 /// its own descriptor so the 0600 re-tighten can be descriptor-bound too.
 fn read_key_file_no_follow(path: &std::path::Path) -> std::io::Result<String> {
-    use std::io::Read;
     let mut file = open_no_follow(path)?;
     let metadata = file.metadata()?;
     if !metadata.file_type().is_file() {
@@ -114,35 +133,27 @@ fn read_key_file_no_follow(path: &std::path::Path) -> std::io::Result<String> {
             "secret key file must be a regular file",
         ));
     }
-    let mut content = String::new();
-    file.read_to_string(&mut content)?;
-    Ok(content)
+    read_bounded(&mut file)
 }
 
 #[cfg(unix)]
 fn open_no_follow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    use std::os::unix::fs::MetadataExt;
-    // This crate carries no libc dependency for O_NOFOLLOW, so the race is
-    // closed by identity instead: lstat refuses an at-rest symlink, and the
-    // OPENED descriptor must describe the very inode the lstat saw — a leaf
-    // swapped to a symlink between the two resolves to a different inode and
-    // is refused.
-    let pre = std::fs::symlink_metadata(path)?;
-    if pre.file_type().is_symlink() {
-        return Err(std::io::Error::new(
+    use std::os::unix::fs::OpenOptionsExt;
+    // O_NOFOLLOW: a symlink leaf is refused BY THE KERNEL at open time (no
+    // check-then-open race). O_NONBLOCK: a FIFO swapped in cannot block the
+    // open; the is_file check below then refuses it.
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => Ok(file),
+        Err(err) if err.raw_os_error() == Some(libc::ELOOP) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "secret key file must not be a symlink",
-        ));
+        )),
+        Err(err) => Err(err),
     }
-    let file = std::fs::OpenOptions::new().read(true).open(path)?;
-    let post = file.metadata()?;
-    if pre.dev() != post.dev() || pre.ino() != post.ino() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "secret key file changed identity during open",
-        ));
-    }
-    Ok(file)
 }
 
 #[cfg(windows)]
@@ -176,8 +187,11 @@ pub fn load_key_file(root: &std::path::Path) -> Result<Option<SecretDataKey>, Cr
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(CryptoError::KeyFileMalformed),
     };
+    // The file exists: its directory must be the workspace's REAL
+    // `.dohc/engine` (a symlinked ancestor would mean this key belongs to
+    // some OTHER tree). Same strict-equality rule as the mint path.
+    verify_key_dir(root)?;
     let read = (|| -> std::io::Result<String> {
-        use std::io::Read;
         let metadata = file.metadata()?;
         if !metadata.file_type().is_file() {
             return Err(std::io::Error::new(
@@ -185,9 +199,7 @@ pub fn load_key_file(root: &std::path::Path) -> Result<Option<SecretDataKey>, Cr
                 "secret key file must be a regular file",
             ));
         }
-        let mut content = String::new();
-        file.read_to_string(&mut content)?;
-        Ok(content)
+        read_bounded(&mut file)
     })();
     let content = match read {
         Ok(content) => Zeroizing::new(content),
@@ -195,15 +207,52 @@ pub fn load_key_file(root: &std::path::Path) -> Result<Option<SecretDataKey>, Cr
     };
     // Tighten permissions BEFORE parsing (a malformed-but-readable file must
     // not stay world-readable just because the parse fails closed), and
-    // DESCRIPTOR-BOUND: `File::set_permissions` is fchmod-equivalent, so a
-    // leaf swapped in after the open can never receive the chmod.
+    // DESCRIPTOR-BOUND (fchmod-equivalent). If the mode cannot be verified
+    // tight afterwards — a foreign-owned restored file — fail CLOSED rather
+    // than operate with a key other local users can read.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = file.set_permissions(std::fs::Permissions::from_mode(0o600));
+        let mode = file
+            .metadata()
+            .map_err(|_| CryptoError::KeyFileMalformed)?
+            .permissions()
+            .mode();
+        if mode & 0o077 != 0 {
+            return Err(CryptoError::KeyFileMalformed);
+        }
     }
     let key = SecretDataKey::parse_key_file(&content)?;
     Ok(Some(key))
+}
+
+/// The key directory must canonicalize to the workspace's REAL lexical
+/// `.dohc/engine` — never an aliased tree. Shared by load and mint.
+fn verify_key_dir(root: &std::path::Path) -> Result<(), CryptoError> {
+    let parent = root
+        .join(SECRET_KEY_FILE_RELATIVE)
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or(CryptoError::KeyFileMalformed)?;
+    let real_parent = parent
+        .canonicalize()
+        .map_err(|_| CryptoError::KeyFileMalformed)?;
+    let mut expected = root
+        .canonicalize()
+        .map_err(|_| CryptoError::KeyFileMalformed)?;
+    for segment in std::path::Path::new(SECRET_KEY_FILE_RELATIVE)
+        .parent()
+        .into_iter()
+        .flat_map(|p| p.components())
+    {
+        expected.push(segment);
+    }
+    if real_parent == expected {
+        Ok(())
+    } else {
+        Err(CryptoError::KeyFileMalformed)
+    }
 }
 
 /// Mint and durably publish a fresh workspace data key. CALLER CONTRACT: only
@@ -227,27 +276,13 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
         builder
             .create(parent)
             .map_err(|_| CryptoError::KeyFileMalformed)?;
-        // The key directory must be the workspace's REAL `.dohc/engine` —
-        // an aliased `.dohc` (symlinked ancestor) would redirect key custody
-        // off-workspace. Strict equality against the canonicalized lexical
-        // location, the same rule the capture sink applies to content paths.
-        let real_parent = parent
-            .canonicalize()
-            .map_err(|_| CryptoError::KeyFileMalformed)?;
-        let mut expected = root
-            .canonicalize()
-            .map_err(|_| CryptoError::KeyFileMalformed)?;
-        for segment in std::path::Path::new(SECRET_KEY_FILE_RELATIVE)
-            .parent()
-            .into_iter()
-            .flat_map(|p| p.components())
-        {
-            expected.push(segment);
-        }
-        if real_parent != expected {
-            return Err(CryptoError::KeyFileMalformed);
-        }
     }
+    // The key directory must be the workspace's REAL `.dohc/engine` — an
+    // aliased `.dohc` would redirect key custody off-workspace. (An ancestor
+    // swapped BETWEEN this check and the writes below is the same documented
+    // residual as the capture sink's: fully closing it needs openat/dirfd
+    // APIs deliberately out of scope pre-cutover.)
+    verify_key_dir(root)?;
     // DURABLE publish: temp (0600) + fsync + hard-link. The key file must
     // be durably on disk BEFORE any ciphertext is committed under it —
     // a crash that lost a visible-but-unflushed key would strand every
@@ -314,14 +349,16 @@ pub fn create_key_file(root: &std::path::Path) -> Result<SecretDataKey, CryptoEr
             }
         }
     }
-    // Durability of the PUBLISH itself: fsync the parent directory
-    // where the platform allows it (std cannot open directories on
-    // Windows; NTFS metadata journaling is the best effort there).
+    // Durability of the PUBLISH itself: fsync the parent directory where the
+    // platform allows it (std cannot open directories on Windows; NTFS
+    // metadata journaling is the best effort there). A FAILED directory sync
+    // must fail the mint — returning a key whose publish may not survive a
+    // crash would let ciphertext commit under a possibly-vanishing key.
     #[cfg(unix)]
-    if let Some(parent) = path.parent()
-        && let Ok(dir) = std::fs::File::open(parent)
     {
-        let _ = dir.sync_all();
+        let parent = path.parent().ok_or(CryptoError::KeyFileMalformed)?;
+        let dir = std::fs::File::open(parent).map_err(|_| CryptoError::KeyFileMalformed)?;
+        dir.sync_all().map_err(|_| CryptoError::KeyFileMalformed)?;
     }
     // Return what is DURABLY at the path — under any interleaving the
     // published file is the single source of truth.
