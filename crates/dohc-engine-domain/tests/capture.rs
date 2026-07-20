@@ -836,3 +836,79 @@ fn deduped_capture_marks_the_confirmed_head_as_materialized() {
         "disk must keep the confirmed bytes"
     );
 }
+
+#[test]
+fn the_capture_origin_is_reserved_on_the_public_write_path() {
+    use dohc_engine_domain::{WriteText, validate_write_input};
+
+    // A caller must not be able to FORGE capture ownership: a write claiming
+    // the reserved origin would be seeded as capture-owned on the next open
+    // and retired for having no disk counterpart.
+    let forged = WriteText {
+        workspace_id: WS.to_owned(),
+        version_id: VERSION.to_owned(),
+        object_id: "obj-forged".to_owned(),
+        path: "forged.md".to_owned(),
+        text: "written by an RPC caller".to_owned(),
+        moment_id: "m-forged".to_owned(),
+        metadata_origin: "capture".to_owned(),
+        author_json: None,
+        now_ms: 10,
+        request_id: None,
+    };
+    let err = validate_write_input(&forged).expect_err("reserved origin must be refused");
+    assert!(matches!(err, DomainError::InvalidInput { .. }));
+
+    // Every ordinary origin still passes.
+    let ordinary = WriteText {
+        metadata_origin: "api".to_owned(),
+        ..forged
+    };
+    validate_write_input(&ordinary).expect("ordinary origins are unaffected");
+}
+
+#[test]
+fn a_claimed_dedupe_transfers_ownership_to_capture() {
+    let (_scratch, mut store) = open_store();
+    // A foreign writer establishes the head.
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: WS.to_owned(),
+                version_id: VERSION.to_owned(),
+                object_id: "obj-shared".to_owned(),
+                path: "shared.md".to_owned(),
+                text: "same bytes".to_owned(),
+                moment_id: "m-foreign".to_owned(),
+                metadata_origin: "api".to_owned(),
+                author_json: None,
+                now_ms: 10,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("foreign write");
+
+    // Capture OBSERVES the same bytes on disk (a claimed capture that
+    // dedupes). Ownership must transfer, or later disk-driven retires stay
+    // blocked forever against a head capture legitimately claimed.
+    let mut claimed = ingest("shared.md", "same bytes", 20);
+    claimed.claim_foreign_head = true;
+    VersionedTextStore::new(&mut store)
+        .capture_ingest(&claimed, &NO_FAULTS)
+        .expect("claimed dedupe");
+
+    let origin: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT metadata_origin FROM snapshots WHERE workspace_id = ?1 AND path = ?2",
+                [WS, "shared.md"],
+                |row| row.get(0),
+            )
+        })
+        .expect("head origin");
+    assert_eq!(
+        origin, "capture-test",
+        "a claimed dedupe must transfer ownership to the claiming writer"
+    );
+}

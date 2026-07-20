@@ -24,9 +24,8 @@
 
 use crate::capture_sink::StoreCaptureSink;
 use dohc_engine_files::{
-    CancellationToken, CaptureApplyResult, CaptureSink, FilesActor, FilesError, ManifestEntry,
-    NativeWatcher, ReconcilePlan, ReconcileRun, ScanBounds, ScanGeneration, ScanManifest,
-    apply_reconcile_plan,
+    CancellationToken, CaptureApplyResult, FilesActor, FilesError, ManifestEntry, NativeWatcher,
+    ReconcilePlan, ReconcileRun, ScanBounds, ScanGeneration, ScanManifest, apply_reconcile_plan,
 };
 use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
@@ -522,7 +521,7 @@ async fn apply_run(
                     now_ms,
                     None,
                 );
-                sink.retire(&retire_path)
+                sink.retire_policy_excluded(&retire_path)
             })
             .await;
             // This loop is the ONLY path that can retire an over-cap narrowed

@@ -1041,6 +1041,14 @@ fn normalized_write_input(input: &WriteText) -> Result<WriteText, DomainError> {
 
 #[doc(hidden)]
 pub fn validate_write_input(input: &WriteText) -> Result<(), DomainError> {
+    // The capture origin is RESERVED: accepting it here would let a caller
+    // forge capture ownership, and the next disk-driven pass would retire
+    // content that never had a disk counterpart.
+    if input.metadata_origin == CAPTURE_ORIGIN {
+        return Err(DomainError::InvalidInput {
+            reason: "metadata origin 'capture' is reserved for autonomous capture",
+        });
+    }
     normalized_write_input(input).map(|_| ())
 }
 
@@ -1137,6 +1145,23 @@ fn capture_ingest_in_tx(
         && before.content_kind == "text"
         && before.blob_sha256.as_deref() == Some(content_sha256.as_str())
     {
+        // A CLAIMED dedupe transfers ownership: capture observed the disk
+        // transition and the content already matches, so the head becomes
+        // capture-owned. Without this the head would stay foreign forever
+        // and later disk-driven retires would be refused.
+        if input.claim_foreign_head && before.metadata_origin != input.metadata_origin {
+            tx.execute(
+                "UPDATE snapshots SET metadata_origin = ?1 \
+                 WHERE workspace_id = ?2 AND version_id = ?3 AND object_id = ?4",
+                params![
+                    input.metadata_origin,
+                    input.workspace_id,
+                    input.version_id,
+                    object_id
+                ],
+            )
+            .map_err(DomainError::sql_persist)?;
+        }
         let result = write_result_for_existing_head(tx, before)?;
         record_request(
             tx,
@@ -1317,6 +1342,11 @@ fn capture_retire_in_tx(
 /// The metadata origin every capture write records. Ownership of a head is
 /// determined by this value: capture only ever overwrites or retires heads
 /// it wrote itself.
+///
+/// RESERVED: [`validate_write_input`] REJECTS this origin on the public
+/// write path, so a caller cannot forge capture ownership and have its own
+/// content retired by a disk-driven pass. Only the capture primitives in
+/// this module may write it.
 pub const CAPTURE_ORIGIN: &str = "capture";
 
 /// Maximum binary payload a capture ingest may persist. Mirrors

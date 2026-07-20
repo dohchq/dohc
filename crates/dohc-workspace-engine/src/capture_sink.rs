@@ -441,6 +441,27 @@ enum DomainIngest {
     ForeignHead,
 }
 
+impl StoreCaptureSink {
+    /// Retire a path the CURRENT policy excludes, WITHOUT the absence check.
+    ///
+    /// The driver calls this for `retained_over_cap` paths: they are still on
+    /// disk by definition (that is why the scanner retained them), so the
+    /// public [`CaptureSink::retire`] would refuse with a reappearance
+    /// guard and the narrowed head would survive forever. Policy exclusion is
+    /// an OWNERSHIP decision — presence on disk is irrelevant to it — while
+    /// the ownership and canonical-name guards still apply.
+    pub fn retire_policy_excluded(&mut self, path: &str) -> Result<(), CaptureError> {
+        match classify_engine_file_path_normalized(path) {
+            (PathClassification::Ignored, _) => Ok(()),
+            (PathClassification::Secret, _) => Ok(()),
+            (PathClassification::Tracked, Some(normalized)) if normalized == path => {
+                self.retire_head(path, false)
+            }
+            (PathClassification::Tracked, _) => Ok(()),
+        }
+    }
+}
+
 impl CaptureSink for StoreCaptureSink {
     fn ingest(
         &mut self,
