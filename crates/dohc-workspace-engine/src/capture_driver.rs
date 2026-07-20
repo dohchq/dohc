@@ -225,7 +225,8 @@ impl DriverStatus {
     pub(crate) fn running(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }
-    #[cfg_attr(not(test), expect(dead_code))]
+    // Consulted by RealEnv's quarantine gate in production; running/terminal
+    // stay test-only until the E-shard watcher.status RPC lands.
     pub(crate) fn degraded(&self) -> bool {
         self.degraded.load(Ordering::Acquire)
     }
@@ -1555,8 +1556,8 @@ impl DriverEnv for RealEnv {
             .reconcile_if_dirty(cancel.child_token())
             .await
         {
-            Ok(run) => TickIo::Applied {
-                clean: apply_run(
+            Ok(run) => {
+                let clean = apply_run(
                     &self.root,
                     &self.actor,
                     &self.workspace_id,
@@ -1564,8 +1565,29 @@ impl DriverEnv for RealEnv {
                     run,
                     &self.status,
                 )
-                .await,
-            },
+                .await;
+                // A clean-looking tick with a NON-EMPTY quarantine is not
+                // health: the controller parks persistently failing paths on
+                // its own degraded-rescan backoff and stops self-forcing
+                // scans, so reconcile CONVERGES while capture has not
+                // recovered — reading that as clean would clear `degraded`
+                // over live failures. Only consulted when the tick looks
+                // clean while status is degraded (a quarantine cannot form
+                // without degraded ticks), so the happy path stays one actor
+                // round-trip.
+                let quarantined = clean
+                    && self.status.degraded()
+                    && layer
+                        .files
+                        .handle()
+                        .stats()
+                        .await
+                        .map(|stats| stats.quarantined > 0)
+                        .unwrap_or(false);
+                TickIo::Applied {
+                    clean: clean && !quarantined,
+                }
+            }
             Err(FilesError::ActorUnavailable) => TickIo::ActorLost,
             Err(_) => TickIo::Failed,
         }

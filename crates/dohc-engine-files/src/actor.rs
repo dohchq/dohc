@@ -74,6 +74,12 @@ pub struct FilesStats {
     /// configured pool size (the bound proof).
     pub max_hash_concurrency: usize,
     pub hashed: usize,
+    /// Paths parked by the degraded-rescan quarantine. NON-EMPTY means the
+    /// controller has stopped self-forcing scans for persistently failing
+    /// paths — `reconcile_if_dirty` can return `Converged` while capture has
+    /// NOT recovered, so a health consumer must not read converged-with-
+    /// quarantine as clean.
+    pub quarantined: usize,
 }
 
 enum Command {
@@ -458,6 +464,7 @@ fn worker_main(
             Command::Stats { reply } => {
                 let gauge = scanner.pool().gauge();
                 let _ = reply.send(FilesStats {
+                    quarantined: controller.quarantined_paths().len(),
                     generation: controller.generation(),
                     dirty: controller.is_dirty(),
                     tracked: controller.tracked_len(),

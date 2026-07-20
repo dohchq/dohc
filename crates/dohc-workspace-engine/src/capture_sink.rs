@@ -51,6 +51,9 @@ const SECRET_RETIRE_FAILED: CaptureError = CaptureError {
 };
 /// The workspace key could not be loaded or created — a transient/config
 /// failure, kept dirty for retry (never silently dropping secret capture).
+const POLICY_UNAVAILABLE: CaptureError = CaptureError {
+    reason: "files.toml unreadable: ownership unknown, holding for retry",
+};
 const SECRET_KEY_UNAVAILABLE: CaptureError = CaptureError {
     reason: "workspace secret key unavailable",
 };
@@ -68,11 +71,28 @@ pub struct StoreCaptureSink {
     shadow_root: PathBuf,
     now_ms: i64,
     author_json: Option<String>,
-    files_policy: Option<Vec<FilesPolicyRule>>,
+    files_policy: PolicyState,
     /// Lazily loaded-or-created on the FIRST secret capture (TS parity:
     /// `loadSecretDataKey` create branch) so workspaces without secrets never
     /// mint a key file.
     secret_key: Option<SecretDataKey>,
+}
+
+/// The sink's view of `.dohc/files.toml`, split by WHY there are no rules.
+enum PolicyState {
+    /// A real answer: absent (default policy), parsed rules, or a MALFORMED
+    /// file — the last lands here as `Known(None)` under the ratified WS-F
+    /// rule (writes are never dropped for a bad policy; SEARCH is where a
+    /// broken policy fails closed).
+    Known(Option<Vec<FilesPolicyRule>>),
+    /// The file exists but could not be READ (IO error, symlink refusal,
+    /// oversize — possibly a transient editor lock). The narrowing set is
+    /// UNKNOWN: falling back to floor-only would durably capture paths the
+    /// user may have excluded, and the policy-retire branch would delete
+    /// heads the policy may still track. Policy-dependent ops HOLD instead —
+    /// fail, stay dirty, retry next cycle — mirroring the driver's
+    /// unknown-fingerprint debounce hold.
+    Unavailable,
 }
 
 impl StoreCaptureSink {
@@ -86,11 +106,19 @@ impl StoreCaptureSink {
     ) -> Self {
         let shadow_root = shadow_root.into();
         // `.dohc/files.toml` can only NARROW engine ownership below the hard
-        // floor. A broken policy file keeps capture FLOOR-ONLY (the WS-F rule:
-        // writes are never dropped for a malformed policy — search is where a
-        // broken policy fails closed), which is exactly the `None` this
-        // returns for a missing OR broken file.
-        let files_policy = read_engine_search_policy(&shadow_root).files_policy;
+        // floor. See [`PolicyState`] for the absent/malformed/unreadable
+        // split: only a file that exists but cannot be READ makes ownership
+        // unknown; malformed keeps the WS-F floor-only rule.
+        let snapshot = read_engine_search_policy(&shadow_root);
+        let files_unreadable = snapshot.diagnostics.iter().any(|diagnostic| {
+            diagnostic.file == "files.toml"
+                && diagnostic.reason == dohc_engine_runtime::search::DiagnosticReason::Unreadable
+        });
+        let files_policy = if files_unreadable {
+            PolicyState::Unavailable
+        } else {
+            PolicyState::Known(snapshot.files_policy)
+        };
         StoreCaptureSink {
             actor,
             workspace_id: workspace_id.into(),
@@ -129,10 +157,15 @@ impl StoreCaptureSink {
         Ok(self.secret_key.as_ref().expect("key just ensured"))
     }
 
-    fn policy_tracks(&self, path: &str) -> bool {
+    fn policy_tracks(&self, path: &str) -> Result<bool, CaptureError> {
         match &self.files_policy {
-            None => true,
-            Some(rules) => resolve_effective_policy(path, Some(rules.as_slice()), None).tracked,
+            PolicyState::Known(None) => Ok(true),
+            PolicyState::Known(Some(rules)) => {
+                Ok(resolve_effective_policy(path, Some(rules.as_slice()), None).tracked)
+            }
+            // Unknown narrowing: neither capture (may widen over an
+            // exclusion) nor retire (may destroy a tracked head). Hold.
+            PolicyState::Unavailable => Err(POLICY_UNAVAILABLE),
         }
     }
 
@@ -504,7 +537,7 @@ impl CaptureSink for StoreCaptureSink {
         if normalized != path {
             return Ok(IngestOutcome::NotOwned);
         }
-        if !self.policy_tracks(path) {
+        if !self.policy_tracks(path)? {
             // `.dohc/files.toml` narrowed the path out of engine ownership:
             // retire any stale head (TS: "Stopped tracking by policy") so
             // opted-out content is never left stale-but-authoritative.
@@ -874,6 +907,59 @@ mod tests {
                 )
             })
             .expect("moment count")
+    }
+
+    #[test]
+    fn an_unreadable_policy_holds_capture_instead_of_widening_or_retiring() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor = WorkspaceSupervisor::new();
+
+        // Establish a capture-owned head under a healthy (absent) policy.
+        write_file(scratch.path(), "kept.md", b"captured content");
+        let (db, mut sink) = sink_for(&scratch, &supervisor);
+        assert!(matches!(
+            ingest(&mut sink, "kept.md").expect("healthy ingest"),
+            IngestOutcome::Captured { .. }
+        ));
+        drop(sink);
+
+        // files.toml becomes UNREADABLE (a directory is deterministic on
+        // every platform: exists, not a regular file). The narrowing set is
+        // now unknown — a fresh sink must HOLD, not widen to floor-only and
+        // not retire.
+        std::fs::create_dir_all(scratch.path().join(".dohc/files.toml")).expect("dir-as-policy");
+        write_file(scratch.path(), "kept.md", b"edited while unreadable");
+        let (_, mut sink) = sink_for(&scratch, &supervisor);
+        assert!(
+            ingest(&mut sink, "kept.md").is_err(),
+            "unknown policy must fail the op (stays dirty, retried), not capture"
+        );
+        assert_eq!(
+            snapshot(&db, "kept.md").expect("head survives").text,
+            "captured content",
+            "the held op must neither update nor retire the existing head"
+        );
+
+        // A MALFORMED file is a different case: the ratified WS-F rule keeps
+        // capture floor-only (writes are never dropped for a bad policy).
+        std::fs::remove_dir_all(scratch.path().join(".dohc/files.toml")).expect("rm dir");
+        write_file(
+            scratch.path(),
+            ".dohc/files.toml",
+            b"this is [not valid toml",
+        );
+        let (_, mut sink) = sink_for(&scratch, &supervisor);
+        assert!(
+            matches!(
+                ingest(&mut sink, "kept.md").expect("malformed policy still captures"),
+                IngestOutcome::Captured { .. }
+            ),
+            "WS-F: a malformed policy must not drop writes"
+        );
+        assert_eq!(
+            snapshot(&db, "kept.md").expect("head updated").text,
+            "edited while unreadable"
+        );
     }
 
     fn try_symlink_file(link: &Path, target: &Path) -> bool {
