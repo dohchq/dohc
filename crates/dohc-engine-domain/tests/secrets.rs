@@ -662,6 +662,7 @@ fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
             path: ".env".to_owned(),
             metadata_origin: "local-file".to_owned(),
             now_ms: 30,
+            only_if_own_origin: false,
         },
         &NO_FAULTS,
     )
@@ -679,6 +680,7 @@ fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
             path: ".env".to_owned(),
             metadata_origin: "local-file".to_owned(),
             now_ms: 40,
+            only_if_own_origin: false,
         },
         &NO_FAULTS,
     )
@@ -720,6 +722,7 @@ fn capture_retire_supersedes_a_stale_pending_secret_job() {
             path: ".env".to_owned(),
             metadata_origin: "local-file".to_owned(),
             now_ms: 20,
+            only_if_own_origin: false,
         },
         &NO_FAULTS,
     )

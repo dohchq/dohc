@@ -513,7 +513,7 @@ async fn apply_run(
             let retire_version = version_for_retire.clone();
             let retire_path = path.clone();
             let retire_root = root.to_path_buf();
-            let _ = tokio::task::spawn_blocking(move || {
+            let retired = tokio::task::spawn_blocking(move || {
                 let mut sink = StoreCaptureSink::new(
                     retire_actor,
                     retire_workspace,
@@ -522,9 +522,17 @@ async fn apply_run(
                     now_ms,
                     None,
                 );
-                let _ = sink.retire(&retire_path);
+                sink.retire(&retire_path)
             })
             .await;
+            // This loop is the ONLY path that can retire an over-cap narrowed
+            // head (such a path never appears in the diff), so a swallowed
+            // failure would strand it stale-but-authoritative with nothing to
+            // re-offer it. Surface it so the driver stays degraded and the
+            // next tick retries.
+            if !matches!(retired, Ok(Ok(()))) {
+                status.degraded.store(true, Ordering::Release);
+            }
         }
     }
     if result.degraded {

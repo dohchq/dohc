@@ -396,6 +396,7 @@ impl StoreCaptureSink {
                 path: path.to_owned(),
                 metadata_origin: SECRET_CAPTURE_ORIGIN.to_owned(),
                 now_ms: self.now_ms,
+                only_if_own_origin: true,
             },
             Arc::new(NoFaults),
         ) {

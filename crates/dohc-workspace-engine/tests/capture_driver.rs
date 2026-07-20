@@ -396,8 +396,17 @@ async fn rpc_written_content_without_a_disk_file_is_never_retired_by_capture() {
         .await
         .expect("rpc write");
 
-    // Several drive cycles must pass without retiring it.
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    // PROVE capture is live rather than merely sleeping: mutate the on-disk
+    // sentinel and wait for the driver to record it. Only then is "rpc-only.md
+    // survived" evidence about capture's behavior.
+    write_file(scratch.path(), "on-disk.md", b"second capture cycle");
+    wait_for_text(
+        &transport,
+        &handle,
+        "on-disk.md",
+        Some("second capture cycle"),
+    )
+    .await;
     assert_eq!(
         read_text(&transport, &handle, 3, "rpc-only.md")
             .await
@@ -415,7 +424,10 @@ async fn rpc_written_content_without_a_disk_file_is_never_retired_by_capture() {
         .await
         .expect("close");
     let handle = open_workspace(&transport, &scratch, 5).await;
-    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    // Same liveness proof after the reopen: the rehydrated baseline must have
+    // actually run before "survived" means anything.
+    write_file(scratch.path(), "on-disk.md", b"after reopen");
+    wait_for_text(&transport, &handle, "on-disk.md", Some("after reopen")).await;
     assert_eq!(
         read_text(&transport, &handle, 6, "rpc-only.md")
             .await
@@ -472,17 +484,72 @@ async fn offline_delete_and_narrow_in_the_same_window_still_retires() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn secret_tip_from_another_writer_is_not_claimed_on_first_sight() {
+async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
+    use dohc_engine_crypto::create_key_file;
+    use dohc_engine_domain::{
+        NoFaults, SecretDiskIntent, SecretFileStore, SecretWrite, VersionedTextStore,
+    };
+
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "witness.md", b"anchor");
-    write_file(scratch.path(), ".env", b"TOKEN=from-disk");
 
+    // Establish the workspace first (the shadow fence binds the store on
+    // open), then inject the foreign tip — the realistic sequence for an
+    // API/replication write into a live workspace.
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1).await;
     wait_for_text(&transport, &handle, "witness.md", Some("anchor")).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close before seeding");
 
+    // A genuinely FOREIGN secret tip (origin "api") whose plaintext
+    // deliberately differs from what will be on disk — capture must neither
+    // overwrite nor retire it.
     let db_path = scratch.path().join(".dohc/engine/engine.db");
+    let key = create_key_file(scratch.path()).expect("mint key");
+    {
+        let mut store = EngineStore::open(&db_path, 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+            .expect("main version");
+        SecretFileStore::new(&mut store, &key)
+            .write_secret_file(
+                &SecretWrite {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: "main".to_owned(),
+                    path: ".env".to_owned(),
+                    text: "TOKEN=written-by-api".to_owned(),
+                    moment_id: "api-secret-moment".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 5,
+                    disk_intent: SecretDiskIntent::Materialize,
+                },
+                &NoFaults,
+            )
+            .expect("foreign secret write");
+    }
+    // Disk carries DIFFERENT bytes: a claim would show up as a changed tip.
+    write_file(scratch.path(), ".env", b"TOKEN=from-disk");
+
+    let handle = open_workspace(&transport, &scratch, 3).await;
+    // Liveness proof: capture ran full cycles before we assert what it did.
+    write_file(scratch.path(), "witness.md", b"second cycle");
+    wait_for_text(&transport, &handle, "witness.md", Some("second cycle")).await;
+
+    // And the destructive direction: delete the plaintext from disk, which
+    // WOULD drive a retire for a capture-owned tip.
+    std::fs::remove_file(scratch.path().join(".env")).expect("delete .env");
+    write_file(scratch.path(), "witness.md", b"third cycle");
+    wait_for_text(&transport, &handle, "witness.md", Some("third cycle")).await;
+
     transport
         .call(
             RequestContext::unbounded(),
@@ -491,20 +558,31 @@ async fn secret_tip_from_another_writer_is_not_claimed_on_first_sight() {
         .await
         .expect("close");
 
-    // The capture-written tip carries the sink's own origin; ownership only
-    // ever lets capture overwrite tips it wrote itself on first sight.
-    let store = EngineStore::open(&db_path, 100).expect("reopen");
-    let origin: String = store
+    let mut store = EngineStore::open(&db_path, 100).expect("reopen");
+    let (origin, moment_id): (String, String) = store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT m.metadata_origin FROM secret_files f \
+                "SELECT m.metadata_origin, f.latest_moment_id FROM secret_files f \
                  JOIN secret_moments m ON m.workspace_id = f.workspace_id \
                    AND m.moment_id = f.latest_moment_id \
                  WHERE f.path = '.env'",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
         })
-        .expect("secret origin");
-    assert_eq!(origin, "local-file", "capture owns the tip it wrote");
+        .expect("the foreign tip must still exist");
+    assert_eq!(origin, "api", "capture must not claim a foreign secret tip");
+    assert_eq!(
+        moment_id, "api-secret-moment",
+        "the foreign tip must be untouched, not superseded"
+    );
+    let plaintext = SecretFileStore::new(&mut store, &key)
+        .materialize_secret_file(WORKSPACE_ID, "main", ".env")
+        .expect("materialize")
+        .expect("tip present");
+    assert_eq!(
+        plaintext.into_utf8().expect("utf8"),
+        "TOKEN=written-by-api",
+        "the foreign writer's plaintext must survive disk bytes AND a disk delete"
+    );
 }
