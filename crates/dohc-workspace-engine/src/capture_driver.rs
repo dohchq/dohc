@@ -172,8 +172,13 @@ impl RestartTracker {
                 LayerAction::Keep
             }
             // A dead watch or actor is unrecoverable in place: drop the layer
-            // and let the backoff govern the rebuild.
+            // and let the backoff govern the rebuild. `running` goes false
+            // BEFORE record_failure can publish `terminal`: the two flags are
+            // separate atomics, so a status reader can interleave between the
+            // stores even with no await point — ordering the stores is what
+            // makes running && terminal unobservable.
             TickObservation::WatchLost | TickObservation::ActorLost => {
+                status.running.store(false, Ordering::Release);
                 self.record_failure(status);
                 LayerAction::Drop
             }
@@ -182,12 +187,15 @@ impl RestartTracker {
             // fails every tick must slow down rather than retry at the fast
             // cadence forever. Once the streak is terminal, REBUILD instead of
             // polling a wedged layer indefinitely; that also stops the driver
-            // from advertising `running` while it reports `terminal`.
+            // from advertising `running` while it reports `terminal` (with
+            // the same store ordering as above).
             TickObservation::ReconcileFailed => {
-                self.record_failure(status);
-                if is_terminal(self.consecutive_failures) {
+                if is_terminal(self.consecutive_failures.saturating_add(1)) {
+                    status.running.store(false, Ordering::Release);
+                    self.record_failure(status);
                     LayerAction::Drop
                 } else {
+                    self.record_failure(status);
                     LayerAction::Keep
                 }
             }
@@ -215,6 +223,11 @@ pub(crate) struct DriverStatus {
     /// resume on its own timescale; the driver keeps a slow recovery probe, so
     /// this is a report, not a grave. Cleared by a healthy restart.
     terminal: AtomicBool,
+    /// An apply observed an UNREADABLE policy (held ops / over-cap holds).
+    /// The drive loop folds this into its own unknown-fingerprint tracking so
+    /// the policy-recovery rebuild fires even when the blip was visible only
+    /// inside the apply window, never to the loop's fingerprint read.
+    policy_hold: AtomicBool,
 }
 
 impl DriverStatus {
@@ -1476,9 +1489,10 @@ async fn drive_loop<E: DriverEnv>(
                     // Transient start failures (a momentarily unwatchable
                     // root) must not be terminal: mark degraded and retry on
                     // the backoff schedule, escalating only after
-                    // MAX_RESTART_ATTEMPTS consecutive failures.
-                    restart.record_failure(&status);
+                    // MAX_RESTART_ATTEMPTS consecutive failures. `running`
+                    // goes false BEFORE the failure can publish `terminal`.
                     status.running.store(false, Ordering::Release);
+                    restart.record_failure(&status);
                 }
             }
             // Whether the baseline applied or the start failed, the open
@@ -1495,7 +1509,13 @@ async fn drive_loop<E: DriverEnv>(
         // outcome through one decision point is what keeps a failure mode
         // from quietly escaping the backoff.
         let fingerprint = env.policy_fingerprint();
-        let policy_recovered = fingerprint.is_some() && policy_was_unknown;
+        // The apply path can observe an unreadable policy the loop's own read
+        // never sees; it arms `policy_hold`, folded in here so recovery fires
+        // for that window too.
+        let policy_was_held = status.policy_hold.swap(false, Ordering::AcqRel);
+        let policy_recovered = fingerprint.is_some() && (policy_was_unknown || policy_was_held);
+        // An unknown fingerprint carries the state forward by itself; a
+        // consumed hold under a still-unknown fingerprint needs no re-arm.
         policy_was_unknown = fingerprint.is_none();
         let observation = if env.watch_lost(current) {
             // A permanently lost watch tears the layer down; the rebuild
@@ -1824,6 +1844,9 @@ async fn apply_run(
                 result.failed_applies.push(path.clone());
                 result.degraded = true;
                 status.degraded.store(true, Ordering::Release);
+                // Arm the loop's policy-recovery trigger: this blip may never
+                // be visible to the loop's own fingerprint read.
+                status.policy_hold.store(true, Ordering::Release);
                 false
             }
         };
