@@ -38,10 +38,90 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// the watcher's debounce means sub-interval changes coalesce anyway.
 const DRIVE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// The restart backoff schedule after a failed files-layer start or a
+/// permanently lost watch. Doubling from [`DRIVE_INTERVAL`] and capped, so a
+/// root that cannot be watched at all (deleted, permissions, handle
+/// exhaustion) stops burning a scan attempt twice a second forever.
+const RESTART_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Consecutive restart failures before the driver declares the watch
+/// TERMINAL. Eight escalating attempts is a little over a minute - long
+/// enough that no transient condition reaches it, short enough that a real
+/// one is reported promptly.
+const MAX_RESTART_ATTEMPTS: u32 = 8;
+
+/// How often a TERMINAL driver still probes for recovery. Slow enough to cost
+/// nothing, present so a root that comes back is picked up WITHOUT the caller
+/// having to close and reopen the workspace.
+const TERMINAL_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long to wait before the next files-layer start attempt, given the
+/// number of CONSECUTIVE failures so far. Pure so the schedule is testable
+/// without waiting out a real minute of backoff.
+fn restart_delay(consecutive_failures: u32) -> std::time::Duration {
+    if consecutive_failures == 0 {
+        return DRIVE_INTERVAL;
+    }
+    if is_terminal(consecutive_failures) {
+        return TERMINAL_PROBE_INTERVAL;
+    }
+    let factor = 1u32
+        .checked_shl(consecutive_failures - 1)
+        .unwrap_or(u32::MAX);
+    DRIVE_INTERVAL
+        .checked_mul(factor)
+        .unwrap_or(RESTART_BACKOFF_CAP)
+        .min(RESTART_BACKOFF_CAP)
+}
+
+/// Whether this many consecutive failures means the watch is TERMINAL: the
+/// driver stops the fast cadence and stops reporting capture as merely
+/// degraded.
+fn is_terminal(consecutive_failures: u32) -> bool {
+    consecutive_failures >= MAX_RESTART_ATTEMPTS
+}
+
 /// How many extra cycles the STARTUP baseline may take to settle before
 /// `workspace.open` is released anyway (degraded). Bounds open latency while
 /// keeping the common transient-failure case ordered.
 const BASELINE_SETTLE_ATTEMPTS: u32 = 3;
+
+/// Supervision state for the files layer: how many consecutive times it has
+/// failed to start or lost its watch, and what that means for cadence and
+/// reported health.
+#[derive(Default)]
+struct RestartTracker {
+    consecutive_failures: u32,
+}
+
+impl RestartTracker {
+    /// A start failed, or a started layer's watch was found dead. Escalates
+    /// the backoff and, past [`MAX_RESTART_ATTEMPTS`], reports TERMINAL.
+    fn record_failure(&mut self, status: &DriverStatus) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        status.running.store(false, Ordering::Release);
+        status.degraded.store(true, Ordering::Release);
+        status
+            .terminal
+            .store(is_terminal(self.consecutive_failures), Ordering::Release);
+    }
+
+    /// The layer survived a full tick with a live watch. This is the ONLY
+    /// reset: clearing the streak at START time instead would let a watch that
+    /// dies immediately after every start flap at the fast cadence forever —
+    /// exactly the case the streak exists to bound. It is also the only exit
+    /// from TERMINAL, which is what makes the slow probe a recovery path
+    /// rather than a graveyard.
+    fn record_healthy_tick(&mut self, status: &DriverStatus) {
+        self.consecutive_failures = 0;
+        status.terminal.store(false, Ordering::Release);
+    }
+
+    /// How long to wait before the next attempt.
+    fn delay(&self) -> std::time::Duration {
+        restart_delay(self.consecutive_failures)
+    }
+}
 
 /// Observable driver state for the E-shard `watcher.status` RPC and tests.
 #[derive(Default)]
@@ -52,6 +132,11 @@ pub(crate) struct DriverStatus {
     /// apply failed, or the files layer could not (re)start. Sticky until a
     /// clean (re)start of the layer.
     degraded: AtomicBool,
+    /// The files layer failed to (re)start [`MAX_RESTART_ATTEMPTS`] times in a
+    /// row. Capture for this workspace is NOT running and is not expected to
+    /// resume on its own timescale; the driver keeps a slow recovery probe, so
+    /// this is a report, not a grave. Cleared by a healthy restart.
+    terminal: AtomicBool,
 }
 
 impl DriverStatus {
@@ -65,6 +150,145 @@ impl DriverStatus {
     #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn degraded(&self) -> bool {
         self.degraded.load(Ordering::Acquire)
+    }
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(crate) fn terminal(&self) -> bool {
+        self.terminal.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+mod restart_schedule_tests {
+    use super::*;
+
+    #[test]
+    fn a_healthy_driver_polls_at_the_fast_cadence() {
+        assert_eq!(restart_delay(0), DRIVE_INTERVAL);
+        assert!(!is_terminal(0));
+    }
+
+    #[test]
+    fn the_backoff_doubles_and_then_caps() {
+        let schedule: Vec<_> = (1..=7).map(restart_delay).collect();
+        assert_eq!(
+            schedule,
+            vec![
+                std::time::Duration::from_millis(500),
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(4),
+                std::time::Duration::from_secs(8),
+                std::time::Duration::from_secs(16),
+                // Capped: 32s would exceed the cap.
+                RESTART_BACKOFF_CAP,
+            ]
+        );
+        // Strictly non-decreasing everywhere, so no schedule edit can
+        // accidentally make a LATER failure retry sooner than an earlier one.
+        for failures in 1..64u32 {
+            assert!(
+                restart_delay(failures + 1) >= restart_delay(failures),
+                "delay went backwards at {failures}"
+            );
+        }
+    }
+
+    #[test]
+    fn escalation_is_bounded_and_the_terminal_probe_still_runs() {
+        assert!(!is_terminal(MAX_RESTART_ATTEMPTS - 1));
+        assert!(is_terminal(MAX_RESTART_ATTEMPTS));
+        assert!(is_terminal(u32::MAX));
+        // A terminal driver keeps probing: the interval must be finite and
+        // slow, never zero (a hot loop) and never absent (a graveyard).
+        assert_eq!(restart_delay(MAX_RESTART_ATTEMPTS), TERMINAL_PROBE_INTERVAL);
+        assert_eq!(restart_delay(u32::MAX), TERMINAL_PROBE_INTERVAL);
+        assert!(TERMINAL_PROBE_INTERVAL > DRIVE_INTERVAL);
+    }
+
+    #[test]
+    fn the_whole_escalation_stays_within_a_couple_of_minutes() {
+        // The point of the bound: reaching terminal must take long enough that
+        // no transient blip gets there, and short enough to be reported while
+        // the user is still at their desk.
+        let total: std::time::Duration = (1..MAX_RESTART_ATTEMPTS).map(restart_delay).sum();
+        assert!(
+            total >= std::time::Duration::from_secs(30),
+            "escalation too eager: {total:?}"
+        );
+        assert!(
+            total <= std::time::Duration::from_secs(150),
+            "escalation too slow to report: {total:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod restart_tracker_tests {
+    use super::*;
+
+    #[test]
+    fn a_streak_escalates_to_terminal_and_a_healthy_tick_recovers_it() {
+        let status = DriverStatus::default();
+        let mut restart = RestartTracker::default();
+
+        for attempt in 1..MAX_RESTART_ATTEMPTS {
+            restart.record_failure(&status);
+            assert!(status.degraded(), "a failure always reports degraded");
+            assert!(!status.running());
+            assert!(
+                !status.terminal(),
+                "failure {attempt} must not be terminal yet"
+            );
+        }
+        restart.record_failure(&status);
+        assert!(status.terminal(), "the bounded streak reports terminal");
+        assert_eq!(
+            restart.delay(),
+            TERMINAL_PROBE_INTERVAL,
+            "a terminal driver keeps a slow recovery probe"
+        );
+
+        // RECOVERY without a close/reopen: the slow probe finds a live watch.
+        restart.record_healthy_tick(&status);
+        assert!(!status.terminal(), "a healthy tick clears terminal");
+        assert_eq!(
+            restart.delay(),
+            DRIVE_INTERVAL,
+            "recovery restores the fast cadence"
+        );
+    }
+
+    #[test]
+    fn a_watch_that_dies_right_after_every_start_still_backs_off() {
+        // The flap case: each cycle STARTS successfully and then loses its
+        // watch before completing a healthy tick. Resetting the streak on a
+        // successful start would pin this at the fast cadence forever, which
+        // is the pathology this shard exists to prevent.
+        let status = DriverStatus::default();
+        let mut restart = RestartTracker::default();
+        let mut delays = Vec::new();
+        for _ in 0..MAX_RESTART_ATTEMPTS {
+            restart.record_failure(&status);
+            delays.push(restart.delay());
+        }
+        assert!(
+            delays.windows(2).all(|w| w[1] >= w[0]),
+            "flapping must escalate, not reset: {delays:?}"
+        );
+        assert_eq!(delays.last().copied(), Some(TERMINAL_PROBE_INTERVAL));
+        assert!(status.terminal(), "a persistent flap is reported terminal");
+    }
+
+    #[test]
+    fn an_isolated_failure_between_healthy_ticks_never_escalates() {
+        let status = DriverStatus::default();
+        let mut restart = RestartTracker::default();
+        for _ in 0..MAX_RESTART_ATTEMPTS * 3 {
+            restart.record_failure(&status);
+            restart.record_healthy_tick(&status);
+            assert!(!status.terminal(), "a recovered blip is not terminal");
+            assert_eq!(restart.delay(), DRIVE_INTERVAL);
+        }
     }
 }
 
@@ -312,6 +536,7 @@ async fn drive(
     baseline_tx: tokio::sync::watch::Sender<bool>,
 ) {
     let mut layer: Option<FilesLayer> = None;
+    let mut restart = RestartTracker::default();
     loop {
         if layer.is_none() {
             // REHYDRATE the scan manifest from the domain's captured state:
@@ -365,10 +590,11 @@ async fn drive(
                     layer = Some(fresh);
                 }
                 Err(_) => {
-                    // Transient start failures (momentarily unwatchable root)
-                    // must not be terminal: mark degraded and retry next tick.
-                    status.running.store(false, Ordering::Release);
-                    status.degraded.store(true, Ordering::Release);
+                    // Transient start failures (a momentarily unwatchable
+                    // root) must not be terminal: mark degraded and retry on
+                    // the backoff schedule, escalating only after
+                    // MAX_RESTART_ATTEMPTS consecutive failures.
+                    restart.record_failure(&status);
                 }
             }
             // Whether the baseline applied or the start failed, the open
@@ -377,10 +603,17 @@ async fn drive(
             let _ = baseline_tx.send(true);
         }
 
+        // A healthy layer polls at the fast cadence; a failing one waits out
+        // the escalating backoff (and, once terminal, the slow recovery probe).
+        let delay = if layer.is_some() {
+            DRIVE_INTERVAL
+        } else {
+            restart.delay()
+        };
         tokio::select! {
             biased;
             () = cancel.cancelled() => break,
-            () = tokio::time::sleep(DRIVE_INTERVAL) => {}
+            () = tokio::time::sleep(delay) => {}
         }
 
         let Some(current) = layer.as_ref() else {
@@ -393,16 +626,21 @@ async fn drive(
         // restart — NativeWatcher::start re-seeds via its initial reconcile,
         // so no change is lost across the gap.
         if current.watcher.is_unavailable() {
-            status.degraded.store(true, Ordering::Release);
+            // Counts as a restart failure: a watch that dies right after every
+            // start is indistinguishable from one that never starts, and both
+            // must back off rather than rescan twice a second indefinitely.
+            restart.record_failure(&status);
             if let Some(dead) = layer.take() {
                 dead.stop().await;
             }
-            status.running.store(false, Ordering::Release);
             continue;
         }
         if current.watcher.is_degraded() {
             status.degraded.store(true, Ordering::Release);
         }
+
+        // The layer has survived a full tick with a live watch.
+        restart.record_healthy_tick(&status);
 
         // Policy-flip re-offer: a changed files.toml/visibility.toml respawns
         // the layer with an EMPTY manifest so every path re-offers through
