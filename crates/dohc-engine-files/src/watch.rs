@@ -19,7 +19,7 @@ use notify::{RecursiveMode, Watcher};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -145,7 +145,7 @@ pub struct WatchStart {
 /// no notification can arrive after stop returns.
 pub struct NativeWatcher {
     stop_tx: SyncSender<ThreadMessage>,
-    degraded: Arc<AtomicBool>,
+    disruptions: Arc<AtomicU64>,
     unavailable: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
@@ -161,11 +161,11 @@ impl NativeWatcher {
     ) -> Result<WatchStart, FilesError> {
         let (message_tx, message_rx) = mpsc::sync_channel(WATCH_EVENT_QUEUE_CAPACITY);
         let stop_tx = message_tx.clone();
-        let degraded = Arc::new(AtomicBool::new(false));
+        let disruptions = Arc::new(AtomicU64::new(0));
         let unavailable = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let thread_handle = handle.clone();
-        let thread_degraded = Arc::clone(&degraded);
+        let thread_disruptions = Arc::clone(&disruptions);
         let thread_unavailable = Arc::clone(&unavailable);
         let worker = std::thread::Builder::new()
             .name("dohc-native-watcher".to_owned())
@@ -175,7 +175,7 @@ impl NativeWatcher {
                     thread_handle,
                     message_rx,
                     message_tx,
-                    thread_degraded,
+                    thread_disruptions,
                     thread_unavailable,
                     ready_tx,
                 );
@@ -185,7 +185,7 @@ impl NativeWatcher {
             })?;
         let mut watcher = NativeWatcher {
             stop_tx,
-            degraded,
+            disruptions,
             unavailable,
             worker: Some(worker),
         };
@@ -230,12 +230,14 @@ impl NativeWatcher {
         })
     }
 
-    /// Whether the notify backend has reported an error since startup. Sticky
-    /// so a supervisor can observe watcher loss even after a rescan completes.
-    /// Set alongside [`NativeWatcher::is_unavailable`] on every backend error;
-    /// unlike that flag, it stays true even after a successful re-attach.
-    pub fn is_degraded(&self) -> bool {
-        self.degraded.load(Ordering::Acquire)
+    /// MONOTONE count of watch disruptions since startup: each notify
+    /// backend error and each root-identity mismatch increments it, even when
+    /// the subsequent re-attach succeeds. A supervisor edge-triggers by
+    /// comparing counts — a bool here could only ever be reported once per
+    /// watcher, silently swallowing every later disruption on the same live
+    /// watch.
+    pub fn disruption_count(&self) -> u64 {
+        self.disruptions.load(Ordering::Acquire)
     }
 
     /// Whether the OS watch is genuinely, permanently lost: either the
@@ -243,8 +245,8 @@ impl NativeWatcher {
     /// error, or startup itself timed out. A caller observing this should
     /// restart the watcher (and, transitively, the workspace it backs)
     /// rather than continue relying on a dead watch. Distinct from
-    /// [`NativeWatcher::is_degraded`], which stays set even after a
-    /// successful re-attach.
+    /// [`NativeWatcher::disruption_count`], which keeps counting even when
+    /// re-attach succeeds.
     ///
     /// TODO(R14 follow-up, tracked as a composition obligation): no
     /// PRODUCTION consumer polls this yet. The files watcher is still dormant
@@ -315,13 +317,13 @@ fn watcher_thread(
     handle: FilesHandle,
     rx: Receiver<ThreadMessage>,
     callback_tx: SyncSender<ThreadMessage>,
-    degraded: Arc<AtomicBool>,
+    disruptions: Arc<AtomicU64>,
     unavailable: Arc<AtomicBool>,
     ready: tokio::sync::oneshot::Sender<Result<(), FilesError>>,
 ) {
     let config = notify::Config::default().with_follow_symlinks(false);
     let callback_handle = handle.clone();
-    let loop_degraded = Arc::clone(&degraded);
+    let loop_disruptions = Arc::clone(&disruptions);
     // Sticky, NON-DROPPABLE backend-error signal. The bounded `callback_tx`
     // event queue can drop a `try_send` under load, so a re-attach request
     // must NOT ride on it: a dropped `Event` merely loses a wake (the health
@@ -333,7 +335,7 @@ fn watcher_thread(
     let mut watcher = match notify::RecommendedWatcher::new(
         move |event: Result<notify::Event, notify::Error>| {
             if event.is_err() {
-                degraded.store(true, Ordering::Release);
+                disruptions.fetch_add(1, Ordering::AcqRel);
                 callback_backend_error.store(true, Ordering::Release);
                 callback_handle.notify_overflow();
             }
@@ -407,7 +409,7 @@ fn watcher_thread(
                     if !unavailable.load(Ordering::Acquire)
                         && !root_identity_matches(&root, watched_identity.as_ref())
                     {
-                        loop_degraded.store(true, Ordering::Release);
+                        loop_disruptions.fetch_add(1, Ordering::AcqRel);
                         handle.notify_overflow();
                         attempt_reattach(&mut watcher, &root, &unavailable);
                         // On a successful reattach, rebind identity to the
@@ -460,9 +462,9 @@ fn watcher_thread(
 /// inline on this dedicated watcher OS thread (never the async runtime, and
 /// never unbounded — a dead watch must not spin this thread forever).
 ///
-/// On success, further events resume flowing normally; [`NativeWatcher::
-/// is_degraded`] stays sticky-true (a real disruption did happen), but
-/// [`NativeWatcher::is_unavailable`] stays false. On exhaustion, the watch is
+/// On success, further events resume flowing normally; the disruption stays
+/// COUNTED in [`NativeWatcher::disruption_count`] (a real disruption did
+/// happen), but [`NativeWatcher::is_unavailable`] stays false. On exhaustion, the watch is
 /// treated as permanently lost: `unavailable` is set so a supervisor can
 /// observe it and restart the watcher/workspace instead of silently running
 /// with a dead watch forever.
