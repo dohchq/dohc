@@ -642,6 +642,13 @@ mod drive_loop_tests {
                     self.status.degraded.store(true, Ordering::Release);
                     TickIo::Applied { clean: false }
                 }
+                Script::PolicyUnreadable => {
+                    // Fidelity: while the policy is unknown the SINK holds
+                    // its ops (POLICY_UNAVAILABLE), so the apply reports
+                    // failures — the tick is degraded, not clean.
+                    self.status.degraded.store(true, Ordering::Release);
+                    TickIo::Applied { clean: false }
+                }
                 Script::Disrupted => {
                     // The disruption lands DURING this tick's window; the
                     // watcher's counter reflects it at the next check.
@@ -988,6 +995,25 @@ mod drive_loop_tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn policy_recovery_after_an_unknown_window_reoffers_held_paths() {
+        // While the policy is unreadable the sink HOLDS ops; the failures
+        // land in the quarantine and stop self-forcing scans. If the policy
+        // then recovers with the SAME bytes, the equality branch never
+        // rebuilds — so the recovery itself must trigger one rebuild (whose
+        // baseline re-offers everything held) whenever status is degraded.
+        let (journal, _) = drive_for(
+            vec![Script::Healthy, Script::PolicyUnreadable, Script::Healthy],
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            journal.starts.len() >= 2,
+            "recovering from an unknown policy while degraded must rebuild: {} starts",
+            journal.starts.len()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn cancellation_is_not_delayed_by_a_terminal_backoff() {
         // The slow probe must never hold up workspace close.
         let journal = Arc::new(Mutex::new(Journal::default()));
@@ -1160,7 +1186,14 @@ fn policy_fingerprint(root: &Path) -> Option<u64> {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 0u8.hash(&mut hasher);
             }
-            Err(_) => return None,
+            // Only files.toml governs capture OWNERSHIP, so only its
+            // unreadability makes the fingerprint unknown. An unreadable
+            // visibility.toml hashes as a stable marker instead — holding on
+            // it would block files.toml edits from ever rebuilding, and the
+            // worst it can cause is one debounced re-offer when its
+            // readability flips.
+            Err(_) if name == "files.toml" => return None,
+            Err(_) => 2u8.hash(&mut hasher),
         }
     }
     Some(hasher.finish())
@@ -1346,6 +1379,12 @@ async fn drive_loop<E: DriverEnv>(
     // The disruption count already seen (and reported) for the CURRENT layer.
     let mut seen_disruptions: u64 = 0;
     let mut pending_policy: Option<u64> = None;
+    // Whether the previous pass saw an UNKNOWN policy fingerprint. Needed at
+    // recovery: ops held during the unknown window failed into the
+    // quarantine, and if the policy comes back with the SAME bytes the
+    // equality branch would never rebuild — nothing would ever re-offer the
+    // held paths.
+    let mut policy_was_unknown = false;
 
     loop {
         // THE cadence, and the ONLY sleep: a healthy driver waits
@@ -1405,11 +1444,22 @@ async fn drive_loop<E: DriverEnv>(
         // Classify the tick, then let the tracker decide. Routing EVERY
         // outcome through one decision point is what keeps a failure mode
         // from quietly escaping the backoff.
+        let fingerprint = env.policy_fingerprint();
+        let policy_recovered = fingerprint.is_some() && policy_was_unknown;
+        policy_was_unknown = fingerprint.is_none();
         let observation = if env.watch_lost(current) {
             // A permanently lost watch tears the layer down; the rebuild
             // re-seeds via its own baseline reconcile, so no change is lost
             // across the gap.
             TickObservation::WatchLost
+        } else if policy_recovered && status.degraded() {
+            // The policy just became READABLE again after an unknown window.
+            // Ops held during that window (the sink fails them) have been
+            // quarantined — and if the recovered bytes EQUAL the layer's
+            // fingerprint, the debounce would never rebuild, so nothing
+            // would re-offer them. A recovery while degraded costs one
+            // rebuild; its baseline re-offers every held path.
+            TickObservation::PolicyChanged
         } else if policy_rebuild_due(env, current, &mut pending_policy) {
             // Policy-flip re-offer: narrowed paths retire, widened paths
             // re-ingest. The rebuild seeds from the REHYDRATED manifest, not
@@ -1453,10 +1503,12 @@ async fn drive_loop<E: DriverEnv>(
         }
     }
 
+    // BEFORE the joins, same as the Drop path: stop_layer drains threads,
+    // and a status reader mid-join must not see a closing driver as running.
+    status.running.store(false, Ordering::Release);
     if let Some(current) = layer.take() {
         env.stop_layer(current).await;
     }
-    status.running.store(false, Ordering::Release);
 }
 
 /// The real filesystem-backed environment.
@@ -1583,7 +1635,12 @@ impl DriverEnv for RealEnv {
                         .stats()
                         .await
                         .map(|stats| stats.quarantined > 0)
-                        .unwrap_or(false);
+                        // A stats failure here means the actor died AFTER the
+                        // reconcile round-trip; claiming a clean tick would
+                        // clear degraded/terminal and reset the backoff for a
+                        // dead layer. Not-clean keeps status honest, and the
+                        // next tick's reconcile takes the ActorLost path.
+                        .unwrap_or(true);
                 TickIo::Applied {
                     clean: clean && !quarantined,
                 }
@@ -1729,7 +1786,17 @@ async fn apply_run(
                 // whose head this loop just deleted, or a later policy widen
                 // would diff clean and never re-ingest it.
                 Ok(Ok(())) => result.not_owned_paths.push(path.clone()),
-                _ => status.degraded.store(true, Ordering::Release),
+                // A FAILED over-cap retire must fail the receipt too: this
+                // loop is the only thing that can retire such a head, so it
+                // must stay dirty and retry. Setting only the sticky status
+                // bit let the same tick report itself clean and clear the
+                // degradation it had just raised — with nothing left to
+                // retry the retire.
+                _ => {
+                    result.failed_applies.push(path.clone());
+                    result.degraded = true;
+                    status.degraded.store(true, Ordering::Release);
+                }
             }
         }
     }
