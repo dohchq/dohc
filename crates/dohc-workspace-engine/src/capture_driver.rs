@@ -30,7 +30,7 @@ use dohc_engine_files::{
 use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// How often the driver polls the dirty flag. Cheap when converged (one
@@ -38,33 +38,1077 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// the watcher's debounce means sub-interval changes coalesce anyway.
 const DRIVE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// The restart backoff schedule after a failed files-layer start or a
+/// permanently lost watch. Doubling from [`DRIVE_INTERVAL`] and capped, so a
+/// root that cannot be watched at all (deleted, permissions, handle
+/// exhaustion) stops burning a scan attempt twice a second forever.
+const RESTART_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// Consecutive restart failures before the driver declares the watch
+/// TERMINAL. Eight escalating attempts is ~30s of widening retries — long
+/// enough that no transient condition reaches it, short enough that a real
+/// one is reported while the user is still at their desk.
+const MAX_RESTART_ATTEMPTS: u32 = 8;
+
+/// How often a TERMINAL driver still probes for recovery. Slow enough to cost
+/// nothing, present so a root that comes back is picked up WITHOUT the caller
+/// having to close and reopen the workspace.
+const TERMINAL_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long to wait before the next files-layer start attempt, given the
+/// number of CONSECUTIVE failures so far. Pure so the schedule is testable
+/// without waiting out a real minute of backoff.
+fn restart_delay(consecutive_failures: u32) -> std::time::Duration {
+    if consecutive_failures == 0 {
+        return DRIVE_INTERVAL;
+    }
+    if is_terminal(consecutive_failures) {
+        return TERMINAL_PROBE_INTERVAL;
+    }
+    let factor = 1u32
+        .checked_shl(consecutive_failures - 1)
+        .unwrap_or(u32::MAX);
+    DRIVE_INTERVAL
+        .checked_mul(factor)
+        .unwrap_or(RESTART_BACKOFF_CAP)
+        .min(RESTART_BACKOFF_CAP)
+}
+
+/// Whether this many consecutive failures means the watch is TERMINAL: the
+/// driver stops the fast cadence and stops reporting capture as merely
+/// degraded.
+fn is_terminal(consecutive_failures: u32) -> bool {
+    consecutive_failures >= MAX_RESTART_ATTEMPTS
+}
+
 /// How many extra cycles the STARTUP baseline may take to settle before
 /// `workspace.open` is released anyway (degraded). Bounds open latency while
 /// keeping the common transient-failure case ordered.
 const BASELINE_SETTLE_ATTEMPTS: u32 = 3;
 
+/// What one driver tick observed about the files layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TickObservation {
+    /// Reconciled (or converged) with a live watch: the layer works.
+    /// `clean` is false when the tick's own apply reported failures, which
+    /// must stay visible as degradation rather than being cleared by the very
+    /// tick that raised it.
+    Healthy { clean: bool },
+    /// The OS watch is permanently gone.
+    WatchLost,
+    /// The files actor died under us.
+    ActorLost,
+    /// The reconcile itself failed while the layer stayed up.
+    ReconcileFailed,
+    /// `files.toml`/`visibility.toml` changed: an INTENTIONAL restart, not a
+    /// failure, so it must never feed the backoff.
+    PolicyChanged,
+}
+
+/// What the loop does with its layer after a tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayerAction {
+    /// Keep driving the current layer.
+    Keep,
+    /// Stop the layer; the next iteration rebuilds it after the backoff.
+    Drop,
+}
+
+/// Supervision state for the files layer: how many consecutive times it has
+/// failed to start or lost its watch, and what that means for cadence and
+/// reported health.
+#[derive(Default)]
+struct RestartTracker {
+    consecutive_failures: u32,
+}
+
+impl RestartTracker {
+    /// A start failed, or a started layer's watch was found dead. Escalates
+    /// the backoff and, past [`MAX_RESTART_ATTEMPTS`], reports TERMINAL.
+    fn record_failure(&mut self, status: &DriverStatus) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        status.record_failure_transition(is_terminal(self.consecutive_failures));
+    }
+
+    /// The layer survived a full tick with a live watch. This is the ONLY
+    /// reset: clearing the streak at START time instead would let a watch that
+    /// dies immediately after every start flap at the fast cadence forever —
+    /// exactly the case the streak exists to bound. It is also the only exit
+    /// from TERMINAL, which is what makes the slow probe a recovery path
+    /// rather than a graveyard.
+    fn record_healthy_tick(&mut self, status: &DriverStatus, clean: bool) {
+        self.consecutive_failures = 0;
+        // The healthy tick IS the proof the layer runs — running is claimed,
+        // terminal cleared, and (when the tick was fully clean) degradation
+        // cleared, all in ONE store. Degradation is sticky until the layer
+        // demonstrably works again; a tick whose own apply failed is not that
+        // demonstration.
+        status.record_healthy_transition(clean);
+    }
+
+    /// How long to wait before the next attempt.
+    fn delay(&self) -> std::time::Duration {
+        restart_delay(self.consecutive_failures)
+    }
+
+    fn failures(&self) -> u32 {
+        self.consecutive_failures
+    }
+
+    /// Fold one tick's observation into supervision state and say what to do
+    /// with the layer. THE decision point: every failure mode routes through
+    /// here so none can quietly escape the backoff.
+    fn observe(&mut self, observation: TickObservation, status: &DriverStatus) -> LayerAction {
+        match observation {
+            TickObservation::Healthy { clean } => {
+                self.record_healthy_tick(status, clean);
+                LayerAction::Keep
+            }
+            // A dead watch or actor is unrecoverable in place: drop the layer
+            // and let the backoff govern the rebuild. The failure transition
+            // is ONE store (running off, degraded on, terminal per streak),
+            // so no reader can observe it half-applied.
+            TickObservation::WatchLost | TickObservation::ActorLost => {
+                self.record_failure(status);
+                LayerAction::Drop
+            }
+            // The layer is kept while the failure might be transient, but the
+            // tick FAILED — `running` reads false until a tick completes,
+            // which is exactly what a status consumer should see for a layer
+            // that exists but is making no progress. Once terminal, rebuild
+            // rather than polling a wedged layer forever.
+            TickObservation::ReconcileFailed => {
+                self.record_failure(status);
+                if is_terminal(self.consecutive_failures) {
+                    LayerAction::Drop
+                } else {
+                    LayerAction::Keep
+                }
+            }
+            // A policy edit is deliberate. It must not escalate toward
+            // terminal, and it must not reset a real failure streak either.
+            TickObservation::PolicyChanged => LayerAction::Drop,
+        }
+    }
+}
+
 /// Observable driver state for the E-shard `watcher.status` RPC and tests.
+///
+/// ONE atomic word, deliberately: with separate atomics per flag, no
+/// writer-side store ordering can stop a READER from loading one flag before
+/// a transition and the other after it — `running && terminal` stayed
+/// observable through four rounds of store-order fixes. A single word makes
+/// every read a consistent snapshot and every transition one store.
 #[derive(Default)]
 pub(crate) struct DriverStatus {
-    /// The files layer (actor + watcher + loop) is up and driving.
-    running: AtomicBool,
-    /// The watcher reported degradation or permanent loss, a reconcile or
-    /// apply failed, or the files layer could not (re)start. Sticky until a
-    /// clean (re)start of the layer.
-    degraded: AtomicBool,
+    bits: std::sync::atomic::AtomicU8,
+}
+
+/// The files layer (actor + watcher + loop) is up and driving.
+const STATUS_RUNNING: u8 = 1 << 0;
+/// The watcher reported a disruption, a reconcile or apply failed, or the
+/// files layer could not (re)start. Cleared by the next FULLY CLEAN tick
+/// (reconcile completed, apply clean, no fresh watcher disruption) — CURRENT
+/// health, not an event log.
+const STATUS_DEGRADED: u8 = 1 << 1;
+/// The files layer failed [`MAX_RESTART_ATTEMPTS`] times in a row. Capture is
+/// NOT running and not expected to resume on its own timescale; the slow
+/// recovery probe still runs, so this is a report, not a grave.
+const STATUS_TERMINAL: u8 = 1 << 2;
+/// An apply observed an UNREADABLE policy (held ops). Folded into the drive
+/// loop's unknown-fingerprint tracking so the policy-recovery rebuild fires
+/// even when the blip was visible only inside the apply window.
+const STATUS_POLICY_HOLD: u8 = 1 << 3;
+
+/// A consistent point-in-time view of the driver, decoded from ONE atomic
+/// load. Any consumer that needs MORE THAN ONE flag must go through this —
+/// composing the per-flag getters performs separate loads, and a reader
+/// interleaving with a transition could still assemble the contradictory
+/// running && terminal tuple the single-word representation exists to kill.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StatusSnapshot {
+    pub(crate) running: bool,
+    pub(crate) degraded: bool,
+    pub(crate) terminal: bool,
 }
 
 impl DriverStatus {
-    // Consumed by the lifecycle tests today and the E-shard `watcher.status`
-    // RPC next; the expectation is scoped to non-test builds so it lifts
-    // automatically the moment the RPC lands.
+    /// ONE load; all flags decoded from the same word.
+    pub(crate) fn snapshot(&self) -> StatusSnapshot {
+        let bits = self.bits.load(Ordering::Acquire);
+        StatusSnapshot {
+            running: bits & STATUS_RUNNING != 0,
+            degraded: bits & STATUS_DEGRADED != 0,
+            terminal: bits & STATUS_TERMINAL != 0,
+        }
+    }
+
+    fn update(&self, transition: impl Fn(u8) -> u8) {
+        // fetch_update never fails with a total closure; the Result is noise.
+        let _ = self
+            .bits
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |bits| {
+                Some(transition(bits))
+            });
+    }
+    // SINGLE-flag conveniences. Correct on their own (one flag cannot
+    // self-contradict); combinations MUST use [`DriverStatus::snapshot`].
     #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn running(&self) -> bool {
-        self.running.load(Ordering::Acquire)
+        self.snapshot().running
+    }
+    pub(crate) fn degraded(&self) -> bool {
+        self.snapshot().degraded
     }
     #[cfg_attr(not(test), expect(dead_code))]
-    pub(crate) fn degraded(&self) -> bool {
-        self.degraded.load(Ordering::Acquire)
+    pub(crate) fn terminal(&self) -> bool {
+        self.snapshot().terminal
+    }
+    fn set_running(&self, running: bool) {
+        self.update(|bits| {
+            if running {
+                bits | STATUS_RUNNING
+            } else {
+                bits & !STATUS_RUNNING
+            }
+        });
+    }
+    fn mark_degraded(&self) {
+        self.update(|bits| bits | STATUS_DEGRADED);
+    }
+    /// A failure: not running, degraded, terminal iff the streak says so —
+    /// ONE store, so no reader can see a half-applied transition.
+    fn record_failure_transition(&self, terminal: bool) {
+        self.update(|bits| {
+            let bits = (bits & !STATUS_RUNNING) | STATUS_DEGRADED;
+            if terminal {
+                bits | STATUS_TERMINAL
+            } else {
+                bits & !STATUS_TERMINAL
+            }
+        });
+    }
+    /// A healthy tick: running, not terminal, and clean clears degradation —
+    /// ONE store.
+    fn record_healthy_transition(&self, clean: bool) {
+        self.update(|bits| {
+            let bits = (bits | STATUS_RUNNING) & !STATUS_TERMINAL;
+            if clean { bits & !STATUS_DEGRADED } else { bits }
+        });
+    }
+    fn arm_policy_hold(&self) {
+        self.update(|bits| bits | STATUS_POLICY_HOLD);
+    }
+    /// Consume the hold (test-and-clear in one atomic op).
+    fn take_policy_hold(&self) -> bool {
+        self.bits.fetch_and(!STATUS_POLICY_HOLD, Ordering::AcqRel) & STATUS_POLICY_HOLD != 0
+    }
+}
+
+#[cfg(test)]
+mod restart_schedule_tests {
+    use super::*;
+
+    #[test]
+    fn a_healthy_driver_polls_at_the_fast_cadence() {
+        assert_eq!(restart_delay(0), DRIVE_INTERVAL);
+        assert!(!is_terminal(0));
+    }
+
+    #[test]
+    fn the_backoff_doubles_and_then_caps() {
+        let schedule: Vec<_> = (1..=7).map(restart_delay).collect();
+        assert_eq!(
+            schedule,
+            vec![
+                std::time::Duration::from_millis(500),
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(4),
+                std::time::Duration::from_secs(8),
+                // Capped from here on: 16s would exceed the cap.
+                RESTART_BACKOFF_CAP,
+                RESTART_BACKOFF_CAP,
+            ]
+        );
+        // Strictly non-decreasing everywhere, so no schedule edit can
+        // accidentally make a LATER failure retry sooner than an earlier one.
+        for failures in 1..64u32 {
+            assert!(
+                restart_delay(failures + 1) >= restart_delay(failures),
+                "delay went backwards at {failures}"
+            );
+        }
+    }
+
+    #[test]
+    fn escalation_is_bounded_and_the_terminal_probe_still_runs() {
+        assert!(!is_terminal(MAX_RESTART_ATTEMPTS - 1));
+        assert!(is_terminal(MAX_RESTART_ATTEMPTS));
+        assert!(is_terminal(u32::MAX));
+        // A terminal driver keeps probing: the interval must be finite and
+        // slow, never zero (a hot loop) and never absent (a graveyard).
+        assert_eq!(restart_delay(MAX_RESTART_ATTEMPTS), TERMINAL_PROBE_INTERVAL);
+        assert_eq!(restart_delay(u32::MAX), TERMINAL_PROBE_INTERVAL);
+        assert!(TERMINAL_PROBE_INTERVAL > DRIVE_INTERVAL);
+        // The terminal probe must be DISTINGUISHABLE from the capped backoff,
+        // or deleting the terminal branch of `restart_delay` would leave every
+        // assertion above satisfied by the cap alone — which is exactly what
+        // an earlier revision of this test did.
+        assert_ne!(
+            TERMINAL_PROBE_INTERVAL, RESTART_BACKOFF_CAP,
+            "a terminal probe indistinguishable from the cap is untestable"
+        );
+        assert_eq!(restart_delay(MAX_RESTART_ATTEMPTS - 1), RESTART_BACKOFF_CAP);
+    }
+
+    #[test]
+    fn the_whole_escalation_stays_within_a_couple_of_minutes() {
+        // The point of the bound: reaching terminal must take long enough that
+        // no transient blip gets there, and short enough to be reported while
+        // the user is still at their desk.
+        let total: std::time::Duration = (1..MAX_RESTART_ATTEMPTS).map(restart_delay).sum();
+        assert!(
+            total >= std::time::Duration::from_secs(25),
+            "escalation too eager: {total:?}"
+        );
+        assert!(
+            total <= std::time::Duration::from_secs(150),
+            "escalation too slow to report: {total:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod supervision_tests {
+    use super::*;
+
+    /// Drive a sequence of tick observations the way `drive` does, returning
+    /// the delay the loop would wait before each subsequent pass. This is the
+    /// layer the real defects lived at: asserting on `RestartTracker` alone
+    /// missed both, because the loop chose its delay independently.
+    fn run(observations: &[TickObservation]) -> (Vec<std::time::Duration>, DriverStatus, u32) {
+        let status = DriverStatus::default();
+        let mut restart = RestartTracker::default();
+        let mut delays = Vec::new();
+        for observation in observations {
+            let _ = restart.observe(*observation, &status);
+            delays.push(restart.delay());
+        }
+        let failures = restart.failures();
+        (delays, status, failures)
+    }
+
+    #[test]
+    fn a_watch_that_dies_every_tick_backs_off_instead_of_rescanning_hot() {
+        // THE regression: a watch that dies right after every start used to
+        // rebuild the layer (actor + watcher + full baseline scan) every
+        // 500ms forever, because the drop-and-restart path skipped the sleep.
+        let (delays, status, _) = run(&[TickObservation::WatchLost; 4]);
+        assert_eq!(
+            delays,
+            vec![
+                std::time::Duration::from_millis(500),
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(4),
+            ],
+            "each repeated watch loss must widen the gap before the rebuild"
+        );
+        assert!(status.degraded());
+    }
+
+    #[test]
+    fn a_files_actor_that_dies_every_tick_also_escalates() {
+        // The other uncounted path: a reconcile returning ActorUnavailable
+        // dropped the layer without recording a failure at all, so the streak
+        // sat at zero and the driver never slowed down or reported terminal.
+        let (delays, status, failures) =
+            run(&[TickObservation::ActorLost; MAX_RESTART_ATTEMPTS as usize]);
+        assert_eq!(failures, MAX_RESTART_ATTEMPTS);
+        assert!(
+            status.terminal(),
+            "a permanently dead actor reports terminal"
+        );
+        assert_eq!(delays.last().copied(), Some(TERMINAL_PROBE_INTERVAL));
+    }
+
+    #[test]
+    fn a_reconcile_that_fails_every_tick_escalates_while_keeping_the_layer() {
+        let status = DriverStatus::default();
+        let mut restart = RestartTracker::default();
+        // While the failure might still be transient the layer is KEPT: a
+        // reconcile error does not mean its threads are dead.
+        for _ in 1..MAX_RESTART_ATTEMPTS {
+            assert_eq!(
+                restart.observe(TickObservation::ReconcileFailed, &status),
+                LayerAction::Keep,
+                "a live layer is not torn down for one failed reconcile"
+            );
+        }
+        // But a layer that has failed every tick to the terminal threshold is
+        // wedged: rebuild it rather than polling it forever, which also stops
+        // the driver reporting "running" while it reports "terminal".
+        assert_eq!(
+            restart.observe(TickObservation::ReconcileFailed, &status),
+            LayerAction::Drop,
+            "a persistently failing layer is rebuilt, not polled forever"
+        );
+        assert!(
+            status.terminal(),
+            "and it must escalate rather than retry hot forever"
+        );
+        assert_eq!(restart.delay(), TERMINAL_PROBE_INTERVAL);
+    }
+
+    #[test]
+    fn only_a_completed_reconcile_counts_as_healthy() {
+        // Health is claimed AFTER the reconcile, not at the watcher check:
+        // an actor that dies on every reconcile would otherwise reset the
+        // streak mid-tick and never escalate.
+        let status = DriverStatus::default();
+        let mut restart = RestartTracker::default();
+        for _ in 0..MAX_RESTART_ATTEMPTS * 2 {
+            restart.observe(TickObservation::ActorLost, &status);
+        }
+        assert!(status.terminal());
+        assert_eq!(
+            restart.observe(TickObservation::Healthy { clean: true }, &status),
+            LayerAction::Keep
+        );
+        assert!(!status.terminal(), "a completed tick recovers the driver");
+        assert_eq!(restart.delay(), DRIVE_INTERVAL);
+        assert_eq!(restart.failures(), 0);
+    }
+
+    #[test]
+    fn a_policy_edit_neither_escalates_nor_forgives() {
+        let status = DriverStatus::default();
+        let mut restart = RestartTracker::default();
+        restart.observe(TickObservation::WatchLost, &status);
+        let after_failure = restart.delay();
+
+        // A deliberate restart drops the layer but must not count as a
+        // failure...
+        assert_eq!(
+            restart.observe(TickObservation::PolicyChanged, &status),
+            LayerAction::Drop
+        );
+        assert_eq!(
+            restart.delay(),
+            after_failure,
+            "policy edits do not escalate"
+        );
+        // ...nor launder an existing streak into a clean bill of health.
+        assert_eq!(
+            restart.failures(),
+            1,
+            "policy edits do not reset the streak"
+        );
+    }
+
+    #[test]
+    fn an_isolated_failure_between_healthy_ticks_never_escalates() {
+        let (_, status, failures) = run(&[
+            TickObservation::WatchLost,
+            TickObservation::Healthy { clean: true },
+            TickObservation::ActorLost,
+            TickObservation::Healthy { clean: true },
+            TickObservation::ReconcileFailed,
+            TickObservation::Healthy { clean: true },
+        ]);
+        assert_eq!(failures, 0);
+        assert!(!status.terminal(), "recovered blips are not terminal");
+    }
+
+    #[test]
+    fn degradation_is_not_cleared_by_a_start_that_has_not_proven_itself() {
+        // The status triple must never read (degraded=false, terminal=true).
+        // It did, twice a second, while a watch flapped: a bare successful
+        // start cleared `degraded` but only a healthy TICK clears `terminal`.
+        let status = DriverStatus::default();
+        let mut restart = RestartTracker::default();
+        for _ in 0..MAX_RESTART_ATTEMPTS {
+            restart.observe(TickObservation::WatchLost, &status);
+        }
+        assert!(status.terminal());
+        // This is the condition the loop consults before clearing `degraded`
+        // on a successful start.
+        assert!(
+            restart.failures() > 0,
+            "a driver mid-streak must not advertise a clean start"
+        );
+        restart.observe(TickObservation::Healthy { clean: true }, &status);
+        assert!(!status.terminal());
+        assert!(
+            !status.degraded(),
+            "a clean tick must clear degradation, or one blip latches it forever"
+        );
+    }
+
+    #[test]
+    fn a_tick_whose_apply_failed_does_not_clear_its_own_degradation() {
+        let status = DriverStatus::default();
+        let mut restart = RestartTracker::default();
+        // apply_run reported failures: the driver marks degraded, then the
+        // very same tick reports Healthy (watch alive, reconcile completed).
+        status.mark_degraded();
+        restart.observe(TickObservation::Healthy { clean: false }, &status);
+        assert!(
+            status.degraded(),
+            "an apply failure must stay visible past the tick that raised it"
+        );
+        // The next fully clean tick is what clears it.
+        restart.observe(TickObservation::Healthy { clean: true }, &status);
+        assert!(!status.degraded());
+    }
+}
+
+/// Loop-level tests. These drive the REAL `drive_loop` against a scripted
+/// environment under paused time, so they observe what the loop actually
+/// waits on and rebuilds. The earlier suite asserted on `RestartTracker`
+/// alone and stayed green when the loop's cadence was reverted to the very
+/// bug it was written for; every test here fails under that mutation.
+#[cfg(test)]
+mod drive_loop_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Script {
+        StartFails,
+        WatchLost,
+        ActorLost,
+        ReconcileFails,
+        Healthy,
+        HealthyButDirtyApply,
+        /// A healthy tick during which the watcher records ONE more
+        /// disruption (backend error / root-identity blip that re-attached).
+        Disrupted,
+        /// The root's policy fingerprint differs from the layer's.
+        PolicyChanged,
+        /// The policy files cannot be read right now (transient lock).
+        PolicyUnreadable,
+    }
+
+    struct FakeLayer {
+        fingerprint: Option<u64>,
+        /// The global disruption count when this watcher was built — a fresh
+        /// watcher counts from zero, exactly like the real one.
+        base_disruptions: u64,
+    }
+
+    /// Records what the loop did and when, in virtual time.
+    #[derive(Default)]
+    struct Journal {
+        starts: Vec<std::time::Duration>,
+        ticks: Vec<std::time::Duration>,
+        stops: usize,
+        /// `status.degraded` / `status.running` sampled DURING each tick —
+        /// what a `watcher.status` RPC arriving at that moment would see.
+        degraded_seen: Vec<bool>,
+        running_seen: Vec<bool>,
+    }
+
+    struct FakeEnv {
+        script: Vec<Script>,
+        step: usize,
+        origin: tokio::time::Instant,
+        journal: Arc<Mutex<Journal>>,
+        policy: u64,
+        /// Disruptions emitted so far. Bumped at TICK END, so a `Disrupted`
+        /// entry becomes visible at the NEXT pass's check — like a real
+        /// watcher whose events land between polls.
+        emitted: u64,
+        /// The real `apply_run` marks the driver degraded when an apply
+        /// fails; the fake mirrors that, or a test asserting on degradation
+        /// would only be testing the fake.
+        status: Arc<DriverStatus>,
+    }
+
+    impl FakeEnv {
+        fn new(
+            script: Vec<Script>,
+            journal: Arc<Mutex<Journal>>,
+            status: Arc<DriverStatus>,
+        ) -> Self {
+            FakeEnv {
+                script,
+                step: 0,
+                origin: tokio::time::Instant::now(),
+                journal,
+                policy: 1,
+                emitted: 0,
+                status,
+            }
+        }
+        /// The script entry governing the CURRENT pass; the last entry repeats
+        /// so a script can describe a steady state.
+        fn current(&self) -> Script {
+            let index = self.step.min(self.script.len().saturating_sub(1));
+            self.script[index]
+        }
+        fn elapsed(&self) -> std::time::Duration {
+            tokio::time::Instant::now().duration_since(self.origin)
+        }
+    }
+
+    impl DriverEnv for FakeEnv {
+        type Layer = FakeLayer;
+
+        fn policy_fingerprint(&self) -> Option<u64> {
+            match self.current() {
+                Script::PolicyChanged => Some(self.policy + 1),
+                Script::PolicyUnreadable => None,
+                _ => Some(self.policy),
+            }
+        }
+        fn layer_fingerprint(&self, layer: &FakeLayer) -> Option<u64> {
+            layer.fingerprint
+        }
+        fn watch_lost(&self, _layer: &FakeLayer) -> bool {
+            self.current() == Script::WatchLost
+        }
+        fn watch_disruptions(&self, layer: &FakeLayer) -> u64 {
+            self.emitted - layer.base_disruptions
+        }
+
+        async fn start_layer(&mut self, _cancel: &CancellationToken) -> Result<FakeLayer, ()> {
+            self.journal
+                .lock()
+                .expect("journal")
+                .starts
+                .push(self.elapsed());
+            if self.current() == Script::StartFails {
+                self.step += 1;
+                return Err(());
+            }
+            // Adopt the CURRENT fingerprint, as RealEnv does (it reads the
+            // policy before building the seed). A fake that pinned the old
+            // value here rebuilt forever after a settled edit, which forced
+            // the exactly-once test down to `>= 2` — masking a real
+            // adopt-the-fingerprint regression.
+            Ok(FakeLayer {
+                fingerprint: self.policy_fingerprint(),
+                base_disruptions: self.emitted,
+            })
+        }
+
+        async fn tick(&mut self, _layer: &FakeLayer, _cancel: &CancellationToken) -> TickIo {
+            {
+                let mut journal = self.journal.lock().expect("journal");
+                journal.ticks.push(self.elapsed());
+                // What a status RPC arriving mid-tick would observe.
+                journal.degraded_seen.push(self.status.degraded());
+                journal.running_seen.push(self.status.running());
+            }
+            let script = self.current();
+            self.step += 1;
+            match script {
+                Script::ActorLost => TickIo::ActorLost,
+                Script::ReconcileFails => TickIo::Failed,
+                Script::HealthyButDirtyApply => {
+                    self.status.mark_degraded();
+                    TickIo::Applied { clean: false }
+                }
+                Script::PolicyUnreadable => {
+                    // Fidelity: while the policy is unknown the SINK holds
+                    // its ops (POLICY_UNAVAILABLE), so the apply reports
+                    // failures — the tick is degraded, not clean.
+                    self.status.mark_degraded();
+                    TickIo::Applied { clean: false }
+                }
+                Script::Disrupted => {
+                    // The disruption lands DURING this tick's window; the
+                    // watcher's counter reflects it at the next check.
+                    self.emitted += 1;
+                    TickIo::Applied { clean: true }
+                }
+                _ => TickIo::Applied { clean: true },
+            }
+        }
+
+        async fn stop_layer(&mut self, _layer: FakeLayer) {
+            self.journal.lock().expect("journal").stops += 1;
+            self.step += 1;
+        }
+    }
+
+    /// Run the loop under paused time for `budget` of virtual time.
+    async fn drive_for(
+        script: Vec<Script>,
+        budget: std::time::Duration,
+    ) -> (Journal, Arc<DriverStatus>) {
+        let journal = Arc::new(Mutex::new(Journal::default()));
+        let status = Arc::new(DriverStatus::default());
+        let cancel = CancellationToken::new();
+        let (baseline_tx, _baseline_rx) = tokio::sync::watch::channel(false);
+        let mut env = FakeEnv::new(script, Arc::clone(&journal), Arc::clone(&status));
+
+        let loop_status = Arc::clone(&status);
+        let loop_cancel = cancel.clone();
+        let handle = tokio::spawn(async move {
+            drive_loop(&mut env, loop_cancel, loop_status, baseline_tx).await
+        });
+
+        tokio::time::sleep(budget).await;
+        cancel.cancel();
+        handle.await.expect("driver loop");
+
+        let journal = Arc::try_unwrap(journal)
+            .map(|m| m.into_inner().expect("journal"))
+            .unwrap_or_else(|_| panic!("journal still shared"));
+        (journal, status)
+    }
+
+    /// Gaps between successive timestamps.
+    fn gaps(stamps: &[std::time::Duration]) -> Vec<std::time::Duration> {
+        stamps.windows(2).map(|w| w[1] - w[0]).collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_start_is_retried_on_the_escalating_backoff() {
+        let (journal, status) =
+            drive_for(vec![Script::StartFails], std::time::Duration::from_secs(20)).await;
+        assert_eq!(
+            gaps(&journal.starts),
+            vec![
+                std::time::Duration::from_millis(500),
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(4),
+                std::time::Duration::from_secs(8),
+            ],
+            "rebuild attempts must widen, not repeat at the drive interval"
+        );
+        assert!(status.degraded());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_watch_that_dies_every_tick_rebuilds_on_the_backoff_not_hot() {
+        // THE regression this shard exists for. The layer STARTS fine every
+        // time and then loses its watch, so a naive loop rebuilds — full
+        // actor + watcher + baseline scan — every drive interval forever.
+        let (journal, status) =
+            drive_for(vec![Script::WatchLost], std::time::Duration::from_secs(20)).await;
+        assert!(
+            journal.starts.len() >= 2,
+            "the layer must actually be rebuilt"
+        );
+        assert_eq!(
+            gaps(&journal.starts),
+            vec![
+                std::time::Duration::from_millis(500),
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(4),
+                std::time::Duration::from_secs(8),
+            ],
+            "a flapping watch must back off between rebuilds"
+        );
+        assert_eq!(
+            journal.stops,
+            journal.starts.len(),
+            "every layer is stopped — the rebuilt ones before their successor, \
+             the last one at shutdown. Any shortfall is a leaked watcher thread."
+        );
+        assert!(status.degraded());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_dead_files_actor_also_backs_off_and_reports_terminal() {
+        let (journal, status) =
+            drive_for(vec![Script::ActorLost], std::time::Duration::from_secs(60)).await;
+        assert_eq!(
+            gaps(&journal.starts)[..5],
+            [
+                std::time::Duration::from_millis(500),
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(4),
+                std::time::Duration::from_secs(8),
+            ],
+            "a dead actor must escalate exactly like a dead watch"
+        );
+        let snapshot = status.snapshot();
+        assert!(
+            snapshot.terminal,
+            "a permanently dead actor is reported terminal"
+        );
+        assert!(!snapshot.running, "terminal must never claim running");
+        // ...and not just at the end: each recovery probe STARTS a layer that
+        // then dies. A bare start mid-streak must not claim `running` — a
+        // status RPC landing in that window would read running && terminal.
+        assert!(
+            journal.running_seen[1..].iter().all(|running| !running),
+            "a probe-window start must not claim running: {:?}",
+            journal.running_seen
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_healthy_driver_polls_at_the_drive_interval() {
+        let (journal, status) =
+            drive_for(vec![Script::Healthy], std::time::Duration::from_secs(5)).await;
+        assert!(
+            gaps(&journal.ticks)
+                .iter()
+                .all(|gap| *gap == DRIVE_INTERVAL),
+            "healthy polling must stay at the drive interval: {:?}",
+            gaps(&journal.ticks)
+        );
+        assert_eq!(journal.starts.len(), 1, "a healthy layer is never rebuilt");
+        assert_eq!(
+            journal.starts.first().copied(),
+            Some(std::time::Duration::ZERO),
+            "the first start happens immediately — workspace.open pays no \
+             sleep before the startup baseline"
+        );
+        assert!(!status.degraded());
+        assert!(!status.terminal());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_permanently_failing_reconcile_slows_down_and_is_finally_rebuilt() {
+        // Some reconcile errors are structural (a workspace over the scan
+        // cap) and no amount of retrying fixes them. The driver must not poll
+        // a wedged layer at the fast cadence forever, and must not advertise
+        // `running` while it reports `terminal`.
+        let (journal, status) = drive_for(
+            vec![Script::ReconcileFails],
+            // Long enough to escalate to terminal (~31s) AND wait out one
+            // terminal probe (30s), which is when the rebuild happens.
+            std::time::Duration::from_secs(90),
+        )
+        .await;
+        let tick_gaps = gaps(&journal.ticks);
+        assert!(
+            tick_gaps.iter().any(|gap| *gap > DRIVE_INTERVAL),
+            "a repeatedly failing reconcile must back off: {tick_gaps:?}"
+        );
+        assert!(status.terminal(), "and eventually report terminal");
+        assert!(
+            journal.starts.len() >= 2,
+            "a wedged layer is finally rebuilt rather than polled forever"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_recovered_watch_disruption_does_not_latch_degraded_forever() {
+        // `watch_degraded` is STICKY for the life of the layer, so folding it
+        // into every tick's cleanliness would leave `degraded` true forever
+        // after one recovered blip — with a live watch and every reconcile
+        // succeeding, and no path to clear it.
+        let (_, status) = drive_for(
+            vec![Script::Disrupted, Script::Healthy],
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            !status.degraded(),
+            "a recovered disruption must be reported once, not latched"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failing_apply_keeps_degraded_visible() {
+        let (_, status) = drive_for(
+            vec![Script::HealthyButDirtyApply],
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            status.degraded(),
+            "an apply that keeps failing must stay visible"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rapidly_rewritten_policy_file_does_not_rebuild_every_tick() {
+        // A full rebuild per tick is the same pathology as the hot restart
+        // loop: fresh actor, fresh watcher, full baseline rescan. The
+        // fingerprint must HOLD for a tick before it costs one.
+        let (journal, _) = drive_for(
+            vec![
+                Script::Healthy,
+                Script::PolicyChanged,
+                Script::Healthy,
+                Script::PolicyChanged,
+                Script::Healthy,
+            ],
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            journal.starts.len(),
+            1,
+            "an unstable fingerprint must not trigger a rebuild at all"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_settled_policy_edit_does_rebuild_exactly_once() {
+        // One healthy tick on the base policy, then the edit appears and
+        // HOLDS. Exactly one rebuild: the debounce absorbs the first sighting,
+        // the second confirms, and the rebuilt layer adopts the new
+        // fingerprint so it must never rebuild again. `>= 2` here would hide
+        // a rebuild-forever regression.
+        let (journal, _) = drive_for(
+            vec![Script::Healthy, Script::PolicyChanged],
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            journal.starts.len(),
+            2,
+            "a held policy edit costs exactly one rebuild, then settles"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_second_disruption_on_the_same_layer_is_rereported() {
+        // The counter seam exists for exactly this: a sticky BOOL can be
+        // edge-triggered once per layer, so after the first report-and-clear
+        // every later disruption on the same live watch was silently
+        // swallowed — a status reader saw "healthy" through a genuinely new
+        // root-swap. With the count, each new disruption re-raises degraded
+        // and a clean tick still clears it afterwards.
+        let (journal, _) = drive_for(
+            vec![
+                Script::Healthy,
+                Script::Disrupted,
+                Script::Healthy,
+                Script::Disrupted,
+                Script::Healthy,
+                Script::Healthy,
+                Script::Healthy,
+            ],
+            std::time::Duration::from_secs(4),
+        )
+        .await;
+        // A disruption during tick N is visible at tick N+1's check, and a
+        // report raised at N+1 clears after the clean tick N+2 — so the
+        // observable pattern lags the script by one.
+        let seen = &journal.degraded_seen;
+        assert!(seen[2], "the first disruption is reported: {seen:?}");
+        assert!(
+            seen[3],
+            "the report must OUTLIVE the tick that raised it — the detecting              tick reports itself unclean, so only the NEXT clean tick clears:              {seen:?}"
+        );
+        assert!(
+            seen[4],
+            "the SECOND disruption on the same layer must be re-reported: {seen:?}"
+        );
+        assert!(
+            !seen[6],
+            "and degradation still clears once disruptions stop: {seen:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rebuilt_layer_rereports_disruptions_from_its_own_baseline() {
+        // A fresh watcher counts from zero. If the loop kept the OLD layer's
+        // seen-count across a rebuild, the new layer's first disruptions
+        // would compare equal to the stale baseline and be swallowed.
+        let (journal, _) = drive_for(
+            vec![
+                Script::Healthy,
+                Script::Disrupted,
+                Script::Healthy,
+                Script::WatchLost,
+                Script::Healthy,
+                Script::Disrupted,
+                Script::Healthy,
+                Script::Healthy,
+            ],
+            std::time::Duration::from_secs(6),
+        )
+        .await;
+        // Tick samples: indices 0-2 are layer 1 (the WatchLost pass has no
+        // tick), then 3,4,5,… are layer 2. The layer-2 disruption lands
+        // during sample 4's tick and is REPORTED at sample 5.
+        let seen = &journal.degraded_seen;
+        assert!(
+            !seen[4],
+            "the rebuilt layer's clean ticks must not inherit a stale \
+             baseline (a spurious report here means the seen-count was not \
+             re-baselined at start): {seen:?}"
+        );
+        assert!(
+            seen[5],
+            "a disruption on the REBUILT layer must be reported: {seen:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_intermittently_unreadable_policy_file_still_applies_the_edit() {
+        // A transiently-locked policy file must HOLD the debounce, not feed
+        // it a distinct error-hash: with the error hashed as content, the
+        // fingerprint alternated edit/error/edit, the same value never held
+        // two consecutive ticks, and a real edit was ignored forever.
+        let (journal, _) = drive_for(
+            vec![
+                Script::Healthy,
+                Script::PolicyChanged,
+                Script::PolicyUnreadable,
+                Script::PolicyChanged,
+                Script::Healthy,
+            ],
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            journal.starts.len(),
+            2,
+            "the held edit must rebuild exactly once despite unreadable ticks"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn policy_recovery_after_an_unknown_window_reoffers_held_paths() {
+        // While the policy is unreadable the sink HOLDS ops; the failures
+        // land in the quarantine and stop self-forcing scans. If the policy
+        // then recovers with the SAME bytes, the equality branch never
+        // rebuilds — so the recovery itself must trigger one rebuild (whose
+        // baseline re-offers everything held) whenever status is degraded.
+        let (journal, _) = drive_for(
+            vec![Script::Healthy, Script::PolicyUnreadable, Script::Healthy],
+            std::time::Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            journal.starts.len() >= 2,
+            "recovering from an unknown policy while degraded must rebuild: {} starts",
+            journal.starts.len()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_is_not_delayed_by_a_terminal_backoff() {
+        // The slow probe must never hold up workspace close.
+        let journal = Arc::new(Mutex::new(Journal::default()));
+        let status = Arc::new(DriverStatus::default());
+        let cancel = CancellationToken::new();
+        let (baseline_tx, _rx) = tokio::sync::watch::channel(false);
+        let mut env = FakeEnv::new(
+            vec![Script::StartFails],
+            Arc::clone(&journal),
+            Arc::clone(&status),
+        );
+        let loop_cancel = cancel.clone();
+        let handle =
+            tokio::spawn(
+                async move { drive_loop(&mut env, loop_cancel, status, baseline_tx).await },
+            );
+        // Let it escalate deep into the backoff.
+        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+        let before = tokio::time::Instant::now();
+        cancel.cancel();
+        handle.await.expect("driver loop");
+        assert!(
+            tokio::time::Instant::now().duration_since(before) < std::time::Duration::from_secs(1),
+            "cancel must cut the backoff sleep short"
+        );
     }
 }
 
@@ -143,7 +1187,7 @@ impl CaptureDriver {
 struct FilesLayer {
     files: FilesActor,
     watcher: NativeWatcher,
-    policy_fingerprint: u64,
+    policy_fingerprint: Option<u64>,
 }
 
 impl FilesLayer {
@@ -159,7 +1203,7 @@ impl FilesLayer {
         root: &Path,
         cancel: &CancellationToken,
         seed: Option<(ScanManifest, ScanGeneration)>,
-        policy_fingerprint: u64,
+        policy_fingerprint: Option<u64>,
     ) -> Result<(FilesLayer, ReconcileRun), FilesError> {
         let files =
             FilesActor::spawn_async_with_manifest(root.to_path_buf(), ScanBounds::default(), seed)
@@ -194,21 +1238,57 @@ impl FilesLayer {
 }
 
 /// A cheap change-detector over the two policy files. Content-hash based so
-/// touch-without-change does not force a re-offer.
-fn policy_fingerprint(root: &Path) -> u64 {
+/// touch-without-change does not force a re-offer. ABSENCE is a real,
+/// hashable state (no files.toml is simply the default policy); any OTHER
+/// read error means the current policy is UNKNOWN — returned as `None` so
+/// the debounce holds position instead of comparing against a fabricated
+/// error-hash, which flapped under an intermittently-locked file.
+fn policy_fingerprint(root: &Path) -> Option<u64> {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     for name in ["files.toml", "visibility.toml"] {
         let path = root.join(".dohc").join(name);
-        match std::fs::read(&path) {
+        // MIRROR the policy reader's refusals: it rejects a symlinked or
+        // non-regular-file policy as Unreadable WITHOUT following it, while a
+        // plain read() would follow the link and hash the target's content.
+        // Diverging here strands recovery — the sink holds (reader refused)
+        // but the fingerprint never reads as unknown, so the None->Some
+        // recovery rebuild never fires.
+        let refused = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                meta.file_type().is_symlink()
+                    || !meta.file_type().is_file()
+                    // The reader refuses oversize files too; hashing one here
+                    // would diverge the same way a followed symlink did.
+                    || meta.len() > dohc_engine_runtime::search::POLICY_FILE_MAX_BYTES
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                0u8.hash(&mut hasher);
+                continue;
+            }
+            Err(_) => true,
+        };
+        let read = if refused {
+            Err(())
+        } else {
+            std::fs::read(&path).map_err(|_| ())
+        };
+        match read {
             Ok(bytes) => {
                 1u8.hash(&mut hasher);
                 bytes.hash(&mut hasher);
             }
-            Err(_) => 0u8.hash(&mut hasher),
+            // Only files.toml governs capture OWNERSHIP, so only its
+            // unreadability makes the fingerprint unknown. An unreadable
+            // visibility.toml hashes as a stable marker instead — holding on
+            // it would block files.toml edits from ever rebuilding, and the
+            // worst it can cause is one debounced re-offer when its
+            // readability flips.
+            Err(()) if name == "files.toml" => return None,
+            Err(()) => 2u8.hash(&mut hasher),
         }
     }
-    hasher.finish()
+    Some(hasher.finish())
 }
 
 /// Build the rehydration seed from the domain's captured state for the
@@ -278,9 +1358,32 @@ const NARROWED_SEED_SENTINEL_SHA: &str = "policy-narrowed-reoffer";
 
 /// Whether `.dohc/files.toml` currently narrows `path` out of engine
 /// ownership (the secret floor is policy-independent and never narrowed).
-fn sink_policy_excludes(root: &Path, path: &str) -> bool {
-    let Some(rules) = dohc_engine_runtime::search::read_engine_search_policy(root).files_policy
-    else {
+/// One policy read for a whole apply run's over-cap evaluations.
+/// `Some(rules)` under a KNOWN policy (`None` inside = no narrowing);
+/// OUTER `None` when files.toml exists but cannot be read — the caller must
+/// hold loudly (failed apply), because a silent skip records no failure,
+/// keeps nothing dirty, and so the policy-recovery rebuild would never fire
+/// to retry it.
+type CapturePolicy = Option<Option<Vec<dohc_engine_runtime::search::FilesPolicyRule>>>;
+
+fn read_capture_policy(root: &Path) -> CapturePolicy {
+    let snapshot = dohc_engine_runtime::search::read_engine_search_policy(root);
+    if snapshot.diagnostics.iter().any(|diagnostic| {
+        diagnostic.file == "files.toml"
+            && diagnostic.reason == dohc_engine_runtime::search::DiagnosticReason::Unreadable
+    }) {
+        return None;
+    }
+    Some(snapshot.files_policy)
+}
+
+/// Whether a KNOWN policy narrows `path` out of engine ownership (the secret
+/// floor is policy-independent and never narrowed).
+fn policy_excludes(
+    policy: &Option<Vec<dohc_engine_runtime::search::FilesPolicyRule>>,
+    path: &str,
+) -> bool {
+    let Some(rules) = policy else {
         return false;
     };
     if matches!(
@@ -300,75 +1403,160 @@ fn wall_now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// The driver loop. Owns the files layer end to end. A missing layer
-/// (initial or restart failure) is retried every tick rather than killing
-/// the driver — the D shard layers backoff/escalation on this seam.
-async fn drive(
-    root: PathBuf,
-    actor: ActorHandle,
-    workspace_id: String,
+/// The I/O one driver tick performs, behind a seam so the loop's CADENCE and
+/// restart decisions are testable without a filesystem. Two rounds of review
+/// found real defects in this loop that every test missed, because the tests
+/// asserted on [`RestartTracker`] while the loop chose its own timing — a
+/// mutation restoring the original bug left the whole suite green. The loop
+/// is now generic over this trait so a fake can drive it under paused time
+/// and assert what it actually waited on.
+trait DriverEnv {
+    type Layer;
+
+    /// The root's CURRENT policy fingerprint; `None` when the policy files
+    /// could not be read right now (transient lock/permission error). Unknown
+    /// is NOT a distinct state to compare — the debounce holds position on
+    /// it, else an intermittently-locked file alternates real/error hashes
+    /// and a genuine edit is never confirmed.
+    fn policy_fingerprint(&self) -> Option<u64>;
+    /// The fingerprint the layer was built against (`None` if the policy was
+    /// unreadable at build time).
+    fn layer_fingerprint(&self, layer: &Self::Layer) -> Option<u64>;
+    /// The OS watch is permanently gone.
+    fn watch_lost(&self, layer: &Self::Layer) -> bool;
+    /// MONOTONE count of watch disruptions this layer's watcher has seen.
+    /// A bool here can only be edge-triggered once per layer — after the
+    /// first report-and-clear, every later disruption on the same live watch
+    /// would be silently swallowed. The loop re-reports whenever the count
+    /// moves.
+    fn watch_disruptions(&self, layer: &Self::Layer) -> u64;
+
+    /// Build a fresh layer and drive its startup baseline to settle.
+    async fn start_layer(&mut self, cancel: &CancellationToken) -> Result<Self::Layer, ()>;
+    /// One reconcile + apply.
+    async fn tick(&mut self, layer: &Self::Layer, cancel: &CancellationToken) -> TickIo;
+    async fn stop_layer(&mut self, layer: Self::Layer);
+}
+
+/// What one reconcile+apply did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TickIo {
+    /// Reconciled and applied; `clean` is false when the apply reported
+    /// failures or the scan itself was degraded.
+    Applied { clean: bool },
+    /// The files actor died under us.
+    ActorLost,
+    /// The reconcile failed while the layer stayed up.
+    Failed,
+}
+
+/// Decide whether a policy edit should rebuild the layer THIS tick.
+///
+/// A policy rebuild is expensive (fresh actor, fresh watcher, full baseline
+/// rescan), so a new fingerprint must HOLD for one tick before it triggers
+/// one. Without the debounce, anything rewriting `files.toml` faster than the
+/// drive interval — an agent syncing config, an editor autosaving — drives a
+/// full rescan every tick forever, and a transient read error (which hashes
+/// differently from any successful read) flaps the rebuild indefinitely.
+fn policy_rebuild_due(
+    fingerprint: Option<u64>,
+    layer_fingerprint: Option<u64>,
+    pending: &mut Option<u64>,
+) -> bool {
+    // Takes the tick's ONE fingerprint sample — re-reading here let a fast
+    // policy toggle differ between the two reads and confirm a pending value
+    // that never actually held across ticks.
+    //
+    // Unknown (unreadable policy) HOLDS the debounce in place: it neither
+    // confirms nor cancels a pending edit. Treating the error as a distinct
+    // hash instead made an intermittently-locked file alternate
+    // real/error/real — the same value never held two consecutive ticks, and
+    // a genuine edit was ignored forever.
+    let Some(current) = fingerprint else {
+        return false;
+    };
+    if Some(current) == layer_fingerprint {
+        *pending = None;
+        return false;
+    }
+    if *pending == Some(current) {
+        *pending = None;
+        return true;
+    }
+    *pending = Some(current);
+    false
+}
+
+/// The driver loop. Owns the files layer end to end; a missing layer (initial
+/// or restart failure) is rebuilt after the supervision backoff rather than
+/// killing the driver.
+async fn drive_loop<E: DriverEnv>(
+    env: &mut E,
     cancel: CancellationToken,
     status: Arc<DriverStatus>,
     baseline_tx: tokio::sync::watch::Sender<bool>,
 ) {
-    let mut layer: Option<FilesLayer> = None;
+    let mut layer: Option<E::Layer> = None;
+    let mut restart = RestartTracker::default();
+    let mut first_pass = true;
+    // The disruption count already seen (and reported) for the CURRENT layer.
+    let mut seen_disruptions: u64 = 0;
+    let mut pending_policy: Option<u64> = None;
+    // Whether the previous pass saw an UNKNOWN policy fingerprint. Needed at
+    // recovery: ops held during the unknown window failed into the
+    // quarantine, and if the policy comes back with the SAME bytes the
+    // equality branch would never rebuild — nothing would ever re-offer the
+    // held paths.
+    let mut policy_was_unknown = false;
+
     loop {
+        // THE cadence, and the ONLY sleep: a healthy driver waits
+        // DRIVE_INTERVAL (restart_delay(0)), a failing one waits out its
+        // backoff — whether it is about to rebuild the layer or retry a
+        // reconcile on a layer it kept. Keeping it here, before every branch,
+        // is what stops a failure path from `continue`ing around it and
+        // rebuilding hot. Skipped once so `workspace.open` pays no latency.
+        if !first_pass {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => break,
+                () = tokio::time::sleep(restart.delay()) => {}
+            }
+        }
+        first_pass = false;
+
         if layer.is_none() {
-            // REHYDRATE the scan manifest from the domain's captured state:
-            // against an EMPTY baseline a file deleted while the daemon was
-            // down could never emit a Retire and its stale head would stay
-            // readable forever. Secrets seed with a sentinel sha (plaintext
-            // hashes are never stored) and re-offer once into the encrypted
-            // dedupe. A seed failure degrades to the empty baseline (safe:
-            // over-capture, never data loss) rather than blocking start.
-            // Read the policy fingerprint BEFORE the seed: if policy changes
-            // between the two, the layer records the OLDER fingerprint and
-            // the next tick detects the edit and restarts. Recording the
-            // newer one would swallow the edit (the seed reflects old policy
-            // while the layer claims to be current).
-            let fingerprint_before_seed = policy_fingerprint(&root);
-            let seed = manifest_seed(&root, &actor, &workspace_id).await;
-            match FilesLayer::start_with_fingerprint(&root, &cancel, seed, fingerprint_before_seed)
-                .await
-            {
-                Ok((fresh, initial)) => {
-                    status.running.store(true, Ordering::Release);
-                    status.degraded.store(false, Ordering::Release);
-                    let mut settled =
-                        apply_run(&root, &actor, &workspace_id, &fresh, initial, &status).await;
-                    // The open barrier must not release on a FAILED baseline:
-                    // a caller whose first write lands before the retry could
-                    // have it overwritten by the retry's capture of stale
-                    // closed-period disk bytes. Retry the cycle a bounded
-                    // number of times so a persistently failing path degrades
-                    // the workspace instead of blocking open forever.
-                    let mut attempts = 0;
-                    while !settled && attempts < BASELINE_SETTLE_ATTEMPTS {
-                        attempts += 1;
-                        tokio::select! {
-                            biased;
-                            () = cancel.cancelled() => break,
-                            () = tokio::time::sleep(DRIVE_INTERVAL) => {}
-                        }
-                        let run = fresh
-                            .files
-                            .handle()
-                            .reconcile_if_dirty(cancel.child_token())
-                            .await;
-                        settled = match run {
-                            Ok(run) => {
-                                apply_run(&root, &actor, &workspace_id, &fresh, run, &status).await
-                            }
-                            Err(_) => false,
-                        };
+            match env.start_layer(&cancel).await {
+                Ok(fresh) => {
+                    // `running` is claimed on a bare start ONLY outside a
+                    // failure streak. Mid-streak (including terminal recovery
+                    // probes) a start proves nothing — the last N layers also
+                    // started and then died — and claiming it here made the
+                    // status read running=true && terminal=true for the probe
+                    // window. The first healthy tick sets it instead.
+                    // `degraded` likewise stays until a fully clean tick.
+                    if restart.failures() == 0 {
+                        status.set_running(true);
                     }
+                    // Baseline for the NEW layer's watcher (a fresh watcher
+                    // counts from zero; taking its current value also holds if
+                    // it observed a disruption during its own startup scan).
+                    seen_disruptions = env.watch_disruptions(&fresh);
+                    pending_policy = None;
+                    // A fresh layer read the policy at its own build time; the
+                    // previous layer's unknown-policy window must not make the
+                    // first readable fingerprint look like a recovery and cost
+                    // a spurious rebuild.
+                    policy_was_unknown = false;
                     layer = Some(fresh);
                 }
-                Err(_) => {
-                    // Transient start failures (momentarily unwatchable root)
-                    // must not be terminal: mark degraded and retry next tick.
-                    status.running.store(false, Ordering::Release);
-                    status.degraded.store(true, Ordering::Release);
+                Err(()) => {
+                    // Transient start failures (a momentarily unwatchable
+                    // root) must not be terminal: mark degraded and retry on
+                    // the backoff schedule, escalating only after
+                    // MAX_RESTART_ATTEMPTS consecutive failures. The failure
+                    // transition is one store; no manual pre-ordering needed.
+                    restart.record_failure(&status);
                 }
             }
             // Whether the baseline applied or the start failed, the open
@@ -377,79 +1565,247 @@ async fn drive(
             let _ = baseline_tx.send(true);
         }
 
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => break,
-            () = tokio::time::sleep(DRIVE_INTERVAL) => {}
-        }
-
         let Some(current) = layer.as_ref() else {
             continue;
         };
 
-        // Surface watcher health (the watch.rs composition contract: a
-        // silently-dead OS watch must never stay silent at this layer). A
-        // PERMANENTLY lost watch tears the layer down for the next-tick
-        // restart — NativeWatcher::start re-seeds via its initial reconcile,
-        // so no change is lost across the gap.
-        if current.watcher.is_unavailable() {
-            status.degraded.store(true, Ordering::Release);
+        // Classify the tick, then let the tracker decide. Routing EVERY
+        // outcome through one decision point is what keeps a failure mode
+        // from quietly escaping the backoff.
+        let fingerprint = env.policy_fingerprint();
+        // The apply path can observe an unreadable policy the loop's own read
+        // never sees; it arms `policy_hold`, folded in here so recovery fires
+        // for that window too.
+        let policy_was_held = status.take_policy_hold();
+        let policy_recovered = fingerprint.is_some() && (policy_was_unknown || policy_was_held);
+        // An unknown fingerprint carries the state forward by itself; a
+        // consumed hold under a still-unknown fingerprint needs no re-arm.
+        policy_was_unknown = fingerprint.is_none();
+        let observation = if env.watch_lost(current) {
+            // A permanently lost watch tears the layer down; the rebuild
+            // re-seeds via its own baseline reconcile, so no change is lost
+            // across the gap.
+            TickObservation::WatchLost
+        } else if policy_recovered && status.degraded() {
+            // The policy just became READABLE again after an unknown window.
+            // Ops held during that window (the sink fails them) have been
+            // quarantined — and if the recovered bytes EQUAL the layer's
+            // fingerprint, the debounce would never rebuild, so nothing
+            // would re-offer them. A recovery while degraded costs one
+            // rebuild; its baseline re-offers every held path.
+            TickObservation::PolicyChanged
+        } else if policy_rebuild_due(
+            fingerprint,
+            env.layer_fingerprint(current),
+            &mut pending_policy,
+        ) {
+            // Policy-flip re-offer: narrowed paths retire, widened paths
+            // re-ingest. The rebuild seeds from the REHYDRATED manifest, not
+            // an empty one: an empty baseline cannot emit a Retire for a path
+            // deleted from disk in the same window as the policy edit.
+            TickObservation::PolicyChanged
+        } else {
+            // EDGE-triggered on the COUNT: report whenever the watcher has
+            // seen disruptions we have not. Folding a sticky signal into
+            // `clean` every tick latched `degraded` forever after one
+            // recovered blip; edge-triggering a BOOL reported at most once
+            // per layer and then went blind to genuinely new disruptions on
+            // the same live watch. The count re-reports each one and still
+            // clears within a tick once they stop.
+            let disruptions = env.watch_disruptions(current);
+            let fresh_disruption = disruptions != seen_disruptions;
+            if fresh_disruption {
+                seen_disruptions = disruptions;
+                status.mark_degraded();
+            }
+            match env.tick(current, &cancel).await {
+                // Only NOW has the layer survived a full tick: live watch AND
+                // a reconcile that completed.
+                TickIo::Applied { clean } => TickObservation::Healthy {
+                    clean: clean && !fresh_disruption,
+                },
+                TickIo::ActorLost => TickObservation::ActorLost,
+                TickIo::Failed => TickObservation::ReconcileFailed,
+            }
+        };
+
+        if restart.observe(observation, &status) == LayerAction::Drop {
+            // `running` goes false BEFORE the teardown await: stop_layer
+            // joins the watcher thread and closes the files actor, and a
+            // status reader sampling mid-join must not see running while a
+            // terminal streak is being reported.
+            status.set_running(false);
             if let Some(dead) = layer.take() {
-                dead.stop().await;
+                env.stop_layer(dead).await;
             }
-            status.running.store(false, Ordering::Release);
-            continue;
         }
-        if current.watcher.is_degraded() {
-            status.degraded.store(true, Ordering::Release);
-        }
+    }
 
-        // Policy-flip re-offer: a changed files.toml/visibility.toml respawns
-        // the layer with an EMPTY manifest so every path re-offers through
-        // the sink (narrowed paths retire, widened paths re-ingest).
-        let fingerprint = policy_fingerprint(&root);
-        if fingerprint != current.policy_fingerprint {
-            if let Some(old) = layer.take() {
-                old.stop().await;
+    // BEFORE the joins, same as the Drop path: stop_layer drains threads,
+    // and a status reader mid-join must not see a closing driver as running.
+    status.set_running(false);
+    if let Some(current) = layer.take() {
+        env.stop_layer(current).await;
+    }
+}
+
+/// The real filesystem-backed environment.
+struct RealEnv {
+    root: PathBuf,
+    actor: ActorHandle,
+    workspace_id: String,
+    status: Arc<DriverStatus>,
+}
+
+impl DriverEnv for RealEnv {
+    type Layer = FilesLayer;
+
+    fn policy_fingerprint(&self) -> Option<u64> {
+        policy_fingerprint(&self.root)
+    }
+    fn layer_fingerprint(&self, layer: &FilesLayer) -> Option<u64> {
+        layer.policy_fingerprint
+    }
+    fn watch_lost(&self, layer: &FilesLayer) -> bool {
+        layer.watcher.is_unavailable()
+    }
+    fn watch_disruptions(&self, layer: &FilesLayer) -> u64 {
+        layer.watcher.disruption_count()
+    }
+
+    async fn start_layer(&mut self, cancel: &CancellationToken) -> Result<FilesLayer, ()> {
+        // REHYDRATE the scan manifest from the domain's captured state:
+        // against an EMPTY baseline a file deleted while the daemon was down
+        // could never emit a Retire and its stale head would stay readable
+        // forever. Secrets seed with a sentinel sha (plaintext hashes are
+        // never stored) and re-offer once into the encrypted dedupe. A seed
+        // failure degrades to the empty baseline (safe: over-capture, never
+        // data loss) rather than blocking start.
+        //
+        // Read the policy fingerprint BEFORE the seed: if policy changes
+        // between the two, the layer records the OLDER fingerprint and the
+        // next tick detects the edit and rebuilds. Recording the newer one
+        // would swallow the edit (the seed reflects old policy while the
+        // layer claims to be current).
+        let fingerprint_before_seed = policy_fingerprint(&self.root);
+        let seed = manifest_seed(&self.root, &self.actor, &self.workspace_id).await;
+        let (fresh, initial) =
+            FilesLayer::start_with_fingerprint(&self.root, cancel, seed, fingerprint_before_seed)
+                .await
+                .map_err(|_| ())?;
+
+        let mut settled = apply_run(
+            &self.root,
+            &self.actor,
+            &self.workspace_id,
+            &fresh,
+            initial,
+            &self.status,
+        )
+        .await;
+        // The open barrier must not release on a FAILED baseline: a caller
+        // whose first write lands before the retry could have it overwritten
+        // by the retry's capture of stale closed-period disk bytes. Retry a
+        // bounded number of times so a persistently failing path degrades the
+        // workspace instead of blocking open forever.
+        let mut attempts = 0;
+        while !settled && attempts < BASELINE_SETTLE_ATTEMPTS {
+            attempts += 1;
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => break,
+                () = tokio::time::sleep(DRIVE_INTERVAL) => {}
             }
-            // The next iteration restarts from the REHYDRATED manifest, not
-            // an empty one: an empty baseline cannot emit a Retire for a
-            // path deleted from disk in the same window as the policy edit
-            // (it appears in neither the listing nor the manifest). The
-            // rehydrated seed re-offers narrowed paths through the sink's
-            // policy branch (retire) and still diffs offline deletes as
-            // removed, so both converge.
-            status.running.store(false, Ordering::Release);
-            continue;
+            settled = match fresh
+                .files
+                .handle()
+                .reconcile_if_dirty(cancel.child_token())
+                .await
+            {
+                Ok(run) => {
+                    apply_run(
+                        &self.root,
+                        &self.actor,
+                        &self.workspace_id,
+                        &fresh,
+                        run,
+                        &self.status,
+                    )
+                    .await
+                }
+                Err(_) => false,
+            };
         }
+        Ok(fresh)
+    }
 
-        let run = current
+    async fn tick(&mut self, layer: &FilesLayer, cancel: &CancellationToken) -> TickIo {
+        match layer
             .files
             .handle()
             .reconcile_if_dirty(cancel.child_token())
-            .await;
-        match run {
+            .await
+        {
             Ok(run) => {
-                let _ = apply_run(&root, &actor, &workspace_id, current, run, &status).await;
-            }
-            Err(FilesError::ActorUnavailable) => {
-                // The files actor died: drop the layer and restart next tick.
-                status.degraded.store(true, Ordering::Release);
-                if let Some(dead) = layer.take() {
-                    dead.stop().await;
+                let clean = apply_run(
+                    &self.root,
+                    &self.actor,
+                    &self.workspace_id,
+                    layer,
+                    run,
+                    &self.status,
+                )
+                .await;
+                // A clean-looking tick with a NON-EMPTY quarantine is not
+                // health: the controller parks persistently failing paths on
+                // its own degraded-rescan backoff and stops self-forcing
+                // scans, so reconcile CONVERGES while capture has not
+                // recovered — reading that as clean would clear `degraded`
+                // over live failures. Only consulted when the tick looks
+                // clean while status is degraded (a quarantine cannot form
+                // without degraded ticks), so the happy path stays one actor
+                // round-trip.
+                if clean && self.status.degraded() {
+                    match layer.files.handle().stats().await {
+                        Ok(stats) => TickIo::Applied {
+                            clean: stats.quarantined == 0,
+                        },
+                        // The actor died AFTER the reconcile round-trip. An
+                        // unclean-but-HEALTHY tick would still reset the
+                        // failure streak and re-claim `running` for a dead
+                        // layer; report the death itself so the backoff
+                        // governs the rebuild.
+                        Err(_) => TickIo::ActorLost,
+                    }
+                } else {
+                    TickIo::Applied { clean }
                 }
-                status.running.store(false, Ordering::Release);
             }
-            Err(_) => {
-                status.degraded.store(true, Ordering::Release);
-            }
+            Err(FilesError::ActorUnavailable) => TickIo::ActorLost,
+            Err(_) => TickIo::Failed,
         }
     }
 
-    if let Some(current) = layer.take() {
-        current.stop().await;
+    async fn stop_layer(&mut self, layer: FilesLayer) {
+        layer.stop().await;
     }
-    status.running.store(false, Ordering::Release);
+}
+
+async fn drive(
+    root: PathBuf,
+    actor: ActorHandle,
+    workspace_id: String,
+    cancel: CancellationToken,
+    status: Arc<DriverStatus>,
+    baseline_tx: tokio::sync::watch::Sender<bool>,
+) {
+    let mut env = RealEnv {
+        root,
+        actor,
+        workspace_id,
+        status: Arc::clone(&status),
+    };
+    drive_loop(&mut env, cancel, status, baseline_tx).await;
 }
 
 /// Apply one reconcile run through the capture sink and acknowledge it.
@@ -483,7 +1839,7 @@ async fn apply_run(
             dohc_engine_domain::DomainError::WorkspaceNotFound,
         )) => "main".to_owned(),
         Err(_) => {
-            status.degraded.store(true, Ordering::Release);
+            status.mark_degraded();
             ack_all_failed(layer, plan, status).await;
             return false;
         }
@@ -515,9 +1871,9 @@ async fn apply_run(
                 None,
             );
             let result = apply_reconcile_plan(&apply_plan, &mut sink, &NoFaults);
-            let _ = done_tx.send((apply_plan, result));
+            let _ = done_tx.send((apply_plan, result, sink.policy_held()));
         });
-    let applied: Option<(ReconcilePlan, CaptureApplyResult)> = match apply_thread {
+    let applied: Option<(ReconcilePlan, CaptureApplyResult, bool)> = match apply_thread {
         Ok(joiner) => {
             let outcome = done_rx.await.ok();
             let _ = tokio::task::spawn_blocking(move || joiner.join()).await;
@@ -525,9 +1881,9 @@ async fn apply_run(
         }
         Err(_) => None,
     };
-    let Some((plan, mut result)) = applied else {
+    let Some((plan, mut result, sink_policy_held)) = applied else {
         // Spawn failure or apply-thread panic: the plan must still resolve.
-        status.degraded.store(true, Ordering::Release);
+        status.mark_degraded();
         ack_all_failed(layer, plan, status).await;
         return false;
     };
@@ -537,8 +1893,32 @@ async fn apply_run(
     // those directly — policy exclusion is an OWNERSHIP decision, distinct
     // from the size-cap false-delete defense that protects still-tracked
     // content.
+    // ONE policy read for the whole loop — a per-path re-read was N disk
+    // round-trips for one answer, and could even give different paths a
+    // DIFFERENT policy if an edit raced the loop.
+    let capture_policy = if plan.retained_over_cap.is_empty() {
+        Some(None)
+    } else {
+        read_capture_policy(root)
+    };
     for path in &plan.retained_over_cap {
-        if sink_policy_excludes(root, path) {
+        let excluded = match &capture_policy {
+            Some(policy) => policy_excludes(policy, path),
+            // Unknown policy: hold LOUDLY. This loop is the only mechanism
+            // that can retire an over-cap narrowed head, so the hold must
+            // register as a failure (dirty + degraded) for the recovery
+            // rebuild to retry — a silent skip strands the head forever.
+            None => {
+                result.failed_applies.push(path.clone());
+                result.degraded = true;
+                status.mark_degraded();
+                // Arm the loop's policy-recovery trigger: this blip may never
+                // be visible to the loop's own fingerprint read.
+                status.arm_policy_hold();
+                false
+            }
+        };
+        if excluded {
             let retire_actor = actor.clone();
             let retire_workspace = workspace_id.to_owned();
             let retire_version = version_for_retire.clone();
@@ -566,12 +1946,28 @@ async fn apply_run(
                 // whose head this loop just deleted, or a later policy widen
                 // would diff clean and never re-ingest it.
                 Ok(Ok(())) => result.not_owned_paths.push(path.clone()),
-                _ => status.degraded.store(true, Ordering::Release),
+                // A FAILED over-cap retire must fail the receipt too: this
+                // loop is the only thing that can retire such a head, so it
+                // must stay dirty and retry. Setting only the sticky status
+                // bit let the same tick report itself clean and clear the
+                // degradation it had just raised — with nothing left to
+                // retry the retire.
+                _ => {
+                    result.failed_applies.push(path.clone());
+                    result.degraded = true;
+                    status.mark_degraded();
+                }
             }
         }
     }
     if result.degraded {
-        status.degraded.store(true, Ordering::Release);
+        status.mark_degraded();
+    }
+    // The sink reports its holds DIRECTLY: a re-read here could miss the
+    // very blip that caused the hold (readable again by the time this line
+    // runs). The flag comes from the exact decision point instead.
+    if sink_policy_held {
+        status.arm_policy_hold();
     }
     let clean = result.failed_applies.is_empty() && !result.degraded;
     if result.completed()
@@ -582,7 +1978,7 @@ async fn apply_run(
             .await
             .is_err()
     {
-        status.degraded.store(true, Ordering::Release);
+        status.mark_degraded();
         return false;
     }
     clean
@@ -608,6 +2004,6 @@ async fn ack_all_failed(layer: &FilesLayer, plan: ReconcilePlan, status: &Arc<Dr
         .await
         .is_err()
     {
-        status.degraded.store(true, Ordering::Release);
+        status.mark_degraded();
     }
 }

@@ -33,10 +33,10 @@ pub use index::{
     upsert_chat_message_search_index, upsert_file_search_index, upsert_thread_header_search_index,
 };
 pub use policy::{
-    DiagnosticReason, EffectivePolicy, Export, FilesPolicyRule, PathFloor, PolicyDiagnostic,
-    SearchPolicySnapshot, Visibility, VisibilityPolicyRule, classify_engine_file_path,
-    parse_files_policy, parse_visibility_policy, path_is_search_indexed, policy_glob_matches,
-    read_engine_search_policy, resolve_effective_policy, validate_policy_glob,
+    DiagnosticReason, EffectivePolicy, Export, FilesPolicyRule, POLICY_FILE_MAX_BYTES, PathFloor,
+    PolicyDiagnostic, SearchPolicySnapshot, Visibility, VisibilityPolicyRule,
+    classify_engine_file_path, parse_files_policy, parse_visibility_policy, path_is_search_indexed,
+    policy_glob_matches, read_engine_search_policy, resolve_effective_policy, validate_policy_glob,
 };
 pub use query::{
     GranularChatMessageSearchResult, SearchCandidate, query_chat_messages_granular,

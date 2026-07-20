@@ -220,7 +220,7 @@ async fn native_watcher_marks_unavailable_after_the_watched_root_is_deleted() {
     .expect("watch start");
     let mut watcher = ready.watcher;
     apply_and_ack(&handle, ready.initial_reconcile).await;
-    assert!(!watcher.is_degraded());
+    assert_eq!(watcher.disruption_count(), 0);
     assert!(!watcher.is_unavailable());
 
     std::fs::remove_dir_all(ws.path()).expect("delete the watched root out from under the watch");
@@ -237,8 +237,8 @@ async fn native_watcher_marks_unavailable_after_the_watched_root_is_deleted() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(
-        watcher.is_degraded(),
-        "a genuinely lost watch must also be sticky-degraded"
+        watcher.disruption_count() > 0,
+        "a genuinely lost watch must also count as a disruption"
     );
     watcher.stop().expect("stop");
 }

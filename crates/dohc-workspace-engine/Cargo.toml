@@ -41,6 +41,10 @@ libc = "0.2"
 harness = []
 
 [dev-dependencies]
+# `test-util` gives the driver-loop tests paused virtual time, so they can
+# assert what the supervision loop actually WAITS on (a 30s terminal probe
+# costs the suite nothing) instead of asserting on the tracker beside it.
+tokio = { version = "1", features = ["test-util"] }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 # Self-dependency so integration tests (tests/shadow_replay.rs) compile the
 # library with the harness-only marker writers; production builds never do.
