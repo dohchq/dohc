@@ -40,8 +40,9 @@ const DRIVE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500
 pub(crate) struct DriverStatus {
     /// The files layer (actor + watcher + loop) is up and driving.
     running: AtomicBool,
-    /// The watcher reported degradation, a reconcile failed, or the files
-    /// layer could not (re)start. Sticky until a clean restart.
+    /// The watcher reported degradation or permanent loss, a reconcile or
+    /// apply failed, or the files layer could not (re)start. Sticky until a
+    /// clean (re)start of the layer.
     degraded: AtomicBool,
 }
 
@@ -173,7 +174,9 @@ fn wall_now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// The driver loop. Owns the files layer end to end.
+/// The driver loop. Owns the files layer end to end. A missing layer
+/// (initial or restart failure) is retried every tick rather than killing
+/// the driver — the D shard layers backoff/escalation on this seam.
 async fn drive(
     root: PathBuf,
     actor: ActorHandle,
@@ -181,63 +184,82 @@ async fn drive(
     cancel: CancellationToken,
     status: Arc<DriverStatus>,
 ) {
-    let mut layer = match FilesLayer::start(&root, &cancel).await {
-        Ok((layer, initial)) => {
-            status.running.store(true, Ordering::Release);
-            apply_run(&root, &actor, &workspace_id, &layer, initial, &status).await;
-            layer
-        }
-        Err(_) => {
-            // The workspace stays functional for RPC; capture is down until
-            // the D-shard supervision restarts it. Sticky-degraded says so.
-            status.degraded.store(true, Ordering::Release);
-            return;
-        }
-    };
-
+    let mut layer: Option<FilesLayer> = None;
     loop {
+        if layer.is_none() {
+            match FilesLayer::start(&root, &cancel).await {
+                Ok((fresh, initial)) => {
+                    status.running.store(true, Ordering::Release);
+                    status.degraded.store(false, Ordering::Release);
+                    apply_run(&root, &actor, &workspace_id, &fresh, initial, &status).await;
+                    layer = Some(fresh);
+                }
+                Err(_) => {
+                    // Transient start failures (momentarily unwatchable root)
+                    // must not be terminal: mark degraded and retry next tick.
+                    status.running.store(false, Ordering::Release);
+                    status.degraded.store(true, Ordering::Release);
+                }
+            }
+        }
+
         tokio::select! {
             biased;
             () = cancel.cancelled() => break,
             () = tokio::time::sleep(DRIVE_INTERVAL) => {}
         }
 
+        let Some(current) = layer.as_ref() else {
+            continue;
+        };
+
+        // Surface watcher health (the watch.rs composition contract: a
+        // silently-dead OS watch must never stay silent at this layer). A
+        // PERMANENTLY lost watch tears the layer down for the next-tick
+        // restart — NativeWatcher::start re-seeds via its initial reconcile,
+        // so no change is lost across the gap.
+        if current.watcher.is_unavailable() {
+            status.degraded.store(true, Ordering::Release);
+            if let Some(dead) = layer.take() {
+                dead.stop().await;
+            }
+            status.running.store(false, Ordering::Release);
+            continue;
+        }
+        if current.watcher.is_degraded() {
+            status.degraded.store(true, Ordering::Release);
+        }
+
         // Policy-flip re-offer: a changed files.toml/visibility.toml respawns
         // the layer with an EMPTY manifest so every path re-offers through
         // the sink (narrowed paths retire, widened paths re-ingest).
         let fingerprint = policy_fingerprint(&root);
-        if fingerprint != layer.policy_fingerprint {
-            layer.stop().await;
-            match FilesLayer::start(&root, &cancel).await {
-                Ok((fresh, initial)) => {
-                    layer = fresh;
-                    layer.policy_fingerprint = fingerprint;
-                    status.degraded.store(false, Ordering::Release);
-                    apply_run(&root, &actor, &workspace_id, &layer, initial, &status).await;
-                    continue;
-                }
-                Err(_) => {
-                    status.running.store(false, Ordering::Release);
-                    status.degraded.store(true, Ordering::Release);
-                    return;
-                }
+        if fingerprint != current.policy_fingerprint {
+            if let Some(old) = layer.take() {
+                old.stop().await;
             }
+            // The next iteration restarts with a fresh baseline (and picks up
+            // the new fingerprint); a start failure retries per the seam
+            // above instead of killing the driver.
+            continue;
         }
 
-        let run = layer
+        let run = current
             .files
             .handle()
             .reconcile_if_dirty(cancel.child_token())
             .await;
         match run {
             Ok(run) => {
-                apply_run(&root, &actor, &workspace_id, &layer, run, &status).await;
+                apply_run(&root, &actor, &workspace_id, current, run, &status).await;
             }
             Err(FilesError::ActorUnavailable) => {
-                // The files actor died; capture halts until D restarts it.
-                status.running.store(false, Ordering::Release);
+                // The files actor died: drop the layer and restart next tick.
                 status.degraded.store(true, Ordering::Release);
-                break;
+                if let Some(dead) = layer.take() {
+                    dead.stop().await;
+                }
+                status.running.store(false, Ordering::Release);
             }
             Err(_) => {
                 status.degraded.store(true, Ordering::Release);
@@ -245,11 +267,20 @@ async fn drive(
         }
     }
 
-    layer.stop().await;
+    if let Some(current) = layer.take() {
+        current.stop().await;
+    }
     status.running.store(false, Ordering::Release);
 }
 
 /// Apply one reconcile run through the capture sink and acknowledge it.
+///
+/// INVARIANT: a prepared plan is ALWAYS acknowledged — the controller's
+/// `outstanding` latch only resets on ack, so an early return that skipped it
+/// would wedge every future reconcile into `StaleReconcilePlan` forever. On
+/// abnormal paths (version fetch failure, apply-thread spawn failure or
+/// panic) the plan is acked with an ALL-FAILED receipt: the latch clears,
+/// the paths stay dirty, and the next cycle retries.
 async fn apply_run(
     root: &Path,
     actor: &ActorHandle,
@@ -262,14 +293,19 @@ async fn apply_run(
         ReconcileRun::Completed(plan) => plan,
         ReconcileRun::Converged | ReconcileRun::Cancelled => return,
     };
-    // An UNINITIALIZED workspace (no versions yet) resolves to "main": the
-    // sink's capture writes run ensure_main_version and bootstrap it. Only an
-    // actor-level failure marks degraded here.
+    // The ACTIVE version, precisely: only a genuinely uninitialized
+    // workspace falls back to "main" (bootstrapped by ensure_main_version).
+    // Storage errors and StateCorrupt must NOT be masked into a silent
+    // capture into the wrong version — they fail this run (all-failed ack,
+    // retried next cycle) and mark degraded.
     let version_id = match actor.active_version_id(workspace_id.to_owned()).await {
         Ok(version_id) => version_id,
-        Err(dohc_engine_runtime::RuntimeError::Domain(_)) => "main".to_owned(),
+        Err(dohc_engine_runtime::RuntimeError::Domain(
+            dohc_engine_domain::DomainError::WorkspaceNotFound,
+        )) => "main".to_owned(),
         Err(_) => {
             status.degraded.store(true, Ordering::Release);
+            ack_all_failed(layer, plan, status).await;
             return;
         }
     };
@@ -283,6 +319,7 @@ async fn apply_run(
     // (uncancellable await) is also exactly the drain-before-close property —
     // teardown cannot interrupt a half-applied plan.
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let apply_plan = plan.clone();
     let apply_thread = std::thread::Builder::new()
         .name("dohc-capture-apply".to_owned())
         .spawn(move || {
@@ -297,8 +334,8 @@ async fn apply_run(
                 now_ms,
                 None,
             );
-            let result = apply_reconcile_plan(&plan, &mut sink, &NoFaults);
-            let _ = done_tx.send((plan, result));
+            let result = apply_reconcile_plan(&apply_plan, &mut sink, &NoFaults);
+            let _ = done_tx.send((apply_plan, result));
         });
     let applied: Option<(ReconcilePlan, CaptureApplyResult)> = match apply_thread {
         Ok(joiner) => {
@@ -309,7 +346,9 @@ async fn apply_run(
         Err(_) => None,
     };
     let Some((plan, result)) = applied else {
+        // Spawn failure or apply-thread panic: the plan must still resolve.
         status.degraded.store(true, Ordering::Release);
+        ack_all_failed(layer, plan, status).await;
         return;
     };
     if result.degraded {
@@ -322,6 +361,30 @@ async fn apply_run(
             .acknowledge_capture(plan, result)
             .await
             .is_err()
+    {
+        status.degraded.store(true, Ordering::Release);
+    }
+}
+
+/// Resolve a prepared plan whose apply never ran: acknowledge with EVERY op
+/// marked failed, clearing the controller's `outstanding` latch while keeping
+/// the paths dirty for the next cycle's retry.
+async fn ack_all_failed(layer: &FilesLayer, plan: ReconcilePlan, status: &Arc<DriverStatus>) {
+    let failed: Vec<String> = plan.ops.iter().map(|op| op.path().to_owned()).collect();
+    let receipt = CaptureApplyResult {
+        applied_paths: Vec::new(),
+        captured: Vec::new(),
+        not_owned_paths: Vec::new(),
+        failed_applies: failed,
+        crashed_after_apply: None,
+        degraded: true,
+    };
+    if layer
+        .files
+        .handle()
+        .acknowledge_capture(plan, receipt)
+        .await
+        .is_err()
     {
         status.degraded.store(true, Ordering::Release);
     }
