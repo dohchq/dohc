@@ -9,8 +9,11 @@
 //! The daemon holds only a [`CaptureDriver`]: a cancellation token, the
 //! driver's join handle, and a small observable status snapshot for the E
 //! RPCs. Shutdown is strictly ordered — watcher.stop() → files.close() →
-//! driver exit — and the daemon awaits the driver BEFORE closing the store
-//! actor, so no capture write can race workspace teardown.
+//! driver exit — and on PER-WORKSPACE close the daemon awaits the driver
+//! BEFORE closing the store actor, so no capture write can race workspace
+//! teardown. (At whole-DAEMON exit the transport's close hook closes actors
+//! first; in-flight capture writes fail contained and un-acked, and the
+//! post-transport drain joins the threads — see `run_stdio`.)
 //!
 //! Policy-flip convergence (the #205-review obligation): `.dohc` is unwatched
 //! (policy edits generate no watcher events — TS parity), so each drive cycle
@@ -21,10 +24,10 @@
 
 use crate::capture_sink::StoreCaptureSink;
 use dohc_engine_files::{
-    CancellationToken, CaptureApplyResult, FilesActor, FilesError, NativeWatcher, ReconcilePlan,
-    ReconcileRun, ScanBounds, apply_reconcile_plan,
+    CancellationToken, CaptureApplyResult, FilesActor, FilesError, ManifestEntry, NativeWatcher,
+    ReconcilePlan, ReconcileRun, ScanBounds, ScanGeneration, ScanManifest, apply_reconcile_plan,
 };
-use dohc_engine_runtime::{ActorHandle, NoFaults};
+use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,8 +66,21 @@ impl DriverStatus {
 /// The daemon-side handle to one workspace's capture driver.
 pub(crate) struct CaptureDriver {
     cancel: CancellationToken,
-    task: tokio::task::JoinHandle<()>,
+    task: Option<tokio::task::JoinHandle<()>>,
     status: Arc<DriverStatus>,
+    /// Resolves once the STARTUP baseline reconcile has been applied (or the
+    /// initial layer start failed) — `workspace.open` awaits this so a
+    /// caller's first RPC write can never be overwritten by a later capture
+    /// of stale closed-period disk bytes.
+    baseline: tokio::sync::watch::Receiver<bool>,
+}
+
+/// A dropped-but-untaken driver must never keep running: cancel on Drop (the
+/// task then winds itself down detached).
+impl Drop for CaptureDriver {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
 }
 
 impl CaptureDriver {
@@ -75,17 +91,31 @@ impl CaptureDriver {
     pub(crate) fn spawn(root: PathBuf, actor: ActorHandle, workspace_id: String) -> CaptureDriver {
         let cancel = CancellationToken::new();
         let status = Arc::new(DriverStatus::default());
+        let (baseline_tx, baseline) = tokio::sync::watch::channel(false);
         let task = tokio::spawn(drive(
             root,
             actor,
             workspace_id,
             cancel.clone(),
             Arc::clone(&status),
+            baseline_tx,
         ));
         CaptureDriver {
             cancel,
-            task,
+            task: Some(task),
             status,
+            baseline,
+        }
+    }
+
+    /// Wait until the startup baseline reconcile has been applied (or the
+    /// initial start failed — the workspace still opens, degraded).
+    pub(crate) async fn wait_for_baseline(&self) {
+        let mut baseline = self.baseline.clone();
+        while !*baseline.borrow() {
+            if baseline.changed().await.is_err() {
+                return;
+            }
         }
     }
 
@@ -98,9 +128,9 @@ impl CaptureDriver {
     /// driver winds itself down (watcher joined, files actor closed) whether
     /// or not the caller awaits. Callers that need ordered teardown await
     /// the handle BEFORE closing the store actor.
-    pub(crate) fn begin_shutdown(self) -> tokio::task::JoinHandle<()> {
+    pub(crate) fn begin_shutdown(mut self) -> Option<tokio::task::JoinHandle<()>> {
         self.cancel.cancel();
-        self.task
+        self.task.take()
     }
 }
 
@@ -118,8 +148,11 @@ impl FilesLayer {
     async fn start(
         root: &Path,
         cancel: &CancellationToken,
+        seed: Option<(ScanManifest, ScanGeneration)>,
     ) -> Result<(FilesLayer, ReconcileRun), FilesError> {
-        let files = FilesActor::spawn_async(root.to_path_buf(), ScanBounds::default()).await?;
+        let files =
+            FilesActor::spawn_async_with_manifest(root.to_path_buf(), ScanBounds::default(), seed)
+                .await?;
         let handle = files.handle();
         match NativeWatcher::start(root.to_path_buf(), handle, cancel.child_token()).await {
             Ok(start) => Ok((
@@ -167,6 +200,59 @@ fn policy_fingerprint(root: &Path) -> u64 {
     hasher.finish()
 }
 
+/// Build the rehydration seed from the domain's captured state for the
+/// version capture will target. `None` (uninitialized workspace or a read
+/// failure) starts from the empty baseline.
+async fn manifest_seed(
+    root: &Path,
+    actor: &ActorHandle,
+    workspace_id: &str,
+) -> Option<(ScanManifest, ScanGeneration)> {
+    let version_id = match actor.active_version_id(workspace_id.to_owned()).await {
+        Ok(version_id) => version_id,
+        Err(RuntimeError::Domain(dohc_engine_domain::DomainError::WorkspaceNotFound)) => {
+            return None;
+        }
+        Err(_) => return None,
+    };
+    let entries = actor
+        .capture_manifest_seed(workspace_id.to_owned(), version_id)
+        .await
+        .ok()?;
+    if entries.is_empty() {
+        return None;
+    }
+    // POLICY-AWARE: entries the CURRENT policy narrows out are dropped from
+    // the seed, so the baseline scan re-offers them and the sink retires
+    // them — this is what converges a files.toml edit made while the daemon
+    // was closed. (Secret-floor paths are unaffected by policy and kept.)
+    let policy = dohc_engine_runtime::search::read_engine_search_policy(root).files_policy;
+    let manifest = ScanManifest::from_entries(entries.into_iter().filter_map(|entry| {
+        if let Some(rules) = &policy {
+            let effective = dohc_engine_runtime::search::resolve_effective_policy(
+                &entry.path,
+                Some(rules.as_slice()),
+                None,
+            );
+            let secret_floor = matches!(
+                dohc_engine_files::policy::classify_engine_file_path(&entry.path),
+                dohc_engine_files::policy::PathClassification::Secret
+            );
+            if !secret_floor && !effective.tracked {
+                return None;
+            }
+        }
+        Some((
+            entry.path,
+            ManifestEntry {
+                size: entry.size,
+                sha256: entry.sha256,
+            },
+        ))
+    }));
+    Some((manifest, ScanGeneration(1)))
+}
+
 fn wall_now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -183,16 +269,33 @@ async fn drive(
     workspace_id: String,
     cancel: CancellationToken,
     status: Arc<DriverStatus>,
+    baseline_tx: tokio::sync::watch::Sender<bool>,
 ) {
     let mut layer: Option<FilesLayer> = None;
+    // A LIVE policy flip must restart against the EMPTY manifest so every
+    // path re-offers; every other (re)start rehydrates.
+    let mut seed_next_start = true;
     loop {
         if layer.is_none() {
-            match FilesLayer::start(&root, &cancel).await {
+            // REHYDRATE the scan manifest from the domain's captured state:
+            // against an EMPTY baseline a file deleted while the daemon was
+            // down could never emit a Retire and its stale head would stay
+            // readable forever. Secrets seed with a sentinel sha (plaintext
+            // hashes are never stored) and re-offer once into the encrypted
+            // dedupe. A seed failure degrades to the empty baseline (safe:
+            // over-capture, never data loss) rather than blocking start.
+            let seed = if seed_next_start {
+                manifest_seed(&root, &actor, &workspace_id).await
+            } else {
+                None
+            };
+            match FilesLayer::start(&root, &cancel, seed).await {
                 Ok((fresh, initial)) => {
                     status.running.store(true, Ordering::Release);
                     status.degraded.store(false, Ordering::Release);
                     apply_run(&root, &actor, &workspace_id, &fresh, initial, &status).await;
                     layer = Some(fresh);
+                    seed_next_start = true;
                 }
                 Err(_) => {
                     // Transient start failures (momentarily unwatchable root)
@@ -201,6 +304,10 @@ async fn drive(
                     status.degraded.store(true, Ordering::Release);
                 }
             }
+            // Whether the baseline applied or the start failed, the open
+            // barrier releases: the workspace opens (possibly degraded), and
+            // callers' first writes are ordered AFTER the startup capture.
+            let _ = baseline_tx.send(true);
         }
 
         tokio::select! {
@@ -238,9 +345,12 @@ async fn drive(
             if let Some(old) = layer.take() {
                 old.stop().await;
             }
-            // The next iteration restarts with a fresh baseline (and picks up
-            // the new fingerprint); a start failure retries per the seam
-            // above instead of killing the driver.
+            // The next iteration restarts against the EMPTY manifest so
+            // every path re-offers (narrowed paths retire via the sink,
+            // widened paths re-ingest); a start failure retries per the
+            // seam above instead of killing the driver.
+            seed_next_start = false;
+            status.running.store(false, Ordering::Release);
             continue;
         }
 

@@ -274,3 +274,84 @@ async fn immediate_close_after_write_drains_cleanly_and_reopen_converges() {
         .await
         .expect("close");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn files_deleted_while_closed_retire_on_reopen() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(
+        scratch.path(),
+        "doomed.md",
+        b"captured then deleted offline",
+    );
+    write_file(scratch.path(), "survivor.md", b"stays");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(
+        &transport,
+        &handle,
+        "doomed.md",
+        Some("captured then deleted offline"),
+    )
+    .await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    // Deleted while the daemon is DOWN: only the rehydrated manifest can
+    // know this path was captured — an empty baseline would leave the stale
+    // head readable forever.
+    std::fs::remove_file(scratch.path().join("doomed.md")).expect("offline delete");
+
+    let handle = open_workspace(&transport, &scratch, 3).await;
+    wait_for_text(&transport, &handle, "doomed.md", None).await;
+    wait_for_text(&transport, &handle, "survivor.md", Some("stays")).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_narrowed_while_closed_retires_on_reopen() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "private/journal.md", b"personal");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    // files.toml narrowed while the daemon was DOWN: the policy-aware seed
+    // must re-offer the unchanged path so the sink retires it on reopen.
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        b"[[rule]]\npath = \"private/**\"\ntracked = false\n",
+    );
+
+    let handle = open_workspace(&transport, &scratch, 3).await;
+    wait_for_text(&transport, &handle, "private/journal.md", None).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}

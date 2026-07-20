@@ -56,7 +56,7 @@ impl OpenWorkspace {
     fn begin_capture_shutdown(&self) -> Option<tokio::task::JoinHandle<()>> {
         lock(&self.capture)
             .take()
-            .map(capture_driver::CaptureDriver::begin_shutdown)
+            .and_then(capture_driver::CaptureDriver::begin_shutdown)
     }
 
     /// Cancel and await the capture driver's full drain (idempotent).
@@ -237,6 +237,13 @@ impl EngineService {
             actor.clone(),
             params.workspace_id.clone(),
         );
+        // STARTUP ORDERING BARRIER: the baseline reconcile (closed-period
+        // disk state) must apply before the handle is handed out, or a
+        // caller's first write could later be overwritten by a capture of
+        // stale disk bytes. Cancellation-safe: the driver was already
+        // cancelled-on-drop armed, and an aborted open leaves it winding
+        // down detached.
+        capture.wait_for_baseline().await;
         lock(&self.handles).insert(
             handle.clone(),
             OpenWorkspace {

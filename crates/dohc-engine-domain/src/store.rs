@@ -1469,6 +1469,102 @@ fn capture_ingest_binary_in_tx(
     })
 }
 
+/// One rehydration-seed entry for the files-layer scan manifest: the path,
+/// the CAPTURED content's byte size, and its lowercase-hex sha256 in the
+/// scanner's own terms (text = the blob bytes, binary = the binary blob).
+/// Secrets carry a sentinel sha (plaintext hashes are deliberately never
+/// stored), so a reopened workspace re-offers each secret once and the
+/// encrypted store's content-equality dedupe settles it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureManifestSeedEntry {
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+/// The sentinel recorded for secret seeds (never a valid hex digest, so the
+/// first scan always re-offers the path).
+pub const SECRET_SEED_SENTINEL_SHA: &str = "rehydrated-secret";
+
+/// Every captured path in `version_id` with its content identity, for
+/// seeding a fresh files-layer manifest on workspace (re)open. Without this
+/// seed the baseline scan diffs against EMPTY and can never emit a Retire
+/// for a file deleted while the daemon was down — the stale captured head
+/// would stay readable forever (`ReconcileController::rehydrated`'s
+/// documented follow-up: the rehydration SOURCE lives above the files
+/// crate, which is here).
+pub fn capture_manifest_seed(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<Vec<CaptureManifestSeedEntry>, DomainError> {
+    let ws = workspace_id.to_owned();
+    let version = version_id.to_owned();
+    store.read_with(move |conn| {
+        let mut entries = Vec::new();
+        let mut stmt = conn
+            .prepare(
+                "SELECT a.path, COALESCE(s.content_kind, 'text'), \
+                        s.blob_sha256, tb.byte_length, \
+                        s.binary_sha256, bb.byte_length \
+                 FROM path_aliases a \
+                 JOIN snapshots s ON s.workspace_id = a.workspace_id \
+                   AND s.version_id = a.version_id AND s.object_id = a.object_id \
+                 LEFT JOIN blobs tb ON tb.sha256 = s.blob_sha256 \
+                 LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
+                 WHERE a.workspace_id = ?1 AND a.version_id = ?2",
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        let rows = stmt
+            .query_map(params![ws, version], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                ))
+            })
+            .map_err(DomainError::sql_corrupt)?;
+        for row in rows {
+            let (path, kind, text_sha, text_len, binary_sha, binary_len) =
+                row.map_err(DomainError::sql_corrupt)?;
+            let (sha256, size) = match kind.as_str() {
+                "binary" => match (binary_sha, binary_len) {
+                    (Some(sha), Some(len)) => (sha, len.max(0) as u64),
+                    _ => continue,
+                },
+                _ => match (text_sha, text_len) {
+                    (Some(sha), Some(len)) => (sha, len.max(0) as u64),
+                    _ => continue,
+                },
+            };
+            entries.push(CaptureManifestSeedEntry { path, size, sha256 });
+        }
+        let mut secrets = conn
+            .prepare(
+                "SELECT path, byte_length FROM secret_files \
+                 WHERE workspace_id = ?1 AND version_id = ?2",
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        let rows = secrets
+            .query_map(params![ws, version], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(DomainError::sql_corrupt)?;
+        for row in rows {
+            let (path, len) = row.map_err(DomainError::sql_corrupt)?;
+            entries.push(CaptureManifestSeedEntry {
+                path,
+                size: len.max(0) as u64,
+                sha256: SECRET_SEED_SENTINEL_SHA.to_owned(),
+            });
+        }
+        Ok(entries)
+    })
+}
+
 fn reconstruct_capture_binary(
     conn: &Connection,
     workspace_id: &str,
