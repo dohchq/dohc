@@ -1486,13 +1486,20 @@ pub struct CaptureManifestSeedEntry {
 /// first scan always re-offers the path).
 pub const SECRET_SEED_SENTINEL_SHA: &str = "rehydrated-secret";
 
-/// Every captured path in `version_id` with its content identity, for
+/// Every CAPTURE-ORIGIN path in `version_id` with its content identity, for
 /// seeding a fresh files-layer manifest on workspace (re)open. Without this
 /// seed the baseline scan diffs against EMPTY and can never emit a Retire
 /// for a file deleted while the daemon was down — the stale captured head
 /// would stay readable forever (`ReconcileController::rehydrated`'s
 /// documented follow-up: the rehydration SOURCE lives above the files
 /// crate, which is here).
+///
+/// CAPTURE-ORIGIN ONLY, deliberately: the manifest states what CAPTURE
+/// believes is on disk. Content that arrived any other way (an RPC
+/// `versionedText.write`, a replication/sync apply) may legitimately have
+/// no disk counterpart yet, and seeding it would make the next baseline
+/// scan diff it as "removed" and RETIRE it — capture deleting content it
+/// never owned.
 pub fn capture_manifest_seed(
     store: &EngineStore,
     workspace_id: &str,
@@ -1512,7 +1519,7 @@ pub fn capture_manifest_seed(
                    AND s.version_id = a.version_id AND s.object_id = a.object_id \
                  LEFT JOIN blobs tb ON tb.sha256 = s.blob_sha256 \
                  LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
-                 WHERE a.workspace_id = ?1 AND a.version_id = ?2",
+                 WHERE a.workspace_id = ?1 AND a.version_id = ?2                    AND s.metadata_origin = 'capture'",
             )
             .map_err(DomainError::sql_corrupt)?;
         let rows = stmt

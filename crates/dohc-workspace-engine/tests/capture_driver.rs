@@ -355,3 +355,79 @@ async fn policy_narrowed_while_closed_retires_on_reopen() {
         .await
         .expect("close");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_written_content_without_a_disk_file_is_never_retired_by_capture() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    // A real captured file anchors the version and proves capture is live.
+    write_file(scratch.path(), "on-disk.md", b"captured from disk");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(
+        &transport,
+        &handle,
+        "on-disk.md",
+        Some("captured from disk"),
+    )
+    .await;
+
+    // DB-only content: written by RPC, never materialized to disk. Capture
+    // must NOT claim it — the manifest states what CAPTURE believes is on
+    // disk, so a path it never captured can never be diffed as removed.
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                2,
+                "versionedText.write",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "objectId": "object-rpc",
+                    "path": "rpc-only.md",
+                    "text": "written by RPC",
+                    "momentId": "moment-rpc",
+                    "metadataOrigin": "api",
+                }),
+            ),
+        )
+        .await
+        .expect("rpc write");
+
+    // Several drive cycles must pass without retiring it.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert_eq!(
+        read_text(&transport, &handle, 3, "rpc-only.md")
+            .await
+            .as_deref(),
+        Some("written by RPC"),
+        "capture must not retire DB-only content it never captured"
+    );
+
+    // The same holds across a reopen (the rehydration seed is capture-only).
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(4, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+    let handle = open_workspace(&transport, &scratch, 5).await;
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    assert_eq!(
+        read_text(&transport, &handle, 6, "rpc-only.md")
+            .await
+            .as_deref(),
+        Some("written by RPC"),
+        "the rehydration seed must be capture-origin only"
+    );
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
