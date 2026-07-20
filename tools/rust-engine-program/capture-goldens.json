@@ -1,0 +1,98 @@
+{
+  "scenarios": {
+    "basic-text": {
+      "notes/a.md": {
+        "kind": "text",
+        "text": "# A\nhello capture\n",
+        "sha256": "8a35574bed72066493bbdffc1ca237be3569e719fb6191911334cc3804a6c928",
+        "byteLength": 18,
+        "everTracked": true
+      }
+    },
+    "update-coalesce": {
+      "doc.md": {
+        "kind": "text",
+        "text": "second draft, longer than the first\n",
+        "sha256": "40c1506b7f193b8f02025d10e7e8b911bbef5da7e2befb567f97e4216d4383d6",
+        "byteLength": 36,
+        "everTracked": true
+      }
+    },
+    "write-then-delete": {
+      "temp/b.md": {
+        "kind": "absent",
+        "everTracked": true
+      }
+    },
+    "never-tracked-control": {
+      "real.md": {
+        "kind": "text",
+        "text": "exists\n",
+        "sha256": "95b4340f5a016b59be85be8351cb267642fea01129c8ae40049061301c1b0a95",
+        "byteLength": 7,
+        "everTracked": true
+      },
+      "ghost.md": {
+        "kind": "absent",
+        "everTracked": false
+      }
+    },
+    "binary-roundtrip": {
+      "assets/logo.png": {
+        "kind": "binary",
+        "sha256": "0746a76192020ccce6158e7bcdeb35dcfb547b3c50dacc13efeaaf06f476f2d8",
+        "byteLength": 89,
+        "everTracked": true
+      }
+    },
+    "secret-basic": {
+      ".env": {
+        "kind": "secret",
+        "byteLength": 25,
+        "everTracked": true
+      }
+    },
+    "nested-unicode": {
+      "docs/ünï cödé/note.md": {
+        "kind": "text",
+        "text": "unicode päth\n",
+        "sha256": "681186c42a67dcc7de2adf1d366f44a0cd4807beb8681049d9fed83c8cc91ce9",
+        "byteLength": 14,
+        "everTracked": true
+      }
+    },
+    "offline-delete": {
+      "kept/d.md": {
+        "kind": "absent",
+        "everTracked": true
+      }
+    },
+    "offline-update": {
+      "kept/e.md": {
+        "kind": "text",
+        "text": "edited while capture was down\n",
+        "sha256": "8dbe986e8acc4d68cde89f0553e88a4fbcb6c33517bc81d1846f0129568140d5",
+        "byteLength": 30,
+        "everTracked": true
+      }
+    },
+    "mixed-workspace": {
+      "readme.md": {
+        "kind": "text",
+        "text": "# mixed, edited\n",
+        "sha256": "8dfc28b94670637da1408ac791d5b3f4d3e1eb2603e94e99e2f88eb2fd142a24",
+        "byteLength": 16,
+        "everTracked": true
+      },
+      ".env": {
+        "kind": "secret",
+        "byteLength": 6,
+        "everTracked": true
+      },
+      "img.png": {
+        "kind": "absent",
+        "everTracked": true
+      }
+    }
+  }
+}
