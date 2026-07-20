@@ -465,6 +465,15 @@ impl ReconcileController {
                 CaptureOp::Retire { path } => next.remove(path),
             }
         }
+        // NotOwned paths are dropped even when they never appeared in
+        // `plan.ops`: an over-cap policy retire is applied as a direct side
+        // effect (such paths are `retained_over_cap`, deliberately absent
+        // from the ops), and leaving its manifest entry would claim the path
+        // is still tracked at content whose head has just been deleted — so a
+        // later policy widen would diff clean and never re-ingest it.
+        for path in &result.not_owned_paths {
+            next.remove(path);
+        }
         self.manifest = next;
         self.generation = plan.to_generation;
         self.outstanding = false;
@@ -540,4 +549,76 @@ fn absolute_path(root: &Path, relative: &str) -> Option<PathBuf> {
         out.push(segment);
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod ack_receipt_tests {
+    use super::*;
+    use crate::capture::{CaptureApplyResult, CaptureSink, IngestOutcome};
+
+    struct Accept;
+    impl CaptureSink for Accept {
+        fn ingest(
+            &mut self,
+            _path: &str,
+            size: u64,
+            sha256: &str,
+            _media_type: &str,
+            _reason: IngestReason,
+        ) -> Result<IngestOutcome, crate::capture::CaptureError> {
+            Ok(IngestOutcome::Captured {
+                size,
+                sha256: sha256.to_owned(),
+            })
+        }
+        fn retire(&mut self, _path: &str) -> Result<(), crate::capture::CaptureError> {
+            Ok(())
+        }
+    }
+
+    /// A side-effect retire (the driver's over-cap policy-exclusion path)
+    /// reports a path that never appeared in `plan.ops`. The manifest MUST
+    /// drop it: leaving the entry would claim the path is still tracked at
+    /// content whose head was just deleted, so a later policy widen would
+    /// diff clean and never re-ingest it.
+    #[test]
+    fn not_owned_paths_absent_from_the_ops_are_still_dropped() {
+        let mut controller = ReconcileController::new();
+        controller.manifest.insert(
+            "over-cap.md".to_owned(),
+            ManifestEntry {
+                size: 10,
+                sha256: "abc".to_owned(),
+            },
+        );
+        controller.outstanding = true;
+        let plan = ReconcilePlan {
+            from_generation: controller.generation,
+            to_generation: controller.generation.next(),
+            ops: Vec::new(),
+            retained_over_cap: vec!["over-cap.md".to_owned()],
+            unconfirmed_removed: Vec::new(),
+            degraded: false,
+            degraded_paths: Vec::new(),
+            prepared_from_dirty: true,
+            dirty_epoch: controller.dirty_epoch,
+        };
+        let receipt = CaptureApplyResult {
+            applied_paths: Vec::new(),
+            captured: Vec::new(),
+            not_owned_paths: vec!["over-cap.md".to_owned()],
+            failed_applies: Vec::new(),
+            crashed_after_apply: None,
+            degraded: false,
+        };
+        assert!(controller.tracks_path("over-cap.md"));
+        controller
+            .acknowledge_capture(&plan, &receipt)
+            .expect("ack a side-effect receipt");
+        assert!(
+            !controller.tracks_path("over-cap.md"),
+            "a side-effect retire must drop the manifest entry"
+        );
+        let _ = Accept;
+    }
 }

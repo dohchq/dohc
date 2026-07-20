@@ -38,6 +38,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// the watcher's debounce means sub-interval changes coalesce anyway.
 const DRIVE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How many extra cycles the STARTUP baseline may take to settle before
+/// `workspace.open` is released anyway (degraded). Bounds open latency while
+/// keeping the common transient-failure case ordered.
+const BASELINE_SETTLE_ATTEMPTS: u32 = 3;
+
 /// Observable driver state for the E-shard `watcher.status` RPC and tests.
 #[derive(Default)]
 pub(crate) struct DriverStatus {
@@ -329,7 +334,34 @@ async fn drive(
                 Ok((fresh, initial)) => {
                     status.running.store(true, Ordering::Release);
                     status.degraded.store(false, Ordering::Release);
-                    apply_run(&root, &actor, &workspace_id, &fresh, initial, &status).await;
+                    let mut settled =
+                        apply_run(&root, &actor, &workspace_id, &fresh, initial, &status).await;
+                    // The open barrier must not release on a FAILED baseline:
+                    // a caller whose first write lands before the retry could
+                    // have it overwritten by the retry's capture of stale
+                    // closed-period disk bytes. Retry the cycle a bounded
+                    // number of times so a persistently failing path degrades
+                    // the workspace instead of blocking open forever.
+                    let mut attempts = 0;
+                    while !settled && attempts < BASELINE_SETTLE_ATTEMPTS {
+                        attempts += 1;
+                        tokio::select! {
+                            biased;
+                            () = cancel.cancelled() => break,
+                            () = tokio::time::sleep(DRIVE_INTERVAL) => {}
+                        }
+                        let run = fresh
+                            .files
+                            .handle()
+                            .reconcile_if_dirty(cancel.child_token())
+                            .await;
+                        settled = match run {
+                            Ok(run) => {
+                                apply_run(&root, &actor, &workspace_id, &fresh, run, &status).await
+                            }
+                            Err(_) => false,
+                        };
+                    }
                     layer = Some(fresh);
                 }
                 Err(_) => {
@@ -398,7 +430,7 @@ async fn drive(
             .await;
         match run {
             Ok(run) => {
-                apply_run(&root, &actor, &workspace_id, current, run, &status).await;
+                let _ = apply_run(&root, &actor, &workspace_id, current, run, &status).await;
             }
             Err(FilesError::ActorUnavailable) => {
                 // The files actor died: drop the layer and restart next tick.
@@ -435,10 +467,10 @@ async fn apply_run(
     layer: &FilesLayer,
     run: ReconcileRun,
     status: &Arc<DriverStatus>,
-) {
+) -> bool {
     let plan = match run {
         ReconcileRun::Completed(plan) => plan,
-        ReconcileRun::Converged | ReconcileRun::Cancelled => return,
+        ReconcileRun::Converged | ReconcileRun::Cancelled => return true,
     };
     // The ACTIVE version, precisely: only a genuinely uninitialized
     // workspace falls back to "main" (bootstrapped by ensure_main_version).
@@ -453,7 +485,7 @@ async fn apply_run(
         Err(_) => {
             status.degraded.store(true, Ordering::Release);
             ack_all_failed(layer, plan, status).await;
-            return;
+            return false;
         }
     };
     let apply_actor = actor.clone();
@@ -493,11 +525,11 @@ async fn apply_run(
         }
         Err(_) => None,
     };
-    let Some((plan, result)) = applied else {
+    let Some((plan, mut result)) = applied else {
         // Spawn failure or apply-thread panic: the plan must still resolve.
         status.degraded.store(true, Ordering::Release);
         ack_all_failed(layer, plan, status).await;
-        return;
+        return false;
     };
     // OVER-CAP + NARROWED: a path in the scanner's retained-over-cap set
     // never appears in the diff (CAL-3 keeps it last-known-good, never
@@ -529,14 +561,19 @@ async fn apply_run(
             // failure would strand it stale-but-authoritative with nothing to
             // re-offer it. Surface it so the driver stays degraded and the
             // next tick retries.
-            if !matches!(retired, Ok(Ok(()))) {
-                status.degraded.store(true, Ordering::Release);
+            match retired {
+                // REPORT it in the receipt: the manifest must forget a path
+                // whose head this loop just deleted, or a later policy widen
+                // would diff clean and never re-ingest it.
+                Ok(Ok(())) => result.not_owned_paths.push(path.clone()),
+                _ => status.degraded.store(true, Ordering::Release),
             }
         }
     }
     if result.degraded {
         status.degraded.store(true, Ordering::Release);
     }
+    let clean = result.failed_applies.is_empty() && !result.degraded;
     if result.completed()
         && layer
             .files
@@ -546,7 +583,9 @@ async fn apply_run(
             .is_err()
     {
         status.degraded.store(true, Ordering::Release);
+        return false;
     }
+    clean
 }
 
 /// Resolve a prepared plan whose apply never ran: acknowledge with EVERY op
