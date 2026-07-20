@@ -142,10 +142,12 @@ impl RestartTracker {
     fn record_healthy_tick(&mut self, status: &DriverStatus, clean: bool) {
         self.consecutive_failures = 0;
         // The healthy tick IS the proof the layer runs — mid-streak starts no
-        // longer claim `running`, so recovery must claim it here, in the same
-        // breath that clears `terminal` (the pair can never contradict).
-        status.running.store(true, Ordering::Release);
+        // longer claim `running`, so recovery claims it here. `terminal`
+        // clears FIRST: the flags are separate atomics, and a reader
+        // interleaving between the stores must never see running && terminal
+        // — the exact ordering the failure paths enforce, mirrored.
         status.terminal.store(false, Ordering::Release);
+        status.running.store(true, Ordering::Release);
         // Degradation is sticky until the layer demonstrably works again.
         // A tick whose own apply failed is not that demonstration.
         if clean {
@@ -1401,16 +1403,24 @@ enum TickIo {
 /// drive interval — an agent syncing config, an editor autosaving — drives a
 /// full rescan every tick forever, and a transient read error (which hashes
 /// differently from any successful read) flaps the rebuild indefinitely.
-fn policy_rebuild_due<E: DriverEnv>(env: &E, layer: &E::Layer, pending: &mut Option<u64>) -> bool {
+fn policy_rebuild_due(
+    fingerprint: Option<u64>,
+    layer_fingerprint: Option<u64>,
+    pending: &mut Option<u64>,
+) -> bool {
+    // Takes the tick's ONE fingerprint sample — re-reading here let a fast
+    // policy toggle differ between the two reads and confirm a pending value
+    // that never actually held across ticks.
+    //
     // Unknown (unreadable policy) HOLDS the debounce in place: it neither
     // confirms nor cancels a pending edit. Treating the error as a distinct
     // hash instead made an intermittently-locked file alternate
     // real/error/real — the same value never held two consecutive ticks, and
     // a genuine edit was ignored forever.
-    let Some(current) = env.policy_fingerprint() else {
+    let Some(current) = fingerprint else {
         return false;
     };
-    if Some(current) == env.layer_fingerprint(layer) {
+    if Some(current) == layer_fingerprint {
         *pending = None;
         return false;
     }
@@ -1530,7 +1540,11 @@ async fn drive_loop<E: DriverEnv>(
             // would re-offer them. A recovery while degraded costs one
             // rebuild; its baseline re-offers every held path.
             TickObservation::PolicyChanged
-        } else if policy_rebuild_due(env, current, &mut pending_policy) {
+        } else if policy_rebuild_due(
+            fingerprint,
+            env.layer_fingerprint(current),
+            &mut pending_policy,
+        ) {
             // Policy-flip re-offer: narrowed paths retire, widened paths
             // re-ingest. The rebuild seeds from the REHYDRATED manifest, not
             // an empty one: an empty baseline cannot emit a Retire for a path
@@ -1894,6 +1908,14 @@ async fn apply_run(
     }
     if result.degraded {
         status.degraded.store(true, Ordering::Release);
+    }
+    // Failed applies with a policy that is CURRENTLY unreadable are (or may
+    // be) POLICY_UNAVAILABLE holds from the sink's normal ingest/retire path
+    // — arm the recovery trigger for them exactly like the over-cap holds,
+    // or a recovery with unchanged policy bytes would never re-offer them.
+    // One extra policy read, only on failing ticks.
+    if !result.failed_applies.is_empty() && read_capture_policy(root).is_none() {
+        status.policy_hold.store(true, Ordering::Release);
     }
     let clean = result.failed_applies.is_empty() && !result.degraded;
     if result.completed()
