@@ -19,6 +19,7 @@ fn ingest(path: &str, text: &str, now_ms: i64) -> CaptureIngest {
         author_json: None,
         now_ms,
         request_id: None,
+        claim_foreign_head: true,
     }
 }
 
@@ -30,6 +31,7 @@ fn retire(path: &str, now_ms: i64) -> CaptureRetire {
         now_ms,
         request_id: None,
         only_if_text_head: false,
+        only_if_capture_origin: false,
     }
 }
 
@@ -147,6 +149,7 @@ fn length_prefixed_capture_ids_distinguish_embedded_nul_tuples() {
         author_json: None,
         now_ms,
         request_id: None,
+        claim_foreign_head: true,
     };
     let first = VersionedTextStore::new(&mut store)
         .capture_ingest(&capture(FIRST_WS, FIRST_VERSION, "first", 10), &NO_FAULTS)
@@ -453,6 +456,7 @@ fn ingest_binary(path: &str, bytes: &[u8], now_ms: i64) -> CaptureIngestBinary {
         author_json: None,
         now_ms,
         request_id: None,
+        claim_foreign_head: true,
     }
 }
 

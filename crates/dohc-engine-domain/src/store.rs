@@ -1099,6 +1099,11 @@ fn capture_ingest_in_tx(
         input.metadata_origin.as_bytes(),
         author_kind,
         author_json,
+        if input.claim_foreign_head {
+            b"claim-foreign".as_slice()
+        } else {
+            b"own-only".as_slice()
+        },
     ]);
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
@@ -1117,6 +1122,16 @@ fn capture_ingest_in_tx(
         input.now_ms,
     )?;
     let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
+    // OWNERSHIP: capture only overwrites heads written with ITS OWN origin.
+    // A head that arrived by another route (RPC, replication) may have no
+    // disk counterpart at all, so letting disk bytes overwrite it would
+    // silently revert that write.
+    if let Some(existing) = &before
+        && existing.metadata_origin != input.metadata_origin
+        && !input.claim_foreign_head
+    {
+        return Err(DomainError::CaptureNotOwned);
+    }
     let content_sha256 = text_blob_sha256(&input.text);
     if let Some(before) = &before
         && before.content_kind == "text"
@@ -1191,6 +1206,11 @@ fn capture_retire_in_tx(
         } else {
             b"any-head".as_slice()
         },
+        if input.only_if_capture_origin {
+            b"capture-origin-only".as_slice()
+        } else {
+            b"any-origin".as_slice()
+        },
     ]);
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
@@ -1227,13 +1247,28 @@ fn capture_retire_in_tx(
             deduped: false,
         });
     };
-    if input.only_if_text_head {
+    if input.only_if_text_head || input.only_if_capture_origin {
         let head = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?.ok_or(
             DomainError::StateCorrupt {
                 reason: "path alias points at a missing snapshot",
             },
         )?;
-        if head.content_kind != "text" {
+        // A head this caller does not own (written by RPC/replication) is
+        // never destroyed by a disk-driven retire.
+        if input.only_if_capture_origin && head.metadata_origin != CAPTURE_ORIGIN {
+            record_request(
+                tx,
+                input.request_id.as_deref(),
+                &payload_hash,
+                0,
+                input.now_ms,
+            )?;
+            return Ok(CaptureRetireResult {
+                retired: None,
+                deduped: false,
+            });
+        }
+        if input.only_if_text_head && head.content_kind != "text" {
             // A live non-text head is not the caller's to retire; settle as a
             // no-op exactly like an absent path.
             record_request(
@@ -1278,6 +1313,11 @@ fn capture_retire_in_tx(
         deduped: false,
     })
 }
+
+/// The metadata origin every capture write records. Ownership of a head is
+/// determined by this value: capture only ever overwrites or retires heads
+/// it wrote itself.
+pub const CAPTURE_ORIGIN: &str = "capture";
 
 /// Maximum binary payload a capture ingest may persist. Mirrors
 /// `MAX_VERSIONED_BINARY_FILE_BYTES` (`versionedTextStore.ts`) and the files
@@ -1334,6 +1374,12 @@ fn capture_ingest_binary_in_tx(
         input.now_ms,
     )?;
     let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
+    if let Some(existing) = &before
+        && existing.metadata_origin != input.metadata_origin
+        && !input.claim_foreign_head
+    {
+        return Err(DomainError::CaptureNotOwned);
+    }
     if let Some(before) = &before {
         // Fail closed on partial head identity, mirroring the binary writer.
         match before.content_kind.as_str() {
@@ -1549,10 +1595,16 @@ pub fn capture_manifest_seed(
             };
             entries.push(CaptureManifestSeedEntry { path, size, sha256 });
         }
+        // Same capture-origin rule for the encrypted store: a tip written by
+        // the API or replication may legitimately have no plaintext on disk,
+        // and seeding it would make the baseline diff RETIRE it.
         let mut secrets = conn
             .prepare(
-                "SELECT path, byte_length FROM secret_files \
-                 WHERE workspace_id = ?1 AND version_id = ?2",
+                "SELECT f.path, f.byte_length FROM secret_files f \
+                 JOIN secret_moments m ON m.workspace_id = f.workspace_id \
+                   AND m.moment_id = f.latest_moment_id \
+                 WHERE f.workspace_id = ?1 AND f.version_id = ?2 \
+                   AND m.metadata_origin = 'local-file'",
             )
             .map_err(DomainError::sql_corrupt)?;
         let rows = secrets

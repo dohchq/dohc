@@ -222,36 +222,48 @@ async fn manifest_seed(
     if entries.is_empty() {
         return None;
     }
-    // POLICY-AWARE: entries the CURRENT policy narrows out are dropped from
-    // the seed, so the baseline scan re-offers them and the sink retires
-    // them — this is what converges a files.toml edit made while the daemon
-    // was closed. (Secret-floor paths are unaffected by policy and kept.)
+    // EVERY capture-owned entry is seeded — including paths the CURRENT
+    // policy narrows out, but with a SENTINEL hash. That single choice
+    // satisfies both halves of the policy-flip obligation:
+    //   * narrowed AND still on disk -> the sentinel can never match the
+    //     scanned hash, so the path is re-offered as `Changed` and the
+    //     sink's policy branch retires it;
+    //   * narrowed AND deleted while closed -> it is absent from the listing
+    //     but PRESENT in the manifest, so the diff emits a Retire.
+    // Dropping narrowed entries entirely would lose the second case forever
+    // (the scanner enumerates by the hard floor, so such a path would appear
+    // in neither the listing nor the manifest).
     let policy = dohc_engine_runtime::search::read_engine_search_policy(root).files_policy;
-    let manifest = ScanManifest::from_entries(entries.into_iter().filter_map(|entry| {
-        if let Some(rules) = &policy {
-            let effective = dohc_engine_runtime::search::resolve_effective_policy(
+    let manifest = ScanManifest::from_entries(entries.into_iter().map(|entry| {
+        let narrowed = policy.as_ref().is_some_and(|rules| {
+            !matches!(
+                dohc_engine_files::policy::classify_engine_file_path(&entry.path),
+                dohc_engine_files::policy::PathClassification::Secret
+            ) && !dohc_engine_runtime::search::resolve_effective_policy(
                 &entry.path,
                 Some(rules.as_slice()),
                 None,
-            );
-            let secret_floor = matches!(
-                dohc_engine_files::policy::classify_engine_file_path(&entry.path),
-                dohc_engine_files::policy::PathClassification::Secret
-            );
-            if !secret_floor && !effective.tracked {
-                return None;
-            }
-        }
-        Some((
+            )
+            .tracked
+        });
+        let sha256 = if narrowed {
+            NARROWED_SEED_SENTINEL_SHA.to_owned()
+        } else {
+            entry.sha256
+        };
+        (
             entry.path,
             ManifestEntry {
                 size: entry.size,
-                sha256: entry.sha256,
+                sha256,
             },
-        ))
+        )
     }));
     Some((manifest, ScanGeneration(1)))
 }
+
+/// Never a valid hex digest, so a seeded entry carrying it always re-offers.
+const NARROWED_SEED_SENTINEL_SHA: &str = "policy-narrowed-reoffer";
 
 fn wall_now_ms() -> i64 {
     SystemTime::now()
@@ -272,9 +284,6 @@ async fn drive(
     baseline_tx: tokio::sync::watch::Sender<bool>,
 ) {
     let mut layer: Option<FilesLayer> = None;
-    // A LIVE policy flip must restart against the EMPTY manifest so every
-    // path re-offers; every other (re)start rehydrates.
-    let mut seed_next_start = true;
     loop {
         if layer.is_none() {
             // REHYDRATE the scan manifest from the domain's captured state:
@@ -284,18 +293,13 @@ async fn drive(
             // hashes are never stored) and re-offer once into the encrypted
             // dedupe. A seed failure degrades to the empty baseline (safe:
             // over-capture, never data loss) rather than blocking start.
-            let seed = if seed_next_start {
-                manifest_seed(&root, &actor, &workspace_id).await
-            } else {
-                None
-            };
+            let seed = manifest_seed(&root, &actor, &workspace_id).await;
             match FilesLayer::start(&root, &cancel, seed).await {
                 Ok((fresh, initial)) => {
                     status.running.store(true, Ordering::Release);
                     status.degraded.store(false, Ordering::Release);
                     apply_run(&root, &actor, &workspace_id, &fresh, initial, &status).await;
                     layer = Some(fresh);
-                    seed_next_start = true;
                 }
                 Err(_) => {
                     // Transient start failures (momentarily unwatchable root)
@@ -345,11 +349,13 @@ async fn drive(
             if let Some(old) = layer.take() {
                 old.stop().await;
             }
-            // The next iteration restarts against the EMPTY manifest so
-            // every path re-offers (narrowed paths retire via the sink,
-            // widened paths re-ingest); a start failure retries per the
-            // seam above instead of killing the driver.
-            seed_next_start = false;
+            // The next iteration restarts from the REHYDRATED manifest, not
+            // an empty one: an empty baseline cannot emit a Retire for a
+            // path deleted from disk in the same window as the policy edit
+            // (it appears in neither the listing nor the manifest). The
+            // rehydrated seed re-offers narrowed paths through the sink's
+            // policy branch (retire) and still diffs offline deletes as
+            // removed, so both converge.
             status.running.store(false, Ordering::Release);
             continue;
         }

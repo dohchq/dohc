@@ -240,10 +240,18 @@ impl EngineService {
         // STARTUP ORDERING BARRIER: the baseline reconcile (closed-period
         // disk state) must apply before the handle is handed out, or a
         // caller's first write could later be overwritten by a capture of
-        // stale disk bytes. Cancellation-safe: the driver was already
-        // cancelled-on-drop armed, and an aborted open leaves it winding
-        // down detached.
+        // stale disk bytes.
+        //
+        // CANCELLATION: nothing owns the store actor yet (the handle is
+        // inserted below), so an abort here would leak it. `OpenGuard` closes
+        // the actor on an early drop and is disarmed once the handle is
+        // inserted; `CaptureDriver`'s own Drop cancels the files layer.
+        let open_guard = OpenGuard {
+            supervisor: self.supervisor,
+            db_path: Some(db_path.clone()),
+        };
         capture.wait_for_baseline().await;
+        open_guard.disarm();
         lock(&self.handles).insert(
             handle.clone(),
             OpenWorkspace {
@@ -597,6 +605,34 @@ impl OperationCancellation {
 
     fn token(&self) -> CancellationToken {
         self.token.clone()
+    }
+}
+
+/// Closes a just-opened store actor if `workspace_open` is dropped before the
+/// handle reaches `handles` (a cancelled/deadline-expired open). Disarmed on
+/// the success path, where the handle owns the actor.
+struct OpenGuard {
+    supervisor: &'static WorkspaceSupervisor,
+    db_path: Option<PathBuf>,
+}
+
+impl OpenGuard {
+    fn disarm(mut self) {
+        self.db_path = None;
+    }
+}
+
+impl Drop for OpenGuard {
+    fn drop(&mut self) {
+        let Some(db_path) = self.db_path.take() else {
+            return;
+        };
+        let supervisor = self.supervisor;
+        // Detached + blocking: never run the actor join on a runtime worker
+        // (the #201 cancellation-safety contract).
+        tokio::task::spawn_blocking(move || {
+            let _ = supervisor.close(&db_path);
+        });
     }
 }
 

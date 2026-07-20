@@ -221,7 +221,12 @@ impl StoreCaptureSink {
     // The blocking actor calls below carry no timeout; this adapter is dormant
     // and not on any request path. The composition driver (sub-shard C) owns
     // stall handling when it wires this sink into workspace open/close.
-    fn ingest_text(&self, path: &str, text: String) -> Result<DomainIngest, CaptureError> {
+    fn ingest_text(
+        &self,
+        path: &str,
+        text: String,
+        claim_foreign_head: bool,
+    ) -> Result<DomainIngest, CaptureError> {
         match self.actor.capture_ingest_blocking(
             CaptureIngest {
                 workspace_id: self.workspace_id.clone(),
@@ -232,6 +237,7 @@ impl StoreCaptureSink {
                 author_json: self.author_json.clone(),
                 now_ms: self.now_ms,
                 request_id: None,
+                claim_foreign_head,
             },
             Arc::new(NoFaults),
         ) {
@@ -243,11 +249,22 @@ impl StoreCaptureSink {
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                 Ok(DomainIngest::NameRefused)
             }
+            // The head belongs to another writer (RPC/replication): capture
+            // does not own it, so it stops tracking the path rather than
+            // overwriting content that may have no disk counterpart.
+            Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
+                Ok(DomainIngest::ForeignHead)
+            }
             Err(_) => Err(INGEST_FAILED),
         }
     }
 
-    fn ingest_binary(&self, path: &str, bytes: Vec<u8>) -> Result<DomainIngest, CaptureError> {
+    fn ingest_binary(
+        &self,
+        path: &str,
+        bytes: Vec<u8>,
+        claim_foreign_head: bool,
+    ) -> Result<DomainIngest, CaptureError> {
         match self.actor.capture_ingest_binary_blocking(
             CaptureIngestBinary {
                 workspace_id: self.workspace_id.clone(),
@@ -258,6 +275,7 @@ impl StoreCaptureSink {
                 author_json: self.author_json.clone(),
                 now_ms: self.now_ms,
                 request_id: None,
+                claim_foreign_head,
             },
             Arc::new(NoFaults),
         ) {
@@ -267,6 +285,9 @@ impl StoreCaptureSink {
             // succeed on retry.
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                 Ok(DomainIngest::NameRefused)
+            }
+            Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
+                Ok(DomainIngest::ForeignHead)
             }
             Err(_) => Err(BINARY_INGEST_FAILED),
         }
@@ -374,6 +395,9 @@ impl StoreCaptureSink {
         }
     }
 
+    /// Retire a head this sink OWNS. `only_if_capture_origin` is always set:
+    /// a head written by RPC or replication may legitimately have no disk
+    /// counterpart, so a disk-driven retire must never destroy it.
     fn retire_head(&self, path: &str, only_if_text_head: bool) -> Result<(), CaptureError> {
         match self.actor.capture_retire_blocking(
             CaptureRetire {
@@ -383,6 +407,7 @@ impl StoreCaptureSink {
                 now_ms: self.now_ms,
                 request_id: None,
                 only_if_text_head,
+                only_if_capture_origin: true,
             },
             Arc::new(NoFaults),
         ) {
@@ -400,6 +425,9 @@ enum DomainIngest {
     Persisted,
     /// The store's admission gate refused the name (settled, not retryable).
     NameRefused,
+    /// The head belongs to another writer and this observation was not a
+    /// disk transition capture witnessed, so nothing was written.
+    ForeignHead,
 }
 
 impl CaptureSink for StoreCaptureSink {
@@ -409,8 +437,15 @@ impl CaptureSink for StoreCaptureSink {
         _size: u64,
         _sha256: &str,
         media_type: &str,
-        _reason: IngestReason,
+        reason: IngestReason,
     ) -> Result<IngestOutcome, CaptureError> {
+        // Capture claims a head written by ANOTHER origin only when it
+        // OBSERVED the disk transition (`Changed`). On first sight (`Added`,
+        // e.g. a fresh or reset manifest) stale disk bytes are
+        // indistinguishable from a genuine edit, so a foreign head is left
+        // intact — the path is still TRACKED (so the next real edit is seen
+        // as `Changed` and captured), just not overwritten now.
+        let claim_foreign_head = matches!(reason, IngestReason::Changed);
         // Plan hashes and sizes describe the scan observation only. Re-read the
         // path so settled rapid writes coalesce to the latest disk state.
         let normalized = match classify_engine_file_path_normalized(path) {
@@ -460,9 +495,12 @@ impl CaptureSink for StoreCaptureSink {
                 // scan-time bytes would diff clean and never re-ingest.
                 let size = text.len() as u64;
                 let sha256 = sha256_hex(text.as_bytes());
-                match self.ingest_text(path, text)? {
+                match self.ingest_text(path, text, claim_foreign_head)? {
                     DomainIngest::Persisted => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
+                    // Foreign head left intact: TRACK the disk identity so the
+                    // next genuine edit arrives as `Changed` and is captured.
+                    DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                 }
             }
             CurrentContent::Untracked => {
@@ -481,9 +519,10 @@ impl CaptureSink for StoreCaptureSink {
                 // same file bytes.
                 let size = bytes.len() as u64;
                 let sha256 = sha256_hex(&bytes);
-                match self.ingest_binary(path, bytes)? {
+                match self.ingest_binary(path, bytes, claim_foreign_head)? {
                     DomainIngest::Persisted => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
+                    DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                 }
             }
         }

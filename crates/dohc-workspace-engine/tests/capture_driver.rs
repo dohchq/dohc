@@ -431,3 +431,42 @@ async fn rpc_written_content_without_a_disk_file_is_never_retired_by_capture() {
         .await
         .expect("close");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn offline_delete_and_narrow_in_the_same_window_still_retires() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "private/journal.md", b"personal");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(&transport, &handle, "private/journal.md", Some("personal")).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    // BOTH in the closed window: the file is deleted AND policy narrows it.
+    // A seed that dropped narrowed entries would leave this head orphaned —
+    // the path appears in neither the scan listing (deleted) nor the
+    // manifest (dropped), so nothing could ever emit its Retire.
+    std::fs::remove_file(scratch.path().join("private/journal.md")).expect("offline delete");
+    write_file(
+        scratch.path(),
+        ".dohc/files.toml",
+        b"[[rule]]\npath = \"private/**\"\ntracked = false\n",
+    );
+
+    let handle = open_workspace(&transport, &scratch, 3).await;
+    wait_for_text(&transport, &handle, "private/journal.md", None).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
