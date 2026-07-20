@@ -914,6 +914,10 @@ mod drive_loop_tests {
         let seen = &journal.degraded_seen;
         assert!(seen[2], "the first disruption is reported: {seen:?}");
         assert!(
+            seen[3],
+            "the report must OUTLIVE the tick that raised it — the detecting              tick reports itself unclean, so only the NEXT clean tick clears:              {seen:?}"
+        );
+        assert!(
             seen[4],
             "the SECOND disruption on the same layer must be re-reported: {seen:?}"
         );
@@ -1437,10 +1441,14 @@ async fn drive_loop<E: DriverEnv>(
         };
 
         if restart.observe(observation, &status) == LayerAction::Drop {
+            // `running` goes false BEFORE the teardown await: stop_layer
+            // joins the watcher thread and closes the files actor, and a
+            // status reader sampling mid-join must not see running while a
+            // terminal streak is being reported.
+            status.running.store(false, Ordering::Release);
             if let Some(dead) = layer.take() {
                 env.stop_layer(dead).await;
             }
-            status.running.store(false, Ordering::Release);
         }
     }
 

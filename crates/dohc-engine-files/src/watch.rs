@@ -248,15 +248,10 @@ impl NativeWatcher {
     /// [`NativeWatcher::disruption_count`], which keeps counting even when
     /// re-attach succeeds.
     ///
-    /// TODO(R14 follow-up, tracked as a composition obligation): no
-    /// PRODUCTION consumer polls this yet. The files watcher is still dormant
-    /// -- nothing composes [`NativeWatcher`] into a live workspace supervisor,
-    /// so "restart the watcher/workspace on unavailable" has no home until the
-    /// composition shard that wires the files actor + watcher into the daemon
-    /// lands. When that composition happens, the owning supervisor MUST poll
-    /// this (or take a signal from it) and restart the watcher/workspace;
-    /// otherwise a permanently-lost watch stays silent at the product layer,
-    /// re-opening the exact silent-dead-watch class this flag exists to close.
+    /// The PRODUCTION consumer is the capture driver's supervision loop
+    /// (`capture_driver.rs`): it polls this every tick, and a lost watch
+    /// drops the files layer and rebuilds it on the escalating backoff
+    /// schedule — closing the silent-dead-watch class this flag exists for.
     pub fn is_unavailable(&self) -> bool {
         self.unavailable.load(Ordering::Acquire)
     }
