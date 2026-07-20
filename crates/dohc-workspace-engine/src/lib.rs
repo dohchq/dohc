@@ -136,6 +136,8 @@ impl EngineService {
                 self.search_query(&ctx, request.workspace, request.params)
                     .await?
             }
+            "watcher.status" => self.watcher_status(request.workspace)?,
+            "capture.flush" => self.capture_flush(request.workspace).await?,
             _ => return Err(wire(ErrorCode::MethodNotFound, "unknown method")),
         };
         Ok(Response { id, result })
@@ -375,6 +377,61 @@ impl EngineService {
             Some(snapshot) => snapshot_json(&snapshot),
             None => Value::Null,
         })
+    }
+
+    /// The capture driver's observable health: whether the files layer is
+    /// up (`running`), whether anything since the last fully clean tick went
+    /// wrong (`degraded`), and whether the restart streak has escalated past
+    /// recovery-on-its-own-timescale (`terminal`).
+    fn watcher_status(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let guard = lock(&open.capture);
+        Ok(match guard.as_ref() {
+            Some(driver) => {
+                let status = driver.status();
+                json!({
+                    "running": status.running(),
+                    "degraded": status.degraded(),
+                    "terminal": status.terminal(),
+                })
+            }
+            // The driver is only absent mid-teardown; report an honest
+            // "down" rather than erroring a racing status poll.
+            None => json!({ "running": false, "degraded": true, "terminal": false }),
+        })
+    }
+
+    /// Drive capture to quiescence and report what was achieved. THE
+    /// determinism seam for the capture differential: without it a harness
+    /// can only sleep and hope, which turns timing blips into parity
+    /// failures. `settled: false` is an honest answer (layer down, teardown
+    /// race, or a workspace under continuous mutation hitting the cycle
+    /// bound) — callers must treat it as "state not comparable", never as
+    /// "clean".
+    async fn capture_flush(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        // Clone the sender OUT of the lock and await OUTSIDE it: a flush can
+        // legitimately take many reconcile cycles, and the workspace table
+        // must not be blocked for its duration.
+        let sender = lock(&open.capture)
+            .as_ref()
+            .map(capture_driver::CaptureDriver::flush_sender);
+        let unavailable = json!({ "settled": false, "running": false, "degraded": true });
+        let Some(sender) = sender else {
+            return Ok(unavailable);
+        };
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        if sender.send(reply_tx).await.is_err() {
+            return Ok(unavailable);
+        }
+        match reply_rx.await {
+            Ok(outcome) => Ok(json!({
+                "settled": outcome.settled,
+                "running": outcome.running,
+                "degraded": outcome.degraded,
+            })),
+            Err(_) => Ok(unavailable),
+        }
     }
 
     async fn ydoc_apply(

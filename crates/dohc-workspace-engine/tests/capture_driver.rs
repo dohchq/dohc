@@ -586,3 +586,106 @@ async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
         "the foreign writer's plaintext must survive disk bytes AND a disk delete"
     );
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn watcher_status_reports_a_live_driver_and_flush_settles() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "seed.md", b"seeded before open");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+
+    // The open barrier guarantees the startup baseline applied, so status
+    // reports a LIVE, non-terminal driver immediately — no polling.
+    let status = transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status");
+    assert_eq!(status.result["running"], json!(true));
+    assert_eq!(status.result["terminal"], json!(false));
+    assert_eq!(status.result["degraded"], json!(false));
+
+    // And a flush on the quiescent workspace settles: the baseline content
+    // is already captured and acknowledged.
+    let flush = transport
+        .call(
+            RequestContext::unbounded(),
+            request(3, "capture.flush", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("capture.flush");
+    assert_eq!(flush.result["settled"], json!(true));
+    assert_eq!(flush.result["running"], json!(true));
+    assert_eq!(
+        read_text(&transport, &handle, 4, "seed.md")
+            .await
+            .as_deref(),
+        Some("seeded before open"),
+        "a settled flush means the baseline capture is READABLE, not pending"
+    );
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(5, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_flush_turns_external_writes_into_read_your_writes() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+
+    // An external write with no RPC involved. The only nondeterminism left
+    // is the watcher noticing the write (the OS debounce); once it has, ONE
+    // settled flush is sufficient — the loop below never needs to sleep for
+    // capture itself, which is exactly what the differential harness relies
+    // on.
+    write_file(scratch.path(), "flush-me.md", b"written behind the daemon");
+    let deadline = tokio::time::Instant::now() + WAIT;
+    let mut id = 20_000;
+    loop {
+        id += 1;
+        let flush = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "capture.flush", Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect("capture.flush");
+        assert_eq!(
+            flush.result["settled"],
+            json!(true),
+            "a quiet workspace must always settle"
+        );
+        id += 1;
+        if read_text(&transport, &handle, id, "flush-me.md")
+            .await
+            .as_deref()
+            == Some("written behind the daemon")
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "flush settled repeatedly but the external write never surfaced"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(90_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}

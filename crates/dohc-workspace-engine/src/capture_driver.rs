@@ -253,14 +253,12 @@ impl DriverStatus {
     }
     // SINGLE-flag conveniences. Correct on their own (one flag cannot
     // self-contradict); combinations MUST use [`DriverStatus::snapshot`].
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn running(&self) -> bool {
         self.snapshot().running
     }
     pub(crate) fn degraded(&self) -> bool {
         self.snapshot().degraded
     }
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn terminal(&self) -> bool {
         self.snapshot().terminal
     }
@@ -581,6 +579,8 @@ mod drive_loop_tests {
         ActorLost,
         ReconcileFails,
         Healthy,
+        /// Nothing dirty: the reconcile round-trips CONVERGED.
+        Idle,
         HealthyButDirtyApply,
         /// A healthy tick during which the watcher records ONE more
         /// disruption (backend error / root-identity blip that re-attached).
@@ -699,8 +699,9 @@ mod drive_loop_tests {
                 let mut journal = self.journal.lock().expect("journal");
                 journal.ticks.push(self.elapsed());
                 // What a status RPC arriving mid-tick would observe.
-                journal.degraded_seen.push(self.status.degraded());
-                journal.running_seen.push(self.status.running());
+                let snapshot = self.status.snapshot();
+                journal.degraded_seen.push(snapshot.degraded);
+                journal.running_seen.push(snapshot.running);
             }
             let script = self.current();
             self.step += 1;
@@ -724,6 +725,7 @@ mod drive_loop_tests {
                     self.emitted += 1;
                     TickIo::Applied { clean: true }
                 }
+                Script::Idle => TickIo::Converged,
                 _ => TickIo::Applied { clean: true },
             }
         }
@@ -734,23 +736,39 @@ mod drive_loop_tests {
         }
     }
 
+    type FlushSender = tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<FlushOutcome>>;
+
+    /// Spawn the loop under paused time; the caller drives, flushes, then
+    /// finishes to collect the journal.
+    fn spawn_loop(
+        script: Vec<Script>,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        CancellationToken,
+        Arc<Mutex<Journal>>,
+        Arc<DriverStatus>,
+        FlushSender,
+    ) {
+        let journal = Arc::new(Mutex::new(Journal::default()));
+        let status = Arc::new(DriverStatus::default());
+        let cancel = CancellationToken::new();
+        let (baseline_tx, _baseline_rx) = tokio::sync::watch::channel(false);
+        let (flush_tx, flush_rx) = tokio::sync::mpsc::channel(8);
+        let mut env = FakeEnv::new(script, Arc::clone(&journal), Arc::clone(&status));
+        let loop_status = Arc::clone(&status);
+        let loop_cancel = cancel.clone();
+        let handle = tokio::spawn(async move {
+            drive_loop(&mut env, loop_cancel, loop_status, baseline_tx, flush_rx).await
+        });
+        (handle, cancel, journal, status, flush_tx)
+    }
+
     /// Run the loop under paused time for `budget` of virtual time.
     async fn drive_for(
         script: Vec<Script>,
         budget: std::time::Duration,
     ) -> (Journal, Arc<DriverStatus>) {
-        let journal = Arc::new(Mutex::new(Journal::default()));
-        let status = Arc::new(DriverStatus::default());
-        let cancel = CancellationToken::new();
-        let (baseline_tx, _baseline_rx) = tokio::sync::watch::channel(false);
-        let mut env = FakeEnv::new(script, Arc::clone(&journal), Arc::clone(&status));
-
-        let loop_status = Arc::clone(&status);
-        let loop_cancel = cancel.clone();
-        let handle = tokio::spawn(async move {
-            drive_loop(&mut env, loop_cancel, loop_status, baseline_tx).await
-        });
-
+        let (handle, cancel, journal, status, _flush_tx) = spawn_loop(script);
         tokio::time::sleep(budget).await;
         cancel.cancel();
         handle.await.expect("driver loop");
@@ -759,6 +777,24 @@ mod drive_loop_tests {
             .map(|m| m.into_inner().expect("journal"))
             .unwrap_or_else(|_| panic!("journal still shared"));
         (journal, status)
+    }
+
+    /// Send one flush after `lead` of virtual time and return its outcome
+    /// plus how much virtual time the answer took.
+    async fn flush_after(
+        script: Vec<Script>,
+        lead: std::time::Duration,
+    ) -> (FlushOutcome, std::time::Duration) {
+        let (handle, cancel, _journal, _status, flush_tx) = spawn_loop(script);
+        tokio::time::sleep(lead).await;
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        flush_tx.send(reply_tx).await.expect("flush queued");
+        let asked = tokio::time::Instant::now();
+        let outcome = reply_rx.await.expect("flush answered");
+        let waited = tokio::time::Instant::now().duration_since(asked);
+        cancel.cancel();
+        handle.await.expect("driver loop");
+        (outcome, waited)
     }
 
     /// Gaps between successive timestamps.
@@ -1086,20 +1122,7 @@ mod drive_loop_tests {
     #[tokio::test(start_paused = true)]
     async fn cancellation_is_not_delayed_by_a_terminal_backoff() {
         // The slow probe must never hold up workspace close.
-        let journal = Arc::new(Mutex::new(Journal::default()));
-        let status = Arc::new(DriverStatus::default());
-        let cancel = CancellationToken::new();
-        let (baseline_tx, _rx) = tokio::sync::watch::channel(false);
-        let mut env = FakeEnv::new(
-            vec![Script::StartFails],
-            Arc::clone(&journal),
-            Arc::clone(&status),
-        );
-        let loop_cancel = cancel.clone();
-        let handle =
-            tokio::spawn(
-                async move { drive_loop(&mut env, loop_cancel, status, baseline_tx).await },
-            );
+        let (handle, cancel, _journal, _status, _flush_tx) = spawn_loop(vec![Script::StartFails]);
         // Let it escalate deep into the backoff.
         tokio::time::sleep(std::time::Duration::from_secs(120)).await;
         let before = tokio::time::Instant::now();
@@ -1110,6 +1133,49 @@ mod drive_loop_tests {
             "cancel must cut the backoff sleep short"
         );
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flush_on_a_quiescent_layer_settles() {
+        let (outcome, _) = flush_after(vec![Script::Idle], std::time::Duration::from_secs(2)).await;
+        assert!(outcome.settled, "an idle layer is already at quiescence");
+        assert!(outcome.running);
+        assert!(!outcome.degraded);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flush_during_a_backoff_answers_promptly_and_honestly() {
+        // The caller must not sit out the escalating backoff (up to the 30s
+        // terminal probe) — that is indistinguishable from a hang. It gets an
+        // immediate honest "not settled, not running".
+        let (outcome, waited) = flush_after(
+            vec![Script::StartFails],
+            std::time::Duration::from_millis(5300),
+        )
+        .await;
+        assert!(!outcome.settled);
+        assert!(!outcome.running);
+        assert!(
+            waited < std::time::Duration::from_secs(1),
+            "flush must skip the remaining backoff sleep, waited {waited:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flush_that_never_converges_is_bounded() {
+        // A workspace under continuous mutation never reaches quiescence;
+        // flush must return an honest not-settled rather than spin forever.
+        let (outcome, waited) = flush_after(
+            vec![Script::HealthyButDirtyApply],
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+        assert!(!outcome.settled, "an unconverged flush must say so");
+        assert!(outcome.degraded, "the failing applies stay visible");
+        assert!(
+            waited < std::time::Duration::from_secs(1),
+            "the cycle bound answers without further sleeps, waited {waited:?}"
+        );
+    }
 }
 
 /// The daemon-side handle to one workspace's capture driver.
@@ -1117,6 +1183,9 @@ pub(crate) struct CaptureDriver {
     cancel: CancellationToken,
     task: Option<tokio::task::JoinHandle<()>>,
     status: Arc<DriverStatus>,
+    /// Bounded: a caller flood means capture is already busy doing exactly
+    /// what flush asks for; excess callers wait for a slot.
+    flush_tx: tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<FlushOutcome>>,
     /// Resolves once the STARTUP baseline reconcile has been applied (or the
     /// initial layer start failed) — `workspace.open` awaits this so a
     /// caller's first RPC write can never be overwritten by a later capture
@@ -1141,6 +1210,7 @@ impl CaptureDriver {
         let cancel = CancellationToken::new();
         let status = Arc::new(DriverStatus::default());
         let (baseline_tx, baseline) = tokio::sync::watch::channel(false);
+        let (flush_tx, flush_rx) = tokio::sync::mpsc::channel(8);
         let task = tokio::spawn(drive(
             root,
             actor,
@@ -1148,13 +1218,24 @@ impl CaptureDriver {
             cancel.clone(),
             Arc::clone(&status),
             baseline_tx,
+            flush_rx,
         ));
         CaptureDriver {
             cancel,
             task: Some(task),
             status,
+            flush_tx,
             baseline,
         }
+    }
+
+    /// A clonable handle for `capture.flush`: the RPC layer clones it out of
+    /// the handle lock and awaits OUTSIDE, so a long flush never blocks the
+    /// daemon's workspace table.
+    pub(crate) fn flush_sender(
+        &self,
+    ) -> tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<FlushOutcome>> {
+        self.flush_tx.clone()
     }
 
     /// Wait until the startup baseline reconcile has been applied (or the
@@ -1168,7 +1249,6 @@ impl CaptureDriver {
         }
     }
 
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn status(&self) -> &Arc<DriverStatus> {
         &self.status
     }
@@ -1441,13 +1521,36 @@ trait DriverEnv {
 /// What one reconcile+apply did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TickIo {
-    /// Reconciled and applied; `clean` is false when the apply reported
-    /// failures or the scan itself was degraded.
+    /// Nothing was dirty: the layer is at QUIESCENCE. This is what a flush
+    /// caller is waiting for — distinct from `Applied`, which may leave more
+    /// work pending (an apply's own side effects, a change that landed
+    /// mid-scan).
+    Converged,
+    /// Reconciled and applied one plan; `clean` is false when the apply
+    /// reported failures or the scan itself was degraded.
     Applied { clean: bool },
     /// The files actor died under us.
     ActorLost,
     /// The reconcile failed while the layer stayed up.
     Failed,
+}
+
+/// How many reconcile cycles one `capture.flush` may drive before giving up
+/// on quiescence. A workspace under CONTINUOUS external writes never
+/// converges; flush must return an honest `settled: false` rather than spin.
+const MAX_FLUSH_CYCLES: u32 = 32;
+
+/// What one `capture.flush` could actually promise.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FlushOutcome {
+    /// The reconcile loop reached CONVERGED: every change visible on disk at
+    /// entry has been captured and acknowledged. False means the cycle bound
+    /// was hit, the layer is down, or teardown raced the flush.
+    pub(crate) settled: bool,
+    /// The files layer was up when the flush was answered.
+    pub(crate) running: bool,
+    /// Same meaning as [`DriverStatus::degraded`].
+    pub(crate) degraded: bool,
 }
 
 /// Decide whether a policy edit should rebuild the layer THIS tick.
@@ -1495,6 +1598,7 @@ async fn drive_loop<E: DriverEnv>(
     cancel: CancellationToken,
     status: Arc<DriverStatus>,
     baseline_tx: tokio::sync::watch::Sender<bool>,
+    mut flush_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<FlushOutcome>>,
 ) {
     let mut layer: Option<E::Layer> = None;
     let mut restart = RestartTracker::default();
@@ -1508,6 +1612,9 @@ async fn drive_loop<E: DriverEnv>(
     // equality branch would never rebuild — nothing would ever re-offer the
     // held paths.
     let mut policy_was_unknown = false;
+    // A flush caller waiting on THIS pass; answered exactly once per pass.
+    let mut pending_flush: Option<tokio::sync::oneshot::Sender<FlushOutcome>> = None;
+    let mut flush_closed = false;
 
     loop {
         // THE cadence, and the ONLY sleep: a healthy driver waits
@@ -1520,10 +1627,24 @@ async fn drive_loop<E: DriverEnv>(
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => break,
+                // A flush SKIPS the remaining wait: the caller is blocked on
+                // this pass, and making it sit out a backoff (up to the 30s
+                // terminal probe) is indistinguishable from a hang. The
+                // `flush_closed` guard stops a closed channel from turning
+                // this select into a hot loop.
+                request = flush_rx.recv(), if !flush_closed => {
+                    match request {
+                        Some(reply) => pending_flush = Some(reply),
+                        None => flush_closed = true,
+                    }
+                }
                 () = tokio::time::sleep(restart.delay()) => {}
             }
         }
         first_pass = false;
+        // Answered on every exit from this pass; set true only by a tick
+        // sequence that reached CONVERGED.
+        let mut flush_settled = false;
 
         if layer.is_none() {
             match env.start_layer(&cancel).await {
@@ -1566,6 +1687,9 @@ async fn drive_loop<E: DriverEnv>(
         }
 
         let Some(current) = layer.as_ref() else {
+            // No layer to drive: answer honestly rather than holding the
+            // caller across a rebuild that may be a terminal probe away.
+            answer_flush(&mut pending_flush, &status, false);
             continue;
         };
 
@@ -1618,15 +1742,47 @@ async fn drive_loop<E: DriverEnv>(
                 seen_disruptions = disruptions;
                 status.mark_degraded();
             }
-            match env.tick(current, &cancel).await {
-                // Only NOW has the layer survived a full tick: live watch AND
-                // a reconcile that completed.
-                TickIo::Applied { clean } => TickObservation::Healthy {
-                    clean: clean && !fresh_disruption,
-                },
-                TickIo::ActorLost => TickObservation::ActorLost,
-                TickIo::Failed => TickObservation::ReconcileFailed,
+            // A flush drives to QUIESCENCE, not one cycle: a single
+            // reconcile can leave the layer dirty again (an apply's own side
+            // effects, a change landing mid-scan), and a differential harness
+            // resumed there would compare a half-captured workspace.
+            let cycles = if pending_flush.is_some() {
+                MAX_FLUSH_CYCLES
+            } else {
+                1
+            };
+            let mut all_clean = true;
+            let mut outcome = None;
+            for _ in 0..cycles {
+                match env.tick(current, &cancel).await {
+                    TickIo::Converged => {
+                        flush_settled = true;
+                        outcome = Some(TickObservation::Healthy {
+                            clean: all_clean && !fresh_disruption,
+                        });
+                        break;
+                    }
+                    TickIo::Applied { clean } => {
+                        all_clean &= clean;
+                        outcome = Some(TickObservation::Healthy {
+                            clean: all_clean && !fresh_disruption,
+                        });
+                    }
+                    TickIo::ActorLost => {
+                        outcome = Some(TickObservation::ActorLost);
+                        break;
+                    }
+                    TickIo::Failed => {
+                        outcome = Some(TickObservation::ReconcileFailed);
+                        break;
+                    }
+                }
+                if cancel.is_cancelled() {
+                    break;
+                }
             }
+            // `cycles >= 1`, so at least one arm set it.
+            outcome.expect("at least one tick ran")
         };
 
         if restart.observe(observation, &status) == LayerAction::Drop {
@@ -1639,6 +1795,7 @@ async fn drive_loop<E: DriverEnv>(
                 env.stop_layer(dead).await;
             }
         }
+        answer_flush(&mut pending_flush, &status, flush_settled);
     }
 
     // BEFORE the joins, same as the Drop path: stop_layer drains threads,
@@ -1646,6 +1803,35 @@ async fn drive_loop<E: DriverEnv>(
     status.set_running(false);
     if let Some(current) = layer.take() {
         env.stop_layer(current).await;
+    }
+    // A caller blocked on flush across teardown gets an answer, not a
+    // dropped channel to interpret.
+    answer_flush(&mut pending_flush, &status, false);
+    flush_rx.close();
+    while let Ok(reply) = flush_rx.try_recv() {
+        let _ = reply.send(FlushOutcome {
+            settled: false,
+            running: false,
+            degraded: status.degraded(),
+        });
+    }
+}
+
+/// Answer a pending flush, if one is waiting. Takes the sender, so a pass
+/// answers at most once.
+fn answer_flush(
+    pending: &mut Option<tokio::sync::oneshot::Sender<FlushOutcome>>,
+    status: &DriverStatus,
+    settled: bool,
+) {
+    if let Some(reply) = pending.take() {
+        // ONE snapshot: running and degraded must come from the same load.
+        let snapshot = status.snapshot();
+        let _ = reply.send(FlushOutcome {
+            settled,
+            running: snapshot.running,
+            degraded: snapshot.degraded,
+        });
     }
 }
 
@@ -1656,6 +1842,8 @@ struct RealEnv {
     workspace_id: String,
     status: Arc<DriverStatus>,
 }
+
+impl RealEnv {}
 
 impl DriverEnv for RealEnv {
     type Layer = FilesLayer;
@@ -1746,6 +1934,29 @@ impl DriverEnv for RealEnv {
             .reconcile_if_dirty(cancel.child_token())
             .await
         {
+            // Converged means at quiescence; Cancelled only happens on the
+            // way down, where the distinction no longer matters.
+            //
+            // EXCEPT converged with a NON-EMPTY quarantine: the controller
+            // parks persistently failing paths on its own degraded-rescan
+            // backoff and stops self-forcing scans, so "nothing dirty"
+            // coexists with "capture has not recovered" — reading that as
+            // clean would clear `degraded` over live failures, and would let
+            // a flush claim `settled` over them.
+            Ok(ReconcileRun::Converged | ReconcileRun::Cancelled) => {
+                if self.status.degraded() {
+                    match layer.files.handle().stats().await {
+                        Ok(stats) if stats.quarantined > 0 => TickIo::Applied { clean: false },
+                        Ok(_) => TickIo::Converged,
+                        // Same as the Applied arm: a dead actor is reported
+                        // as itself, not laundered into an unclean-but-
+                        // healthy tick that resets the backoff.
+                        Err(_) => TickIo::ActorLost,
+                    }
+                } else {
+                    TickIo::Converged
+                }
+            }
             Ok(run) => {
                 let clean = apply_run(
                     &self.root,
@@ -1798,6 +2009,7 @@ async fn drive(
     cancel: CancellationToken,
     status: Arc<DriverStatus>,
     baseline_tx: tokio::sync::watch::Sender<bool>,
+    flush_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<FlushOutcome>>,
 ) {
     let mut env = RealEnv {
         root,
@@ -1805,7 +2017,7 @@ async fn drive(
         workspace_id,
         status: Arc::clone(&status),
     };
-    drive_loop(&mut env, cancel, status, baseline_tx).await;
+    drive_loop(&mut env, cancel, status, baseline_tx, flush_rx).await;
 }
 
 /// Apply one reconcile run through the capture sink and acknowledge it.
