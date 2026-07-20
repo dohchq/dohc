@@ -72,6 +72,11 @@ pub struct StoreCaptureSink {
     now_ms: i64,
     author_json: Option<String>,
     files_policy: PolicyState,
+    /// Set when any op this run was HELD on an unreadable policy. The driver
+    /// reads it after the apply to arm its policy-recovery trigger — a
+    /// DETERMINISTIC signal from the exact decision point, immune to the
+    /// blip being over before any re-read could observe it.
+    policy_held: std::cell::Cell<bool>,
     /// Lazily loaded-or-created on the FIRST secret capture (TS parity:
     /// `loadSecretDataKey` create branch) so workspaces without secrets never
     /// mint a key file.
@@ -127,6 +132,7 @@ impl StoreCaptureSink {
             now_ms,
             author_json,
             files_policy,
+            policy_held: std::cell::Cell::new(false),
             secret_key: None,
         }
     }
@@ -157,6 +163,11 @@ impl StoreCaptureSink {
         Ok(self.secret_key.as_ref().expect("key just ensured"))
     }
 
+    /// Whether any op this run was held on an unreadable policy.
+    pub fn policy_held(&self) -> bool {
+        self.policy_held.get()
+    }
+
     fn policy_tracks(&self, path: &str) -> Result<bool, CaptureError> {
         match &self.files_policy {
             PolicyState::Known(None) => Ok(true),
@@ -165,7 +176,10 @@ impl StoreCaptureSink {
             }
             // Unknown narrowing: neither capture (may widen over an
             // exclusion) nor retire (may destroy a tracked head). Hold.
-            PolicyState::Unavailable => Err(POLICY_UNAVAILABLE),
+            PolicyState::Unavailable => {
+                self.policy_held.set(true);
+                Err(POLICY_UNAVAILABLE)
+            }
         }
     }
 

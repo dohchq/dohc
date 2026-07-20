@@ -30,7 +30,7 @@ use dohc_engine_files::{
 use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// How often the driver polls the dirty flag. Cheap when converged (one
@@ -127,10 +127,7 @@ impl RestartTracker {
     /// the backoff and, past [`MAX_RESTART_ATTEMPTS`], reports TERMINAL.
     fn record_failure(&mut self, status: &DriverStatus) {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-        status.degraded.store(true, Ordering::Release);
-        status
-            .terminal
-            .store(is_terminal(self.consecutive_failures), Ordering::Release);
+        status.record_failure_transition(is_terminal(self.consecutive_failures));
     }
 
     /// The layer survived a full tick with a live watch. This is the ONLY
@@ -141,18 +138,12 @@ impl RestartTracker {
     /// rather than a graveyard.
     fn record_healthy_tick(&mut self, status: &DriverStatus, clean: bool) {
         self.consecutive_failures = 0;
-        // The healthy tick IS the proof the layer runs — mid-streak starts no
-        // longer claim `running`, so recovery claims it here. `terminal`
-        // clears FIRST: the flags are separate atomics, and a reader
-        // interleaving between the stores must never see running && terminal
-        // — the exact ordering the failure paths enforce, mirrored.
-        status.terminal.store(false, Ordering::Release);
-        status.running.store(true, Ordering::Release);
-        // Degradation is sticky until the layer demonstrably works again.
-        // A tick whose own apply failed is not that demonstration.
-        if clean {
-            status.degraded.store(false, Ordering::Release);
-        }
+        // The healthy tick IS the proof the layer runs — running is claimed,
+        // terminal cleared, and (when the tick was fully clean) degradation
+        // cleared, all in ONE store. Degradation is sticky until the layer
+        // demonstrably works again; a tick whose own apply failed is not that
+        // demonstration.
+        status.record_healthy_transition(clean);
     }
 
     /// How long to wait before the next attempt.
@@ -174,13 +165,10 @@ impl RestartTracker {
                 LayerAction::Keep
             }
             // A dead watch or actor is unrecoverable in place: drop the layer
-            // and let the backoff govern the rebuild. `running` goes false
-            // BEFORE record_failure can publish `terminal`: the two flags are
-            // separate atomics, so a status reader can interleave between the
-            // stores even with no await point — ordering the stores is what
-            // makes running && terminal unobservable.
+            // and let the backoff govern the rebuild. The failure transition
+            // is ONE store (running off, degraded on, terminal per streak),
+            // so no reader can observe it half-applied.
             TickObservation::WatchLost | TickObservation::ActorLost => {
-                status.running.store(false, Ordering::Release);
                 self.record_failure(status);
                 LayerAction::Drop
             }
@@ -191,13 +179,16 @@ impl RestartTracker {
             // polling a wedged layer indefinitely; that also stops the driver
             // from advertising `running` while it reports `terminal` (with
             // the same store ordering as above).
+            // The layer is kept while the failure might be transient, but the
+            // tick FAILED — `running` reads false until a tick completes,
+            // which is exactly what a status consumer should see for a layer
+            // that exists but is making no progress. Once terminal, rebuild
+            // rather than polling a wedged layer forever.
             TickObservation::ReconcileFailed => {
-                if is_terminal(self.consecutive_failures.saturating_add(1)) {
-                    status.running.store(false, Ordering::Release);
-                    self.record_failure(status);
+                self.record_failure(status);
+                if is_terminal(self.consecutive_failures) {
                     LayerAction::Drop
                 } else {
-                    self.record_failure(status);
                     LayerAction::Keep
                 }
             }
@@ -209,45 +200,93 @@ impl RestartTracker {
 }
 
 /// Observable driver state for the E-shard `watcher.status` RPC and tests.
+///
+/// ONE atomic word, deliberately: with separate atomics per flag, no
+/// writer-side store ordering can stop a READER from loading one flag before
+/// a transition and the other after it — `running && terminal` stayed
+/// observable through four rounds of store-order fixes. A single word makes
+/// every read a consistent snapshot and every transition one store.
 #[derive(Default)]
 pub(crate) struct DriverStatus {
-    /// The files layer (actor + watcher + loop) is up and driving.
-    running: AtomicBool,
-    /// The watcher reported a disruption, a reconcile or apply failed, or
-    /// the files layer could not (re)start. Cleared by the next FULLY CLEAN
-    /// tick (reconcile completed, apply clean, no fresh watcher disruption) —
-    /// so it reads as CURRENT health, not an event log: a recovered blip
-    /// clears within a tick, while a persisting cause (unreadable file,
-    /// failing apply, dead watch) holds it set.
-    degraded: AtomicBool,
-    /// The files layer failed to (re)start [`MAX_RESTART_ATTEMPTS`] times in a
-    /// row. Capture for this workspace is NOT running and is not expected to
-    /// resume on its own timescale; the driver keeps a slow recovery probe, so
-    /// this is a report, not a grave. Cleared by a healthy restart.
-    terminal: AtomicBool,
-    /// An apply observed an UNREADABLE policy (held ops / over-cap holds).
-    /// The drive loop folds this into its own unknown-fingerprint tracking so
-    /// the policy-recovery rebuild fires even when the blip was visible only
-    /// inside the apply window, never to the loop's fingerprint read.
-    policy_hold: AtomicBool,
+    bits: std::sync::atomic::AtomicU8,
 }
 
+/// The files layer (actor + watcher + loop) is up and driving.
+const STATUS_RUNNING: u8 = 1 << 0;
+/// The watcher reported a disruption, a reconcile or apply failed, or the
+/// files layer could not (re)start. Cleared by the next FULLY CLEAN tick
+/// (reconcile completed, apply clean, no fresh watcher disruption) — CURRENT
+/// health, not an event log.
+const STATUS_DEGRADED: u8 = 1 << 1;
+/// The files layer failed [`MAX_RESTART_ATTEMPTS`] times in a row. Capture is
+/// NOT running and not expected to resume on its own timescale; the slow
+/// recovery probe still runs, so this is a report, not a grave.
+const STATUS_TERMINAL: u8 = 1 << 2;
+/// An apply observed an UNREADABLE policy (held ops). Folded into the drive
+/// loop's unknown-fingerprint tracking so the policy-recovery rebuild fires
+/// even when the blip was visible only inside the apply window.
+const STATUS_POLICY_HOLD: u8 = 1 << 3;
+
 impl DriverStatus {
+    fn update(&self, transition: impl Fn(u8) -> u8) {
+        // fetch_update never fails with a total closure; the Result is noise.
+        let _ = self
+            .bits
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |bits| {
+                Some(transition(bits))
+            });
+    }
     // Consumed by the lifecycle tests today and the E-shard `watcher.status`
-    // RPC next; the expectation is scoped to non-test builds so it lifts
-    // automatically the moment the RPC lands.
+    // RPC next.
     #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn running(&self) -> bool {
-        self.running.load(Ordering::Acquire)
+        self.bits.load(Ordering::Acquire) & STATUS_RUNNING != 0
     }
-    // Consulted by RealEnv's quarantine gate in production; running/terminal
-    // stay test-only until the E-shard watcher.status RPC lands.
     pub(crate) fn degraded(&self) -> bool {
-        self.degraded.load(Ordering::Acquire)
+        self.bits.load(Ordering::Acquire) & STATUS_DEGRADED != 0
     }
     #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn terminal(&self) -> bool {
-        self.terminal.load(Ordering::Acquire)
+        self.bits.load(Ordering::Acquire) & STATUS_TERMINAL != 0
+    }
+    fn set_running(&self, running: bool) {
+        self.update(|bits| {
+            if running {
+                bits | STATUS_RUNNING
+            } else {
+                bits & !STATUS_RUNNING
+            }
+        });
+    }
+    fn mark_degraded(&self) {
+        self.update(|bits| bits | STATUS_DEGRADED);
+    }
+    /// A failure: not running, degraded, terminal iff the streak says so —
+    /// ONE store, so no reader can see a half-applied transition.
+    fn record_failure_transition(&self, terminal: bool) {
+        self.update(|bits| {
+            let bits = (bits & !STATUS_RUNNING) | STATUS_DEGRADED;
+            if terminal {
+                bits | STATUS_TERMINAL
+            } else {
+                bits & !STATUS_TERMINAL
+            }
+        });
+    }
+    /// A healthy tick: running, not terminal, and clean clears degradation —
+    /// ONE store.
+    fn record_healthy_transition(&self, clean: bool) {
+        self.update(|bits| {
+            let bits = (bits | STATUS_RUNNING) & !STATUS_TERMINAL;
+            if clean { bits & !STATUS_DEGRADED } else { bits }
+        });
+    }
+    fn arm_policy_hold(&self) {
+        self.update(|bits| bits | STATUS_POLICY_HOLD);
+    }
+    /// Consume the hold (test-and-clear in one atomic op).
+    fn take_policy_hold(&self) -> bool {
+        self.bits.fetch_and(!STATUS_POLICY_HOLD, Ordering::AcqRel) & STATUS_POLICY_HOLD != 0
     }
 }
 
@@ -498,7 +537,7 @@ mod supervision_tests {
         let mut restart = RestartTracker::default();
         // apply_run reported failures: the driver marks degraded, then the
         // very same tick reports Healthy (watch alive, reconcile completed).
-        status.degraded.store(true, Ordering::Release);
+        status.mark_degraded();
         restart.observe(TickObservation::Healthy { clean: false }, &status);
         assert!(
             status.degraded(),
@@ -654,14 +693,14 @@ mod drive_loop_tests {
                 Script::ActorLost => TickIo::ActorLost,
                 Script::ReconcileFails => TickIo::Failed,
                 Script::HealthyButDirtyApply => {
-                    self.status.degraded.store(true, Ordering::Release);
+                    self.status.mark_degraded();
                     TickIo::Applied { clean: false }
                 }
                 Script::PolicyUnreadable => {
                     // Fidelity: while the policy is unknown the SINK holds
                     // its ops (POLICY_UNAVAILABLE), so the apply reports
                     // failures — the tick is degraded, not clean.
-                    self.status.degraded.store(true, Ordering::Release);
+                    self.status.mark_degraded();
                     TickIo::Applied { clean: false }
                 }
                 Script::Disrupted => {
@@ -1481,7 +1520,7 @@ async fn drive_loop<E: DriverEnv>(
                     // window. The first healthy tick sets it instead.
                     // `degraded` likewise stays until a fully clean tick.
                     if restart.failures() == 0 {
-                        status.running.store(true, Ordering::Release);
+                        status.set_running(true);
                     }
                     // Baseline for the NEW layer's watcher (a fresh watcher
                     // counts from zero; taking its current value also holds if
@@ -1499,9 +1538,8 @@ async fn drive_loop<E: DriverEnv>(
                     // Transient start failures (a momentarily unwatchable
                     // root) must not be terminal: mark degraded and retry on
                     // the backoff schedule, escalating only after
-                    // MAX_RESTART_ATTEMPTS consecutive failures. `running`
-                    // goes false BEFORE the failure can publish `terminal`.
-                    status.running.store(false, Ordering::Release);
+                    // MAX_RESTART_ATTEMPTS consecutive failures. The failure
+                    // transition is one store; no manual pre-ordering needed.
                     restart.record_failure(&status);
                 }
             }
@@ -1522,7 +1560,7 @@ async fn drive_loop<E: DriverEnv>(
         // The apply path can observe an unreadable policy the loop's own read
         // never sees; it arms `policy_hold`, folded in here so recovery fires
         // for that window too.
-        let policy_was_held = status.policy_hold.swap(false, Ordering::AcqRel);
+        let policy_was_held = status.take_policy_hold();
         let policy_recovered = fingerprint.is_some() && (policy_was_unknown || policy_was_held);
         // An unknown fingerprint carries the state forward by itself; a
         // consumed hold under a still-unknown fingerprint needs no re-arm.
@@ -1562,7 +1600,7 @@ async fn drive_loop<E: DriverEnv>(
             let fresh_disruption = disruptions != seen_disruptions;
             if fresh_disruption {
                 seen_disruptions = disruptions;
-                status.degraded.store(true, Ordering::Release);
+                status.mark_degraded();
             }
             match env.tick(current, &cancel).await {
                 // Only NOW has the layer survived a full tick: live watch AND
@@ -1580,7 +1618,7 @@ async fn drive_loop<E: DriverEnv>(
             // joins the watcher thread and closes the files actor, and a
             // status reader sampling mid-join must not see running while a
             // terminal streak is being reported.
-            status.running.store(false, Ordering::Release);
+            status.set_running(false);
             if let Some(dead) = layer.take() {
                 env.stop_layer(dead).await;
             }
@@ -1589,7 +1627,7 @@ async fn drive_loop<E: DriverEnv>(
 
     // BEFORE the joins, same as the Drop path: stop_layer drains threads,
     // and a status reader mid-join must not see a closing driver as running.
-    status.running.store(false, Ordering::Release);
+    status.set_running(false);
     if let Some(current) = layer.take() {
         env.stop_layer(current).await;
     }
@@ -1785,7 +1823,7 @@ async fn apply_run(
             dohc_engine_domain::DomainError::WorkspaceNotFound,
         )) => "main".to_owned(),
         Err(_) => {
-            status.degraded.store(true, Ordering::Release);
+            status.mark_degraded();
             ack_all_failed(layer, plan, status).await;
             return false;
         }
@@ -1817,9 +1855,9 @@ async fn apply_run(
                 None,
             );
             let result = apply_reconcile_plan(&apply_plan, &mut sink, &NoFaults);
-            let _ = done_tx.send((apply_plan, result));
+            let _ = done_tx.send((apply_plan, result, sink.policy_held()));
         });
-    let applied: Option<(ReconcilePlan, CaptureApplyResult)> = match apply_thread {
+    let applied: Option<(ReconcilePlan, CaptureApplyResult, bool)> = match apply_thread {
         Ok(joiner) => {
             let outcome = done_rx.await.ok();
             let _ = tokio::task::spawn_blocking(move || joiner.join()).await;
@@ -1827,9 +1865,9 @@ async fn apply_run(
         }
         Err(_) => None,
     };
-    let Some((plan, mut result)) = applied else {
+    let Some((plan, mut result, sink_policy_held)) = applied else {
         // Spawn failure or apply-thread panic: the plan must still resolve.
-        status.degraded.store(true, Ordering::Release);
+        status.mark_degraded();
         ack_all_failed(layer, plan, status).await;
         return false;
     };
@@ -1857,10 +1895,10 @@ async fn apply_run(
             None => {
                 result.failed_applies.push(path.clone());
                 result.degraded = true;
-                status.degraded.store(true, Ordering::Release);
+                status.mark_degraded();
                 // Arm the loop's policy-recovery trigger: this blip may never
                 // be visible to the loop's own fingerprint read.
-                status.policy_hold.store(true, Ordering::Release);
+                status.arm_policy_hold();
                 false
             }
         };
@@ -1901,21 +1939,19 @@ async fn apply_run(
                 _ => {
                     result.failed_applies.push(path.clone());
                     result.degraded = true;
-                    status.degraded.store(true, Ordering::Release);
+                    status.mark_degraded();
                 }
             }
         }
     }
     if result.degraded {
-        status.degraded.store(true, Ordering::Release);
+        status.mark_degraded();
     }
-    // Failed applies with a policy that is CURRENTLY unreadable are (or may
-    // be) POLICY_UNAVAILABLE holds from the sink's normal ingest/retire path
-    // — arm the recovery trigger for them exactly like the over-cap holds,
-    // or a recovery with unchanged policy bytes would never re-offer them.
-    // One extra policy read, only on failing ticks.
-    if !result.failed_applies.is_empty() && read_capture_policy(root).is_none() {
-        status.policy_hold.store(true, Ordering::Release);
+    // The sink reports its holds DIRECTLY: a re-read here could miss the
+    // very blip that caused the hold (readable again by the time this line
+    // runs). The flag comes from the exact decision point instead.
+    if sink_policy_held {
+        status.arm_policy_hold();
     }
     let clean = result.failed_applies.is_empty() && !result.degraded;
     if result.completed()
@@ -1926,7 +1962,7 @@ async fn apply_run(
             .await
             .is_err()
     {
-        status.degraded.store(true, Ordering::Release);
+        status.mark_degraded();
         return false;
     }
     clean
@@ -1952,6 +1988,6 @@ async fn ack_all_failed(layer: &FilesLayer, plan: ReconcilePlan, status: &Arc<Dr
         .await
         .is_err()
     {
-        status.degraded.store(true, Ordering::Release);
+        status.mark_degraded();
     }
 }
