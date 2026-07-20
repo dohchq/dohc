@@ -1759,3 +1759,88 @@ documented reason. What landed:
   into workspace open/close, policy-flip re-offer obligation, secret-aware
   materializer executor) → D → E → full-soak → RPC-growth → GATE6 → R15
   (ICE checkpoint — STOP).
+
+## 2026-07-20 — Files-composition C merged (#212): the composition driver — capture is AUTONOMOUS
+
+Once a shadow-bound workspace is open, the daemon notices external disk
+changes and records them (text → plaintext store, binary → BINHEAD head,
+secret → encrypted store) with NO RPC involved, matching what
+`workspaceEngineCapture.ts` does for the live desktop. The files layer spawns
+only after `bind_shadow_clone` succeeds, so an unmarked root can never grow a
+watcher.
+
+**Structure.** The driver TASK owns the `FilesActor` + `NativeWatcher` and the
+reconcile→apply→acknowledge loop; the daemon holds a cancel token, join handle,
+and an observable `DriverStatus` (the E-shard `watcher.status` seam). Applies
+run a FRESH `StoreCaptureSink` per cycle on a dedicated plain thread (the
+sink's blocking actor calls forbid tokio context; the uncancellable await IS
+the drain-before-close property). Captures target the ACTIVE version.
+
+**THE CENTRAL OUTCOME — a capture OWNERSHIP model.** Composing disk-driven
+capture onto a store other writers can mutate created a question the engine
+did not previously have: *when may capture overwrite or delete a head?* The
+answer, now enforced uniformly across text/binary/secret and both
+ingest/retire:
+- Capture owns only what IT wrote (`metadata_origin`).
+- It may claim a foreign head ONLY on a disk transition it OBSERVED
+  (`IngestReason::Changed`); on first sight (`Added`, e.g. a reset manifest)
+  stale disk bytes are indistinguishable from a user edit, so the foreign head
+  is left intact while the path is still TRACKED — the next genuine edit then
+  arrives as `Changed` and captures normally.
+- A claimed PLAINTEXT/BINARY dedupe TRANSFERS ownership (else later retires
+  stay blocked). Secret dedupes deliberately do NOT transfer — a secret
+  tip's origin lives on its MOMENT, so transferring would rewrite history
+  or append a no-op moment; the claimed-but-deduped foreign tip stays
+  foreign (preserved, never retired) until the GATE6 marker column. Pinned
+  by a tripwire test.
+- Retires never touch a foreign head (`only_if_capture_origin`,
+  `only_if_own_origin` for secrets).
+- `capture` is a RESERVED metadata origin: `VersionedTextStore::write_text`
+  (the public door the RPC calls) rejects it, so ownership cannot be forged
+  from outside. Capture's own primitive reaches `write_text_in_tx` beneath it.
+
+**Rehydration + policy convergence.** `capture_manifest_seed` seeds each fresh
+layer from the domain's CAPTURE-ORIGIN state (text blob sha/size, binary
+sha/size, secrets by sentinel), so a file deleted while the daemon was down
+RETIRES instead of surviving forever. Policy-narrowed entries seed with a
+sentinel hash — still-on-disk re-offers and retires via the sink; deleted
+offline diffs as removed — which is what converges an offline files.toml edit.
+Over-cap narrowed paths (never in the diff by CAL-3 §7.1) retire through a
+dedicated `retire_policy_excluded` that skips absence confirmation and REPORTS
+into the receipt so the manifest forgets them.
+
+**Lifecycle.** Strict files-then-actor teardown on PER-WORKSPACE close and
+stale-actor eviction. Whole-DAEMON exit is deliberately the REVERSE: the
+transport's close hook closes actors first, so in-flight capture writes fail
+CONTAINED (never acked; the next start re-offers from the dirty baseline),
+and the post-transport drain then joins the watcher/files threads. Close stays #201-cancellation-safe (driver cancelled
+synchronously; a detached task owns drain+finish). `workspace.open` holds a
+BARRIER until the startup baseline settles (bounded retries) so a caller's
+first write cannot be overwritten by a later capture of stale closed-period
+bytes; `OpenGuard` closes the actor if open is cancelled mid-barrier.
+
+**Review.** 34 findings across nine rounds of CodeRabbit, Codex, and an
+independent adversarial Claude review, plus 5 caught by the gate. Nearly all
+were genuine correctness bugs in the ownership/convergence family, including
+three data-loss paths (foreign secret retire, DB-only content retire,
+flip-and-revert lost capture) and two guards placed on layers the real call
+path never reached. The final rounds extracted the shared secret-tip-origin
+query and pinned the DELIBERATE secret-dedupe non-transfer with a tripwire
+test (claiming a foreign tip with identical plaintext must dedupe without
+conferring ownership — flipping that behavior must break a test, not slip
+through).
+
+**RESIDUAL carried to GATE6 (not papered over):** secret ownership keys on
+`local-file`, which is ALSO a legitimate API origin (TS parity forces capture
+to use it), so secrets cannot get the reserved-origin treatment without a
+dedicated ownership-marker column. Plaintext/binary ownership is
+non-spoofable; SECRET ownership remains heuristic. Adding the marker is a
+migration — cheap before R15's reset, expensive after — so it is an explicit
+Ice decision at GATE6.
+
+- Gate: full-workspace PASS on every pushed head (19 runs; 5 caught real
+  defects). Final (round 9, head 16564026):
+  - 2026-07-20T10:20:05.544Z | run-rust-checks | win32/x64 | PASS | fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS cargo-deny=PASS cargo-audit=SKIP
+- Next: D (bounded watcher-restart backoff + escalation on the seam C built),
+  then E (status/flush RPCs + the TS capture differential), full-soak,
+  RPC-growth, GATE6, R15 (ICE checkpoint — STOP).
