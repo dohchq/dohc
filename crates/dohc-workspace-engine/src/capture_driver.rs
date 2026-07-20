@@ -1185,7 +1185,13 @@ fn policy_fingerprint(root: &Path) -> Option<u64> {
         // but the fingerprint never reads as unknown, so the None->Some
         // recovery rebuild never fires.
         let refused = match std::fs::symlink_metadata(&path) {
-            Ok(meta) => meta.file_type().is_symlink() || !meta.file_type().is_file(),
+            Ok(meta) => {
+                meta.file_type().is_symlink()
+                    || !meta.file_type().is_file()
+                    // The reader refuses oversize files too; hashing one here
+                    // would diverge the same way a followed symlink did.
+                    || meta.len() > dohc_engine_runtime::search::POLICY_FILE_MAX_BYTES
+            }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 0u8.hash(&mut hasher);
                 continue;
@@ -1282,11 +1288,15 @@ const NARROWED_SEED_SENTINEL_SHA: &str = "policy-narrowed-reoffer";
 
 /// Whether `.dohc/files.toml` currently narrows `path` out of engine
 /// ownership (the secret floor is policy-independent and never narrowed).
-/// `Some(excluded)` under a KNOWN policy; `None` when files.toml exists but
-/// cannot be read — the caller must hold loudly (failed apply), because a
-/// silent skip records no failure, keeps nothing dirty, and so the policy-
-/// recovery rebuild would never fire to retry it.
-fn sink_policy_excludes(root: &Path, path: &str) -> Option<bool> {
+/// One policy read for a whole apply run's over-cap evaluations.
+/// `Some(rules)` under a KNOWN policy (`None` inside = no narrowing);
+/// OUTER `None` when files.toml exists but cannot be read — the caller must
+/// hold loudly (failed apply), because a silent skip records no failure,
+/// keeps nothing dirty, and so the policy-recovery rebuild would never fire
+/// to retry it.
+type CapturePolicy = Option<Option<Vec<dohc_engine_runtime::search::FilesPolicyRule>>>;
+
+fn read_capture_policy(root: &Path) -> CapturePolicy {
     let snapshot = dohc_engine_runtime::search::read_engine_search_policy(root);
     if snapshot.diagnostics.iter().any(|diagnostic| {
         diagnostic.file == "files.toml"
@@ -1294,19 +1304,26 @@ fn sink_policy_excludes(root: &Path, path: &str) -> Option<bool> {
     }) {
         return None;
     }
-    let Some(rules) = snapshot.files_policy else {
-        return Some(false);
+    Some(snapshot.files_policy)
+}
+
+/// Whether a KNOWN policy narrows `path` out of engine ownership (the secret
+/// floor is policy-independent and never narrowed).
+fn policy_excludes(
+    policy: &Option<Vec<dohc_engine_runtime::search::FilesPolicyRule>>,
+    path: &str,
+) -> bool {
+    let Some(rules) = policy else {
+        return false;
     };
     if matches!(
         dohc_engine_files::policy::classify_engine_file_path(path),
         dohc_engine_files::policy::PathClassification::Secret
     ) {
-        return Some(false);
+        return false;
     }
-    Some(
-        !dohc_engine_runtime::search::resolve_effective_policy(path, Some(rules.as_slice()), None)
-            .tracked,
-    )
+    !dohc_engine_runtime::search::resolve_effective_policy(path, Some(rules.as_slice()), None)
+        .tracked
 }
 
 fn wall_now_ms() -> i64 {
@@ -1448,6 +1465,11 @@ async fn drive_loop<E: DriverEnv>(
                     // it observed a disruption during its own startup scan).
                     seen_disruptions = env.watch_disruptions(&fresh);
                     pending_policy = None;
+                    // A fresh layer read the policy at its own build time; the
+                    // previous layer's unknown-policy window must not make the
+                    // first readable fingerprint look like a recovery and cost
+                    // a spurious rebuild.
+                    policy_was_unknown = false;
                     layer = Some(fresh);
                 }
                 Err(()) => {
@@ -1783,9 +1805,17 @@ async fn apply_run(
     // those directly — policy exclusion is an OWNERSHIP decision, distinct
     // from the size-cap false-delete defense that protects still-tracked
     // content.
+    // ONE policy read for the whole loop — a per-path re-read was N disk
+    // round-trips for one answer, and could even give different paths a
+    // DIFFERENT policy if an edit raced the loop.
+    let capture_policy = if plan.retained_over_cap.is_empty() {
+        Some(None)
+    } else {
+        read_capture_policy(root)
+    };
     for path in &plan.retained_over_cap {
-        let excluded = match sink_policy_excludes(root, path) {
-            Some(excluded) => excluded,
+        let excluded = match &capture_policy {
+            Some(policy) => policy_excludes(policy, path),
             // Unknown policy: hold LOUDLY. This loop is the only mechanism
             // that can retire an over-cap narrowed head, so the hold must
             // register as a failure (dirty + degraded) for the recovery
