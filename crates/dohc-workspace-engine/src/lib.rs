@@ -388,11 +388,14 @@ impl EngineService {
         let guard = lock(&open.capture);
         Ok(match guard.as_ref() {
             Some(driver) => {
-                let status = driver.status();
+                // ONE snapshot — the three flags must come from the same
+                // atomic load, or a reader racing a transition could report
+                // running && terminal.
+                let snapshot = driver.status().snapshot();
                 json!({
-                    "running": status.running(),
-                    "degraded": status.degraded(),
-                    "terminal": status.terminal(),
+                    "running": snapshot.running,
+                    "degraded": snapshot.degraded,
+                    "terminal": snapshot.terminal,
                 })
             }
             // The driver is only absent mid-teardown; report an honest

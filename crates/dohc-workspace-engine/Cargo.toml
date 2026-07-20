@@ -26,8 +26,10 @@ tokio = { version = "1", features = [
   "io-std",
   "io-util",
   "macros",
+  "process",
   "rt-multi-thread",
   "sync",
+  "time",
 ] }
 tokio-util = "0.7"
 
@@ -53,3 +55,9 @@ yrs = "=0.27.3"
 
 [lints]
 workspace = true
+
+# The soak runner writes shadow markers, so it only exists under the
+# harness feature — production builds never compile it.
+[[bin]]
+name = "dohc-soak-runner"
+required-features = ["harness"]

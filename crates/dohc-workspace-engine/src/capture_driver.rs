@@ -252,13 +252,17 @@ impl DriverStatus {
             });
     }
     // SINGLE-flag conveniences. Correct on their own (one flag cannot
-    // self-contradict); combinations MUST use [`DriverStatus::snapshot`].
+    // self-contradict); combinations MUST use [`DriverStatus::snapshot`] —
+    // which is why production consumers (the RPC handler, flush answers)
+    // use the snapshot and these are test-only.
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn running(&self) -> bool {
         self.snapshot().running
     }
     pub(crate) fn degraded(&self) -> bool {
         self.snapshot().degraded
     }
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn terminal(&self) -> bool {
         self.snapshot().terminal
     }
