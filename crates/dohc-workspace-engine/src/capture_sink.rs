@@ -298,7 +298,11 @@ impl StoreCaptureSink {
     /// heuristic; non-UTF-8 is untracked, never binary) and write it through
     /// the encrypted store. The workspace key is loaded-or-created on first
     /// use.
-    fn ingest_secret(&mut self, path: &str) -> Result<IngestOutcome, CaptureError> {
+    fn ingest_secret(
+        &mut self,
+        path: &str,
+        claim_foreign_head: bool,
+    ) -> Result<IngestOutcome, CaptureError> {
         match self.read_current_secret(path)? {
             SecretContent::Text(text) => {
                 let size = text.len() as u64;
@@ -313,6 +317,7 @@ impl StoreCaptureSink {
                         text,
                         metadata_origin: SECRET_CAPTURE_ORIGIN.to_owned(),
                         now_ms: self.now_ms,
+                        claim_foreign_head,
                     },
                     key,
                     Arc::new(NoFaults),
@@ -320,6 +325,11 @@ impl StoreCaptureSink {
                     Ok(_) => Ok(IngestOutcome::Captured { size, sha256 }),
                     Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                         Ok(IngestOutcome::NotOwned)
+                    }
+                    // Foreign tip left intact; TRACK the disk identity so the
+                    // next observed edit arrives as `Changed` and captures.
+                    Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
+                        Ok(IngestOutcome::Captured { size, sha256 })
                     }
                     Err(_) => Err(SECRET_INGEST_FAILED),
                 }
@@ -459,7 +469,7 @@ impl CaptureSink for StoreCaptureSink {
                 if normalized.as_deref() != Some(path) {
                     return Ok(IngestOutcome::NotOwned);
                 }
-                return self.ingest_secret(path);
+                return self.ingest_secret(path, claim_foreign_head);
             }
             (PathClassification::Tracked, normalized) => normalized.ok_or(INGEST_FAILED)?,
         };

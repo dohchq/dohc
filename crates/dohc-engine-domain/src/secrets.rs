@@ -127,6 +127,12 @@ pub struct CaptureSecret {
     pub text: String,
     pub metadata_origin: String,
     pub now_ms: i64,
+    /// Whether this write may overwrite a tip written by a DIFFERENT origin
+    /// (API, replication). Capture sets it only when it OBSERVED the disk
+    /// transition; on first sight it must not silently revert another
+    /// writer whose plaintext may never have reached disk. Mirrors
+    /// [`crate::CaptureIngest::claim_foreign_head`].
+    pub claim_foreign_head: bool,
 }
 
 impl core::fmt::Debug for CaptureSecret {
@@ -364,6 +370,30 @@ impl<'a> SecretFileStore<'a> {
         non_empty(&input.version_id, "version_id")?;
         validate_secret_path(&input.path)?;
         let ws = input.workspace_id.clone();
+        // OWNERSHIP: a tip written by another origin (API, replication) may
+        // legitimately have no plaintext on disk, so capture only claims it
+        // when it OBSERVED the disk transition.
+        if !input.claim_foreign_head {
+            let version = input.version_id.clone();
+            let path = input.path.clone();
+            let owner_ws = ws.clone();
+            let foreign = self.store.read_with(move |conn| {
+                let origin: Option<String> = conn
+                    .query_row(
+                        "SELECT m.metadata_origin FROM secret_files f                          JOIN secret_moments m ON m.workspace_id = f.workspace_id                            AND m.moment_id = f.latest_moment_id                          WHERE f.workspace_id = ?1 AND f.version_id = ?2 AND f.path = ?3",
+                        params![owner_ws, version, path],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(DomainError::sql_corrupt)?;
+                Ok::<_, DomainError>(origin)
+            })?;
+            if let Some(origin) = foreign
+                && origin != input.metadata_origin
+            {
+                return Err(DomainError::CaptureNotOwned);
+            }
+        }
         // Single-writer: this pre-read reservation is authoritative; the
         // post-write pin makes the assumption release-checked.
         let reserved = self

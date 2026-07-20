@@ -24,8 +24,9 @@
 
 use crate::capture_sink::StoreCaptureSink;
 use dohc_engine_files::{
-    CancellationToken, CaptureApplyResult, FilesActor, FilesError, ManifestEntry, NativeWatcher,
-    ReconcilePlan, ReconcileRun, ScanBounds, ScanGeneration, ScanManifest, apply_reconcile_plan,
+    CancellationToken, CaptureApplyResult, CaptureSink, FilesActor, FilesError, ManifestEntry,
+    NativeWatcher, ReconcilePlan, ReconcileRun, ScanBounds, ScanGeneration, ScanManifest,
+    apply_reconcile_plan,
 };
 use dohc_engine_runtime::{ActorHandle, NoFaults, RuntimeError};
 use std::path::{Path, PathBuf};
@@ -145,10 +146,16 @@ impl FilesLayer {
     /// Spawn the files actor and attach the watcher; the watcher's startup
     /// reconcile (the full baseline scan) is returned for the caller to
     /// apply through the normal capture path.
-    async fn start(
+    /// Start with a CALLER-SUPPLIED policy fingerprint. The driver reads it
+    /// BEFORE building the seed, so a policy edit that races startup leaves
+    /// the layer holding the older fingerprint and the next tick restarts —
+    /// recording the newer one would swallow the edit (the seed would
+    /// reflect old policy while the layer claimed to be current).
+    async fn start_with_fingerprint(
         root: &Path,
         cancel: &CancellationToken,
         seed: Option<(ScanManifest, ScanGeneration)>,
+        policy_fingerprint: u64,
     ) -> Result<(FilesLayer, ReconcileRun), FilesError> {
         let files =
             FilesActor::spawn_async_with_manifest(root.to_path_buf(), ScanBounds::default(), seed)
@@ -159,7 +166,7 @@ impl FilesLayer {
                 FilesLayer {
                     files,
                     watcher: start.watcher,
-                    policy_fingerprint: policy_fingerprint(root),
+                    policy_fingerprint,
                 },
                 start.initial_reconcile,
             )),
@@ -265,6 +272,23 @@ async fn manifest_seed(
 /// Never a valid hex digest, so a seeded entry carrying it always re-offers.
 const NARROWED_SEED_SENTINEL_SHA: &str = "policy-narrowed-reoffer";
 
+/// Whether `.dohc/files.toml` currently narrows `path` out of engine
+/// ownership (the secret floor is policy-independent and never narrowed).
+fn sink_policy_excludes(root: &Path, path: &str) -> bool {
+    let Some(rules) = dohc_engine_runtime::search::read_engine_search_policy(root).files_policy
+    else {
+        return false;
+    };
+    if matches!(
+        dohc_engine_files::policy::classify_engine_file_path(path),
+        dohc_engine_files::policy::PathClassification::Secret
+    ) {
+        return false;
+    }
+    !dohc_engine_runtime::search::resolve_effective_policy(path, Some(rules.as_slice()), None)
+        .tracked
+}
+
 fn wall_now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -293,8 +317,16 @@ async fn drive(
             // hashes are never stored) and re-offer once into the encrypted
             // dedupe. A seed failure degrades to the empty baseline (safe:
             // over-capture, never data loss) rather than blocking start.
+            // Read the policy fingerprint BEFORE the seed: if policy changes
+            // between the two, the layer records the OLDER fingerprint and
+            // the next tick detects the edit and restarts. Recording the
+            // newer one would swallow the edit (the seed reflects old policy
+            // while the layer claims to be current).
+            let fingerprint_before_seed = policy_fingerprint(&root);
             let seed = manifest_seed(&root, &actor, &workspace_id).await;
-            match FilesLayer::start(&root, &cancel, seed).await {
+            match FilesLayer::start_with_fingerprint(&root, &cancel, seed, fingerprint_before_seed)
+                .await
+            {
                 Ok((fresh, initial)) => {
                     status.running.store(true, Ordering::Release);
                     status.degraded.store(false, Ordering::Release);
@@ -428,6 +460,7 @@ async fn apply_run(
     let apply_actor = actor.clone();
     let apply_root = root.to_path_buf();
     let apply_workspace = workspace_id.to_owned();
+    let version_for_retire = version_id.clone();
     let now_ms = wall_now_ms();
     // A DEDICATED plain thread, not spawn_blocking: the sink's blocking actor
     // calls assert they run OUTSIDE any tokio runtime context, and
@@ -467,6 +500,33 @@ async fn apply_run(
         ack_all_failed(layer, plan, status).await;
         return;
     };
+    // OVER-CAP + NARROWED: a path in the scanner's retained-over-cap set
+    // never appears in the diff (CAL-3 keeps it last-known-good, never
+    // Retire), so a policy narrow could never reach it through an op. Retire
+    // those directly — policy exclusion is an OWNERSHIP decision, distinct
+    // from the size-cap false-delete defense that protects still-tracked
+    // content.
+    for path in &plan.retained_over_cap {
+        if sink_policy_excludes(root, path) {
+            let retire_actor = actor.clone();
+            let retire_workspace = workspace_id.to_owned();
+            let retire_version = version_for_retire.clone();
+            let retire_path = path.clone();
+            let retire_root = root.to_path_buf();
+            let _ = tokio::task::spawn_blocking(move || {
+                let mut sink = StoreCaptureSink::new(
+                    retire_actor,
+                    retire_workspace,
+                    retire_version,
+                    retire_root,
+                    now_ms,
+                    None,
+                );
+                let _ = sink.retire(&retire_path);
+            })
+            .await;
+        }
+    }
     if result.degraded {
         status.degraded.store(true, Ordering::Release);
     }

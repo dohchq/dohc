@@ -603,6 +603,7 @@ fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
                 text: "TOKEN=alpha".to_owned(),
                 metadata_origin: "local-file".to_owned(),
                 now_ms: 10,
+                claim_foreign_head: true,
             },
             &NO_FAULTS,
         )
@@ -645,6 +646,7 @@ fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
                 text: "TOKEN=alpha".to_owned(),
                 metadata_origin: "local-file".to_owned(),
                 now_ms: 20,
+                claim_foreign_head: true,
             },
             &NO_FAULTS,
         )

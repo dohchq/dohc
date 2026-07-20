@@ -1356,6 +1356,11 @@ fn capture_ingest_binary_in_tx(
         input.metadata_origin.as_bytes(),
         author_kind,
         author_json,
+        if input.claim_foreign_head {
+            b"claim-foreign".as_slice()
+        } else {
+            b"own-only".as_slice()
+        },
     ]);
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?

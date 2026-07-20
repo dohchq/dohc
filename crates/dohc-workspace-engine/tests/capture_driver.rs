@@ -470,3 +470,41 @@ async fn offline_delete_and_narrow_in_the_same_window_still_retires() {
         .await
         .expect("close");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn secret_tip_from_another_writer_is_not_claimed_on_first_sight() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "witness.md", b"anchor");
+    write_file(scratch.path(), ".env", b"TOKEN=from-disk");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+    wait_for_text(&transport, &handle, "witness.md", Some("anchor")).await;
+
+    let db_path = scratch.path().join(".dohc/engine/engine.db");
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(9_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+
+    // The capture-written tip carries the sink's own origin; ownership only
+    // ever lets capture overwrite tips it wrote itself on first sight.
+    let store = EngineStore::open(&db_path, 100).expect("reopen");
+    let origin: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT m.metadata_origin FROM secret_files f \
+                 JOIN secret_moments m ON m.workspace_id = f.workspace_id \
+                   AND m.moment_id = f.latest_moment_id \
+                 WHERE f.path = '.env'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("secret origin");
+    assert_eq!(origin, "local-file", "capture owns the tip it wrote");
+}
