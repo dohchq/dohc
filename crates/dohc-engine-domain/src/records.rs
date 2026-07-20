@@ -225,6 +225,14 @@ pub struct CaptureIngest {
     pub author_json: Option<String>,
     pub now_ms: i64,
     pub request_id: Option<String>,
+    /// Whether this write may overwrite a head written by a DIFFERENT origin
+    /// (an RPC write, a replication apply). Capture sets it only when it
+    /// OBSERVED the disk transition (`IngestReason::Changed`) — a genuine
+    /// user edit is authoritative for file content. On first sight of a path
+    /// (`Added`, e.g. after a fresh/reset manifest) capture cannot tell a
+    /// user edit from stale disk bytes, so it must NOT claim a foreign head
+    /// and silently revert that writer.
+    pub claim_foreign_head: bool,
 }
 
 /// Inputs to [`crate::VersionedTextStore::capture_ingest_binary`]: the
@@ -241,6 +249,8 @@ pub struct CaptureIngestBinary {
     pub author_json: Option<String>,
     pub now_ms: i64,
     pub request_id: Option<String>,
+    /// See [`CaptureIngest::claim_foreign_head`].
+    pub claim_foreign_head: bool,
 }
 
 /// Result of [`crate::VersionedTextStore::capture_ingest_binary`].
@@ -269,6 +279,12 @@ pub struct CaptureRetire {
     /// heads exist via mirrored resolve / the binary capture path). A binary
     /// head under this flag is a no-op, not an error.
     pub only_if_text_head: bool,
+    /// Retire ONLY when the current head was itself written by CAPTURE. The
+    /// capture sink sets this so a head that arrived by another route (an
+    /// RPC versionedText.write, a replication apply) — which may legitimately
+    /// have no disk counterpart — can never be deleted by a disk-driven
+    /// retire. A foreign-origin head is a no-op, not an error.
+    pub only_if_capture_origin: bool,
 }
 
 /// Inputs to [`crate::VersionedTextStore::delete_text_file`].

@@ -133,6 +133,13 @@ impl<'a> VersionedTextStore<'a> {
         input: &WriteText,
         faults: &dyn FaultInjector,
     ) -> Result<WriteResult, DomainError> {
+        // RESERVED ORIGIN, enforced at the PUBLIC door. This is the method
+        // the RPC surface calls; capture's own primitive reaches
+        // `write_text_in_tx` directly, so the reservation cannot be forged
+        // from outside while capture keeps writing its own origin. Without
+        // it a caller could mark DB-only content capture-owned and have the
+        // next disk-driven pass retire it.
+        reject_reserved_capture_origin(&input.metadata_origin)?;
         let outcome = self
             .store
             .write_with(faults, |tx| write_text_in_tx(tx, input))?;
@@ -1041,7 +1048,18 @@ fn normalized_write_input(input: &WriteText) -> Result<WriteText, DomainError> {
 
 #[doc(hidden)]
 pub fn validate_write_input(input: &WriteText) -> Result<(), DomainError> {
+    reject_reserved_capture_origin(&input.metadata_origin)?;
     normalized_write_input(input).map(|_| ())
+}
+
+/// The shared reservation check for the capture-owned metadata origin.
+fn reject_reserved_capture_origin(metadata_origin: &str) -> Result<(), DomainError> {
+    if metadata_origin == CAPTURE_ORIGIN {
+        return Err(DomainError::InvalidInput {
+            reason: "metadata origin 'capture' is reserved for autonomous capture",
+        });
+    }
+    Ok(())
 }
 
 /// Validate a delete and return the input with its path normalized through the
@@ -1099,6 +1117,11 @@ fn capture_ingest_in_tx(
         input.metadata_origin.as_bytes(),
         author_kind,
         author_json,
+        if input.claim_foreign_head {
+            b"claim-foreign".as_slice()
+        } else {
+            b"own-only".as_slice()
+        },
     ]);
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
@@ -1117,11 +1140,38 @@ fn capture_ingest_in_tx(
         input.now_ms,
     )?;
     let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
+    // OWNERSHIP: capture only overwrites heads written with ITS OWN origin.
+    // A head that arrived by another route (RPC, replication) may have no
+    // disk counterpart at all, so letting disk bytes overwrite it would
+    // silently revert that write.
+    if let Some(existing) = &before
+        && existing.metadata_origin != input.metadata_origin
+        && !input.claim_foreign_head
+    {
+        return Err(DomainError::CaptureNotOwned);
+    }
     let content_sha256 = text_blob_sha256(&input.text);
     if let Some(before) = &before
         && before.content_kind == "text"
         && before.blob_sha256.as_deref() == Some(content_sha256.as_str())
     {
+        // A CLAIMED dedupe transfers ownership: capture observed the disk
+        // transition and the content already matches, so the head becomes
+        // capture-owned. Without this the head would stay foreign forever
+        // and later disk-driven retires would be refused.
+        if input.claim_foreign_head && before.metadata_origin != input.metadata_origin {
+            tx.execute(
+                "UPDATE snapshots SET metadata_origin = ?1 \
+                 WHERE workspace_id = ?2 AND version_id = ?3 AND object_id = ?4",
+                params![
+                    input.metadata_origin,
+                    input.workspace_id,
+                    input.version_id,
+                    object_id
+                ],
+            )
+            .map_err(DomainError::sql_persist)?;
+        }
         let result = write_result_for_existing_head(tx, before)?;
         record_request(
             tx,
@@ -1191,6 +1241,11 @@ fn capture_retire_in_tx(
         } else {
             b"any-head".as_slice()
         },
+        if input.only_if_capture_origin {
+            b"capture-origin-only".as_slice()
+        } else {
+            b"any-origin".as_slice()
+        },
     ]);
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
@@ -1227,13 +1282,28 @@ fn capture_retire_in_tx(
             deduped: false,
         });
     };
-    if input.only_if_text_head {
+    if input.only_if_text_head || input.only_if_capture_origin {
         let head = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?.ok_or(
             DomainError::StateCorrupt {
                 reason: "path alias points at a missing snapshot",
             },
         )?;
-        if head.content_kind != "text" {
+        // A head this caller does not own (written by RPC/replication) is
+        // never destroyed by a disk-driven retire.
+        if input.only_if_capture_origin && head.metadata_origin != CAPTURE_ORIGIN {
+            record_request(
+                tx,
+                input.request_id.as_deref(),
+                &payload_hash,
+                0,
+                input.now_ms,
+            )?;
+            return Ok(CaptureRetireResult {
+                retired: None,
+                deduped: false,
+            });
+        }
+        if input.only_if_text_head && head.content_kind != "text" {
             // A live non-text head is not the caller's to retire; settle as a
             // no-op exactly like an absent path.
             record_request(
@@ -1279,6 +1349,17 @@ fn capture_retire_in_tx(
     })
 }
 
+/// The metadata origin every capture write records. Ownership of a head is
+/// determined by this value: capture only ever overwrites or retires heads
+/// it wrote itself.
+///
+/// RESERVED: `normalized_write_input` — which EVERY plaintext write path
+/// runs, including `write_text_in_tx` behind the RPC surface — rejects this
+/// origin, so a caller cannot forge capture ownership and have its own
+/// content retired by a disk-driven pass. Only the capture primitives in
+/// this module may write it.
+pub const CAPTURE_ORIGIN: &str = "capture";
+
 /// Maximum binary payload a capture ingest may persist. Mirrors
 /// `MAX_VERSIONED_BINARY_FILE_BYTES` (`versionedTextStore.ts`) and the files
 /// crate's `MAX_CAPTURE_BINARY_BYTES`; the storage blob cap (64 MiB) stays
@@ -1316,6 +1397,11 @@ fn capture_ingest_binary_in_tx(
         input.metadata_origin.as_bytes(),
         author_kind,
         author_json,
+        if input.claim_foreign_head {
+            b"claim-foreign".as_slice()
+        } else {
+            b"own-only".as_slice()
+        },
     ]);
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
@@ -1334,6 +1420,12 @@ fn capture_ingest_binary_in_tx(
         input.now_ms,
     )?;
     let before = get_snapshot(tx, &input.workspace_id, &input.version_id, &object_id)?;
+    if let Some(existing) = &before
+        && existing.metadata_origin != input.metadata_origin
+        && !input.claim_foreign_head
+    {
+        return Err(DomainError::CaptureNotOwned);
+    }
     if let Some(before) = &before {
         // Fail closed on partial head identity, mirroring the binary writer.
         match before.content_kind.as_str() {
@@ -1466,6 +1558,115 @@ fn capture_ingest_binary_in_tx(
         moment_order,
         binary_sha256,
         deduped: false,
+    })
+}
+
+/// One rehydration-seed entry for the files-layer scan manifest: the path,
+/// the CAPTURED content's byte size, and its lowercase-hex sha256 in the
+/// scanner's own terms (text = the blob bytes, binary = the binary blob).
+/// Secrets carry a sentinel sha (plaintext hashes are deliberately never
+/// stored), so a reopened workspace re-offers each secret once and the
+/// encrypted store's content-equality dedupe settles it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureManifestSeedEntry {
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+/// The sentinel recorded for secret seeds (never a valid hex digest, so the
+/// first scan always re-offers the path).
+pub const SECRET_SEED_SENTINEL_SHA: &str = "rehydrated-secret";
+
+/// Every CAPTURE-ORIGIN path in `version_id` with its content identity, for
+/// seeding a fresh files-layer manifest on workspace (re)open. Without this
+/// seed the baseline scan diffs against EMPTY and can never emit a Retire
+/// for a file deleted while the daemon was down — the stale captured head
+/// would stay readable forever (`ReconcileController::rehydrated`'s
+/// documented follow-up: the rehydration SOURCE lives above the files
+/// crate, which is here).
+///
+/// CAPTURE-ORIGIN ONLY, deliberately: the manifest states what CAPTURE
+/// believes is on disk. Content that arrived any other way (an RPC
+/// `versionedText.write`, a replication/sync apply) may legitimately have
+/// no disk counterpart yet, and seeding it would make the next baseline
+/// scan diff it as "removed" and RETIRE it — capture deleting content it
+/// never owned.
+pub fn capture_manifest_seed(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<Vec<CaptureManifestSeedEntry>, DomainError> {
+    let ws = workspace_id.to_owned();
+    let version = version_id.to_owned();
+    store.read_with(move |conn| {
+        let mut entries = Vec::new();
+        let mut stmt = conn
+            .prepare(
+                "SELECT a.path, COALESCE(s.content_kind, 'text'), \
+                        s.blob_sha256, tb.byte_length, \
+                        s.binary_sha256, bb.byte_length \
+                 FROM path_aliases a \
+                 JOIN snapshots s ON s.workspace_id = a.workspace_id \
+                   AND s.version_id = a.version_id AND s.object_id = a.object_id \
+                 LEFT JOIN blobs tb ON tb.sha256 = s.blob_sha256 \
+                 LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
+                 WHERE a.workspace_id = ?1 AND a.version_id = ?2                    AND s.metadata_origin = 'capture'",
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        let rows = stmt
+            .query_map(params![ws, version], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                ))
+            })
+            .map_err(DomainError::sql_corrupt)?;
+        for row in rows {
+            let (path, kind, text_sha, text_len, binary_sha, binary_len) =
+                row.map_err(DomainError::sql_corrupt)?;
+            let (sha256, size) = match kind.as_str() {
+                "binary" => match (binary_sha, binary_len) {
+                    (Some(sha), Some(len)) => (sha, len.max(0) as u64),
+                    _ => continue,
+                },
+                _ => match (text_sha, text_len) {
+                    (Some(sha), Some(len)) => (sha, len.max(0) as u64),
+                    _ => continue,
+                },
+            };
+            entries.push(CaptureManifestSeedEntry { path, size, sha256 });
+        }
+        // Same capture-origin rule for the encrypted store: a tip written by
+        // the API or replication may legitimately have no plaintext on disk,
+        // and seeding it would make the baseline diff RETIRE it.
+        let mut secrets = conn
+            .prepare(
+                "SELECT f.path, f.byte_length FROM secret_files f \
+                 JOIN secret_moments m ON m.workspace_id = f.workspace_id \
+                   AND m.moment_id = f.latest_moment_id \
+                 WHERE f.workspace_id = ?1 AND f.version_id = ?2 \
+                   AND m.metadata_origin = 'local-file'",
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        let rows = secrets
+            .query_map(params![ws, version], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(DomainError::sql_corrupt)?;
+        for row in rows {
+            let (path, len) = row.map_err(DomainError::sql_corrupt)?;
+            entries.push(CaptureManifestSeedEntry {
+                path,
+                size: len.max(0) as u64,
+                sha256: SECRET_SEED_SENTINEL_SHA.to_owned(),
+            });
+        }
+        Ok(entries)
     })
 }
 

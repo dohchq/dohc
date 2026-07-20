@@ -23,6 +23,7 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
                 author_json: None,
                 now_ms: 10,
                 request_id: Some("actor-capture-request".to_owned()),
+                claim_foreign_head: true,
             },
             Arc::new(NoFaults),
         )
@@ -40,6 +41,7 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
                 now_ms: 20,
                 request_id: Some("actor-retire-request".to_owned()),
                 only_if_text_head: false,
+                only_if_capture_origin: false,
             },
             Arc::new(NoFaults),
         )
@@ -66,6 +68,7 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
                 author_json: None,
                 now_ms: 10,
                 request_id: Some("actor-async-capture-request".to_owned()),
+                claim_foreign_head: true,
             },
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -83,6 +86,7 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
                 now_ms: 20,
                 request_id: Some("actor-async-retire-request".to_owned()),
                 only_if_text_head: false,
+                only_if_capture_origin: false,
             },
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -102,6 +106,7 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
                 author_json: None,
                 now_ms: 25,
                 request_id: None,
+                claim_foreign_head: true,
             },
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -122,6 +127,7 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
                 author_json: None,
                 now_ms: 30,
                 request_id: None,
+                claim_foreign_head: true,
             },
             Arc::new(NoFaults),
             cancelled,
@@ -152,6 +158,7 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
                 now_ms: 40,
                 request_id: None,
                 only_if_text_head: false,
+                only_if_capture_origin: false,
             },
             Arc::new(NoFaults),
             cancelled,
@@ -231,6 +238,7 @@ async fn binary_capture_round_trips_through_the_actor_both_ways() {
         author_json: None,
         now_ms,
         request_id: None,
+        claim_foreign_head: true,
     };
 
     let written = handle

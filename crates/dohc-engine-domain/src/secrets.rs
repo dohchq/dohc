@@ -127,6 +127,12 @@ pub struct CaptureSecret {
     pub text: String,
     pub metadata_origin: String,
     pub now_ms: i64,
+    /// Whether this write may overwrite a tip written by a DIFFERENT origin
+    /// (API, replication). Capture sets it only when it OBSERVED the disk
+    /// transition; on first sight it must not silently revert another
+    /// writer whose plaintext may never have reached disk. Mirrors
+    /// [`crate::CaptureIngest::claim_foreign_head`].
+    pub claim_foreign_head: bool,
 }
 
 impl core::fmt::Debug for CaptureSecret {
@@ -154,6 +160,11 @@ pub struct CaptureSecretRetire {
     pub path: String,
     pub metadata_origin: String,
     pub now_ms: i64,
+    /// Retire ONLY a tip whose latest moment carries `metadata_origin` — i.e.
+    /// one THIS writer produced. The capture sink sets it so a disk delete
+    /// can never destroy an API/replication-written tip whose plaintext may
+    /// legitimately have never been on disk. A foreign tip is a no-op.
+    pub only_if_own_origin: bool,
 }
 
 impl core::fmt::Debug for SecretWrite {
@@ -364,6 +375,22 @@ impl<'a> SecretFileStore<'a> {
         non_empty(&input.version_id, "version_id")?;
         validate_secret_path(&input.path)?;
         let ws = input.workspace_id.clone();
+        // OWNERSHIP: a tip written by another origin (API, replication) may
+        // legitimately have no plaintext on disk, so capture only claims it
+        // when it OBSERVED the disk transition.
+        if !input.claim_foreign_head {
+            let version = input.version_id.clone();
+            let path = input.path.clone();
+            let owner_ws = ws.clone();
+            let foreign = self
+                .store
+                .read_with(move |conn| secret_tip_origin(conn, &owner_ws, &version, &path))?;
+            if let Some(origin) = foreign
+                && origin != input.metadata_origin
+            {
+                return Err(DomainError::CaptureNotOwned);
+            }
+        }
         // Single-writer: this pre-read reservation is authoritative; the
         // post-write pin makes the assumption release-checked.
         let reserved = self
@@ -406,6 +433,19 @@ impl<'a> SecretFileStore<'a> {
             }
             None => {
                 // Deduped: the tip's plaintext is VERIFIED on disk right now.
+                //
+                // NOTE — ownership is deliberately NOT transferred here, unlike
+                // the plaintext path (`capture_ingest_in_tx`). A secret tip's
+                // origin lives on its MOMENT, so transferring would mean either
+                // rewriting history or appending a moment for a no-op change;
+                // both are worse than the consequence of not transferring,
+                // which is that a claimed-but-deduped FOREIGN tip stays foreign
+                // and a later disk delete will not retire it. That errs toward
+                // PRESERVING another writer's secret — the safe direction, and
+                // consistent with how an api-written secret with no disk file
+                // is already treated. Resolved properly by the dedicated
+                // ownership-marker column tracked for GATE6.
+                //
                 // Mark the tip's generation materialized (upsert) so the
                 // staleness gate supersedes any older pending job — the same
                 // regression class the binary capture marker closes.
@@ -788,6 +828,21 @@ pub fn capture_secret_retire(
     non_empty(&input.version_id, "version_id")?;
     validate_secret_path(&input.path)?;
     let ws = input.workspace_id.clone();
+    // OWNERSHIP: a disk-driven retire must never destroy a tip written by
+    // another origin (API, replication) — its plaintext may never have been
+    // on disk at all, so absence proves nothing about it.
+    if input.only_if_own_origin {
+        let version = input.version_id.clone();
+        let path = input.path.clone();
+        let owner_ws = ws.clone();
+        let origin =
+            store.read_with(move |conn| secret_tip_origin(conn, &owner_ws, &version, &path))?;
+        if let Some(origin) = origin
+            && origin != input.metadata_origin
+        {
+            return Ok(None);
+        }
+    }
     // Single-writer: the pre-read reservation is authoritative; the post-write
     // pin makes the assumption release-checked.
     let reserved = store.read_with(|conn| next_secret_moment_order(conn, &ws))?;
@@ -885,6 +940,24 @@ pub fn has_secret_state(store: &mut EngineStore, workspace_id: &str) -> Result<b
         )
         .map_err(DomainError::sql_corrupt)
     })
+}
+
+/// The `metadata_origin` of the current secret tip, or `None` when no tip
+/// exists. ONE definition shared by the capture write and retire ownership
+/// checks — a schema change to the join must not need two edits.
+fn secret_tip_origin(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<Option<String>, DomainError> {
+    conn.query_row(
+        "SELECT m.metadata_origin FROM secret_files f          JOIN secret_moments m ON m.workspace_id = f.workspace_id            AND m.moment_id = f.latest_moment_id          WHERE f.workspace_id = ?1 AND f.version_id = ?2 AND f.path = ?3",
+        params![workspace_id, version_id, path],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)
 }
 
 /// Read the encrypted tip for a secret path. Free-standing (no key borrow) so

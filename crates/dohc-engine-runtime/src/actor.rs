@@ -32,11 +32,11 @@ use crate::search::{SearchResult, search_workspace};
 use dohc_engine_collab::{AppendOutcome, ContentKind, DocKey, Regime};
 use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
-    CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
-    CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ResolveTextConflict,
+    CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureManifestSeedEntry,
+    CaptureRetire, CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ResolveTextConflict,
     ResolveTextConflictResult, SecretFileStore, SecretMomentRecord, SecretWriteResult,
-    TextConflict, TextSnapshot, VersionedTextStore, WriteResult, WriteText, capture_secret_retire,
-    has_secret_state, insert_text_conflict_if_absent,
+    TextConflict, TextSnapshot, VersionedTextStore, WriteResult, WriteText, capture_manifest_seed,
+    capture_secret_retire, has_secret_state, insert_text_conflict_if_absent,
 };
 use dohc_engine_storage::{
     CompoundWrite, Document, EngineStore, FaultInjector, StorageError, TxnOutcome, WriteOutcome,
@@ -195,6 +195,15 @@ enum Command {
         path: String,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<TextSnapshot>, RuntimeError>>,
+    },
+    ActiveVersionId {
+        workspace_id: String,
+        reply: oneshot::Sender<Result<String, RuntimeError>>,
+    },
+    CaptureManifestSeed {
+        workspace_id: String,
+        version_id: String,
+        reply: oneshot::Sender<Result<Vec<CaptureManifestSeedEntry>, RuntimeError>>,
     },
     YdocApply {
         key: DocKey,
@@ -717,6 +726,41 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// The workspace's ACTIVE version id (falling back to main), read on the
+    /// actor thread. The capture driver targets this so captures land in the
+    /// version the user is actually on (TS oracle parity).
+    pub async fn active_version_id(&self, workspace_id: String) -> Result<String, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ActiveVersionId {
+                workspace_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Every captured path with its content identity, for seeding a fresh
+    /// files-layer manifest on workspace (re)open (deleted-while-closed
+    /// files must retire against the seed, never survive an empty baseline).
+    pub async fn capture_manifest_seed(
+        &self,
+        workspace_id: String,
+        version_id: String,
+    ) -> Result<Vec<CaptureManifestSeedEntry>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CaptureManifestSeed {
+                workspace_id,
+                version_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Capture a secret file on the actor's single writer thread.
     pub async fn capture_secret(
         &self,
@@ -1147,6 +1191,25 @@ fn worker_main(
             } => {
                 let outcome =
                     has_secret_state(&mut store, &workspace_id).map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ActiveVersionId {
+                workspace_id,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .get_active_version(&workspace_id)
+                    .map(|version| version.version_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::CaptureManifestSeed {
+                workspace_id,
+                version_id,
+                reply,
+            } => {
+                let outcome = capture_manifest_seed(&store, &workspace_id, &version_id)
+                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::CaptureRetire {

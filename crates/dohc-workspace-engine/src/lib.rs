@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+pub(crate) mod capture_driver;
 pub mod capture_sink;
 pub mod cutover_rehearse;
 pub mod shadow_fence;
@@ -42,6 +43,30 @@ struct OpenWorkspace {
     db_path: PathBuf,
     workspace_id: String,
     actor: ActorHandle,
+    /// The autonomous capture driver (files actor + watcher + reconcile
+    /// loop), spawned only after the shadow binding succeeded. Shared so the
+    /// teardown paths can take it exactly once.
+    capture: Arc<Mutex<Option<capture_driver::CaptureDriver>>>,
+}
+
+impl OpenWorkspace {
+    /// Take the driver and cancel it SYNCHRONOUSLY (no await point, so an
+    /// aborted RPC future can never leave a driver un-cancelled), returning
+    /// the join handle for callers that must await the full drain.
+    fn begin_capture_shutdown(&self) -> Option<tokio::task::JoinHandle<()>> {
+        lock(&self.capture)
+            .take()
+            .and_then(capture_driver::CaptureDriver::begin_shutdown)
+    }
+
+    /// Cancel and await the capture driver's full drain (idempotent).
+    /// Strictly BEFORE the store-actor close: the driver may be mid-apply
+    /// against the actor.
+    async fn shutdown_capture(&self) {
+        if let Some(task) = self.begin_capture_shutdown() {
+            let _ = task.await;
+        }
+    }
 }
 
 /// Protocol service composing domain operations on the runtime actor's sole
@@ -116,6 +141,19 @@ impl EngineService {
         Ok(Response { id, result })
     }
 
+    /// Tear down every open workspace's capture driver (watcher joined,
+    /// files actor closed). Called at daemon shutdown AFTER the transport's
+    /// workspace close hook: store actors are already gone by then, so any
+    /// in-flight capture write fails CONTAINED (never acked — the next
+    /// daemon start re-offers it from the dirty baseline), and this drain
+    /// joins the watcher/files threads so the process exits clean.
+    pub async fn shutdown_all_capture(&self) {
+        let open: Vec<OpenWorkspace> = lock(&self.handles).values().cloned().collect();
+        for workspace in open {
+            workspace.shutdown_capture().await;
+        }
+    }
+
     async fn workspace_open(
         &self,
         ctx: &RequestContext,
@@ -156,6 +194,8 @@ impl EngineService {
                 return Ok(json!({ "workspace": handle }));
             }
             lock(&self.handles).remove(&handle);
+            // The evicted binding's files layer must not outlive it.
+            open.shutdown_capture().await;
         }
         if lock(&self.handles).len() >= MAX_OPEN_HANDLES {
             return Err(wire(
@@ -189,6 +229,29 @@ impl EngineService {
             .next_handle
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let handle = WorkspaceHandle(format!("ws-{sequence:016x}"));
+        // The files layer spawns ONLY here — after the shadow binding
+        // succeeded — so an unmarked or mismatched root can never grow a
+        // watcher or files actor (the shadow-scope dormancy invariant).
+        let capture = capture_driver::CaptureDriver::spawn(
+            root.clone(),
+            actor.clone(),
+            params.workspace_id.clone(),
+        );
+        // STARTUP ORDERING BARRIER: the baseline reconcile (closed-period
+        // disk state) must apply before the handle is handed out, or a
+        // caller's first write could later be overwritten by a capture of
+        // stale disk bytes.
+        //
+        // CANCELLATION: nothing owns the store actor yet (the handle is
+        // inserted below), so an abort here would leak it. `OpenGuard` closes
+        // the actor on an early drop and is disarmed once the handle is
+        // inserted; `CaptureDriver`'s own Drop cancels the files layer.
+        let open_guard = OpenGuard {
+            supervisor: self.supervisor,
+            db_path: Some(db_path.clone()),
+        };
+        capture.wait_for_baseline().await;
+        open_guard.disarm();
         lock(&self.handles).insert(
             handle.clone(),
             OpenWorkspace {
@@ -196,6 +259,7 @@ impl EngineService {
                 db_path,
                 workspace_id: params.workspace_id,
                 actor,
+                capture: Arc::new(Mutex::new(Some(capture))),
             },
         );
         Ok(json!({ "workspace": handle }))
@@ -210,7 +274,7 @@ impl EngineService {
         // Closing marker is installed. Once begin_close has marked Closing, the
         // lock is released — the marker (not this lock) serializes reopen, and
         // the detached finish stays cancellation-safe.
-        let closing = {
+        let (closing, removed) = {
             let _serial = self.open_lock.lock().await;
             let db_path = {
                 let guard = lock(&self.handles);
@@ -225,16 +289,32 @@ impl EngineService {
             // service's open_lock) observes Closing at supervisor.open and waits
             // for a fresh actor instead of the one being torn down.
             let closing = supervisor.begin_close(&db_path).map_err(map_runtime)?;
-            lock(&self.handles).remove(&handle);
-            closing
+            let removed = lock(&self.handles).remove(&handle);
+            (closing, removed)
         };
+        // The capture driver is CANCELLED synchronously here (an aborted close
+        // future can never leave it running), and the detached task below owns
+        // both the drain and the actor close from the start — so cancellation
+        // at ANY await point leaves the #201 backstop semantics intact while
+        // the teardown order stays strictly files-then-actor: the driver
+        // drains its in-flight apply BEFORE the store actor goes down.
+        let capture_drain = removed
+            .as_ref()
+            .and_then(OpenWorkspace::begin_capture_shutdown);
         let closed = closing.is_some();
-        let close_task = tokio::task::spawn_blocking(move || match closing {
-            Some(closing) => closing.finish(),
-            None => Ok(()),
+        let close_task = tokio::spawn(async move {
+            if let Some(drain) = capture_drain {
+                let _ = drain.await;
+            }
+            tokio::task::spawn_blocking(move || match closing {
+                Some(closing) => closing.finish(),
+                None => Ok(()),
+            })
+            .await
         });
         close_task
             .await
+            .map_err(|_| wire(ErrorCode::Internal, "workspace close task failed"))?
             .map_err(|_| wire(ErrorCode::Internal, "workspace close task failed"))?
             .map_err(map_runtime)?;
         Ok(json!({ "closed": closed }))
@@ -525,6 +605,34 @@ impl OperationCancellation {
 
     fn token(&self) -> CancellationToken {
         self.token.clone()
+    }
+}
+
+/// Closes a just-opened store actor if `workspace_open` is dropped before the
+/// handle reaches `handles` (a cancelled/deadline-expired open). Disarmed on
+/// the success path, where the handle owns the actor.
+struct OpenGuard {
+    supervisor: &'static WorkspaceSupervisor,
+    db_path: Option<PathBuf>,
+}
+
+impl OpenGuard {
+    fn disarm(mut self) {
+        self.db_path = None;
+    }
+}
+
+impl Drop for OpenGuard {
+    fn drop(&mut self) {
+        let Some(db_path) = self.db_path.take() else {
+            return;
+        };
+        let supervisor = self.supervisor;
+        // Detached + blocking: never run the actor join on a runtime worker
+        // (the #201 cancellation-safety contract).
+        tokio::task::spawn_blocking(move || {
+            let _ = supervisor.close(&db_path);
+        });
     }
 }
 
@@ -1251,6 +1359,53 @@ mod tests {
             .await
             .expect("service B close");
         assert_eq!(supervisor.actor_count(), baseline);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn capture_driver_status_tracks_the_workspace_lifecycle() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = Arc::new(EngineService::with_supervisor(supervisor));
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "driver-status"
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+
+        let status = {
+            let guard = lock(&service.handles);
+            let open = guard.get(&handle).expect("open workspace");
+            let capture = lock(&open.capture);
+            Arc::clone(capture.as_ref().expect("driver present").status())
+        };
+        // The files layer comes up shortly after open (watcher attach +
+        // baseline reconcile) and must not be degraded on the happy path.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !status.running() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "driver never reported running"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(!status.degraded(), "happy path must not be degraded");
+
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+        // Close drains the driver fully: running flips off.
+        assert!(!status.running(), "driver reports stopped after close");
     }
 
     #[tokio::test]

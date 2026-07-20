@@ -52,6 +52,12 @@ pub enum DomainError {
     #[error("content at path is a binary head, not text")]
     BinaryHeadNotText,
 
+    /// The path current head was not written by capture, so a disk-driven
+    /// capture write must not overwrite or retire it (it may legitimately
+    /// have no disk counterpart). A settled refusal, never a retry.
+    #[error("capture does not own this path current head")]
+    CaptureNotOwned,
+
     /// A rename/rollback restore path is already occupied by another object.
     #[error("target path already exists")]
     TargetPathExists,
@@ -134,6 +140,7 @@ impl DomainError {
             DomainError::DuplicateMomentId => "duplicate-moment-id",
             DomainError::FileNotFound => "file-not-found",
             DomainError::BinaryHeadNotText => "binary-head-not-text",
+            DomainError::CaptureNotOwned => "capture-not-owned",
             DomainError::TargetPathExists => "target-path-exists",
             DomainError::ForkBaseNotFound => "fork-base-not-found",
             DomainError::ConflictNotFound => "conflict-not-found",

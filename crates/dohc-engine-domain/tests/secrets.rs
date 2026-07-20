@@ -603,6 +603,7 @@ fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
                 text: "TOKEN=alpha".to_owned(),
                 metadata_origin: "local-file".to_owned(),
                 now_ms: 10,
+                claim_foreign_head: true,
             },
             &NO_FAULTS,
         )
@@ -645,6 +646,7 @@ fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
                 text: "TOKEN=alpha".to_owned(),
                 metadata_origin: "local-file".to_owned(),
                 now_ms: 20,
+                claim_foreign_head: true,
             },
             &NO_FAULTS,
         )
@@ -660,6 +662,7 @@ fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
             path: ".env".to_owned(),
             metadata_origin: "local-file".to_owned(),
             now_ms: 30,
+            only_if_own_origin: false,
         },
         &NO_FAULTS,
     )
@@ -677,6 +680,7 @@ fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {
             path: ".env".to_owned(),
             metadata_origin: "local-file".to_owned(),
             now_ms: 40,
+            only_if_own_origin: false,
         },
         &NO_FAULTS,
     )
@@ -718,6 +722,7 @@ fn capture_retire_supersedes_a_stale_pending_secret_job() {
             path: ".env".to_owned(),
             metadata_origin: "local-file".to_owned(),
             now_ms: 20,
+            only_if_own_origin: false,
         },
         &NO_FAULTS,
     )
@@ -747,4 +752,189 @@ fn capture_retire_supersedes_a_stale_pending_secret_job() {
         marker_gen > pending_gen,
         "the marker's generation ({marker_gen}) must exceed the stale pending job's ({pending_gen})"
     );
+}
+
+#[test]
+fn capture_secret_ownership_is_enforced_in_both_directions() {
+    use dohc_engine_domain::{CaptureSecret, CaptureSecretRetire, capture_secret_retire};
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_version(&db, WS);
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    let key = key();
+
+    // A FOREIGN writer (api) establishes the tip.
+    write(&mut store, &key, ".env", "TOKEN=from-api", "sm-api", 10);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "UPDATE secret_moments SET metadata_origin = 'api' WHERE moment_id = 'sm-api'",
+                [],
+            )
+            .expect("mark the tip foreign");
+            Ok::<_, dohc_engine_domain::DomainError>(())
+        })
+        .expect("mark the tip foreign");
+
+    // FIRST SIGHT (claim_foreign_head = false): capture must refuse.
+    let refused = SecretFileStore::new(&mut store, &key).capture_secret(
+        &CaptureSecret {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: ".env".to_owned(),
+            text: "TOKEN=from-disk".to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            now_ms: 20,
+            claim_foreign_head: false,
+        },
+        &NO_FAULTS,
+    );
+    assert!(
+        matches!(
+            refused,
+            Err(dohc_engine_domain::DomainError::CaptureNotOwned)
+        ),
+        "first sight must not claim a foreign secret tip"
+    );
+
+    // RETIRE must refuse too — the plaintext may never have been on disk.
+    let retired = capture_secret_retire(
+        &mut store,
+        &CaptureSecretRetire {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: ".env".to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            now_ms: 30,
+            only_if_own_origin: true,
+        },
+        &NO_FAULTS,
+    )
+    .expect("keyless retire");
+    assert!(
+        retired.is_none(),
+        "a foreign secret tip must never be retired by a disk-driven pass"
+    );
+
+    // The foreign plaintext survives both.
+    let plaintext = SecretFileStore::new(&mut store, &key)
+        .materialize_secret_file(WS, "main", ".env")
+        .expect("materialize")
+        .expect("tip present");
+    assert_eq!(plaintext.into_utf8().expect("utf8"), "TOKEN=from-api");
+
+    // An OBSERVED transition (claim_foreign_head = true) may claim it.
+    let claimed = SecretFileStore::new(&mut store, &key)
+        .capture_secret(
+            &CaptureSecret {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: ".env".to_owned(),
+                text: "TOKEN=user-edited".to_owned(),
+                metadata_origin: "local-file".to_owned(),
+                now_ms: 40,
+                claim_foreign_head: true,
+            },
+            &NO_FAULTS,
+        )
+        .expect("an observed edit is authoritative");
+    assert!(claimed.changed);
+    let plaintext = SecretFileStore::new(&mut store, &key)
+        .materialize_secret_file(WS, "main", ".env")
+        .expect("materialize")
+        .expect("tip present");
+    assert_eq!(plaintext.into_utf8().expect("utf8"), "TOKEN=user-edited");
+
+    // Now capture-owned: the disk-driven retire works.
+    let retired = capture_secret_retire(
+        &mut store,
+        &CaptureSecretRetire {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: ".env".to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            now_ms: 50,
+            only_if_own_origin: true,
+        },
+        &NO_FAULTS,
+    )
+    .expect("keyless retire");
+    assert!(retired.is_some(), "capture retires the tip it owns");
+}
+#[test]
+fn a_claimed_secret_dedupe_does_not_transfer_ownership() {
+    // Pins a DELIBERATE non-transfer (see the note in `capture_secret`). A
+    // secret tip's origin lives on its MOMENT, so transferring on a dedupe
+    // would mean rewriting history or appending a moment for a no-op change.
+    // The consequence — a claimed-but-deduped foreign tip stays foreign, so a
+    // later disk delete will not retire it — PRESERVES another writer's
+    // secret, which is the safe direction. If that ever changes, it must be a
+    // decision, not an accident: this test is the tripwire.
+    use dohc_engine_domain::{CaptureSecret, CaptureSecretRetire, capture_secret_retire};
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_version(&db, WS);
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    let key = key();
+
+    write(&mut store, &key, ".env", "TOKEN=shared", "sm-api", 10);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "UPDATE secret_moments SET metadata_origin = 'api' WHERE moment_id = 'sm-api'",
+                [],
+            )
+            .expect("mark the tip foreign");
+            Ok::<_, dohc_engine_domain::DomainError>(())
+        })
+        .expect("mark the tip foreign");
+
+    // An OBSERVED transition whose bytes already match the foreign tip: the
+    // claim is permitted, but there is nothing to write.
+    let deduped = SecretFileStore::new(&mut store, &key)
+        .capture_secret(
+            &CaptureSecret {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: ".env".to_owned(),
+                text: "TOKEN=shared".to_owned(),
+                metadata_origin: "local-file".to_owned(),
+                now_ms: 20,
+                claim_foreign_head: true,
+            },
+            &NO_FAULTS,
+        )
+        .expect("claimed dedupe is permitted");
+    assert!(
+        !deduped.changed,
+        "identical plaintext must dedupe rather than write a moment"
+    );
+
+    // Ownership did NOT transfer, so the disk-driven retire stays a no-op.
+    let retired = capture_secret_retire(
+        &mut store,
+        &CaptureSecretRetire {
+            workspace_id: WS.to_owned(),
+            version_id: "main".to_owned(),
+            path: ".env".to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            now_ms: 30,
+            only_if_own_origin: true,
+        },
+        &NO_FAULTS,
+    )
+    .expect("keyless retire");
+    assert!(
+        retired.is_none(),
+        "a deduped claim must not confer ownership of a foreign tip"
+    );
+
+    // And the foreign plaintext is still readable — nothing was destroyed.
+    let plaintext = SecretFileStore::new(&mut store, &key)
+        .materialize_secret_file(WS, "main", ".env")
+        .expect("materialize")
+        .expect("tip present");
+    assert_eq!(plaintext.into_utf8().expect("utf8"), "TOKEN=shared");
 }
