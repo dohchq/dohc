@@ -1178,13 +1178,29 @@ fn policy_fingerprint(root: &Path) -> Option<u64> {
     let mut hasher = DefaultHasher::new();
     for name in ["files.toml", "visibility.toml"] {
         let path = root.join(".dohc").join(name);
-        match std::fs::read(&path) {
+        // MIRROR the policy reader's refusals: it rejects a symlinked or
+        // non-regular-file policy as Unreadable WITHOUT following it, while a
+        // plain read() would follow the link and hash the target's content.
+        // Diverging here strands recovery — the sink holds (reader refused)
+        // but the fingerprint never reads as unknown, so the None->Some
+        // recovery rebuild never fires.
+        let refused = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta.file_type().is_symlink() || !meta.file_type().is_file(),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                0u8.hash(&mut hasher);
+                continue;
+            }
+            Err(_) => true,
+        };
+        let read = if refused {
+            Err(())
+        } else {
+            std::fs::read(&path).map_err(|_| ())
+        };
+        match read {
             Ok(bytes) => {
                 1u8.hash(&mut hasher);
                 bytes.hash(&mut hasher);
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                0u8.hash(&mut hasher);
             }
             // Only files.toml governs capture OWNERSHIP, so only its
             // unreadability makes the fingerprint unknown. An unreadable
@@ -1192,8 +1208,8 @@ fn policy_fingerprint(root: &Path) -> Option<u64> {
             // it would block files.toml edits from ever rebuilding, and the
             // worst it can cause is one debounced re-offer when its
             // readability flips.
-            Err(_) if name == "files.toml" => return None,
-            Err(_) => 2u8.hash(&mut hasher),
+            Err(()) if name == "files.toml" => return None,
+            Err(()) => 2u8.hash(&mut hasher),
         }
     }
     Some(hasher.finish())
@@ -1266,19 +1282,31 @@ const NARROWED_SEED_SENTINEL_SHA: &str = "policy-narrowed-reoffer";
 
 /// Whether `.dohc/files.toml` currently narrows `path` out of engine
 /// ownership (the secret floor is policy-independent and never narrowed).
-fn sink_policy_excludes(root: &Path, path: &str) -> bool {
-    let Some(rules) = dohc_engine_runtime::search::read_engine_search_policy(root).files_policy
-    else {
-        return false;
+/// `Some(excluded)` under a KNOWN policy; `None` when files.toml exists but
+/// cannot be read — the caller must hold loudly (failed apply), because a
+/// silent skip records no failure, keeps nothing dirty, and so the policy-
+/// recovery rebuild would never fire to retry it.
+fn sink_policy_excludes(root: &Path, path: &str) -> Option<bool> {
+    let snapshot = dohc_engine_runtime::search::read_engine_search_policy(root);
+    if snapshot.diagnostics.iter().any(|diagnostic| {
+        diagnostic.file == "files.toml"
+            && diagnostic.reason == dohc_engine_runtime::search::DiagnosticReason::Unreadable
+    }) {
+        return None;
+    }
+    let Some(rules) = snapshot.files_policy else {
+        return Some(false);
     };
     if matches!(
         dohc_engine_files::policy::classify_engine_file_path(path),
         dohc_engine_files::policy::PathClassification::Secret
     ) {
-        return false;
+        return Some(false);
     }
-    !dohc_engine_runtime::search::resolve_effective_policy(path, Some(rules.as_slice()), None)
-        .tracked
+    Some(
+        !dohc_engine_runtime::search::resolve_effective_policy(path, Some(rules.as_slice()), None)
+            .tracked,
+    )
 }
 
 fn wall_now_ms() -> i64 {
@@ -1627,22 +1655,20 @@ impl DriverEnv for RealEnv {
                 // clean while status is degraded (a quarantine cannot form
                 // without degraded ticks), so the happy path stays one actor
                 // round-trip.
-                let quarantined = clean
-                    && self.status.degraded()
-                    && layer
-                        .files
-                        .handle()
-                        .stats()
-                        .await
-                        .map(|stats| stats.quarantined > 0)
-                        // A stats failure here means the actor died AFTER the
-                        // reconcile round-trip; claiming a clean tick would
-                        // clear degraded/terminal and reset the backoff for a
-                        // dead layer. Not-clean keeps status honest, and the
-                        // next tick's reconcile takes the ActorLost path.
-                        .unwrap_or(true);
-                TickIo::Applied {
-                    clean: clean && !quarantined,
+                if clean && self.status.degraded() {
+                    match layer.files.handle().stats().await {
+                        Ok(stats) => TickIo::Applied {
+                            clean: stats.quarantined == 0,
+                        },
+                        // The actor died AFTER the reconcile round-trip. An
+                        // unclean-but-HEALTHY tick would still reset the
+                        // failure streak and re-claim `running` for a dead
+                        // layer; report the death itself so the backoff
+                        // governs the rebuild.
+                        Err(_) => TickIo::ActorLost,
+                    }
+                } else {
+                    TickIo::Applied { clean }
                 }
             }
             Err(FilesError::ActorUnavailable) => TickIo::ActorLost,
@@ -1758,7 +1784,20 @@ async fn apply_run(
     // from the size-cap false-delete defense that protects still-tracked
     // content.
     for path in &plan.retained_over_cap {
-        if sink_policy_excludes(root, path) {
+        let excluded = match sink_policy_excludes(root, path) {
+            Some(excluded) => excluded,
+            // Unknown policy: hold LOUDLY. This loop is the only mechanism
+            // that can retire an over-cap narrowed head, so the hold must
+            // register as a failure (dirty + degraded) for the recovery
+            // rebuild to retry — a silent skip strands the head forever.
+            None => {
+                result.failed_applies.push(path.clone());
+                result.degraded = true;
+                status.degraded.store(true, Ordering::Release);
+                false
+            }
+        };
+        if excluded {
             let retire_actor = actor.clone();
             let retire_workspace = workspace_id.to_owned();
             let retire_version = version_for_retire.clone();

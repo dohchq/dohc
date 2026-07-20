@@ -618,9 +618,22 @@ fn read_policy_file<T>(
             format!("policy file exceeds {POLICY_FILE_MAX_BYTES} bytes"),
         );
     }
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
         Err(err) => return broken(DiagnosticReason::Unreadable, describe_io(&err)),
+    };
+    // Non-UTF-8 content is MALFORMED (the user's file is bad), not an access
+    // failure: consumers that hold on Unreadable (capture's unknown-policy
+    // hold) must not stall forever on a byte-level typo — Invalid routes it
+    // to the WS-F floor-only rule instead, same as a TOML parse error.
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(_) => {
+            return broken(
+                DiagnosticReason::Invalid,
+                "policy file is not valid UTF-8".to_owned(),
+            );
+        }
     };
     match parse(&text) {
         Ok(rules) => PolicyRead::Rules(Some(rules)),
