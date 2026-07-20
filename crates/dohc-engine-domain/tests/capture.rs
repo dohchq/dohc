@@ -859,6 +859,15 @@ fn the_capture_origin_is_reserved_on_the_public_write_path() {
     let err = validate_write_input(&forged).expect_err("reserved origin must be refused");
     assert!(matches!(err, DomainError::InvalidInput { .. }));
 
+    // And — the case that matters — the REAL write path must refuse it too.
+    // A guard living only in the validator would never see the RPC surface,
+    // which reaches write_text_in_tx through the normalizer instead.
+    let (_scratch, mut store) = open_store();
+    let err = VersionedTextStore::new(&mut store)
+        .write_text(&forged, &NO_FAULTS)
+        .expect_err("the real write path must reserve the capture origin");
+    assert!(matches!(err, DomainError::InvalidInput { .. }));
+
     // Every ordinary origin still passes.
     let ordinary = WriteText {
         metadata_origin: "api".to_owned(),

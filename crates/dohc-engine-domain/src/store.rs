@@ -133,6 +133,13 @@ impl<'a> VersionedTextStore<'a> {
         input: &WriteText,
         faults: &dyn FaultInjector,
     ) -> Result<WriteResult, DomainError> {
+        // RESERVED ORIGIN, enforced at the PUBLIC door. This is the method
+        // the RPC surface calls; capture's own primitive reaches
+        // `write_text_in_tx` directly, so the reservation cannot be forged
+        // from outside while capture keeps writing its own origin. Without
+        // it a caller could mark DB-only content capture-owned and have the
+        // next disk-driven pass retire it.
+        reject_reserved_capture_origin(&input.metadata_origin)?;
         let outcome = self
             .store
             .write_with(faults, |tx| write_text_in_tx(tx, input))?;
@@ -1041,15 +1048,18 @@ fn normalized_write_input(input: &WriteText) -> Result<WriteText, DomainError> {
 
 #[doc(hidden)]
 pub fn validate_write_input(input: &WriteText) -> Result<(), DomainError> {
-    // The capture origin is RESERVED: accepting it here would let a caller
-    // forge capture ownership, and the next disk-driven pass would retire
-    // content that never had a disk counterpart.
-    if input.metadata_origin == CAPTURE_ORIGIN {
+    reject_reserved_capture_origin(&input.metadata_origin)?;
+    normalized_write_input(input).map(|_| ())
+}
+
+/// The shared reservation check for the capture-owned metadata origin.
+fn reject_reserved_capture_origin(metadata_origin: &str) -> Result<(), DomainError> {
+    if metadata_origin == CAPTURE_ORIGIN {
         return Err(DomainError::InvalidInput {
             reason: "metadata origin 'capture' is reserved for autonomous capture",
         });
     }
-    normalized_write_input(input).map(|_| ())
+    Ok(())
 }
 
 /// Validate a delete and return the input with its path normalized through the
@@ -1343,8 +1353,9 @@ fn capture_retire_in_tx(
 /// determined by this value: capture only ever overwrites or retires heads
 /// it wrote itself.
 ///
-/// RESERVED: [`validate_write_input`] REJECTS this origin on the public
-/// write path, so a caller cannot forge capture ownership and have its own
+/// RESERVED: `normalized_write_input` — which EVERY plaintext write path
+/// runs, including `write_text_in_tx` behind the RPC surface — rejects this
+/// origin, so a caller cannot forge capture ownership and have its own
 /// content retired by a disk-driven pass. Only the capture primitives in
 /// this module may write it.
 pub const CAPTURE_ORIGIN: &str = "capture";
