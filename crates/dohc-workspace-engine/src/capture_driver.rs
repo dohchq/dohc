@@ -172,13 +172,6 @@ impl RestartTracker {
                 self.record_failure(status);
                 LayerAction::Drop
             }
-            // The layer is still up, so keep it while the failure might be
-            // transient — but this DOES count as a failure: a reconcile that
-            // fails every tick must slow down rather than retry at the fast
-            // cadence forever. Once the streak is terminal, REBUILD instead of
-            // polling a wedged layer indefinitely; that also stops the driver
-            // from advertising `running` while it reports `terminal` (with
-            // the same store ordering as above).
             // The layer is kept while the failure might be transient, but the
             // tick FAILED — `running` reads false until a tick completes,
             // which is exactly what a status consumer should see for a layer
@@ -227,7 +220,29 @@ const STATUS_TERMINAL: u8 = 1 << 2;
 /// even when the blip was visible only inside the apply window.
 const STATUS_POLICY_HOLD: u8 = 1 << 3;
 
+/// A consistent point-in-time view of the driver, decoded from ONE atomic
+/// load. Any consumer that needs MORE THAN ONE flag must go through this —
+/// composing the per-flag getters performs separate loads, and a reader
+/// interleaving with a transition could still assemble the contradictory
+/// running && terminal tuple the single-word representation exists to kill.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StatusSnapshot {
+    pub(crate) running: bool,
+    pub(crate) degraded: bool,
+    pub(crate) terminal: bool,
+}
+
 impl DriverStatus {
+    /// ONE load; all flags decoded from the same word.
+    pub(crate) fn snapshot(&self) -> StatusSnapshot {
+        let bits = self.bits.load(Ordering::Acquire);
+        StatusSnapshot {
+            running: bits & STATUS_RUNNING != 0,
+            degraded: bits & STATUS_DEGRADED != 0,
+            terminal: bits & STATUS_TERMINAL != 0,
+        }
+    }
+
     fn update(&self, transition: impl Fn(u8) -> u8) {
         // fetch_update never fails with a total closure; the Result is noise.
         let _ = self
@@ -236,18 +251,18 @@ impl DriverStatus {
                 Some(transition(bits))
             });
     }
-    // Consumed by the lifecycle tests today and the E-shard `watcher.status`
-    // RPC next.
+    // SINGLE-flag conveniences. Correct on their own (one flag cannot
+    // self-contradict); combinations MUST use [`DriverStatus::snapshot`].
     #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn running(&self) -> bool {
-        self.bits.load(Ordering::Acquire) & STATUS_RUNNING != 0
+        self.snapshot().running
     }
     pub(crate) fn degraded(&self) -> bool {
-        self.bits.load(Ordering::Acquire) & STATUS_DEGRADED != 0
+        self.snapshot().degraded
     }
     #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn terminal(&self) -> bool {
-        self.bits.load(Ordering::Acquire) & STATUS_TERMINAL != 0
+        self.snapshot().terminal
     }
     fn set_running(&self, running: bool) {
         self.update(|bits| {
@@ -815,11 +830,12 @@ mod drive_loop_tests {
             ],
             "a dead actor must escalate exactly like a dead watch"
         );
+        let snapshot = status.snapshot();
         assert!(
-            status.terminal(),
+            snapshot.terminal,
             "a permanently dead actor is reported terminal"
         );
-        assert!(!status.running(), "terminal must never claim running");
+        assert!(!snapshot.running, "terminal must never claim running");
         // ...and not just at the end: each recovery probe STARTS a layer that
         // then dies. A bare start mid-streak must not claim `running` — a
         // status RPC landing in that window would read running && terminal.
