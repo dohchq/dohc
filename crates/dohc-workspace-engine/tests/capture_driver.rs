@@ -689,3 +689,56 @@ async fn capture_flush_turns_external_writes_into_read_your_writes() {
         .await
         .expect("close");
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e_rpcs_on_a_closed_handle_fail_cleanly_and_unmarked_roots_never_reach_them() {
+    // SHADOW-SCOPE ACCEPTANCE for the E surface. Two properties:
+    //
+    // 1. An UNMARKED root cannot reach watcher.status/capture.flush at all —
+    //    workspace.open refuses at the shadow fence, so no handle ever
+    //    exists and no watcher can have spawned.
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await;
+    assert!(refused.is_err(), "an unmarked root must not open");
+    assert!(
+        !scratch.path().join(".dohc/engine/engine.db").exists(),
+        "the refused open must leave no engine state behind"
+    );
+
+    // 2. On a CLOSED handle both RPCs fail cleanly (no hang, no panic, no
+    //    stale driver reached).
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let handle = open_workspace(&transport, &scratch, 2).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(3, "workspace.close", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("close");
+    for (id, method) in [(4, "watcher.status"), (5, "capture.flush")] {
+        let stale = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, method, Some(handle.clone()), json!({})),
+            )
+            .await;
+        assert!(
+            stale.is_err(),
+            "{method} on a closed handle must error cleanly"
+        );
+    }
+}
