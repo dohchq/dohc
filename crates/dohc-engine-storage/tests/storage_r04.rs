@@ -23,10 +23,15 @@ struct Scratch {
 }
 impl Scratch {
     fn new(tag: &str) -> Self {
+        // Counter first: the clock alone is too coarse on Windows to separate
+        // two scratches created in the same tick, and `tag` only saves us for
+        // as long as no two concurrent tests share one.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut root = std::env::temp_dir();
         root.push(format!(
-            "dohc-r04-{tag}-{}-{}",
+            "dohc-r04-{tag}-{}-{}-{}",
             std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())

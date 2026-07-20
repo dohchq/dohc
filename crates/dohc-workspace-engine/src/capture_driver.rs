@@ -42,7 +42,7 @@ const DRIVE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500
 /// permanently lost watch. Doubling from [`DRIVE_INTERVAL`] and capped, so a
 /// root that cannot be watched at all (deleted, permissions, handle
 /// exhaustion) stops burning a scan attempt twice a second forever.
-const RESTART_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(30);
+const RESTART_BACKOFF_CAP: std::time::Duration = std::time::Duration::from_secs(8);
 
 /// Consecutive restart failures before the driver declares the watch
 /// TERMINAL. Eight escalating attempts is a little over a minute - long
@@ -86,6 +86,34 @@ fn is_terminal(consecutive_failures: u32) -> bool {
 /// keeping the common transient-failure case ordered.
 const BASELINE_SETTLE_ATTEMPTS: u32 = 3;
 
+/// What one driver tick observed about the files layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TickObservation {
+    /// Reconciled (or converged) with a live watch: the layer works.
+    /// `clean` is false when the tick's own apply reported failures, which
+    /// must stay visible as degradation rather than being cleared by the very
+    /// tick that raised it.
+    Healthy { clean: bool },
+    /// The OS watch is permanently gone.
+    WatchLost,
+    /// The files actor died under us.
+    ActorLost,
+    /// The reconcile itself failed while the layer stayed up.
+    ReconcileFailed,
+    /// `files.toml`/`visibility.toml` changed: an INTENTIONAL restart, not a
+    /// failure, so it must never feed the backoff.
+    PolicyChanged,
+}
+
+/// What the loop does with its layer after a tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LayerAction {
+    /// Keep driving the current layer.
+    Keep,
+    /// Stop the layer; the next iteration rebuilds it after the backoff.
+    Drop,
+}
+
 /// Supervision state for the files layer: how many consecutive times it has
 /// failed to start or lost its watch, and what that means for cadence and
 /// reported health.
@@ -99,7 +127,6 @@ impl RestartTracker {
     /// the backoff and, past [`MAX_RESTART_ATTEMPTS`], reports TERMINAL.
     fn record_failure(&mut self, status: &DriverStatus) {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
-        status.running.store(false, Ordering::Release);
         status.degraded.store(true, Ordering::Release);
         status
             .terminal
@@ -112,14 +139,54 @@ impl RestartTracker {
     /// exactly the case the streak exists to bound. It is also the only exit
     /// from TERMINAL, which is what makes the slow probe a recovery path
     /// rather than a graveyard.
-    fn record_healthy_tick(&mut self, status: &DriverStatus) {
+    fn record_healthy_tick(&mut self, status: &DriverStatus, clean: bool) {
         self.consecutive_failures = 0;
         status.terminal.store(false, Ordering::Release);
+        // Degradation is sticky until the layer demonstrably works again.
+        // A tick whose own apply failed is not that demonstration.
+        if clean {
+            status.degraded.store(false, Ordering::Release);
+        }
     }
 
     /// How long to wait before the next attempt.
     fn delay(&self) -> std::time::Duration {
         restart_delay(self.consecutive_failures)
+    }
+
+    /// The streak itself is an implementation detail of the schedule; only
+    /// the tests read it, to prove escalation and reset happen where claimed.
+    #[cfg(test)]
+    fn failures(&self) -> u32 {
+        self.consecutive_failures
+    }
+
+    /// Fold one tick's observation into supervision state and say what to do
+    /// with the layer. THE decision point: every failure mode routes through
+    /// here so none can quietly escape the backoff.
+    fn observe(&mut self, observation: TickObservation, status: &DriverStatus) -> LayerAction {
+        match observation {
+            TickObservation::Healthy { clean } => {
+                self.record_healthy_tick(status, clean);
+                LayerAction::Keep
+            }
+            // A dead watch or actor is unrecoverable in place: drop the layer
+            // and let the backoff govern the rebuild.
+            TickObservation::WatchLost | TickObservation::ActorLost => {
+                self.record_failure(status);
+                LayerAction::Drop
+            }
+            // The layer is still up, so keep it — but this DOES count as a
+            // failure: a reconcile that fails every tick must slow down and
+            // escalate rather than retry at the fast cadence forever.
+            TickObservation::ReconcileFailed => {
+                self.record_failure(status);
+                LayerAction::Keep
+            }
+            // A policy edit is deliberate. It must not escalate toward
+            // terminal, and it must not reset a real failure streak either.
+            TickObservation::PolicyChanged => LayerAction::Drop,
+        }
     }
 }
 
@@ -178,8 +245,8 @@ mod restart_schedule_tests {
                 std::time::Duration::from_secs(2),
                 std::time::Duration::from_secs(4),
                 std::time::Duration::from_secs(8),
-                std::time::Duration::from_secs(16),
-                // Capped: 32s would exceed the cap.
+                // Capped from here on: 16s would exceed the cap.
+                RESTART_BACKOFF_CAP,
                 RESTART_BACKOFF_CAP,
             ]
         );
@@ -203,6 +270,15 @@ mod restart_schedule_tests {
         assert_eq!(restart_delay(MAX_RESTART_ATTEMPTS), TERMINAL_PROBE_INTERVAL);
         assert_eq!(restart_delay(u32::MAX), TERMINAL_PROBE_INTERVAL);
         assert!(TERMINAL_PROBE_INTERVAL > DRIVE_INTERVAL);
+        // The terminal probe must be DISTINGUISHABLE from the capped backoff,
+        // or deleting the terminal branch of `restart_delay` would leave every
+        // assertion above satisfied by the cap alone — which is exactly what
+        // an earlier revision of this test did.
+        assert_ne!(
+            TERMINAL_PROBE_INTERVAL, RESTART_BACKOFF_CAP,
+            "a terminal probe indistinguishable from the cap is untestable"
+        );
+        assert_eq!(restart_delay(MAX_RESTART_ATTEMPTS - 1), RESTART_BACKOFF_CAP);
     }
 
     #[test]
@@ -212,7 +288,7 @@ mod restart_schedule_tests {
         // the user is still at their desk.
         let total: std::time::Duration = (1..MAX_RESTART_ATTEMPTS).map(restart_delay).sum();
         assert!(
-            total >= std::time::Duration::from_secs(30),
+            total >= std::time::Duration::from_secs(25),
             "escalation too eager: {total:?}"
         );
         assert!(
@@ -223,72 +299,177 @@ mod restart_schedule_tests {
 }
 
 #[cfg(test)]
-mod restart_tracker_tests {
+mod supervision_tests {
     use super::*;
 
-    #[test]
-    fn a_streak_escalates_to_terminal_and_a_healthy_tick_recovers_it() {
-        let status = DriverStatus::default();
-        let mut restart = RestartTracker::default();
-
-        for attempt in 1..MAX_RESTART_ATTEMPTS {
-            restart.record_failure(&status);
-            assert!(status.degraded(), "a failure always reports degraded");
-            assert!(!status.running());
-            assert!(
-                !status.terminal(),
-                "failure {attempt} must not be terminal yet"
-            );
-        }
-        restart.record_failure(&status);
-        assert!(status.terminal(), "the bounded streak reports terminal");
-        assert_eq!(
-            restart.delay(),
-            TERMINAL_PROBE_INTERVAL,
-            "a terminal driver keeps a slow recovery probe"
-        );
-
-        // RECOVERY without a close/reopen: the slow probe finds a live watch.
-        restart.record_healthy_tick(&status);
-        assert!(!status.terminal(), "a healthy tick clears terminal");
-        assert_eq!(
-            restart.delay(),
-            DRIVE_INTERVAL,
-            "recovery restores the fast cadence"
-        );
-    }
-
-    #[test]
-    fn a_watch_that_dies_right_after_every_start_still_backs_off() {
-        // The flap case: each cycle STARTS successfully and then loses its
-        // watch before completing a healthy tick. Resetting the streak on a
-        // successful start would pin this at the fast cadence forever, which
-        // is the pathology this shard exists to prevent.
+    /// Drive a sequence of tick observations the way `drive` does, returning
+    /// the delay the loop would wait before each subsequent pass. This is the
+    /// layer the real defects lived at: asserting on `RestartTracker` alone
+    /// missed both, because the loop chose its delay independently.
+    fn run(observations: &[TickObservation]) -> (Vec<std::time::Duration>, DriverStatus, u32) {
         let status = DriverStatus::default();
         let mut restart = RestartTracker::default();
         let mut delays = Vec::new();
-        for _ in 0..MAX_RESTART_ATTEMPTS {
-            restart.record_failure(&status);
+        for observation in observations {
+            let _ = restart.observe(*observation, &status);
             delays.push(restart.delay());
         }
+        let failures = restart.failures();
+        (delays, status, failures)
+    }
+
+    #[test]
+    fn a_watch_that_dies_every_tick_backs_off_instead_of_rescanning_hot() {
+        // THE regression: a watch that dies right after every start used to
+        // rebuild the layer (actor + watcher + full baseline scan) every
+        // 500ms forever, because the drop-and-restart path skipped the sleep.
+        let (delays, status, _) = run(&[TickObservation::WatchLost; 4]);
+        assert_eq!(
+            delays,
+            vec![
+                std::time::Duration::from_millis(500),
+                std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(2),
+                std::time::Duration::from_secs(4),
+            ],
+            "each repeated watch loss must widen the gap before the rebuild"
+        );
+        assert!(status.degraded());
+    }
+
+    #[test]
+    fn a_files_actor_that_dies_every_tick_also_escalates() {
+        // The other uncounted path: a reconcile returning ActorUnavailable
+        // dropped the layer without recording a failure at all, so the streak
+        // sat at zero and the driver never slowed down or reported terminal.
+        let (delays, status, failures) =
+            run(&[TickObservation::ActorLost; MAX_RESTART_ATTEMPTS as usize]);
+        assert_eq!(failures, MAX_RESTART_ATTEMPTS);
         assert!(
-            delays.windows(2).all(|w| w[1] >= w[0]),
-            "flapping must escalate, not reset: {delays:?}"
+            status.terminal(),
+            "a permanently dead actor reports terminal"
         );
         assert_eq!(delays.last().copied(), Some(TERMINAL_PROBE_INTERVAL));
-        assert!(status.terminal(), "a persistent flap is reported terminal");
+    }
+
+    #[test]
+    fn a_reconcile_that_fails_every_tick_escalates_while_keeping_the_layer() {
+        let status = DriverStatus::default();
+        let mut restart = RestartTracker::default();
+        for _ in 0..MAX_RESTART_ATTEMPTS {
+            assert_eq!(
+                restart.observe(TickObservation::ReconcileFailed, &status),
+                LayerAction::Keep,
+                "a live layer is not torn down for a failed reconcile"
+            );
+        }
+        assert!(
+            status.terminal(),
+            "but it must still escalate rather than retry hot forever"
+        );
+        assert_eq!(restart.delay(), TERMINAL_PROBE_INTERVAL);
+    }
+
+    #[test]
+    fn only_a_completed_reconcile_counts_as_healthy() {
+        // Health is claimed AFTER the reconcile, not at the watcher check:
+        // an actor that dies on every reconcile would otherwise reset the
+        // streak mid-tick and never escalate.
+        let status = DriverStatus::default();
+        let mut restart = RestartTracker::default();
+        for _ in 0..MAX_RESTART_ATTEMPTS * 2 {
+            restart.observe(TickObservation::ActorLost, &status);
+        }
+        assert!(status.terminal());
+        assert_eq!(
+            restart.observe(TickObservation::Healthy { clean: true }, &status),
+            LayerAction::Keep
+        );
+        assert!(!status.terminal(), "a completed tick recovers the driver");
+        assert_eq!(restart.delay(), DRIVE_INTERVAL);
+        assert_eq!(restart.failures(), 0);
+    }
+
+    #[test]
+    fn a_policy_edit_neither_escalates_nor_forgives() {
+        let status = DriverStatus::default();
+        let mut restart = RestartTracker::default();
+        restart.observe(TickObservation::WatchLost, &status);
+        let after_failure = restart.delay();
+
+        // A deliberate restart drops the layer but must not count as a
+        // failure...
+        assert_eq!(
+            restart.observe(TickObservation::PolicyChanged, &status),
+            LayerAction::Drop
+        );
+        assert_eq!(
+            restart.delay(),
+            after_failure,
+            "policy edits do not escalate"
+        );
+        // ...nor launder an existing streak into a clean bill of health.
+        assert_eq!(
+            restart.failures(),
+            1,
+            "policy edits do not reset the streak"
+        );
     }
 
     #[test]
     fn an_isolated_failure_between_healthy_ticks_never_escalates() {
+        let (_, status, failures) = run(&[
+            TickObservation::WatchLost,
+            TickObservation::Healthy { clean: true },
+            TickObservation::ActorLost,
+            TickObservation::Healthy { clean: true },
+            TickObservation::ReconcileFailed,
+            TickObservation::Healthy { clean: true },
+        ]);
+        assert_eq!(failures, 0);
+        assert!(!status.terminal(), "recovered blips are not terminal");
+    }
+
+    #[test]
+    fn degradation_is_not_cleared_by_a_start_that_has_not_proven_itself() {
+        // The status triple must never read (degraded=false, terminal=true).
+        // It did, twice a second, while a watch flapped: a bare successful
+        // start cleared `degraded` but only a healthy TICK clears `terminal`.
         let status = DriverStatus::default();
         let mut restart = RestartTracker::default();
-        for _ in 0..MAX_RESTART_ATTEMPTS * 3 {
-            restart.record_failure(&status);
-            restart.record_healthy_tick(&status);
-            assert!(!status.terminal(), "a recovered blip is not terminal");
-            assert_eq!(restart.delay(), DRIVE_INTERVAL);
+        for _ in 0..MAX_RESTART_ATTEMPTS {
+            restart.observe(TickObservation::WatchLost, &status);
         }
+        assert!(status.terminal());
+        // This is the condition the loop consults before clearing `degraded`
+        // on a successful start.
+        assert!(
+            restart.failures() > 0,
+            "a driver mid-streak must not advertise a clean start"
+        );
+        restart.observe(TickObservation::Healthy { clean: true }, &status);
+        assert!(!status.terminal());
+        assert!(
+            !status.degraded(),
+            "a clean tick must clear degradation, or one blip latches it forever"
+        );
+    }
+
+    #[test]
+    fn a_tick_whose_apply_failed_does_not_clear_its_own_degradation() {
+        let status = DriverStatus::default();
+        let mut restart = RestartTracker::default();
+        // apply_run reported failures: the driver marks degraded, then the
+        // very same tick reports Healthy (watch alive, reconcile completed).
+        status.degraded.store(true, Ordering::Release);
+        restart.observe(TickObservation::Healthy { clean: false }, &status);
+        assert!(
+            status.degraded(),
+            "an apply failure must stay visible past the tick that raised it"
+        );
+        // The next fully clean tick is what clears it.
+        restart.observe(TickObservation::Healthy { clean: true }, &status);
+        assert!(!status.degraded());
     }
 }
 
@@ -537,7 +718,21 @@ async fn drive(
 ) {
     let mut layer: Option<FilesLayer> = None;
     let mut restart = RestartTracker::default();
+    let mut first_pass = true;
     loop {
+        // THE cadence. A healthy driver waits DRIVE_INTERVAL (restart_delay(0));
+        // a failing one waits out its backoff, whether it is about to rebuild
+        // the layer or to retry a reconcile on a layer it kept. Skipped only
+        // on the very first pass, so `workspace.open` pays no extra latency.
+        if !first_pass {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => break,
+                () = tokio::time::sleep(restart.delay()) => {}
+            }
+        }
+        first_pass = false;
+
         if layer.is_none() {
             // REHYDRATE the scan manifest from the domain's captured state:
             // against an EMPTY baseline a file deleted while the daemon was
@@ -558,7 +753,11 @@ async fn drive(
             {
                 Ok((fresh, initial)) => {
                     status.running.store(true, Ordering::Release);
-                    status.degraded.store(false, Ordering::Release);
+                    // Deliberately NOT clearing `degraded` here: a start is
+                    // not evidence of health. Clearing it on a bare start let
+                    // a watch that died right after every start flicker
+                    // "clean" twice a second while provably dead. The first
+                    // healthy TICK clears it.
                     let mut settled =
                         apply_run(&root, &actor, &workspace_id, &fresh, initial, &status).await;
                     // The open barrier must not release on a FAILED baseline:
@@ -595,6 +794,7 @@ async fn drive(
                     // the backoff schedule, escalating only after
                     // MAX_RESTART_ATTEMPTS consecutive failures.
                     restart.record_failure(&status);
+                    status.running.store(false, Ordering::Release);
                 }
             }
             // Whether the baseline applied or the start failed, the open
@@ -603,84 +803,60 @@ async fn drive(
             let _ = baseline_tx.send(true);
         }
 
-        // A healthy layer polls at the fast cadence; a failing one waits out
-        // the escalating backoff (and, once terminal, the slow recovery probe).
-        let delay = if layer.is_some() {
-            DRIVE_INTERVAL
-        } else {
-            restart.delay()
-        };
-        tokio::select! {
-            biased;
-            () = cancel.cancelled() => break,
-            () = tokio::time::sleep(delay) => {}
-        }
-
         let Some(current) = layer.as_ref() else {
             continue;
         };
 
-        // Surface watcher health (the watch.rs composition contract: a
+        // Classify this tick, then let the tracker decide. Routing EVERY
+        // outcome through one decision point is what keeps a failure mode
+        // from quietly escaping the backoff.
+        //
+        // Watcher health first (the watch.rs composition contract: a
         // silently-dead OS watch must never stay silent at this layer). A
-        // PERMANENTLY lost watch tears the layer down for the next-tick
+        // permanently lost watch tears the layer down for the next
         // restart — NativeWatcher::start re-seeds via its initial reconcile,
         // so no change is lost across the gap.
-        if current.watcher.is_unavailable() {
-            // Counts as a restart failure: a watch that dies right after every
-            // start is indistinguishable from one that never starts, and both
-            // must back off rather than rescan twice a second indefinitely.
-            restart.record_failure(&status);
+        let observation = if current.watcher.is_unavailable() {
+            TickObservation::WatchLost
+        } else if policy_fingerprint(&root) != current.policy_fingerprint {
+            // Policy-flip re-offer: a changed files.toml/visibility.toml
+            // respawns the layer so every path re-offers through the sink
+            // (narrowed paths retire, widened paths re-ingest). The rebuild
+            // seeds from the REHYDRATED manifest, not an empty one: an empty
+            // baseline cannot emit a Retire for a path deleted from disk in
+            // the same window as the policy edit (it appears in neither the
+            // listing nor the manifest).
+            TickObservation::PolicyChanged
+        } else {
+            let watcher_degraded = current.watcher.is_degraded();
+            if watcher_degraded {
+                status.degraded.store(true, Ordering::Release);
+            }
+            match current
+                .files
+                .handle()
+                .reconcile_if_dirty(cancel.child_token())
+                .await
+            {
+                Ok(run) => {
+                    let clean =
+                        apply_run(&root, &actor, &workspace_id, current, run, &status).await;
+                    // Only NOW has the layer survived a full tick: live watch
+                    // AND a reconcile that completed.
+                    TickObservation::Healthy {
+                        clean: clean && !watcher_degraded,
+                    }
+                }
+                Err(FilesError::ActorUnavailable) => TickObservation::ActorLost,
+                Err(_) => TickObservation::ReconcileFailed,
+            }
+        };
+
+        if restart.observe(observation, &status) == LayerAction::Drop {
             if let Some(dead) = layer.take() {
                 dead.stop().await;
             }
-            continue;
-        }
-        if current.watcher.is_degraded() {
-            status.degraded.store(true, Ordering::Release);
-        }
-
-        // The layer has survived a full tick with a live watch.
-        restart.record_healthy_tick(&status);
-
-        // Policy-flip re-offer: a changed files.toml/visibility.toml respawns
-        // the layer with an EMPTY manifest so every path re-offers through
-        // the sink (narrowed paths retire, widened paths re-ingest).
-        let fingerprint = policy_fingerprint(&root);
-        if fingerprint != current.policy_fingerprint {
-            if let Some(old) = layer.take() {
-                old.stop().await;
-            }
-            // The next iteration restarts from the REHYDRATED manifest, not
-            // an empty one: an empty baseline cannot emit a Retire for a
-            // path deleted from disk in the same window as the policy edit
-            // (it appears in neither the listing nor the manifest). The
-            // rehydrated seed re-offers narrowed paths through the sink's
-            // policy branch (retire) and still diffs offline deletes as
-            // removed, so both converge.
             status.running.store(false, Ordering::Release);
-            continue;
-        }
-
-        let run = current
-            .files
-            .handle()
-            .reconcile_if_dirty(cancel.child_token())
-            .await;
-        match run {
-            Ok(run) => {
-                let _ = apply_run(&root, &actor, &workspace_id, current, run, &status).await;
-            }
-            Err(FilesError::ActorUnavailable) => {
-                // The files actor died: drop the layer and restart next tick.
-                status.degraded.store(true, Ordering::Release);
-                if let Some(dead) = layer.take() {
-                    dead.stop().await;
-                }
-                status.running.store(false, Ordering::Release);
-            }
-            Err(_) => {
-                status.degraded.store(true, Ordering::Release);
-            }
         }
     }
 
