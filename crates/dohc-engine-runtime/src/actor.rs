@@ -196,6 +196,10 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<TextSnapshot>, RuntimeError>>,
     },
+    ActiveVersionId {
+        workspace_id: String,
+        reply: oneshot::Sender<Result<String, RuntimeError>>,
+    },
     YdocApply {
         key: DocKey,
         content_kind: ContentKind,
@@ -717,6 +721,21 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// The workspace's ACTIVE version id (falling back to main), read on the
+    /// actor thread. The capture driver targets this so captures land in the
+    /// version the user is actually on (TS oracle parity).
+    pub async fn active_version_id(&self, workspace_id: String) -> Result<String, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ActiveVersionId {
+                workspace_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Capture a secret file on the actor's single writer thread.
     pub async fn capture_secret(
         &self,
@@ -1147,6 +1166,16 @@ fn worker_main(
             } => {
                 let outcome =
                     has_secret_state(&mut store, &workspace_id).map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ActiveVersionId {
+                workspace_id,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .get_active_version(&workspace_id)
+                    .map(|version| version.version_id)
+                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::CaptureRetire {

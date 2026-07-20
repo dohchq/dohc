@@ -40,15 +40,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 async fn run_stdio(auth_token: String) -> Result<(), Box<dyn Error>> {
     let service = Arc::new(EngineService::new());
-    let supervisor = Arc::new(Supervisor::new(SupervisorConfig::default(), service));
-    run_transport(
+    let supervisor = Arc::new(Supervisor::new(
+        SupervisorConfig::default(),
+        service.clone(),
+    ));
+    let transport = run_transport(
         auth_token,
         tokio::io::stdin(),
         tokio::io::stdout(),
         supervisor,
         || WorkspaceSupervisor::global().close_all(),
     )
-    .await?;
+    .await;
+    // Store actors are closed by the hook above; any in-flight capture write
+    // failed contained and stays un-acked (the next start re-offers it). This
+    // drain joins the watcher/files threads so the process exits clean.
+    service.shutdown_all_capture().await;
+    transport?;
     Ok(())
 }
 
