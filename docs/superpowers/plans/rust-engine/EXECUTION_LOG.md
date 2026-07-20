@@ -1787,7 +1787,12 @@ ingest/retire:
   stale disk bytes are indistinguishable from a user edit, so the foreign head
   is left intact while the path is still TRACKED — the next genuine edit then
   arrives as `Changed` and captures normally.
-- A claimed dedupe TRANSFERS ownership (else later retires stay blocked).
+- A claimed PLAINTEXT/BINARY dedupe TRANSFERS ownership (else later retires
+  stay blocked). Secret dedupes deliberately do NOT transfer — a secret
+  tip's origin lives on its MOMENT, so transferring would rewrite history
+  or append a no-op moment; the claimed-but-deduped foreign tip stays
+  foreign (preserved, never retired) until the GATE6 marker column. Pinned
+  by a tripwire test.
 - Retires never touch a foreign head (`only_if_capture_origin`,
   `only_if_own_origin` for secrets).
 - `capture` is a RESERVED metadata origin: `VersionedTextStore::write_text`
@@ -1804,8 +1809,11 @@ Over-cap narrowed paths (never in the diff by CAL-3 §7.1) retire through a
 dedicated `retire_policy_excluded` that skips absence confirmation and REPORTS
 into the receipt so the manifest forgets them.
 
-**Lifecycle.** Strict files-then-actor teardown on close, stale-actor eviction,
-and daemon exit. Close stays #201-cancellation-safe (driver cancelled
+**Lifecycle.** Strict files-then-actor teardown on PER-WORKSPACE close and
+stale-actor eviction. Whole-DAEMON exit is deliberately the REVERSE: the
+transport's close hook closes actors first, so in-flight capture writes fail
+CONTAINED (never acked; the next start re-offers from the dirty baseline),
+and the post-transport drain then joins the watcher/files threads. Close stays #201-cancellation-safe (driver cancelled
 synchronously; a detached task owns drain+finish). `workspace.open` holds a
 BARRIER until the startup baseline settles (bounded retries) so a caller's
 first write cannot be overwritten by a later capture of stale closed-period
