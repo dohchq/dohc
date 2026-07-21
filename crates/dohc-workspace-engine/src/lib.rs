@@ -718,6 +718,16 @@ impl EngineService {
                 .await?;
                 match head {
                     None => Value::Null,
+                    // The head can change BETWEEN the two actor turns (a
+                    // concurrent capture can replace it with a bigger
+                    // blob): recheck the cap on what was actually read.
+                    Some(head) if head.bytes.len() > MAX_INBAND_CONTENT_BYTES => json!({
+                        "objectId": head.object_id,
+                        "sha256": head.sha256,
+                        "byteLength": head.bytes.len(),
+                        "bytesBase64": Value::Null,
+                        "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+                    }),
                     Some(head) => json!({
                         "objectId": head.object_id,
                         "sha256": head.sha256,
@@ -737,6 +747,15 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: MomentsListParams = parse(params)?;
+        // A blank filter is malformed input, not an empty timeline (TS
+        // normalizeObjectId parity).
+        if params
+            .object_id
+            .as_deref()
+            .is_some_and(|id| id.trim().is_empty())
+        {
+            return Err(wire(ErrorCode::InvalidParams, "objectId must not be blank"));
+        }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let page = Self::read_under_ctx(
@@ -750,7 +769,9 @@ impl EngineService {
                     // Clamped: an unbounded page would load a workspace's whole
                     // history in one actor turn and then fail the wire's
                     // collection cap at encode anyway.
-                    limit: params.limit.unwrap_or(100).min(1000),
+                    // TS normalizeMomentListLimit contract: default 200, cap 500
+                    // — page boundaries and cursors must match across engines.
+                    limit: params.limit.unwrap_or(200).min(500),
                     before_moment_order: params.before_moment_order,
                 }),
         )
@@ -785,6 +806,10 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: MomentsGetParams = parse(params)?;
+        // Blank ids are malformed input, never "absent moment" (TS parity).
+        if params.moment_id.trim().is_empty() {
+            return Err(wire(ErrorCode::InvalidParams, "momentId must not be blank"));
+        }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let moment = Self::read_under_ctx(
@@ -869,6 +894,14 @@ impl EngineService {
             if has_state {
                 return Err(wire(ErrorCode::Internal, "secret key unavailable"));
             }
+            // The keyed domain path validates the SECRET PATH first
+            // (normalizeSecretPath) — the keyless branch matches that
+            // precedence exactly, then the version.
+            if dohc_engine_files::policy::classify_engine_file_path(&params.path)
+                != dohc_engine_files::policy::PathClassification::Secret
+            {
+                return Err(wire(ErrorCode::InvalidParams, "not a secret path"));
+            }
             // Even keyless-and-stateless, an invalid version must error the
             // same way it does once state exists — a caller must never see
             // the error surface CHANGE because a key appeared.
@@ -883,14 +916,6 @@ impl EngineService {
                 .any(|version| version.version_id == params.version_id)
             {
                 return Err(wire(ErrorCode::InvalidParams, "version not found"));
-            }
-            // The keyed path routes through the domain's fail-closed
-            // secret-path gate; keyless-and-stateless must refuse ordinary
-            // paths identically, never read them as "absent secrets".
-            if dohc_engine_files::policy::classify_engine_file_path(&params.path)
-                != dohc_engine_files::policy::PathClassification::Secret
-            {
-                return Err(wire(ErrorCode::InvalidParams, "not a secret path"));
             }
             return Ok(Value::Null);
         };

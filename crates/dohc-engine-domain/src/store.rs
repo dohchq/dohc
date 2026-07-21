@@ -645,13 +645,29 @@ impl<'a> VersionedTextStore<'a> {
             let sha256 = snapshot.binary_sha256.ok_or(DomainError::StateCorrupt {
                 reason: "binary head without a binary sha",
             })?;
-            let byte_length: i64 = conn
+            // Fail closed like get_binary_blob does: the RECORDED length
+            // must match the stored bytes, and the row must exist — for an
+            // over-cap read this is the only storage access that runs, so
+            // it carries the integrity check itself.
+            let lengths: Option<(i64, i64)> = conn
                 .query_row(
-                    "SELECT LENGTH(bytes) FROM binary_blobs WHERE sha256 = ?1",
+                    "SELECT byte_length, LENGTH(bytes) FROM binary_blobs WHERE sha256 = ?1",
                     [&sha256],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
+                .optional()
                 .map_err(DomainError::sql_corrupt)?;
+            let Some((recorded, actual)) = lengths else {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary head references a missing blob",
+                });
+            };
+            if recorded != actual {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary blob length does not match its bytes",
+                });
+            }
+            let byte_length = recorded;
             Ok(Some(BinaryHeadMeta {
                 object_id,
                 sha256,
@@ -828,6 +844,21 @@ impl<'a> VersionedTextStore<'a> {
                 .map_err(DomainError::sql_corrupt)?
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(DomainError::sql_corrupt)?;
+            // The LEFT JOINs exist to classify kind — never to launder a
+            // broken FK into nulls: a text head must have sized text, a
+            // binary head its sha (get_snapshot raises the same invariant).
+            for row in &rows {
+                let sound = match row.content_kind.as_str() {
+                    "text" => row.text_byte_length.is_some(),
+                    "binary" => row.binary_sha256.is_some(),
+                    _ => false,
+                };
+                if !sound {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "snapshot references a missing blob row",
+                    });
+                }
+            }
             Ok(rows)
         })
     }
