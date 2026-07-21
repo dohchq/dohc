@@ -346,7 +346,7 @@ fn sample_process(pid: u32) -> Option<(u64, u64, u64)> {
             parts.next()?.parse().ok()?,
         ))
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
         let field = |name: &str| -> Option<u64> {
@@ -364,6 +364,42 @@ fn sample_process(pid: u32) -> Option<(u64, u64, u64)> {
             .map(|dir| dir.count() as u64)
             .unwrap_or(0);
         Some((rss_kib * 1024, handles, threads))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // /proc does not exist on macOS. RSS (KiB) via ps; thread count via
+        // the mandatory `wq` state column trick is unreliable, so use
+        // `ps -M` line count; open-file count via lsof (slow but fine at
+        // the 5s sample cadence).
+        let ps = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let rss_kib: u64 = String::from_utf8_lossy(&ps.stdout).trim().parse().ok()?;
+        let threads_out = std::process::Command::new("ps")
+            .args(["-M", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let thread_lines = String::from_utf8_lossy(&threads_out.stdout)
+            .lines()
+            .count()
+            .saturating_sub(1) as u64;
+        let lsof = std::process::Command::new("lsof")
+            .args(["-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let handles = String::from_utf8_lossy(&lsof.stdout)
+            .lines()
+            .count()
+            .saturating_sub(1) as u64;
+        Some((rss_kib * 1024, handles, thread_lines))
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        // Fail loudly rather than emit evidence from a platform whose
+        // sampling was never implemented.
+        let _ = pid;
+        panic!("soak sampling is not implemented for this platform");
     }
 }
 
@@ -696,6 +732,15 @@ async fn main() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     let (rss_end, handles_end, threads_end) =
         sample_process(daemon.pid()).expect("final process sample");
+    // The final sample joins the trend series: an RSS jump in the last
+    // scenario after the most recent periodic sample must not escape the
+    // fit that rssDisposition is computed from.
+    samples.push(Sample {
+        at_secs: started.elapsed().as_secs_f64(),
+        rss_bytes: rss_end,
+        handles: handles_end,
+        threads: threads_end,
+    });
     let slope = rss_slope(&samples);
     let (handle_base, thread_base) = (handles_base, threads_base);
     let handles_ok = handles_end as i64 <= handle_base as i64 + HANDLE_SLACK;
@@ -728,7 +773,9 @@ async fn main() {
         "tier": "cutoverBlocking",
         "verdict": verdict,
         "cyclesRequested": options.cycles,
-        "cyclesCompleted": counts.values().sum::<u64>(),
+        // Phase-2 WORKLOAD cycles only — the phase-1 crash prelude reports
+        // under crashRestarts/scenarioCounts, never in this denominator.
+        "cyclesCompleted": cycle,
         "scenarioCounts": counts,
         "crashRestarts": crashes,
         "durationSecs": started.elapsed().as_secs(),
@@ -761,7 +808,13 @@ async fn main() {
         "assertions": {
             "handlesReturnToBaseline": handles_ok,
             "threadsReturnToBaseline": threads_ok,
-            "noMonotonicRssSlope": slope_ok,
+            // Tri-state: null when the trend was not evaluated, so a
+            // scenarios-only artifact can never read as leak evidence.
+            "noMonotonicRssSlope": if trend_evaluated {
+                json!(slope <= MAX_RSS_SLOPE_BYTES_PER_SEC)
+            } else {
+                json!(null)
+            },
         },
         // Config assertions this runner does NOT measure, named in the
         // artifact itself so a PASS can never be read as covering them
@@ -773,6 +826,11 @@ async fn main() {
         ],
         "samples": samples,
     });
+    if let Some(parent) = options.evidence.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).expect("create evidence directory");
+        }
+    }
     std::fs::write(
         &options.evidence,
         serde_json::to_string_pretty(&evidence).expect("serialize evidence"),

@@ -1189,6 +1189,40 @@ mod drive_loop_tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn flush_polling_does_not_defeat_the_restart_backoff() {
+        // A client polling capture.flush must neither drive start attempts
+        // at its poll rate (each early pass would rebuild hot) NOR push the
+        // scheduled rebuild out by resetting the wait (the deadline is an
+        // Instant that flush interruptions leave standing). Both mutations
+        // are killed by the start-count window below: poll-rate rebuilds
+        // overshoot it, a reset-on-poll deadline starves it to one start.
+        let (handle, cancel, journal, _status, flush_tx) = spawn_loop(vec![Script::StartFails]);
+        // First pass fails immediately; a backoff is armed.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Poll every 100ms for 4s of virtual time — far faster than the
+        // 500ms -> 8s backoff schedule.
+        for _ in 0..40 {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            flush_tx.send(reply_tx).await.expect("flush queued");
+            let outcome = tokio::time::timeout(std::time::Duration::from_millis(100), reply_rx)
+                .await
+                .expect("a mid-backoff flush answers promptly")
+                .expect("flush answered");
+            assert!(!outcome.settled, "a down layer must never settle a flush");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        cancel.cancel();
+        handle.await.expect("driver loop");
+        let starts = journal.lock().expect("journal").starts.len();
+        assert!(
+            (3..=5).contains(&starts),
+            "4s of failing starts under the backoff schedule means 3-5 \
+             attempts; saw {starts} (more = flush polling defeats the \
+             backoff, fewer = polling starves the rebuild)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn a_flush_that_never_converges_is_bounded() {
         // A workspace under continuous mutation never reaches quiescence;
         // flush must return an honest not-settled rather than spin forever.
@@ -1648,6 +1682,10 @@ async fn drive_loop<E: DriverEnv>(
     // A flush caller waiting on THIS pass; answered exactly once per pass.
     let mut pending_flush: Option<tokio::sync::oneshot::Sender<FlushOutcome>> = None;
     let mut flush_closed = false;
+    // The pass deadline is an INSTANT, not a fresh sleep: a flush that
+    // interrupts the wait must not reset the remaining backoff, or client
+    // flush-polling would push a pending rebuild out forever.
+    let mut next_pass_at = tokio::time::Instant::now();
 
     loop {
         // THE cadence, and the ONLY sleep: a healthy driver waits
@@ -1671,10 +1709,23 @@ async fn drive_loop<E: DriverEnv>(
                         None => flush_closed = true,
                     }
                 }
-                () = tokio::time::sleep(restart.delay()) => {}
+                () = tokio::time::sleep_until(next_pass_at) => {}
             }
         }
         first_pass = false;
+        // A flush may cut the wait short ONLY outside a failure streak (a
+        // healthy tick is cheap and the caller is blocked). Mid-streak, an
+        // early pass would let flush-polling drive rebuild/retry at the
+        // client's poll rate — answer honestly (nothing ticked: settled
+        // stays false) and leave the deadline standing; the rebuild still
+        // happens exactly on its backoff schedule.
+        if pending_flush.is_some()
+            && restart.failures() > 0
+            && tokio::time::Instant::now() < next_pass_at
+        {
+            answer_flush(&mut pending_flush, &status, false);
+            continue;
+        }
         // Answered on every exit from this pass; set true only by a tick
         // sequence that reached CONVERGED.
         let mut flush_settled = false;
@@ -1723,6 +1774,7 @@ async fn drive_loop<E: DriverEnv>(
             // No layer to drive: answer honestly rather than holding the
             // caller across a rebuild that may be a terminal probe away.
             answer_flush(&mut pending_flush, &status, false);
+            next_pass_at = tokio::time::Instant::now() + restart.delay();
             continue;
         };
 
@@ -1828,6 +1880,7 @@ async fn drive_loop<E: DriverEnv>(
                 // exit on the cancel token — no health claim either way.
                 None => {
                     answer_flush(&mut pending_flush, &status, false);
+                    next_pass_at = tokio::time::Instant::now() + restart.delay();
                     continue;
                 }
             }
@@ -1844,6 +1897,7 @@ async fn drive_loop<E: DriverEnv>(
             }
         }
         answer_flush(&mut pending_flush, &status, flush_settled);
+        next_pass_at = tokio::time::Instant::now() + restart.delay();
     }
 
     // BEFORE the joins, same as the Drop path: stop_layer drains threads,
