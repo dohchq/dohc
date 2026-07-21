@@ -1224,6 +1224,54 @@ pub fn secret_file_len_keyless(
     })
 }
 
+/// One PAGE of secret-file tips (metadata only), ordered by path, keyset
+/// after `after_path` — the listing RPC pages here so a many-secret
+/// workspace never loads every tip per request.
+pub fn list_secret_files_keyless_page(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    after_path: Option<&str>,
+    limit: usize,
+) -> Result<Vec<SecretFileStat>, DomainError> {
+    store.read_with(|conn| {
+        require_version(conn, workspace_id, version_id)?;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT workspace_id, version_id, path, byte_length, updated_at_ms, \
+                 latest_moment_id FROM secret_files \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND path > ?3 \
+                 ORDER BY path LIMIT ?4",
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    workspace_id,
+                    version_id,
+                    after_path.unwrap_or(""),
+                    limit as i64
+                ],
+                |row| {
+                    Ok(SecretFileStat {
+                        workspace_id: row.get(0)?,
+                        version_id: row.get(1)?,
+                        path: row.get(2)?,
+                        byte_length: row.get(3)?,
+                        updated_at_ms: row.get(4)?,
+                        latest_moment_id: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(DomainError::sql_corrupt)?);
+        }
+        Ok(out)
+    })
+}
+
 pub fn list_secret_files_keyless(
     store: &EngineStore,
     workspace_id: &str,

@@ -39,7 +39,7 @@ use dohc_engine_domain::{
     SecretWriteResult, SnapshotMetadata, SnapshotView, TextConflict, TextSnapshot, VersionRecord,
     VersionedTextStore, WriteResult, WriteText, capture_manifest_seed, capture_secret_retire,
     has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
-    secret_file_len_keyless,
+    list_secret_files_keyless_page, secret_file_len_keyless,
 };
 use dohc_engine_storage::{
     CompoundWrite, Document, EngineStore, FaultInjector, StorageError, TxnOutcome, WriteOutcome,
@@ -246,6 +246,13 @@ enum Command {
         version_id: String,
         path: String,
         reply: oneshot::Sender<Result<Option<i64>, RuntimeError>>,
+    },
+    ListSecretFilesPage {
+        workspace_id: String,
+        version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+        reply: oneshot::Sender<Result<Vec<SecretFileStat>, RuntimeError>>,
     },
     MaterializeSecret {
         workspace_id: String,
@@ -961,6 +968,28 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// One page of secret-file tips (metadata only, keyset by path).
+    pub async fn list_secret_files_page(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+    ) -> Result<Vec<SecretFileStat>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ListSecretFilesPage {
+                workspace_id,
+                version_id,
+                after_path,
+                limit,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Decrypt one secret tip to UTF-8 plaintext. The KEY comes from the
     /// caller (the daemon loads it from the workspace root), matching the
     /// capture-secret pattern — the actor never holds key custody itself.
@@ -1543,6 +1572,23 @@ fn worker_main(
             } => {
                 let outcome = secret_file_len_keyless(&store, &workspace_id, &version_id, &path)
                     .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ListSecretFilesPage {
+                workspace_id,
+                version_id,
+                after_path,
+                limit,
+                reply,
+            } => {
+                let outcome = list_secret_files_keyless_page(
+                    &store,
+                    &workspace_id,
+                    &version_id,
+                    after_path.as_deref(),
+                    limit,
+                )
+                .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::MaterializeSecret {

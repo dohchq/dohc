@@ -433,6 +433,24 @@ impl EngineService {
             .await
             .map_err(map_runtime)?;
         Ok(match snapshot {
+            // The framed transport caps every response string at 64 KiB:
+            // an over-cap body answers its metadata (the listing directs
+            // callers here for bodies, so the read carries the same
+            // self-describing over-cap contract as binary and secrets).
+            // Large-text delivery is the recorded blob-streaming follow-up.
+            Some(snapshot) if snapshot.text.len() > MAX_INBAND_CONTENT_BYTES => json!({
+                "workspaceId": snapshot.workspace_id,
+                "versionId": snapshot.version_id,
+                "objectId": snapshot.object_id,
+                "path": snapshot.path,
+                "text": Value::Null,
+                "byteLength": snapshot.text.len(),
+                "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+                "blobSha256": snapshot.blob_sha256,
+                "updatedAtMs": snapshot.updated_at_ms,
+                "latestMomentId": snapshot.latest_moment_id,
+                "metadataOrigin": snapshot.metadata_origin
+            }),
             Some(snapshot) => snapshot_json(&snapshot),
             None => Value::Null,
         })
@@ -830,16 +848,26 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: VersionScopedParams = parse(params)?;
+        let params: SecretsListParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
+        // Paged at the DOMAIN (keyset by path): a many-secret workspace
+        // never loads every tip per request just for the RPC to discard
+        // the overflow.
+        let limit = params.limit.unwrap_or(200).clamp(1, 500);
         let secrets = Self::read_under_ctx(
             &cancellation,
             "secrets.list",
-            open.actor
-                .list_secret_files(open.workspace_id, params.version_id),
+            open.actor.list_secret_files_page(
+                open.workspace_id,
+                params.version_id,
+                params.after_path.clone(),
+                limit + 1,
+            ),
         )
         .await?;
+        let has_more = secrets.len() > limit;
+        let secrets = &secrets[..secrets.len().min(limit)];
         // Metadata-only, but paths are wire-legal strings: the byte
         // budget keeps a many-secret workspace under the frame limit.
         // No cursor on this family yet — truncated says so honestly
@@ -856,10 +884,13 @@ impl EngineService {
             })
             .collect();
         let included = byte_budget_cut_serialized(&row_values, MOMENTS_PAGE_BYTE_BUDGET);
-        let truncated = included < row_values.len();
+        let byte_truncated = included < row_values.len();
+        let next_after_path = (has_more || byte_truncated)
+            .then(|| secrets[..included].last().map(|stat| stat.path.clone()))
+            .flatten();
         Ok(json!({
             "secrets": row_values[..included].to_vec(),
-            "truncated": truncated,
+            "nextAfterPath": next_after_path,
         }))
     }
 
@@ -1288,8 +1319,12 @@ struct VersionedTextReadParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct VersionScopedParams {
+struct SecretsListParams {
     version_id: String,
+    #[serde(default)]
+    after_path: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[derive(Deserialize)]
