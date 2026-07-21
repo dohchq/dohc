@@ -598,8 +598,27 @@ async fn scenario_watcher_storm(daemon: &Daemon, root: &Path, n: u64) {
 /// answered `Cancelled`). Fast completions make a cancel a no-op; the run
 /// aggregates this count into the evidence so a soak where cancellation
 /// recovery was never actually exercised is visible, not assumed.
-async fn scenario_cancel_storm(daemon: &Daemon, root: &Path) -> u64 {
+async fn scenario_cancel_storm(daemon: &Daemon, root: &Path, n: u64) -> u64 {
     let handle = open(daemon, root, "soak-cancel").await;
+    // Seed one real write so the post-storm recovery read proves a genuine
+    // round-trip: without it the workspace has no "main" version and even a
+    // healthy read errors InvalidParams (version not found), which is
+    // indistinguishable from a broken queue.
+    daemon
+        .call(
+            "versionedText.write",
+            Some(handle.clone()),
+            json!({
+                "versionId": "main",
+                "objectId": format!("soak-cancel-object-{n}"),
+                "path": format!("cancel-seed-{n}.md"),
+                "text": "recovery probe",
+                "momentId": format!("soak-cancel-moment-{n}"),
+                "metadataOrigin": "api",
+                "nowMs": 1
+            }),
+        )
+        .await;
     let mut receivers = Vec::new();
     for _ in 0..16 {
         let (id, rx) = daemon
@@ -624,20 +643,26 @@ async fn scenario_cancel_storm(daemon: &Daemon, root: &Path) -> u64 {
             }
         }
     }
-    // The queue must recover: a normal request still RESOLVES (the path does
-    // not exist, so an error result is fine — a hang is not).
+    // The queue must RECOVER: the seeded write must read back after the
+    // storm. Any error (Cancelled/Overloaded/unavailable) is a real failed
+    // recovery — never swallowed into passing evidence.
     let (_, rx) = daemon
         .begin(
             "versionedText.read",
             Some(handle.clone()),
-            json!({ "versionId": "main", "path": "cancel-target.md" }),
+            json!({ "versionId": "main", "path": format!("cancel-seed-{n}.md") }),
         )
         .await;
-    tokio::time::timeout(Duration::from_secs(30), rx)
+    let recovered = tokio::time::timeout(Duration::from_secs(30), rx)
         .await
         .expect("post-storm request must resolve")
         .expect("response channel")
-        .ok();
+        .expect("post-storm recovery read must succeed");
+    assert_eq!(
+        recovered["text"],
+        json!("recovery probe"),
+        "post-storm read must return the seeded content"
+    );
     close(daemon, handle).await;
     cancellations_observed
 }
@@ -835,7 +860,7 @@ async fn main() {
                 *counts.entry("watcherStorm").or_default() += 1;
             }
             3 => {
-                cancellations_observed += scenario_cancel_storm(&daemon, &root_cancel).await;
+                cancellations_observed += scenario_cancel_storm(&daemon, &root_cancel, cycle).await;
                 *counts.entry("cancelStorm").or_default() += 1;
             }
             _ => {

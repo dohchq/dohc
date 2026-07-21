@@ -593,6 +593,9 @@ mod drive_loop_tests {
         Disrupted,
         /// The root's policy fingerprint differs from the layer's.
         PolicyChanged,
+        /// The fingerprint differs AND the tick converges — the exact pass
+        /// where a flush could settle over a mid-debounce policy edit.
+        PolicyChangedIdle,
         /// The policy files cannot be read right now (transient lock).
         PolicyUnreadable,
     }
@@ -664,7 +667,7 @@ mod drive_loop_tests {
 
         fn policy_fingerprint(&self) -> Option<u64> {
             match self.current() {
-                Script::PolicyChanged => Some(self.policy + 1),
+                Script::PolicyChanged | Script::PolicyChangedIdle => Some(self.policy + 1),
                 Script::PolicyUnreadable => None,
                 _ => Some(self.policy),
             }
@@ -731,7 +734,7 @@ mod drive_loop_tests {
                     self.emitted += 1;
                     TickIo::Applied { clean: true }
                 }
-                Script::Idle => TickIo::Converged,
+                Script::Idle | Script::PolicyChangedIdle => TickIo::Converged,
                 Script::CancelledTick => TickIo::Cancelled,
                 _ => TickIo::Applied { clean: true },
             }
@@ -1186,6 +1189,50 @@ mod drive_loop_tests {
             waited < std::time::Duration::from_secs(1),
             "flush must skip the remaining backoff sleep, waited {waited:?}"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flush_does_not_settle_over_a_pending_policy_rebuild() {
+        // Pass 1 sees a NEW policy fingerprint for the first time (debounce
+        // arms) and the tick converges — without the guard, the flush would
+        // certify deterministic ownership state the very pass before the
+        // rebuild/re-offer runs. It must answer settled:false until the
+        // debounce confirms and the rebuild completes.
+        // Pass 1 (Idle) builds the layer under the ORIGINAL policy — the
+        // edit lands after the build, as it does in life (a build adopts
+        // the fingerprint it reads, so a pre-build change never debounces).
+        let (handle, cancel, journal, _status, flush_tx) =
+            spawn_loop(vec![Script::Idle, Script::PolicyChangedIdle]);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut settled = Vec::new();
+        for pass in 0..3 {
+            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+            flush_tx.send(reply_tx).await.expect("flush queued");
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), reply_rx)
+                .await
+                .expect("flush answered")
+                .expect("flush channel");
+            settled.push(outcome.settled);
+            // Flush 2 fires IMMEDIATELY so it drives the confirm/rebuild
+            // pass itself (a sleep would let the loop's own cadence finish
+            // the rebuild first and the middle answer would race to true).
+            if pass != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            }
+        }
+        cancel.cancel();
+        handle.await.expect("driver loop");
+
+        assert_eq!(
+            settled,
+            vec![false, false, true],
+            "flush must stay unsettled while the policy edit is mid-debounce \
+             (pass 1) and during the rebuild pass (pass 2), then settle on \
+             the rebuilt layer"
+        );
+        let starts = journal.lock().expect("journal").starts.len();
+        assert_eq!(starts, 2, "exactly the initial build plus ONE rebuild");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1841,7 +1888,13 @@ async fn drive_loop<E: DriverEnv>(
             for _ in 0..cycles {
                 match env.tick(current, &cancel).await {
                     TickIo::Converged => {
-                        flush_settled = true;
+                        // Quiescence is real for CONTENT — but a policy edit
+                        // whose new fingerprint was FIRST seen this pass is
+                        // mid-debounce, and ownership may be about to
+                        // change. A flush must not certify deterministic
+                        // state over it: settled stays false, the caller
+                        // polls, and the next pass confirms + rebuilds.
+                        flush_settled = pending_policy.is_none();
                         outcome = Some(TickObservation::Healthy {
                             clean: all_clean && !fresh_disruption,
                         });

@@ -166,7 +166,7 @@ impl EngineService {
         let _open_serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
-                return Err(wire(ErrorCode::Cancelled, "workspace open cancelled while queued"));
+                return Err(cancellation.interruption("workspace open (queued)"));
             }
             serial = self.open_lock.lock() => serial,
         };
@@ -440,7 +440,7 @@ impl EngineService {
         tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
-                return Err(wire(ErrorCode::Cancelled, "capture.flush cancelled while queued"));
+                return Err(cancellation.interruption("capture.flush (queued)"));
             }
             sent = sender.send(reply_tx) => {
                 if sent.is_err() {
@@ -451,7 +451,7 @@ impl EngineService {
         tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
-                Err(wire(ErrorCode::Cancelled, "capture.flush cancelled"))
+                Err(cancellation.interruption("capture.flush"))
             }
             outcome = reply_rx => match outcome {
                 Ok(outcome) => Ok(json!({
@@ -672,6 +672,9 @@ impl ProtocolEngineService for EngineService {
 
 struct OperationCancellation {
     token: CancellationToken,
+    /// Whether the DEADLINE (not a client cancel) is what fired the token —
+    /// the two report different wire codes with different retryability.
+    deadline_hit: Arc<std::sync::atomic::AtomicBool>,
     bridge: tokio::task::JoinHandle<()>,
 }
 
@@ -683,25 +686,45 @@ impl OperationCancellation {
         }
         let signal = ctx.cancel.clone();
         let deadline = ctx.deadline;
+        let deadline_hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hit = Arc::clone(&deadline_hit);
         let child = token.clone();
         let bridge = tokio::spawn(async move {
             // The supervisor enforces deadlines non-cooperatively for wire
             // requests; EMBEDDED callers (InProcessTransport, future
             // mobile/WASM hosts) have no supervisor, so the deadline arms
-            // the same token here — a deadlined operation cancels exactly
-            // like a cancelled one.
+            // the same token here.
             match deadline {
                 Some(deadline) => {
                     tokio::select! {
                         () = signal.cancelled() => {}
-                        () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
+                        () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                            hit.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
                 }
                 None => signal.cancelled().await,
             }
             child.cancel();
         });
-        OperationCancellation { token, bridge }
+        OperationCancellation {
+            token,
+            deadline_hit,
+            bridge,
+        }
+    }
+
+    /// The wire error for an interrupted wait: DEADLINE_EXCEEDED when the
+    /// deadline fired, CANCELLED for a client cancel — retryability differs.
+    fn interruption(&self, what: &str) -> WireError {
+        if self.deadline_hit.load(std::sync::atomic::Ordering::Relaxed) {
+            WireError::new(
+                ErrorCode::DeadlineExceeded,
+                format!("{what} deadline elapsed"),
+            )
+        } else {
+            WireError::new(ErrorCode::Cancelled, format!("{what} cancelled"))
+        }
     }
 
     fn token(&self) -> CancellationToken {
