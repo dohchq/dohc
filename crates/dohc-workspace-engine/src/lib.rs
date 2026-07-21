@@ -872,11 +872,14 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: MomentsGetParams = parse(params)?;
-        // TS getMoment TRIMS before querying; blank stays malformed input.
-        let moment_id = params.moment_id.trim().to_owned();
-        if moment_id.is_empty() {
+        // Blank-after-trim is malformed input — but the QUERY uses the id
+        // AS STORED: the domain accepts whitespace-carrying ids at write,
+        // and an id returned by moments.list must stay fetchable verbatim
+        // (internal consistency beats imported trim behavior here).
+        if params.moment_id.trim().is_empty() {
             return Err(wire(ErrorCode::InvalidParams, "momentId must not be blank"));
         }
+        let moment_id = params.moment_id;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let moment = Self::read_under_ctx(
