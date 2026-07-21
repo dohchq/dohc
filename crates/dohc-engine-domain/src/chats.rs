@@ -72,6 +72,8 @@ const MAX_AUTHOR_USER_ID_CHARS: usize = 200;
 const MAX_FEED_CURSOR_LEN: usize = 512;
 /// Feed cursor message-id char cap (`decodeFeedCursor`).
 const MAX_FEED_CURSOR_MESSAGE_ID_CHARS: usize = 256;
+/// Dispatch run ids are stored verbatim; match the TS store's hard byte floor.
+const MAX_DISPATCH_RUN_ID_BYTES: usize = 512;
 /// Feed page limit bounds (`listPersonalFeed`).
 const FEED_LIMIT_MAX: i64 = 100;
 const FEED_LIMIT_DEFAULT: i64 = 20;
@@ -152,6 +154,14 @@ pub struct ChatChannel {
     pub kind: ChatChannelKind,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+/// A channel row plus derived thread/unread aggregates for channel listings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatChannelSummary {
+    pub channel: ChatChannel,
+    pub thread_count: i64,
+    pub unread_count: i64,
 }
 
 /// A durable chat thread row.
@@ -275,11 +285,23 @@ pub struct ChatFeedItem {
     pub created_at_ms: i64,
 }
 
+/// The personal feed's receiver-private, monotonic read cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatFeedReadState {
+    pub workspace_id: String,
+    pub owner_user_id: String,
+    pub last_seen_created_at_ms: i64,
+    pub last_seen_message_id: String,
+    pub updated_at_ms: i64,
+}
+
 /// A page of personal-feed items, newest first, with a base64url keyset cursor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatFeedPage {
     pub items: Vec<ChatFeedItem>,
     pub next_cursor: Option<String>,
+    pub head_cursor: Option<String>,
+    pub read_state: Option<ChatFeedReadState>,
 }
 
 /// A bookmark target kind.
@@ -327,9 +349,13 @@ pub struct ChatBookmark {
     pub destination_path: String,
     pub state: String,
     pub generation: i64,
+    pub projected_generation: i64,
     pub projection_state: String,
+    pub projection_object_id: Option<String>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    pub last_projected_at_ms: Option<i64>,
+    pub failure_reason: Option<String>,
 }
 
 /// The outcome of a bookmark projection transition (generation-CAS).
@@ -609,6 +635,19 @@ pub fn decode_feed_cursor(cursor: &str) -> Result<FeedCursorValue, DomainError> 
 fn non_empty(value: &str, code: &'static str, reason: &'static str) -> Result<(), DomainError> {
     if value.is_empty() {
         Err(DomainError::chat(code, reason))
+    } else {
+        Ok(())
+    }
+}
+
+/// Run ids are persisted verbatim. Reject only values SQLite/TS will never
+/// store: empty, over the 512-byte wire bound, or containing NUL.
+fn validate_dispatch_run_id(run_id: &str) -> Result<(), DomainError> {
+    if run_id.is_empty() || run_id.len() > MAX_DISPATCH_RUN_ID_BYTES || run_id.contains('\0') {
+        Err(DomainError::chat(
+            "invalid-message-body",
+            "Agent run id is invalid.",
+        ))
     } else {
         Ok(())
     }
@@ -912,19 +951,48 @@ impl<'a> LinkedChatStore<'a> {
     /// List channels, hiding placeholder channels (a replicated thread's guessed
     /// channel is invisible until its authoritative create arrives —
     /// `listChannels`). Ordered by `(created_at_ms, channel_id)`.
-    pub fn list_channels(&self, workspace_id: &str) -> Result<Vec<ChatChannel>, DomainError> {
+    pub fn list_channels(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Vec<ChatChannelSummary>, DomainError> {
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms \
-                     FROM chat_channels ch WHERE ch.workspace_id = ?1 \
+                    "SELECT ch.workspace_id, ch.channel_id, ch.name, ch.slug, ch.kind, \
+                            ch.created_at_ms, ch.updated_at_ms, \
+                            COALESCE(agg.thread_count, 0), COALESCE(agg.unread_count, 0) \
+                     FROM chat_channels ch \
+                     LEFT JOIN ( \
+                       SELECT t.workspace_id, t.channel_id, COUNT(*) AS thread_count, \
+                              SUM(MAX( \
+                                (SELECT COUNT(*) FROM chat_messages m \
+                                 WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id) \
+                                - COALESCE((SELECT rs.last_read_sequence \
+                                            FROM chat_thread_read_state rs \
+                                            WHERE rs.workspace_id = t.workspace_id \
+                                              AND rs.thread_id = t.thread_id), 0), \
+                                0)) AS unread_count \
+                       FROM chat_threads t \
+                       WHERE t.channel_id IS NOT NULL \
+                       GROUP BY t.workspace_id, t.channel_id \
+                     ) agg ON agg.workspace_id = ch.workspace_id AND agg.channel_id = ch.channel_id \
+                     WHERE ch.workspace_id = ?1 \
                        AND NOT EXISTS (SELECT 1 FROM chat_channel_placeholders p \
                          WHERE p.workspace_id = ch.workspace_id AND p.channel_id = ch.channel_id) \
                      ORDER BY ch.created_at_ms, ch.channel_id LIMIT ?2",
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
-                .query_map(params![workspace_id, MAX_LIST_ROWS], map_channel_row)
+                .query_map(params![workspace_id, MAX_LIST_ROWS], |row| {
+                    let channel = map_channel_row(row)?;
+                    let thread_count = row.get(7)?;
+                    let unread_count = row.get(8)?;
+                    Ok(channel.map(|channel| ChatChannelSummary {
+                        channel,
+                        thread_count,
+                        unread_count,
+                    }))
+                })
                 .map_err(DomainError::sql_corrupt)?;
             collect(rows)
         })
@@ -1382,6 +1450,75 @@ impl<'a> LinkedChatStore<'a> {
         )?;
         let input = input.clone();
         let outcome = self.store.write_with(faults, |tx| {
+            match input.target_kind {
+                FollowTargetKind::Channel => {
+                    let kind: Option<String> = tx
+                        .query_row(
+                            "SELECT c.kind FROM chat_channel_wire_ids w \
+                             JOIN chat_channels c \
+                               ON c.workspace_id = w.workspace_id AND c.channel_id = w.channel_id \
+                             WHERE w.workspace_id = ?1 AND w.wire_id = ?2",
+                            params![input.workspace_id, input.target_id],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(DomainError::sql_corrupt)?;
+                    if kind.as_deref().is_none_or(|kind| kind == "dm") {
+                        return Err(DomainError::chat(
+                            "invalid-follow-target",
+                            "Channel is not followable.",
+                        ));
+                    }
+                }
+                FollowTargetKind::Thread => {
+                    let thread = require_thread(tx, &input.workspace_id, &input.target_id)
+                        .map_err(|error| match error {
+                            DomainError::Chat { .. } => DomainError::chat(
+                                "invalid-follow-target",
+                                "Chat thread is not followable.",
+                            ),
+                            other => other,
+                        })?;
+                    if let Some(channel_id) = thread.channel_id {
+                        let channel = require_channel(tx, &input.workspace_id, &channel_id)?;
+                        if channel.kind == ChatChannelKind::Dm {
+                            return Err(DomainError::chat(
+                                "invalid-follow-target",
+                                "DM threads are not followable.",
+                            ));
+                        }
+                    }
+                }
+                FollowTargetKind::Person | FollowTargetKind::Agent => {
+                    let author_kind = match input.target_kind {
+                        FollowTargetKind::Agent => "agent",
+                        FollowTargetKind::Person => "human",
+                        _ => unreachable!(),
+                    };
+                    let found: Option<i64> = tx
+                        .query_row(
+                            "SELECT 1 FROM chat_messages m \
+                             JOIN chat_threads t \
+                               ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id \
+                             LEFT JOIN chat_channels c \
+                               ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
+                             WHERE m.workspace_id = ?1 AND m.author_user_id = ?2 \
+                               AND m.author_kind = ?3 \
+                               AND (t.channel_id IS NULL OR c.kind <> 'dm') \
+                             LIMIT 1",
+                            params![input.workspace_id, input.target_id, author_kind],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(DomainError::sql_corrupt)?;
+                    if found.is_none() {
+                        return Err(DomainError::chat(
+                            "invalid-follow-target",
+                            "Chat author is not followable.",
+                        ));
+                    }
+                }
+            }
             upsert_follow_lww(tx, &input)?;
             journal(tx, &input.target_id, "chat.follow.set", input.at_ms)?;
             require_follow(
@@ -1540,6 +1677,7 @@ impl<'a> LinkedChatStore<'a> {
             for row in rows {
                 items.push(row.map_err(DomainError::sql_corrupt)?);
             }
+            drop(stmt);
             let next_cursor = if items.len() as i64 > limit {
                 items.truncate(limit as usize);
                 items.last().map(|last| {
@@ -1551,7 +1689,45 @@ impl<'a> LinkedChatStore<'a> {
             } else {
                 None
             };
-            Ok(ChatFeedPage { items, next_cursor })
+            let head = conn
+                .query_row(
+                    PERSONAL_FEED_SQL,
+                    params![workspace_id, owner_user_id, 0, i64::MAX, "", 1],
+                    |row| {
+                        Ok(FeedCursorValue {
+                            message_id: row.get(0)?,
+                            created_at_ms: row.get(2)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            let head_cursor = head.as_ref().map(encode_feed_cursor);
+            let read_state = conn
+                .query_row(
+                    "SELECT workspace_id, owner_user_id, last_seen_created_at_ms, \
+                            last_seen_message_id, updated_at_ms \
+                     FROM chat_feed_read_state \
+                     WHERE workspace_id = ?1 AND owner_user_id = ?2",
+                    params![workspace_id, owner_user_id],
+                    |row| {
+                        Ok(ChatFeedReadState {
+                            workspace_id: row.get(0)?,
+                            owner_user_id: row.get(1)?,
+                            last_seen_created_at_ms: row.get(2)?,
+                            last_seen_message_id: row.get(3)?,
+                            updated_at_ms: row.get(4)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            Ok(ChatFeedPage {
+                items,
+                next_cursor,
+                head_cursor,
+                read_state,
+            })
         })
     }
 
@@ -1711,6 +1887,7 @@ impl<'a> LinkedChatStore<'a> {
     /// finished `generation` is still the current pending one. A stale worker
     /// (generation N after N+1 was queued) matches no row → `applied = false`,
     /// no lost update.
+    #[allow(clippy::too_many_arguments)]
     pub fn mark_bookmark_ready(
         &mut self,
         workspace_id: &str,
@@ -1718,6 +1895,8 @@ impl<'a> LinkedChatStore<'a> {
         bookmark_id: &str,
         generation: i64,
         projected_at_ms: i64,
+        projection_object_id: Option<&str>,
+        projection_path: Option<&str>,
         faults: &dyn FaultInjector,
     ) -> Result<ChatBookmarkTransition, DomainError> {
         non_empty(
@@ -1736,11 +1915,66 @@ impl<'a> LinkedChatStore<'a> {
                 "Bookmark generation is invalid.",
             ));
         }
+        let projection_identity = match (projection_object_id, projection_path) {
+            (None, None) => None,
+            (Some(object_id), Some(path)) => {
+                let object_id = object_id.trim_matches(is_js_trim_ws);
+                if object_id.is_empty()
+                    || object_id.encode_utf16().count() > 256
+                    || has_projection_control_char(object_id)
+                {
+                    return Err(DomainError::chat(
+                        "invalid-bookmark-target",
+                        "Bookmark projection object id is invalid.",
+                    ));
+                }
+                crate::store::validate_path(path).map_err(|_| {
+                    DomainError::chat(
+                        "invalid-bookmark-target",
+                        "Bookmark projection path is invalid.",
+                    )
+                })?;
+                Some((object_id.to_owned(), path.to_owned()))
+            }
+            _ => {
+                return Err(DomainError::chat(
+                    "invalid-bookmark-target",
+                    "Projection identity and path must be recorded together.",
+                ));
+            }
+        };
         let ws = workspace_id.to_owned();
         let owner = owner_user_id.to_owned();
         let bid = bookmark_id.to_owned();
         let outcome = self.store.write_with(faults, |tx| {
-            require_bookmark(tx, &ws, &owner, &bid)?;
+            let current = require_bookmark(tx, &ws, &owner, &bid)?;
+            if let Some((projection_object_id, projection_path)) = &projection_identity
+                && current.generation == generation
+                && current.projection_state == "pending"
+            {
+                let claimed = tx
+                    .execute(
+                        "UPDATE chat_bookmark_outbox \
+                         SET projection_object_id = ?4 \
+                         WHERE workspace_id = ?1 AND bookmark_id = ?2 \
+                           AND generation = ?3 AND projection_state = 'pending' \
+                           AND (projection_object_id IS NULL OR projection_object_id = ?4) \
+                           AND EXISTS ( \
+                             SELECT 1 FROM chat_bookmarks b \
+                             WHERE b.workspace_id = chat_bookmark_outbox.workspace_id \
+                               AND b.bookmark_id = chat_bookmark_outbox.bookmark_id \
+                               AND b.destination_path = ?5 \
+                           )",
+                        params![ws, bid, generation, projection_object_id, projection_path],
+                    )
+                    .map_err(DomainError::sql_persist)?;
+                if claimed != 1 {
+                    return Err(DomainError::chat(
+                        "invalid-bookmark-target",
+                        "Bookmark projection ownership no longer matches.",
+                    ));
+                }
+            }
             let changed = tx
                 .execute(
                     "UPDATE chat_bookmark_outbox \
@@ -1805,6 +2039,7 @@ impl<'a> LinkedChatStore<'a> {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<Option<DispatchClaim>, DomainError> {
+        validate_dispatch_run_id(run_id)?;
         let ws = workspace_id.to_owned();
         let run = run_id.to_owned();
         let cmd = if command.is_empty() {
@@ -1941,7 +2176,7 @@ impl<'a> LinkedChatStore<'a> {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<(), DomainError> {
-        non_empty(run_id, "invalid-message-body", "run_id must not be empty")?;
+        validate_dispatch_run_id(run_id)?;
         let workspace_id = workspace_id.to_owned();
         let run = run_id.to_owned();
         let reason = reason.map(str::to_owned);
@@ -2172,7 +2407,8 @@ LIMIT 1";
 const BOOKMARK_SELECT: &str = "\
 SELECT b.bookmark_id, b.owner_user_id, b.target_kind, b.target_id, b.thread_id, b.message_id, \
        b.mode, b.destination_path, b.state, b.created_at_ms, b.updated_at_ms, \
-       o.generation, o.projection_state \
+       o.generation, o.projected_generation, o.projection_state, o.last_projected_at_ms, \
+       o.projection_object_id, o.failure_reason \
 FROM chat_bookmarks b \
 JOIN chat_bookmark_outbox o \
   ON o.workspace_id = b.workspace_id AND o.bookmark_id = b.bookmark_id";
@@ -2789,6 +3025,10 @@ fn map_bookmark_row(
         created_at_ms: row.get(9)?,
         updated_at_ms: row.get(10)?,
         generation: row.get(11)?,
-        projection_state: row.get(12)?,
+        projected_generation: row.get(12)?,
+        projection_state: row.get(13)?,
+        last_projected_at_ms: row.get(14)?,
+        projection_object_id: row.get(15)?,
+        failure_reason: row.get(16)?,
     }))
 }

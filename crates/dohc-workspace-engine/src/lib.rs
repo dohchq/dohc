@@ -13,11 +13,11 @@ use base64::Engine as _;
 use dohc_engine_collab::{CollabError, ContentKind, DocKey};
 use dohc_engine_domain::{
     BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatBookmark, ChatChannel, ChatChannelKind,
-    ChatFollow, ChatMessage, ChatThread, ChatThreadReadState, ConflictChoice, ConflictContentKind,
-    ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus, DispatchClaim,
-    DomainError, FollowState, FollowTargetKind, ResolveConflictKind, ResolveTextConflict,
-    SaveBookmark, SendMessage, SetFollow, StartChannelThread, TextConflict, TextSnapshot,
-    WriteText,
+    ChatChannelSummary, ChatFeedReadState, ChatFollow, ChatMessage, ChatThread,
+    ChatThreadReadState, ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata,
+    ConflictResolution, ConflictStatus, DispatchClaim, DomainError, FollowState, FollowTargetKind,
+    ResolveConflictKind, ResolveTextConflict, SaveBookmark, SendMessage, SetFollow,
+    StartChannelThread, TextConflict, TextSnapshot, WriteText,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -39,6 +39,7 @@ use std::{
 };
 
 const MAX_OPEN_HANDLES: usize = 64;
+const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 
 /// In-band CONTENT (binary bytes, secret plaintext) is bounded by the DOP1
 /// string limit (64 KiB per string): base64 expands 4/3, so this raw cap
@@ -316,10 +317,6 @@ impl EngineService {
                 self.chats_dispatch_fail(&ctx, request.workspace, request.params)
                     .await?
             }
-            "chats.dispatch.reclaimRunning" => {
-                self.chats_dispatch_reclaim_running(&ctx, request.workspace, request.params)
-                    .await?
-            }
             _ => return Err(wire(ErrorCode::MethodNotFound, "unknown method")),
         };
         Ok(Response { id, result })
@@ -434,6 +431,14 @@ impl EngineService {
             supervisor: self.supervisor,
             db_path: Some(db_path.clone()),
         };
+        actor
+            .chat_dispatch_reclaim_running(
+                params.workspace_id.clone(),
+                CHAT_DISPATCH_MAX_ATTEMPTS,
+                now_ms,
+            )
+            .await
+            .map_err(map_runtime)?;
         capture.wait_for_baseline().await;
         open_guard.disarm();
         lock(&self.handles).insert(
@@ -1252,7 +1257,7 @@ impl EngineService {
         // heavy: the byte budget keeps every page under the wire frame.
         // No cursor on this family yet (composite sort keys) — truncated
         // says so honestly; cursor pagination is RPC_GAP follow-up work.
-        let row_values: Vec<Value> = channels.iter().map(channel_json).collect();
+        let row_values: Vec<Value> = channels.iter().map(channel_summary_json).collect();
         let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
         if included == 0 && !row_values.is_empty() {
             return Err(wire(
@@ -1301,20 +1306,23 @@ impl EngineService {
         let (thread, message) = Self::read_under_ctx(
             &cancellation,
             "chats.threads.start",
-            open.actor.chat_thread_start(StartChannelThread {
-                workspace_id: open.workspace_id,
-                channel_id: params.channel_id,
-                thread_id: params.thread_id,
-                message_id: params.message_id,
-                title: params.title,
-                author_kind,
-                author_display_name: params.author_display_name,
-                author_user_id: params.author_user_id,
-                origin: params.origin,
-                body: params.body,
-                now_ms: params.now_ms.unwrap_or(now_ms()?),
-                request_id,
-            }),
+            open.actor.chat_thread_start(
+                StartChannelThread {
+                    workspace_id: open.workspace_id,
+                    channel_id: params.channel_id,
+                    thread_id: params.thread_id,
+                    message_id: params.message_id,
+                    title: params.title,
+                    author_kind,
+                    author_display_name: params.author_display_name,
+                    author_user_id: params.author_user_id,
+                    origin: params.origin,
+                    body: params.body,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                    request_id,
+                },
+                cancellation.token(),
+            ),
         )
         .await?;
         Ok(json!({ "thread": thread_json(&thread), "message": message_json(&message) }))
@@ -1369,19 +1377,22 @@ impl EngineService {
         let message = Self::read_under_ctx(
             &cancellation,
             "chats.messages.send",
-            open.actor.chat_message_send(SendMessage {
-                workspace_id: open.workspace_id,
-                thread_id: params.thread_id,
-                message_id: params.message_id,
-                author_kind,
-                author_display_name: params.author_display_name,
-                author_user_id: params.author_user_id,
-                parent_message_id: params.parent_message_id,
-                origin: params.origin,
-                body: params.body,
-                now_ms: params.now_ms.unwrap_or(now_ms()?),
-                request_id,
-            }),
+            open.actor.chat_message_send(
+                SendMessage {
+                    workspace_id: open.workspace_id,
+                    thread_id: params.thread_id,
+                    message_id: params.message_id,
+                    author_kind,
+                    author_display_name: params.author_display_name,
+                    author_user_id: params.author_user_id,
+                    parent_message_id: params.parent_message_id,
+                    origin: params.origin,
+                    body: params.body,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                    request_id,
+                },
+                cancellation.token(),
+            ),
         )
         .await?;
         Ok(message_json(&message))
@@ -1447,6 +1458,7 @@ impl EngineService {
                 params.up_to_sequence,
                 params.expected_revision,
                 params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
             ),
         )
         .await?;
@@ -1487,16 +1499,19 @@ impl EngineService {
         let follow = Self::read_under_ctx(
             &cancellation,
             "chats.follows.set",
-            open.actor.chat_follow_set(SetFollow {
-                workspace_id: open.workspace_id,
-                owner_user_id: params.owner_user_id,
-                target_kind,
-                target_id: params.target_id,
-                state,
-                at_ms: params.at_ms.unwrap_or(now_ms()?),
-                origin_id: params.origin_id,
-                origin_seq: params.origin_seq,
-            }),
+            open.actor.chat_follow_set(
+                SetFollow {
+                    workspace_id: open.workspace_id,
+                    owner_user_id: params.owner_user_id,
+                    target_kind,
+                    target_id: params.target_id,
+                    state,
+                    at_ms: params.at_ms.unwrap_or(now_ms()?),
+                    origin_id: params.origin_id,
+                    origin_seq: params.origin_seq,
+                },
+                cancellation.token(),
+            ),
         )
         .await?;
         Ok(follow_json(&follow))
@@ -1558,6 +1573,7 @@ impl EngineService {
                 params.at_ms.unwrap_or(now_ms()?),
                 params.origin_id,
                 params.origin_seq,
+                cancellation.token(),
             ),
         )
         .await?;
@@ -1591,6 +1607,8 @@ impl EngineService {
                 "createdAtMs": item.created_at_ms,
             })).collect::<Vec<_>>(),
             "nextCursor": page.next_cursor,
+            "headCursor": page.head_cursor,
+            "readState": page.read_state.as_ref().map(feed_read_state_json),
         }))
     }
 
@@ -1608,16 +1626,19 @@ impl EngineService {
         let bookmark = Self::read_under_ctx(
             &cancellation,
             "chats.bookmarks.save",
-            open.actor.chat_bookmark_save(SaveBookmark {
-                workspace_id: open.workspace_id,
-                bookmark_id: params.bookmark_id,
-                owner_user_id: params.owner_user_id,
-                target_kind,
-                target_id: params.target_id,
-                mode,
-                destination_path: params.destination_path,
-                now_ms: params.now_ms.unwrap_or(now_ms()?),
-            }),
+            open.actor.chat_bookmark_save(
+                SaveBookmark {
+                    workspace_id: open.workspace_id,
+                    bookmark_id: params.bookmark_id,
+                    owner_user_id: params.owner_user_id,
+                    target_kind,
+                    target_id: params.target_id,
+                    mode,
+                    destination_path: params.destination_path,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                },
+                cancellation.token(),
+            ),
         )
         .await?;
         Ok(bookmark_json(&bookmark))
@@ -1676,6 +1697,9 @@ impl EngineService {
                 params.bookmark_id,
                 params.generation,
                 params.projected_at_ms.unwrap_or(now_ms()?),
+                params.projection_object_id,
+                params.projection_path,
+                cancellation.token(),
             ),
         )
         .await?;
@@ -1702,6 +1726,7 @@ impl EngineService {
                 params.trigger_message_id,
                 params.thread_id,
                 params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
             ),
         )
         .await?;
@@ -1726,6 +1751,7 @@ impl EngineService {
                 params.command.unwrap_or_else(|| "agent".to_owned()),
                 params.log_path,
                 params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
             ),
         )
         .await?;
@@ -1752,6 +1778,7 @@ impl EngineService {
                 params.run_id,
                 params.exit_code,
                 params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
             ),
         )
         .await?;
@@ -1776,32 +1803,11 @@ impl EngineService {
                 params.reason,
                 params.exit_code,
                 params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
             ),
         )
         .await?;
         Ok(json!({ "failed": true }))
-    }
-
-    async fn chats_dispatch_reclaim_running(
-        &self,
-        ctx: &RequestContext,
-        handle: Option<WorkspaceHandle>,
-        params: Value,
-    ) -> Result<Value, WireError> {
-        let params: ChatDispatchReclaimParams = parse(params)?;
-        let open = self.open(handle.as_ref())?;
-        let cancellation = OperationCancellation::new(ctx);
-        let trigger_message_ids = Self::read_under_ctx(
-            &cancellation,
-            "chats.dispatch.reclaimRunning",
-            open.actor.chat_dispatch_reclaim_running(
-                open.workspace_id,
-                params.max_attempts,
-                params.now_ms.unwrap_or(now_ms()?),
-            ),
-        )
-        .await?;
-        Ok(json!({ "triggerMessageIds": trigger_message_ids }))
     }
 
     async fn ydoc_apply(
@@ -2374,6 +2380,8 @@ struct ChatBookmarkMarkReadyParams {
     bookmark_id: String,
     generation: i64,
     projected_at_ms: Option<i64>,
+    projection_object_id: Option<String>,
+    projection_path: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2407,13 +2415,6 @@ struct ChatDispatchFailParams {
     run_id: String,
     reason: String,
     exit_code: Option<i64>,
-    now_ms: Option<i64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ChatDispatchReclaimParams {
-    max_attempts: i64,
     now_ms: Option<i64>,
 }
 
@@ -2660,6 +2661,13 @@ fn channel_json(channel: &ChatChannel) -> Value {
     })
 }
 
+fn channel_summary_json(summary: &ChatChannelSummary) -> Value {
+    let mut value = channel_json(&summary.channel);
+    value["threadCount"] = json!(summary.thread_count);
+    value["unreadCount"] = json!(summary.unread_count);
+    value
+}
+
 fn thread_json(thread: &ChatThread) -> Value {
     json!({
         "workspaceId": thread.workspace_id,
@@ -2701,6 +2709,16 @@ fn read_state_json(state: &ChatThreadReadState) -> Value {
     })
 }
 
+fn feed_read_state_json(state: &ChatFeedReadState) -> Value {
+    json!({
+        "workspaceId": state.workspace_id,
+        "ownerUserId": state.owner_user_id,
+        "lastSeenCreatedAtMs": state.last_seen_created_at_ms,
+        "lastSeenMessageId": state.last_seen_message_id,
+        "updatedAtMs": state.updated_at_ms,
+    })
+}
+
 fn follow_json(follow: &ChatFollow) -> Value {
     json!({
         "ownerUserId": follow.owner_user_id,
@@ -2733,9 +2751,13 @@ fn bookmark_json(bookmark: &ChatBookmark) -> Value {
         "destinationPath": bookmark.destination_path,
         "state": bookmark.state,
         "generation": bookmark.generation,
+        "projectedGeneration": bookmark.projected_generation,
         "projectionState": bookmark.projection_state,
+        "projectionObjectId": bookmark.projection_object_id,
         "createdAtMs": bookmark.created_at_ms,
         "updatedAtMs": bookmark.updated_at_ms,
+        "lastProjectedAtMs": bookmark.last_projected_at_ms,
+        "failureReason": bookmark.failure_reason,
     })
 }
 

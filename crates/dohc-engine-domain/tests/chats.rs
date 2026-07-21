@@ -91,7 +91,9 @@ fn create_list_find_channel_round_trip() {
 
     let listed = chats.list_channels(WS).expect("list");
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].channel_id, "chan-1");
+    assert_eq!(listed[0].channel.channel_id, "chan-1");
+    assert_eq!(listed[0].thread_count, 0);
+    assert_eq!(listed[0].unread_count, 0);
 
     let found = chats
         .find_channel_by_slug(WS, "general-chat")
@@ -402,6 +404,15 @@ fn follow_lww_last_write_wins_and_lists_active() {
     let db = scratch.engine_db_path().expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .expect("general");
+    chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t1", "m1", "opening", ChatActorKind::Human, 2),
+            &NO_FAULTS,
+        )
+        .expect("thread");
 
     let follow = |ts: i64, state: FollowState, seq: i64| SetFollow {
         workspace_id: WS.to_owned(),
@@ -554,14 +565,14 @@ fn bookmark_generation_cas_stale_worker_loses() {
 
     // A stale worker finishing generation 1 loses: no row matches → applied=false.
     let stale = chats
-        .mark_bookmark_ready(WS, "owner", "bm-1", 1, 40, &NO_FAULTS)
+        .mark_bookmark_ready(WS, "owner", "bm-1", 1, 40, None, None, &NO_FAULTS)
         .expect("stale ready");
     assert!(!stale.applied, "stale generation must not mark ready");
     assert_eq!(stale.bookmark.projection_state, "pending");
 
     // The current generation 2 wins.
     let fresh = chats
-        .mark_bookmark_ready(WS, "owner", "bm-1", 2, 41, &NO_FAULTS)
+        .mark_bookmark_ready(WS, "owner", "bm-1", 2, 41, None, None, &NO_FAULTS)
         .expect("fresh ready");
     assert!(fresh.applied, "current generation marks ready");
     assert_eq!(fresh.bookmark.projection_state, "ready");
@@ -595,6 +606,15 @@ fn dispatch_claim_is_single_writer_idempotent() {
         .enqueue_dispatch(WS, "m0", "t1", 21, &NO_FAULTS)
         .expect("enqueue");
 
+    for invalid in [String::new(), "bad\0run".to_owned(), "x".repeat(513)] {
+        assert!(
+            chats
+                .claim_next_pending(WS, &invalid, "agent", None, 22, &NO_FAULTS)
+                .is_err(),
+            "invalid run id must be refused"
+        );
+    }
+
     let claim = chats
         .claim_next_pending(WS, "run-1", "agent", None, 22, &NO_FAULTS)
         .expect("claim")
@@ -602,6 +622,19 @@ fn dispatch_claim_is_single_writer_idempotent() {
     assert_eq!(claim.trigger_message_id, "m0");
     assert_eq!(claim.run_id, "run-1");
     assert_eq!(claim.attempt_count, 1);
+
+    for invalid in [String::new(), "bad\0run".to_owned(), "x".repeat(513)] {
+        assert!(
+            chats
+                .complete_dispatch(WS, &invalid, 0, 22, &NO_FAULTS)
+                .is_err()
+        );
+        assert!(
+            chats
+                .fail_dispatch(WS, &invalid, "failed", None, 22, &NO_FAULTS)
+                .is_err()
+        );
+    }
 
     // A second claim while run-1 is RUNNING returns None (single-writer).
     let second = chats
@@ -911,7 +944,7 @@ fn create_channel_preserves_requested_dm_kind() {
         "requested DM kind is persisted"
     );
     let listed = chats.list_channels(WS).expect("list");
-    assert_eq!(listed[0].kind, ChatChannelKind::Dm);
+    assert_eq!(listed[0].channel.kind, ChatChannelKind::Dm);
 }
 
 #[test]
