@@ -25,7 +25,7 @@ read surface with #217, both merged 2026-07-21).
 | readTextFile binary-head metadata | PARTIAL | TS readTextFile's snapshot exposes binary heads (contentKind/sha256/byteLength) in the SAME call; Rust versionedText.read refuses binary heads and callers must pivot to versionedBinary.read. Single-call snapshot introspection parity is RPC-D work |
 | set/ensure active version | MISSING | domain exists |
 | listVersions / createNamedVersion / forkVersion | listVersions SHIPPED in RPC-A (#217, versions.list); createNamedVersion/forkVersion remain MISSING (RPC-D) | domain `store.rs list_versions`/`create_named_version`, `secrets.rs` fork section |
-| listMoments / getMoment | SHIPPED in RPC-A (#217, merged): moments.list/moments.get hydrate before/after TEXT plus actual byte lengths under the one-turn in-band cap (over-cap bodies come back as metadata + null text + inbandLimitBytes). What is NOT ported is the oracle's payload-provenance columns (payload_before_*/payload_after_* and before-snapshot identity) — the Rust schema lacks them; see the SCHEMA OBLIGATION below (pre-R15 migration candidate). RPC-D owes ONE more thing: over-cap moment bodies return null text + byte lengths but NO inbandLimitBytes field (versionedText.read/versionedBinary.read/secrets.materialize all self-describe their cap) — RPC-D adds the field for contract uniformity. | domain `store.rs:616/783` |
+| listMoments / getMoment | SHIPPED in RPC-A (#217, merged): moments.list/moments.get hydrate before/after TEXT plus actual byte lengths under the one-turn in-band cap. Over-cap moment bodies today = null text + byte lengths WITHOUT an inbandLimitBytes field (unlike the other read RPCs). What is NOT ported is the oracle's payload-provenance columns (payload_before_*/payload_after_* and before-snapshot identity) — the Rust schema lacks them; see the SCHEMA OBLIGATION below (pre-R15 migration candidate). RPC-D owes ONE more thing: over-cap moment bodies return null text + byte lengths but NO inbandLimitBytes field (versionedText.read/versionedBinary.read/secrets.materialize all self-describe their cap) — RPC-D adds the field for contract uniformity. | domain `store.rs:616/783` |
 | listSecretFiles / materializeSecretFile | SHIPPED in RPC-A (#217): secrets.list (keyless page) + secrets.materialize (in-band cap; over-cap tips authenticate then drop plaintext) | domain `secrets.rs:547/526` |
 | secret moments/compare/restore | MISSING | moments exist (`secrets.rs:582/614`); compare/restore are NOT ported — those line refs are TS `secretFileStore.ts:1468/1517/1584`. Real Rust domain work, not wiring |
 | CHATS (threads/messages/channels/feed/follows/bookmarks/reactions/mentions/decisions/dispatch) | ALL MISSING | `chats.rs:744-2004` covers channels/threads/messages/read-state/follows/feed/bookmarks/dispatch; reactions, decisions, and mention indexing were scoped OUT of R09 — unported domain work. Nothing on the actor |
@@ -135,6 +135,12 @@ capture) — but parity/differential suites must expect the delta, renderer
 surfaces switching on origin must treat "ydoc" as first-class, and RPC-D
 must decide whether the daemon's write RPCs validate the closed set
 (recommended: closed set + "ydoc" as the one daemon-internal addition).
+DESKTOP IPC OBLIGATION (owned by R14 cutover wiring): the renderer
+bridge schema (apps/desktop/src/ipc/bridgeContract.ts) accepts only the
+closed 5-set today and main.ts parses engine-history responses through
+it — the first "ydoc"-origin moment crossing IPC fails schema
+validation until that contract widens. R14's wiring checklist must
+include it.
 
 R15 IS A DESTRUCTIVE CUTOVER GATE, not a parity note: the reset wipes
 TS-written rows in Ice's dogfood workspace. Policy (R15/R15-REHEARSE
