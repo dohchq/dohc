@@ -138,6 +138,23 @@ impl EngineService {
             }
             "watcher.status" => self.watcher_status(request.workspace)?,
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
+            "versions.active" => self.versions_active(request.workspace).await?,
+            "versions.list" => self.versions_list(request.workspace).await?,
+            "versionedText.list" => {
+                self.versioned_text_list(request.workspace, request.params)
+                    .await?
+            }
+            "versionedBinary.read" => {
+                self.versioned_binary_read(request.workspace, request.params)
+                    .await?
+            }
+            "moments.list" => self.moments_list(request.workspace, request.params).await?,
+            "moments.get" => self.moments_get(request.workspace, request.params).await?,
+            "secrets.list" => self.secrets_list(request.workspace, request.params).await?,
+            "secrets.materialize" => {
+                self.secrets_materialize(request.workspace, request.params)
+                    .await?
+            }
             _ => return Err(wire(ErrorCode::MethodNotFound, "unknown method")),
         };
         Ok(Response { id, result })
@@ -462,6 +479,208 @@ impl EngineService {
                 Err(_) => Ok(unavailable),
             }
         }
+    }
+
+    async fn versions_active(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let version_id = open
+            .actor
+            .active_version_id(open.workspace_id)
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({ "versionId": version_id }))
+    }
+
+    async fn versions_list(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let versions = open
+            .actor
+            .list_versions(open.workspace_id)
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({
+            "versions": versions
+                .iter()
+                .map(|version| {
+                    json!({
+                        "versionId": version.version_id,
+                        "kind": version.kind.as_str(),
+                        "name": version.name,
+                        "createdAtMs": version.created_at_ms,
+                        "forkVersionId": version.fork_version_id,
+                        "forkMomentId": version.fork_moment_id,
+                    })
+                })
+                .collect::<Vec<_>>()
+        }))
+    }
+
+    async fn versioned_text_list(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionScopedParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let snapshots = open
+            .actor
+            .list_snapshots(open.workspace_id, params.version_id)
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({
+            "files": snapshots
+                .iter()
+                .map(|snapshot| {
+                    let (content_kind, text, binary_sha256) = match &snapshot.content {
+                        dohc_engine_domain::SnapshotContent::Text { text } => {
+                            ("text", Some(text.as_str()), None)
+                        }
+                        dohc_engine_domain::SnapshotContent::Binary { sha256 } => {
+                            ("binary", None, Some(sha256.as_str()))
+                        }
+                    };
+                    json!({
+                        "path": snapshot.path,
+                        "objectId": snapshot.object_id,
+                        "contentKind": content_kind,
+                        "text": text,
+                        "binarySha256": binary_sha256,
+                        "updatedAtMs": snapshot.updated_at_ms,
+                        "latestMomentId": snapshot.latest_moment_id,
+                        "metadataOrigin": snapshot.metadata_origin,
+                    })
+                })
+                .collect::<Vec<_>>()
+        }))
+    }
+
+    async fn versioned_binary_read(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionPathParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let head = open
+            .actor
+            .read_binary(open.workspace_id, params.version_id, params.path)
+            .await
+            .map_err(map_runtime)?;
+        Ok(match head {
+            None => Value::Null,
+            Some(head) => json!({
+                "objectId": head.object_id,
+                "sha256": head.sha256,
+                "byteLength": head.bytes.len(),
+                "bytesBase64": base64::engine::general_purpose::STANDARD.encode(&head.bytes),
+            }),
+        })
+    }
+
+    async fn moments_list(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: MomentsListParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let page = open
+            .actor
+            .list_moments(dohc_engine_domain::ListMomentsQuery {
+                workspace_id: open.workspace_id,
+                version_id: params.version_id,
+                object_id: params.object_id,
+                limit: params.limit.unwrap_or(100),
+                before_moment_order: params.before_moment_order,
+            })
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({
+            "moments": page.moments.iter().map(moment_json).collect::<Vec<_>>(),
+            "nextBeforeMomentOrder": page.next_before_moment_order,
+            "latestMomentOrder": page.latest_moment_order,
+        }))
+    }
+
+    async fn moments_get(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: MomentsGetParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let moment = open
+            .actor
+            .get_moment(open.workspace_id, params.moment_id)
+            .await
+            .map_err(map_runtime)?;
+        Ok(match moment {
+            None => Value::Null,
+            Some(moment) => moment_json(&moment),
+        })
+    }
+
+    async fn secrets_list(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionScopedParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let secrets = open
+            .actor
+            .list_secret_files(open.workspace_id, params.version_id)
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({
+            "secrets": secrets
+                .iter()
+                .map(|stat| {
+                    json!({
+                        "path": stat.path,
+                        "byteLength": stat.byte_length,
+                        "updatedAtMs": stat.updated_at_ms,
+                        "latestMomentId": stat.latest_moment_id,
+                    })
+                })
+                .collect::<Vec<_>>()
+        }))
+    }
+
+    /// THE single authorized plaintext accessor over RPC (TS parity:
+    /// `materializeSecretFile`). The key is loaded from the workspace root
+    /// per call — the daemon holds no key custody — and a missing key with
+    /// live secret state fails closed rather than returning nothing.
+    async fn secrets_materialize(
+        &self,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionPathParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let key = dohc_engine_crypto::load_key_file(&open.root)
+            .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?;
+        let Some(key) = key else {
+            // No key file: a workspace that never minted one has no secrets;
+            // one WITH secret rows and no key is corrupt/misrestored state.
+            let has_state = open
+                .actor
+                .secret_state_exists_blocking(open.workspace_id.clone())
+                .map_err(map_runtime)?;
+            if has_state {
+                return Err(wire(ErrorCode::Internal, "secret key unavailable"));
+            }
+            return Ok(Value::Null);
+        };
+        let plaintext = open
+            .actor
+            .materialize_secret(open.workspace_id, params.version_id, params.path, key)
+            .await
+            .map_err(map_runtime)?;
+        Ok(match plaintext {
+            None => Value::Null,
+            Some(text) => json!({ "text": text }),
+        })
     }
 
     async fn ydoc_apply(
@@ -796,6 +1015,38 @@ struct VersionedTextReadParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionScopedParams {
+    version_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionPathParams {
+    version_id: String,
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MomentsListParams {
+    #[serde(default)]
+    version_id: Option<String>,
+    #[serde(default)]
+    object_id: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    before_moment_order: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MomentsGetParams {
+    moment_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct YdocApplyParams {
     version_id: String,
     object_id: String,
@@ -1007,6 +1258,29 @@ fn parse_resolution(raw: &str) -> Result<ConflictResolution, WireError> {
             "unknown conflict resolution",
         )),
     }
+}
+
+fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
+    json!({
+        "momentOrder": moment.moment_order,
+        "momentId": moment.moment_id,
+        "versionId": moment.version_id,
+        "objectId": moment.object_id,
+        "path": moment.path,
+        "recordedAtMs": moment.recorded_at_ms,
+        "operation": moment.operation.as_str(),
+        "afterContentKind": moment.after_content_kind,
+        "afterBlobSha256": moment.after_blob_sha256,
+        "afterBinarySha256": moment.after_binary_sha256,
+        "beforePresent": moment.before_present,
+        "beforeContentKind": moment.before_content_kind,
+        "beforeBlobSha256": moment.before_blob_sha256,
+        "beforeBinarySha256": moment.before_binary_sha256,
+        "beforeLatestMomentId": moment.before_latest_moment_id,
+        "metadataOrigin": moment.metadata_origin,
+        "authorJson": moment.author_json,
+        "syncRecordOnly": moment.sync_record_only,
+    })
 }
 
 fn snapshot_json(snapshot: &TextSnapshot) -> Value {

@@ -62,7 +62,7 @@ pub use merge::{
 };
 pub use normalize::NormalizedState;
 pub use records::{
-    CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
+    BinaryHead, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
     CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord,
     ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
     RollbackTextFileMutation, SnapshotContent, SnapshotView, TextSnapshot, VersionKind,
@@ -72,7 +72,7 @@ pub use secrets::{
     CaptureSecret, CaptureSecretRetire, SecretDelete, SecretDiskIntent, SecretFileStat,
     SecretFileStore, SecretMomentRecord, SecretOp, SecretWrite, SecretWriteResult,
     capture_secret_retire, delete_secret_file_keyless, derive_capture_secret_moment_id,
-    derive_capture_secret_retire_moment_id, has_secret_state,
+    derive_capture_secret_retire_moment_id, has_secret_state, list_secret_files_keyless,
 };
 pub use store::{
     CaptureManifestSeedEntry, MAX_CAPTURE_BINARY_FILE_BYTES, MAX_TEXT_BYTES,

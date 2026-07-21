@@ -131,6 +131,14 @@ pub(crate) struct SnapshotRecord {
     pub metadata_origin: String,
 }
 
+/// The binary head at a path: identity plus the blob bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryHead {
+    pub object_id: String,
+    pub sha256: String,
+    pub bytes: Vec<u8>,
+}
+
 /// Stable file-object identity, independent of any version-local path alias.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileObjectRecord {

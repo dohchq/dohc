@@ -32,11 +32,13 @@ use crate::search::{SearchResult, search_workspace};
 use dohc_engine_collab::{AppendOutcome, ContentKind, DocKey, Regime};
 use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
-    CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureManifestSeedEntry,
-    CaptureRetire, CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ResolveTextConflict,
-    ResolveTextConflictResult, SecretFileStore, SecretMomentRecord, SecretWriteResult,
-    TextConflict, TextSnapshot, VersionedTextStore, WriteResult, WriteText, capture_manifest_seed,
-    capture_secret_retire, has_secret_state, insert_text_conflict_if_absent,
+    BinaryHead, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
+    CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult, CaptureSecret,
+    CaptureSecretRetire, ListMomentsQuery, MomentPage, MomentRecord, ResolveTextConflict,
+    ResolveTextConflictResult, SecretFileStat, SecretFileStore, SecretMomentRecord,
+    SecretWriteResult, SnapshotView, TextConflict, TextSnapshot, VersionRecord, VersionedTextStore,
+    WriteResult, WriteText, capture_manifest_seed, capture_secret_retire, has_secret_state,
+    insert_text_conflict_if_absent, list_secret_files_keyless,
 };
 use dohc_engine_storage::{
     CompoundWrite, Document, EngineStore, FaultInjector, StorageError, TxnOutcome, WriteOutcome,
@@ -195,6 +197,42 @@ enum Command {
         path: String,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<TextSnapshot>, RuntimeError>>,
+    },
+    ListVersions {
+        workspace_id: String,
+        reply: oneshot::Sender<Result<Vec<VersionRecord>, RuntimeError>>,
+    },
+    ListSnapshots {
+        workspace_id: String,
+        version_id: String,
+        reply: oneshot::Sender<Result<Vec<SnapshotView>, RuntimeError>>,
+    },
+    ListMoments {
+        query: Box<ListMomentsQuery>,
+        reply: oneshot::Sender<Result<MomentPage, RuntimeError>>,
+    },
+    GetMoment {
+        workspace_id: String,
+        moment_id: String,
+        reply: oneshot::Sender<Result<Option<MomentRecord>, RuntimeError>>,
+    },
+    ReadBinary {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        reply: oneshot::Sender<Result<Option<BinaryHead>, RuntimeError>>,
+    },
+    ListSecretFiles {
+        workspace_id: String,
+        version_id: String,
+        reply: oneshot::Sender<Result<Vec<SecretFileStat>, RuntimeError>>,
+    },
+    MaterializeSecret {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        key: Box<SecretDataKey>,
+        reply: oneshot::Sender<Result<Option<String>, RuntimeError>>,
     },
     ActiveVersionId {
         workspace_id: String,
@@ -729,6 +767,127 @@ impl ActorHandle {
     /// The workspace's ACTIVE version id (falling back to main), read on the
     /// actor thread. The capture driver targets this so captures land in the
     /// version the user is actually on (TS oracle parity).
+    pub async fn list_versions(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<VersionRecord>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ListVersions {
+                workspace_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn list_snapshots(
+        &self,
+        workspace_id: String,
+        version_id: String,
+    ) -> Result<Vec<SnapshotView>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ListSnapshots {
+                workspace_id,
+                version_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn list_moments(&self, query: ListMomentsQuery) -> Result<MomentPage, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ListMoments {
+                query: Box::new(query),
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn get_moment(
+        &self,
+        workspace_id: String,
+        moment_id: String,
+    ) -> Result<Option<MomentRecord>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::GetMoment {
+                workspace_id,
+                moment_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn read_binary(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+    ) -> Result<Option<BinaryHead>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReadBinary {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn list_secret_files(
+        &self,
+        workspace_id: String,
+        version_id: String,
+    ) -> Result<Vec<SecretFileStat>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ListSecretFiles {
+                workspace_id,
+                version_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Decrypt one secret tip to UTF-8 plaintext. The KEY comes from the
+    /// caller (the daemon loads it from the workspace root), matching the
+    /// capture-secret pattern — the actor never holds key custody itself.
+    pub async fn materialize_secret(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        key: SecretDataKey,
+    ) -> Result<Option<String>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::MaterializeSecret {
+                workspace_id,
+                version_id,
+                path,
+                key: Box::new(key),
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     pub async fn active_version_id(&self, workspace_id: String) -> Result<String, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
@@ -1191,6 +1350,81 @@ fn worker_main(
             } => {
                 let outcome =
                     has_secret_state(&mut store, &workspace_id).map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ListVersions {
+                workspace_id,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .list_versions(&workspace_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ListSnapshots {
+                workspace_id,
+                version_id,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .list_snapshots(&workspace_id, &version_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ListMoments { query, reply } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .list_moments(&query)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::GetMoment {
+                workspace_id,
+                moment_id,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .get_moment(&workspace_id, &moment_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ReadBinary {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .read_binary(&workspace_id, &version_id, &path)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ListSecretFiles {
+                workspace_id,
+                version_id,
+                reply,
+            } => {
+                let outcome = list_secret_files_keyless(&store, &workspace_id, &version_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::MaterializeSecret {
+                workspace_id,
+                version_id,
+                path,
+                key,
+                reply,
+            } => {
+                let outcome = SecretFileStore::new(&mut store, &key)
+                    .materialize_secret_file(&workspace_id, &version_id, &path)
+                    .map_err(RuntimeError::from)
+                    .and_then(|plaintext| match plaintext {
+                        None => Ok(None),
+                        Some(plaintext) => plaintext.into_utf8().map(Some).map_err(|_| {
+                            RuntimeError::from(dohc_engine_domain::DomainError::StateCorrupt {
+                                reason: "secret plaintext is not utf-8",
+                            })
+                        }),
+                    });
                 let _ = reply.send(outcome);
             }
             Command::ActiveVersionId {

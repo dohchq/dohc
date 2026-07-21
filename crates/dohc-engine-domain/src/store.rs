@@ -16,7 +16,7 @@
 
 use crate::error::DomainError;
 use crate::records::{
-    CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
+    BinaryHead, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
     CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord,
     ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
     RollbackTextFileMutation, SnapshotContent, SnapshotRecord, SnapshotView, TextSnapshot,
@@ -575,6 +575,46 @@ impl<'a> VersionedTextStore<'a> {
                 return Err(DomainError::BinaryHeadNotText);
             }
             Ok(Some(snapshot_text_view(&snapshot)))
+        })
+    }
+
+    /// Read the BINARY head at `path`: the stored sha plus the blob bytes.
+    /// `Ok(None)` when the path has no head; a TEXT head is refused the same
+    /// way a binary head is refused by [`Self::read_text`] — the caller asked
+    /// the wrong question, and silently returning empty bytes would hide it.
+    pub fn read_binary(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+        path: &str,
+    ) -> Result<Option<BinaryHead>, DomainError> {
+        let path = validate_addressable_plaintext_path(path)?;
+        self.store.read_with(|conn| {
+            if !version_exists(conn, workspace_id, version_id)? {
+                return Err(DomainError::VersionNotFound);
+            }
+            let Some(object_id) = alias_object_id(conn, workspace_id, version_id, &path)? else {
+                return Ok(None);
+            };
+            let Some(snapshot) = get_snapshot(conn, workspace_id, version_id, &object_id)? else {
+                return Ok(None);
+            };
+            if snapshot.content_kind != "binary" {
+                return Err(DomainError::TextHeadNotBinary);
+            }
+            let sha256 = snapshot.binary_sha256.ok_or(DomainError::StateCorrupt {
+                reason: "binary head without a binary sha",
+            })?;
+            let bytes = dohc_engine_storage::get_binary_blob(conn, &sha256)
+                .map_err(DomainError::from)?
+                .ok_or(DomainError::StateCorrupt {
+                    reason: "binary head references a missing blob",
+                })?;
+            Ok(Some(BinaryHead {
+                object_id,
+                sha256,
+                bytes,
+            }))
         })
     }
 

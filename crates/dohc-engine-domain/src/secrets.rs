@@ -549,33 +549,7 @@ impl<'a> SecretFileStore<'a> {
         workspace_id: &str,
         version_id: &str,
     ) -> Result<Vec<SecretFileStat>, DomainError> {
-        self.store.read_with(|conn| {
-            require_version(conn, workspace_id, version_id)?;
-            let mut stmt = conn
-                .prepare_cached(
-                    "SELECT workspace_id, version_id, path, byte_length, updated_at_ms, \
-                     latest_moment_id FROM secret_files \
-                     WHERE workspace_id = ?1 AND version_id = ?2 ORDER BY path",
-                )
-                .map_err(DomainError::sql_corrupt)?;
-            let rows = stmt
-                .query_map(params![workspace_id, version_id], |row| {
-                    Ok(SecretFileStat {
-                        workspace_id: row.get(0)?,
-                        version_id: row.get(1)?,
-                        path: row.get(2)?,
-                        byte_length: row.get(3)?,
-                        updated_at_ms: row.get(4)?,
-                        latest_moment_id: row.get(5)?,
-                    })
-                })
-                .map_err(DomainError::sql_corrupt)?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row.map_err(DomainError::sql_corrupt)?);
-            }
-            Ok(out)
-        })
+        list_secret_files_keyless(self.store, workspace_id, version_id)
     }
 
     /// List secret moments, newest first, optionally scoped to a version.
@@ -1222,4 +1196,41 @@ fn map_moment_row(
             metadata_correlation_id,
         }),
     )
+}
+/// Keyless tip listing: the metadata never touches the AEAD, so a caller
+/// without the data key (the RPC surface of a workspace that has never
+/// minted one) can still enumerate. ONE query definition — the keyed store
+/// method delegates here.
+pub fn list_secret_files_keyless(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<Vec<SecretFileStat>, DomainError> {
+    store.read_with(|conn| {
+        require_version(conn, workspace_id, version_id)?;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT workspace_id, version_id, path, byte_length, updated_at_ms, \
+                 latest_moment_id FROM secret_files \
+                 WHERE workspace_id = ?1 AND version_id = ?2 ORDER BY path",
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        let rows = stmt
+            .query_map(params![workspace_id, version_id], |row| {
+                Ok(SecretFileStat {
+                    workspace_id: row.get(0)?,
+                    version_id: row.get(1)?,
+                    path: row.get(2)?,
+                    byte_length: row.get(3)?,
+                    updated_at_ms: row.get(4)?,
+                    latest_moment_id: row.get(5)?,
+                })
+            })
+            .map_err(DomainError::sql_corrupt)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(DomainError::sql_corrupt)?);
+        }
+        Ok(out)
+    })
 }
