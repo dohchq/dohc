@@ -2028,4 +2028,5 @@ next round caught. The compounding lesson became structure:
   per-string wire limit (BlobStart exists, no daemon producer).
 - SHARDS: RPC-A done (#217). RPC-B open (#218, codex-implemented,
   adversarially pre-reviewed). NEXT: RPC-C (design v2 reviewed) -> RPC-D
-  -> GATE6 -> R15 (ICE STOP).
+  and RPC-B2 (production chat follow-ups; both GATE6 deps) -> GATE6 -> R15
+  (ICE STOP).

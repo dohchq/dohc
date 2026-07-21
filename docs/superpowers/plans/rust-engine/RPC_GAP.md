@@ -102,8 +102,8 @@ under the authenticated DOP1 session; desktop-supplied identifiers are never
 trusted for access.
 
 WIRE-LIMIT OBLIGATION (found in RPC-A review): in-band content is bounded
-by the DOP1 limits (64 KiB per string, 1 MiB per frame). #217 (RPC-A, in
-review — nothing below is on main until it merges) ships
+by the DOP1 limits (64 KiB per string, 1 MiB per frame). #217 (RPC-A, MERGED
+2026-07-21 — everything below is on main) ships
 versionedBinary.read with a 48 KiB in-band cap (over-cap answers metadata +
 null body, self-describing), versionedText.list as METADATA-ONLY
 (bodies via versionedText.read), and the SAME 48 KiB in-band contract for
@@ -135,12 +135,12 @@ capture) — but parity/differential suites must expect the delta, renderer
 surfaces switching on origin must treat "ydoc" as first-class, and RPC-D
 must decide whether the daemon's write RPCs validate the closed set
 (recommended: closed set + "ydoc" as the one daemon-internal addition).
-DESKTOP IPC OBLIGATION (owned by R14 cutover wiring): the renderer
+DESKTOP IPC OBLIGATION (owned by RPC-D, whose owned_paths now include
+bridgeContract.ts — R14 is already gate-passed): the renderer
 bridge schema (apps/desktop/src/ipc/bridgeContract.ts) accepts only the
 closed 5-set today and main.ts parses engine-history responses through
 it — the first "ydoc"-origin moment crossing IPC fails schema
-validation until that contract widens. R14's wiring checklist must
-include it.
+validation until that contract widens. RPC-D's review must include it.
 
 R15 IS A DESTRUCTIVE CUTOVER GATE, not a parity note: the reset wipes
 TS-written rows in Ice's dogfood workspace. Policy (R15/R15-REHEARSE
