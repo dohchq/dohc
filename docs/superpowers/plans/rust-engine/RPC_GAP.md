@@ -21,7 +21,7 @@ read surface with #217, both merged 2026-07-21).
 | readBinaryFile | PARTIAL in RPC-A (#217): versionedBinary.read (one-turn in-band cap, over-cap = metadata + inbandLimitBytes) — CONTRACT DELTA: TS returns null when the path is absent, text-headed, or blob-missing; the Rust RPC refuses a text head with InvalidParams. RPC-D decides (recommend: match the oracle's null-on-text so non-binary fallbacks keep working). | domain `store.rs read_binary_inband` |
 | rename/delete/rollback text | MISSING | domain `store.rs:203/216/353` |
 | compare/merge versions | MISSING | domain `merge.rs` |
-| getActiveVersion | MISSING | actor `active_version_id` is ID-ONLY; TS returns a full `VersionRecord \| null`. RPC-A ships the id (callers join via versions.list); a full-record passthrough is RPC-D work |
+| getActiveVersion | PARTIAL in RPC-A (#217): versions.active ships the ID ONLY (null on a nothing-versioned store); TS returns a full `VersionRecord \| null` — the full-record passthrough is RPC-D work (rpc-a-versions-active-id-only / versions-get-active-version) |
 | readTextFile binary-head metadata | PARTIAL | TS readTextFile's snapshot exposes binary heads (contentKind/sha256/byteLength) in the SAME call; Rust versionedText.read refuses binary heads and callers must pivot to versionedBinary.read. Single-call snapshot introspection parity is RPC-D work |
 | set/ensure active version | MISSING | domain exists |
 | listVersions / createNamedVersion / forkVersion | listVersions SHIPPED in RPC-A (#217, versions.list); createNamedVersion/forkVersion remain MISSING (RPC-D) | domain `store.rs list_versions`/`create_named_version`, `secrets.rs` fork section |
