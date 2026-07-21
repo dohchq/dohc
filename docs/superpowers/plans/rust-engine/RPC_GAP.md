@@ -20,6 +20,7 @@ conflicts.list/open/resolve · search.query · watcher.status · capture.flush
 | rename/delete/rollback text | MISSING | domain `store.rs:203/216/353` |
 | compare/merge versions | MISSING | domain `merge.rs` |
 | getActiveVersion | MISSING | actor `active_version_id` is ID-ONLY; TS returns a full `VersionRecord \| null`. RPC-A ships the id (callers join via versions.list); a full-record passthrough is RPC-D work |
+| readTextFile binary-head metadata | PARTIAL | TS readTextFile's snapshot exposes binary heads (contentKind/sha256/byteLength) in the SAME call; Rust versionedText.read refuses binary heads and callers must pivot to versionedBinary.read. Single-call snapshot introspection parity is RPC-D work |
 | set/ensure active version | MISSING | domain exists |
 | listVersions / createNamedVersion / forkVersion | listVersions SHIPPED in RPC-A (#217, versions.list); createNamedVersion/forkVersion remain MISSING (RPC-D) | domain `store.rs:593/823`, `secrets.rs:645` |
 | listMoments / getMoment | SHIPPED in RPC-A (#217, merged): moments.list/moments.get hydrate before/after TEXT plus actual byte lengths under the one-turn in-band cap (over-cap bodies come back as metadata + null text + inbandLimitBytes). What is NOT ported is the oracle's payload-provenance columns (payload_before_*/payload_after_* and before-snapshot identity) — the Rust schema lacks them; see the SCHEMA OBLIGATION below (pre-R15 migration candidate). RPC-D owes nothing here beyond that migration. | domain `store.rs:616/783` |
