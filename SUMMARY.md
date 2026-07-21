@@ -118,3 +118,12 @@ Per the task constraint, no Cargo command was run. The changed Rust files were p
 - `WorkspaceSupervisor::open` now returns whether it created the actor or attached to an existing live one. Workspace open runs dispatch recovery only for the fresh actor, and an RPC regression opens one root through two services and proves the first service's running claim survives the second attach.
 
 Round-8 regressions cover padded bookmark lifecycle/list lookups, padded feed visibility/`matchedBy`/mark-seen behavior, control-bearing message IDs on both write paths, the 512-byte replicated-ID ceiling, zero-based imported opening-message order, and the two-service reclaim boundary. Per the task constraint, no Cargo build, check, or test command was run; changed Rust files were parsed/formatted directly with `rustfmt --edition 2024`, followed by `rustfmt --check` and `git diff --check`.
+
+## Review round 9
+
+- ensureGeneral/ensureAgent channel ids run the same replicated-id
+  normalization create_channel applies before persisting/journaling
+  (well-known channels journal chat.channel.create too).
+- list_follows normalizes the owner identity like the write path — a
+  padded owner lookup resolves the trimmed rows instead of answering an
+  empty list.

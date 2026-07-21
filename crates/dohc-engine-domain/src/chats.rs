@@ -1207,14 +1207,13 @@ impl<'a> LinkedChatStore<'a> {
             "invalid-channel-name",
             "workspace_id must not be empty",
         )?;
-        non_empty(
-            channel_id,
-            "invalid-channel-name",
-            "channel_id must not be empty",
-        )?;
+        // Same replicated-id bounds create_channel applies: a well-known
+        // channel journals chat.channel.create too, and a control-bearing or
+        // over-long id would wedge every receiving replica.
+        let channel_id = normalize_replicated_chat_id(channel_id, "channel id is invalid")?;
         let slug = channel_slug_for_name(name);
         let ws = workspace_id.to_owned();
-        let cid = channel_id.to_owned();
+        let cid = channel_id.clone();
         let slug_c = slug.clone();
         let name_c = name.to_owned();
         let wire = wire_id.to_owned();
@@ -2051,6 +2050,10 @@ impl<'a> LinkedChatStore<'a> {
         workspace_id: &str,
         owner_user_id: &str,
     ) -> Result<Vec<ChatFollow>, DomainError> {
+        // The write path stores TRIMMED owners: a padded lookup must resolve
+        // the same identity or the caller sees a silently empty list.
+        let owner_user_id = normalize_feed_identity(owner_user_id, "follow owner")?;
+        let owner_user_id = owner_user_id.as_str();
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(
