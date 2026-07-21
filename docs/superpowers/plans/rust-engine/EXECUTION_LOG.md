@@ -1894,12 +1894,17 @@ next round caught. The compounding lesson became structure:
 
 - Gate: full-workspace PASS on every pushed head (13 runs). Final:
   - 2026-07-20T18:31:28.392Z | run-rust-checks | win32/x64 | PASS | fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS cargo-deny=PASS cargo-audit=SKIP
-- SOAK (cutoverBlocking tier, GATE6 artifact; runner lands with E #215):
-  full 30-minute RELEASE-build run against the composed daemon —
+- SOAK (cutoverBlocking tier; runner lands with E #215): the first full
+  30-minute run —
   - 2026-07-20T18:33:44Z | soak-cutoverBlocking | windows/x86_64 | PASS | cycles=4914 crashes=819 durationSecs=1804 rssSlopeB/s=0.0 handles 109->109 threads 38->38
-  (4,914 scenario cycles incl. 819 kill/restart loops; zero RSS trend;
-  handles/threads exactly at baseline. Sample series preserved:
-  C:/w/soak-evidence-cutoverBlocking-2026-07-20.json.)
+  — is WITHDRAWN as leak evidence: review found the crash cadence cleared
+  the sample series every ~6 cycles, so the 0.0 slope was fit over a
+  seconds-long tail and no process was soaked long enough for a trend
+  (scenario-correctness results stand: 819 crash/restart recoveries all
+  settled; handles/threads at baseline). The runner was restructured
+  (two phases; tri-state trend verdict that cannot pass vacuously) and the
+  corrected 30-minute release run's verdict + committed sample series
+  replace this entry below when it lands.
 - Next: E (#215, in review: capture RPCs + the TS-vs-Rust differential —
   10 scenarios green + tamper-verified — + the soak runner + RPC_GAP.md),
   then RPC-A per RPC_GAP.md -> GATE6 -> R15 (ICE checkpoint — STOP).
