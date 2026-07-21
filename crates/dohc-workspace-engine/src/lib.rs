@@ -991,12 +991,22 @@ impl EngineService {
             ),
         )
         .await?;
-        // Blocking filesystem work stays off the tokio worker.
+        // Blocking filesystem work stays off the tokio worker — and the
+        // WAIT for it is cancellation/deadline-raced like every other
+        // await on this surface (the blocking task finishes on its own;
+        // only the caller's wait abandons).
         let key_root = open.root.clone();
-        let key = tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_root))
-            .await
-            .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?
-            .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?;
+        let key_task =
+            tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_root));
+        let key = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("secrets.materialize (key load)"));
+            }
+            loaded = key_task => loaded
+                .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?
+                .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?,
+        };
         let Some(key) = key else {
             // Path and version already validated above (gate + stat).
             // The state check: a workspace that never minted a key has no
