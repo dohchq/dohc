@@ -81,8 +81,10 @@ const MAX_FEED_CURSOR_MESSAGE_ID_BYTES: usize = (MAX_FEED_CURSOR_LEN / 4) * 3 - 
 /// Required dispatch ids are trimmed before storage and bounded like the TS
 /// store's JavaScript strings (UTF-16 code units).
 const MAX_DISPATCH_ID_UTF16_UNITS: usize = 512;
-/// Replicated chat identifiers use the sync payload validator's UTF-16 bound.
+/// Replicated chat identifiers use the sync payload validator's UTF-16 and
+/// UTF-8 bounds.
 const MAX_REPLICATED_CHAT_ID_UTF16_UNITS: usize = 256;
+const MAX_REPLICATED_CHAT_ID_UTF8_BYTES: usize = 512;
 /// Dispatch metadata uses the TS store's 16,384 UTF-16-code-unit text bound.
 const MAX_DISPATCH_METADATA_UTF16_UNITS: usize = 16_384;
 /// Sentinel message id for the synthetic per-thread header FTS row.
@@ -720,11 +722,11 @@ fn non_empty(value: &str, code: &'static str, reason: &'static str) -> Result<()
 
 /// Message ids can become the second coordinate in an encoded personal-feed
 /// cursor. Keep caller-supplied ids within the exact cap enforced by
-/// [`decode_feed_cursor`], in addition to the existing empty/NUL floor, so an
+/// [`decode_feed_cursor`], in addition to the empty/ASCII-control floor, so an
 /// emitted page cursor is always accepted by the next page request.
 fn validate_message_id(message_id: &str) -> Result<(), DomainError> {
     if message_id.is_empty()
-        || message_id.contains('\0')
+        || has_projection_control_char(message_id)
         || message_id.chars().count() > MAX_FEED_CURSOR_MESSAGE_ID_CHARS
         || message_id.len() > MAX_FEED_CURSOR_MESSAGE_ID_BYTES
         || encode_feed_cursor(&FeedCursorValue {
@@ -766,6 +768,7 @@ fn normalize_replicated_chat_id(value: &str, reason: &'static str) -> Result<Str
     let normalized = value.trim_matches(is_js_trim_ws);
     if normalized.is_empty()
         || normalized.encode_utf16().count() > MAX_REPLICATED_CHAT_ID_UTF16_UNITS
+        || normalized.len() > MAX_REPLICATED_CHAT_ID_UTF8_BYTES
         || has_projection_control_char(normalized)
     {
         Err(DomainError::InvalidInput { reason })
@@ -2177,11 +2180,7 @@ impl<'a> LinkedChatStore<'a> {
         limit: Option<i64>,
         cursor: Option<&str>,
     ) -> Result<ChatFeedPage, DomainError> {
-        non_empty(
-            owner_user_id,
-            "invalid-follow-target",
-            "Feed owner is required.",
-        )?;
+        let owner_user_id = normalize_feed_identity(owner_user_id, "Feed owner")?;
         let limit = limit.unwrap_or(FEED_LIMIT_DEFAULT);
         if !(1..=FEED_LIMIT_MAX).contains(&limit) {
             return Err(DomainError::chat(
@@ -2292,7 +2291,7 @@ impl<'a> LinkedChatStore<'a> {
                     if active_follow_exists(
                         conn,
                         workspace_id,
-                        owner_user_id,
+                        &owner_user_id,
                         kind,
                         author_user_id,
                     )? {
@@ -2302,7 +2301,7 @@ impl<'a> LinkedChatStore<'a> {
                 if active_follow_exists(
                     conn,
                     workspace_id,
-                    owner_user_id,
+                    &owner_user_id,
                     FollowTargetKind::Thread,
                     &thread.thread_id,
                 )? {
@@ -2315,7 +2314,7 @@ impl<'a> LinkedChatStore<'a> {
                     && active_follow_exists(
                         conn,
                         workspace_id,
-                        owner_user_id,
+                        &owner_user_id,
                         FollowTargetKind::Channel,
                         &wire_id,
                     )?
@@ -2511,6 +2510,7 @@ impl<'a> LinkedChatStore<'a> {
         workspace_id: &str,
         owner_user_id: &str,
     ) -> Result<Vec<ChatBookmark>, DomainError> {
+        let owner_user_id = normalize_feed_identity(owner_user_id, "Bookmark owner")?;
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(&format!(
@@ -2538,18 +2538,14 @@ impl<'a> LinkedChatStore<'a> {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<ChatBookmark, DomainError> {
-        non_empty(
-            owner_user_id,
-            "invalid-bookmark-target",
-            "Bookmark owner is required.",
-        )?;
+        let owner_user_id = normalize_feed_identity(owner_user_id, "Bookmark owner")?;
         non_empty(
             bookmark_id,
             "invalid-bookmark-target",
             "Bookmark id is required.",
         )?;
         let ws = workspace_id.to_owned();
-        let owner = owner_user_id.to_owned();
+        let owner = owner_user_id;
         let bid = bookmark_id.to_owned();
         let outcome = self.store.write_with(faults, |tx| {
             let current = require_bookmark(tx, &ws, &owner, &bid)?;
@@ -2631,7 +2627,7 @@ impl<'a> LinkedChatStore<'a> {
         faults: &dyn FaultInjector,
     ) -> Result<ChatBookmarkTransition, DomainError> {
         let ws = workspace_id.to_owned();
-        let owner = owner_user_id.to_owned();
+        let owner = normalize_feed_identity(owner_user_id, "Bookmark owner")?;
         let bid = bookmark_id.to_owned();
         let failure_reason = failure_reason.map(str::to_owned);
         let outcome = self.store.write_with(faults, |tx| {
@@ -2686,11 +2682,7 @@ impl<'a> LinkedChatStore<'a> {
         projection_path: Option<&str>,
         faults: &dyn FaultInjector,
     ) -> Result<ChatBookmarkTransition, DomainError> {
-        non_empty(
-            owner_user_id,
-            "invalid-bookmark-target",
-            "Bookmark owner is required.",
-        )?;
+        let owner_user_id = normalize_feed_identity(owner_user_id, "Bookmark owner")?;
         non_empty(
             bookmark_id,
             "invalid-bookmark-target",
@@ -2731,7 +2723,7 @@ impl<'a> LinkedChatStore<'a> {
             }
         };
         let ws = workspace_id.to_owned();
-        let owner = owner_user_id.to_owned();
+        let owner = owner_user_id;
         let bid = bookmark_id.to_owned();
         let outcome = self.store.write_with(faults, |tx| {
             let current = require_bookmark(tx, &ws, &owner, &bid)?;
@@ -3074,10 +3066,10 @@ impl<'a> LinkedChatStore<'a> {
     /// fresh worker can claim it) when `attempt_count < max_attempts`, else leaves
     /// it terminally `failed`. Returns the trigger ids requeued to `pending`.
     ///
-    /// Because the engine is the single writer, ANY `running` row observed at
-    /// call time belongs to a process that is no longer executing (a live run
-    /// holds the writer and would not be calling reclaim); calling this on
-    /// startup is the safe, deterministic recovery point.
+    /// Because the engine is the single writer, this sweep is safe only when a
+    /// freshly-created actor establishes the startup recovery boundary. An
+    /// additional service may attach to an existing live actor while its worker
+    /// is still executing and must not invoke this method.
     pub fn reclaim_running_dispatches(
         &mut self,
         workspace_id: &str,

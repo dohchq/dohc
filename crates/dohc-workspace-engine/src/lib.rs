@@ -404,10 +404,11 @@ impl EngineService {
         let supervisor = self.supervisor;
         let actor_path = db_path.clone();
         let now_ms = now_ms()?;
-        let actor = tokio::task::spawn_blocking(move || supervisor.open(&actor_path, now_ms))
+        let actor_open = tokio::task::spawn_blocking(move || supervisor.open(&actor_path, now_ms))
             .await
             .map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?
             .map_err(map_runtime)?;
+        let actor = actor_open.actor;
         let binding = actor.bind_shadow_clone(validated.token).await;
         let binding_error = match binding {
             Ok(true) => None,
@@ -447,14 +448,16 @@ impl EngineService {
             supervisor: self.supervisor,
             db_path: Some(db_path.clone()),
         };
-        actor
-            .chat_dispatch_reclaim_running(
-                params.workspace_id.clone(),
-                CHAT_DISPATCH_MAX_ATTEMPTS,
-                now_ms,
-            )
-            .await
-            .map_err(map_runtime)?;
+        if actor_open.created_actor {
+            actor
+                .chat_dispatch_reclaim_running(
+                    params.workspace_id.clone(),
+                    CHAT_DISPATCH_MAX_ATTEMPTS,
+                    now_ms,
+                )
+                .await
+                .map_err(map_runtime)?;
+        }
         capture.wait_for_baseline().await;
         open_guard.disarm();
         lock(&self.handles).insert(

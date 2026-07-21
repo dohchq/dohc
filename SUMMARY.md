@@ -107,3 +107,14 @@ Per the task constraint, no Cargo build, check, or test command was run. All cha
 - Added focused in-process RPC coverage for unknown versus real-unmapped channels, trimmed persisted/journaled ids, control/length refusal, normalized bookmark deduplication, and normalized dispatch ledger values.
 
 Per the task constraint, no Cargo command was run. The changed Rust files were parsed and formatted directly with `rustfmt --edition 2024`; final verification also used direct `rustfmt --check` and `git diff --check`.
+
+## Review round 8
+
+- Bookmark owner identities are now normalized on list, archive, ready, failed, and stale paths before any bookmark lookup, matching `saveBookmark`; padded-owner lifecycle calls therefore resolve the trimmed row.
+- Thread-start and send-message IDs now reject every ASCII control character, matching the sync identifier validator instead of allowing non-NUL controls into the local journal.
+- Personal-feed listing now normalizes its owner before the visibility query, hydrated `matchedBy` follow checks, head/read-state lookup, and cursor construction. `markSeen` continues through the same normalizer, so padded feed reads match follows stored under the trimmed identity.
+- The TypeScript oracle has no order/opening field in `ChatMessageAppendPayload` (`packages/workspace-contracts/src/engine.ts:394`). Its importer branch (`packages/workspace-engine/src/linkedChatStore.ts:4442`) computes every imported append through `nextMessageOrder` (`linkedChatStore.ts:4491`), whose SQL is `COALESCE(MAX(message_order), -1) + 1` (`linkedChatStore.ts:2050`). The Rust importer now matches that actual zero-based order semantic by defaulting an empty thread's maximum to `-1`, so a journaled opening append imports at order 0.
+- Replicated channel/thread IDs now enforce both the existing 256 UTF-16-unit cap and the sync layer's 512 UTF-8-byte cap; a 200-character three-byte ID is refused locally before it can be journaled.
+- `WorkspaceSupervisor::open` now returns whether it created the actor or attached to an existing live one. Workspace open runs dispatch recovery only for the fresh actor, and an RPC regression opens one root through two services and proves the first service's running claim survives the second attach.
+
+Round-8 regressions cover padded bookmark lifecycle/list lookups, padded feed visibility/`matchedBy`/mark-seen behavior, control-bearing message IDs on both write paths, the 512-byte replicated-ID ceiling, zero-based imported opening-message order, and the two-service reclaim boundary. Per the task constraint, no Cargo build, check, or test command was run; changed Rust files were parsed/formatted directly with `rustfmt --edition 2024`, followed by `rustfmt --check` and `git diff --check`.

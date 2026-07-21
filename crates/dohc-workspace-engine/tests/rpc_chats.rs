@@ -105,9 +105,13 @@ async fn review_round_7_normalizes_persisted_chat_identities() {
     )
     .await;
     assert_eq!(channel["channelId"], json!("channel-round-7"));
-    for (index, invalid_channel_id) in [format!("bad{}channel", '\u{0001}'), "x".repeat(257)]
-        .into_iter()
-        .enumerate()
+    for (index, invalid_channel_id) in [
+        format!("bad{}channel", '\u{0001}'),
+        "x".repeat(257),
+        "界".repeat(200),
+    ]
+    .into_iter()
+    .enumerate()
     {
         let invalid_name = format!("Invalid channel {index}");
         let error = call_error(
@@ -299,6 +303,106 @@ async fn review_round_7_normalizes_persisted_chat_identities() {
         .expect("thread replication payload");
     let payload: Value = serde_json::from_str(&payload).expect("valid replication payload");
     assert_eq!(payload["threadId"], json!("thread-round-7"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn second_service_open_does_not_reclaim_a_live_dispatch() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let first_transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let second_transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let first_handle = open_workspace(&first_transport, &scratch, 1, "rpc-chat-round-8").await;
+    let mut id = 10;
+
+    call(
+        &first_transport,
+        &first_handle,
+        &mut id,
+        "chats.channels.ensureAgent",
+        json!({ "channelId": "agent-round-8", "nowMs": 10 }),
+    )
+    .await;
+    call(
+        &first_transport,
+        &first_handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "agent-round-8",
+            "threadId": "thread-round-8",
+            "messageId": "message-round-8",
+            "authorKind": "human",
+            "authorDisplayName": "Alice",
+            "body": "@agent keep running",
+            "nowMs": 20,
+        }),
+    )
+    .await;
+    call(
+        &first_transport,
+        &first_handle,
+        &mut id,
+        "chats.dispatch.enqueue",
+        json!({
+            "triggerMessageId": "message-round-8",
+            "threadId": "thread-round-8",
+            "nowMs": 21,
+        }),
+    )
+    .await;
+    let running = call(
+        &first_transport,
+        &first_handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "runId": "run-round-8", "nowMs": 22 }),
+    )
+    .await;
+    assert_eq!(running["dispatch"]["state"], json!("running"));
+
+    let second_handle = open_workspace(&second_transport, &scratch, 100, "rpc-chat-round-8").await;
+    let competing = call(
+        &second_transport,
+        &second_handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "runId": "competing-round-8", "nowMs": 23 }),
+    )
+    .await;
+    assert!(competing.is_null(), "the original live claim must survive");
+    let retried = call(
+        &first_transport,
+        &first_handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "runId": "run-round-8", "nowMs": 24 }),
+    )
+    .await;
+    assert_eq!(retried, running);
+
+    call(
+        &first_transport,
+        &first_handle,
+        &mut id,
+        "chats.dispatch.complete",
+        json!({ "runId": "run-round-8", "exitCode": 0, "nowMs": 25 }),
+    )
+    .await;
+    call(
+        &second_transport,
+        &second_handle,
+        &mut id,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+    call(
+        &first_transport,
+        &first_handle,
+        &mut id,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

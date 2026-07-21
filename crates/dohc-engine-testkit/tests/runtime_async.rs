@@ -29,7 +29,7 @@ async fn async_write_read_round_trip() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let sup = WorkspaceSupervisor::new();
-    let handle = sup.open(&db, 1).expect("open");
+    let handle = sup.open(&db, 1).expect("open").actor;
 
     let outcome = handle
         .write_async(unit(1), Arc::new(NoFaults))
@@ -61,7 +61,7 @@ async fn close_returns_promptly_under_sustained_submission() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let sup = Arc::new(WorkspaceSupervisor::new());
-    let handle = sup.open(&db, 1).expect("open");
+    let handle = sup.open(&db, 1).expect("open").actor;
 
     // Many producers hammer write_async; when the bounded queue is full they
     // park in the fair send() queue, exactly the condition that could starve a
@@ -120,7 +120,7 @@ async fn cancellation_stops_between_units_leaving_consistent_state() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let sup = WorkspaceSupervisor::new();
-    let handle = sup.open(&db, 1).expect("open");
+    let handle = sup.open(&db, 1).expect("open").actor;
 
     let units: Vec<CompoundWrite> = (0..5).map(unit).collect();
     let gate = GateFaults::at(FaultPoint::StorageBeforePersist);
@@ -163,7 +163,7 @@ async fn run_units_counts_after_commit_crash_as_committed() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let sup = WorkspaceSupervisor::new();
-    let handle = sup.open(&db, 1).expect("open");
+    let handle = sup.open(&db, 1).expect("open").actor;
 
     // Crash after unit 0 commits durably but before its ack.
     let faults: Arc<dyn FaultInjector> =
@@ -190,7 +190,7 @@ async fn deadline_trips_without_tearing_a_unit() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let sup = WorkspaceSupervisor::new();
-    let handle = sup.open(&db, 1).expect("open");
+    let handle = sup.open(&db, 1).expect("open").actor;
 
     let units: Vec<CompoundWrite> = (0..3).map(unit).collect();
     let gate = GateFaults::at(FaultPoint::StorageBeforePersist);

@@ -41,7 +41,7 @@ fn actor_lifecycle_open_ready_closed() {
     let db = scratch.engine_db_path().expect("db path");
     let sup = WorkspaceSupervisor::new();
 
-    let handle = sup.open(&db, 1).expect("open");
+    let handle = sup.open(&db, 1).expect("open").actor;
     assert_eq!(handle.lifecycle(), LifecycleState::Ready);
 
     let outcome = handle
@@ -77,8 +77,8 @@ fn lexical_aliases_converge_on_one_actor() {
     let engine_dir = db.parent().expect("engine dir");
     let aliased = engine_dir.join(".").join("engine.db");
 
-    let a = sup.open(&db, 1).expect("open a");
-    let b = sup.open(&aliased, 1).expect("open b");
+    let a = sup.open(&db, 1).expect("open a").actor;
+    let b = sup.open(&aliased, 1).expect("open b").actor;
 
     assert_eq!(a.identity(), b.identity(), "aliases must share identity");
     assert_eq!(sup.actor_count(), 1, "only one actor / one writer");
@@ -111,8 +111,8 @@ fn symlink_or_junction_alias_converges_on_one_actor() {
     let aliased_db = link_dir.join("engine.db");
 
     let sup = WorkspaceSupervisor::new();
-    let real = sup.open(&db, 1).expect("open real");
-    let via_link = sup.open(&aliased_db, 1).expect("open via link");
+    let real = sup.open(&db, 1).expect("open real").actor;
+    let via_link = sup.open(&aliased_db, 1).expect("open via link").actor;
 
     assert_eq!(
         real.identity(),
@@ -138,7 +138,7 @@ fn restart_bumps_generation_and_preserves_state() {
     let db = scratch.engine_db_path().expect("db path");
     let sup = WorkspaceSupervisor::new();
 
-    let handle = sup.open(&db, 1).expect("open");
+    let handle = sup.open(&db, 1).expect("open").actor;
     handle
         .write(write("r1", "keep", "durable", 1), Arc::new(NoFaults))
         .expect("write");
@@ -170,7 +170,7 @@ fn close_releases_the_connection() {
     let db = scratch.engine_db_path().expect("db path");
     let sup = WorkspaceSupervisor::new();
 
-    let handle = sup.open(&db, 1).expect("open");
+    let handle = sup.open(&db, 1).expect("open").actor;
     handle
         .write(write("r1", "d", "x", 1), Arc::new(NoFaults))
         .expect("write");
@@ -210,7 +210,7 @@ fn dropping_supervisor_releases_all_actors() {
 
     {
         let sup = WorkspaceSupervisor::new();
-        let handle = sup.open(&db, 1).expect("open");
+        let handle = sup.open(&db, 1).expect("open").actor;
         handle
             .write(write("r1", "d", "x", 1), Arc::new(NoFaults))
             .expect("write");
@@ -231,14 +231,14 @@ fn hardlink_converges_on_one_actor() {
     let sup = WorkspaceSupervisor::new();
 
     // Open (creates + initializes the db), then hard-link a second name to it.
-    let a = sup.open(&db, 1).expect("open real");
+    let a = sup.open(&db, 1).expect("open real").actor;
     a.write(write("r1", "k", "value", 1), Arc::new(NoFaults))
         .expect("write");
 
     let linked = db.parent().expect("engine dir").join("engine-hardlink.db");
     make_hardlink(&db, &linked).expect("hard link");
 
-    let b = sup.open(&linked, 1).expect("open hardlink");
+    let b = sup.open(&linked, 1).expect("open hardlink").actor;
     assert_eq!(a.identity(), b.identity(), "hard links share file identity");
     assert_eq!(sup.actor_count(), 1, "one actor / one writer");
     let doc = b.read("k").expect("read").expect("present");
@@ -252,7 +252,7 @@ fn case_alias_converges_on_one_actor() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db path");
     let sup = WorkspaceSupervisor::new();
-    let a = sup.open(&db, 1).expect("open");
+    let a = sup.open(&db, 1).expect("open").actor;
 
     // Upper-case the file name; on a case-insensitive volume this is the same
     // file, on a case-sensitive one it does not exist.
@@ -261,7 +261,7 @@ fn case_alias_converges_on_one_actor() {
         eprintln!("SKIP: case-sensitive filesystem — case-alias convergence N/A");
         return;
     }
-    let b = sup.open(&upper, 1).expect("open case alias");
+    let b = sup.open(&upper, 1).expect("open case alias").actor;
     assert_eq!(
         a.identity(),
         b.identity(),
@@ -277,7 +277,7 @@ fn file_symlink_converges_on_one_actor() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db path");
     let sup = WorkspaceSupervisor::new();
-    let a = sup.open(&db, 1).expect("open real");
+    let a = sup.open(&db, 1).expect("open real").actor;
 
     let link = db.parent().expect("dir").join("engine-symlink.db");
     match try_make_file_symlink(&db, &link) {
@@ -289,7 +289,7 @@ fn file_symlink_converges_on_one_actor() {
         Err(err) => panic!("symlink creation failed: {err}"),
     }
 
-    let b = sup.open(&link, 1).expect("open via symlink");
+    let b = sup.open(&link, 1).expect("open via symlink").actor;
     assert_eq!(
         a.identity(),
         b.identity(),
@@ -305,7 +305,7 @@ fn worker_panic_publishes_closed() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db path");
     let sup = WorkspaceSupervisor::new();
-    let handle = sup.open(&db, 1).expect("open");
+    let handle = sup.open(&db, 1).expect("open").actor;
 
     let panic_faults: Arc<dyn FaultInjector> = PanicFaults::at(FaultPoint::StorageBeforePersist);
     let err = handle
@@ -325,7 +325,7 @@ fn restart_after_panicked_predecessor_continues_generation() {
     let db = scratch.engine_db_path().expect("db path");
     let sup = WorkspaceSupervisor::new();
 
-    let handle = sup.open(&db, 1).expect("open");
+    let handle = sup.open(&db, 1).expect("open").actor;
     assert_eq!(sup.generation_of(&db).expect("gen"), Some(1));
 
     let panic_faults: Arc<dyn FaultInjector> = PanicFaults::at(FaultPoint::StorageBeforePersist);
@@ -358,7 +358,7 @@ fn full_command_queue_reports_overloaded() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db path");
     let sup = WorkspaceSupervisor::new();
-    let handle = sup.open(&db, 1).expect("open");
+    let handle = sup.open(&db, 1).expect("open").actor;
 
     // Wedge the worker: it dequeues this write and parks inside the gate.
     let gate = GateFaults::at(FaultPoint::StorageBeforePersist);
@@ -403,7 +403,7 @@ fn concurrent_opens_share_one_actor() {
         let sup = Arc::clone(&sup);
         let db = db.clone();
         joins.push(std::thread::spawn(move || {
-            let handle = sup.open(&db, 1).expect("concurrent open");
+            let handle = sup.open(&db, 1).expect("concurrent open").actor;
             handle
                 .write(
                     write(&format!("r-{t}"), &format!("d-{t}"), "v", 1),

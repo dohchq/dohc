@@ -838,7 +838,7 @@ mod tests {
         supervisor: &WorkspaceSupervisor,
     ) -> (PathBuf, StoreCaptureSink) {
         let db = scratch.engine_db_path().expect("engine db path");
-        let actor = supervisor.open(&db, 1).expect("open actor");
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
         (
             db,
             StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 10, None),
@@ -1199,7 +1199,7 @@ mod tests {
             b"[[rule]]\npath = \"private/**\"\ntracked = false\n",
         );
         // The policy snapshot is read at construction: a fresh sink sees it.
-        let actor = supervisor.open(&db, 1).expect("reopen actor");
+        let actor = supervisor.open(&db, 1).expect("reopen actor").actor;
         let mut sink =
             StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 20, None);
         assert_eq!(
@@ -1595,7 +1595,7 @@ mod tests {
         // A backup restored without the key file / accidental deletion.
         std::fs::remove_file(scratch.path().join(".dohc/engine/secret.key")).expect("lose key");
 
-        let actor = supervisor.open(&db, 1).expect("reopen actor");
+        let actor = supervisor.open(&db, 1).expect("reopen actor").actor;
         let mut fresh =
             StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, scratch.path(), 30, None);
         write_file(scratch.path(), ".env", b"TOKEN=changed");

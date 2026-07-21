@@ -468,6 +468,7 @@ fn feed_cursor_message_id_cap_applies_to_start_and_send() {
 
     let too_long = "x".repeat(257);
     let too_many_bytes = "😀".repeat(200);
+    let control_id = "m\n1";
     let invalid_start = start_thread(
         "gen-1",
         "too-long",
@@ -494,6 +495,21 @@ fn feed_cursor_message_id_cap_applies_to_start_and_send() {
     assert_eq!(
         chats
             .start_channel_thread(&invalid_byte_heavy_start, &NO_FAULTS)
+            .unwrap_err()
+            .code(),
+        "invalid-input"
+    );
+    let invalid_control_start = start_thread(
+        "gen-1",
+        "control-id",
+        control_id,
+        "opening",
+        ChatActorKind::Human,
+        20,
+    );
+    assert_eq!(
+        chats
+            .start_channel_thread(&invalid_control_start, &NO_FAULTS)
             .unwrap_err()
             .code(),
         "invalid-input"
@@ -534,6 +550,14 @@ fn feed_cursor_message_id_cap_applies_to_start_and_send() {
     assert_eq!(
         chats
             .send_message(&invalid_byte_heavy_send, &NO_FAULTS)
+            .unwrap_err()
+            .code(),
+        "invalid-input"
+    );
+    let invalid_control_send = send_msg("valid", control_id, None, "reply", 22);
+    assert_eq!(
+        chats
+            .send_message(&invalid_control_send, &NO_FAULTS)
             .unwrap_err()
             .code(),
         "invalid-input"
@@ -1252,6 +1276,48 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
     );
 }
 
+#[test]
+fn personal_feed_reads_normalize_owner_before_follow_matching() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("general");
+    chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t1", "m1", "opening", ChatActorKind::Human, 20),
+            &NO_FAULTS,
+        )
+        .expect("start");
+    chats
+        .set_follow(
+            &SetFollow {
+                workspace_id: WS.to_owned(),
+                owner_user_id: "viewer".to_owned(),
+                replication_owner_user_id: None,
+                target_kind: FollowTargetKind::Thread,
+                target_id: "t1".to_owned(),
+                state: FollowState::Following,
+                now_ms: 21,
+            },
+            &NO_FAULTS,
+        )
+        .expect("follow");
+
+    let page = chats
+        .list_personal_feed(WS, "  viewer  ", Some(10), None)
+        .expect("padded-owner feed");
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].matched_by, vec![FollowTargetKind::Thread]);
+    let head = page.head_cursor.expect("feed head");
+    let seen = chats
+        .mark_feed_seen(WS, "  viewer  ", None, &head, 22, &NO_FAULTS)
+        .expect("padded-owner mark seen");
+    assert_eq!(seen.owner_user_id, "viewer");
+}
+
 // ---------------------------------------------- bookmark generation-CAS
 
 #[test]
@@ -1300,6 +1366,88 @@ fn bookmark_generation_cas_stale_worker_loses() {
         .expect("fresh ready");
     assert!(fresh.applied, "current generation marks ready");
     assert_eq!(fresh.bookmark.projection_state, "ready");
+}
+
+#[test]
+fn bookmark_lifecycle_lookups_normalize_owner() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("general");
+    chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t1", "m1", "opening", ChatActorKind::Human, 20),
+            &NO_FAULTS,
+        )
+        .expect("start");
+    let save = |now_ms| SaveBookmark {
+        workspace_id: WS.to_owned(),
+        owner_user_id: "alice".to_owned(),
+        target_kind: BookmarkTargetKind::Thread,
+        target_id: "t1".to_owned(),
+        mode: BookmarkMode::Live,
+        destination_path: "bookmarks/alice.md".to_owned(),
+        now_ms,
+    };
+
+    let first = chats.save_bookmark(&save(30), &NO_FAULTS).expect("save");
+    let archived = chats
+        .archive_bookmark(WS, "  alice  ", &first.bookmark_id, 31, &NO_FAULTS)
+        .expect("padded-owner archive");
+    assert_eq!(archived.state, "archived");
+    assert_eq!(
+        chats
+            .list_bookmarks(WS, "  alice  ")
+            .expect("padded-owner list")
+            .len(),
+        1
+    );
+    let ready = chats
+        .mark_bookmark_ready(
+            WS,
+            "  alice  ",
+            &first.bookmark_id,
+            2,
+            32,
+            None,
+            None,
+            &NO_FAULTS,
+        )
+        .expect("padded-owner ready");
+    assert!(ready.applied);
+
+    let third = chats
+        .save_bookmark(&save(33), &NO_FAULTS)
+        .expect("reactivate");
+    let failed = chats
+        .mark_bookmark_failed(
+            WS,
+            "  alice  ",
+            &first.bookmark_id,
+            third.generation,
+            "projection failed",
+            34,
+            &NO_FAULTS,
+        )
+        .expect("padded-owner failed");
+    assert!(failed.applied);
+
+    let fourth = chats.save_bookmark(&save(35), &NO_FAULTS).expect("resave");
+    let stale = chats
+        .mark_bookmark_stale(
+            WS,
+            "  alice  ",
+            &first.bookmark_id,
+            fourth.generation,
+            None,
+            36,
+            &NO_FAULTS,
+        )
+        .expect("padded-owner stale");
+    assert!(stale.applied);
 }
 
 #[test]
