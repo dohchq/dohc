@@ -475,10 +475,45 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         active["versionId"].is_null(),
         "an empty workspace has no active version yet"
     );
+    // With NO versions at all, materialize refuses like every sibling
+    // read — the error surface must not depend on whether a key exists.
+    let no_version = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id + 3,
+                "secrets.materialize",
+                Some(fresh_handle.clone()),
+                json!({ "versionId": "main", "path": ".env" }),
+            ),
+        )
+        .await;
+    assert!(
+        no_version.is_err(),
+        "an unknown version refuses even keyless-and-stateless"
+    );
+    // Once a version exists (text write; no key ever minted), keyless +
+    // stateless materialize answers null.
+    call(
+        &transport,
+        &fresh_handle,
+        id + 4,
+        "versionedText.write",
+        json!({
+            "versionId": "main",
+            "objectId": "fresh-object",
+            "path": "fresh.md",
+            "text": "fresh",
+            "momentId": "fresh-moment",
+            "metadataOrigin": "api",
+            "nowMs": 7
+        }),
+    )
+    .await;
     let no_state = call(
         &transport,
         &fresh_handle,
-        id + 3,
+        id + 5,
         "secrets.materialize",
         json!({ "versionId": "main", "path": ".env" }),
     )
@@ -487,7 +522,7 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     transport
         .call(
             RequestContext::unbounded(),
-            request(id + 4, "workspace.close", Some(fresh_handle), json!({})),
+            request(id + 6, "workspace.close", Some(fresh_handle), json!({})),
         )
         .await
         .expect("fresh close");

@@ -51,6 +51,21 @@ const MAX_INBAND_CONTENT_BYTES: usize = 48 * 1024;
 /// pass this, well under the 1 MiB frame limit.
 const MOMENTS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
 
+/// How many leading rows fit a byte budget (at least one always ships —
+/// every string is wire-capped, so a single row fits by construction).
+fn byte_budget_cut<T>(rows: &[T], size_of: impl Fn(&T) -> usize, budget: usize) -> usize {
+    let mut included = 0usize;
+    let mut remaining = budget as i64;
+    for row in rows {
+        remaining -= size_of(row) as i64;
+        if included > 0 && remaining < 0 {
+            break;
+        }
+        included += 1;
+    }
+    included
+}
+
 #[derive(Clone)]
 struct OpenWorkspace {
     root: PathBuf,
@@ -602,10 +617,11 @@ impl EngineService {
             ),
         )
         .await?;
-        // An unknown version must REFUSE, never read as empty — but only
-        // the FIRST page can tell (a later page past the last path is
-        // legitimately empty).
-        if rows.is_empty() && params.after_path.is_none() {
+        // An unknown version must REFUSE, never read as empty — on EVERY
+        // page: a stale cursor plus a typo'd version would otherwise read
+        // as "exhausted". A legitimately-empty tail page for a real
+        // version pays one extra membership read; correctness wins.
+        if rows.is_empty() {
             let versions = Self::read_under_ctx(
                 &cancellation,
                 "versionedText.list",
@@ -621,7 +637,23 @@ impl EngineService {
         }
         let has_more = rows.len() > limit;
         rows.truncate(limit);
-        let next_after_path = has_more
+        // Metadata rows can still be string-heavy (paths/origins are
+        // wire-legal up to 64 KiB): the byte budget cuts the page under
+        // the frame limit; the cursor resumes at the cut.
+        let byte_cut = byte_budget_cut(
+            &rows,
+            |row| {
+                160 + row.path.len()
+                    + row.object_id.len()
+                    + row.latest_moment_id.len()
+                    + row.metadata_origin.len()
+                    + row.binary_sha256.as_deref().map_or(0, str::len)
+            },
+            MOMENTS_PAGE_BYTE_BUDGET,
+        );
+        let byte_truncated = byte_cut < rows.len();
+        rows.truncate(byte_cut);
+        let next_after_path = (has_more || byte_truncated)
             .then(|| rows.last().map(|row| row.path.clone()))
             .flatten();
         Ok(json!({
@@ -740,7 +772,9 @@ impl EngineService {
         Ok(json!({
             "moments": moments.iter().map(moment_json).collect::<Vec<_>>(),
             "nextBeforeMomentOrder": next_before,
-            "latestMomentOrder": page.latest_moment_order,
+            // The TS contract's numeric sentinel: -1 for an empty timeline,
+            // never null (numeric comparisons drive polling/cursor state).
+            "latestMomentOrder": page.latest_moment_order.unwrap_or(-1),
         }))
     }
 
@@ -781,8 +815,18 @@ impl EngineService {
                 .list_secret_files(open.workspace_id, params.version_id),
         )
         .await?;
+        // Metadata-only, but paths are wire-legal strings: the byte
+        // budget keeps a many-secret workspace under the frame limit.
+        // No cursor on this family yet — truncated says so honestly
+        // (RPC_GAP follow-up alongside the chat list families).
+        let included = byte_budget_cut(
+            &secrets,
+            |stat| 140 + stat.path.len() + stat.latest_moment_id.len(),
+            MOMENTS_PAGE_BYTE_BUDGET,
+        );
+        let truncated = included < secrets.len();
         Ok(json!({
-            "secrets": secrets
+            "secrets": secrets[..included]
                 .iter()
                 .map(|stat| {
                     json!({
@@ -792,7 +836,8 @@ impl EngineService {
                         "latestMomentId": stat.latest_moment_id,
                     })
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            "truncated": truncated,
         }))
     }
 
@@ -822,6 +867,21 @@ impl EngineService {
             .await?;
             if has_state {
                 return Err(wire(ErrorCode::Internal, "secret key unavailable"));
+            }
+            // Even keyless-and-stateless, an invalid version must error the
+            // same way it does once state exists — a caller must never see
+            // the error surface CHANGE because a key appeared.
+            let versions = Self::read_under_ctx(
+                &cancellation,
+                "secrets.materialize",
+                open.actor.list_versions(open.workspace_id.clone()),
+            )
+            .await?;
+            if !versions
+                .iter()
+                .any(|version| version.version_id == params.version_id)
+            {
+                return Err(wire(ErrorCode::InvalidParams, "version not found"));
             }
             return Ok(Value::Null);
         };
