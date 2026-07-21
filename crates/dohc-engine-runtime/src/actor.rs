@@ -137,6 +137,9 @@ pub struct YdocOpenState {
     pub content_kind: ContentKind,
     pub regime: Regime,
     pub initial_update: Vec<u8>,
+    /// The text head's blob sha at open time (None for an absent head) —
+    /// the session's settle preimage expectation until its first settle.
+    pub head_blob_sha256: Option<String>,
     pub lineage_existing: bool,
     pub seed_markdown: Option<String>,
 }
@@ -367,6 +370,7 @@ enum Command {
         key: DocKey,
         path: String,
         content_kind: ContentKind,
+        expected_head_sha: Option<String>,
         session_id: String,
         self_writes: Arc<dyn SelfWriteRecorder>,
         now_ms: i64,
@@ -1404,6 +1408,7 @@ impl ActorHandle {
         key: DocKey,
         path: String,
         content_kind: ContentKind,
+        expected_head_sha: Option<String>,
         session_id: String,
         self_writes: Arc<dyn SelfWriteRecorder>,
         now_ms: i64,
@@ -1417,6 +1422,7 @@ impl ActorHandle {
                 key,
                 path,
                 content_kind,
+                expected_head_sha,
                 session_id,
                 self_writes,
                 now_ms,
@@ -2071,6 +2077,7 @@ fn worker_main(
                 key,
                 path,
                 content_kind,
+                expected_head_sha,
                 session_id,
                 self_writes,
                 now_ms,
@@ -2084,6 +2091,7 @@ fn worker_main(
                     &key,
                     &path,
                     content_kind,
+                    expected_head_sha,
                     &session_id,
                     self_writes.as_ref(),
                     now_ms,
@@ -2268,6 +2276,7 @@ fn ydoc_open_state_on_store(
         &NoFaults,
     )?;
     let head = VersionedTextStore::new(store).read_text(workspace_id, version_id, path)?;
+    let head_sha = head.as_ref().map(|snapshot| snapshot.blob_sha256.clone());
     let object_id = head.as_ref().map_or_else(
         || derive_capture_object_id(workspace_id, version_id, path),
         |snapshot| snapshot.object_id.clone(),
@@ -2320,6 +2329,7 @@ fn ydoc_open_state_on_store(
         }
     };
     Ok(YdocOpenState {
+        head_blob_sha256: head_sha,
         key,
         content_kind,
         regime,
@@ -2418,6 +2428,7 @@ fn ydoc_settle_on_store(
     key: &DocKey,
     path: &str,
     content_kind: ContentKind,
+    expected_head_sha: Option<String>,
     session_id: &str,
     self_writes: &dyn SelfWriteRecorder,
     now_ms: i64,
@@ -2479,6 +2490,10 @@ fn ydoc_settle_on_store(
         // prune the CRDT while the disk still holds the old bytes.
         let pending_job_id = format!("ydoc-mat_{}", current.latest_moment_id);
         if let Some(job) = store.load_materialization_job(&pending_job_id)? {
+            // Suppression BEFORE the replace, exactly like the fresh path —
+            // the watcher can observe the replayed bytes the instant they
+            // land; retract on a conflicted job.
+            self_writes.record(&key.workspace_id, &current.path, &current.blob_sha256);
             match materialize_one(
                 store,
                 root_dir,
@@ -2489,10 +2504,9 @@ fn ydoc_settle_on_store(
                 now_ms,
                 faults,
             )? {
-                JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {
-                    self_writes.record(&key.workspace_id, &current.path, &current.blob_sha256);
-                }
+                JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
                 JobOutcome::Conflict | JobOutcome::Superseded => {
+                    self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);
                     return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
                 }
                 JobOutcome::Crashed(_) => return Err(RuntimeError::OperationCrashed),
@@ -2519,6 +2533,18 @@ fn ydoc_settle_on_store(
         if let Some(snapshot) = current.snapshot.as_ref()
             && snapshot.object_id != key.object_id
         {
+            return Err(dohc_engine_domain::DomainError::ConflictStaleTarget);
+        }
+        // SAME-object divergence: capture (an external disk edit) or another
+        // writer may have advanced this object's head since the session's
+        // expectation (the open-time head, or its own last settle). Settling
+        // anyway would overwrite those newer bytes with a projection the
+        // user never saw — refuse; the client resyncs/merges.
+        let current_sha = current
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.blob_sha256.clone());
+        if current_sha != expected_head_sha {
             return Err(dohc_engine_domain::DomainError::ConflictStaleTarget);
         }
         let preimage = current

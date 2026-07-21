@@ -687,7 +687,12 @@ export class YdocAdapterSession {
     }
     const update = base64ToBytes(encoded);
     Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
-    this.adapter.resetEventBaseline(this.sessionId);
+    // The event baseline is PRESERVED across resync: transport event seqs
+    // stay monotone within a session generation, and clearing the position
+    // would let the first post-resync gap pass undetected (the next event
+    // would be accepted as a fresh baseline). Positions recorded during the
+    // stale window keep the continuity; a genuine gap after this resync
+    // marks stale again and converges through one more pass.
     this.staleError = null;
     if (this.droppedWhileStale) {
       // An update arrived after the engine produced this resync state but
@@ -899,9 +904,6 @@ export class YdocLiveAdapter {
     this.eventPositions.delete(sessionId);
   }
 
-  resetEventBaseline(sessionId: string): void {
-    this.eventPositions.delete(sessionId);
-  }
 
   dispose(): void {
     this.unsubscribeEvents();

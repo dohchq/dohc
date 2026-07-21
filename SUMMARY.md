@@ -285,3 +285,24 @@ the raw result alongside the existing decoder.
   client decode instead of dying at the DOP1 framer post-write — C1
   cannot round-trip such docs either way (the seed refusal blocks
   opening them); recorded as RPC-D streaming scope.
+
+## Codex review round 6 (PR #220)
+
+- P1 same-object divergence: the settle transaction refuses
+  ConflictStaleTarget when the object's CURRENT head sha differs from the
+  session's expectation (open-time head sha, replaced by its own last
+  settle) — capture ingests or another writer advancing the same object
+  can no longer be silently overwritten by a stale projection.
+- P1 legacy append serialization: ydoc.apply now holds session_ops across
+  its lease check + append — it can no longer interleave between
+  ydoc.open's lease acquisition and post-lease read.
+- P2 crashed base claims: a TxnOutcome::Crashed from claim_base returns
+  Crashed WITHOUT acking — redelivery replays the claim instead of
+  permanently skipping the base coordinate.
+- P2 event baseline preserved across resync: transport event seqs stay
+  monotone within a generation, so the position survives resync and the
+  first post-resync gap is DETECTED (the reset had made the next event a
+  fresh baseline); the dead resetEventBaseline method is removed.
+- P2 no-op-path suppression ordering: the pending-job replay records the
+  suppression identity BEFORE materialize_one and retracts it on a
+  conflicted job — same discipline as the fresh settle path.

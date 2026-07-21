@@ -255,10 +255,25 @@ pub fn apply_ydoc_envelope(
                 reason: "ydoc.update base bootstrap failed",
             })?;
         let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind);
-        dohc_engine_collab::claim_base(store, &key, kind, &bytes, faults, envelope.recorded_at_ms)
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc.update base could not be claimed",
-            })?;
+        match dohc_engine_collab::claim_base(
+            store,
+            &key,
+            kind,
+            &bytes,
+            faults,
+            envelope.recorded_at_ms,
+        )
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "ydoc.update base could not be claimed",
+        })? {
+            TxnOutcome::Committed(_) => {}
+            // A crashed claim rolled the marker/snapshot back: acking now
+            // would permanently skip the base coordinate and wedge the doc.
+            // Leave it unacked; redelivery replays the claim.
+            TxnOutcome::Crashed { .. } => {
+                return Ok(ApplyOutcome::Crashed { committed: false });
+            }
+        }
         let outcome = crate::apply_envelope_with(store, envelope, faults, |_tx, _op| {
             Ok(YdocApplyResult {
                 deferred: false,

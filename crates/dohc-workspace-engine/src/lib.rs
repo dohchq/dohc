@@ -117,6 +117,9 @@ struct YdocSession {
     lineage_absent: bool,
     first_update_pending: bool,
     last_settled_sha: Option<String>,
+    /// The head sha observed at open — the settle preimage expectation
+    /// until the session's first settle replaces it.
+    open_head_sha: Option<String>,
     _lease: Lease,
 }
 
@@ -128,6 +131,8 @@ struct YdocSessionView {
     regime: Regime,
     lineage_absent: bool,
     first_update_pending: bool,
+    last_settled_sha: Option<String>,
+    open_head_sha: Option<String>,
 }
 
 impl OpenWorkspace {
@@ -1165,6 +1170,10 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: YdocApplyParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
+        // Serialize with the session surface: the lease check below is only
+        // meaningful if no ydoc.open can interleave between it and the
+        // append (open holds this same lock across lease + state read).
+        let _serial = self.session_ops.lock().await;
         let update = base64::engine::general_purpose::STANDARD
             .decode(params.update_base64)
             .map_err(|_| wire(ErrorCode::InvalidParams, "invalid update encoding"))?;
@@ -1311,6 +1320,7 @@ impl EngineService {
                 lineage_absent: !state.lineage_existing,
                 first_update_pending: !state.lineage_existing,
                 last_settled_sha: None,
+                open_head_sha: state.head_blob_sha256,
                 _lease: lease,
             },
         );
@@ -1415,6 +1425,10 @@ impl EngineService {
                 session.key,
                 session.path.clone(),
                 session.content_kind,
+                session
+                    .last_settled_sha
+                    .clone()
+                    .or_else(|| session.open_head_sha.clone()),
                 session_id.to_owned(),
                 Arc::new(self.self_writes.clone()),
                 now_ms()?,
@@ -1575,6 +1589,8 @@ impl EngineService {
                 regime: session.regime,
                 lineage_absent: session.lineage_absent,
                 first_update_pending: session.first_update_pending,
+                last_settled_sha: session.last_settled_sha.clone(),
+                open_head_sha: session.open_head_sha.clone(),
             },
         ))
     }
