@@ -1903,8 +1903,17 @@ next round caught. The compounding lesson became structure:
   (scenario-correctness results stand: 819 crash/restart recoveries all
   settled; handles/threads at baseline). The runner was restructured
   (two phases; tri-state trend verdict that cannot pass vacuously) and the
-  corrected 30-minute release run's verdict + committed sample series
-  replace this entry below when it lands.
+  CORRECTED 30-minute release run replaces it as the GATE6 artifact:
+  - 2026-07-21T05:06:40Z | soak-cutoverBlocking | windows/x86_64 | PASS | cycles=7771 crashes=83 durationSecs=1805 rssSlopeB/s=12497.7 handles 110->112 threads 38->37
+  Sample series COMMITTED:
+  tools/rust-engine-program/soak-evidence/2026-07-21-cutoverBlocking.json
+  (281 samples over 1791s, trendEvaluated:true). Curve shape, stated
+  honestly: 26.0 KiB/s first half -> 4.9 KiB/s second half (last quarter
+  9.3 KiB/s) — strongly decelerating, i.e. predominantly cache/WAL warmup,
+  47 MB absolute RSS at end. The residual second-half slope (~5 KiB/s under
+  sustained max-rate load) is FLAGGED for dogfood-period monitoring, not
+  alarming: real usage is orders of magnitude quieter than the soak's
+  ~4.3 cycles/sec.
 - Next: E (#215, in review: capture RPCs + the TS-vs-Rust differential —
   10 scenarios green + tamper-verified — + the soak runner + RPC_GAP.md),
   then RPC-A per RPC_GAP.md -> GATE6 -> R15 (ICE checkpoint — STOP).
