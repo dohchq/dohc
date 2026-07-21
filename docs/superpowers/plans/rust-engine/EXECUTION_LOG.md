@@ -1844,3 +1844,151 @@ Ice decision at GATE6.
 - Next: D (bounded watcher-restart backoff + escalation on the seam C built),
   then E (status/flush RPCs + the TS capture differential), full-soak,
   RPC-growth, GATE6, R15 (ICE checkpoint — STOP).
+
+
+## 2026-07-21 — Files-composition D merged (#214): watcher supervision — and the status became ONE WORD
+
+Capture now SUPERVISES its files layer instead of blindly retrying: an
+escalating backoff (500ms -> 8s cap) between rebuilds for every failure mode
+(failed start, dead watch, dead files actor, persistently failing
+reconcile), a TERMINAL report after 8 consecutive failures (~30s), and a 30s
+recovery probe so a root that comes back is picked up without a
+close/reopen. A policy-edit DEBOUNCE (a new fingerprint must hold one tick)
+stops an agent rewriting files.toml at 2Hz from driving a full rescan every
+500ms; an UNREADABLE files.toml makes ownership UNKNOWN — capture holds
+(fail, stay dirty, retry) rather than widening over user exclusions or
+retiring heads the policy may still track (malformed stays WS-F floor-only —
+that split is by DiagnosticReason). Recovery from an unknown-policy window
+re-offers everything that was held, even when the recovered bytes equal the
+layer's fingerprint, and holds observed only inside the apply window arm the
+same trigger deterministically (the sink reports them through its channel).
+
+DELIBERATE DEVIATION from the R14 sketch, argued in the PR: no escalation to
+WorkspaceSupervisor::restart. A store-actor restart cannot fix a dead OS
+watch and would drop in-flight RPC work for a healthy RPC surface;
+escalation is a SIGNAL (terminal via watcher.status) for the product layer
+— which OWNS the remaining obligation at cutover: surface a persistent
+warning while terminal (capture must never appear active over a dead
+watch), preserve the dirty workspace state, and offer recovery
+(close/reopen) driven by watcher.status.
+
+THE REVIEW STORY (12 rounds; CodeRabbit APPROVED, Codex clean at r12 after
+SEVEN consecutive rounds of real findings, plus 4 independent adversarial
+Claude reviews): nearly every fix round's own fixes contained defects the
+next round caught. The compounding lesson became structure:
+
+- Tests were repeatedly TRUE-BY-CONSTRUCTION (asserting on the tracker while
+  the defect lived in the loop; a fake whose fidelity gap hid an infinite
+  rebuild). The loop is now generic over a DriverEnv seam and the tests
+  drive the REAL loop under paused virtual time, asserting what it actually
+  WAITS on — with mutation evidence: every defect-restoring mutation kills
+  at least one test (several previously survived the whole suite).
+- The running&&terminal contradiction survived FOUR rounds of store-order
+  fixes because writer-side ordering can never stop a READER from sampling
+  across a two-atomic transition. DriverStatus is now ONE AtomicU8 bitfield
+  with a snapshot() API: reads are consistent snapshots, transitions are
+  single stores, and the whole ordering dance is deleted. Multi-flag
+  consumers MUST use the snapshot (per-flag getters are single-flag only).
+- Also fixed on the way: converged-with-quarantine read as health (the
+  controller parks persistently failing paths and stops self-forcing scans,
+  so "nothing dirty" is not "recovered" — FilesStats now exposes the
+  quarantine), a failed over-cap retire that was invisible and unretried,
+  and a pre-existing gate flake (migration tempdirs keyed on pid+clock;
+  Windows clock granularity let parallel tests share one engine.db).
+
+- Gate: full-workspace PASS on every pushed head (13 runs). Final:
+  - 2026-07-20T18:31:28.392Z | run-rust-checks | win32/x64 | PASS | fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS cargo-deny=PASS cargo-audit=SKIP
+- SOAK (cutoverBlocking tier; runner lands with E #215): the first full
+  30-minute run —
+  - 2026-07-20T18:33:44Z | soak-cutoverBlocking | windows/x86_64 | PASS | cycles=4914 crashes=819 durationSecs=1804 rssSlopeB/s=0.0 handles 109->109 threads 38->38
+  — is WITHDRAWN as leak evidence: review found the crash cadence cleared
+  the sample series every ~6 cycles, so the 0.0 slope was fit over a
+  seconds-long tail and no process was soaked long enough for a trend
+  (scenario-correctness results stand: 819 crash/restart recoveries all
+  settled; handles/threads at baseline). The runner was restructured
+  (two phases; tri-state trend verdict that cannot pass vacuously), and
+  after #215's nine review rounds hardened it further (recorded
+  tolerances, unmeasuredAssertions in-artifact, exit-status-checked
+  cleanShutdown, bounded requests, scenarios that PROVE what they count),
+  the run was REPEATED on the settled runner — then again after the
+  assertion KEYS were renamed to say what they check
+  (handlesWithinRecordedSlack / threadsWithinRecordedSlack /
+  rssSlopeWithinThreshold — a reviewer reading the booleans must never
+  infer an exact-baseline or zero-slope claim the tolerances block would
+  contradict). The GATE6 artifact:
+  - 2026-07-21T12:44:01Z | soak-cutoverBlocking | windows/x86_64 | PASS | cycles=5564 crashes=83 durationSecs=1803 rssSlopeB/s=13183.3 handles 105->107 threads 38->37
+  Sample series COMMITTED:
+  tools/rust-engine-program/soak-evidence/2026-07-21-cutoverBlocking.json
+  (293 samples over ~1795s, trendEvaluated:true, rssDisposition:PASS,
+  cleanShutdown:true, 83/83 crash cycles CAPTURE-PROVEN via exact-content
+  probes, cancellations observed and counted, switch overlaps tallied,
+  unmeasuredAssertions named in the artifact). FIVE independent
+  30-minute runs measured the same decelerating warmup shape
+  (12.5 / 13.5 / 13.0 / 13.7 / 13.2 KiB/s whole-run slopes; interim
+  artifacts are superseded formats, not withdrawn results). GATE6 disposition, stated
+  precisely: scenario correctness + handles/threads baseline + clean
+  shutdown = PASS; MEMORY = PASS-WITH-FLAG (slope 13.0 KiB/s against the
+  20 KiB/s threshold, warmup-shaped and reproducible), conditional on
+  dogfood-period monitoring — NOT an unconditional leak-freedom claim.
+  Real usage is orders of magnitude quieter than the soak's ~2.8
+  cycles/sec.
+- Next: E (#215, in review: capture RPCs + the TS-vs-Rust differential —
+  10 scenarios green + tamper-verified — + the soak runner + RPC_GAP.md),
+  then RPC-A per RPC_GAP.md -> GATE6 -> R15 (ICE checkpoint — STOP).
+
+## 2026-07-21 — Files-composition E merged (#215): capture RPCs, the differential, the soak runner
+
+- E completes FCOMP (merged 10:11Z as 126d79eb; squash). The shard:
+  `watcher.status` + `capture.flush` RPCs (the determinism seam), the
+  TS-vs-Rust capture DIFFERENTIAL (10 scenarios, goldens committed,
+  tamper-verified — corrupt either side and the compare fails), shadow-scope
+  acceptance for the E surface, and the cutoverBlocking SOAK RUNNER (GATE6's
+  evidence instrument).
+- The flush contract, hardened across the rounds: drives to QUIESCENCE
+  (MAX_FLUSH_CYCLES bound), TickIo::Cancelled distinct from Converged
+  (teardown races answer settled:false), flush-polling can neither defeat
+  the restart backoff nor starve the rebuild (persistent sleep_until
+  deadline; paused-time mutation test with a 3–5 start-attempt window),
+  settled is REFUSED over a non-empty quarantine (share-locked-file E2E,
+  mutation-verified) and over a mid-debounce files.toml edit (PolicyChangedIdle
+  paused-time test, mutation-verified), and capture.flush honors
+  cancellation AND deadlines (OperationCancellation arms its token from
+  ctx.deadline; DEADLINE_EXCEEDED vs CANCELLED split preserved for
+  embedded callers).
+- The runner's evidence is honest BY CONSTRUCTION: recorded tolerances,
+  tri-state rssDisposition AND the tri-state
+  assertions.rssSlopeWithinThreshold (null when unevaluated; the key was
+  later renamed from noMonotonicRssSlope to state its actual check), unmeasuredAssertions named IN the artifact, cleanShutdown
+  requires a successful exit status, cyclesCompleted counts phase-2
+  workload only, the final RSS sample joins the fit, per-request 60s and
+  handshake 30s bounds with pending-drain on daemon death, scenarios that
+  PROVE what they count (storm/crash probes read back exact content;
+  switch overlap tallied separately; cancellations observed and counted;
+  the cancel-storm recovery probe reads back a per-cycle seeded write —
+  the strict probe exposed that the old .ok()'d read on an empty
+  workspace had been proving nothing), cross-platform sampling
+  (win32 / linux /proc / macos ps+lsof, loud panic elsewhere), and exit
+  codes CI can trust (only PASS, or a REQUESTED --quick smoke's
+  PASS-SCENARIOS-ONLY, exit 0; hard-cap and a cut-short crash prelude
+  degrade the verdict).
+- THE REVIEW STORY (9 fix rounds): Codex posted real findings on six
+  consecutive heads (flush-cancel contract; masked non-zero daemon exits,
+  reader-death hangs, unbounded awaits, env leak, config-vs-measured gap;
+  flush-polling backoff bypass — whose NAIVE fix would have livelocked the
+  rebuild; scenario-proof gaps; probe null-reads, deadline plumbing,
+  policy-debounce settle) and came back clean on the 9th. CodeRabbit
+  APPROVED at r3 and posted two later actionables (quick-run exit code;
+  the quarantined-flush E2E), both landed. A 3-minute --quick smoke ran
+  before EVERY runner-affecting push and caught three of my own fix bugs
+  pre-push (a DOP1 64 KiB string-limit trip, a consumed-oneshot
+  double-await, and the nothing-proving recovery read). RPC_GAP.md moved
+  wholly to this PR (#216) mid-review — a stale draft on #215 would have
+  conflicted at merge.
+- Gate (merge head): 2026-07-21T09:59:06.362Z | run-rust-checks |
+  win32/x64 | PASS | fmt --check=PASS clippy -D warnings=PASS
+  build --workspace=PASS test --workspace=PASS cargo-deny=PASS
+  cargo-audit=SKIP
+- SHARDS: FCOMP row -> E done. NEXT: RPC-A (rebased onto the merged main,
+  in review) -> RPC-B -> RPC-C (design v2 adversarially reviewed) ->
+  RPC-D per RPC_GAP.md, then GATE6 packet -> macOS evidence -> R15 (ICE
+  checkpoint — STOP).

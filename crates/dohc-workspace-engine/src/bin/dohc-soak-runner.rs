@@ -958,11 +958,13 @@ async fn main() {
         "final": { "rss": rss_end, "handles": handles_end, "threads": threads_end },
         "rssSlopeBytesPerSec": slope,
         "assertions": {
-            "handlesReturnToBaseline": handles_ok,
-            "threadsReturnToBaseline": threads_ok,
+            // The keys SAY what they CHECK: within the recorded slack —
+            // never "exactly baseline", which no Windows run can hold.
+            "handlesWithinRecordedSlack": handles_ok,
+            "threadsWithinRecordedSlack": threads_ok,
             // Tri-state: null when the trend was not evaluated, so a
             // scenarios-only artifact can never read as leak evidence.
-            "noMonotonicRssSlope": if trend_evaluated {
+            "rssSlopeWithinThreshold": if trend_evaluated {
                 json!(slope <= MAX_RSS_SLOPE_BYTES_PER_SEC)
             } else {
                 json!(null)
