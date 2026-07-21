@@ -124,6 +124,18 @@ normalization, so disguises cannot bypass it). Moot for data post-R15
 (the reset wipes TS-written rows); differential/parity suites must expect
 it.
 
+CROSS-ENGINE DELTA (RPC-C, recorded 2026-07-22): daemon Y.Doc settles
+mint moments with metadata_origin "ydoc"; the TS oracle's ydocEngineDriver
+settles with "local-file" (ydocEngineDriver.ts:920) because TS's origin
+contract is the closed 5-set {api, local-file, restore, sync, unknown}
+(versionedTextStore.ts:2195-2201 — "ydoc" would be invalid-metadata
+there). The Rust text path takes origin as an opaque string, so "ydoc" is
+deliberate richer provenance (a settle is distinguishable from a disk
+capture) — but parity/differential suites must expect the delta, renderer
+surfaces switching on origin must treat "ydoc" as first-class, and RPC-D
+must decide whether the daemon's write RPCs validate the closed set
+(recommended: closed set + "ydoc" as the one daemon-internal addition).
+
 R15 IS A DESTRUCTIVE CUTOVER GATE, not a parity note: the reset wipes
 TS-written rows in Ice's dogfood workspace. Policy (R15/R15-REHEARSE
 shards): full pre-reset backup of the TS engine state, a rehearsed
