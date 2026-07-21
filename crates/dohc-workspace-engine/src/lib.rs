@@ -183,7 +183,16 @@ impl EngineService {
             next_handle: std::sync::atomic::AtomicU64::new(1),
             sessions: Mutex::new(HashMap::new()),
             session_ops: tokio::sync::Mutex::new(()),
-            leases: LeaseRegistry::new(),
+            leases: {
+                // ONE process-wide registry: the supervisor lets multiple
+                // EngineServices open the same workspace root, and per-service
+                // registries would hand two transports concurrent live
+                // sessions on one DocKey with no mutual exclusion. DocKeys are
+                // workspace-scoped, so a global set is collision-safe.
+                static GLOBAL_LEASES: std::sync::LazyLock<LeaseRegistry> =
+                    std::sync::LazyLock::new(LeaseRegistry::new);
+                GLOBAL_LEASES.clone()
+            },
             next_session: std::sync::atomic::AtomicU64::new(1),
             self_writes: SelfWriteSuppression::default(),
         }
@@ -1161,6 +1170,13 @@ impl EngineService {
             .map_err(|_| wire(ErrorCode::InvalidParams, "invalid update encoding"))?;
         let key = DocKey::new(open.workspace_id, params.version_id, params.object_id)
             .map_err(|_| wire(ErrorCode::InvalidParams, "invalid document coordinates"))?;
+        // A live session's lease is single-writer: the legacy append path
+        // must not advance the durable CRDT behind an open editor (no
+        // remoteUpdate delivery, no forced resync). Same refusal shape as a
+        // second ydoc.open.
+        if self.leases.is_held(&key) {
+            return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
+        }
         let cancellation = OperationCancellation::new(ctx);
         let content_kind = match params.content_kind.as_str() {
             "plaintext" => ContentKind::Plaintext,
@@ -1287,6 +1303,7 @@ impl EngineService {
             .actor
             .ydoc_record_update(
                 session.key,
+                session.path,
                 session.content_kind,
                 session.regime,
                 update,
@@ -1431,8 +1448,12 @@ impl EngineService {
             // Richdoc settle is a C1 refusal on the EXPLICIT ydoc.settle RPC;
             // a default close must not inherit that error — it skips the
             // markdown settle and the close below persists the closed CRDT
-            // state instead (nothing is lost, nothing is projected).
+            // state instead (nothing is lost, nothing is projected). An
+            // untouched absent-lineage session (opened, never seeded) has
+            // nothing to settle either: defaulting to settle there would
+            // refuse NoMarker and strand the session/lease.
             session.content_kind != ContentKind::Richdoc
+                && !(session.lineage_absent && session.first_update_pending)
         };
         if params.settle.unwrap_or(default_settle) {
             self.ydoc_settle_inner(
@@ -1444,12 +1465,17 @@ impl EngineService {
             .await?;
         }
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+        // The close command carries a FRESH token: once the settle above has
+        // materialized, honoring a caller cancel here would leave the
+        // session/lease held, and the retried close would re-settle over the
+        // already-settled content (the fingerprint's previous-moment input
+        // changed) — duplicate moments for one close.
         open.actor
             .ydoc_close_session(
                 session.key,
                 now_ms()?,
                 Arc::new(NoFaults),
-                cancellation.token(),
+                CancellationToken::new(),
             )
             .await
             .map_err(map_runtime)?;

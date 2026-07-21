@@ -12,6 +12,7 @@ description = "CAL-1/CAL-2 calibration slice: the workspace actor that owns the 
 fault-injection = ["dohc-engine-storage/fault-injection"]
 
 [dependencies]
+serde_json = "1"
 dohc-engine-storage = { path = "../dohc-engine-storage" }
 dohc-engine-crypto = { path = "../dohc-engine-crypto" }
 dohc-engine-domain = { path = "../dohc-engine-domain" }

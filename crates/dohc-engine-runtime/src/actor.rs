@@ -156,6 +156,10 @@ pub struct YdocSettlement {
 /// protocol layer regaining control.
 pub trait SelfWriteRecorder: Send + Sync {
     fn record(&self, workspace_id: &str, path: &str, sha256: &str);
+    /// Remove a previously recorded identity — the compensation for a settle
+    /// whose materialization conflicted (the file was never replaced, so the
+    /// entry must not survive to suppress a genuine capture).
+    fn retract(&self, workspace_id: &str, path: &str, sha256: &str);
 }
 
 enum Command {
@@ -346,6 +350,7 @@ enum Command {
     },
     YdocRecordUpdate {
         key: DocKey,
+        path: String,
         content_kind: ContentKind,
         regime: Regime,
         update: Vec<u8>,
@@ -1358,6 +1363,7 @@ impl ActorHandle {
     pub async fn ydoc_record_update(
         &self,
         key: DocKey,
+        path: String,
         content_kind: ContentKind,
         regime: Regime,
         update: Vec<u8>,
@@ -1371,6 +1377,7 @@ impl ActorHandle {
         self.tx
             .send(Command::YdocRecordUpdate {
                 key,
+                path,
                 content_kind,
                 regime,
                 update,
@@ -2027,6 +2034,7 @@ fn worker_main(
             }
             Command::YdocRecordUpdate {
                 key,
+                path,
                 content_kind,
                 regime,
                 update,
@@ -2040,6 +2048,7 @@ fn worker_main(
                 let outcome = ydoc_record_update_on_store(
                     &mut store,
                     &key,
+                    &path,
                     content_kind,
                     regime,
                     &update,
@@ -2217,6 +2226,14 @@ fn ydoc_apply_on_store(
     }
 }
 
+/// Durable Y.Doc state exists when the lineage holds updates OR snapshots.
+/// A pruned local-only marker (both zero) has NO durable state: opens report
+/// it absent and settles refuse it (an empty projection must never clobber
+/// the artifact).
+fn ydoc_marker_has_durable_state(marker: &dohc_engine_collab::Marker) -> bool {
+    marker.head_update_seq > 0 || marker.head_snapshot_seq > 0
+}
+
 fn ydoc_open_state_on_store(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -2263,10 +2280,14 @@ fn ydoc_open_state_on_store(
     // hand the client an EMPTY doc with no seedMarkdown — its next settle
     // would clobber the settled file. A pruned marker is seed-eligible
     // (the recordUpdate guard checks head_update_seq > 0), so the artifact
-    // re-seeds the cache exactly like a first open.
+    // re-seeds the cache exactly like a first open. "Durable doc state"
+    // means updates OR snapshots: a replicated lineage holding only its
+    // base snapshot (head_update_seq == 0, head_snapshot_seq > 0) is
+    // EXISTING — reporting it absent would hand the client the base state
+    // AND a markdown seed, duplicating content on the first seed apply.
     let lineage_existing = persisted
         .as_ref()
-        .is_some_and(|persisted| persisted.marker.head_update_seq > 0);
+        .is_some_and(|persisted| ydoc_marker_has_durable_state(&persisted.marker));
     let (content_kind, regime, initial_update) = match persisted {
         Some(persisted) => (
             persisted.marker.content_kind,
@@ -2298,6 +2319,7 @@ fn ydoc_open_state_on_store(
 fn ydoc_record_update_on_store(
     store: &mut EngineStore,
     key: &DocKey,
+    path: &str,
     content_kind: ContentKind,
     regime: Regime,
     update: &[u8],
@@ -2328,7 +2350,15 @@ fn ydoc_record_update_on_store(
     if matches!(parent, TxnOutcome::Crashed { .. }) {
         return Err(RuntimeError::OperationCrashed);
     }
-    match dohc_engine_collab::record_local_update_creating_marker(
+    // A replicated, base-claimed lineage journals the ydoc.update DELTA in
+    // the SAME transaction as the append (blob-before-log holds; TS parity:
+    // ydocEngineDriver journals inside the recordUpdate write). Local-only
+    // lineages journal nothing — their markdown is the artifact.
+    let update_sha = dohc_engine_storage::hex_sha256(update);
+    let journal_key = key.clone();
+    let journal_path = path.to_owned();
+    let journal_kind = content_kind;
+    match dohc_engine_collab::record_local_update_creating_marker_with_hook(
         store,
         key,
         content_kind,
@@ -2337,6 +2367,28 @@ fn ydoc_record_update_on_store(
         actor_origin_id.as_deref(),
         faults,
         now_ms,
+        move |tx, outcome| {
+            if outcome.emit_outbound {
+                dohc_engine_sync::journal_local_op_in_tx(
+                    tx,
+                    &journal_key.workspace_id,
+                    "ydoc.update",
+                    &serde_json::json!({
+                        "versionId": journal_key.version_id,
+                        "objectId": journal_key.object_id,
+                        "path": journal_path,
+                        "contentKind": journal_kind.as_str(),
+                        "updateBlobSha256": update_sha,
+                        "isBaseState": false,
+                    }),
+                    now_ms,
+                )
+                .map_err(|_| dohc_engine_collab::CollabError::Corrupt {
+                    reason: "outbound ydoc.update journal append failed".to_string(),
+                })?;
+            }
+            Ok(())
+        },
     )? {
         TxnOutcome::Committed(outcome) => Ok(outcome),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
@@ -2362,7 +2414,25 @@ fn ydoc_settle_on_store(
     // Refuse to settle a lineage that has no durable state: projecting a
     // fresh doc would be the empty string, and the projected write below
     // would clobber the existing file with it. Mirrors collab settle()'s
-    // NoMarker refusal.
+    // NoMarker refusal — and a PRUNED bare marker (local-only close) is the
+    // same hazard: load_persisted returns Some with an EMPTY doc, so the
+    // durable-state predicate (updates OR snapshots) gates it, matching
+    // ydoc.open's lineage-absent treatment.
+    match dohc_engine_collab::read_marker(store, key)? {
+        None => return Err(dohc_engine_collab::CollabError::NoMarker.into()),
+        Some(marker) => {
+            if !ydoc_marker_has_durable_state(&marker) {
+                return Err(dohc_engine_collab::CollabError::NoMarker.into());
+            }
+            // Acked-but-deferred remote envelopes must land BEFORE the
+            // projection: settling first would materialize a pre-drain
+            // markdown artifact and report success while the durable doc
+            // moves past it moments later at close.
+            if marker.regime == Regime::Replicated {
+                dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?;
+            }
+        }
+    }
     let doc = match dohc_engine_collab::load_persisted(store, key)? {
         Some(persisted) => persisted.doc,
         None => return Err(dohc_engine_collab::CollabError::NoMarker.into()),
@@ -2471,6 +2541,16 @@ fn ydoc_settle_on_store(
     // for a settle the lineage already records — and close(settle:false)
     // could then prune the CRDT with the artifact never materialized or
     // suppressed. Once committed, the settle runs to completion.
+    //
+    // The suppression identity registers BEFORE the file replace: the watcher
+    // can observe the materialized bytes the instant they land, and a
+    // record-after-replace left a window where capture queued an ingest that
+    // would claim the settle as an external edit.
+    self_writes.record(
+        &key.workspace_id,
+        &write.snapshot.path,
+        &write.snapshot.blob_sha256,
+    );
     let job_id = format!("ydoc-mat_{}", write.moment.moment_id);
     let job = store.load_materialization_job(&job_id)?.ok_or_else(|| {
         RuntimeError::Domain(dohc_engine_domain::DomainError::StateCorrupt {
@@ -2515,15 +2595,15 @@ fn ydoc_settle_on_store(
             if matches!(compensated, TxnOutcome::Crashed { .. }) {
                 return Err(RuntimeError::OperationCrashed);
             }
+            self_writes.retract(
+                &key.workspace_id,
+                &write.snapshot.path,
+                &write.snapshot.blob_sha256,
+            );
             return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
         }
         JobOutcome::Crashed(_) => return Err(RuntimeError::OperationCrashed),
     }
-    self_writes.record(
-        &key.workspace_id,
-        &write.snapshot.path,
-        &write.snapshot.blob_sha256,
-    );
     Ok(YdocSettlement {
         moment_id: write.moment.moment_id,
         path: write.snapshot.path,

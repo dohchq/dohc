@@ -1378,7 +1378,10 @@ const V1_YDOC_DEFERRED_DDL: &str = "CREATE TABLE ydoc_deferred_updates (
     origin_id      TEXT    NOT NULL,
     origin_seq     INTEGER NOT NULL,
     recorded_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (workspace_id, origin_id, origin_seq)
+    PRIMARY KEY (workspace_id, origin_id, origin_seq),
+    FOREIGN KEY (workspace_id, version_id, object_id)
+      REFERENCES ydoc_docs(workspace_id, version_id, object_id)
+      ON DELETE CASCADE
 ) STRICT;
 CREATE INDEX ydoc_deferred_updates_by_doc
     ON ydoc_deferred_updates (workspace_id, version_id, object_id);

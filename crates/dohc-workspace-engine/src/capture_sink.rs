@@ -104,6 +104,12 @@ impl dohc_engine_runtime::SelfWriteRecorder for SelfWriteSuppression {
     fn record(&self, workspace_id: &str, path: &str, sha256: &str) {
         SelfWriteSuppression::record(self, workspace_id, path, sha256);
     }
+
+    fn retract(&self, workspace_id: &str, path: &str, sha256: &str) {
+        // Single-shot removal keyed on the exact identity: only the entry the
+        // conflicted settle recorded is dropped (consume_match semantics).
+        let _ = self.consume_match(workspace_id, path, sha256);
+    }
 }
 
 /// Bridges a files-crate reconcile plan to the actor's domain capture writes.

@@ -365,10 +365,42 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     .await;
     assert_eq!(race["lineage"], json!("absent"));
     let race_session = race["sessionId"].as_str().expect("race session");
+    // The legacy append path cannot advance the CRDT behind a live editor:
+    // the session's lease is single-writer, so the old raced-seed scenario
+    // (apply a durable head under an open absent session) is refused at the
+    // door. The recordUpdate seed guard stays as actor-level defense-in-depth.
+    let busy_apply = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                20,
+                "ydoc.apply",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "objectId": race["objectId"],
+                    "contentKind": "plaintext",
+                    "updateBase64": plaintext_update("winner")
+                }),
+            ),
+        )
+        .await
+        .expect_err("a leased doc refuses legacy appends");
+    assert_eq!(busy_apply.message, "ydoc-session-busy");
+    // An untouched absent session closes without settling (nothing durable
+    // exists to project) and releases the lease.
     call(
         &transport,
         &handle,
-        20,
+        21,
+        "ydoc.close",
+        json!({ "sessionId": race_session }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        22,
         "ydoc.apply",
         json!({
             "versionId": "main",
@@ -378,28 +410,27 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         }),
     )
     .await;
-    let seed_refusal = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                21,
-                "ydoc.recordUpdate",
-                Some(handle.clone()),
-                json!({
-                    "sessionId": race_session,
-                    "updateBase64": plaintext_update("losing seed")
-                }),
-            ),
-        )
-        .await
-        .expect_err("an absent session cannot seed over a raced durable head");
-    assert_eq!(seed_refusal.message, "seed-onto-existing-lineage");
+    let reraced = call(
+        &transport,
+        &handle,
+        33,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "notes/race.md" }),
+    )
+    .await;
+    assert_eq!(
+        reraced["lineage"],
+        json!("existing"),
+        "a lineage created after the lease released is existing on reopen"
+    );
+    // Default close settles the raced winner over its captured base and
+    // prunes cleanly.
     call(
         &transport,
         &handle,
-        22,
+        34,
         "ydoc.close",
-        json!({ "sessionId": race_session }),
+        json!({ "sessionId": reraced["sessionId"] }),
     )
     .await;
 

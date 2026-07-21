@@ -18,7 +18,7 @@ use dohc_engine_storage::{
     enqueue_job, put_binary_blob, EngineStore, FaultInjector, MaterializationJobSpec, Preimage,
     TxnOutcome,
 };
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::error::CollabError;
 use crate::limits::{DEFAULT_COMPACTION_THRESHOLD, MAX_PROJECTION_BYTES, MAX_YDOC_UPDATE_BYTES};
@@ -282,12 +282,44 @@ pub fn record_local_update_with_origin(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
+    record_local_update_with_origin_and_hook(
+        store,
+        key,
+        update,
+        actor_origin_id,
+        faults,
+        now_ms,
+        |_tx, _outcome| Ok(()),
+    )
+}
+
+/// [`record_local_update_with_origin`] with a post-append hook running in the
+/// SAME transaction as the CRDT append. The live-session path uses it to
+/// journal the outbound `ydoc.update` replication op atomically with the
+/// append (blob-before-log holds — the append stored the blob earlier in this
+/// transaction). The hook runs only for a genuinely-new append.
+pub fn record_local_update_with_origin_and_hook<F>(
+    store: &mut EngineStore,
+    key: &DocKey,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+    post_append: F,
+) -> Result<TxnOutcome<AppendOutcome>, CollabError>
+where
+    F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
+{
     validate_update_bytes(update)?;
     let sha = crate::hex_sha256(update);
 
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
         let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
-        append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)
+        let outcome = append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)?;
+        if !outcome.deduped {
+            post_append(tx, &outcome)?;
+        }
+        Ok(outcome)
     })?;
     self_bound_log(store, key, &outcome, faults, now_ms)?;
     Ok(outcome)
@@ -307,6 +339,37 @@ pub fn record_local_update_creating_marker(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
+    record_local_update_creating_marker_with_hook(
+        store,
+        key,
+        content_kind,
+        regime,
+        update,
+        actor_origin_id,
+        faults,
+        now_ms,
+        |_tx, _outcome| Ok(()),
+    )
+}
+
+/// [`record_local_update_creating_marker`] with a post-append hook in the same
+/// transaction (see [`record_local_update_with_origin_and_hook`]). The hook
+/// runs only for a genuinely-new append.
+#[allow(clippy::too_many_arguments)]
+pub fn record_local_update_creating_marker_with_hook<F>(
+    store: &mut EngineStore,
+    key: &DocKey,
+    content_kind: ContentKind,
+    regime: Regime,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+    post_append: F,
+) -> Result<TxnOutcome<AppendOutcome>, CollabError>
+where
+    F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
+{
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
         validate_update_bytes(update)?;
         let marker = match query_marker(tx, key)? {
@@ -342,7 +405,14 @@ pub fn record_local_update_creating_marker(
             }
         };
         let sha = crate::hex_sha256(update);
-        append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)
+        {
+            let outcome =
+                append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)?;
+            if !outcome.deduped {
+                post_append(tx, &outcome)?;
+            }
+            Ok(outcome)
+        }
     })?;
     self_bound_log(store, key, &outcome, faults, now_ms)?;
     Ok(outcome)

@@ -193,3 +193,36 @@ the raw result alongside the existing decoder.
 - Client: markStale while already stale marks dropped-while-stale, so a
   gap/generation event landing inside the resync window forces the extra
   resync pass (previously only directly-delivered updates did).
+
+## Codex review round 3 (PR #220)
+
+- P1 pruned-marker settles: settle refuses any marker without durable doc
+  state (updates OR snapshots) — a pruned bare marker no longer projects
+  "" over the artifact; same predicate now drives ydoc.open's lineage
+  report, so a replicated base-snapshot-only lineage (seq 0, snapshot
+  present) is EXISTING and never double-seeds.
+- P1 drain-before-project: settle drains acked-deferred envelopes for
+  replicated markers BEFORE reconstructing/projecting — a close can no
+  longer materialize a pre-drain artifact and then advance the doc.
+- P1 outbound replication: a replicated base-claimed session's
+  recordUpdate journals the ydoc.update delta op IN THE SAME transaction
+  as the CRDT append (new journal_local_op_in_tx +
+  record_local_update_creating_marker_with_hook); local live edits reach
+  list_replication_ops. Local-only lineages journal nothing.
+- P2 legacy append lease: ydoc.apply refuses ydoc-session-busy while a
+  live lease holds the key (single-writer preserved); the raced-seed RPC
+  scenario is structurally gone and the test now asserts the refusal.
+- P2 suppression timing: the identity records BEFORE materialize_one
+  replaces the file (watcher can observe the bytes instantly); the
+  conflict compensation retracts it (new SelfWriteRecorder::retract).
+- P2 empty-session close: an untouched absent-lineage session closes
+  without the default settle (no NoMarker error, lease released).
+- P2 shared leases: ONE process-wide LeaseRegistry (static) — two
+  EngineServices on the same root can no longer hold concurrent live
+  sessions on one DocKey.
+- P2 deferred-row lifecycle: ydoc_deferred_updates now FKs to ydoc_docs
+  ON DELETE CASCADE — a deleted doc cannot leak parked updates into a
+  later same-path incarnation.
+- P2 close cancellation: after the default settle materialized, the close
+  command runs on a fresh token — a caller cancel can no longer strand
+  the session/lease and force a duplicate re-settle.
