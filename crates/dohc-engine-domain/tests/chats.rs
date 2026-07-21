@@ -102,6 +102,40 @@ fn create_list_find_channel_round_trip() {
 }
 
 #[test]
+fn list_channels_fails_closed_on_negative_read_state() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+            .expect("general");
+        chats
+            .start_channel_thread(
+                &start_thread("gen-1", "t1", "m1", "hello", ChatActorKind::Human, 20),
+                &NO_FAULTS,
+            )
+            .expect("start");
+    }
+
+    // Deliberately bypass the domain validation to model a tampered persisted row.
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE chat_thread_read_state SET last_read_sequence = -1 \
+                 WHERE workspace_id = ?1 AND thread_id = ?2",
+                rusqlite::params![WS, "t1"],
+            )
+        })
+        .expect("tamper read state");
+
+    let chats = LinkedChatStore::new(&mut store);
+    let error = chats.list_channels(WS).unwrap_err();
+    assert_eq!(error.code(), "state-corrupt");
+}
+
+#[test]
 fn duplicate_slug_and_reserved_name_and_agent_kind_fail_closed() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");

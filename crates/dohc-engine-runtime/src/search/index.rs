@@ -14,6 +14,9 @@ use crate::search::policy::{
     read_engine_search_policy,
 };
 use crate::search::{SearchError, THREAD_HEADER_MESSAGE_ID};
+use dohc_engine_domain::chats::{
+    chat_message_search_text, chat_thread_display_title, upsert_chat_search_index_row,
+};
 use dohc_engine_storage::{FaultAction, FaultInjector, FaultPoint};
 use rusqlite::{Connection, params};
 use std::path::Path;
@@ -30,61 +33,16 @@ fn should_crash(faults: &dyn FaultInjector, point: FaultPoint) -> bool {
     faults.poll(point) == FaultAction::Crash
 }
 
-/// Untitled-thread snippet cap (`THREAD_SNIPPET_TITLE_MAX_CHARS`).
-const THREAD_SNIPPET_TITLE_MAX_CHARS: usize = 80;
-/// Untitled-thread fallback (`UNTITLED_THREAD_FALLBACK_TITLE`).
-const UNTITLED_THREAD_FALLBACK_TITLE: &str = "New chat";
-
 /// Hard ceiling on rows processed in one rebuild pass — a DoS bound the TS
 /// engine lacks (approved-delta style). Far above any realistic per-version
 /// file count / per-workspace message count; exceeding it fails the rebuild
 /// closed rather than building an unbounded in-flight statement stream.
 const MAX_REBUILD_ROWS: usize = 5_000_000;
 
-/// First line of `body`, whitespace-collapsed and bounded — the untitled-thread
-/// display title. Ports `threadSnippetTitle` (`chatThreadTitle.ts`).
-fn thread_snippet_title(body: &str) -> String {
-    let first_line_raw = body.split('\n').next().unwrap_or("");
-    // Collapse every whitespace run to a single space, then trim.
-    let mut collapsed = String::with_capacity(first_line_raw.len());
-    let mut in_ws = false;
-    for ch in first_line_raw.chars() {
-        if ch.is_whitespace() {
-            in_ws = true;
-        } else {
-            if in_ws && !collapsed.is_empty() {
-                collapsed.push(' ');
-            }
-            in_ws = false;
-            collapsed.push(ch);
-        }
-    }
-    let first_line = collapsed.trim();
-    if first_line.is_empty() {
-        return UNTITLED_THREAD_FALLBACK_TITLE.to_owned();
-    }
-    if first_line.chars().count() <= THREAD_SNIPPET_TITLE_MAX_CHARS {
-        return first_line.to_owned();
-    }
-    // Bound to MAX-1 chars + an ellipsis, trimming trailing space (JS
-    // `slice(0, MAX-1).trimEnd()` + "…").
-    let kept: String = first_line
-        .chars()
-        .take(THREAD_SNIPPET_TITLE_MAX_CHARS.saturating_sub(1))
-        .collect();
-    format!("{}\u{2026}", kept.trim_end())
-}
-
 /// Stored title (`""` = untitled) + first message body -> display title. Ports
 /// `threadDisplayTitle` (`chatThreadTitle.ts`).
 fn thread_display_title(stored_title: &str, first_body: Option<&str>) -> String {
-    if !stored_title.is_empty() {
-        return stored_title.to_owned();
-    }
-    match first_body {
-        Some(body) => thread_snippet_title(body),
-        None => UNTITLED_THREAD_FALLBACK_TITLE.to_owned(),
-    }
+    chat_thread_display_title(stored_title, first_body)
 }
 
 /// The indexed text for a chat header row (title only). Ports `chatIndexText`
@@ -97,17 +55,7 @@ fn chat_header_text(title: &str) -> String {
 /// author + body: displayName, then `displayName (agent)` when the author is an
 /// agent, then the body — newline-joined, empty parts dropped.
 fn chat_message_text(display_name: &str, is_agent: bool, body: &str) -> String {
-    let mut parts: Vec<String> = Vec::with_capacity(3);
-    if !display_name.is_empty() {
-        parts.push(display_name.to_owned());
-        if is_agent {
-            parts.push(format!("{display_name} (agent)"));
-        }
-    }
-    if !body.is_empty() {
-        parts.push(body.to_owned());
-    }
-    parts.join("\n")
+    chat_message_search_text(display_name, is_agent, body)
 }
 
 /// Delete a file's FTS row by its exact key.
@@ -196,20 +144,12 @@ pub fn upsert_thread_header_search_index(
     thread_id: &str,
     title: &str,
 ) -> Result<(), SearchError> {
-    conn.execute(
-        "DELETE FROM engine_search_chat_messages_fts \
-         WHERE workspace_id = ?1 AND thread_id = ?2 AND message_id = ?3",
-        params![workspace_id, thread_id, THREAD_HEADER_MESSAGE_ID],
-    )?;
-    conn.execute(
-        "INSERT INTO engine_search_chat_messages_fts \
-         (workspace_id, thread_id, message_id, text) VALUES (?1, ?2, ?3, ?4)",
-        params![
-            workspace_id,
-            thread_id,
-            THREAD_HEADER_MESSAGE_ID,
-            chat_header_text(title)
-        ],
+    upsert_chat_search_index_row(
+        conn,
+        workspace_id,
+        thread_id,
+        THREAD_HEADER_MESSAGE_ID,
+        &chat_header_text(title),
     )?;
     Ok(())
 }
@@ -224,20 +164,12 @@ pub fn upsert_chat_message_search_index(
     is_agent: bool,
     body: &str,
 ) -> Result<(), SearchError> {
-    conn.execute(
-        "DELETE FROM engine_search_chat_messages_fts \
-         WHERE workspace_id = ?1 AND thread_id = ?2 AND message_id = ?3",
-        params![workspace_id, thread_id, message_id],
-    )?;
-    conn.execute(
-        "INSERT INTO engine_search_chat_messages_fts \
-         (workspace_id, thread_id, message_id, text) VALUES (?1, ?2, ?3, ?4)",
-        params![
-            workspace_id,
-            thread_id,
-            message_id,
-            chat_message_text(display_name, is_agent, body)
-        ],
+    upsert_chat_search_index_row(
+        conn,
+        workspace_id,
+        thread_id,
+        message_id,
+        &chat_message_text(display_name, is_agent, body),
     )?;
     Ok(())
 }
@@ -359,16 +291,7 @@ fn rebuild_chat_index_for_workspace(
                 continue;
             }
             let display = thread_display_title(&title, first_body.as_deref());
-            conn.execute(
-                "INSERT INTO engine_search_chat_messages_fts \
-                 (workspace_id, thread_id, message_id, text) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    workspace_id,
-                    thread_id,
-                    THREAD_HEADER_MESSAGE_ID,
-                    chat_header_text(&display)
-                ],
-            )?;
+            upsert_thread_header_search_index(conn, workspace_id, &thread_id, &display)?;
         }
     }
     // Message rows: ORDER BY thread_id, message_order.
@@ -393,15 +316,14 @@ fn rebuild_chat_index_for_workspace(
             let display_name: String = row.get(3)?;
             let body: String = row.get(4)?;
             let is_agent = author_kind == "agent";
-            conn.execute(
-                "INSERT INTO engine_search_chat_messages_fts \
-                 (workspace_id, thread_id, message_id, text) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    workspace_id,
-                    thread_id,
-                    message_id,
-                    chat_message_text(&display_name, is_agent, &body)
-                ],
+            upsert_chat_message_search_index(
+                conn,
+                workspace_id,
+                &thread_id,
+                &message_id,
+                &display_name,
+                is_agent,
+                &body,
             )?;
         }
     }
@@ -566,12 +488,18 @@ mod tests {
 
     #[test]
     fn snippet_title_collapses_and_bounds() {
-        assert_eq!(thread_snippet_title(""), "New chat");
-        assert_eq!(thread_snippet_title("hello   world\nsecond"), "hello world");
+        assert_eq!(thread_display_title("", Some("")), "New chat");
+        assert_eq!(
+            thread_display_title("", Some("hello   world\nsecond")),
+            "hello world"
+        );
         let long = "a".repeat(200);
-        let title = thread_snippet_title(&long);
+        let title = thread_display_title("", Some(long.as_str()));
         assert!(title.ends_with('\u{2026}'));
-        assert_eq!(title.chars().count(), THREAD_SNIPPET_TITLE_MAX_CHARS);
+        assert_eq!(
+            title.chars().count(),
+            dohc_engine_domain::chats::THREAD_SNIPPET_TITLE_MAX_CHARS
+        );
     }
 
     #[test]

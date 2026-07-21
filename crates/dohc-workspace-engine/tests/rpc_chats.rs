@@ -197,6 +197,65 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     assert_eq!(started["thread"]["threadId"], json!("thread-1"));
     assert_eq!(started["message"]["messageOrder"], json!(0));
 
+    call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel-general",
+            "threadId": "thread-search",
+            "messageId": "message-search-seed",
+            "authorKind": "human",
+            "authorDisplayName": "Alice",
+            "body": "search seed",
+            "nowMs": 1001,
+        }),
+    )
+    .await;
+    // Prime the durable search state. The next stable-policy query will not run
+    // the repair rebuild, so only write-time indexing can expose the new message.
+    call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "search.query",
+        json!({ "versionId": "main", "query": "search seed", "nowMs": 1002 }),
+    )
+    .await;
+    call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "thread-search",
+            "messageId": "message-search-fresh",
+            "authorKind": "agent",
+            "authorDisplayName": "My agent",
+            "body": "fresh r2indexsentinel payload",
+            "nowMs": 1003,
+        }),
+    )
+    .await;
+    let write_time_search = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "search.query",
+        json!({ "versionId": "main", "query": "r2indexsentinel", "nowMs": 1004 }),
+    )
+    .await;
+    // Mutation guard: removing the send-message FTS upsert must make this fail;
+    // no policy transition occurs between the priming and asserting queries.
+    assert!(
+        write_time_search
+            .as_array()
+            .expect("search results")
+            .iter()
+            .any(|result| result["surface"] == "chat" && result["threadId"] == "thread-search")
+    );
+
     let channels = call(
         &transport,
         &first_handle,
@@ -222,7 +281,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         json!({}),
     )
     .await;
-    assert_eq!(threads["threads"].as_array().expect("threads").len(), 1);
+    assert_eq!(threads["threads"].as_array().expect("threads").len(), 2);
 
     // 501 more real sends make the message cap observable: a request for 999
     // returns exactly 500 plus a keyset cursor, then the remaining two.
@@ -656,7 +715,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
 
     // Complete, fail, and close/reopen reclaim each exercise a distinct
     // terminal/recovery transition. A claim while another is running is null.
-    call(
+    let enqueued = call(
         &transport,
         &first_handle,
         &mut id,
@@ -664,6 +723,25 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         json!({ "triggerMessageId": "message-001", "threadId": "thread-1", "nowMs": 2400 }),
     )
     .await;
+    assert_eq!(enqueued["enqueued"], json!(true));
+    let duplicate = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.dispatch.enqueue",
+        json!({ "triggerMessageId": "message-001", "threadId": "thread-1", "nowMs": 2400 }),
+    )
+    .await;
+    assert_eq!(duplicate["enqueued"], json!(false));
+    let conflicting_thread = call_error(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.dispatch.enqueue",
+        json!({ "triggerMessageId": "message-001", "threadId": "thread-big", "nowMs": 2400 }),
+    )
+    .await;
+    assert_eq!(conflicting_thread.code, ErrorCode::Internal);
     for run_id in [String::new(), "bad\0run".to_owned(), "x".repeat(513)] {
         let error = call_error(
             &transport,
@@ -680,16 +758,17 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.claimNextPending",
-        json!({ "runId": "run-complete", "command": "agent", "nowMs": 2401 }),
+        json!({ "runId": " run-1 ", "command": "agent", "nowMs": 2401 }),
     )
     .await;
     assert_eq!(claimed["attemptCount"], json!(1));
+    assert_eq!(claimed["runId"], json!("run-1"));
     let cross_workspace = call_error(
         &transport,
         &second_handle,
         &mut id,
         "chats.dispatch.complete",
-        json!({ "runId": "run-complete", "exitCode": 0, "nowMs": 2402 }),
+        json!({ "runId": "run-1", "exitCode": 0, "nowMs": 2402 }),
     )
     .await;
     assert_eq!(cross_workspace.code, ErrorCode::InvalidParams);
@@ -698,7 +777,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.dispatch.complete",
-        json!({ "runId": "run-complete", "exitCode": 0, "nowMs": 2403 }),
+        json!({ "runId": "run-1", "exitCode": 0, "nowMs": 2403 }),
     )
     .await;
 

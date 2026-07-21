@@ -46,3 +46,13 @@ Replication apply arms and reactions/decisions/attachment/mention indexing were 
 - Added per-channel `threadCount` and `unreadCount` aggregates and acceptance coverage showing the counts change with messages and read-cursor advances.
 
 The RPC acceptance flow now covers unfollowable targets, feed page cursors/read state, guarded bookmark projection ownership, invalid run ids, channel aggregates, the removed reclaim method, and close/reopen reclaim through exhaustion. The domain dispatch case also covers the run-id bounds.
+
+## Review round 2
+
+- Chat message sends now update their FTS row inside the same domain transaction as the message insert. Channel-thread starts atomically index both the derived thread header and first message. Runtime repair/rebuild calls the same domain-owned delete-then-insert SQL and shared title/message text derivations.
+- Dispatch enqueue now returns `true` only for a fresh ledger row. A duplicate for the same thread returns `false`; a missing or different-thread conflict fails as chat `state-corrupt`, which the RPC maps to `Internal`.
+- `chats.channels.create`, `ensureGeneral`, and `ensureAgent` now carry the request cancellation token and refuse mutation when it is already cancelled at actor entry.
+- Dispatch run ids are trimmed before validation, storage, and lookup. The existing empty, 512-byte, and NUL checks apply to the trimmed value, so padded claims can be completed with the normalized id.
+- Channel listing now fails closed on negative or non-integer persisted read-state sequence/revision values before calculating unread aggregates, while retaining the aggregate's zero clamp for valid over-count cursors.
+
+Round-2 regression coverage proves stable-policy write-time chat search (with a mutation-guard comment), duplicate/conflicting enqueue behavior, normalized run-id completion, and corrupt negative read-state rejection. Per the task constraint, no Cargo build, check, or test command was run; all changed Rust files passed direct `rustfmt --edition 2024 --check`, and `git diff --check` passed.

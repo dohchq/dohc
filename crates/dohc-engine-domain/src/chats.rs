@@ -72,8 +72,14 @@ const MAX_AUTHOR_USER_ID_CHARS: usize = 200;
 const MAX_FEED_CURSOR_LEN: usize = 512;
 /// Feed cursor message-id char cap (`decodeFeedCursor`).
 const MAX_FEED_CURSOR_MESSAGE_ID_CHARS: usize = 256;
-/// Dispatch run ids are stored verbatim; match the TS store's hard byte floor.
+/// Dispatch run ids are trimmed before storage; match the TS store's hard byte floor.
 const MAX_DISPATCH_RUN_ID_BYTES: usize = 512;
+/// Sentinel message id for the synthetic per-thread header FTS row.
+pub const CHAT_THREAD_HEADER_MESSAGE_ID: &str = "__thread__";
+/// Untitled-thread snippet cap (`THREAD_SNIPPET_TITLE_MAX_CHARS`).
+pub const THREAD_SNIPPET_TITLE_MAX_CHARS: usize = 80;
+/// Untitled-thread fallback (`UNTITLED_THREAD_FALLBACK_TITLE`).
+const UNTITLED_THREAD_FALLBACK_TITLE: &str = "New chat";
 /// Feed page limit bounds (`listPersonalFeed`).
 const FEED_LIMIT_MAX: i64 = 100;
 const FEED_LIMIT_DEFAULT: i64 = 20;
@@ -640,17 +646,97 @@ fn non_empty(value: &str, code: &'static str, reason: &'static str) -> Result<()
     }
 }
 
-/// Run ids are persisted verbatim. Reject only values SQLite/TS will never
-/// store: empty, over the 512-byte wire bound, or containing NUL.
-fn validate_dispatch_run_id(run_id: &str) -> Result<(), DomainError> {
-    if run_id.is_empty() || run_id.len() > MAX_DISPATCH_RUN_ID_BYTES || run_id.contains('\0') {
+/// Run ids are trimmed before persistence, then checked for empty, the
+/// 512-byte wire bound, and NUL (`normalizeRequiredId`).
+fn normalize_dispatch_run_id(run_id: &str) -> Result<String, DomainError> {
+    let normalized = run_id.trim();
+    if normalized.is_empty()
+        || normalized.len() > MAX_DISPATCH_RUN_ID_BYTES
+        || normalized.contains('\0')
+    {
         Err(DomainError::chat(
             "invalid-message-body",
             "Agent run id is invalid.",
         ))
     } else {
-        Ok(())
+        Ok(normalized.to_owned())
     }
+}
+
+/// Stored title (`""` = untitled) + first message body -> display title. This
+/// is shared with the runtime rebuild so write-time and repair header rows stay
+/// byte-identical (`chatThreadTitle.ts`).
+pub fn chat_thread_display_title(stored_title: &str, first_body: Option<&str>) -> String {
+    if !stored_title.is_empty() {
+        return stored_title.to_owned();
+    }
+    let Some(body) = first_body else {
+        return UNTITLED_THREAD_FALLBACK_TITLE.to_owned();
+    };
+    let first_line_raw = body.split('\n').next().unwrap_or("");
+    let mut collapsed = String::with_capacity(first_line_raw.len());
+    let mut in_ws = false;
+    for ch in first_line_raw.chars() {
+        if ch.is_whitespace() {
+            in_ws = true;
+        } else {
+            if in_ws && !collapsed.is_empty() {
+                collapsed.push(' ');
+            }
+            in_ws = false;
+            collapsed.push(ch);
+        }
+    }
+    let first_line = collapsed.trim();
+    if first_line.is_empty() {
+        return UNTITLED_THREAD_FALLBACK_TITLE.to_owned();
+    }
+    if first_line.chars().count() <= THREAD_SNIPPET_TITLE_MAX_CHARS {
+        return first_line.to_owned();
+    }
+    let kept: String = first_line
+        .chars()
+        .take(THREAD_SNIPPET_TITLE_MAX_CHARS.saturating_sub(1))
+        .collect();
+    format!("{}\u{2026}", kept.trim_end())
+}
+
+/// Indexed message text (`chatIndexText`): author, optional agent marker, body.
+pub fn chat_message_search_text(display_name: &str, is_agent: bool, body: &str) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(3);
+    if !display_name.is_empty() {
+        parts.push(display_name.to_owned());
+        if is_agent {
+            parts.push(format!("{display_name} (agent)"));
+        }
+    }
+    if !body.is_empty() {
+        parts.push(body.to_owned());
+    }
+    parts.join("\n")
+}
+
+/// The ONE delete-then-insert SQL implementation for a chat FTS row. Domain
+/// writes call it inside their transaction; runtime rebuild/upsert wrappers call
+/// the same helper so the two maintenance paths cannot drift.
+pub fn upsert_chat_search_index_row(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    text: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM engine_search_chat_messages_fts \
+         WHERE workspace_id = ?1 AND thread_id = ?2 AND message_id = ?3",
+        params![workspace_id, thread_id, message_id],
+    )?;
+    conn.execute(
+        "INSERT INTO engine_search_chat_messages_fts \
+         (workspace_id, thread_id, message_id, text) VALUES (?1, ?2, ?3, ?4)",
+        params![workspace_id, thread_id, message_id, text],
+    )?;
+    Ok(())
 }
 
 /// `normalizeChannelName`: NFC then trim, 1..=80 chars, no control chars.
@@ -956,6 +1042,26 @@ impl<'a> LinkedChatStore<'a> {
         workspace_id: &str,
     ) -> Result<Vec<ChatChannelSummary>, DomainError> {
         self.store.read_with(|conn| {
+            let corrupt_read_state = conn
+                .query_row(
+                    "SELECT 1 FROM chat_thread_read_state \
+                     WHERE workspace_id = ?1 \
+                       AND (last_read_sequence < 0 \
+                            OR last_read_sequence <> CAST(last_read_sequence AS INTEGER) \
+                            OR revision < 0 \
+                            OR revision <> CAST(revision AS INTEGER)) \
+                     LIMIT 1",
+                    params![workspace_id],
+                    |_| Ok(()),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            if corrupt_read_state.is_some() {
+                return Err(DomainError::chat(
+                    "state-corrupt",
+                    "Linked chat store is corrupt.",
+                ));
+            }
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT ch.workspace_id, ch.channel_id, ch.name, ch.slug, ch.kind, \
@@ -1123,6 +1229,28 @@ impl<'a> LinkedChatStore<'a> {
             if input.author_kind == ChatActorKind::Human {
                 advance_read_cursor(tx, &input.workspace_id, &input.thread_id, 1, now, None)?;
             }
+            let display_title = chat_thread_display_title(&title_c, Some(&body_c));
+            upsert_chat_search_index_row(
+                tx,
+                &input.workspace_id,
+                &input.thread_id,
+                CHAT_THREAD_HEADER_MESSAGE_ID,
+                &display_title,
+            )
+            .map_err(DomainError::sql_persist)?;
+            let message_search_text = chat_message_search_text(
+                &display_c,
+                input.author_kind == ChatActorKind::Agent,
+                &body_c,
+            );
+            upsert_chat_search_index_row(
+                tx,
+                &input.workspace_id,
+                &input.thread_id,
+                &input.message_id,
+                &message_search_text,
+            )
+            .map_err(DomainError::sql_persist)?;
             journal(tx, &input.thread_id, "chat.thread.create", now)?;
             journal(tx, &input.message_id, "chat.message.append", now)?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
@@ -1271,6 +1399,19 @@ impl<'a> LinkedChatStore<'a> {
                     None,
                 )?;
             }
+            let message_search_text = chat_message_search_text(
+                &display_c,
+                input.author_kind == ChatActorKind::Agent,
+                &body_c,
+            );
+            upsert_chat_search_index_row(
+                tx,
+                &input.workspace_id,
+                &input.thread_id,
+                &input.message_id,
+                &message_search_text,
+            )
+            .map_err(DomainError::sql_persist)?;
             journal(tx, &input.message_id, "chat.message.append", now)?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
             Ok::<_, DomainError>(ChatMessage {
@@ -2005,21 +2146,40 @@ impl<'a> LinkedChatStore<'a> {
         thread_id: &str,
         now_ms: i64,
         faults: &dyn FaultInjector,
-    ) -> Result<(), DomainError> {
+    ) -> Result<bool, DomainError> {
         let ws = workspace_id.to_owned();
         let trigger = trigger_message_id.to_owned();
         let tid = thread_id.to_owned();
         let outcome = self.store.write_with(faults, |tx| {
-            tx.execute(
-                "INSERT INTO chat_dispatch_ledger \
+            let inserted = tx
+                .execute(
+                    "INSERT INTO chat_dispatch_ledger \
                  (workspace_id, trigger_message_id, thread_id, state, run_id, failure_reason, \
                   attempt_count, created_at_ms, updated_at_ms) \
                  VALUES (?1, ?2, ?3, 'pending', NULL, NULL, 0, ?4, ?4) \
                  ON CONFLICT(workspace_id, trigger_message_id) DO NOTHING",
-                params![ws, trigger, tid, now_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
-            Ok::<_, DomainError>(())
+                    params![ws, trigger, tid, now_ms],
+                )
+                .map_err(DomainError::sql_persist)?;
+            if inserted == 1 {
+                return Ok::<_, DomainError>(true);
+            }
+            let existing_thread: Option<String> = tx
+                .query_row(
+                    "SELECT thread_id FROM chat_dispatch_ledger \
+                     WHERE workspace_id = ?1 AND trigger_message_id = ?2",
+                    params![ws, trigger],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            if existing_thread.as_deref() != Some(tid.as_str()) {
+                return Err(DomainError::chat(
+                    "state-corrupt",
+                    "Agent dispatch store is corrupt.",
+                ));
+            }
+            Ok(false)
         })?;
         committed(outcome)
     }
@@ -2039,9 +2199,8 @@ impl<'a> LinkedChatStore<'a> {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<Option<DispatchClaim>, DomainError> {
-        validate_dispatch_run_id(run_id)?;
+        let run = normalize_dispatch_run_id(run_id)?;
         let ws = workspace_id.to_owned();
-        let run = run_id.to_owned();
         let cmd = if command.is_empty() {
             "agent".to_owned()
         } else {
@@ -2176,9 +2335,8 @@ impl<'a> LinkedChatStore<'a> {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<(), DomainError> {
-        validate_dispatch_run_id(run_id)?;
+        let run = normalize_dispatch_run_id(run_id)?;
         let workspace_id = workspace_id.to_owned();
-        let run = run_id.to_owned();
         let reason = reason.map(str::to_owned);
         let outcome = self.store.write_with(faults, |tx| {
             let Some((trigger, ended, ledger_state)) =

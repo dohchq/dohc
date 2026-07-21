@@ -1188,6 +1188,7 @@ impl EngineService {
                 params.name,
                 kind,
                 params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
             ),
         )
         .await?;
@@ -1210,6 +1211,7 @@ impl EngineService {
                 open.workspace_id,
                 params.channel_id,
                 params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
             ),
         )
         .await?;
@@ -1232,6 +1234,7 @@ impl EngineService {
                 open.workspace_id,
                 params.channel_id,
                 params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
             ),
         )
         .await?;
@@ -1718,7 +1721,7 @@ impl EngineService {
         let params: ChatDispatchEnqueueParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        Self::read_under_ctx(
+        let enqueued = Self::read_under_ctx(
             &cancellation,
             "chats.dispatch.enqueue",
             open.actor.chat_dispatch_enqueue(
@@ -1730,7 +1733,7 @@ impl EngineService {
             ),
         )
         .await?;
-        Ok(json!({ "enqueued": true }))
+        Ok(json!({ "enqueued": enqueued }))
     }
 
     async fn chats_dispatch_claim_next_pending(
@@ -2974,7 +2977,12 @@ fn map_runtime(error: RuntimeError) -> WireError {
 
 fn map_domain_code(error: DomainError) -> ErrorCode {
     match error {
-        DomainError::Storage(_) | DomainError::StateCorrupt { .. } => ErrorCode::Internal,
+        DomainError::Storage(_)
+        | DomainError::StateCorrupt { .. }
+        | DomainError::Chat {
+            code: "state-corrupt",
+            ..
+        } => ErrorCode::Internal,
         DomainError::Crypto(error) => match error {
             dohc_engine_crypto::CryptoError::InvalidIvLength
             | dohc_engine_crypto::CryptoError::InvalidTagLength

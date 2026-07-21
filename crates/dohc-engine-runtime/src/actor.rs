@@ -345,18 +345,21 @@ enum Command {
         name: String,
         kind: ChatChannelKind,
         now_ms: i64,
+        token: CancellationToken,
         reply: oneshot::Sender<Result<ChatChannel, RuntimeError>>,
     },
     ChatChannelEnsureGeneral {
         workspace_id: String,
         channel_id: String,
         now_ms: i64,
+        token: CancellationToken,
         reply: oneshot::Sender<Result<ChatChannel, RuntimeError>>,
     },
     ChatChannelEnsureAgent {
         workspace_id: String,
         channel_id: String,
         now_ms: i64,
+        token: CancellationToken,
         reply: oneshot::Sender<Result<ChatChannel, RuntimeError>>,
     },
     ChatChannelsList {
@@ -458,7 +461,7 @@ enum Command {
         thread_id: String,
         now_ms: i64,
         token: CancellationToken,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
+        reply: oneshot::Sender<Result<bool, RuntimeError>>,
     },
     ChatDispatchClaimNextPending {
         workspace_id: String,
@@ -1520,6 +1523,7 @@ impl ActorHandle {
         name: String,
         kind: ChatChannelKind,
         now_ms: i64,
+        token: CancellationToken,
     ) -> Result<ChatChannel, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
@@ -1529,6 +1533,7 @@ impl ActorHandle {
                 name,
                 kind,
                 now_ms,
+                token,
                 reply,
             })
             .await
@@ -1541,6 +1546,7 @@ impl ActorHandle {
         workspace_id: String,
         channel_id: String,
         now_ms: i64,
+        token: CancellationToken,
     ) -> Result<ChatChannel, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
@@ -1548,6 +1554,7 @@ impl ActorHandle {
                 workspace_id,
                 channel_id,
                 now_ms,
+                token,
                 reply,
             })
             .await
@@ -1560,6 +1567,7 @@ impl ActorHandle {
         workspace_id: String,
         channel_id: String,
         now_ms: i64,
+        token: CancellationToken,
     ) -> Result<ChatChannel, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
@@ -1567,6 +1575,7 @@ impl ActorHandle {
                 workspace_id,
                 channel_id,
                 now_ms,
+                token,
                 reply,
             })
             .await
@@ -1875,7 +1884,7 @@ impl ActorHandle {
         thread_id: String,
         now_ms: i64,
         token: CancellationToken,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<bool, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ChatDispatchEnqueue {
@@ -2491,33 +2500,48 @@ fn worker_main(
                 name,
                 kind,
                 now_ms,
+                token,
                 reply,
             } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .create_channel(&workspace_id, &channel_id, &name, kind, now_ms, &NoFaults)
-                    .map_err(RuntimeError::from);
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    LinkedChatStore::new(&mut store)
+                        .create_channel(&workspace_id, &channel_id, &name, kind, now_ms, &NoFaults)
+                        .map_err(RuntimeError::from)
+                };
                 let _ = reply.send(outcome);
             }
             Command::ChatChannelEnsureGeneral {
                 workspace_id,
                 channel_id,
                 now_ms,
+                token,
                 reply,
             } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .ensure_general_channel(&workspace_id, &channel_id, now_ms, &NoFaults)
-                    .map_err(RuntimeError::from);
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    LinkedChatStore::new(&mut store)
+                        .ensure_general_channel(&workspace_id, &channel_id, now_ms, &NoFaults)
+                        .map_err(RuntimeError::from)
+                };
                 let _ = reply.send(outcome);
             }
             Command::ChatChannelEnsureAgent {
                 workspace_id,
                 channel_id,
                 now_ms,
+                token,
                 reply,
             } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .ensure_agent_channel(&workspace_id, &channel_id, now_ms, &NoFaults)
-                    .map_err(RuntimeError::from);
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    LinkedChatStore::new(&mut store)
+                        .ensure_agent_channel(&workspace_id, &channel_id, now_ms, &NoFaults)
+                        .map_err(RuntimeError::from)
+                };
                 let _ = reply.send(outcome);
             }
             Command::ChatChannelsList {
