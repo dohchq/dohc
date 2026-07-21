@@ -1889,12 +1889,14 @@ impl<'a> LinkedChatStore<'a> {
     /// `done` run is a no-op; any other terminal state is `run-state-mismatch`.
     pub fn complete_dispatch(
         &mut self,
+        workspace_id: &str,
         run_id: &str,
         exit_code: i64,
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<(), DomainError> {
         self.finish_dispatch(
+            workspace_id,
             run_id,
             DispatchOutcomeKind::Done,
             Some(exit_code),
@@ -1909,6 +1911,7 @@ impl<'a> LinkedChatStore<'a> {
     /// `ended_at_ms`/`exit_code`. Idempotent on an already-`failed` run.
     pub fn fail_dispatch(
         &mut self,
+        workspace_id: &str,
         run_id: &str,
         reason: &str,
         exit_code: Option<i64>,
@@ -1917,6 +1920,7 @@ impl<'a> LinkedChatStore<'a> {
     ) -> Result<(), DomainError> {
         let reason = if reason.is_empty() { "failed" } else { reason };
         self.finish_dispatch(
+            workspace_id,
             run_id,
             DispatchOutcomeKind::Failed,
             exit_code,
@@ -1929,6 +1933,7 @@ impl<'a> LinkedChatStore<'a> {
     #[allow(clippy::too_many_arguments)]
     fn finish_dispatch(
         &mut self,
+        workspace_id: &str,
         run_id: &str,
         kind: DispatchOutcomeKind,
         exit_code: Option<i64>,
@@ -1937,10 +1942,13 @@ impl<'a> LinkedChatStore<'a> {
         faults: &dyn FaultInjector,
     ) -> Result<(), DomainError> {
         non_empty(run_id, "invalid-message-body", "run_id must not be empty")?;
+        let workspace_id = workspace_id.to_owned();
         let run = run_id.to_owned();
         let reason = reason.map(str::to_owned);
         let outcome = self.store.write_with(faults, |tx| {
-            let Some((ws, trigger, ended, ledger_state)) = dispatch_run_context(tx, &run)? else {
+            let Some((trigger, ended, ledger_state)) =
+                dispatch_run_context(tx, &workspace_id, &run)?
+            else {
                 return Err(DomainError::chat(
                     "run-not-found",
                     "Agent run was not found.",
@@ -1964,10 +1972,10 @@ impl<'a> LinkedChatStore<'a> {
             }
             let run_changed = tx
                 .execute(
-                    "UPDATE agent_run_records SET ended_at_ms = ?2, exit_code = ?3, \
-                       failure_reason = COALESCE(?4, failure_reason) \
-                     WHERE run_id = ?1 AND ended_at_ms IS NULL",
-                    params![run, now_ms, exit_code, reason],
+                    "UPDATE agent_run_records SET ended_at_ms = ?3, exit_code = ?4, \
+                       failure_reason = COALESCE(?5, failure_reason) \
+                     WHERE workspace_id = ?1 AND run_id = ?2 AND ended_at_ms IS NULL",
+                    params![workspace_id, run, now_ms, exit_code, reason],
                 )
                 .map_err(DomainError::sql_persist)?;
             let ledger_changed = tx
@@ -1976,7 +1984,14 @@ impl<'a> LinkedChatStore<'a> {
                        updated_at_ms = ?3 \
                      WHERE workspace_id = ?1 AND trigger_message_id = ?2 \
                        AND state = 'running' AND run_id = ?6",
-                    params![ws, trigger, now_ms, kind.ledger_state(), reason, run],
+                    params![
+                        workspace_id,
+                        trigger,
+                        now_ms,
+                        kind.ledger_state(),
+                        reason,
+                        run
+                    ],
                 )
                 .map_err(DomainError::sql_persist)?;
             if run_changed != 1 || ledger_changed != 1 {
@@ -2588,23 +2603,24 @@ fn require_message(
     .ok_or_else(|| DomainError::chat("message-not-found", "Chat message was not found."))
 }
 
-/// Resolve a run id to `(workspace_id, trigger_message_id, ended_at_ms,
-/// ledger_state)` by joining `agent_run_records` (run_id is globally unique) to
-/// its dispatch ledger row. `None` when the run id is unknown.
-type DispatchRunContext = (String, String, Option<i64>, Option<String>);
+/// Resolve a workspace-scoped run id to `(trigger_message_id, ended_at_ms,
+/// ledger_state)` by joining `agent_run_records` to its dispatch ledger row.
+/// `None` when the run id is unknown in that workspace.
+type DispatchRunContext = (String, Option<i64>, Option<String>);
 
 fn dispatch_run_context(
     conn: &Connection,
+    workspace_id: &str,
     run_id: &str,
 ) -> Result<Option<DispatchRunContext>, DomainError> {
     conn.query_row(
-        "SELECT r.workspace_id, r.trigger_message_id, r.ended_at_ms, l.state \
+        "SELECT r.trigger_message_id, r.ended_at_ms, l.state \
          FROM agent_run_records r \
          LEFT JOIN chat_dispatch_ledger l \
            ON l.workspace_id = r.workspace_id AND l.trigger_message_id = r.trigger_message_id \
-         WHERE r.run_id = ?1",
-        params![run_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+         WHERE r.workspace_id = ?1 AND r.run_id = ?2",
+        params![workspace_id, run_id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     )
     .optional()
     .map_err(DomainError::sql_corrupt)

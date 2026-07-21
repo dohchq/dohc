@@ -663,7 +663,7 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
 
     // Complete A → the running row leaves 'running'; B becomes claimable.
     chats
-        .complete_dispatch("run-A", 0, 26, &NO_FAULTS)
+        .complete_dispatch(WS, "run-A", 0, 26, &NO_FAULTS)
         .expect("complete A");
     let b = chats
         .claim_next_pending(WS, "run-B", "agent", None, 27, &NO_FAULTS)
@@ -671,9 +671,24 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
         .expect("some B");
     assert_eq!(b.trigger_message_id, "mB");
 
+    // A DIFFERENT workspace can neither complete nor fail this run — the
+    // lookup is workspace-scoped at the SQL, not just at the RPC layer.
+    assert!(
+        chats
+            .complete_dispatch("other-workspace", "run-B", 0, 27, &NO_FAULTS)
+            .is_err(),
+        "cross-workspace completion must refuse"
+    );
+    assert!(
+        chats
+            .fail_dispatch("other-workspace", "run-B", "nope", None, 27, &NO_FAULTS)
+            .is_err(),
+        "cross-workspace failure must refuse"
+    );
+
     // Completing an already-done run is an idempotent no-op.
     chats
-        .complete_dispatch("run-A", 0, 28, &NO_FAULTS)
+        .complete_dispatch(WS, "run-A", 0, 28, &NO_FAULTS)
         .expect("idempotent complete");
 
     // A's run record is ended with its ORIGINAL exit code timestamp (26), not
