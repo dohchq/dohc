@@ -4,7 +4,7 @@ use dohc_engine_collab::{
     apply_remote_update_in_transaction, maybe_compact,
 };
 use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
-use rusqlite::OptionalExtension;
+use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 
 use crate::{ApplyOutcome, PathClass, ReplicationEnvelope, SyncError};
@@ -49,9 +49,13 @@ pub struct YdocApplyResult {
     pub reason: Option<&'static str>,
 }
 
-/// Drain acked Y.Doc envelopes parked in the imported replication log while
-/// `key` was leased. That log is the durable pending queue: replaying a row
-/// already applied is convergence-neutral and content-deduped.
+/// Drain acked Y.Doc envelopes deferred while `key` was leased. The
+/// `ydoc_deferred_updates` table records exactly which coordinates are
+/// pending (written in the same transaction as their ack); the imported
+/// replication log keeps the payloads. Only those rows replay — never the
+/// whole history, which after compaction would re-append non-dedupable
+/// updates and cost O(history) per open. Each drained coordinate's marker
+/// row is removed after a successful apply/dedup.
 pub fn drain_deferred_ydoc_for_key(
     store: &mut EngineStore,
     key: &DocKey,
@@ -60,20 +64,29 @@ pub fn drain_deferred_ydoc_for_key(
     let pending: Vec<(String, i64, i64, YdocUpdatePayload)> = store.read_with(|conn| {
         let mut stmt = conn
             .prepare(
-                "SELECT origin_id, origin_seq, recorded_at_ms, payload_json \
-                 FROM replication_log WHERE workspace_id = ?1 AND op_kind = 'ydoc.update' \
-                 ORDER BY recorded_at_ms, origin_id, origin_seq",
+                "SELECT log.origin_id, log.origin_seq, log.recorded_at_ms, log.payload_json \
+                 FROM ydoc_deferred_updates AS deferred \
+                 JOIN replication_log AS log \
+                   ON log.workspace_id = deferred.workspace_id \
+                  AND log.origin_id = deferred.origin_id \
+                  AND log.origin_seq = deferred.origin_seq \
+                 WHERE deferred.workspace_id = ?1 AND deferred.version_id = ?2 \
+                   AND deferred.object_id = ?3 AND log.op_kind = 'ydoc.update' \
+                 ORDER BY log.recorded_at_ms, log.origin_id, log.origin_seq",
             )
             .map_err(SyncError::corrupt)?;
         let rows = stmt
-            .query_map([&key.workspace_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })
+            .query_map(
+                params![key.workspace_id, key.version_id, key.object_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
             .map_err(SyncError::corrupt)?;
         let mut pending = Vec::new();
         for row in rows {
@@ -85,9 +98,7 @@ pub fn drain_deferred_ydoc_for_key(
                         reason: "parked ydoc.update payload is malformed",
                     }
                 })?;
-            if payload.version_id == key.version_id && payload.object_id == key.object_id {
-                pending.push((origin_id, origin_seq, recorded_at_ms, payload));
-            }
+            pending.push((origin_id, origin_seq, recorded_at_ms, payload));
         }
         Ok::<_, SyncError>(pending)
     })?;
@@ -103,7 +114,7 @@ pub fn drain_deferred_ydoc_for_key(
             store,
             key,
             &RemoteUpdate {
-                origin_id,
+                origin_id: origin_id.clone(),
                 origin_seq,
                 bytes,
             },
@@ -117,6 +128,15 @@ pub fn drain_deferred_ydoc_for_key(
             TxnOutcome::Committed(ReplicationApplyOutcome::Deduped { .. }) => {}
             TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
         }
+        store.write_with(faults, |tx| {
+            tx.execute(
+                "DELETE FROM ydoc_deferred_updates \
+                 WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
+                params![key.workspace_id, origin_id, origin_seq],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })?;
     }
     Ok(applied)
 }
@@ -169,7 +189,38 @@ pub fn apply_ydoc_envelope(
         return Err(SyncError::BlobInvalid);
     }
     if leases.is_live(&key) {
-        return crate::apply_envelope_with(store, envelope, faults, |_tx, _op| {
+        // A deferred coordinate is ACKED — it must be drainable later, which
+        // the close/open drains only do for REPLICATED markers. A live lease
+        // over an absent or local-only lineage cannot accept a remote update
+        // now or later: refuse (leaving the coordinate unacked) exactly like
+        // the non-live path's NoMarker/regime refusal would.
+        let marker =
+            dohc_engine_collab::read_marker(store, &key).map_err(|_| SyncError::InvalidInput {
+                reason: "ydoc marker read failed",
+            })?;
+        if !marker.is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated) {
+            return Err(SyncError::InvalidInput {
+                reason: "live lease on a non-replicated lineage",
+            });
+        }
+        let deferred_key = key.clone();
+        return crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
+            // Record WHICH coordinate is pending in the same transaction as
+            // the ack: drains replay exactly these rows, never the whole
+            // imported history (which after compaction would re-append
+            // non-dedupable updates and cost O(history) per open).
+            tx.execute(
+                "INSERT OR IGNORE INTO ydoc_deferred_updates                  (workspace_id, version_id, object_id, origin_id, origin_seq, recorded_at_ms)                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    deferred_key.workspace_id,
+                    deferred_key.version_id,
+                    deferred_key.object_id,
+                    op.origin_id,
+                    op.origin_seq,
+                    op.recorded_at_ms,
+                ],
+            )
+            .map_err(SyncError::persist)?;
             Ok(YdocApplyResult {
                 deferred: true,
                 reason: Some("ydoc-session-live"),

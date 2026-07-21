@@ -160,3 +160,36 @@ the raw result alongside the existing decoder.
   marks the session dropped-while-stale; the resync then runs one more
   pass instead of resetting the baseline past the missed update.
   Mutation-verified (22nd client test fails with the re-resync disabled).
+
+## Codex review round 2 (PR #220)
+
+- P1 settle marker compensation: a materialization Conflict/Superseded now
+  reverts settle_seq/last_settled_sha to their pre-settle values before
+  the error returns — an errored settle can no longer leave a marker that
+  lets close(settle:false) prune the CRDT artifactless. (Crash before the
+  compensation = the durable pending-job case; it drains on reopen.)
+- P1 close default: missing `settle` now means SETTLE (TS driver
+  semantics). Richdoc sessions skip the markdown settle on default close
+  (the C1 refusal belongs to the explicit ydoc.settle RPC) and close with
+  persist-closed-state so the CRDT survives; the local-only prune's
+  markdown-is-the-artifact premise never applied to richdoc.
+- P2 empty-workspace bootstrap: ydoc.open ensures the main version before
+  resolving the head — the first live doc in a fresh workspace works.
+- P2 drain precision: new `ydoc_deferred_updates` table (migration 12)
+  records deferred coordinates in the same transaction as their ack;
+  drains replay exactly those rows (never the whole imported history,
+  which after compaction re-appended non-dedupable updates at O(history)
+  per open) and delete each drained coordinate.
+- P2 defer admission: a live lease over an absent/local-only lineage now
+  REFUSES the envelope (unacked) — mirrors the non-live NoMarker/regime
+  refusal; a deferred coordinate is always drainable.
+- P2 eviction ordering: workspace.close evicts sessions/leases only after
+  the close owns teardown (handle removed under open_lock) — a dropped
+  close future can no longer strand live editors while the workspace
+  stays open.
+- P2 actor origin: recordUpdate's actorOriginId now persists onto the
+  appended row (ydoc_updates.actor_origin_id) via
+  record_local_update_with_origin — provenance parity with the TS driver.
+- Client: markStale while already stale marks dropped-while-stale, so a
+  gap/generation event landing inside the resync window forces the extra
+  resync pass (previously only directly-delivered updates did).

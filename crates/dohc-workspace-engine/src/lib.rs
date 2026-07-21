@@ -117,7 +117,6 @@ struct YdocSession {
     lineage_absent: bool,
     first_update_pending: bool,
     last_settled_sha: Option<String>,
-    event_baseline: u64,
     _lease: Lease,
 }
 
@@ -420,7 +419,6 @@ impl EngineService {
     async fn workspace_close(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
         let handle = handle.ok_or_else(workspace_unavailable)?;
         let _session_serial = self.session_ops.lock().await;
-        lock(&self.sessions).retain(|_, session| session.workspace != handle);
         let supervisor = self.supervisor;
         // Hold open_lock only across the handle removal and the synchronous
         // begin_close, so a workspace_open already waiting on `handles` cannot
@@ -444,6 +442,12 @@ impl EngineService {
             // for a fresh actor instead of the one being torn down.
             let closing = supervisor.begin_close(&db_path).map_err(map_runtime)?;
             let removed = lock(&self.handles).remove(&handle);
+            // Sessions (and their lease guards) evict only AFTER this close
+            // owns the teardown — evicting earlier meant a close future
+            // dropped while waiting on open_lock had already stranded live
+            // editors (ydoc-session-not-found) and released their leases for
+            // a workspace that stayed open.
+            lock(&self.sessions).retain(|_, session| session.workspace != handle);
             (closing, removed)
         };
         // The capture driver is CANCELLED synchronously here (an aborted close
@@ -1209,6 +1213,7 @@ impl EngineService {
             .actor
             .ydoc_open_state(
                 open.workspace_id.clone(),
+                now_ms()?,
                 params.version_id,
                 params.path.clone(),
                 requested_kind,
@@ -1251,7 +1256,6 @@ impl EngineService {
                 lineage_absent: !state.lineage_existing,
                 first_update_pending: !state.lineage_existing,
                 last_settled_sha: None,
-                event_baseline: 0,
                 _lease: lease,
             },
         );
@@ -1286,6 +1290,7 @@ impl EngineService {
                 session.content_kind,
                 session.regime,
                 update,
+                params.actor_origin_id,
                 require_empty,
                 now_ms()?,
                 Arc::new(NoFaults),
@@ -1305,7 +1310,6 @@ impl EngineService {
         if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
             session.first_update_pending = false;
         }
-        let _ = params.actor_origin_id;
         serde_json::to_value(YdocRecordUpdateResult {
             seq: outcome.seq,
             deduped: outcome.deduped,
@@ -1418,7 +1422,19 @@ impl EngineService {
             }
             serial = self.session_ops.lock() => serial,
         };
-        if params.settle.unwrap_or(false) {
+        // Missing `settle` means SETTLE — the TS driver treats close() as
+        // settle-unless-explicitly-false, and defaulting to false here would
+        // fail dirty local-only closes (UnsettledClose) and let a replicated
+        // close compact while the markdown projection is stale.
+        let default_settle = {
+            let (_open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+            // Richdoc settle is a C1 refusal on the EXPLICIT ydoc.settle RPC;
+            // a default close must not inherit that error — it skips the
+            // markdown settle and the close below persists the closed CRDT
+            // state instead (nothing is lost, nothing is projected).
+            session.content_kind != ContentKind::Richdoc
+        };
+        if params.settle.unwrap_or(default_settle) {
             self.ydoc_settle_inner(
                 &cancellation,
                 handle.as_ref(),
@@ -1463,9 +1479,6 @@ impl EngineService {
             .ydoc_resync(session.key, cancellation.token())
             .await
             .map_err(map_runtime)?;
-        if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
-            session.event_baseline = 0;
-        }
         serde_json::to_value(YdocResyncResult {
             initial_update_base64: encode_ydoc_state_base64(&full_state)?,
         })

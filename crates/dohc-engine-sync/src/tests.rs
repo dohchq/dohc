@@ -46,6 +46,33 @@ impl LeaseProbe for AlwaysLive {
 #[test]
 fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
     let (_scratch, _path, mut engine) = store();
+    // The defer path refuses non-replicated lineages (they can never drain),
+    // so the test needs the replicated marker scaffolding first.
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO versioned_workspaces (workspace_id, main_version_id)                  VALUES ('ws','main')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES ('ws','object-1',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("workspace scaffolding");
+    let marker_key = dohc_engine_collab::DocKey::new("ws", "main", "object-1").expect("key");
+    dohc_engine_collab::ensure_marker(
+        &mut engine,
+        &marker_key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        dohc_engine_collab::Regime::Replicated,
+        &NoFaults,
+        1_500,
+    )
+    .expect("replicated marker");
     // A MISSING blob must refuse BEFORE any ack — a deferred coordinate is
     // already acknowledged, and a blob that can never load would strand the
     // drain forever while the peer cursor is past the row.

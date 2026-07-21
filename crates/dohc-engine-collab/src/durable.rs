@@ -267,12 +267,27 @@ pub fn record_local_update(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
+    record_local_update_with_origin(store, key, update, None, faults, now_ms)
+}
+
+/// [`record_local_update`] with the requesting client's actor origin id
+/// persisted onto the appended row (`ydoc_updates.actor_origin_id`) —
+/// provenance/echo-filter parity with the TS driver, which stores the
+/// caller-supplied origin rather than dropping it.
+pub fn record_local_update_with_origin(
+    store: &mut EngineStore,
+    key: &DocKey,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
     validate_update_bytes(update)?;
     let sha = crate::hex_sha256(update);
 
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
         let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
-        append_local_update(tx, key, &marker, update, &sha, now_ms)
+        append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)
     })?;
     self_bound_log(store, key, &outcome, faults, now_ms)?;
     Ok(outcome)
@@ -281,12 +296,14 @@ pub fn record_local_update(
 /// Create a marker when needed and append a locally-produced update in one
 /// transaction. Validation, replay parity, blob storage, journal append, and
 /// first-marker creation therefore share one rollback boundary.
+#[allow(clippy::too_many_arguments)]
 pub fn record_local_update_creating_marker(
     store: &mut EngineStore,
     key: &DocKey,
     content_kind: ContentKind,
     regime: Regime,
     update: &[u8],
+    actor_origin_id: Option<&str>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
@@ -325,7 +342,7 @@ pub fn record_local_update_creating_marker(
             }
         };
         let sha = crate::hex_sha256(update);
-        append_local_update(tx, key, &marker, update, &sha, now_ms)
+        append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)
     })?;
     self_bound_log(store, key, &outcome, faults, now_ms)?;
     Ok(outcome)
@@ -337,6 +354,7 @@ fn append_local_update(
     marker: &Marker,
     update: &[u8],
     sha: &str,
+    actor_origin_id: Option<&str>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     let base = load_for_replay_gate(conn, key)?;
@@ -349,7 +367,7 @@ fn append_local_update(
         });
     }
     put_binary_blob(conn, update)?;
-    let seq = append_row(conn, key, sha, None, now_ms)?;
+    let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
     Ok(AppendOutcome {
         seq,
         deduped: false,

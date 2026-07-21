@@ -648,7 +648,14 @@ export class YdocAdapterSession {
   }
 
   markStale(error: YdocResyncNeededError): void {
-    if (this.closed || this.staleError !== null) return;
+    if (this.closed) return;
+    if (this.staleError !== null) {
+      // A gap/generation event observed while already stale is still an
+      // event whose update this doc missed — the in-flight resync must run
+      // one more pass rather than resetting the baseline past it.
+      this.droppedWhileStale = true;
+      return;
+    }
     this.staleError = error;
     this.notifyListeners(this.resyncNeededListeners, error);
     void this.resync().catch((cause: unknown) => this.surfaceSessionError(cause));

@@ -337,6 +337,7 @@ enum Command {
     },
     YdocOpenState {
         workspace_id: String,
+        now_ms: i64,
         version_id: String,
         path: String,
         content_kind: Option<ContentKind>,
@@ -348,6 +349,7 @@ enum Command {
         content_kind: ContentKind,
         regime: Regime,
         update: Vec<u8>,
+        actor_origin_id: Option<String>,
         require_empty_lineage: bool,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
@@ -1330,6 +1332,7 @@ impl ActorHandle {
     pub async fn ydoc_open_state(
         &self,
         workspace_id: String,
+        now_ms: i64,
         version_id: String,
         path: String,
         content_kind: Option<ContentKind>,
@@ -1339,6 +1342,7 @@ impl ActorHandle {
         self.tx
             .send(Command::YdocOpenState {
                 workspace_id,
+                now_ms,
                 version_id,
                 path,
                 content_kind,
@@ -1357,6 +1361,7 @@ impl ActorHandle {
         content_kind: ContentKind,
         regime: Regime,
         update: Vec<u8>,
+        actor_origin_id: Option<String>,
         require_empty_lineage: bool,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
@@ -1369,6 +1374,7 @@ impl ActorHandle {
                 content_kind,
                 regime,
                 update,
+                actor_origin_id,
                 require_empty_lineage,
                 now_ms,
                 faults,
@@ -2001,6 +2007,7 @@ fn worker_main(
             }
             Command::YdocOpenState {
                 workspace_id,
+                now_ms,
                 version_id,
                 path,
                 content_kind,
@@ -2010,6 +2017,7 @@ fn worker_main(
                 let outcome = ydoc_open_state_on_store(
                     &mut store,
                     &workspace_id,
+                    now_ms,
                     &version_id,
                     &path,
                     content_kind,
@@ -2022,6 +2030,7 @@ fn worker_main(
                 content_kind,
                 regime,
                 update,
+                actor_origin_id,
                 require_empty_lineage,
                 now_ms,
                 faults,
@@ -2034,6 +2043,7 @@ fn worker_main(
                     content_kind,
                     regime,
                     &update,
+                    actor_origin_id,
                     require_empty_lineage,
                     now_ms,
                     faults.as_ref(),
@@ -2198,6 +2208,7 @@ fn ydoc_apply_on_store(
         content_kind,
         Regime::Replicated,
         update,
+        None,
         faults,
         now_ms,
     )? {
@@ -2209,6 +2220,7 @@ fn ydoc_apply_on_store(
 fn ydoc_open_state_on_store(
     store: &mut EngineStore,
     workspace_id: &str,
+    now_ms: i64,
     version_id: &str,
     path: &str,
     requested_content_kind: Option<ContentKind>,
@@ -2217,6 +2229,15 @@ fn ydoc_open_state_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    // Bootstrap: the first live doc in an EMPTY workspace must be creatable —
+    // without this, read_text errors VersionNotFound before the absent-path
+    // flow can run (capture normally creates main, but nothing has captured).
+    VersionedTextStore::new(store).ensure_main_version(
+        workspace_id,
+        version_id,
+        now_ms,
+        &NoFaults,
+    )?;
     let head = VersionedTextStore::new(store).read_text(workspace_id, version_id, path)?;
     let object_id = head.as_ref().map_or_else(
         || derive_capture_object_id(workspace_id, version_id, path),
@@ -2280,6 +2301,7 @@ fn ydoc_record_update_on_store(
     content_kind: ContentKind,
     regime: Regime,
     update: &[u8],
+    actor_origin_id: Option<String>,
     require_empty_lineage: bool,
     now_ms: i64,
     faults: &dyn FaultInjector,
@@ -2312,6 +2334,7 @@ fn ydoc_record_update_on_store(
         content_kind,
         regime,
         update,
+        actor_origin_id.as_deref(),
         faults,
         now_ms,
     )? {
@@ -2403,12 +2426,25 @@ fn ydoc_settle_on_store(
         // The settle marker commits ATOMICALLY with the moment: a crash can
         // never leave a minted settlement moment whose lineage still reads
         // as unsettled (which would force a non-idempotent re-settle — the
-        // moment fingerprint includes the per-open session_id).
+        // moment fingerprint includes the per-open session_id). The PRIOR
+        // marker values ride along so a materialization conflict below can
+        // compensate — an errored settle must not leave a marker that lets
+        // close(settle:false) prune the CRDT with no artifact on disk.
         //
         // settle_seq namespace: the daemon settle path owns this column and
         // writes moment_order into it; collab settle()'s +1 generation
         // counter is never invoked on daemon-settled lineages (C1 has no
         // collab-settle caller). The close guard reads last_settled_sha only.
+        let prior_marker: (i64, Option<String>) = tx
+            .query_row(
+                "SELECT settle_seq, last_settled_sha FROM ydoc_docs \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| {
+                dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
+            })?;
         tx.execute(
             "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
@@ -2424,9 +2460,9 @@ fn ydoc_settle_on_store(
         .map_err(|error| {
             dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
         })?;
-        Ok(result)
+        Ok((result, prior_marker))
     })?;
-    let write = match outcome {
+    let (write, prior_marker) = match outcome {
         TxnOutcome::Committed(write) => write,
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
@@ -2453,6 +2489,32 @@ fn ydoc_settle_on_store(
     )? {
         JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
         JobOutcome::Conflict | JobOutcome::Superseded => {
+            // The target changed on disk and the job left it untouched: this
+            // settle FAILED, so the marker committed above must not stand —
+            // it would let close(settle:false) pass the settled check and
+            // prune the CRDT while the artifact was never materialized.
+            // (A crash before this compensation is the pending-job case: the
+            // job itself is durable and drains on reopen.)
+            let compensated = store.write_with(faults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, \
+                     updated_at_ms = ?6 \
+                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                    params![
+                        key.workspace_id,
+                        key.version_id,
+                        key.object_id,
+                        prior_marker.0,
+                        prior_marker.1,
+                        now_ms,
+                    ],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })?;
+            if matches!(compensated, TxnOutcome::Crashed { .. }) {
+                return Err(RuntimeError::OperationCrashed);
+            }
             return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
         }
         JobOutcome::Crashed(_) => return Err(RuntimeError::OperationCrashed),
@@ -2498,7 +2560,17 @@ fn ydoc_close_session_on_store(
     let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
         return Ok(None);
     };
-    let outcome = match dohc_engine_collab::close_session(store, key, false, faults, now_ms)? {
+    // Richdoc lineages persist their closed CRDT state: C1 has no richdoc
+    // markdown settle, so the local-only prune's markdown-is-the-artifact
+    // premise doesn't hold — pruning would discard the only copy.
+    let persist_closed_state = marker.content_kind == ContentKind::Richdoc;
+    let outcome = match dohc_engine_collab::close_session(
+        store,
+        key,
+        persist_closed_state,
+        faults,
+        now_ms,
+    )? {
         TxnOutcome::Committed(outcome) => outcome,
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
