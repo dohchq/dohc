@@ -968,13 +968,17 @@ impl EngineService {
         // secret" for a real one. This also runs the fail-closed secret
         // gate up front, before ANY state-dependent branch, so the error
         // surface is identical across key states.
-        let (classification, normalized) =
-            dohc_engine_files::policy::classify_engine_file_path_normalized(&params.path);
-        if classification != dohc_engine_files::policy::PathClassification::Secret {
+        if dohc_engine_files::policy::classify_engine_file_path(&params.path)
+            != dohc_engine_files::policy::PathClassification::Secret
+        {
             return Err(wire(ErrorCode::InvalidParams, "not a secret path"));
         }
-        let secret_path =
-            normalized.ok_or_else(|| wire(ErrorCode::InvalidParams, "not a secret path"))?;
+        // QUERY VERBATIM: the domain stores the spelling the write
+        // carried, and a path secrets.list returns must materialize
+        // verbatim — rewriting to the normalized spelling would orphan
+        // stored tips (the classification above still uses it, so the
+        // gate is disguise-proof).
+        let secret_path = params.path.clone();
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         // PRECEDENCE stat (keyless): validates the secret path and the

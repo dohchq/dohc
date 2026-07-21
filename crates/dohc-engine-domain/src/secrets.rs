@@ -544,6 +544,13 @@ impl<'a> SecretFileStore<'a> {
             };
             let byte_length = tip.byte_length() as i64;
             if tip.byte_length() > cap {
+                // AUTHENTICATE even what we withhold: a wrong key,
+                // tampered ciphertext/tag, or AAD-spliced row must fail
+                // closed, never read as a valid over-cap secret. The
+                // plaintext is decrypted into a zeroizing buffer and
+                // dropped immediately — bounded by the 1 MiB domain cap,
+                // never converted to an ordinary String.
+                let _verified = aead::open(key, workspace_id, path, &tip)?;
                 return Ok(Some(InbandSecret {
                     text: None,
                     byte_length,

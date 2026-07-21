@@ -377,9 +377,10 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     )
     .await;
     assert_eq!(plaintext["text"], json!("TOKEN=rpc-read"));
-    // A percent-disguised spelling normalizes to the SAME secret — the
-    // policy stable-decodes %2eenv to .env, and the query must use the
-    // normalized spelling or a real secret reads as absent.
+    // A percent-disguised spelling CLASSIFIES as secret (the gate
+    // stable-decodes) but resolves VERBATIM: the store keeps the spelling
+    // the write carried, so %2eenv is a DIFFERENT (absent) secret than
+    // .env — never an orphaned rewrite, never a bypass of the gate.
     id += 1;
     let disguised = call(
         &transport,
@@ -389,7 +390,10 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         json!({ "versionId": "main", "path": "%2eenv" }),
     )
     .await;
-    assert_eq!(disguised["text"], json!("TOKEN=rpc-read"));
+    assert!(
+        disguised.is_null(),
+        "a distinct spelling is a distinct secret"
+    );
     id += 1;
     let absent = call(
         &transport,
