@@ -85,6 +85,223 @@ async fn call_error(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_round_7_normalizes_persisted_chat_identities() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-chat-round-7").await;
+    let mut id = 10;
+
+    let channel = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "  channel-round-7  ",
+            "name": "Round Seven",
+            "kind": "channel",
+            "nowMs": 10,
+        }),
+    )
+    .await;
+    assert_eq!(channel["channelId"], json!("channel-round-7"));
+    for (index, invalid_channel_id) in [format!("bad{}channel", '\u{0001}'), "x".repeat(257)]
+        .into_iter()
+        .enumerate()
+    {
+        let invalid_name = format!("Invalid channel {index}");
+        let error = call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.channels.create",
+            json!({
+                "channelId": invalid_channel_id,
+                "name": invalid_name,
+                "kind": "channel",
+                "nowMs": 11,
+            }),
+        )
+        .await;
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+    }
+
+    let missing = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.getWireId",
+        json!({ "channelId": "missing-channel" }),
+    )
+    .await;
+    assert_eq!(missing.code, ErrorCode::InvalidParams);
+
+    let db_path = scratch.engine_db_path().expect("engine db path");
+    let conn = rusqlite::Connection::open(&db_path).expect("open engine db");
+    conn.execute(
+        "DELETE FROM chat_channel_wire_ids WHERE workspace_id = ?1 AND channel_id = ?2",
+        ["rpc-chat-round-7", "channel-round-7"],
+    )
+    .expect("delete channel wire mapping");
+    drop(conn);
+    let unmapped = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.getWireId",
+        json!({ "channelId": "channel-round-7" }),
+    )
+    .await;
+    assert_eq!(unmapped["wireId"], Value::Null);
+
+    let started = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel-round-7",
+            "threadId": "  thread-round-7  ",
+            "messageId": "message-round-7",
+            "authorKind": "human",
+            "authorDisplayName": "Alice",
+            "body": "round seven",
+            "nowMs": 20,
+        }),
+    )
+    .await;
+    assert_eq!(started["thread"]["threadId"], json!("thread-round-7"));
+    assert_eq!(started["message"]["threadId"], json!("thread-round-7"));
+    for (thread_id, message_id) in [
+        (format!("bad{}thread", '\u{0001}'), "bad-control"),
+        ("x".repeat(257), "bad-overlong"),
+    ] {
+        let error = call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.threads.start",
+            json!({
+                "channelId": "channel-round-7",
+                "threadId": thread_id,
+                "messageId": message_id,
+                "authorKind": "human",
+                "authorDisplayName": "Alice",
+                "body": "must fail",
+                "nowMs": 21,
+            }),
+        )
+        .await;
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+    }
+
+    let padded_bookmark = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.save",
+        json!({
+            "ownerUserId": "  owner-round-7  ",
+            "targetKind": "thread",
+            "targetId": "  thread-round-7  ",
+            "mode": "live",
+            "destinationPath": "bookmarks/round-7.md",
+            "nowMs": 30,
+        }),
+    )
+    .await;
+    assert_eq!(padded_bookmark["ownerUserId"], json!("owner-round-7"));
+    assert_eq!(padded_bookmark["targetId"], json!("thread-round-7"));
+    let plain_bookmark = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.save",
+        json!({
+            "ownerUserId": "owner-round-7",
+            "targetKind": "thread",
+            "targetId": "thread-round-7",
+            "mode": "live",
+            "destinationPath": "bookmarks/round-7.md",
+            "nowMs": 31,
+        }),
+    )
+    .await;
+    assert_eq!(plain_bookmark["bookmarkId"], padded_bookmark["bookmarkId"]);
+    let bookmarks = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.list",
+        json!({ "ownerUserId": "owner-round-7" }),
+    )
+    .await;
+    assert_eq!(
+        bookmarks["bookmarks"].as_array().expect("bookmarks").len(),
+        1
+    );
+
+    let enqueued = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.enqueue",
+        json!({
+            "triggerMessageId": "  trigger-round-7  ",
+            "threadId": "  thread-round-7  ",
+            "nowMs": 40,
+        }),
+    )
+    .await;
+    assert_eq!(enqueued["enqueued"], json!(true));
+    let claim = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "runId": "run-round-7", "nowMs": 41 }),
+    )
+    .await;
+    assert_eq!(
+        claim["dispatch"]["triggerMessageId"],
+        json!("trigger-round-7")
+    );
+    assert_eq!(claim["dispatch"]["threadId"], json!("thread-round-7"));
+    for (trigger_message_id, thread_id) in [
+        ("   ".to_owned(), "thread-round-7".to_owned()),
+        ("x".repeat(513), "thread-round-7".to_owned()),
+        ("bad\0trigger".to_owned(), "thread-round-7".to_owned()),
+        ("another-trigger".to_owned(), "   ".to_owned()),
+    ] {
+        let error = call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.enqueue",
+            json!({
+                "triggerMessageId": trigger_message_id,
+                "threadId": thread_id,
+                "nowMs": 42,
+            }),
+        )
+        .await;
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+    }
+
+    let conn = rusqlite::Connection::open(db_path).expect("reopen engine db");
+    let payload: String = conn
+        .query_row(
+            "SELECT payload_json FROM replication_log WHERE workspace_id = ?1 \
+             AND op_kind = 'chat.thread.create' ORDER BY origin_seq DESC LIMIT 1",
+            ["rpc-chat-round-7"],
+            |row| row.get(0),
+        )
+        .expect("thread replication payload");
+    let payload: Value = serde_json::from_str(&payload).expect("valid replication payload");
+    assert_eq!(payload["threadId"], json!("thread-round-7"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     let first = ScratchDir::new().expect("first scratch");
     let second = ScratchDir::new().expect("second scratch");
@@ -142,7 +359,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     )
     .await;
     assert_eq!(general_wire["wireId"], json!("channel_wire_general_v1"));
-    let unknown_wire = call(
+    let unknown_wire = call_error(
         &transport,
         &first_handle,
         &mut id,
@@ -150,7 +367,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         json!({ "channelId": "missing-channel" }),
     )
     .await;
-    assert_eq!(unknown_wire["wireId"], Value::Null);
+    assert_eq!(unknown_wire.code, ErrorCode::InvalidParams);
     assert_eq!(general["slug"], json!("general"));
     let agent = call(
         &transport,
@@ -967,7 +1184,11 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     )
     .await;
     for sequence in 0..6_i64 {
-        let huge_thread_id = format!("feed-{sequence}-{}", "t".repeat(60 * 1024));
+        // Ids are bounded (256 UTF-16 units) since round 7, so the byte
+        // pressure comes from LARGE MESSAGE BODIES — hydrated feed items
+        // embed the opening message body, so ~60 KiB bodies trip the
+        // 256 KiB page budget after a handful of items.
+        let huge_body = format!("feed budget {} {}", sequence, "b".repeat(60 * 1024));
         call(
             &transport,
             &first_handle,
@@ -975,11 +1196,11 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
             "chats.threads.start",
             json!({
                 "channelId": "channel-project",
-                "threadId": huge_thread_id,
+                "threadId": format!("feed-budget-thread-{sequence}"),
                 "messageId": format!("feed-budget-message-{sequence}"),
                 "authorKind": "human",
                 "authorDisplayName": "Feed",
-                "body": "feed budget seed",
+                "body": huge_body,
                 "nowMs": 2260 + sequence,
             }),
         )

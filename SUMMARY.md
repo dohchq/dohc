@@ -97,3 +97,13 @@ Per the task constraint, no Cargo command was run. The changed Rust files were p
 - Domain and in-process RPC regressions cover both replication-owner gates, exact core payloads, hydrated feed joins/matches, bookmark archive/failure/stale transitions, stale-generation no-ops, and well-known/unknown wire-id lookups.
 
 Per the task constraint, no Cargo build, check, or test command was run. All changed Rust files passed direct `rustfmt --edition 2024` parsing/formatting and `rustfmt --check`; `git diff --check` also passes.
+
+## Review round 7
+
+- `chats.channels.getWireId` now requires a real workspace channel before looking up its wire mapping. Unknown channel ids fail as chat invalid input, while an existing channel with no mapping still returns `{ wireId: null }`.
+- `chats.dispatch.enqueue` now applies the TypeScript `normalizeRequiredId` contract to trigger-message and thread ids before persistence: JavaScript trim semantics, a 512 UTF-16-code-unit cap, and empty/NUL rejection. Dispatch run ids share that exact helper.
+- `chats.bookmarks.save` now normalizes and validates bookmark owner/target identities before lookup, uniqueness checks, and deterministic SHA-256 bookmark-id derivation, so padded and unpadded identities converge on one row.
+- Caller-supplied thread ids and `chats.channels.create` channel ids are trimmed and validated against the replicated-id contract before database or replication-journal writes: non-empty, no ASCII control characters, and at most 256 UTF-16 code units.
+- Added focused in-process RPC coverage for unknown versus real-unmapped channels, trimmed persisted/journaled ids, control/length refusal, normalized bookmark deduplication, and normalized dispatch ledger values.
+
+Per the task constraint, no Cargo command was run. The changed Rust files were parsed and formatted directly with `rustfmt --edition 2024`; final verification also used direct `rustfmt --check` and `git diff --check`.

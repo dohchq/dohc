@@ -78,8 +78,11 @@ const MAX_FEED_CURSOR_MESSAGE_ID_CHARS: usize = 256;
 /// `[i64::MIN,"id"]` framing costs exactly 25 bytes (20 timestamp bytes plus
 /// `[`, `,"`, and `"]`), leaving 359 bytes for the unescaped id.
 const MAX_FEED_CURSOR_MESSAGE_ID_BYTES: usize = (MAX_FEED_CURSOR_LEN / 4) * 3 - 25;
-/// Dispatch run ids are trimmed before storage; match the TS store's hard byte floor.
-const MAX_DISPATCH_RUN_ID_BYTES: usize = 512;
+/// Required dispatch ids are trimmed before storage and bounded like the TS
+/// store's JavaScript strings (UTF-16 code units).
+const MAX_DISPATCH_ID_UTF16_UNITS: usize = 512;
+/// Replicated chat identifiers use the sync payload validator's UTF-16 bound.
+const MAX_REPLICATED_CHAT_ID_UTF16_UNITS: usize = 256;
 /// Dispatch metadata uses the TS store's 16,384 UTF-16-code-unit text bound.
 const MAX_DISPATCH_METADATA_UTF16_UNITS: usize = 16_384;
 /// Sentinel message id for the synthetic per-thread header FTS row.
@@ -739,18 +742,33 @@ fn validate_message_id(message_id: &str) -> Result<(), DomainError> {
     }
 }
 
-/// Run ids are trimmed before persistence, then checked for empty, the
-/// 512-byte wire bound, and NUL (`normalizeRequiredId`).
-fn normalize_dispatch_run_id(run_id: &str) -> Result<String, DomainError> {
-    let normalized = run_id.trim();
+/// Dispatch ids use `agentDispatchStore.ts`'s `normalizeRequiredId`: JS trim,
+/// then reject empty, more than 512 UTF-16 code units, or NUL.
+fn normalize_dispatch_id(value: &str, reason: &'static str) -> Result<String, DomainError> {
+    let normalized = value.trim_matches(is_js_trim_ws);
     if normalized.is_empty()
-        || normalized.len() > MAX_DISPATCH_RUN_ID_BYTES
+        || normalized.encode_utf16().count() > MAX_DISPATCH_ID_UTF16_UNITS
         || normalized.contains('\0')
     {
-        Err(DomainError::chat(
-            "invalid-message-body",
-            "Agent run id is invalid.",
-        ))
+        Err(DomainError::InvalidInput { reason })
+    } else {
+        Ok(normalized.to_owned())
+    }
+}
+
+fn normalize_dispatch_run_id(run_id: &str) -> Result<String, DomainError> {
+    normalize_dispatch_id(run_id, "Agent run id is invalid.")
+}
+
+/// Caller-minted local ids are normalized before they become replicated ids,
+/// then checked with `isBoundedReplicatedId`'s exact trim/control/UTF-16 rules.
+fn normalize_replicated_chat_id(value: &str, reason: &'static str) -> Result<String, DomainError> {
+    let normalized = value.trim_matches(is_js_trim_ws);
+    if normalized.is_empty()
+        || normalized.encode_utf16().count() > MAX_REPLICATED_CHAT_ID_UTF16_UNITS
+        || has_projection_control_char(normalized)
+    {
+        Err(DomainError::InvalidInput { reason })
     } else {
         Ok(normalized.to_owned())
     }
@@ -811,6 +829,8 @@ fn normalize_feed_identity(value: &str, label: &str) -> Result<String, DomainErr
             "Feed owner" => "Feed owner is invalid.",
             "Replication feed owner" => "Replication feed owner is invalid.",
             "Follow target" => "Follow target is invalid.",
+            "Bookmark owner" => "Bookmark owner is invalid.",
+            "Bookmark target" => "Bookmark target is invalid.",
             _ => "Feed identity is invalid.",
         };
         return Err(DomainError::chat("invalid-follow-target", reason));
@@ -1053,12 +1073,11 @@ impl<'a> LinkedChatStore<'a> {
             "invalid-channel-name",
             "workspace_id must not be empty",
         )?;
-        non_empty(
-            channel_id,
-            "invalid-channel-name",
-            "channel_id must not be empty",
-        )?;
-        if matches!(channel_id, GENERAL_CHANNEL_WIRE_ID | AGENT_CHANNEL_WIRE_ID) {
+        let channel_id = normalize_replicated_chat_id(channel_id, "channel id is invalid")?;
+        if matches!(
+            channel_id.as_str(),
+            GENERAL_CHANNEL_WIRE_ID | AGENT_CHANNEL_WIRE_ID
+        ) {
             return Err(DomainError::InvalidInput {
                 reason: "channel id is reserved",
             });
@@ -1085,7 +1104,7 @@ impl<'a> LinkedChatStore<'a> {
         }
 
         let ws = workspace_id.to_owned();
-        let cid = channel_id.to_owned();
+        let cid = channel_id;
         let slug_c = slug.clone();
         let name_c = name.clone();
         let outcome = self.store.write_with(faults, |tx| {
@@ -1336,14 +1355,17 @@ impl<'a> LinkedChatStore<'a> {
     }
 
     /// Return the stable cross-machine wire identity for a local channel id.
-    /// Unknown channels and channels without a mapping both resolve to `None`.
+    /// An existing channel without a mapping resolves to `None`; an unknown
+    /// channel is rejected by the same precheck as the TS store.
     pub fn get_channel_wire_id(
         &self,
         workspace_id: &str,
         channel_id: &str,
     ) -> Result<Option<String>, DomainError> {
-        self.store
-            .read_with(|conn| wire_id_for_channel_id(conn, workspace_id, channel_id))
+        self.store.read_with(|conn| {
+            let channel = require_channel(conn, workspace_id, channel_id)?;
+            wire_id_for_channel_id(conn, workspace_id, &channel.channel_id)
+        })
     }
 
     // ------------------------------------------------------- threads/messages
@@ -1363,11 +1385,7 @@ impl<'a> LinkedChatStore<'a> {
             "invalid-channel-name",
             "workspace_id must not be empty",
         )?;
-        non_empty(
-            &input.thread_id,
-            "invalid-thread-title",
-            "thread_id must not be empty",
-        )?;
+        let thread_id = normalize_replicated_chat_id(&input.thread_id, "thread id is invalid")?;
         validate_message_id(&input.message_id)?;
         if input.message_id == CHAT_THREAD_HEADER_MESSAGE_ID {
             return Err(DomainError::InvalidInput {
@@ -1382,7 +1400,7 @@ impl<'a> LinkedChatStore<'a> {
         let now = input.now_ms;
 
         let payload_hash = hash_fields(&[
-            input.thread_id.as_bytes(),
+            thread_id.as_bytes(),
             input.message_id.as_bytes(),
             input.channel_id.as_bytes(),
             title.as_bytes(),
@@ -1404,12 +1422,13 @@ impl<'a> LinkedChatStore<'a> {
             }
             return self.reconstruct_thread_message(
                 &input.workspace_id,
-                &input.thread_id,
+                &thread_id,
                 &input.message_id,
             );
         }
 
-        let input = input.clone();
+        let mut input = input.clone();
+        input.thread_id = thread_id;
         let title_c = title.clone();
         let body_c = body.clone();
         let display_c = display_name.clone();
@@ -2367,16 +2386,8 @@ impl<'a> LinkedChatStore<'a> {
         input: &SaveBookmark,
         faults: &dyn FaultInjector,
     ) -> Result<ChatBookmark, DomainError> {
-        non_empty(
-            &input.owner_user_id,
-            "invalid-bookmark-target",
-            "Bookmark owner is required.",
-        )?;
-        non_empty(
-            &input.target_id,
-            "invalid-bookmark-target",
-            "Bookmark target is required.",
-        )?;
+        let owner_user_id = normalize_feed_identity(&input.owner_user_id, "Bookmark owner")?;
+        let target_id = normalize_feed_identity(&input.target_id, "Bookmark target")?;
         // The destination is a user-write path a projection worker later
         // materializes, so it must clear the path floor (no empty/absolute/
         // backslash/traversal/`.dohc` targets) BEFORE it is persisted and queued
@@ -2386,7 +2397,9 @@ impl<'a> LinkedChatStore<'a> {
         crate::store::validate_path(&input.destination_path).map_err(|_| {
             DomainError::chat("invalid-path", "Bookmark destination path is invalid.")
         })?;
-        let input = input.clone();
+        let mut input = input.clone();
+        input.owner_user_id = owner_user_id;
+        input.target_id = target_id;
         let now = input.now_ms;
         let outcome = self.store.write_with(faults, |tx| {
             // Resolve the thread (+ message) the bookmark targets.
@@ -2781,8 +2794,8 @@ impl<'a> LinkedChatStore<'a> {
         faults: &dyn FaultInjector,
     ) -> Result<bool, DomainError> {
         let ws = workspace_id.to_owned();
-        let trigger = trigger_message_id.to_owned();
-        let tid = thread_id.to_owned();
+        let trigger = normalize_dispatch_id(trigger_message_id, "Trigger message id is invalid.")?;
+        let tid = normalize_dispatch_id(thread_id, "Thread id is invalid.")?;
         let outcome = self.store.write_with(faults, |tx| {
             let inserted = tx
                 .execute(
