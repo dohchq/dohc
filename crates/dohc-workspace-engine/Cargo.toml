@@ -26,7 +26,6 @@ tokio = { version = "1", features = [
   "io-std",
   "io-util",
   "macros",
-  "process",
   "rt-multi-thread",
   "sync",
   "time",
@@ -40,7 +39,9 @@ libc = "0.2"
 [features]
 # Compiles the harness-only marker writers (e.g.
 # `write_rehearsal_token_for_harness`); production builds must not enable it.
-harness = []
+# `tokio/process` lives here because only the harness-gated soak runner
+# spawns child processes.
+harness = ["tokio/process"]
 
 [dev-dependencies]
 # `test-util` gives the driver-loop tests paused virtual time, so they can
