@@ -964,7 +964,7 @@ async fn main() {
             "threadsWithinRecordedSlack": threads_ok,
             // Tri-state: null when the trend was not evaluated, so a
             // scenarios-only artifact can never read as leak evidence.
-            "noMonotonicRssSlope": if trend_evaluated {
+            "rssSlopeWithinThreshold": if trend_evaluated {
                 json!(slope <= MAX_RSS_SLOPE_BYTES_PER_SEC)
             } else {
                 json!(null)

@@ -22,7 +22,7 @@ conflicts.list/open/resolve · search.query · watcher.status · capture.flush
 | getActiveVersion | MISSING | actor `active_version_id` is ID-ONLY; TS returns a full `VersionRecord \| null`. RPC-A ships the id (callers join via versions.list); a full-record passthrough is RPC-D work |
 | set/ensure active version | MISSING | domain exists |
 | listVersions / createNamedVersion / forkVersion | MISSING | domain `store.rs:593/823`, `secrets.rs:645` |
-| listMoments / getMoment | RPC-A ships SUMMARY shapes (hashes, not before/after text payloads — those belong to the compare/diff surface, RPC-D, where the wire-limit treatment for bodies already lives) | domain `store.rs:616/783` |
+| listMoments / getMoment | MISSING on main; RPC-A (#217, in review) ships SUMMARY shapes (hashes, not before/after text payloads — those belong to the compare/diff surface, RPC-D, where the wire-limit treatment for bodies lives) | domain `store.rs:616/783` |
 | listSecretFiles / materializeSecretFile | MISSING | domain `secrets.rs:547/526` |
 | secret moments/compare/restore | MISSING | moments exist (`secrets.rs:582/614`); compare/restore are NOT ported — those line refs are TS `secretFileStore.ts:1468/1517/1584`. Real Rust domain work, not wiring |
 | CHATS (threads/messages/channels/feed/follows/bookmarks/reactions/mentions/decisions/dispatch) | ALL MISSING | `chats.rs:744-2004` covers channels/threads/messages/read-state/follows/feed/bookmarks/dispatch; reactions, decisions, and mention indexing were scoped OUT of R09 — unported domain work. Nothing on the actor |
@@ -63,6 +63,13 @@ of scope here.
   Rust counterparts (no thread<->file link queries, no thread->markdown
   projection renderer in chats.rs). Real domain work; slots with the
   reactions/decisions follow-up (RPC-B2), NOT mechanical wiring.
+  ALSO production-called and to VERIFY-THEN-ADD (Codex, 2026-07-21):
+  `getChannelWireId` (wire-id RECORDING exists Rust-side —
+  record_channel_wire_id, chats.rs:800 — the read accessor is unverified),
+  `findThreadChannelId` and `listChannelThreads` (thread->channel and
+  per-channel thread queries; desktop main.ts + MCP tools.ts call all
+  three). Likely small query additions, but per this program's rule they
+  are VERIFIED per method before the slice estimates, never assumed.
 - **RPC-C (ydoc session):** implement the session protocol daemon-side over
   the `ydoc.apply` primitive + collab crate (port `ydocLoopbackEngine`
   semantics). Deepest design work; needs the wire contract's event side.
