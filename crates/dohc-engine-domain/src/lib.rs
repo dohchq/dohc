@@ -51,7 +51,7 @@ pub use conflicts::{
     ConflictRowUpdate, ConflictStatus, ResolveConflictKind, ResolveTextConflict,
     ResolveTextConflictResult, TextConflict, WriteBinaryFile, enqueue_delete, enqueue_write,
     insert_text_conflict_if_absent, live_state_matches_conflict_current, load_text_conflict_in_tx,
-    update_text_conflict_row, write_binary_file_in_tx,
+    select_snapshot_by_path_in_tx, update_text_conflict_row, write_binary_file_in_tx,
 };
 pub use error::DomainError;
 pub use merge::{
@@ -80,7 +80,8 @@ pub use store::{
     CaptureManifestSeedEntry, INBAND_CONTENT_CAP_BYTES, MAX_CAPTURE_BINARY_FILE_BYTES,
     MAX_TEXT_BYTES, SECRET_SEED_SENTINEL_SHA, VersionedTextStore, capture_manifest_seed,
     delete_text_in_tx, derive_capture_moment_id, derive_capture_object_id,
-    derive_capture_retire_moment_id, validate_delete_input, validate_write_input, write_text_in_tx,
+    derive_capture_retire_moment_id, validate_delete_input, validate_write_input,
+    write_projected_text_in_tx, write_text_in_tx,
 };
 
 // Re-export the storage surface a domain caller needs on the common path.

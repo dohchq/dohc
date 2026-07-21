@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import type { Event } from "./generated/Event";
 import type { Request } from "./generated/Request";
 import type { Response } from "./generated/Response";
@@ -171,6 +172,13 @@ function declareDohcRootSchema(doc: Y.Doc): void {
   doc.getMap("meta");
   doc.getXmlFragment("body");
   doc.getText("plainText");
+}
+
+function createPlaintextSeedDoc(markdown: string): Y.Doc {
+  const doc = new Y.Doc();
+  declareDohcRootSchema(doc);
+  if (markdown.length > 0) doc.getText("plainText").insert(0, markdown);
+  return doc;
 }
 
 function visitJsonStrings(
@@ -634,6 +642,38 @@ export class YdocAdapterSession {
     if (this.closed || this.staleError !== null) return;
     this.staleError = error;
     this.notifyListeners(this.resyncNeededListeners, error);
+    void this.resync().catch((cause: unknown) => this.surfaceSessionError(cause));
+  }
+
+  async resync(): Promise<Uint8Array> {
+    if (this.closed) {
+      throw new YdocAdapterError(
+        "session-closed",
+        "The Y.Doc adapter session is closed.",
+      );
+    }
+    await this.recordChain;
+    const raw = await this.adapter.request(this.workspace, YDOC_METHOD.resync, {
+      sessionId: this.sessionId,
+    });
+    if (raw === null || Array.isArray(raw) || typeof raw !== "object") {
+      throw new YdocAdapterError(
+        "response-mismatch",
+        "ydoc.resync result must be an object.",
+      );
+    }
+    const encoded = (raw as Record<string, unknown>).initialUpdateBase64;
+    if (typeof encoded !== "string") {
+      throw new YdocAdapterError(
+        "response-mismatch",
+        "ydoc.resync result.initialUpdateBase64 must be a string.",
+      );
+    }
+    const update = base64ToBytes(encoded);
+    Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
+    this.adapter.resetEventBaseline(this.sessionId);
+    this.staleError = null;
+    return update;
   }
 
   async close(options?: { settle?: boolean; summary?: string }): Promise<void> {
@@ -770,9 +810,8 @@ export class YdocLiveAdapter {
       path: input.path,
       ...(input.contentKind ? { contentKind: input.contentKind } : {}),
     };
-    const result = decodeYdocOpenResult(
-      await this.request(input.workspace, YDOC_METHOD.open, params),
-    );
+    const rawResult = await this.request(input.workspace, YDOC_METHOD.open, params);
+    const result = decodeYdocOpenResult(rawResult);
     const session = new YdocAdapterSession(this, input.workspace, result.sessionId, {
       objectId: result.objectId,
       path: result.path,
@@ -780,6 +819,19 @@ export class YdocLiveAdapter {
       initialUpdate: base64ToBytes(result.initialUpdateBase64),
     });
     this.sessions.set(result.sessionId, session);
+    if (
+      rawResult !== null &&
+      !Array.isArray(rawResult) &&
+      typeof rawResult === "object" &&
+      rawResult.lineage === "absent" &&
+      typeof rawResult.seedMarkdown === "string"
+    ) {
+      const seedDoc =
+        result.contentKind === "plaintext"
+          ? createPlaintextSeedDoc(rawResult.seedMarkdown)
+          : markdownToYDoc(rawResult.seedMarkdown);
+      await session.applyLocalUpdate(Y.encodeStateAsUpdate(seedDoc));
+    }
     return session;
   }
 
@@ -810,6 +862,10 @@ export class YdocLiveAdapter {
 
   releaseSession(sessionId: string): void {
     this.sessions.delete(sessionId);
+    this.eventPositions.delete(sessionId);
+  }
+
+  resetEventBaseline(sessionId: string): void {
     this.eventPositions.delete(sessionId);
   }
 

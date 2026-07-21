@@ -45,7 +45,9 @@ pub use relay::{
 };
 pub use secret_apply::apply_secret_envelope;
 pub use share::{ShareBoundary, ShareSurface, apply_shared_envelope};
-pub use ydoc_apply::apply_ydoc_envelope;
+pub use ydoc_apply::{
+    LeaseProbe, NoLiveLeases, YdocApplyResult, apply_ydoc_envelope, drain_deferred_ydoc_for_key,
+};
 
 pub use dohc_engine_storage::{FaultInjector, FaultPoint, NoFaults};
 

@@ -30,7 +30,10 @@ pub mod identity;
 pub mod search;
 pub mod supervisor;
 
-pub use actor::{ActorHandle, LifecycleState, StoreSnapshot, UnitsOutcome, WorkspaceActor};
+pub use actor::{
+    ActorHandle, LifecycleState, SelfWriteRecorder, StoreSnapshot, UnitsOutcome, WorkspaceActor,
+    YdocOpenState, YdocSettlement,
+};
 pub use error::RuntimeError;
 pub use identity::EngineDbIdentity;
 pub use search::{SearchCandidate, SearchError, SearchResult, SearchSurface};

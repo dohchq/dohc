@@ -466,8 +466,8 @@ describe("YdocLiveAdapter", () => {
     const resyncErrors: YdocResyncNeededError[] = [];
     session.onResyncNeeded((error) => resyncErrors.push(error));
 
-    engine.emitRemoteUpdate(session.sessionId, first);
-    engine.emitRemoteUpdate(session.sessionId, second, { seq: 3 });
+    engine.applyRemoteUpdate(session.sessionId, first);
+    engine.applyRemoteUpdate(session.sessionId, second, { seq: 3 });
 
     expect(resyncErrors).toHaveLength(1);
     expect(resyncErrors[0]?.reason).toBe("event-sequence-gap");
@@ -475,6 +475,15 @@ describe("YdocLiveAdapter", () => {
     expect(() =>
       session.applyLocalTextEdit({ root: "plainText", index: 1, insert: "C" }),
     ).toThrow(YdocResyncNeededError);
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(engine.requests.map((request) => request.method)).toContain(
+      YDOC_METHOD.resync,
+    );
+    expect(session.doc.getText("plainText").toString()).toBe("AB");
+    await expect(
+      session.applyLocalTextEdit({ root: "plainText", index: 2, insert: "C" }),
+    ).resolves.toBeDefined();
 
     await session.close({ settle: false });
     adapter.dispose();

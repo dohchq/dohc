@@ -15,10 +15,11 @@ use dohc_engine_runtime::{
     ActorHandle, CaptureIngest, CaptureIngestBinary, CaptureRetire, CaptureSecret,
     CaptureSecretRetire, NoFaults, RuntimeError,
 };
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const CAPTURE_METADATA_ORIGIN: &str = "capture";
 /// The encrypted store validates origins against the TS `WRITE_ORIGINS` set,
@@ -58,6 +59,44 @@ const SECRET_KEY_UNAVAILABLE: CaptureError = CaptureError {
     reason: "workspace secret key unavailable",
 };
 
+/// Single-shot identities of daemon-materialized Y.Doc projections. Capture
+/// consumes a matching `(workspace, path, sha)` observation instead of
+/// claiming the just-settled head as a new external edit.
+#[derive(Clone, Default)]
+pub struct SelfWriteSuppression {
+    entries: Arc<Mutex<HashMap<(String, String), String>>>,
+}
+
+impl SelfWriteSuppression {
+    pub fn record(&self, workspace_id: &str, path: &str, sha256: &str) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.insert(
+                (workspace_id.to_owned(), path.to_owned()),
+                sha256.to_owned(),
+            );
+        }
+    }
+
+    fn consume_match(&self, workspace_id: &str, path: &str, sha256: &str) -> bool {
+        let Ok(mut entries) = self.entries.lock() else {
+            return false;
+        };
+        let key = (workspace_id.to_owned(), path.to_owned());
+        if entries.get(&key).is_some_and(|recorded| recorded == sha256) {
+            entries.remove(&key);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+impl dohc_engine_runtime::SelfWriteRecorder for SelfWriteSuppression {
+    fn record(&self, workspace_id: &str, path: &str, sha256: &str) {
+        SelfWriteSuppression::record(self, workspace_id, path, sha256);
+    }
+}
+
 /// Bridges a files-crate reconcile plan to the actor's domain capture writes.
 ///
 /// The adapter is intentionally not wired into workspace open/close yet. Its
@@ -81,6 +120,7 @@ pub struct StoreCaptureSink {
     /// `loadSecretDataKey` create branch) so workspaces without secrets never
     /// mint a key file.
     secret_key: Option<SecretDataKey>,
+    self_writes: SelfWriteSuppression,
 }
 
 /// The sink's view of `.dohc/files.toml`, split by WHY there are no rules.
@@ -109,6 +149,27 @@ impl StoreCaptureSink {
         now_ms: i64,
         author_json: Option<String>,
     ) -> Self {
+        Self::new_with_self_writes(
+            actor,
+            workspace_id,
+            version_id,
+            shadow_root,
+            now_ms,
+            author_json,
+            SelfWriteSuppression::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_self_writes(
+        actor: ActorHandle,
+        workspace_id: impl Into<String>,
+        version_id: impl Into<String>,
+        shadow_root: impl Into<PathBuf>,
+        now_ms: i64,
+        author_json: Option<String>,
+        self_writes: SelfWriteSuppression,
+    ) -> Self {
         let shadow_root = shadow_root.into();
         // `.dohc/files.toml` can only NARROW engine ownership below the hard
         // floor. See [`PolicyState`] for the absent/malformed/unreadable
@@ -134,6 +195,7 @@ impl StoreCaptureSink {
             files_policy,
             policy_held: std::cell::Cell::new(false),
             secret_key: None,
+            self_writes,
         }
     }
 
@@ -574,6 +636,13 @@ impl CaptureSink for StoreCaptureSink {
                 // scan-time bytes would diff clean and never re-ingest.
                 let size = text.len() as u64;
                 let sha256 = sha256_hex(text.as_bytes());
+                if matches!(reason, IngestReason::Changed)
+                    && self
+                        .self_writes
+                        .consume_match(&self.workspace_id, path, &sha256)
+                {
+                    return Ok(IngestOutcome::Captured { size, sha256 });
+                }
                 match self.ingest_text(path, text, claim_foreign_head)? {
                     DomainIngest::Persisted => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),

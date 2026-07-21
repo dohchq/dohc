@@ -344,6 +344,7 @@ dependencies = [
  "dohc-engine-collab",
  "dohc-engine-crypto",
  "dohc-engine-domain",
+ "dohc-engine-files",
  "dohc-engine-storage",
  "dohc-engine-sync",
  "dohc-engine-testkit",

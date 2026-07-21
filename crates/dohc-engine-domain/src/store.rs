@@ -2011,6 +2011,26 @@ pub fn write_text_in_tx(
     tx: &Transaction<'_>,
     input: &WriteText,
 ) -> Result<WriteResult, DomainError> {
+    write_text_in_tx_with_journal(tx, input, true)
+}
+
+/// Apply a projected text write without appending `moment.append` to the
+/// replication journal. A Y.Doc settle has already durably recorded the CRDT
+/// edits that produced this projection, so journaling the derived markdown a
+/// second time would create a competing replication mutation.
+#[doc(hidden)]
+pub fn write_projected_text_in_tx(
+    tx: &Transaction<'_>,
+    input: &WriteText,
+) -> Result<WriteResult, DomainError> {
+    write_text_in_tx_with_journal(tx, input, false)
+}
+
+fn write_text_in_tx_with_journal(
+    tx: &Transaction<'_>,
+    input: &WriteText,
+    journal: bool,
+) -> Result<WriteResult, DomainError> {
     let normalized_input = normalized_write_input(input)?;
     let input = &normalized_input;
     let ws = &input.workspace_id;
@@ -2132,12 +2152,14 @@ pub fn write_text_in_tx(
         ],
     )
     .map_err(DomainError::sql_persist)?;
-    tx.execute(
-        "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-         VALUES (?1, 'moment.append', ?2)",
-        params![object_id, input.now_ms],
-    )
-    .map_err(DomainError::sql_persist)?;
+    if journal {
+        tx.execute(
+            "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
+             VALUES (?1, 'moment.append', ?2)",
+            params![object_id, input.now_ms],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
     record_request(
         tx,
         input.request_id.as_deref(),

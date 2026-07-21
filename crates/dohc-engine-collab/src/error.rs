@@ -53,6 +53,11 @@ pub enum CollabError {
     #[error("no Y.Doc marker for this document key")]
     NoMarker,
 
+    /// A session opened an absent lineage, but another writer established a
+    /// durable update head before that session could record its seed.
+    #[error("cannot seed onto an existing Y.Doc lineage")]
+    SeedOntoExistingLineage,
+
     /// A local-only close would prune CRDT state whose edits no durable settle
     /// covers (the current head is not reflected in the materialized markdown).
     /// Settle first — markdown-is-the-artifact requires the artifact to exist
@@ -83,6 +88,7 @@ impl CollabError {
             CollabError::BaseAlreadyClaimed => "base-already-claimed",
             CollabError::LeaseHeld => "lease-held",
             CollabError::NoMarker => "no-marker",
+            CollabError::SeedOntoExistingLineage => "seed-onto-existing-lineage",
             CollabError::UnsettledClose => "unsettled-close",
             CollabError::Corrupt { .. } => "corrupt-lineage",
             CollabError::Storage(_) => "storage",

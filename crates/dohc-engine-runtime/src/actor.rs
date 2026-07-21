@@ -29,7 +29,9 @@
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
 use crate::search::{SearchResult, search_workspace};
-use dohc_engine_collab::{AppendOutcome, ContentKind, DocKey, Regime};
+use dohc_engine_collab::{
+    AppendOutcome, CloseOutcome, ContentKind, DocKey, Projection, Regime, Ydoc,
+};
 use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
     BinaryHead, BinaryHeadMeta, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
@@ -38,11 +40,14 @@ use dohc_engine_domain::{
     MomentRecord, ResolveTextConflict, ResolveTextConflictResult, SecretFileStat, SecretFileStore,
     SecretMomentRecord, SecretWriteResult, SnapshotMetadata, SnapshotView, TextConflict,
     TextSnapshot, VersionRecord, VersionedTextStore, WriteResult, WriteText, capture_manifest_seed,
-    capture_secret_retire, has_secret_state, insert_text_conflict_if_absent,
-    list_secret_files_keyless, list_secret_files_keyless_page, secret_file_len_keyless,
+    capture_secret_retire, derive_capture_object_id, enqueue_write, has_secret_state,
+    insert_text_conflict_if_absent, list_secret_files_keyless, list_secret_files_keyless_page,
+    secret_file_len_keyless, select_snapshot_by_path_in_tx, write_projected_text_in_tx,
 };
+use dohc_engine_files::{DurabilityPolicy, JobOutcome, StdBackoff, StdReplacer, materialize_one};
 use dohc_engine_storage::{
-    CompoundWrite, Document, EngineStore, FaultInjector, StorageError, TxnOutcome, WriteOutcome,
+    CompoundWrite, Document, EngineStore, FaultInjector, Preimage, StorageError, TxnOutcome,
+    WriteOutcome,
 };
 use dohc_engine_sync::{
     ApplyOutcome, ConflictApplyResult, ReplicationEnvelope, apply_conflict_envelope,
@@ -122,6 +127,35 @@ pub struct StoreSnapshot {
 pub struct UnitsOutcome {
     pub committed: usize,
     pub cancelled: bool,
+}
+
+/// Actor-owned snapshot used to establish one daemon Y.Doc session without
+/// exposing the store connection to the protocol layer.
+#[derive(Debug)]
+pub struct YdocOpenState {
+    pub key: DocKey,
+    pub content_kind: ContentKind,
+    pub regime: Regime,
+    pub initial_update: Vec<u8>,
+    pub lineage_existing: bool,
+    pub seed_markdown: Option<String>,
+}
+
+/// Result of the single moment+snapshot+materialization settlement path.
+#[derive(Debug)]
+pub struct YdocSettlement {
+    pub moment_id: String,
+    pub path: String,
+    pub markdown: String,
+    pub sha256: String,
+    pub projection: Projection,
+}
+
+/// Daemon-owned sink for identities written by settlement. Recording before
+/// the actor replies closes the watcher race between atomic replace and the
+/// protocol layer regaining control.
+pub trait SelfWriteRecorder: Send + Sync {
+    fn record(&self, workspace_id: &str, path: &str, sha256: &str);
 }
 
 enum Command {
@@ -300,6 +334,49 @@ enum Command {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<AppendOutcome, RuntimeError>>,
+    },
+    YdocOpenState {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        content_kind: Option<ContentKind>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<YdocOpenState, RuntimeError>>,
+    },
+    YdocRecordUpdate {
+        key: DocKey,
+        content_kind: ContentKind,
+        regime: Regime,
+        update: Vec<u8>,
+        require_empty_lineage: bool,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<AppendOutcome, RuntimeError>>,
+    },
+    YdocSettle {
+        root_dir: PathBuf,
+        key: DocKey,
+        path: String,
+        content_kind: ContentKind,
+        session_id: String,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<YdocSettlement, RuntimeError>>,
+    },
+    YdocResync {
+        key: DocKey,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Vec<u8>, RuntimeError>>,
+    },
+    YdocCloseSession {
+        key: DocKey,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Option<CloseOutcome>, RuntimeError>>,
     },
     ConflictList {
         workspace_id: String,
@@ -1250,6 +1327,125 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    pub async fn ydoc_open_state(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        content_kind: Option<ContentKind>,
+        token: CancellationToken,
+    ) -> Result<YdocOpenState, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocOpenState {
+                workspace_id,
+                version_id,
+                path,
+                content_kind,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ydoc_record_update(
+        &self,
+        key: DocKey,
+        content_kind: ContentKind,
+        regime: Regime,
+        update: Vec<u8>,
+        require_empty_lineage: bool,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<AppendOutcome, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocRecordUpdate {
+                key,
+                content_kind,
+                regime,
+                update,
+                require_empty_lineage,
+                now_ms,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ydoc_settle(
+        &self,
+        root_dir: PathBuf,
+        key: DocKey,
+        path: String,
+        content_kind: ContentKind,
+        session_id: String,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<YdocSettlement, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocSettle {
+                root_dir,
+                key,
+                path,
+                content_kind,
+                session_id,
+                self_writes,
+                now_ms,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn ydoc_resync(
+        &self,
+        key: DocKey,
+        token: CancellationToken,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocResync { key, token, reply })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn ydoc_close_session(
+        &self,
+        key: DocKey,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Option<CloseOutcome>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocCloseSession {
+                key,
+                now_ms,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     pub async fn conflict_list(
         &self,
         workspace_id: String,
@@ -1803,6 +1999,89 @@ fn worker_main(
                 );
                 let _ = reply.send(outcome);
             }
+            Command::YdocOpenState {
+                workspace_id,
+                version_id,
+                path,
+                content_kind,
+                token,
+                reply,
+            } => {
+                let outcome = ydoc_open_state_on_store(
+                    &mut store,
+                    &workspace_id,
+                    &version_id,
+                    &path,
+                    content_kind,
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::YdocRecordUpdate {
+                key,
+                content_kind,
+                regime,
+                update,
+                require_empty_lineage,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = ydoc_record_update_on_store(
+                    &mut store,
+                    &key,
+                    content_kind,
+                    regime,
+                    &update,
+                    require_empty_lineage,
+                    now_ms,
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::YdocSettle {
+                root_dir,
+                key,
+                path,
+                content_kind,
+                session_id,
+                self_writes,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = ydoc_settle_on_store(
+                    &mut store,
+                    &root_dir,
+                    &key,
+                    &path,
+                    content_kind,
+                    &session_id,
+                    self_writes.as_ref(),
+                    now_ms,
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::YdocResync { key, token, reply } => {
+                let outcome = ydoc_resync_on_store(&store, &key, &token);
+                let _ = reply.send(outcome);
+            }
+            Command::YdocCloseSession {
+                key,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome =
+                    ydoc_close_session_on_store(&mut store, &key, now_ms, faults.as_ref(), &token);
+                let _ = reply.send(outcome);
+            }
             Command::ConflictList {
                 workspace_id,
                 status,
@@ -1925,6 +2204,267 @@ fn ydoc_apply_on_store(
         TxnOutcome::Committed(outcome) => Ok(outcome),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
+}
+
+fn ydoc_open_state_on_store(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+    requested_content_kind: Option<ContentKind>,
+    token: &CancellationToken,
+) -> Result<YdocOpenState, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let head = VersionedTextStore::new(store).read_text(workspace_id, version_id, path)?;
+    let object_id = head.as_ref().map_or_else(
+        || derive_capture_object_id(workspace_id, version_id, path),
+        |snapshot| snapshot.object_id.clone(),
+    );
+    let key = DocKey::new(workspace_id, version_id, object_id)?;
+    let persisted = dohc_engine_collab::load_persisted(store, &key)?;
+    let lineage_existing = persisted.is_some();
+    let (content_kind, regime, initial_update) = match persisted {
+        Some(persisted) => (
+            persisted.marker.content_kind,
+            persisted.marker.regime,
+            persisted.doc.encode_full_state(),
+        ),
+        None => {
+            let doc = Ydoc::wire();
+            (
+                requested_content_kind.unwrap_or(ContentKind::Richdoc),
+                Regime::LocalOnly,
+                doc.encode_full_state(),
+            )
+        }
+    };
+    Ok(YdocOpenState {
+        key,
+        content_kind,
+        regime,
+        initial_update,
+        lineage_existing,
+        seed_markdown: (!lineage_existing)
+            .then(|| head.map(|snapshot| snapshot.text))
+            .flatten(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ydoc_record_update_on_store(
+    store: &mut EngineStore,
+    key: &DocKey,
+    content_kind: ContentKind,
+    regime: Regime,
+    update: &[u8],
+    require_empty_lineage: bool,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<AppendOutcome, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    if require_empty_lineage
+        && dohc_engine_collab::read_marker(store, key)?
+            .is_some_and(|marker| marker.head_update_seq > 0)
+    {
+        return Err(dohc_engine_collab::CollabError::SeedOntoExistingLineage.into());
+    }
+    let parent = store.write_with(faults, |tx| {
+        tx.execute(
+            "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
+             VALUES (?1, ?2, ?3)",
+            params![key.workspace_id, key.object_id, now_ms],
+        )
+        .map_err(StorageError::persist_public)?;
+        Ok::<_, StorageError>(())
+    })?;
+    if matches!(parent, TxnOutcome::Crashed { .. }) {
+        return Err(RuntimeError::OperationCrashed);
+    }
+    match dohc_engine_collab::record_local_update_creating_marker(
+        store,
+        key,
+        content_kind,
+        regime,
+        update,
+        faults,
+        now_ms,
+    )? {
+        TxnOutcome::Committed(outcome) => Ok(outcome),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ydoc_settle_on_store(
+    store: &mut EngineStore,
+    root_dir: &std::path::Path,
+    key: &DocKey,
+    path: &str,
+    content_kind: ContentKind,
+    session_id: &str,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<YdocSettlement, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let doc = match dohc_engine_collab::load_persisted(store, key)? {
+        Some(persisted) => persisted.doc,
+        None => Ydoc::wire(),
+    };
+    let projection = doc.project(content_kind);
+    let projection_for_write = projection.clone();
+    let outcome = store.write_with(faults, |tx| {
+        let current = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)?;
+        if current.binary_sha256.is_some() {
+            return Err(dohc_engine_domain::DomainError::BinaryHeadNotText);
+        }
+        let preimage = current
+            .snapshot
+            .as_ref()
+            .map_or(Preimage::Absent, |snapshot| {
+                Preimage::Present(snapshot.blob_sha256.clone())
+            });
+        let previous_moment = current
+            .snapshot
+            .as_ref()
+            .map_or("absent", |snapshot| snapshot.latest_moment_id.as_str());
+        let fingerprint = format!(
+            "{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            path,
+            session_id,
+            previous_moment,
+            projection_for_write.source_state_vector_sha256,
+        );
+        let moment_id = format!(
+            "moment-ydoc-{}",
+            dohc_engine_storage::hex_sha256(fingerprint.as_bytes())
+        );
+        let result = write_projected_text_in_tx(
+            tx,
+            &WriteText {
+                workspace_id: key.workspace_id.clone(),
+                version_id: key.version_id.clone(),
+                object_id: key.object_id.clone(),
+                path: path.to_owned(),
+                text: projection_for_write.markdown.clone(),
+                moment_id,
+                metadata_origin: "ydoc".to_owned(),
+                author_json: None,
+                now_ms,
+                request_id: None,
+            },
+        )?;
+        enqueue_write(tx, &result, preimage, "ydoc")?;
+        Ok(result)
+    })?;
+    let write = match outcome {
+        TxnOutcome::Committed(write) => write,
+        TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+    };
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let job_id = format!("ydoc-mat_{}", write.moment.moment_id);
+    let job = store.load_materialization_job(&job_id)?.ok_or_else(|| {
+        RuntimeError::Domain(dohc_engine_domain::DomainError::StateCorrupt {
+            reason: "Y.Doc settle materialization job is missing",
+        })
+    })?;
+    match materialize_one(
+        store,
+        root_dir,
+        &job,
+        DurabilityPolicy::per_os(),
+        &StdReplacer,
+        &StdBackoff,
+        now_ms,
+        faults,
+    )? {
+        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
+        JobOutcome::Conflict | JobOutcome::Superseded => {
+            return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
+        }
+        JobOutcome::Crashed(_) => return Err(RuntimeError::OperationCrashed),
+    }
+    self_writes.record(
+        &key.workspace_id,
+        &write.snapshot.path,
+        &write.snapshot.blob_sha256,
+    );
+    let settled_marker = store.write_with(faults, |tx| {
+        tx.execute(
+            "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6 \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                write.moment.moment_order,
+                write.snapshot.blob_sha256,
+                now_ms,
+            ],
+        )
+        .map_err(StorageError::persist_public)?;
+        Ok::<_, StorageError>(())
+    })?;
+    if matches!(settled_marker, TxnOutcome::Crashed { .. }) {
+        return Err(RuntimeError::OperationCrashed);
+    }
+    Ok(YdocSettlement {
+        moment_id: write.moment.moment_id,
+        path: write.snapshot.path,
+        markdown: write.snapshot.text,
+        sha256: write.snapshot.blob_sha256,
+        projection,
+    })
+}
+
+fn ydoc_resync_on_store(
+    store: &EngineStore,
+    key: &DocKey,
+    token: &CancellationToken,
+) -> Result<Vec<u8>, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    Ok(match dohc_engine_collab::load_persisted(store, key)? {
+        Some(persisted) => persisted.doc.encode_full_state(),
+        None => Ydoc::wire().encode_full_state(),
+    })
+}
+
+fn ydoc_close_session_on_store(
+    store: &mut EngineStore,
+    key: &DocKey,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<Option<CloseOutcome>, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
+        return Ok(None);
+    };
+    let outcome = match dohc_engine_collab::close_session(store, key, false, faults, now_ms)? {
+        TxnOutcome::Committed(outcome) => outcome,
+        TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+    };
+    if marker.regime == Regime::Replicated {
+        dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?;
+    }
+    Ok(Some(outcome))
 }
 
 fn versioned_text_write_on_store(

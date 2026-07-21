@@ -7,10 +7,10 @@ pub mod capture_sink;
 pub mod cutover_rehearse;
 pub mod shadow_fence;
 
-pub use capture_sink::StoreCaptureSink;
+pub use capture_sink::{SelfWriteSuppression, StoreCaptureSink};
 
 use base64::Engine as _;
-use dohc_engine_collab::{CollabError, ContentKind, DocKey};
+use dohc_engine_collab::{CollabError, ContentKind, DocKey, Lease, LeaseRegistry, Regime};
 use dohc_engine_domain::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
     ConflictStatus, DomainError, ResolveConflictKind, ResolveTextConflict, TextConflict,
@@ -26,7 +26,7 @@ use dohc_engine_runtime::{
     RuntimeError, SearchError, SearchSurface, WorkspaceSupervisor,
 };
 use dohc_engine_sync::{ReplicationEnvelope, SyncError};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -93,6 +93,29 @@ struct OpenWorkspace {
     capture: Arc<Mutex<Option<capture_driver::CaptureDriver>>>,
 }
 
+struct YdocSession {
+    workspace: WorkspaceHandle,
+    key: DocKey,
+    path: String,
+    content_kind: ContentKind,
+    regime: Regime,
+    lineage_absent: bool,
+    first_update_pending: bool,
+    last_settled_sha: Option<String>,
+    event_baseline: u64,
+    _lease: Lease,
+}
+
+#[derive(Clone)]
+struct YdocSessionView {
+    key: DocKey,
+    path: String,
+    content_kind: ContentKind,
+    regime: Regime,
+    lineage_absent: bool,
+    first_update_pending: bool,
+}
+
 impl OpenWorkspace {
     /// Take the driver and cancel it SYNCHRONOUSLY (no await point, so an
     /// aborted RPC future can never leave a driver un-cancelled), returning
@@ -120,6 +143,11 @@ pub struct EngineService {
     handles: Mutex<HashMap<WorkspaceHandle, OpenWorkspace>>,
     open_lock: tokio::sync::Mutex<()>,
     next_handle: std::sync::atomic::AtomicU64,
+    sessions: Mutex<HashMap<String, YdocSession>>,
+    session_ops: tokio::sync::Mutex<()>,
+    leases: LeaseRegistry,
+    next_session: std::sync::atomic::AtomicU64,
+    self_writes: SelfWriteSuppression,
 }
 
 impl Default for EngineService {
@@ -139,6 +167,11 @@ impl EngineService {
             handles: Mutex::new(HashMap::new()),
             open_lock: tokio::sync::Mutex::new(()),
             next_handle: std::sync::atomic::AtomicU64::new(1),
+            sessions: Mutex::new(HashMap::new()),
+            session_ops: tokio::sync::Mutex::new(()),
+            leases: LeaseRegistry::new(),
+            next_session: std::sync::atomic::AtomicU64::new(1),
+            self_writes: SelfWriteSuppression::default(),
         }
     }
 
@@ -157,6 +190,30 @@ impl EngineService {
             }
             "ydoc.apply" => {
                 self.ydoc_apply(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.open" => {
+                self.ydoc_open(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.recordUpdate" => {
+                self.ydoc_record_update(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.settle" => {
+                self.ydoc_settle(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.applyExternalMarkdownEdit" => {
+                self.ydoc_apply_external_markdown_edit(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.close" => {
+                self.ydoc_close(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "ydoc.resync" => {
+                self.ydoc_resync(&ctx, request.workspace, request.params)
                     .await?
             }
             "conflicts.list" => {
@@ -269,6 +326,7 @@ impl EngineService {
                 return Ok(json!({ "workspace": handle }));
             }
             lock(&self.handles).remove(&handle);
+            lock(&self.sessions).retain(|_, session| session.workspace != handle);
             // The evicted binding's files layer must not outlive it.
             open.shutdown_capture().await;
         }
@@ -311,6 +369,7 @@ impl EngineService {
             root.clone(),
             actor.clone(),
             params.workspace_id.clone(),
+            self.self_writes.clone(),
         );
         // STARTUP ORDERING BARRIER: the baseline reconcile (closed-period
         // disk state) must apply before the handle is handed out, or a
@@ -342,6 +401,8 @@ impl EngineService {
 
     async fn workspace_close(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
         let handle = handle.ok_or_else(workspace_unavailable)?;
+        let _session_serial = self.session_ops.lock().await;
+        lock(&self.sessions).retain(|_, session| session.workspace != handle);
         let supervisor = self.supervisor;
         // Hold open_lock only across the handle removal and the synchronous
         // begin_close, so a workspace_open already waiting on `handles` cannot
@@ -1093,6 +1154,322 @@ impl EngineService {
         }))
     }
 
+    async fn ydoc_open(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: YdocOpenParams = parse(params)?;
+        validate_ydoc_path(&params.path)?;
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(&handle))?;
+        let requested_kind = params
+            .content_kind
+            .as_deref()
+            .map(parse_ydoc_content_kind)
+            .transpose()?;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("ydoc.open (queued)"));
+            }
+            serial = self.session_ops.lock() => serial,
+        };
+        let state = open
+            .actor
+            .ydoc_open_state(
+                open.workspace_id.clone(),
+                params.version_id,
+                params.path.clone(),
+                requested_kind,
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        let lease = self
+            .leases
+            .acquire(&state.key)
+            .map_err(|error| match error {
+                CollabError::LeaseHeld => wire(ErrorCode::InvalidParams, "ydoc-session-busy"),
+                other => map_runtime(RuntimeError::Collab(other)),
+            })?;
+        let sequence = self
+            .next_session
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let session_id = format!("ydoc-{sequence:016x}");
+        let result = YdocOpenResult {
+            session_id: session_id.clone(),
+            object_id: state.key.object_id.clone(),
+            path: params.path.clone(),
+            content_kind: ydoc_content_kind_name(state.content_kind),
+            initial_update_base64: base64::engine::general_purpose::STANDARD
+                .encode(&state.initial_update),
+            lineage: if state.lineage_existing {
+                "existing"
+            } else {
+                "absent"
+            },
+            seed_markdown: state.seed_markdown,
+        };
+        lock(&self.sessions).insert(
+            session_id,
+            YdocSession {
+                workspace: handle,
+                key: state.key,
+                path: params.path,
+                content_kind: state.content_kind,
+                regime: state.regime,
+                lineage_absent: !state.lineage_existing,
+                first_update_pending: !state.lineage_existing,
+                last_settled_sha: None,
+                event_baseline: 0,
+                _lease: lease,
+            },
+        );
+        serde_json::to_value(result)
+            .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
+    }
+
+    async fn ydoc_record_update(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: YdocRecordUpdateParams = parse(params)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("ydoc.recordUpdate (queued)"));
+            }
+            serial = self.session_ops.lock() => serial,
+        };
+        let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+        let update = base64::engine::general_purpose::STANDARD
+            .decode(params.update_base64)
+            .map_err(|_| wire(ErrorCode::InvalidParams, "invalid update encoding"))?;
+        let require_empty = session.lineage_absent && session.first_update_pending;
+        let outcome = open
+            .actor
+            .ydoc_record_update(
+                session.key,
+                session.content_kind,
+                session.regime,
+                update,
+                require_empty,
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(|error| {
+                if matches!(
+                    error,
+                    RuntimeError::Collab(CollabError::SeedOntoExistingLineage)
+                ) {
+                    wire(ErrorCode::InvalidParams, "seed-onto-existing-lineage")
+                } else {
+                    map_runtime(error)
+                }
+            })?;
+        if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
+            session.first_update_pending = false;
+        }
+        let _ = params.actor_origin_id;
+        serde_json::to_value(YdocRecordUpdateResult {
+            seq: outcome.seq,
+            deduped: outcome.deduped,
+        })
+        .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
+    }
+
+    async fn ydoc_settle(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: YdocSettleParams = parse(params)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("ydoc.settle (queued)"));
+            }
+            serial = self.session_ops.lock() => serial,
+        };
+        self.ydoc_settle_inner(
+            &cancellation,
+            handle.as_ref(),
+            &params.session_id,
+            params.summary.as_deref(),
+        )
+        .await
+    }
+
+    async fn ydoc_settle_inner(
+        &self,
+        cancellation: &OperationCancellation,
+        handle: Option<&WorkspaceHandle>,
+        session_id: &str,
+        _summary: Option<&str>,
+    ) -> Result<Value, WireError> {
+        let (open, session) = self.ydoc_session(handle, session_id)?;
+        if session.content_kind == ContentKind::Richdoc {
+            return Err(wire(ErrorCode::InvalidParams, "richdoc-settle-unsupported"));
+        }
+        let settled = open
+            .actor
+            .ydoc_settle(
+                open.root.clone(),
+                session.key,
+                session.path.clone(),
+                session.content_kind,
+                session_id.to_owned(),
+                Arc::new(self.self_writes.clone()),
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        if let Some(session) = lock(&self.sessions).get_mut(session_id) {
+            session.last_settled_sha = Some(settled.sha256.clone());
+        }
+        serde_json::to_value(YdocSettleResult {
+            moment_id: settled.moment_id,
+            path: settled.path,
+            markdown: settled.markdown,
+            sha256: settled.sha256,
+            projection: YdocProjectionProvenance {
+                content_kind: ydoc_content_kind_name(settled.projection.content_kind),
+                source_state_vector_sha256: settled.projection.source_state_vector_sha256,
+                destructive: settled.projection.destructive,
+            },
+        })
+        .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
+    }
+
+    async fn ydoc_apply_external_markdown_edit(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: YdocApplyExternalMarkdownEditParams = parse(params)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("ydoc.applyExternalMarkdownEdit (queued)"));
+            }
+            serial = self.session_ops.lock() => serial,
+        };
+        let _ = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+        let _ = params.markdown;
+        Err(wire(
+            ErrorCode::InvalidParams,
+            "external-edit-unsupported-live",
+        ))
+    }
+
+    async fn ydoc_close(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: YdocCloseParams = parse(params)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("ydoc.close (queued)"));
+            }
+            serial = self.session_ops.lock() => serial,
+        };
+        if params.settle.unwrap_or(false) {
+            self.ydoc_settle_inner(
+                &cancellation,
+                handle.as_ref(),
+                &params.session_id,
+                params.summary.as_deref(),
+            )
+            .await?;
+        }
+        let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+        open.actor
+            .ydoc_close_session(
+                session.key,
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        lock(&self.sessions).remove(&params.session_id);
+        serde_json::to_value(YdocCloseResult { closed: true })
+            .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
+    }
+
+    async fn ydoc_resync(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: YdocResyncParams = parse(params)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("ydoc.resync (queued)"));
+            }
+            serial = self.session_ops.lock() => serial,
+        };
+        let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
+        let full_state = open
+            .actor
+            .ydoc_resync(session.key, cancellation.token())
+            .await
+            .map_err(map_runtime)?;
+        if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
+            session.event_baseline = 0;
+        }
+        serde_json::to_value(YdocResyncResult {
+            initial_update_base64: base64::engine::general_purpose::STANDARD.encode(full_state),
+        })
+        .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
+    }
+
+    fn ydoc_session(
+        &self,
+        handle: Option<&WorkspaceHandle>,
+        session_id: &str,
+    ) -> Result<(OpenWorkspace, YdocSessionView), WireError> {
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(handle))?;
+        let sessions = lock(&self.sessions);
+        let session = sessions
+            .get(session_id)
+            .filter(|session| &session.workspace == handle)
+            .ok_or_else(|| wire(ErrorCode::InvalidParams, "ydoc-session-not-found"))?;
+        Ok((
+            open,
+            YdocSessionView {
+                key: session.key.clone(),
+                path: session.path.clone(),
+                content_kind: session.content_kind,
+                regime: session.regime,
+                lineage_absent: session.lineage_absent,
+                first_update_pending: session.first_update_pending,
+            },
+        ))
+    }
+
     async fn conflicts_list(
         &self,
         ctx: &RequestContext,
@@ -1446,6 +1823,118 @@ struct YdocApplyParams {
     content_kind: String,
     update_base64: String,
     now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct YdocOpenParams {
+    version_id: String,
+    path: String,
+    #[serde(default)]
+    content_kind: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct YdocOpenResult {
+    session_id: String,
+    object_id: String,
+    path: String,
+    content_kind: &'static str,
+    initial_update_base64: String,
+    lineage: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    seed_markdown: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct YdocRecordUpdateParams {
+    session_id: String,
+    update_base64: String,
+    #[serde(default)]
+    actor_origin_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct YdocRecordUpdateResult {
+    /// Durable per-lineage head sequence (not a session-local counter).
+    seq: i64,
+    deduped: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct YdocSettleParams {
+    session_id: String,
+    #[serde(default)]
+    summary: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct YdocProjectionProvenance {
+    content_kind: &'static str,
+    source_state_vector_sha256: String,
+    destructive: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct YdocSettleResult {
+    moment_id: String,
+    path: String,
+    markdown: String,
+    sha256: String,
+    projection: YdocProjectionProvenance,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct YdocApplyExternalMarkdownEditParams {
+    session_id: String,
+    markdown: String,
+}
+
+#[allow(dead_code, reason = "C1 refuses this method before producing a result")]
+#[derive(Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum YdocApplyExternalMarkdownEditResult {
+    Merged { markdown: String },
+    Conflict { conflict_path: String },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct YdocCloseParams {
+    session_id: String,
+    #[serde(default)]
+    settle: Option<bool>,
+    #[serde(default)]
+    summary: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct YdocCloseResult {
+    closed: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct YdocResyncParams {
+    session_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct YdocResyncResult {
+    initial_update_base64: String,
 }
 
 #[derive(Deserialize)]
@@ -1816,6 +2305,32 @@ fn parse<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, WireError> {
     serde_json::from_value(value).map_err(|_| wire(ErrorCode::InvalidParams, "invalid parameters"))
 }
 
+fn parse_ydoc_content_kind(raw: &str) -> Result<ContentKind, WireError> {
+    match raw {
+        "plaintext" => Ok(ContentKind::Plaintext),
+        "richdoc" => Ok(ContentKind::Richdoc),
+        _ => Err(wire(ErrorCode::InvalidParams, "unknown Y.Doc content kind")),
+    }
+}
+
+fn ydoc_content_kind_name(kind: ContentKind) -> &'static str {
+    match kind {
+        ContentKind::Plaintext => "plaintext",
+        ContentKind::Richdoc => "richdoc",
+    }
+}
+
+fn validate_ydoc_path(path: &str) -> Result<(), WireError> {
+    match dohc_engine_files::classify_engine_file_path_normalized(path) {
+        (dohc_engine_files::PathClassification::Tracked, Some(normalized))
+            if normalized == path =>
+        {
+            Ok(())
+        }
+        _ => Err(wire(ErrorCode::InvalidParams, "invalid Y.Doc path")),
+    }
+}
+
 fn enforce_workspace(open: &OpenWorkspace, workspace_id: &str) -> Result<(), WireError> {
     if open.workspace_id == workspace_id {
         Ok(())
@@ -1904,6 +2419,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::BaseAlreadyClaimed
         | CollabError::LeaseHeld
         | CollabError::NoMarker
+        | CollabError::SeedOntoExistingLineage
         | CollabError::UnsettledClose => ErrorCode::InvalidParams,
     }
 }

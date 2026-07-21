@@ -35,6 +35,53 @@ fn insert_probe(tx: &rusqlite::Transaction<'_>, op: &ReplicationEnvelope) -> Res
     Ok(())
 }
 
+struct AlwaysLive;
+
+impl LeaseProbe for AlwaysLive {
+    fn is_live(&self, _key: &dohc_engine_collab::DocKey) -> bool {
+        true
+    }
+}
+
+#[test]
+fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
+    let (_scratch, _path, mut engine) = store();
+    let op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-1",
+            "path": "notes/live.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": "not-read-while-live",
+            "isBaseState": false
+        }),
+    );
+    let outcome =
+        apply_ydoc_envelope(&mut engine, &op, &NoFaults, &AlwaysLive).expect("live lineage defers");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: true,
+            reason: Some("ydoc-session-live"),
+        })
+    );
+    let update_rows: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))
+                .map_err(SyncError::corrupt)
+        })
+        .expect("count Y.Doc updates");
+    assert_eq!(update_rows, 0, "defer must not append remote Y.Doc bytes");
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "peer").expect("ack"),
+        0,
+        "the poison-pill coordinate is acknowledged"
+    );
+}
+
 #[test]
 fn fault_sync_during_journal_txn_rolls_back_domain_and_position() {
     let (_scratch, path, mut engine) = store();

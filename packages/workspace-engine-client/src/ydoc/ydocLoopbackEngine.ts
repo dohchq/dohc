@@ -168,10 +168,14 @@ export class YdocLoopbackEngine implements EngineTransport {
     return Y.encodeStateAsUpdate(this.requireSession(sessionId).doc);
   }
 
-  applyRemoteUpdate(sessionId: string, update: Uint8Array): void {
+  applyRemoteUpdate(
+    sessionId: string,
+    update: Uint8Array,
+    options?: EmitLoopbackRemoteUpdateOptions,
+  ): void {
     const session = this.requireSession(sessionId);
     Y.applyUpdate(session.doc, update);
-    this.emitRemoteUpdate(sessionId, update);
+    this.emitRemoteUpdate(sessionId, update, options);
   }
 
   emitRemoteUpdate(
@@ -211,6 +215,8 @@ export class YdocLoopbackEngine implements EngineTransport {
         return this.applyExternalMarkdownEdit(request.params);
       case YDOC_METHOD.close:
         return this.close(request.params);
+      case YDOC_METHOD.resync:
+        return this.resync(request.params);
       default:
         throw new Error(`Unsupported loopback method: ${request.method}`);
     }
@@ -345,6 +351,17 @@ export class YdocLoopbackEngine implements EngineTransport {
     this.requireSession(sessionId);
     this.sessions.delete(sessionId);
     return { closed: true };
+  }
+
+  private resync(value: JsonValue): JsonValue {
+    const params = asObject(value, "ydoc.resync params");
+    const session = this.requireSession(
+      requiredString(params, "sessionId", "ydoc.resync params"),
+    );
+    session.eventSeq = 0;
+    return {
+      initialUpdateBase64: encodeBase64(Y.encodeStateAsUpdate(session.doc)),
+    };
   }
 
   private requireSession(sessionId: string): LoopbackSession {
