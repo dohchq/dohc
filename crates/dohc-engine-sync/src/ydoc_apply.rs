@@ -190,14 +190,44 @@ pub fn apply_ydoc_envelope(
     }
     if leases.is_live(&key) {
         // FULL durable validation BEFORE the ack: byte caps, abort-safe
-        // prevalidation, AND the replay-parity gate — exactly what the later
-        // drain's apply_remote_update enforces. Anything it would refuse must
-        // stay unacked here, or the cursor advances past an unapplyable row.
-        dohc_engine_collab::validate_remote_update_for(store, &key, &bytes).map_err(|_| {
-            SyncError::InvalidInput {
-                reason: "ydoc.update bytes fail durable validation",
+        // prevalidation, AND the replay-parity gate — replayed on top of the
+        // ALREADY-QUEUED deferred predecessors, because a later update can
+        // only become invalid after they apply, and the drain will apply
+        // them first. Anything the drain would refuse must stay unacked.
+        let queued: Vec<Vec<u8>> = {
+            let mut queued = Vec::new();
+            let rows: Vec<String> = store.read_with(|conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT log.payload_json                          FROM ydoc_deferred_updates AS deferred                          JOIN replication_log AS log                            ON log.workspace_id = deferred.workspace_id                           AND log.origin_id = deferred.origin_id                           AND log.origin_seq = deferred.origin_seq                          WHERE deferred.workspace_id = ?1 AND deferred.version_id = ?2                            AND deferred.object_id = ?3                          ORDER BY log.recorded_at_ms, log.origin_id, log.origin_seq",
+                    )
+                    .map_err(SyncError::corrupt)?;
+                let mapped = stmt
+                    .query_map(
+                        params![key.workspace_id, key.version_id, key.object_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(SyncError::corrupt)?;
+                mapped
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(SyncError::corrupt)
+            })?;
+            for payload_json in rows {
+                let queued_payload = serde_json::from_str::<YdocUpdatePayload>(&payload_json)
+                    .map_err(|_| SyncError::InvalidInput {
+                        reason: "parked ydoc.update payload is malformed",
+                    })?;
+                let queued_bytes = store
+                    .get_binary_blob(&queued_payload.update_blob_sha256)?
+                    .ok_or(SyncError::BlobInvalid)?;
+                queued.push(queued_bytes);
             }
-        })?;
+            queued
+        };
+        dohc_engine_collab::validate_remote_update_with_pending(store, &key, &queued, &bytes)
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "ydoc.update bytes fail durable validation",
+            })?;
         // A deferred coordinate is ACKED — it must be drainable later, which
         // the close/open drains only do for REPLICATED markers. A live lease
         // over an absent or local-only lineage cannot accept a remote update
@@ -242,39 +272,37 @@ pub fn apply_ydoc_envelope(
     // claim is idempotent (an existing claimed base resumes), so a crash
     // between claim and ack replays safely; the coordinate then acks below.
     if payload.is_base_state {
-        store
-            .write_with(faults, |tx| {
-                tx.execute(
-                    "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                      VALUES (?1, ?2, ?3)",
-                    rusqlite::params![key.workspace_id, key.object_id, envelope.recorded_at_ms],
-                )
-                .map_err(SyncError::persist)?;
-                Ok::<_, SyncError>(())
-            })
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc.update base bootstrap failed",
-            })?;
+        // The claim runs INSIDE the admission transaction: a standalone claim
+        // before apply_envelope_with would persist the marker/base for an
+        // envelope the sequence/divergence checks then reject (out-of-order
+        // or divergent redelivery), leaving state for an unacked coordinate.
         let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind);
-        match dohc_engine_collab::claim_base(
-            store,
-            &key,
-            kind,
-            &bytes,
-            faults,
-            envelope.recorded_at_ms,
-        )
-        .map_err(|_| SyncError::InvalidInput {
-            reason: "ydoc.update base could not be claimed",
-        })? {
-            TxnOutcome::Committed(_) => {}
-            // A crashed claim rolled the marker/snapshot back: acking now
-            // would permanently skip the base coordinate and wedge the doc.
-            // Leave it unacked; redelivery replays the claim.
-            TxnOutcome::Crashed { .. } => {
-                return Ok(ApplyOutcome::Crashed { committed: false });
-            }
-        }
-        let outcome = crate::apply_envelope_with(store, envelope, faults, |_tx, _op| {
+        let sv_bytes = {
+            let doc = dohc_engine_collab::Ydoc::wire();
+            doc.apply(&bytes).map_err(|_| SyncError::InvalidInput {
+                reason: "ydoc.update base bytes fail validation",
+            })?;
+            doc.encode_state_vector()
+        };
+        let claim_key = key.clone();
+        let claim_bytes = bytes.clone();
+        let outcome = crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES (?1, ?2, ?3)",
+                rusqlite::params![claim_key.workspace_id, claim_key.object_id, op.recorded_at_ms],
+            )
+            .map_err(SyncError::persist)?;
+            dohc_engine_collab::claim_base_in_tx(
+                tx,
+                &claim_key,
+                kind,
+                &claim_bytes,
+                &sv_bytes,
+                op.recorded_at_ms,
+            )
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "ydoc.update base could not be claimed",
+            })?;
             Ok(YdocApplyResult {
                 deferred: false,
                 reason: None,

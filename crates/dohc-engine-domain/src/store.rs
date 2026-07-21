@@ -1915,7 +1915,7 @@ pub fn capture_manifest_seed(
                    AND s.version_id = a.version_id AND s.object_id = a.object_id \
                  LEFT JOIN blobs tb ON tb.sha256 = s.blob_sha256 \
                  LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
-                 WHERE a.workspace_id = ?1 AND a.version_id = ?2                    AND s.metadata_origin IN ('capture', 'ydoc')",
+                 WHERE a.workspace_id = ?1 AND a.version_id = ?2                    AND (s.metadata_origin = 'capture'                        OR (s.metadata_origin = 'ydoc'                            AND NOT EXISTS (                                SELECT 1 FROM materialization_jobs j                                WHERE j.job_id = 'ydoc-mat_' || s.latest_moment_id)))",
             )
             .map_err(DomainError::sql_corrupt)?;
         let rows = stmt

@@ -2456,11 +2456,17 @@ fn ydoc_settle_on_store(
                 return Err(dohc_engine_collab::CollabError::NoMarker.into());
             }
             // Acked-but-deferred remote envelopes must land BEFORE the
-            // projection: settling first would materialize a pre-drain
-            // markdown artifact and report success while the durable doc
-            // moves past it moments later at close.
-            if marker.regime == Regime::Replicated {
-                dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?;
+            // projection — but if any actually apply, the CLIENT's doc has
+            // not seen them: settling would materialize content the user
+            // never saw while they keep editing stale state. Refuse; the
+            // client resyncs (which also drains) and settles again.
+            if marker.regime == Regime::Replicated
+                && dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)? > 0
+            {
+                return Err(dohc_engine_domain::DomainError::InvalidInput {
+                    reason: "ydoc-remote-updates-pending",
+                }
+                .into());
             }
         }
     }
@@ -2521,7 +2527,7 @@ fn ydoc_settle_on_store(
             // the watcher can observe the replayed bytes the instant they
             // land; retract on a conflicted job.
             self_writes.record(&key.workspace_id, &current.path, &current.blob_sha256);
-            match materialize_one(
+            let replay_outcome = materialize_one(
                 store,
                 root_dir,
                 &job,
@@ -2530,7 +2536,29 @@ fn ydoc_settle_on_store(
                 &StdBackoff,
                 now_ms,
                 faults,
-            )? {
+            );
+            let replay_outcome = match replay_outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    // Same compensation as the conflict arm: the artifact
+                    // never reached disk, so neither the suppression entry
+                    // nor the settled marker may stand.
+                    self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);
+                    let cleared = store.write_with(faults, |tx| {
+                        tx.execute(
+                            "UPDATE ydoc_docs SET last_settled_sha = NULL, updated_at_ms = ?4                              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                            params![key.workspace_id, key.version_id, key.object_id, now_ms],
+                        )
+                        .map_err(StorageError::persist_public)?;
+                        Ok::<_, StorageError>(())
+                    })?;
+                    if matches!(cleared, TxnOutcome::Crashed { .. }) {
+                        return Err(RuntimeError::OperationCrashed);
+                    }
+                    return Err(error.into());
+                }
+            };
+            match replay_outcome {
                 JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
                 JobOutcome::Conflict | JobOutcome::Superseded => {
                     self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);

@@ -580,6 +580,24 @@ pub fn claim_base(
     };
 
     store.write_with(faults, |tx| {
+        claim_base_in_tx(tx, key, content_kind, base_bytes, &sv_bytes, now_ms)
+    })
+}
+
+/// Transaction-composable form of [`claim_base`] for callers that must claim
+/// a REMOTE base atomically with the imported coordinate's admission and ack
+/// (a standalone claim before admission would persist a marker for an
+/// envelope the sequence/divergence checks then reject).
+pub fn claim_base_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    content_kind: ContentKind,
+    base_bytes: &[u8],
+    sv_bytes: &[u8],
+    now_ms: i64,
+) -> Result<ClaimOutcome, CollabError> {
+    validate_update_bytes(base_bytes)?;
+    (|| {
         // Upsert the marker first (FK parent for the snapshot), stamping the
         // replicated regime + content kind. In the INDIVIDUAL-FIRST flow the
         // marker already exists as `local-only` (created by `ensure_marker`), so
@@ -614,7 +632,7 @@ pub fn claim_base(
         }
 
         let base_sha = put_binary_blob(tx, base_bytes)?;
-        let sv_sha = put_binary_blob(tx, &sv_bytes)?;
+        let sv_sha = put_binary_blob(tx, sv_bytes)?;
         // The base IS the seq-0 snapshot. INSERT (not REPLACE): a genuine second
         // base at up_to_seq = 0 would conflict, a hard backstop under the flag.
         tx.execute(
@@ -641,7 +659,7 @@ pub fn claim_base(
         Ok(ClaimOutcome::Claimed {
             base_snapshot_sha: base_sha,
         })
-    })
+    })()
 }
 
 /// Settle: project the reconstructed Y.Doc to markdown (with provenance),
@@ -942,8 +960,24 @@ pub fn validate_remote_update_for(
     key: &DocKey,
     bytes: &[u8],
 ) -> Result<(), CollabError> {
+    validate_remote_update_with_pending(store, key, &[], bytes)
+}
+
+/// [`validate_remote_update_for`] with already-acked-but-deferred
+/// predecessor updates replayed onto the gate doc first — a later deferred
+/// update may only become invalid AFTER its queued predecessors apply, and
+/// acking it against the bare durable head would strand the drain.
+pub fn validate_remote_update_with_pending(
+    store: &EngineStore,
+    key: &DocKey,
+    pending: &[Vec<u8>],
+    bytes: &[u8],
+) -> Result<(), CollabError> {
     validate_update_bytes(bytes)?;
     let base = store.read_with(|conn| load_for_replay_gate(conn, key))?;
+    for queued in pending {
+        base.apply(queued)?;
+    }
     crate::validate_replay_parity(&base, bytes)
 }
 

@@ -324,3 +324,21 @@ the raw result alongside the existing decoder.
   offline edits/deletes of materialized ydoc markdown reconcile.
 - ydoc.apply honors cancellation while queued on session_ops; seed
   updates validate before the file_objects parent row commits.
+
+## Codex review round 8 (PR #220)
+
+- P1 no-op replay materialize ERRORS get the full compensation (retract +
+  last_settled_sha NULL) — not just conflicts.
+- P1 settles refuse ydoc-remote-updates-pending when the pre-settle drain
+  APPLIED anything: materializing content the client's doc never saw
+  would let the user keep editing stale state; resync (which drains and
+  returns full state) then settle again.
+- P2 remote base claims run INSIDE the admission transaction
+  (claim_base_in_tx) — an out-of-order or divergent base redelivery can
+  no longer persist a marker for an unacked coordinate.
+- P2 the capture manifest seeds only MATERIALIZED ydoc heads (rows whose
+  ydoc-mat_ job is gone) — an unmaterialized settle can't be diffed as a
+  user change on reopen.
+- P2 defer validation replays the QUEUED deferred predecessors onto the
+  gate doc first — a later update that only breaks after they apply
+  stays unacked.
