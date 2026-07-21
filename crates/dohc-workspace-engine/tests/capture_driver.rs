@@ -586,3 +586,272 @@ async fn foreign_origin_secret_tip_is_never_claimed_or_retired_by_capture() {
         "the foreign writer's plaintext must survive disk bytes AND a disk delete"
     );
 }
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn watcher_status_reports_a_live_driver_and_flush_settles() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "seed.md", b"seeded before open");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+
+    // The open barrier guarantees the startup baseline applied, so status
+    // reports a LIVE, non-terminal driver immediately — no polling.
+    let status = transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "watcher.status", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("watcher.status");
+    assert_eq!(status.result["running"], json!(true));
+    assert_eq!(status.result["terminal"], json!(false));
+    assert_eq!(status.result["degraded"], json!(false));
+
+    // And a flush on the quiescent workspace settles: the baseline content
+    // is already captured and acknowledged.
+    let flush = transport
+        .call(
+            RequestContext::unbounded(),
+            request(3, "capture.flush", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("capture.flush");
+    assert_eq!(flush.result["settled"], json!(true));
+    assert_eq!(flush.result["running"], json!(true));
+    assert_eq!(
+        read_text(&transport, &handle, 4, "seed.md")
+            .await
+            .as_deref(),
+        Some("seeded before open"),
+        "a settled flush means the baseline capture is READABLE, not pending"
+    );
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(5, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn capture_flush_turns_external_writes_into_read_your_writes() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+
+    // An external write with no RPC involved. The only nondeterminism left
+    // is the watcher noticing the write (the OS debounce); once it has, ONE
+    // settled flush is sufficient — the loop below never needs to sleep for
+    // capture itself, which is exactly what the differential harness relies
+    // on.
+    write_file(scratch.path(), "flush-me.md", b"written behind the daemon");
+    let deadline = tokio::time::Instant::now() + WAIT;
+    let mut id = 20_000;
+    loop {
+        id += 1;
+        let flush = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "capture.flush", Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect("capture.flush");
+        assert_eq!(
+            flush.result["settled"],
+            json!(true),
+            "a quiet workspace must always settle"
+        );
+        id += 1;
+        if read_text(&transport, &handle, id, "flush-me.md")
+            .await
+            .as_deref()
+            == Some("written behind the daemon")
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "flush settled repeatedly but the external write never surfaced"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(90_000, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e_rpcs_on_a_closed_handle_fail_cleanly_and_unmarked_roots_never_reach_them() {
+    // SHADOW-SCOPE ACCEPTANCE for the E surface. Two properties:
+    //
+    // 1. An UNMARKED root cannot reach watcher.status/capture.flush at all —
+    //    workspace.open refuses at the shadow fence, so no handle ever
+    //    exists and no watcher can have spawned.
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await;
+    assert!(refused.is_err(), "an unmarked root must not open");
+    assert!(
+        !scratch.path().join(".dohc/engine/engine.db").exists(),
+        "the refused open must leave no engine state behind"
+    );
+
+    // 2. On a CLOSED handle both RPCs fail cleanly (no hang, no panic, no
+    //    stale driver reached).
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let handle = open_workspace(&transport, &scratch, 2).await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(3, "workspace.close", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("close");
+    for (id, method) in [(4, "watcher.status"), (5, "capture.flush")] {
+        let stale = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, method, Some(handle.clone()), json!({})),
+            )
+            .await;
+        assert!(
+            stale.is_err(),
+            "{method} on a closed handle must error cleanly"
+        );
+    }
+}
+
+/// A workspace whose reconciler has PARKED a persistently failing path (a
+/// non-empty quarantine) must keep answering `capture.flush`
+/// `settled: false`: after DEGRADED_RESCAN_BACKOFF identical degraded
+/// passes the controller stops self-forcing rescans, so "nothing dirty"
+/// coexists with "capture has not recovered" — and reading that as settled
+/// would launder live failures into a clean differential baseline. This
+/// drives the REAL daemon path end to end; the unreadable file is a
+/// genuinely share-locked handle (there is deliberately no fault-injection
+/// seam at the daemon level), which is why the test is Windows-only.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_quarantined_path_keeps_capture_flush_unsettled() {
+    use std::io::Write as _;
+    use std::os::windows::fs::OpenOptionsExt as _;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "healthy.md", b"captured fine");
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1).await;
+
+    // The baseline must settle first, so the locked file below is the ONLY
+    // unclean thing in the workspace when the assertions run.
+    let baseline = transport
+        .call(
+            RequestContext::unbounded(),
+            request(2, "capture.flush", Some(handle.clone()), json!({})),
+        )
+        .await
+        .expect("baseline flush");
+    assert_eq!(baseline.result["settled"], json!(true));
+
+    // A file every capture read genuinely fails on: created and written
+    // through a NO-SHARE handle that stays open for the whole test
+    // (ERROR_SHARING_VIOLATION on every scanner open).
+    let mut lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .share_mode(0)
+        .open(scratch.path().join("locked.md"))
+        .expect("share-locked file");
+    lock.write_all(b"unreadable while locked")
+        .expect("locked write");
+    lock.flush().expect("locked flush");
+
+    // Wait (bounded) for the watcher to notice and the first capture
+    // failure to surface: the first flush answered after that is unsettled.
+    let deadline = std::time::Instant::now() + WAIT;
+    let mut id = 10_u64;
+    loop {
+        let flush = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "capture.flush", Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect("probe flush");
+        id += 1;
+        if flush.result["settled"] == json!(false) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the locked file was never noticed as a capture failure"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Each flush drives up to MAX_FLUSH_CYCLES reconcile passes, and the
+    // quarantine parks the path after DEGRADED_RESCAN_BACKOFF identical
+    // degraded passes — so by these flushes the controller has stopped
+    // self-forcing rescans and the workspace is "converged" over a live
+    // failure. WITHOUT the converged-with-quarantine guard these would
+    // flip to settled:true.
+    for _ in 0..3 {
+        let flush = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "capture.flush", Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect("quarantined flush");
+        id += 1;
+        assert_eq!(
+            flush.result["settled"],
+            json!(false),
+            "a non-empty quarantine is not quiescence"
+        );
+        assert_eq!(flush.result["degraded"], json!(true));
+        assert_eq!(flush.result["running"], json!(true));
+    }
+
+    // Control: the healthy baseline capture is still readable — the
+    // workspace is degraded, not wedged.
+    assert_eq!(
+        read_text(&transport, &handle, id, "healthy.md")
+            .await
+            .as_deref(),
+        Some("captured fine")
+    );
+
+    drop(lock);
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(id + 1, "workspace.close", Some(handle), json!({})),
+        )
+        .await
+        .expect("close");
+}

@@ -1,0 +1,79 @@
+{
+  "_readme": "Shared fixtures for the TS-vs-Rust capture differential (E shard). Each scenario is a SEQUENCE of disk mutations driven to quiescence step by step; `offline` mutations happen with capture stopped and are reconciled by a fresh start. DISK-DRIVEN ONLY by design: TS writeIfChanged ignores metadata_origin (safe there because the desktop materializes API writes to disk), while the Rust shadow daemon enforces capture ownership — an approved behavioral delta, so RPC-vs-disk interleavings are covered by Rust-only acceptance tests instead. The goldens (capture-goldens.json) are emitted by apps/desktop/src/workspaces/captureOracleGoldens.test.ts (DOHC_EMIT_CAPTURE_GOLDENS=1) and verified by both that test and crates/dohc-workspace-engine/tests/capture_differential.rs. Ids and timestamps are deliberately excluded from projections; text/binary heads project sha256+byteLength(+text), secrets project byteLength only (goldens stay non-leaking); everTracked distinguishes retired from never-tracked (moments exist for the path). The text->binary content flip on one path is deferred: media-type routing precedes UTF-8 sniffing, so it needs its own sniffing-parity scenario set.",
+  "scenarios": [
+    {
+      "name": "basic-text",
+      "steps": [{ "op": "write", "path": "notes/a.md", "text": "# A\nhello capture\n" }],
+      "offline": [],
+      "watch": ["notes/a.md"]
+    },
+    {
+      "name": "update-coalesce",
+      "steps": [
+        { "op": "write", "path": "doc.md", "text": "first draft\n" },
+        { "op": "write", "path": "doc.md", "text": "second draft, longer than the first\n" }
+      ],
+      "offline": [],
+      "watch": ["doc.md"]
+    },
+    {
+      "name": "write-then-delete",
+      "steps": [
+        { "op": "write", "path": "temp/b.md", "text": "ephemeral\n" },
+        { "op": "delete", "path": "temp/b.md" }
+      ],
+      "offline": [],
+      "watch": ["temp/b.md"]
+    },
+    {
+      "name": "never-tracked-control",
+      "steps": [{ "op": "write", "path": "real.md", "text": "exists\n" }],
+      "offline": [],
+      "watch": ["real.md", "ghost.md"]
+    },
+    {
+      "name": "binary-roundtrip",
+      "steps": [
+        { "op": "write-binary", "path": "assets/logo.png", "bytesBase64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAH/rgAAAAlwSFlzAAALEwAACxMBAJqcGAAAAA1JREFUeF5jYGBgYAAAAAUAAR4f7BQAAAAASUVORK5CYII=" }
+      ],
+      "offline": [],
+      "watch": ["assets/logo.png"]
+    },
+    {
+      "name": "secret-basic",
+      "steps": [{ "op": "write", "path": ".env", "text": "TOKEN=abc123\nSECRET=deep\n" }],
+      "offline": [],
+      "watch": [".env"]
+    },
+    {
+      "name": "nested-unicode",
+      "steps": [{ "op": "write", "path": "docs/ünï cödé/note.md", "text": "unicode päth\n" }],
+      "offline": [],
+      "watch": ["docs/ünï cödé/note.md"]
+    },
+    {
+      "name": "offline-delete",
+      "steps": [{ "op": "write", "path": "kept/d.md", "text": "captured before the gap\n" }],
+      "offline": [{ "op": "delete", "path": "kept/d.md" }],
+      "watch": ["kept/d.md"]
+    },
+    {
+      "name": "offline-update",
+      "steps": [{ "op": "write", "path": "kept/e.md", "text": "old content\n" }],
+      "offline": [{ "op": "write", "path": "kept/e.md", "text": "edited while capture was down\n" }],
+      "watch": ["kept/e.md"]
+    },
+    {
+      "name": "mixed-workspace",
+      "steps": [
+        { "op": "write", "path": "readme.md", "text": "# mixed\n" },
+        { "op": "write", "path": ".env", "text": "KEY=v\n" },
+        { "op": "write-binary", "path": "img.png", "bytesBase64": "iVBORw0KGgo0AAAADUlEQVR42mNgYGBgAAAABQABp8v0GAAAAABJRU5ErkJggg==" },
+        { "op": "write", "path": "readme.md", "text": "# mixed, edited\n" },
+        { "op": "delete", "path": "img.png" }
+      ],
+      "offline": [],
+      "watch": ["readme.md", ".env", "img.png"]
+    }
+  ]
+}

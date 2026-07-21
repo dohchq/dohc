@@ -136,6 +136,8 @@ impl EngineService {
                 self.search_query(&ctx, request.workspace, request.params)
                     .await?
             }
+            "watcher.status" => self.watcher_status(request.workspace)?,
+            "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
             _ => return Err(wire(ErrorCode::MethodNotFound, "unknown method")),
         };
         Ok(Response { id, result })
@@ -164,7 +166,7 @@ impl EngineService {
         let _open_serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
-                return Err(wire(ErrorCode::Cancelled, "workspace open cancelled while queued"));
+                return Err(cancellation.interruption("workspace open (queued)"));
             }
             serial = self.open_lock.lock() => serial,
         };
@@ -377,6 +379,91 @@ impl EngineService {
         })
     }
 
+    /// The capture driver's observable health: whether the files layer is
+    /// up (`running`), whether anything since the last fully clean tick went
+    /// wrong (`degraded`), and whether the restart streak has escalated past
+    /// recovery-on-its-own-timescale (`terminal`).
+    fn watcher_status(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let guard = lock(&open.capture);
+        Ok(match guard.as_ref() {
+            Some(driver) => {
+                // ONE snapshot — the three flags must come from the same
+                // atomic load, or a reader racing a transition could report
+                // running && terminal.
+                let snapshot = driver.status().snapshot();
+                json!({
+                    "running": snapshot.running,
+                    "degraded": snapshot.degraded,
+                    "terminal": snapshot.terminal,
+                })
+            }
+            // The driver is only absent mid-teardown; report an honest
+            // "down" rather than erroring a racing status poll.
+            None => json!({ "running": false, "degraded": true, "terminal": false }),
+        })
+    }
+
+    /// Drive capture to quiescence and report what was achieved. THE
+    /// determinism seam for the capture differential: without it a harness
+    /// can only sleep and hope, which turns timing blips into parity
+    /// failures. Quiescence covers every change the WATCHER has noticed — a
+    /// write still inside the OS debounce is invisible to flush too; callers
+    /// needing a specific write poll for it (flush + check), which the
+    /// differential does. `settled: false` is an honest answer (layer down, teardown
+    /// race, or a workspace under continuous mutation hitting the cycle
+    /// bound) — callers must treat it as "state not comparable", never as
+    /// "clean".
+    async fn capture_flush(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        // Clone the sender OUT of the lock and await OUTSIDE it: a flush can
+        // legitimately take many reconcile cycles, and the workspace table
+        // must not be blocked for its duration.
+        let sender = lock(&open.capture)
+            .as_ref()
+            .map(capture_driver::CaptureDriver::flush_sender);
+        let unavailable = json!({ "settled": false, "running": false, "degraded": true });
+        let Some(sender) = sender else {
+            return Ok(unavailable);
+        };
+        // A flush can drive up to MAX_FLUSH_CYCLES reconciles or sit behind
+        // a full flush queue — a cancelled/deadlined caller must get its
+        // answer NOW, like every other workspace RPC. The driver still
+        // finishes its pass; only the wait is abandoned (the reply send
+        // fails harmlessly).
+        let cancellation = OperationCancellation::new(ctx);
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("capture.flush (queued)"));
+            }
+            sent = sender.send(reply_tx) => {
+                if sent.is_err() {
+                    return Ok(unavailable);
+                }
+            }
+        }
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                Err(cancellation.interruption("capture.flush"))
+            }
+            outcome = reply_rx => match outcome {
+                Ok(outcome) => Ok(json!({
+                    "settled": outcome.settled,
+                    "running": outcome.running,
+                    "degraded": outcome.degraded,
+                })),
+                Err(_) => Ok(unavailable),
+            }
+        }
+    }
+
     async fn ydoc_apply(
         &self,
         ctx: &RequestContext,
@@ -585,6 +672,9 @@ impl ProtocolEngineService for EngineService {
 
 struct OperationCancellation {
     token: CancellationToken,
+    /// Whether the DEADLINE (not a client cancel) is what fired the token —
+    /// the two report different wire codes with different retryability.
+    deadline_hit: Arc<std::sync::atomic::AtomicBool>,
     bridge: tokio::task::JoinHandle<()>,
 }
 
@@ -595,12 +685,46 @@ impl OperationCancellation {
             token.cancel();
         }
         let signal = ctx.cancel.clone();
+        let deadline = ctx.deadline;
+        let deadline_hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hit = Arc::clone(&deadline_hit);
         let child = token.clone();
         let bridge = tokio::spawn(async move {
-            signal.cancelled().await;
+            // The supervisor enforces deadlines non-cooperatively for wire
+            // requests; EMBEDDED callers (InProcessTransport, future
+            // mobile/WASM hosts) have no supervisor, so the deadline arms
+            // the same token here.
+            match deadline {
+                Some(deadline) => {
+                    tokio::select! {
+                        () = signal.cancelled() => {}
+                        () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                            hit.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                }
+                None => signal.cancelled().await,
+            }
             child.cancel();
         });
-        OperationCancellation { token, bridge }
+        OperationCancellation {
+            token,
+            deadline_hit,
+            bridge,
+        }
+    }
+
+    /// The wire error for an interrupted wait: DEADLINE_EXCEEDED when the
+    /// deadline fired, CANCELLED for a client cancel — retryability differs.
+    fn interruption(&self, what: &str) -> WireError {
+        if self.deadline_hit.load(std::sync::atomic::Ordering::Relaxed) {
+            WireError::new(
+                ErrorCode::DeadlineExceeded,
+                format!("{what} deadline elapsed"),
+            )
+        } else {
+            WireError::new(ErrorCode::Cancelled, format!("{what} cancelled"))
+        }
     }
 
     fn token(&self) -> CancellationToken {
