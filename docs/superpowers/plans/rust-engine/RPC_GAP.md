@@ -18,6 +18,7 @@ read surface with #217, both merged 2026-07-21).
 | desktop operation | daemon RPC | Rust logic |
 |---|---|---|
 | listTextFiles | PARTIAL in RPC-A (#217): versionedText.list is METADATA-ONLY (paged, keyset afterPath cursor, measured byte budget); the TS operation returns TextFileSnapshot[] WITH text, and production callers (workspace search, version materialization) read file.text off the listing. RPC-D owns the callers' pivot: per-path hydration via versionedText.read or a bulk hydration/streaming path. | domain `store.rs list_snapshot_metadata` |
+| readBinaryBlob (by sha) | MISSING | sole caller is the desktop binary restore (workspaceEngineCapture.ts:2371); Rust has put_binary_blob only — the read-by-sha seam is RPC-D's versions-read-binary-blob |
 | readBinaryFile | PARTIAL in RPC-A (#217): versionedBinary.read (one-turn in-band cap, over-cap = metadata + inbandLimitBytes) — CONTRACT DELTA: TS returns null when the path is absent, text-headed, or blob-missing; the Rust RPC refuses a text head with InvalidParams. RPC-D decides (recommend: match the oracle's null-on-text so non-binary fallbacks keep working). | domain `store.rs read_binary_inband` |
 | rename/delete/rollback text | MISSING | domain `store.rs:203/216/353` |
 | compare/merge versions | MISSING | domain `merge.rs` |
@@ -103,7 +104,8 @@ trusted for access.
 
 WIRE-LIMIT OBLIGATION (found in RPC-A review): in-band content is bounded
 by the DOP1 limits (64 KiB per string, 1 MiB per frame). #217 (RPC-A, MERGED
-2026-07-21 — everything below is on main) ships
+2026-07-21 — this WIRE-LIMIT paragraph's contracts are on main; sections
+explicitly labeled PENDING #220 below are NOT) ships
 versionedBinary.read with a 48 KiB in-band cap (over-cap answers metadata +
 null body, self-describing), versionedText.list as METADATA-ONLY
 (bodies via versionedText.read), and the SAME 48 KiB in-band contract for
@@ -145,6 +147,20 @@ bridge schema (apps/desktop/src/ipc/bridgeContract.ts) accepts only the
 closed 5-set today and main.ts parses engine-history responses through
 it — the first "ydoc"-origin moment crossing IPC fails schema
 validation until that contract widens. RPC-D's review must include it.
+
+STANDING IDENTITY POSTURE (chats surface, recorded at #218 rounds 2/5):
+the daemon's authenticated DOP1 client IS the desktop main process — the
+same process the TS oracle trusts to DERIVE author/owner identity before
+touching the store (main.ts:5215-5225 derives authorship; the renderer
+payload carries no identity fields, bridgeContract.ts:971-977; the relay
+separately verifies authorUserId === actor.userId for replicated ops,
+linkedChatStore.ts:4492-4498). The DOP1 socket is shadow-fence
+token-authenticated and main-only; the renderer never reaches it. Chat
+RPC identity params (authorUserId/ownerUserId) therefore sit in the SAME
+trust position as the oracle's function arguments — per-user
+authorization on the socket becomes meaningful only if the daemon ever
+accepts multi-principal clients, which is R15+ scope and recorded here so
+review rounds stop re-litigating it.
 
 R15 IS A DESTRUCTIVE CUTOVER GATE, not a parity note: the reset wipes
 TS-written rows in Ice's dogfood workspace. Policy (R15/R15-REHEARSE
