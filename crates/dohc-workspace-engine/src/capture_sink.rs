@@ -77,18 +77,15 @@ impl SelfWriteSuppression {
         }
     }
 
-    /// Single-shot on ANY `Changed` observation of the path: a non-matching
-    /// sha means a genuine edit landed after the settle, so the entry is
-    /// stale and must not survive to suppress a later revert back to the
-    /// settled content.
-    fn consume_match(&self, workspace_id: &str, path: &str, sha256: &str) -> bool {
+    /// Single-shot removal on ANY `Changed` observation of the path — the
+    /// caller compares the returned recorded sha against what it actually
+    /// read (a non-matching or unreadable observation still clears the
+    /// entry, which must not survive to suppress a later revert).
+    fn take(&self, workspace_id: &str, path: &str) -> Option<String> {
         let Ok(mut entries) = self.entries.lock() else {
-            return false;
+            return None;
         };
-        match entries.remove(&(workspace_id.to_owned(), path.to_owned())) {
-            Some(recorded) => recorded == sha256,
-            None => false,
-        }
+        entries.remove(&(workspace_id.to_owned(), path.to_owned()))
     }
 
     /// Forget every entry for a workspace — called when the workspace closes
@@ -106,9 +103,14 @@ impl dohc_engine_runtime::SelfWriteRecorder for SelfWriteSuppression {
     }
 
     fn retract(&self, workspace_id: &str, path: &str, sha256: &str) {
-        // Single-shot removal keyed on the exact identity: only the entry the
-        // conflicted settle recorded is dropped (consume_match semantics).
-        let _ = self.consume_match(workspace_id, path, sha256);
+        // Remove only when the stored identity matches what the failed settle
+        // recorded — a newer settle's entry must survive a stale retract.
+        if let Ok(mut entries) = self.entries.lock() {
+            let key = (workspace_id.to_owned(), path.to_owned());
+            if entries.get(&key).is_some_and(|recorded| recorded == sha256) {
+                entries.remove(&key);
+            }
+        }
     }
 }
 
@@ -643,6 +645,16 @@ impl CaptureSink for StoreCaptureSink {
             self.retire_head(path, false)?;
             return Ok(IngestOutcome::NotOwned);
         }
+        // A Changed observation consumes the suppression entry REGARDLESS of
+        // what the re-read resolves to: an entry left armed by a
+        // binary/untracked/over-cap read-back would later suppress a genuine
+        // revert to the settled content. The recorded sha decides whether the
+        // TEXT branch below suppresses; every other branch just clears.
+        let consumed_suppression = if matches!(reason, IngestReason::Changed) {
+            self.self_writes.take(&self.workspace_id, path)
+        } else {
+            None
+        };
         match self.read_current(path, media_type)? {
             CurrentContent::Text(text) => {
                 // Report the identity of the bytes ACTUALLY captured — the
@@ -651,11 +663,7 @@ impl CaptureSink for StoreCaptureSink {
                 // scan-time bytes would diff clean and never re-ingest.
                 let size = text.len() as u64;
                 let sha256 = sha256_hex(text.as_bytes());
-                if matches!(reason, IngestReason::Changed)
-                    && self
-                        .self_writes
-                        .consume_match(&self.workspace_id, path, &sha256)
-                {
+                if consumed_suppression.as_deref() == Some(sha256.as_str()) {
                     return Ok(IngestOutcome::Captured { size, sha256 });
                 }
                 match self.ingest_text(path, text, claim_foreign_head)? {

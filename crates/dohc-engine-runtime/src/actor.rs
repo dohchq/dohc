@@ -2358,6 +2358,10 @@ fn ydoc_record_update_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    // Validate BEFORE the parent-row transaction: a malformed first seed
+    // must not strand a bare file_objects row for the deterministic object
+    // id (which regular writes then treat as already existing).
+    Ydoc::validate_update(update)?;
     if require_empty_lineage
         && dohc_engine_collab::read_marker(store, key)?
             .is_some_and(|marker| marker.head_update_seq > 0)
@@ -2472,6 +2476,29 @@ fn ydoc_settle_on_store(
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
     let projection = doc.project(content_kind);
+    // A successful settle must be REPORTABLE: the response carries the
+    // markdown as one wire string, so a projection past the in-band cap
+    // refuses BEFORE anything commits (a committed-but-undecodable settle
+    // would strand the client). Blob streaming lifts this at RPC-D.
+    if projection.markdown.len() > dohc_engine_domain::INBAND_CONTENT_CAP_BYTES {
+        return Err(dohc_engine_domain::DomainError::InvalidText {
+            reason: "ydoc-settle-exceeds-inband-cap",
+        }
+        .into());
+    }
+    // The stale-head guard runs BEFORE the idempotent no-op: an external
+    // capture ingest (or any same-object writer) must surface as
+    // ConflictStaleTarget even when the projection itself is unchanged —
+    // otherwise settle reports success and a close can prune without the
+    // client ever resyncing over the divergence.
+    let head_probe =
+        VersionedTextStore::new(store).read_text(&key.workspace_id, &key.version_id, path)?;
+    let probe_sha = head_probe
+        .as_ref()
+        .map(|snapshot| snapshot.blob_sha256.clone());
+    if probe_sha != expected_head_sha {
+        return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
+    }
     // Idempotent no-op: when the lineage's last settled content is exactly
     // this projection, re-settling would mint a duplicate moment (the
     // fingerprint's previous-moment input changed) and a redundant
@@ -2507,6 +2534,21 @@ fn ydoc_settle_on_store(
                 JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
                 JobOutcome::Conflict | JobOutcome::Superseded => {
                     self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);
+                    // The disk moved past the prior settle before its job
+                    // replayed: last_settled_sha no longer describes a
+                    // materialized artifact. NULL it so close(settle:false)
+                    // refuses UnsettledClose instead of pruning.
+                    let cleared = store.write_with(faults, |tx| {
+                        tx.execute(
+                            "UPDATE ydoc_docs SET last_settled_sha = NULL, updated_at_ms = ?4                              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                            params![key.workspace_id, key.version_id, key.object_id, now_ms],
+                        )
+                        .map_err(StorageError::persist_public)?;
+                        Ok::<_, StorageError>(())
+                    })?;
+                    if matches!(cleared, TxnOutcome::Crashed { .. }) {
+                        return Err(RuntimeError::OperationCrashed);
+                    }
                     return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
                 }
                 JobOutcome::Crashed(_) => return Err(RuntimeError::OperationCrashed),
@@ -2651,7 +2693,7 @@ fn ydoc_settle_on_store(
             reason: "Y.Doc settle materialization job is missing",
         })
     })?;
-    match materialize_one(
+    let job_outcome = materialize_one(
         store,
         root_dir,
         &job,
@@ -2660,7 +2702,41 @@ fn ydoc_settle_on_store(
         &StdBackoff,
         now_ms,
         faults,
-    )? {
+    );
+    let job_outcome = match job_outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // ANY materialization error (symlink target, lock exhaustion,
+            // IO) gets the same compensation as a conflict: the marker must
+            // not claim a settled artifact that never reached disk, and the
+            // suppression identity must not outlive the failed replace.
+            self_writes.retract(
+                &key.workspace_id,
+                &write.snapshot.path,
+                &write.snapshot.blob_sha256,
+            );
+            let compensated = store.write_with(faults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5,                      updated_at_ms = ?6                      WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                    params![
+                        key.workspace_id,
+                        key.version_id,
+                        key.object_id,
+                        prior_marker.0,
+                        prior_marker.1,
+                        now_ms,
+                    ],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })?;
+            if matches!(compensated, TxnOutcome::Crashed { .. }) {
+                return Err(RuntimeError::OperationCrashed);
+            }
+            return Err(error.into());
+        }
+    };
+    match job_outcome {
         JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
         JobOutcome::Conflict | JobOutcome::Superseded => {
             // The target changed on disk and the job left it untouched: this

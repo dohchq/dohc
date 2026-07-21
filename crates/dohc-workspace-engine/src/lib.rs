@@ -1173,7 +1173,16 @@ impl EngineService {
         // Serialize with the session surface: the lease check below is only
         // meaningful if no ydoc.open can interleave between it and the
         // append (open holds this same lock across lease + state read).
-        let _serial = self.session_ops.lock().await;
+        // Cancellation stays honored while queued — a long settle must not
+        // pin an already-expired apply on the transport.
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("ydoc.apply (queued)"));
+            }
+            serial = self.session_ops.lock() => serial,
+        };
         let update = base64::engine::general_purpose::STANDARD
             .decode(params.update_base64)
             .map_err(|_| wire(ErrorCode::InvalidParams, "invalid update encoding"))?;
@@ -1186,7 +1195,6 @@ impl EngineService {
         if self.leases.is_held(&key) {
             return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
         }
-        let cancellation = OperationCancellation::new(ctx);
         let content_kind = match params.content_kind.as_str() {
             "plaintext" => ContentKind::Plaintext,
             "richdoc" => ContentKind::Richdoc,
@@ -1440,14 +1448,10 @@ impl EngineService {
         if let Some(session) = lock(&self.sessions).get_mut(session_id) {
             session.last_settled_sha = Some(settled.sha256.clone());
         }
-        let byte_length = settled.markdown.len();
-        let over_cap = byte_length > MAX_INBAND_CONTENT_BYTES;
         serde_json::to_value(YdocSettleResult {
             moment_id: settled.moment_id,
             path: settled.path,
-            markdown: (!over_cap).then_some(settled.markdown),
-            byte_length,
-            inband_limit_bytes: over_cap.then_some(MAX_INBAND_CONTENT_BYTES),
+            markdown: settled.markdown,
             sha256: settled.sha256,
             projection: YdocProjectionProvenance {
                 content_kind: ydoc_content_kind_name(settled.projection.content_kind),
@@ -2010,13 +2014,7 @@ struct YdocProjectionProvenance {
 struct YdocSettleResult {
     moment_id: String,
     path: String,
-    /// None when the settled body exceeds the in-band cap — the write is
-    /// durable; the body is fetchable via versionedText.read semantics and
-    /// the response self-describes with `inbandLimitBytes`.
-    markdown: Option<String>,
-    byte_length: usize,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    inband_limit_bytes: Option<usize>,
+    markdown: String,
     sha256: String,
     projection: YdocProjectionProvenance,
 }

@@ -306,3 +306,21 @@ the raw result alongside the existing decoder.
 - P2 no-op-path suppression ordering: the pending-job replay records the
   suppression identity BEFORE materialize_one and retracts it on a
   conflicted job — same discipline as the fresh settle path.
+
+## Codex review round 7 (PR #220)
+
+- Stale-head guard precedes the idempotent no-op (an unchanged projection
+  over an externally-advanced head refuses ConflictStaleTarget).
+- Settles past the in-band cap refuse ydoc-settle-exceeds-inband-cap
+  BEFORE committing (a successful settle is always client-decodable; the
+  Option-markdown response experiment is reverted).
+- MaterializeError gets the same marker compensation + suppression
+  retract as conflicts; the no-op replay's conflict arm NULLs
+  last_settled_sha so close(settle:false) refuses UnsettledClose.
+- Suppression entries are TAKEN on every Changed observation (binary/
+  untracked/over-cap read-backs clear them; only a matching text sha
+  suppresses); retract removes only its own identity.
+- capture_manifest_seed rehydrates 'ydoc' heads alongside 'capture' —
+  offline edits/deletes of materialized ydoc markdown reconcile.
+- ydoc.apply honors cancellation while queued on session_ops; seed
+  updates validate before the file_objects parent row commits.
