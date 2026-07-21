@@ -64,6 +64,9 @@ struct Options {
     cycles: u64,
     daemon: PathBuf,
     evidence: PathBuf,
+    /// The caller ASKED for a smoke: PASS-SCENARIOS-ONLY is then a
+    /// successful exit. A full run that degrades to it is not.
+    quick: bool,
 }
 
 fn parse_options() -> Options {
@@ -71,6 +74,7 @@ fn parse_options() -> Options {
     let mut cycles = 1000_u64;
     let mut daemon: Option<PathBuf> = None;
     let mut evidence = PathBuf::from("soak-evidence.json");
+    let mut quick = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -81,6 +85,7 @@ fn parse_options() -> Options {
             "--quick" => {
                 minutes = 3;
                 cycles = 36;
+                quick = true;
             }
             other => panic!("unknown argument {other}"),
         }
@@ -107,6 +112,7 @@ fn parse_options() -> Options {
         cycles,
         daemon,
         evidence,
+        quick,
     }
 }
 
@@ -477,10 +483,24 @@ async fn scenario_open_close(daemon: &Daemon, root: &Path) {
     close(daemon, handle).await;
 }
 
-async fn scenario_two_workspace_switch(daemon: &Daemon, root_a: &Path, root_b: &Path, n: u64) {
+/// Returns whether the write was still IN FLIGHT when workspace B opened —
+/// the path this scenario advertises. Fast runs can complete the write
+/// first; the caller counts overlapped cycles separately so the evidence
+/// never claims coverage the run didn't have.
+async fn scenario_two_workspace_switch(
+    daemon: &Daemon,
+    root_a: &Path,
+    root_b: &Path,
+    n: u64,
+) -> bool {
     let handle_a = open(daemon, root_a, "soak-switch-a").await;
-    // An in-flight write on A while B opens and closes.
-    let (_, in_flight) = daemon
+    // An in-flight write on A while B opens and closes. The payload is
+    // deliberately bulky — but bounded by the DOP1 wire limit on string
+    // fields (64 KiB), which the first smoke of this scenario tripped at
+    // 256 KiB. ~45 KiB keeps headroom while still straddling the switch
+    // more often than a one-liner.
+    let text = format!("in-flight during switch {n}\n").repeat(1600);
+    let (_, mut in_flight) = daemon
         .begin(
             "versionedText.write",
             Some(handle_a.clone()),
@@ -488,7 +508,7 @@ async fn scenario_two_workspace_switch(daemon: &Daemon, root_a: &Path, root_b: &
                 "versionId": "main",
                 "objectId": format!("soak-switch-object-{n}"),
                 "path": format!("switch-{n}.md"),
-                "text": format!("in-flight during switch {n}"),
+                "text": text,
                 "momentId": format!("soak-switch-moment-{n}"),
                 "metadataOrigin": "api",
                 "nowMs": 1
@@ -496,13 +516,27 @@ async fn scenario_two_workspace_switch(daemon: &Daemon, root_a: &Path, root_b: &
         )
         .await;
     let handle_b = open(daemon, root_b, "soak-switch-b").await;
+    // try_recv CONSUMES a value that already completed — the answer must be
+    // threaded through, never awaited again (polling a consumed oneshot
+    // panics "called after complete").
+    let early = in_flight.try_recv();
+    let overlapped = matches!(early, Err(tokio::sync::oneshot::error::TryRecvError::Empty));
     close(daemon, handle_b).await;
-    tokio::time::timeout(Duration::from_secs(60), in_flight)
-        .await
-        .expect("in-flight write answered within 60s")
-        .expect("in-flight channel")
-        .expect("in-flight write survives the switch");
+    let answer = match early {
+        Ok(answer) => answer,
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+            tokio::time::timeout(Duration::from_secs(60), in_flight)
+                .await
+                .expect("in-flight write answered within 60s")
+                .expect("in-flight channel")
+        }
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+            panic!("in-flight channel closed without an answer")
+        }
+    };
+    answer.expect("in-flight write survives the switch");
     close(daemon, handle_a).await;
+    overlapped
 }
 
 async fn scenario_watcher_storm(daemon: &Daemon, root: &Path, n: u64) {
@@ -525,10 +559,44 @@ async fn scenario_watcher_storm(daemon: &Daemon, root: &Path, n: u64) {
         flush_until_settled(daemon, &handle, Duration::from_secs(60)).await,
         "watcher storm must settle"
     );
+    // A settled flush is NOT proof the burst was captured: writes still
+    // inside the OS debounce are invisible to flush (the capture.flush
+    // contract). Prove ingestion — one burst path must become readable,
+    // re-flushing while the debounce drains.
+    let probe = format!("storm/burst-{n}-0.md");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (_, rx) = daemon
+            .begin(
+                "versionedText.read",
+                Some(handle.clone()),
+                json!({ "versionId": "main", "path": probe }),
+            )
+            .await;
+        let answer = tokio::time::timeout(Duration::from_secs(30), rx)
+            .await
+            .expect("storm probe read resolves")
+            .expect("response channel");
+        if answer.is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "storm burst was never captured within 60s"
+        );
+        assert!(
+            flush_until_settled(daemon, &handle, Duration::from_secs(60)).await,
+            "watcher storm re-flush must settle"
+        );
+    }
     close(daemon, handle).await;
 }
 
-async fn scenario_cancel_storm(daemon: &Daemon, root: &Path) {
+/// Returns how many of the storm's cancellations were OBSERVED (a request
+/// answered `Cancelled`). Fast completions make a cancel a no-op; the run
+/// aggregates this count into the evidence so a soak where cancellation
+/// recovery was never actually exercised is visible, not assumed.
+async fn scenario_cancel_storm(daemon: &Daemon, root: &Path) -> u64 {
     let handle = open(daemon, root, "soak-cancel").await;
     let mut receivers = Vec::new();
     for _ in 0..16 {
@@ -542,11 +610,17 @@ async fn scenario_cancel_storm(daemon: &Daemon, root: &Path) {
         daemon.cancel(id).await;
         receivers.push(rx);
     }
+    let mut cancellations_observed = 0_u64;
     for rx in receivers {
         // Either outcome (result or cancelled error) is fine; a HANG is not.
-        let _ = tokio::time::timeout(Duration::from_secs(30), rx)
+        let answer = tokio::time::timeout(Duration::from_secs(30), rx)
             .await
             .expect("cancelled request must resolve");
+        if let Ok(Err(error)) = answer {
+            if error.contains("Cancelled") {
+                cancellations_observed += 1;
+            }
+        }
     }
     // The queue must recover: a normal request still RESOLVES (the path does
     // not exist, so an error result is fine — a hang is not).
@@ -563,6 +637,7 @@ async fn scenario_cancel_storm(daemon: &Daemon, root: &Path) {
         .expect("response channel")
         .ok();
     close(daemon, handle).await;
+    cancellations_observed
 }
 
 async fn scenario_editor_cycle(daemon: &Daemon, root: &Path, n: u64) {
@@ -682,6 +757,7 @@ async fn main() {
     );
     let mut cycle: u64 = 0;
     let mut hard_capped = false;
+    let mut cancellations_observed: u64 = 0;
     loop {
         if cycle >= options.cycles && started.elapsed() >= budget {
             break;
@@ -708,15 +784,19 @@ async fn main() {
                 *counts.entry("openClose").or_default() += 1;
             }
             1 => {
-                scenario_two_workspace_switch(&daemon, &root_a, &root_b, cycle).await;
+                let overlapped =
+                    scenario_two_workspace_switch(&daemon, &root_a, &root_b, cycle).await;
                 *counts.entry("twoWorkspaceSwitch").or_default() += 1;
+                if overlapped {
+                    *counts.entry("twoWorkspaceSwitchOverlapped").or_default() += 1;
+                }
             }
             2 => {
                 scenario_watcher_storm(&daemon, &root_storm, cycle).await;
                 *counts.entry("watcherStorm").or_default() += 1;
             }
             3 => {
-                scenario_cancel_storm(&daemon, &root_cancel).await;
+                cancellations_observed += scenario_cancel_storm(&daemon, &root_cancel).await;
                 *counts.entry("cancelStorm").or_default() += 1;
             }
             _ => {
@@ -777,6 +857,11 @@ async fn main() {
         // under crashRestarts/scenarioCounts, never in this denominator.
         "cyclesCompleted": cycle,
         "scenarioCounts": counts,
+        // How many cancel-storm cancellations were actually OBSERVED (a
+        // request answered Cancelled) — fast completions make a cancel a
+        // no-op, and a run that never exercised cancellation recovery must
+        // be visible as such, not assumed covered.
+        "cancelStormCancellationsObserved": cancellations_observed,
         "crashRestarts": crashes,
         "durationSecs": started.elapsed().as_secs(),
         "baseline": { "rss": rss_base, "handles": handles_base, "threads": threads_base },
@@ -853,10 +938,15 @@ async fn main() {
         thread_base,
         threads_end,
     );
-    // Only a hard FAIL is a failing exit: PASS-SCENARIOS-ONLY (quick runs
-    // that cannot evaluate a trend) and PASS-INCOMPLETE (hard-capped) are
-    // healthy runs whose evidence says exactly what was and wasn't checked.
-    if verdict == "FAIL" {
+    // PASS exits 0. A REQUESTED smoke (--quick) legitimately reports
+    // PASS-SCENARIOS-ONLY and also exits 0 — the caller asked for a run
+    // that cannot evaluate a trend. Everything else (FAIL, a FULL run that
+    // degraded to trend-not-evaluated, a hard-capped run) did not meet its
+    // tier's targets: non-zero, so a CI gate checking only the process
+    // status can never accept incomplete cutover evidence.
+    let acceptable = verdict == "PASS"
+        || (options.quick && verdict == "PASS-SCENARIOS-ONLY(trend-not-evaluated)");
+    if !acceptable {
         std::process::exit(1);
     }
 }
