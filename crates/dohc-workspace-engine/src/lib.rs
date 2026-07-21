@@ -747,14 +747,13 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: MomentsListParams = parse(params)?;
-        // A blank filter is malformed input, not an empty timeline (TS
-        // normalizeObjectId parity).
-        if params
-            .object_id
-            .as_deref()
-            .is_some_and(|id| id.trim().is_empty())
-        {
-            return Err(wire(ErrorCode::InvalidParams, "objectId must not be blank"));
+        // TS normalizeObjectId REJECTS blank, whitespace-padded, and
+        // control-character ids — a malformed filter is an input error,
+        // never an empty timeline.
+        if params.object_id.as_deref().is_some_and(|id| {
+            id.trim().is_empty() || id.trim() != id || id.chars().any(char::is_control)
+        }) {
+            return Err(wire(ErrorCode::InvalidParams, "objectId is malformed"));
         }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
@@ -806,8 +805,9 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: MomentsGetParams = parse(params)?;
-        // Blank ids are malformed input, never "absent moment" (TS parity).
-        if params.moment_id.trim().is_empty() {
+        // TS getMoment TRIMS before querying; blank stays malformed input.
+        let moment_id = params.moment_id.trim().to_owned();
+        if moment_id.is_empty() {
             return Err(wire(ErrorCode::InvalidParams, "momentId must not be blank"));
         }
         let open = self.open(handle.as_ref())?;
@@ -815,7 +815,7 @@ impl EngineService {
         let moment = Self::read_under_ctx(
             &cancellation,
             "moments.get",
-            open.actor.get_moment(open.workspace_id, params.moment_id),
+            open.actor.get_moment(open.workspace_id, moment_id),
         )
         .await?;
         Ok(match moment {
@@ -874,6 +874,19 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: VersionPathParams = parse(params)?;
+        // Normalize ONCE and use the normalized spelling everywhere: the
+        // policy stable-decodes percent disguises (%2eenv classifies as
+        // .env), and querying with the raw spelling would answer "absent
+        // secret" for a real one. This also runs the fail-closed secret
+        // gate up front, before ANY state-dependent branch, so the error
+        // surface is identical across key states.
+        let (classification, normalized) =
+            dohc_engine_files::policy::classify_engine_file_path_normalized(&params.path);
+        if classification != dohc_engine_files::policy::PathClassification::Secret {
+            return Err(wire(ErrorCode::InvalidParams, "not a secret path"));
+        }
+        let secret_path =
+            normalized.ok_or_else(|| wire(ErrorCode::InvalidParams, "not a secret path"))?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         // Blocking filesystem work stays off the tokio worker.
@@ -883,28 +896,9 @@ impl EngineService {
             .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?
             .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?;
         let Some(key) = key else {
-            // No key file: a workspace that never minted one has no secrets;
-            // one WITH secret rows and no key is corrupt/misrestored state.
-            let has_state = Self::read_under_ctx(
-                &cancellation,
-                "secrets.materialize",
-                open.actor.secret_state_exists(open.workspace_id.clone()),
-            )
-            .await?;
-            if has_state {
-                return Err(wire(ErrorCode::Internal, "secret key unavailable"));
-            }
-            // The keyed domain path validates the SECRET PATH first
-            // (normalizeSecretPath) — the keyless branch matches that
-            // precedence exactly, then the version.
-            if dohc_engine_files::policy::classify_engine_file_path(&params.path)
-                != dohc_engine_files::policy::PathClassification::Secret
-            {
-                return Err(wire(ErrorCode::InvalidParams, "not a secret path"));
-            }
-            // Even keyless-and-stateless, an invalid version must error the
-            // same way it does once state exists — a caller must never see
-            // the error surface CHANGE because a key appeared.
+            // The path gate already ran above; the VERSION must also
+            // validate before any state-dependent answer — the error
+            // surface for caller mistakes never changes with key state.
             let versions = Self::read_under_ctx(
                 &cancellation,
                 "secrets.materialize",
@@ -917,13 +911,25 @@ impl EngineService {
             {
                 return Err(wire(ErrorCode::InvalidParams, "version not found"));
             }
+            // Only NOW the state check: a workspace that never minted a key
+            // has no secrets; one WITH secret rows and no key is
+            // corrupt/misrestored state and fails closed.
+            let has_state = Self::read_under_ctx(
+                &cancellation,
+                "secrets.materialize",
+                open.actor.secret_state_exists(open.workspace_id.clone()),
+            )
+            .await?;
+            if has_state {
+                return Err(wire(ErrorCode::Internal, "secret key unavailable"));
+            }
             return Ok(Value::Null);
         };
         let plaintext = Self::read_under_ctx(
             &cancellation,
             "secrets.materialize",
             open.actor
-                .materialize_secret(open.workspace_id, params.version_id, params.path, key),
+                .materialize_secret(open.workspace_id, params.version_id, secret_path, key),
         )
         .await?;
         Ok(match plaintext {

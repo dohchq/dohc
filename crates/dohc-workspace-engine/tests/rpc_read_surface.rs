@@ -377,6 +377,19 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     )
     .await;
     assert_eq!(plaintext["text"], json!("TOKEN=rpc-read"));
+    // A percent-disguised spelling normalizes to the SAME secret — the
+    // policy stable-decodes %2eenv to .env, and the query must use the
+    // normalized spelling or a real secret reads as absent.
+    id += 1;
+    let disguised = call(
+        &transport,
+        &handle,
+        id,
+        "secrets.materialize",
+        json!({ "versionId": "main", "path": "%2eenv" }),
+    )
+    .await;
+    assert_eq!(disguised["text"], json!("TOKEN=rpc-read"));
     id += 1;
     let absent = call(
         &transport,
