@@ -210,6 +210,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     assert_eq!(reserved_first_message.code, ErrorCode::InvalidParams);
 
     let overlong_message_id = "x".repeat(257);
+    let byte_heavy_message_id = "😀".repeat(200);
     let overlong_first_message = call_error(
         &transport,
         &first_handle,
@@ -227,6 +228,23 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     )
     .await;
     assert_eq!(overlong_first_message.code, ErrorCode::InvalidParams);
+    let byte_heavy_first_message = call_error(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel-project",
+            "threadId": "byte-heavy-message-thread",
+            "messageId": byte_heavy_message_id.clone(),
+            "authorKind": "human",
+            "authorDisplayName": "Alice",
+            "body": "must fail",
+            "nowMs": 22,
+        }),
+    )
+    .await;
+    assert_eq!(byte_heavy_first_message.code, ErrorCode::InvalidParams);
 
     let started = call(
         &transport,
@@ -266,8 +284,25 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     )
     .await;
     assert_eq!(overlong_send.code, ErrorCode::InvalidParams);
+    let byte_heavy_send = call_error(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "thread-1",
+            "messageId": byte_heavy_message_id,
+            "authorKind": "agent",
+            "authorDisplayName": "My agent",
+            "body": "must fail",
+            "nowMs": 1001,
+        }),
+    )
+    .await;
+    assert_eq!(byte_heavy_send.code, ErrorCode::InvalidParams);
 
-    let max_cursor_message_id = "m".repeat(256);
+    let max_cursor_message_id = format!("{}abc", "😀".repeat(89));
+    assert_eq!(max_cursor_message_id.len(), 359);
     call(
         &transport,
         &first_handle,
@@ -276,7 +311,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         json!({
             "channelId": "channel-general",
             "threadId": "cursor-cap-thread",
-            "messageId": max_cursor_message_id,
+            "messageId": max_cursor_message_id.clone(),
             "authorKind": "human",
             "authorDisplayName": "Alice",
             "body": "cursor cap newest",
@@ -323,12 +358,28 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     .await;
     assert_eq!(
         cursor_cap_page["items"][0]["messageId"],
-        json!("m".repeat(256))
+        json!(max_cursor_message_id)
     );
     let cursor_cap_next = cursor_cap_page["nextCursor"]
         .as_str()
-        .expect("256-character message-id cursor")
+        .expect("exact-byte-budget message-id cursor")
         .to_owned();
+    let cursor_cap_seen = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.feed.markSeen",
+        json!({
+            "ownerUserId": "cursor-cap-owner",
+            "headCursor": cursor_cap_next.clone(),
+            "nowMs": 1003,
+        }),
+    )
+    .await;
+    assert_eq!(
+        cursor_cap_seen["lastSeenMessageId"],
+        json!(max_cursor_message_id)
+    );
     let cursor_cap_remainder = call(
         &transport,
         &first_handle,
@@ -936,6 +987,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         .expect("derived bookmark id")
         .to_owned();
     assert!(bookmark_id.starts_with("bookmark_"));
+    assert_eq!(bookmark["workspaceId"], json!("rpc-chat-first"));
     assert_eq!(bookmark["generation"], json!(1));
     assert_eq!(bookmark["projectionState"], json!("pending"));
     let bookmarks = call(
@@ -949,6 +1001,10 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     assert_eq!(
         bookmarks["bookmarks"].as_array().expect("bookmarks").len(),
         1
+    );
+    assert_eq!(
+        bookmarks["bookmarks"][0]["workspaceId"],
+        json!("rpc-chat-first")
     );
     let wrong_projection_path = call_error(
         &transport,
@@ -983,6 +1039,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     )
     .await;
     assert_eq!(ready["applied"], json!(true));
+    assert_eq!(ready["bookmark"]["workspaceId"], json!("rpc-chat-first"));
     assert_eq!(ready["bookmark"]["projectionState"], json!("ready"));
     assert_eq!(
         ready["bookmark"]["projectionObjectId"],
@@ -1138,6 +1195,28 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     assert_eq!(claimed["run"]["failureReason"], Value::Null);
     assert_eq!(claimed["run"]["logPath"], json!("  logs/run-1.log  "));
     assert_eq!(claimed["run"]["failureNotePosted"], json!(false));
+    let retried_claim = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({
+            "runId": "run-1",
+            "command": "ignored retry command",
+            "nowMs": 2402,
+        }),
+    )
+    .await;
+    assert_eq!(retried_claim, claimed);
+    let blocked_claim = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "runId": "run-other", "nowMs": 2402 }),
+    )
+    .await;
+    assert!(blocked_claim.is_null());
     let cross_workspace = call_error(
         &transport,
         &second_handle,

@@ -73,6 +73,11 @@ const MAX_AUTHOR_USER_ID_CHARS: usize = 200;
 const MAX_FEED_CURSOR_LEN: usize = 512;
 /// Feed cursor message-id char cap (`decodeFeedCursor`).
 const MAX_FEED_CURSOR_MESSAGE_ID_CHARS: usize = 256;
+/// Maximum UTF-8 bytes available to a message id in a worst-case feed cursor.
+/// A 512-byte unpadded-base64url value decodes to at most 384 bytes. The JSON
+/// `[i64::MIN,"id"]` framing costs exactly 25 bytes (20 timestamp bytes plus
+/// `[`, `,"`, and `"]`), leaving 359 bytes for the unescaped id.
+const MAX_FEED_CURSOR_MESSAGE_ID_BYTES: usize = (MAX_FEED_CURSOR_LEN / 4) * 3 - 25;
 /// Dispatch run ids are trimmed before storage; match the TS store's hard byte floor.
 const MAX_DISPATCH_RUN_ID_BYTES: usize = 512;
 /// Dispatch metadata uses the TS store's 16,384 UTF-16-code-unit text bound.
@@ -699,6 +704,13 @@ fn validate_message_id(message_id: &str) -> Result<(), DomainError> {
     if message_id.is_empty()
         || message_id.contains('\0')
         || message_id.chars().count() > MAX_FEED_CURSOR_MESSAGE_ID_CHARS
+        || message_id.len() > MAX_FEED_CURSOR_MESSAGE_ID_BYTES
+        || encode_feed_cursor(&FeedCursorValue {
+            created_at_ms: i64::MIN,
+            message_id: message_id.to_owned(),
+        })
+        .len()
+            > MAX_FEED_CURSOR_LEN
     {
         Err(DomainError::InvalidInput {
             reason: "message id is invalid",
@@ -1801,6 +1813,21 @@ impl<'a> LinkedChatStore<'a> {
             let (origin_id, origin_seq) =
                 local_replication_coordinate(tx, &input.workspace_id, at_ms)?;
             upsert_follow_lww(tx, &input, at_ms, &origin_id, origin_seq)?;
+            insert_local_replication_op(
+                tx,
+                &input.workspace_id,
+                &origin_id,
+                origin_seq,
+                "chat.follow.set",
+                &serde_json::json!({
+                    "ownerUserId": input.owner_user_id,
+                    "targetKind": input.target_kind.as_str(),
+                    "targetId": input.target_id,
+                    "state": input.state.as_str(),
+                    "atMs": at_ms,
+                }),
+                at_ms,
+            )?;
             journal(tx, &input.target_id, "chat.follow.set", at_ms)?;
             require_follow(
                 tx,
@@ -1906,6 +1933,20 @@ impl<'a> LinkedChatStore<'a> {
                 params![ws, owner, last_seen_created_at_ms, msg, at_ms, origin_id, origin_seq],
             )
             .map_err(DomainError::sql_persist)?;
+            insert_local_replication_op(
+                tx,
+                &ws,
+                &origin_id,
+                origin_seq,
+                "chat.feed.read.set",
+                &serde_json::json!({
+                    "ownerUserId": owner,
+                    "lastSeenCreatedAtMs": last_seen_created_at_ms,
+                    "lastSeenMessageId": msg,
+                    "atMs": at_ms,
+                }),
+                at_ms,
+            )?;
             journal(tx, &owner, "chat.feed.read.set", at_ms)?;
             require_feed_read_state(tx, &ws, &owner)
         })?;
@@ -2352,9 +2393,9 @@ impl<'a> LinkedChatStore<'a> {
     /// Claim the oldest pending, non-paused dispatch trigger (`claimNextPending`):
     /// flips it to `running`, marks every other pending trigger in the same
     /// thread `done` under the same run, mints an `agent_run_records` row, and
-    /// returns the claim. Idempotent: with an open run already RUNNING in the
-    /// workspace, returns `None` (single-writer; no double-claim). `None` also
-    /// when nothing is pending/claimable.
+    /// returns the claim. Idempotent: retrying the same RUNNING `run_id`
+    /// returns its existing claim; a different open run returns `None`
+    /// (single-writer; no double-claim). `None` also when nothing is pending.
     pub fn claim_next_pending(
         &mut self,
         workspace_id: &str,
@@ -2369,6 +2410,11 @@ impl<'a> LinkedChatStore<'a> {
         let cmd = normalize_dispatch_command(command)?;
         let log = normalize_optional_dispatch_path(log_path)?;
         let outcome = self.store.write_with(faults, |tx| {
+            // A response can be lost after commit. Recover that exact durable
+            // claim before the workspace-wide single-flight guard rejects it.
+            if let Some(existing) = running_dispatch_claim(tx, &ws, &run)? {
+                return Ok::<_, DomainError>(Some(existing));
+            }
             // Single-writer guard: a run already RUNNING means no new claim.
             let open_running: i64 = tx
                 .query_row(
@@ -3152,6 +3198,34 @@ fn local_replication_coordinate(
     Ok((origin_id, origin_seq))
 }
 
+/// Consume a locally allocated LWW coordinate in the relay-visible log inside
+/// the same transaction as the register update and compatibility journal row.
+fn insert_local_replication_op(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    origin_id: &str,
+    origin_seq: i64,
+    op_kind: &str,
+    payload: &serde_json::Value,
+    recorded_at_ms: i64,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "INSERT INTO replication_log \
+         (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+        params![
+            workspace_id,
+            origin_id,
+            origin_seq,
+            op_kind,
+            payload.to_string(),
+            recorded_at_ms
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
 fn require_feed_read_state(
     conn: &Connection,
     workspace_id: &str,
@@ -3260,6 +3334,59 @@ fn require_message(
     .map_err(DomainError::sql_corrupt)?
     .transpose()?
     .ok_or_else(|| DomainError::chat("message-not-found", "Chat message was not found."))
+}
+
+/// Rehydrate a lost-response retry from the one RUNNING ledger row and its
+/// still-open run record. The join also makes a half-persisted pair fail closed
+/// as no retry claim; the workspace guard will then surface the wedged row.
+fn running_dispatch_claim(
+    conn: &Connection,
+    workspace_id: &str,
+    run_id: &str,
+) -> Result<Option<DispatchClaim>, DomainError> {
+    conn.query_row(
+        "SELECT l.workspace_id, l.trigger_message_id, l.thread_id, l.state, l.run_id, \
+                l.failure_reason, l.attempt_count, l.created_at_ms, l.updated_at_ms, \
+                r.workspace_id, r.run_id, r.thread_id, r.trigger_message_id, r.command, \
+                r.started_at_ms, r.ended_at_ms, r.exit_code, r.failure_reason, r.log_path, \
+                r.failure_note_posted \
+         FROM chat_dispatch_ledger l \
+         JOIN agent_run_records r \
+           ON r.workspace_id = l.workspace_id AND r.run_id = l.run_id \
+         WHERE l.workspace_id = ?1 AND l.run_id = ?2 AND l.state = 'running' \
+           AND r.ended_at_ms IS NULL",
+        params![workspace_id, run_id],
+        |row| {
+            Ok(DispatchClaim {
+                dispatch: DispatchRecord {
+                    workspace_id: row.get(0)?,
+                    trigger_message_id: row.get(1)?,
+                    thread_id: row.get(2)?,
+                    state: row.get(3)?,
+                    run_id: row.get(4)?,
+                    failure_reason: row.get(5)?,
+                    attempt_count: row.get(6)?,
+                    created_at_ms: row.get(7)?,
+                    updated_at_ms: row.get(8)?,
+                },
+                run: AgentRunRecord {
+                    workspace_id: row.get(9)?,
+                    run_id: row.get(10)?,
+                    thread_id: row.get(11)?,
+                    trigger_message_id: row.get(12)?,
+                    command: row.get(13)?,
+                    started_at_ms: row.get(14)?,
+                    ended_at_ms: row.get(15)?,
+                    exit_code: row.get(16)?,
+                    failure_reason: row.get(17)?,
+                    log_path: row.get(18)?,
+                    failure_note_posted: row.get(19)?,
+                },
+            })
+        },
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)
 }
 
 /// Resolve a workspace-scoped run id to `(trigger_message_id, ended_at_ms,

@@ -1648,13 +1648,14 @@ impl EngineService {
         let target_kind = parse_bookmark_target_kind(&params.target_kind)?;
         let mode = parse_bookmark_mode(&params.mode)?;
         let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
         let cancellation = OperationCancellation::new(ctx);
         let bookmark = Self::read_under_ctx(
             &cancellation,
             "chats.bookmarks.save",
             open.actor.chat_bookmark_save(
                 SaveBookmark {
-                    workspace_id: open.workspace_id,
+                    workspace_id: workspace_id.clone(),
                     owner_user_id: params.owner_user_id,
                     target_kind,
                     target_id: params.target_id,
@@ -1666,7 +1667,7 @@ impl EngineService {
             ),
         )
         .await?;
-        Ok(bookmark_json(&bookmark))
+        Ok(bookmark_json(&workspace_id, &bookmark))
     }
 
     async fn chats_bookmarks_list(
@@ -1677,19 +1678,23 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: ChatOwnerParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
         let cancellation = OperationCancellation::new(ctx);
         let bookmarks = Self::read_under_ctx(
             &cancellation,
             "chats.bookmarks.list",
             open.actor
-                .chat_bookmarks_list(open.workspace_id, params.owner_user_id),
+                .chat_bookmarks_list(workspace_id.clone(), params.owner_user_id),
         )
         .await?;
         // Bounded domain-side (10k rows) but a row can still be string-
         // heavy: the byte budget keeps every page under the wire frame.
         // No cursor on this family yet (composite sort keys) — truncated
         // says so honestly; cursor pagination is RPC_GAP follow-up work.
-        let row_values: Vec<Value> = bookmarks.iter().map(bookmark_json).collect();
+        let row_values: Vec<Value> = bookmarks
+            .iter()
+            .map(|bookmark| bookmark_json(&workspace_id, bookmark))
+            .collect();
         let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
         if included == 0 && !row_values.is_empty() {
             return Err(wire(
@@ -1712,12 +1717,13 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: ChatBookmarkMarkReadyParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
         let cancellation = OperationCancellation::new(ctx);
         let transition = Self::read_under_ctx(
             &cancellation,
             "chats.bookmarks.markReady",
             open.actor.chat_bookmark_mark_ready(
-                open.workspace_id,
+                workspace_id.clone(),
                 params.owner_user_id,
                 params.bookmark_id,
                 params.generation,
@@ -1729,7 +1735,7 @@ impl EngineService {
         )
         .await?;
         Ok(json!({
-            "bookmark": bookmark_json(&transition.bookmark),
+            "bookmark": bookmark_json(&workspace_id, &transition.bookmark),
             "applied": transition.applied,
         }))
     }
@@ -2757,9 +2763,10 @@ fn follow_json(workspace_id: &str, follow: &ChatFollow) -> Value {
     })
 }
 
-fn bookmark_json(bookmark: &ChatBookmark) -> Value {
+fn bookmark_json(workspace_id: &str, bookmark: &ChatBookmark) -> Value {
     json!({
         "bookmarkId": bookmark.bookmark_id,
+        "workspaceId": workspace_id,
         "ownerUserId": bookmark.owner_user_id,
         "targetKind": bookmark.target_kind,
         "targetId": bookmark.target_id,

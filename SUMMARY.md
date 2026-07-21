@@ -77,3 +77,12 @@ Round-3 domain and RPC regressions cover projection ownership transfer, exact bo
 - Thread-start and message-send ids now share the feed cursor decoder's 256-character cap (plus the empty/NUL floor), preventing an emitted feed cursor from becoming undecodable.
 
 Round-4 RPC and domain regressions cover list-to-mark-seen cursor flow and garbage refusal, forged follow-origin rejection plus server-derived journal coordinates, invalid dispatch metadata and verbatim persistence, 257-character message-id refusal on both write paths, and a 256-character id paging through `nextCursor`. Per the task constraint, no Cargo command was run; all changed Rust files passed direct `rustfmt --edition 2024 --check`, and `git diff --check` passed.
+
+## Review round 5
+
+- Message-id validation now retains the 256-scalar outer cap and also enforces the exact 359-byte UTF-8 budget implied by a worst-case i64 feed cursor. The final encoded form is checked as well, so JSON-escaped ids cannot mint a cursor above 512 bytes. Domain and RPC regressions reject a 200-emoji id on thread start and send, while an exact-budget id round-trips through `listPersonal`'s `nextCursor` and `markSeen`.
+- Bookmark save, list, and mark-ready responses now include the handle-derived `workspaceId`, matching the TypeScript `ChatBookmark` contract without trusting a caller-supplied workspace identity.
+- `claimNextPending` now rehydrates and returns an existing RUNNING `{ dispatch, run }` for a lost-response retry with the same normalized `runId` before applying the workspace single-flight guard. A different run id remains blocked with a null claim.
+- Local `chat.follow.set` and `chat.feed.read.set` writes now insert their exact TypeScript apply payloads into `replication_log` with `imported = 0` in the same transaction as the LWW register and compatibility journal write. Repeated writes therefore consume distinct local origin sequences and are relay-visible; tests inspect both rows and payload shapes.
+
+Per the task constraint, no Cargo command was run. The changed Rust files were parsed and formatted directly with `rustfmt --edition 2024`; final checks also include `rustfmt --check` and `git diff --check`.

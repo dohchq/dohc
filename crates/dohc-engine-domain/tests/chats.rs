@@ -14,6 +14,7 @@ use dohc_engine_domain::{
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use serde_json::json;
 use sha2::{Digest, Sha256};
 
 const NO_FAULTS: NoFaults = NoFaults;
@@ -466,6 +467,7 @@ fn feed_cursor_message_id_cap_applies_to_start_and_send() {
         .expect("general");
 
     let too_long = "x".repeat(257);
+    let too_many_bytes = "😀".repeat(200);
     let invalid_start = start_thread(
         "gen-1",
         "too-long",
@@ -481,8 +483,32 @@ fn feed_cursor_message_id_cap_applies_to_start_and_send() {
             .code(),
         "invalid-input"
     );
+    let invalid_byte_heavy_start = start_thread(
+        "gen-1",
+        "too-many-bytes",
+        &too_many_bytes,
+        "opening",
+        ChatActorKind::Human,
+        20,
+    );
+    assert_eq!(
+        chats
+            .start_channel_thread(&invalid_byte_heavy_start, &NO_FAULTS)
+            .unwrap_err()
+            .code(),
+        "invalid-input"
+    );
 
-    let max_id = "m".repeat(256);
+    let max_id = format!("{}abc", "😀".repeat(89));
+    assert_eq!(max_id.len(), 359);
+    assert_eq!(
+        encode_feed_cursor(&FeedCursorValue {
+            created_at_ms: i64::MIN,
+            message_id: max_id.clone(),
+        })
+        .len(),
+        512
+    );
     chats
         .start_channel_thread(
             &start_thread(
@@ -495,7 +521,7 @@ fn feed_cursor_message_id_cap_applies_to_start_and_send() {
             ),
             &NO_FAULTS,
         )
-        .expect("256-character id");
+        .expect("exact cursor byte-budget id");
     let invalid_send = send_msg("valid", &too_long, None, "reply", 22);
     assert_eq!(
         chats
@@ -504,6 +530,39 @@ fn feed_cursor_message_id_cap_applies_to_start_and_send() {
             .code(),
         "invalid-input"
     );
+    let invalid_byte_heavy_send = send_msg("valid", &too_many_bytes, None, "reply", 22);
+    assert_eq!(
+        chats
+            .send_message(&invalid_byte_heavy_send, &NO_FAULTS)
+            .unwrap_err()
+            .code(),
+        "invalid-input"
+    );
+    chats
+        .send_message(&send_msg("valid", "older", None, "older", 20), &NO_FAULTS)
+        .expect("older message");
+    chats
+        .set_follow(
+            &SetFollow {
+                workspace_id: WS.to_owned(),
+                owner_user_id: "cursor-owner".to_owned(),
+                target_kind: FollowTargetKind::Thread,
+                target_id: "valid".to_owned(),
+                state: FollowState::Following,
+                now_ms: 23,
+            },
+            &NO_FAULTS,
+        )
+        .expect("follow");
+    let page = chats
+        .list_personal_feed(WS, "cursor-owner", Some(1), None)
+        .expect("feed page");
+    assert_eq!(page.items[0].message_id, max_id);
+    let next = page.next_cursor.expect("exact-budget next cursor");
+    let seen = chats
+        .mark_feed_seen(WS, "cursor-owner", &next, 24, &NO_FAULTS)
+        .expect("next cursor marks seen");
+    assert_eq!(seen.last_seen_message_id, max_id);
 }
 
 #[test]
@@ -715,7 +774,7 @@ fn follow_lww_last_write_wins_and_lists_active() {
         .expect("f3");
     assert_eq!(active.state, FollowState::Following);
     assert!(active.origin_id.starts_with("origin_"));
-    assert_eq!(active.origin_seq, 0);
+    assert_eq!(active.origin_seq, 2);
 }
 
 #[test]
@@ -802,6 +861,44 @@ fn local_follow_timestamp_advances_past_same_millisecond_unfollow() {
     assert_eq!(unfollowed.updated_at_ms, 100);
     assert_eq!(followed.updated_at_ms, 101);
     assert_eq!(followed.state, FollowState::Following);
+    assert_eq!(unfollowed.origin_id, followed.origin_id);
+    assert_eq!(unfollowed.origin_seq, 0);
+    assert_eq!(followed.origin_seq, 1);
+    let rows: Vec<(i64, String, i64)> = store
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT origin_seq, payload_json, imported FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind = 'chat.follow.set' ORDER BY origin_seq",
+            )?;
+            let mapped = stmt.query_map([WS], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            mapped.collect()
+        })
+        .expect("follow replication rows");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].0, 0);
+    assert_eq!(rows[1].0, 1);
+    assert_eq!(rows[0].2, 0);
+    assert_eq!(rows[1].2, 0);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&rows[0].1).expect("unfollow payload"),
+        json!({
+            "ownerUserId": "owner",
+            "targetKind": "thread",
+            "targetId": "t1",
+            "state": "unfollowed",
+            "atMs": 100,
+        })
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&rows[1].1).expect("follow payload"),
+        json!({
+            "ownerUserId": "owner",
+            "targetKind": "thread",
+            "targetId": "t1",
+            "state": "following",
+            "atMs": 101,
+        })
+    );
 }
 
 #[test]
@@ -1216,6 +1313,12 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
         .expect("claim A")
         .expect("some A");
     assert_eq!(a.dispatch.trigger_message_id, "mA");
+
+    let retry = chats
+        .claim_next_pending(WS, "run-A", "ignored retry command", None, 25, &NO_FAULTS)
+        .expect("retry claim")
+        .expect("same running claim");
+    assert_eq!(retry, a);
 
     // Before completion, B is NOT claimable (single-writer guard).
     assert!(
@@ -1668,6 +1771,42 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
         .expect("now visible");
     assert_eq!(state.last_seen_created_at_ms, 100);
     assert_eq!(state.last_seen_message_id, "m0");
+    let repeated = chats
+        .mark_feed_seen(WS, "owner", &head, 200, &NO_FAULTS)
+        .expect("repeat mark");
+    assert_eq!(repeated.updated_at_ms, 201);
+    let rows: Vec<(i64, String, i64)> = store
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT origin_seq, payload_json, imported FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind = 'chat.feed.read.set' ORDER BY origin_seq",
+            )?;
+            let mapped = stmt.query_map([WS], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+            mapped.collect()
+        })
+        .expect("feed-read replication rows");
+    assert_eq!(rows.len(), 2);
+    assert_ne!(rows[0].0, rows[1].0);
+    assert_eq!(rows[0].2, 0);
+    assert_eq!(rows[1].2, 0);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&rows[0].1).expect("first read payload"),
+        json!({
+            "ownerUserId": "owner",
+            "lastSeenCreatedAtMs": 100,
+            "lastSeenMessageId": "m0",
+            "atMs": 200,
+        })
+    );
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&rows[1].1).expect("second read payload"),
+        json!({
+            "ownerUserId": "owner",
+            "lastSeenCreatedAtMs": 100,
+            "lastSeenMessageId": "m0",
+            "atMs": 201,
+        })
+    );
 }
 
 // ------------------------------------------------------ migration presence
