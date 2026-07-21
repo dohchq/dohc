@@ -110,10 +110,14 @@ null body, self-describing), versionedText.list as METADATA-ONLY
 secrets.materialize: an over-cap secret answers {text: null, byteLength,
 inbandLimitBytes} — plaintext stays in-band or absent, NEVER partially
 delivered and never a post-decrypt encode failure; callers needing larger
-secrets wait on the same blob-streaming follow-up. Real binaries and >64 KiB text need the
-protocol's blob-chunk streaming (BlobStart exists in the wire contract; NO
-daemon producer yet) — cutover-relevant for readBinaryFile and large text
-reads; slot with RPC-D or its own slice. The pre-existing
+secrets wait on the same blob-streaming follow-up. versionedText.read
+carries the SAME 48 KiB in-band content cap (read_text_inband with
+MAX_INBAND_CONTENT_BYTES = INBAND_CONTENT_CAP_BYTES = 48 KiB — NOT the
+64 KiB wire-string bound, which is the DOP1 envelope limit above it).
+Real binaries and text past the 48 KiB cap need the protocol's blob-chunk
+streaming (BlobStart exists in the wire contract; NO daemon producer
+yet) — cutover-relevant for readBinaryFile and large text reads; owned by
+RPC-D. The pre-existing
 versionedText.read carries the same 64 KiB bound for a single body.
 
 
