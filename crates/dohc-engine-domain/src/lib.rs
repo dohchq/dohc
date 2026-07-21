@@ -65,8 +65,8 @@ pub use records::{
     BinaryHead, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
     CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord,
     ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
-    RollbackTextFileMutation, SnapshotContent, SnapshotView, TextSnapshot, VersionKind,
-    VersionRecord, WriteResult, WriteText,
+    RollbackTextFileMutation, SnapshotContent, SnapshotMetadata, SnapshotView, TextSnapshot,
+    VersionKind, VersionRecord, WriteResult, WriteText,
 };
 pub use secrets::{
     CaptureSecret, CaptureSecretRetire, SecretDelete, SecretDiskIntent, SecretFileStat,

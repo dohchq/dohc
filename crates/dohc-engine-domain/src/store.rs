@@ -19,8 +19,8 @@ use crate::records::{
     BinaryHead, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
     CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord,
     ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
-    RollbackTextFileMutation, SnapshotContent, SnapshotRecord, SnapshotView, TextSnapshot,
-    VersionKind, VersionRecord, WriteResult, WriteText,
+    RollbackTextFileMutation, SnapshotContent, SnapshotMetadata, SnapshotRecord, SnapshotView,
+    TextSnapshot, VersionKind, VersionRecord, WriteResult, WriteText,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
@@ -737,6 +737,57 @@ impl<'a> VersionedTextStore<'a> {
             .iter()
             .map(snapshot_view)
             .collect()
+    }
+
+    /// One PAGE of snapshot metadata in `version`, ordered by path, with NO
+    /// body hydration — `LENGTH(CAST(text AS BLOB))` sizes a text head in
+    /// bytes without copying it out of the row. Keyset: strictly after
+    /// `after_path` (None = from the start).
+    pub fn list_snapshot_metadata(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+        after_path: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SnapshotMetadata>, DomainError> {
+        self.store.read_with(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT s.object_id, s.path, LENGTH(CAST(b.text AS BLOB)), \
+                     s.updated_at_ms, s.latest_moment_id, s.metadata_origin, \
+                     COALESCE(s.content_kind, 'text'), bb.sha256 FROM snapshots s \
+                     LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                     LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
+                     WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path > ?3 \
+                     ORDER BY s.path LIMIT ?4",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![
+                        workspace_id,
+                        version_id,
+                        after_path.unwrap_or(""),
+                        limit as i64
+                    ],
+                    |row| {
+                        Ok(SnapshotMetadata {
+                            object_id: row.get(0)?,
+                            path: row.get(1)?,
+                            text_byte_length: row.get::<_, Option<i64>>(2)?,
+                            updated_at_ms: row.get(3)?,
+                            latest_moment_id: row.get(4)?,
+                            metadata_origin: row.get(5)?,
+                            content_kind: row.get(6)?,
+                            binary_sha256: row.get(7)?,
+                        })
+                    },
+                )
+                .map_err(DomainError::sql_corrupt)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DomainError::sql_corrupt)?;
+            Ok(rows)
+        })
     }
 
     /// Durable snapshot records for `version`, ordered by path.

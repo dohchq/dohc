@@ -37,12 +37,19 @@ use std::{
 
 const MAX_OPEN_HANDLES: usize = 64;
 
-/// In-band binary reads are bounded by the DOP1 string limit (64 KiB per
-/// string): base64 expands 4/3, so this raw cap leaves headroom under it.
-/// Larger blobs need the protocol's blob-chunk streaming (BlobStart exists
-/// in the wire contract; no daemon producer yet — a recorded RPC_GAP.md
-/// obligation).
-const MAX_INBAND_BINARY_BYTES: usize = 48 * 1024;
+/// In-band CONTENT (binary bytes, secret plaintext) is bounded by the DOP1
+/// string limit (64 KiB per string): base64 expands 4/3, so this raw cap
+/// leaves headroom under it. Larger content needs the protocol's blob-chunk
+/// streaming (BlobStart exists in the wire contract; no daemon producer
+/// yet) — tracked in docs/superpowers/plans/rust-engine/RPC_GAP.md, which
+/// is maintained on the integrator branch (PR #216) until it merges.
+const MAX_INBAND_CONTENT_BYTES: usize = 48 * 1024;
+
+/// Approximate serialized-bytes budget for one moments.list page: a row
+/// can legitimately carry 64 KiB strings (authorJson), so a row COUNT can
+/// never bound the frame — the page cuts when the running estimate would
+/// pass this, well under the 1 MiB frame limit.
+const MOMENTS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
 
 #[derive(Clone)]
 struct OpenWorkspace {
@@ -576,20 +583,29 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: VersionScopedParams = parse(params)?;
+        let params: VersionedTextListParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let snapshots = Self::read_under_ctx(
+        // METADATA ONLY, PAGED: bodies come one path at a time via
+        // versionedText.read (aggregated bodies trivially exceed the 1 MiB
+        // frame limit), and even metadata rows are paged so a large
+        // workspace cannot exceed it either. The +1 row probes for more.
+        let limit = params.limit.unwrap_or(200).clamp(1, 500);
+        let mut rows = Self::read_under_ctx(
             &cancellation,
             "versionedText.list",
-            open.actor
-                .list_snapshots(open.workspace_id.clone(), params.version_id.clone()),
+            open.actor.list_snapshot_metadata(
+                open.workspace_id.clone(),
+                params.version_id.clone(),
+                params.after_path.clone(),
+                limit + 1,
+            ),
         )
         .await?;
-        // list_snapshots reads an unknown version as empty; every sibling
-        // read fails closed with VersionNotFound. Match them — a typo'd
-        // version must never masquerade as an empty one.
-        if snapshots.is_empty() {
+        // An unknown version must REFUSE, never read as empty — but only
+        // the FIRST page can tell (a later page past the last path is
+        // legitimately empty).
+        if rows.is_empty() && params.after_path.is_none() {
             let versions = Self::read_under_ctx(
                 &cancellation,
                 "versionedText.list",
@@ -603,36 +619,28 @@ impl EngineService {
                 return Err(wire(ErrorCode::InvalidParams, "version not found"));
             }
         }
-        // METADATA ONLY — no bodies. A version's aggregated text trivially
-        // exceeds the DOP1 frame limit (64 KiB per string, 1 MiB per
-        // frame); bodies come one path at a time via versionedText.read.
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        let next_after_path = has_more
+            .then(|| rows.last().map(|row| row.path.clone()))
+            .flatten();
         Ok(json!({
-            "files": snapshots
+            "files": rows
                 .iter()
-                .map(|snapshot| {
-                    // byteLength only where the domain already holds it
-                    // (text); binary byte length comes with
-                    // versionedBinary.read's metadata.
-                    let (content_kind, byte_length, binary_sha256) = match &snapshot.content {
-                        dohc_engine_domain::SnapshotContent::Text { text } => {
-                            ("text", Some(text.len()), None)
-                        }
-                        dohc_engine_domain::SnapshotContent::Binary { sha256 } => {
-                            ("binary", None, Some(sha256.as_str()))
-                        }
-                    };
+                .map(|row| {
                     json!({
-                        "path": snapshot.path,
-                        "objectId": snapshot.object_id,
-                        "contentKind": content_kind,
-                        "byteLength": byte_length,
-                        "binarySha256": binary_sha256,
-                        "updatedAtMs": snapshot.updated_at_ms,
-                        "latestMomentId": snapshot.latest_moment_id,
-                        "metadataOrigin": snapshot.metadata_origin,
+                        "path": row.path,
+                        "objectId": row.object_id,
+                        "contentKind": row.content_kind,
+                        "byteLength": row.text_byte_length,
+                        "binarySha256": row.binary_sha256,
+                        "updatedAtMs": row.updated_at_ms,
+                        "latestMomentId": row.latest_moment_id,
+                        "metadataOrigin": row.metadata_origin,
                     })
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            "nextAfterPath": next_after_path,
         }))
     }
 
@@ -655,16 +663,16 @@ impl EngineService {
         Ok(match head {
             None => Value::Null,
             // The DOP1 wire caps strings at 64 KiB: base64 of anything over
-            // MAX_INBAND_BINARY_BYTES would fail at ENCODE, after the work
+            // MAX_INBAND_CONTENT_BYTES would fail at ENCODE, after the work
             // was done. Answer with the metadata and a null body instead —
             // self-describing, never silent — until the blob-chunk
             // streaming surface exists (recorded in RPC_GAP.md).
-            Some(head) if head.bytes.len() > MAX_INBAND_BINARY_BYTES => json!({
+            Some(head) if head.bytes.len() > MAX_INBAND_CONTENT_BYTES => json!({
                 "objectId": head.object_id,
                 "sha256": head.sha256,
                 "byteLength": head.bytes.len(),
                 "bytesBase64": Value::Null,
-                "inbandLimitBytes": MAX_INBAND_BINARY_BYTES,
+                "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
             }),
             Some(head) => json!({
                 "objectId": head.object_id,
@@ -700,9 +708,38 @@ impl EngineService {
                 }),
         )
         .await?;
+        // A row COUNT cannot bound the frame: authorJson alone may be a
+        // 64 KiB string. Cut the page when the running size estimate would
+        // pass the budget (at least one row always ships — a single row
+        // fits by construction, every string being wire-capped).
+        let mut included = 0usize;
+        let mut budget = MOMENTS_PAGE_BYTE_BUDGET as i64;
+        for moment in &page.moments {
+            let row_estimate = 220
+                + moment.moment_id.len()
+                + moment.version_id.len()
+                + moment.object_id.len()
+                + moment.path.len()
+                + moment.metadata_origin.len()
+                + moment.author_json.as_deref().map_or(0, str::len)
+                + moment.after_blob_sha256.as_deref().map_or(0, str::len)
+                + moment.before_blob_sha256.as_deref().map_or(0, str::len);
+            budget -= row_estimate as i64;
+            if included > 0 && budget < 0 {
+                break;
+            }
+            included += 1;
+        }
+        let truncated = included < page.moments.len();
+        let moments = &page.moments[..included];
+        let next_before = if truncated {
+            moments.last().map(|moment| moment.moment_order)
+        } else {
+            page.next_before_moment_order
+        };
         Ok(json!({
-            "moments": page.moments.iter().map(moment_json).collect::<Vec<_>>(),
-            "nextBeforeMomentOrder": page.next_before_moment_order,
+            "moments": moments.iter().map(moment_json).collect::<Vec<_>>(),
+            "nextBeforeMomentOrder": next_before,
             "latestMomentOrder": page.latest_moment_order,
         }))
     }
@@ -797,6 +834,14 @@ impl EngineService {
         .await?;
         Ok(match plaintext {
             None => Value::Null,
+            // Same in-band bound as binary reads: an over-cap secret
+            // answers its SIZE, never a post-decrypt encode failure and
+            // never silence.
+            Some(text) if text.len() > MAX_INBAND_CONTENT_BYTES => json!({
+                "text": Value::Null,
+                "byteLength": text.len(),
+                "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+            }),
             Some(text) => json!({ "text": text }),
         })
     }
@@ -1135,6 +1180,16 @@ struct VersionedTextReadParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VersionScopedParams {
     version_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextListParams {
+    version_id: String,
+    #[serde(default)]
+    after_path: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[derive(Deserialize)]

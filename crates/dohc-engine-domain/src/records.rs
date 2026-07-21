@@ -98,6 +98,23 @@ pub enum SnapshotContent {
     Binary { sha256: String },
 }
 
+/// One snapshot's METADATA — everything a listing needs, with no body
+/// hydration (text is sized in SQL, never copied out).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotMetadata {
+    pub object_id: String,
+    pub path: String,
+    /// Byte length of a TEXT head; None for binary heads (their length
+    /// comes with `versionedBinary.read`'s metadata).
+    pub text_byte_length: Option<i64>,
+    pub updated_at_ms: i64,
+    pub latest_moment_id: String,
+    pub metadata_origin: String,
+    /// "text" | "binary" (the stored discriminant).
+    pub content_kind: String,
+    pub binary_sha256: Option<String>,
+}
+
 /// The materialized current state of an object within a version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotView {

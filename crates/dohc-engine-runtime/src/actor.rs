@@ -36,9 +36,9 @@ use dohc_engine_domain::{
     CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult, CaptureSecret,
     CaptureSecretRetire, ListMomentsQuery, MomentPage, MomentRecord, ResolveTextConflict,
     ResolveTextConflictResult, SecretFileStat, SecretFileStore, SecretMomentRecord,
-    SecretWriteResult, SnapshotView, TextConflict, TextSnapshot, VersionRecord, VersionedTextStore,
-    WriteResult, WriteText, capture_manifest_seed, capture_secret_retire, has_secret_state,
-    insert_text_conflict_if_absent, list_secret_files_keyless,
+    SecretWriteResult, SnapshotMetadata, SnapshotView, TextConflict, TextSnapshot, VersionRecord,
+    VersionedTextStore, WriteResult, WriteText, capture_manifest_seed, capture_secret_retire,
+    has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
 };
 use dohc_engine_storage::{
     CompoundWrite, Document, EngineStore, FaultInjector, StorageError, TxnOutcome, WriteOutcome,
@@ -206,6 +206,13 @@ enum Command {
         workspace_id: String,
         version_id: String,
         reply: oneshot::Sender<Result<Vec<SnapshotView>, RuntimeError>>,
+    },
+    ListSnapshotMetadata {
+        workspace_id: String,
+        version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+        reply: oneshot::Sender<Result<Vec<SnapshotMetadata>, RuntimeError>>,
     },
     ListMoments {
         query: Box<ListMomentsQuery>,
@@ -813,6 +820,29 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// One page of snapshot METADATA (no body hydration) — the listing read
+    /// behind `versionedText.list`.
+    pub async fn list_snapshot_metadata(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+    ) -> Result<Vec<SnapshotMetadata>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ListSnapshotMetadata {
+                workspace_id,
+                version_id,
+                after_path,
+                limit,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     pub async fn list_moments(&self, query: ListMomentsQuery) -> Result<MomentPage, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
@@ -1385,6 +1415,23 @@ fn worker_main(
             } => {
                 let outcome = VersionedTextStore::new(&mut store)
                     .list_snapshots(&workspace_id, &version_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ListSnapshotMetadata {
+                workspace_id,
+                version_id,
+                after_path,
+                limit,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .list_snapshot_metadata(
+                        &workspace_id,
+                        &version_id,
+                        after_path.as_deref(),
+                        limit,
+                    )
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }

@@ -95,6 +95,13 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     big_png.resize(64 * 1024, 0xAB);
     write_file(scratch.path(), "img-big.png", &big_png);
     write_file(scratch.path(), ".env", b"TOKEN=rpc-read");
+    // Secret over the in-band cap: 64 KiB of env content.
+    let big_secret = format!(
+        "BIG={}
+",
+        "v".repeat(64 * 1024)
+    );
+    write_file(scratch.path(), "big.env", big_secret.as_bytes());
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
@@ -184,6 +191,51 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         },
     )
     .await;
+
+    // The listing pages by path with a keyset cursor — metadata only, so
+    // no page can outgrow the wire frame.
+    id += 1;
+    let page1 = call(
+        &transport,
+        &handle,
+        id,
+        "versionedText.list",
+        json!({ "versionId": "main", "limit": 2 }),
+    )
+    .await;
+    let page1_paths: Vec<&str> = page1["files"]
+        .as_array()
+        .expect("page1 files")
+        .iter()
+        .map(|file| file["path"].as_str().expect("path"))
+        .collect();
+    assert_eq!(page1_paths.len(), 2, "limit must bound the page");
+    let cursor = page1["nextAfterPath"].as_str().expect("cursor").to_owned();
+    assert_eq!(cursor, *page1_paths.last().expect("last"));
+    id += 1;
+    let page2 = call(
+        &transport,
+        &handle,
+        id,
+        "versionedText.list",
+        json!({ "versionId": "main", "limit": 50, "afterPath": cursor }),
+    )
+    .await;
+    let page2_paths: Vec<&str> = page2["files"]
+        .as_array()
+        .expect("page2 files")
+        .iter()
+        .map(|file| file["path"].as_str().expect("path"))
+        .collect();
+    assert!(!page2_paths.is_empty(), "the tail page holds the rest");
+    assert!(
+        page2["nextAfterPath"].is_null(),
+        "the final page carries no cursor"
+    );
+    assert!(
+        page1_paths.iter().all(|path| !page2_paths.contains(path)),
+        "pages must not overlap"
+    );
 
     // versionedBinary.read returns the exact bytes; on a TEXT head it errors
     // (asked the wrong question) rather than returning empty bytes.
@@ -310,7 +362,7 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         .iter()
         .map(|stat| stat["path"].as_str().expect("path"))
         .collect();
-    assert_eq!(secret_paths, vec![".env"]);
+    assert_eq!(secret_paths, vec![".env", "big.env"]);
     assert!(
         secrets["secrets"][0].get("text").is_none(),
         "the listing must never carry plaintext"
@@ -335,6 +387,24 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     )
     .await;
     assert!(absent.is_null(), "an absent secret materializes to null");
+
+    // An over-cap secret answers its SIZE, never a post-decrypt encode
+    // failure (the DOP1 string limit binds every in-band body).
+    id += 1;
+    let big = call(
+        &transport,
+        &handle,
+        id,
+        "secrets.materialize",
+        json!({ "versionId": "main", "path": "big.env" }),
+    )
+    .await;
+    assert!(
+        big["text"].is_null(),
+        "over-cap plaintext stays out-of-band"
+    );
+    assert_eq!(big["inbandLimitBytes"], json!(48 * 1024));
+    assert!(big["byteLength"].as_u64().expect("byteLength") > 48 * 1024);
 
     // FAIL CLOSED: live secret state with a MISSING key file is
     // corrupt/misrestored — materialize must error, never read as empty.
