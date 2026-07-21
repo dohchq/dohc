@@ -124,7 +124,7 @@ normalization, so disguises cannot bypass it). Moot for data post-R15
 (the reset wipes TS-written rows); differential/parity suites must expect
 it.
 
-CROSS-ENGINE DELTA (RPC-C, recorded 2026-07-22): daemon Y.Doc settles
+CROSS-ENGINE DELTA (RPC-C, recorded 2026-07-21): daemon Y.Doc settles
 mint moments with metadata_origin "ydoc"; the TS oracle's ydocEngineDriver
 settles with "local-file" (ydocEngineDriver.ts:920) because TS's origin
 contract is the closed 5-set {api, local-file, restore, sync, unknown}
