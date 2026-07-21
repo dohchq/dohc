@@ -1910,19 +1910,21 @@ next round caught. The compounding lesson became structure:
   after #215's nine review rounds hardened it further (recorded
   tolerances, unmeasuredAssertions in-artifact, exit-status-checked
   cleanShutdown, bounded requests, scenarios that PROVE what they count),
-  the run was REPEATED on the settled runner. The GATE6 artifact:
-  - 2026-07-21T10:46:48Z | soak-cutoverBlocking | windows/x86_64 | PASS | cycles=5078 crashes=83 durationSecs=1804 rssSlopeB/s=13017.4 handles 105->108 threads 38->38
+  the run was REPEATED on the settled runner — then once more after the
+  assertion KEYS were renamed to say what they check
+  (handlesWithinRecordedSlack / threadsWithinRecordedSlack — a reviewer
+  reading the booleans must never infer an exact-baseline claim the
+  tolerances block would contradict). The GATE6 artifact:
+  - 2026-07-21T11:52:08Z | soak-cutoverBlocking | windows/x86_64 | PASS | cycles=5383 crashes=83 durationSecs=1805 rssSlopeB/s=13695.0 handles 105->109 threads 38->38
   Sample series COMMITTED:
   tools/rust-engine-program/soak-evidence/2026-07-21-cutoverBlocking.json
-  (289 samples over 1797s, trendEvaluated:true, rssDisposition:PASS,
+  (288 samples over 1798s, trendEvaluated:true, rssDisposition:PASS,
   cleanShutdown:true, 83/83 crash cycles CAPTURE-PROVEN via exact-content
-  probes, 13916 cancellations observed, 951/1016 switch cycles genuinely
-  overlapped, unmeasuredAssertions named in the artifact). Curve shape,
-  stated honestly: 26.8 KiB/s first half -> 10.4 second half (last
-  quarter 6.6) — strongly decelerating, i.e. predominantly cache/WAL
-  warmup. THREE independent 30-minute runs measured the same shape
-  (12.5 / 13.5 / 13.0 KiB/s whole-run slopes; the interim artifacts are
-  superseded formats, not withdrawn results). GATE6 disposition, stated
+  probes, cancellations observed and counted, switch overlaps tallied,
+  unmeasuredAssertions named in the artifact). FOUR independent
+  30-minute runs measured the same decelerating warmup shape
+  (12.5 / 13.5 / 13.0 / 13.7 KiB/s whole-run slopes; interim artifacts
+  are superseded formats, not withdrawn results). GATE6 disposition, stated
   precisely: scenario correctness + handles/threads baseline + clean
   shutdown = PASS; MEMORY = PASS-WITH-FLAG (slope 13.0 KiB/s against the
   20 KiB/s threshold, warmup-shaped and reproducible), conditional on
