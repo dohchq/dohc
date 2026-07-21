@@ -577,7 +577,9 @@ async fn scenario_watcher_storm(daemon: &Daemon, root: &Path, n: u64) {
             .await
             .expect("storm probe read resolves")
             .expect("response channel");
-        if answer.is_ok() {
+        // A missing path reads back as a SUCCESSFUL null — only a non-null
+        // snapshot proves the burst was ingested.
+        if matches!(&answer, Ok(value) if !value.is_null()) {
             break;
         }
         assert!(
@@ -736,8 +738,39 @@ async fn main() {
         let handle = open(&daemon, &root_crash, "soak-crash").await;
         assert!(
             flush_until_settled(&daemon, &handle, Duration::from_secs(60)).await,
-            "post-crash reopen must settle (the un-acked write re-offers)"
+            "post-crash reopen must settle"
         );
+        // Settling is not the proof — the pre-crash write must be CAPTURED
+        // after restart. Whether the kill caught it inside the OS debounce,
+        // dirty-but-unacked, or already acked varies by timing; across the
+        // cycle series all interleavings occur, and every one must converge
+        // to the write being ingested. (A missing path reads back as a
+        // successful null, so the probe requires a non-null snapshot.)
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let (_, rx) = daemon
+                .begin(
+                    "versionedText.read",
+                    Some(handle.clone()),
+                    json!({ "versionId": "main", "path": "crash-window.md" }),
+                )
+                .await;
+            let answer = tokio::time::timeout(Duration::from_secs(30), rx)
+                .await
+                .expect("crash probe read resolves")
+                .expect("response channel");
+            if matches!(&answer, Ok(value) if !value.is_null()) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "pre-crash write was never captured after restart"
+            );
+            assert!(
+                flush_until_settled(&daemon, &handle, Duration::from_secs(60)).await,
+                "post-crash re-flush must settle"
+            );
+        }
         close(&daemon, handle).await;
         crashes += 1;
         *counts.entry("crashRestart").or_default() += 1;
@@ -929,7 +962,10 @@ async fn main() {
         std::env::consts::OS,
         std::env::consts::ARCH,
         verdict,
-        counts.values().sum::<u64>(),
+        // Phase-2 workload cycles, same denominator as the evidence JSON —
+        // never a sum over counts (supplemental counters like the overlap
+        // tally would inflate it).
+        cycle,
         crashes,
         started.elapsed().as_secs(),
         slope,

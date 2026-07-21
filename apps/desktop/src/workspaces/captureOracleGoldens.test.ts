@@ -30,16 +30,25 @@ import {
 } from "./workspaceEngineCapture";
 
 const requireModule = createRequire(import.meta.url);
-// vitest's vite pipeline cannot statically resolve the node:sqlite builtin.
-const { DatabaseSync } = requireModule("node:sqlite") as {
-  DatabaseSync: new (
-    path: string,
-    options?: { readOnly?: boolean },
-  ) => {
-    prepare(sql: string): { get(...args: unknown[]): unknown };
-    close(): void;
-  };
+type SqliteDatabase = new (
+  path: string,
+  options?: { readOnly?: boolean },
+) => {
+  prepare(sql: string): { get(...args: unknown[]): unknown };
+  close(): void;
 };
+// vitest's vite pipeline cannot statically resolve the node:sqlite builtin —
+// and Node 20 (still in the workspace's supported range) does not ship it.
+// The oracle test SKIPS visibly there; the rust-engine gate and golden
+// regeneration always run on Node 22+.
+let DatabaseSync: SqliteDatabase | null = null;
+try {
+  ({ DatabaseSync } = requireModule("node:sqlite") as {
+    DatabaseSync: SqliteDatabase;
+  });
+} catch {
+  DatabaseSync = null;
+}
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_PATH = join(HERE, "../../../../tools/rust-engine-program/capture-fixtures.json");
@@ -96,6 +105,7 @@ async function applyToDisk(root: string, step: FixtureStep): Promise<void> {
 }
 
 function everTracked(root: string, path: string): boolean {
+  if (!DatabaseSync) throw new Error("node:sqlite unavailable — test must be skipped");
   const db = new DatabaseSync(join(root, ".dohc/engine/engine.db"), { readOnly: true });
   try {
     const moments = db
@@ -211,7 +221,10 @@ async function runScenario(scenario: FixtureScenario): Promise<Record<string, Pa
   return projectScenario(root, scenario);
 }
 
-it("capture goldens match the TypeScript oracle", { timeout: 120_000 }, async () => {
+it.skipIf(!DatabaseSync)(
+  "capture goldens match the TypeScript oracle",
+  { timeout: 120_000 },
+  async () => {
   // Forcing the TS fallback path must not leak into other tests sharing
   // this Vitest worker — restore whatever the environment had.
   const priorSidecar = process.env.DOHC_KERNEL_SIDECAR;
@@ -242,4 +255,5 @@ it("capture goldens match the TypeScript oracle", { timeout: 120_000 }, async ()
     }
     resetWorkspaceKernelRuntimeForTests();
   }
-});
+  },
+);

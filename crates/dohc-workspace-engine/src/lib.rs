@@ -137,7 +137,7 @@ impl EngineService {
                     .await?
             }
             "watcher.status" => self.watcher_status(request.workspace)?,
-            "capture.flush" => self.capture_flush(request.workspace).await?,
+            "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
             _ => return Err(wire(ErrorCode::MethodNotFound, "unknown method")),
         };
         Ok(Response { id, result })
@@ -414,7 +414,11 @@ impl EngineService {
     /// race, or a workspace under continuous mutation hitting the cycle
     /// bound) — callers must treat it as "state not comparable", never as
     /// "clean".
-    async fn capture_flush(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
+    async fn capture_flush(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
         let open = self.open(handle.as_ref())?;
         // Clone the sender OUT of the lock and await OUTSIDE it: a flush can
         // legitimately take many reconcile cycles, and the workspace table
@@ -426,17 +430,37 @@ impl EngineService {
         let Some(sender) = sender else {
             return Ok(unavailable);
         };
+        // A flush can drive up to MAX_FLUSH_CYCLES reconciles or sit behind
+        // a full flush queue — a cancelled/deadlined caller must get its
+        // answer NOW, like every other workspace RPC. The driver still
+        // finishes its pass; only the wait is abandoned (the reply send
+        // fails harmlessly).
+        let cancellation = OperationCancellation::new(ctx);
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-        if sender.send(reply_tx).await.is_err() {
-            return Ok(unavailable);
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(wire(ErrorCode::Cancelled, "capture.flush cancelled while queued"));
+            }
+            sent = sender.send(reply_tx) => {
+                if sent.is_err() {
+                    return Ok(unavailable);
+                }
+            }
         }
-        match reply_rx.await {
-            Ok(outcome) => Ok(json!({
-                "settled": outcome.settled,
-                "running": outcome.running,
-                "degraded": outcome.degraded,
-            })),
-            Err(_) => Ok(unavailable),
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                Err(wire(ErrorCode::Cancelled, "capture.flush cancelled"))
+            }
+            outcome = reply_rx => match outcome {
+                Ok(outcome) => Ok(json!({
+                    "settled": outcome.settled,
+                    "running": outcome.running,
+                    "degraded": outcome.degraded,
+                })),
+                Err(_) => Ok(unavailable),
+            }
         }
     }
 
