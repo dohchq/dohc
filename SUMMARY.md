@@ -95,3 +95,43 @@ mutating `ydoc_updates`.
 None known. `packages/workspace-engine-client/src/ydoc/ydocWireContract.ts` was
 left unchanged as required; the C1 lineage/seed additions are consumed from
 the raw result alongside the existing decoder.
+
+## Adversarial review round (opus, pre-PR)
+
+- **P0 fixed**: `ydoc.settle` on an un-seeded/absent lineage previously
+  projected a fresh empty doc and clobbered the existing file; it now
+  refuses with the collab `NoMarker` error, mirroring collab `settle()`.
+  Mutation-verified: restoring `None => Ydoc::wire()` makes the new
+  refusal test fail with a successful empty-markdown settle.
+- **P1 fixed (drain completeness)**: acked-but-parked replicated envelopes
+  were only drained on `ydoc.close` of a replicated session — workspace
+  close, stale-handle eviction, and crashes orphaned them. `ydoc.open` now
+  drains parked envelopes for its key before loading state, so any parked
+  update lands on the next use of the doc regardless of how the previous
+  session ended. New sync test proves defer -> drain applies (and re-drain
+  dedupes).
+- **P1 fixed (settle atomicity)**: the `settle_seq`/`last_settled_sha`
+  marker update now commits in the SAME transaction as the settlement
+  moment; a crash can no longer leave a minted moment on an
+  unsettled-looking lineage (which forced a non-idempotent re-settle).
+- **Flow bug found by strengthening the resync assertion**: a local-only
+  close PRUNES the CRDT cache to a bare marker, but reopen still reported
+  `lineage: "existing"` with an EMPTY doc and no `seedMarkdown` — the
+  client's next settle would clobber the settled file. `lineage` now
+  reports durable DOC STATE (marker with `head_update_seq > 0`), so a
+  pruned reopen is `absent` + `seedMarkdown` and the artifact re-seeds the
+  cache (the recordUpdate seed guard already admits a pruned marker).
+- **P2 fixed (stale suppression entry)**: `consume_match` is now
+  single-shot on ANY Changed observation of the path (a non-matching sha
+  clears the stale entry), and workspace close/eviction clears the
+  workspace's entries (the registry outlives workspaces).
+- **P2 fixed (wire-size guard)**: `ydoc.open`/`ydoc.resync` refuse with
+  `ydoc-state-exceeds-wire-limit` when the full state cannot fit one DOP1
+  string post-base64 (48 KiB raw), instead of relying on the framer.
+- **P2 fixed (client leak)**: a throw during the client's first-seed apply
+  now releases the registered session and closes the daemon lease before
+  surfacing.
+- **Documented**: daemon settle path owns `settle_seq` as moment_order
+  generation (collab `settle()` never runs on daemon lineages in C1);
+  lease-on-actor-panic recovers via workspace reopen eviction (noted, not
+  changed).

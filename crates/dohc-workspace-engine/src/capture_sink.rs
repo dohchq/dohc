@@ -77,16 +77,25 @@ impl SelfWriteSuppression {
         }
     }
 
+    /// Single-shot on ANY `Changed` observation of the path: a non-matching
+    /// sha means a genuine edit landed after the settle, so the entry is
+    /// stale and must not survive to suppress a later revert back to the
+    /// settled content.
     fn consume_match(&self, workspace_id: &str, path: &str, sha256: &str) -> bool {
         let Ok(mut entries) = self.entries.lock() else {
             return false;
         };
-        let key = (workspace_id.to_owned(), path.to_owned());
-        if entries.get(&key).is_some_and(|recorded| recorded == sha256) {
-            entries.remove(&key);
-            true
-        } else {
-            false
+        match entries.remove(&(workspace_id.to_owned(), path.to_owned())) {
+            Some(recorded) => recorded == sha256,
+            None => false,
+        }
+    }
+
+    /// Forget every entry for a workspace — called when the workspace closes
+    /// or its handle is evicted; the registry outlives workspaces.
+    pub fn clear_workspace(&self, workspace_id: &str) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.retain(|(workspace, _), _| workspace != workspace_id);
         }
     }
 }

@@ -985,3 +985,74 @@ fn reserved_agent_channel_shapes_rejected() {
         Ok(ApplyOutcome::Applied(()))
     ));
 }
+
+#[test]
+fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
+    let (_scratch, _path, mut engine) = store();
+    // The replicated lineage exists before envelopes arrive (base claim);
+    // apply_remote_update refuses NoMarker rather than conjuring one.
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO versioned_workspaces (workspace_id, main_version_id)                  VALUES ('ws','main')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES ('ws','object-1',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("workspace scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-1").expect("key");
+    dohc_engine_collab::ensure_marker(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        dohc_engine_collab::Regime::Replicated,
+        &NoFaults,
+        1_500,
+    )
+    .expect("replicated marker");
+    let update_bytes = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "parked edit");
+    let blob_sha = engine.put_binary_blob(&update_bytes).expect("store blob");
+    let op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-1",
+            "path": "notes/live.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": blob_sha,
+            "isBaseState": false
+        }),
+    );
+    let outcome =
+        apply_ydoc_envelope(&mut engine, &op, &NoFaults, &AlwaysLive).expect("live lineage defers");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: true,
+            reason: Some("ydoc-session-live"),
+        })
+    );
+
+    // The lease is gone (close/eviction/crash — any teardown): the drain must
+    // land the acked-but-parked envelope in the durable lineage.
+    let drained = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("drain");
+    assert_eq!(drained, 1, "the parked envelope must apply");
+    let update_rows: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))
+                .map_err(SyncError::corrupt)
+        })
+        .expect("count Y.Doc updates");
+    assert_eq!(update_rows, 1, "the drained update reaches the Y.Doc log");
+
+    let redrained = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("redrain");
+    assert_eq!(redrained, 0, "replaying the parked row is content-deduped");
+}

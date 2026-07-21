@@ -45,6 +45,21 @@ const MAX_OPEN_HANDLES: usize = 64;
 /// is maintained on the integrator branch (PR #216) until it merges.
 const MAX_INBAND_CONTENT_BYTES: usize = dohc_engine_domain::INBAND_CONTENT_CAP_BYTES;
 
+/// Largest raw Y.Doc full-state that still fits one wire string once
+/// base64-expanded (4/3): DOP1's 64 KiB `max_string_bytes` divided by 4,
+/// times 3. Refusing here surfaces a clean error instead of the framer
+/// rejecting the whole response (which InProcessTransport would not even
+/// catch). Docs beyond this belong to the blob-chunk streaming path.
+const MAX_YDOC_STATE_WIRE_BYTES: usize =
+    (dohc_engine_protocol::limits::WireLimits::SPIKE_DEFAULTS.max_string_bytes as usize / 4) * 3;
+
+fn encode_ydoc_state_base64(full_state: &[u8]) -> Result<String, WireError> {
+    if full_state.len() > MAX_YDOC_STATE_WIRE_BYTES {
+        return Err(wire(ErrorCode::Internal, "ydoc-state-exceeds-wire-limit"));
+    }
+    Ok(base64::engine::general_purpose::STANDARD.encode(full_state))
+}
+
 /// Approximate serialized-bytes budget for one moments.list page: a row
 /// can legitimately carry 64 KiB strings (authorJson), so a row COUNT can
 /// never bound the frame — the page cuts when the running estimate would
@@ -327,6 +342,7 @@ impl EngineService {
             }
             lock(&self.handles).remove(&handle);
             lock(&self.sessions).retain(|_, session| session.workspace != handle);
+            self.self_writes.clear_workspace(&open.workspace_id);
             // The evicted binding's files layer must not outlive it.
             open.shutdown_capture().await;
         }
@@ -434,6 +450,9 @@ impl EngineService {
         // at ANY await point leaves the #201 backstop semantics intact while
         // the teardown order stays strictly files-then-actor: the driver
         // drains its in-flight apply BEFORE the store actor goes down.
+        if let Some(removed) = removed.as_ref() {
+            self.self_writes.clear_workspace(&removed.workspace_id);
+        }
         let capture_drain = removed
             .as_ref()
             .and_then(OpenWorkspace::begin_capture_shutdown);
@@ -1204,8 +1223,7 @@ impl EngineService {
             object_id: state.key.object_id.clone(),
             path: params.path.clone(),
             content_kind: ydoc_content_kind_name(state.content_kind),
-            initial_update_base64: base64::engine::general_purpose::STANDARD
-                .encode(&state.initial_update),
+            initial_update_base64: encode_ydoc_state_base64(&state.initial_update)?,
             lineage: if state.lineage_existing {
                 "existing"
             } else {
@@ -1440,7 +1458,7 @@ impl EngineService {
             session.event_baseline = 0;
         }
         serde_json::to_value(YdocResyncResult {
-            initial_update_base64: base64::engine::general_purpose::STANDARD.encode(full_state),
+            initial_update_base64: encode_ydoc_state_base64(&full_state)?,
         })
         .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
     }

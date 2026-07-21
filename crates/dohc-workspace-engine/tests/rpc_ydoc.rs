@@ -254,20 +254,49 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         json!({ "versionId": "main", "path": "notes/live.md" }),
     )
     .await;
-    assert_eq!(reopened["lineage"], json!("existing"));
+    // The local-only close PRUNED the CRDT cache to the bare marker
+    // (markdown-is-the-artifact), so the reopen must NOT claim an existing
+    // lineage — that would hand the client an empty doc with nothing to seed
+    // from, and its next settle would clobber the settled file. Instead the
+    // artifact re-seeds the cache: lineage absent + seedMarkdown carrying the
+    // settled content.
+    assert_eq!(reopened["lineage"], json!("absent"));
+    assert_eq!(reopened["seedMarkdown"], json!("settled text"));
     let reopened_session = reopened["sessionId"].as_str().expect("reopened session");
-    let resync = call(
+    let reseeded = call(
         &transport,
         &handle,
         13,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": reopened_session,
+            "updateBase64": plaintext_update("settled text")
+        }),
+    )
+    .await;
+    assert_eq!(reseeded["seq"], json!(1));
+    let resync = call(
+        &transport,
+        &handle,
+        32,
         "ydoc.resync",
         json!({ "sessionId": reopened_session }),
     )
     .await;
-    assert_eq!(
-        resync["initialUpdateBase64"],
-        reopened["initialUpdateBase64"]
-    );
+    // Decode the resync state and prove the durable lineage now carries the
+    // re-seeded settled content — equality with an empty state can't pass.
+    let resync_state = base64::engine::general_purpose::STANDARD
+        .decode(
+            resync["initialUpdateBase64"]
+                .as_str()
+                .expect("resync state"),
+        )
+        .expect("resync state decodes");
+    let resynced_doc = Ydoc::wire();
+    resynced_doc
+        .apply(&resync_state)
+        .expect("resync state applies");
+    assert_eq!(resynced_doc.plaintext_string(), "settled text");
     call(
         &transport,
         &handle,
@@ -428,4 +457,73 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     )
     .await;
     call(&transport, &other_handle, 31, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settle_without_a_seeded_lineage_refuses_and_leaves_the_file_intact() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "notes/precious.md", b"precious content");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-noseed", 1).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "notes/precious.md",
+            "contentKind": "plaintext"
+        }),
+    )
+    .await;
+    assert_eq!(opened["lineage"], json!("absent"));
+    let session_id = opened["sessionId"].as_str().expect("session id");
+
+    // Mutation check: restore `None => Ydoc::wire()` in ydoc_settle_on_store's
+    // load_persisted match to bring the bug back — the settle then projects an
+    // EMPTY doc over the existing file and both assertions below fail.
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                3,
+                "ydoc.settle",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id, "summary": "no seed" }),
+            ),
+        )
+        .await
+        .expect_err("settling an un-seeded lineage must refuse");
+    assert_eq!(refused.code, ErrorCode::InvalidParams);
+
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/precious.md"))
+            .expect("file still readable"),
+        "precious content",
+        "a refused settle must not touch the file"
+    );
+    let head = call(
+        &transport,
+        &handle,
+        4,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": "notes/precious.md" }),
+    )
+    .await;
+    assert_eq!(head["text"], json!("precious content"));
+
+    call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.close",
+        json!({ "sessionId": session_id, "settle": false }),
+    )
+    .await;
+    call(&transport, &handle, 6, "workspace.close", json!({})).await;
 }

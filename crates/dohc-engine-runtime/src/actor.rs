@@ -46,8 +46,8 @@ use dohc_engine_domain::{
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, StdBackoff, StdReplacer, materialize_one};
 use dohc_engine_storage::{
-    CompoundWrite, Document, EngineStore, FaultInjector, Preimage, StorageError, TxnOutcome,
-    WriteOutcome,
+    CompoundWrite, Document, EngineStore, FaultInjector, NoFaults, Preimage, StorageError,
+    TxnOutcome, WriteOutcome,
 };
 use dohc_engine_sync::{
     ApplyOutcome, ConflictApplyResult, ReplicationEnvelope, apply_conflict_envelope,
@@ -2223,8 +2223,29 @@ fn ydoc_open_state_on_store(
         |snapshot| snapshot.object_id.clone(),
     );
     let key = DocKey::new(workspace_id, version_id, object_id)?;
+    // Re-converge BEFORE loading state: an envelope acked-but-deferred while
+    // a previous session held the lease is only guaranteed to drain on that
+    // session's ydoc.close — workspace.close, stale-handle eviction, and a
+    // crash all skip it. The imported replication log is the durable pending
+    // queue, and replaying an already-applied row is content-deduped, so
+    // draining on every open makes the parked update land on the next use
+    // of the doc no matter how the previous session ended.
+    if dohc_engine_collab::read_marker(store, &key)?
+        .is_some_and(|marker| marker.regime == Regime::Replicated)
+    {
+        dohc_engine_sync::drain_deferred_ydoc_for_key(store, &key, &NoFaults)?;
+    }
     let persisted = dohc_engine_collab::load_persisted(store, &key)?;
-    let lineage_existing = persisted.is_some();
+    // "Existing" means durable DOC STATE, not a bare marker: a local-only
+    // close prunes every CRDT row and leaves head_update_seq == 0
+    // (markdown-is-the-artifact). Reporting such a lineage as existing would
+    // hand the client an EMPTY doc with no seedMarkdown — its next settle
+    // would clobber the settled file. A pruned marker is seed-eligible
+    // (the recordUpdate guard checks head_update_seq > 0), so the artifact
+    // re-seeds the cache exactly like a first open.
+    let lineage_existing = persisted
+        .as_ref()
+        .is_some_and(|persisted| persisted.marker.head_update_seq > 0);
     let (content_kind, regime, initial_update) = match persisted {
         Some(persisted) => (
             persisted.marker.content_kind,
@@ -2315,9 +2336,13 @@ fn ydoc_settle_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    // Refuse to settle a lineage that has no durable state: projecting a
+    // fresh doc would be the empty string, and the projected write below
+    // would clobber the existing file with it. Mirrors collab settle()'s
+    // NoMarker refusal.
     let doc = match dohc_engine_collab::load_persisted(store, key)? {
         Some(persisted) => persisted.doc,
-        None => Ydoc::wire(),
+        None => return Err(dohc_engine_collab::CollabError::NoMarker.into()),
     };
     let projection = doc.project(content_kind);
     let projection_for_write = projection.clone();
@@ -2366,6 +2391,30 @@ fn ydoc_settle_on_store(
             },
         )?;
         enqueue_write(tx, &result, preimage, "ydoc")?;
+        // The settle marker commits ATOMICALLY with the moment: a crash can
+        // never leave a minted settlement moment whose lineage still reads
+        // as unsettled (which would force a non-idempotent re-settle — the
+        // moment fingerprint includes the per-open session_id).
+        //
+        // settle_seq namespace: the daemon settle path owns this column and
+        // writes moment_order into it; collab settle()'s +1 generation
+        // counter is never invoked on daemon-settled lineages (C1 has no
+        // collab-settle caller). The close guard reads last_settled_sha only.
+        tx.execute(
+            "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6 \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                result.moment.moment_order,
+                result.snapshot.blob_sha256,
+                now_ms,
+            ],
+        )
+        .map_err(|error| {
+            dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
+        })?;
         Ok(result)
     })?;
     let write = match outcome {
@@ -2402,25 +2451,6 @@ fn ydoc_settle_on_store(
         &write.snapshot.path,
         &write.snapshot.blob_sha256,
     );
-    let settled_marker = store.write_with(faults, |tx| {
-        tx.execute(
-            "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6 \
-             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-            params![
-                key.workspace_id,
-                key.version_id,
-                key.object_id,
-                write.moment.moment_order,
-                write.snapshot.blob_sha256,
-                now_ms,
-            ],
-        )
-        .map_err(StorageError::persist_public)?;
-        Ok::<_, StorageError>(())
-    })?;
-    if matches!(settled_marker, TxnOutcome::Crashed { .. }) {
-        return Err(RuntimeError::OperationCrashed);
-    }
     Ok(YdocSettlement {
         moment_id: write.moment.moment_id,
         path: write.snapshot.path,

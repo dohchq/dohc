@@ -826,11 +826,22 @@ export class YdocLiveAdapter {
       rawResult.lineage === "absent" &&
       typeof rawResult.seedMarkdown === "string"
     ) {
-      const seedDoc =
-        result.contentKind === "plaintext"
-          ? createPlaintextSeedDoc(rawResult.seedMarkdown)
-          : markdownToYDoc(rawResult.seedMarkdown);
-      await session.applyLocalUpdate(Y.encodeStateAsUpdate(seedDoc));
+      try {
+        const seedDoc =
+          result.contentKind === "plaintext"
+            ? createPlaintextSeedDoc(rawResult.seedMarkdown)
+            : markdownToYDoc(rawResult.seedMarkdown);
+        await session.applyLocalUpdate(Y.encodeStateAsUpdate(seedDoc));
+      } catch (error) {
+        // A failed seed must not leak the registered session (and with it
+        // the daemon lease) — release before surfacing the failure.
+        this.releaseSession(result.sessionId);
+        await this.request(input.workspace, YDOC_METHOD.close, {
+          sessionId: result.sessionId,
+          settle: false,
+        }).catch(() => undefined);
+        throw error;
+      }
     }
     return session;
   }
