@@ -32,11 +32,14 @@ use crate::search::{SearchResult, search_workspace};
 use dohc_engine_collab::{AppendOutcome, ContentKind, DocKey, Regime};
 use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
-    CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureManifestSeedEntry,
-    CaptureRetire, CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ResolveTextConflict,
-    ResolveTextConflictResult, SecretFileStore, SecretMomentRecord, SecretWriteResult,
-    TextConflict, TextSnapshot, VersionedTextStore, WriteResult, WriteText, capture_manifest_seed,
+    BinaryHead, BinaryHeadMeta, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
+    CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult, CaptureSecret,
+    CaptureSecretRetire, InbandBinary, InbandSecret, InbandText, ListMomentsQuery, MomentPage,
+    MomentRecord, ResolveTextConflict, ResolveTextConflictResult, SecretFileStat, SecretFileStore,
+    SecretMomentRecord, SecretWriteResult, SnapshotMetadata, SnapshotView, TextConflict,
+    TextSnapshot, VersionRecord, VersionedTextStore, WriteResult, WriteText, capture_manifest_seed,
     capture_secret_retire, has_secret_state, insert_text_conflict_if_absent,
+    list_secret_files_keyless, list_secret_files_keyless_page, secret_file_len_keyless,
 };
 use dohc_engine_storage::{
     CompoundWrite, Document, EngineStore, FaultInjector, StorageError, TxnOutcome, WriteOutcome,
@@ -195,6 +198,90 @@ enum Command {
         path: String,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<TextSnapshot>, RuntimeError>>,
+    },
+    ListVersions {
+        workspace_id: String,
+        reply: oneshot::Sender<Result<Vec<VersionRecord>, RuntimeError>>,
+    },
+    ListSnapshots {
+        workspace_id: String,
+        version_id: String,
+        reply: oneshot::Sender<Result<Vec<SnapshotView>, RuntimeError>>,
+    },
+    ListSnapshotMetadata {
+        workspace_id: String,
+        version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+        reply: oneshot::Sender<Result<Vec<SnapshotMetadata>, RuntimeError>>,
+    },
+    ListMoments {
+        query: Box<ListMomentsQuery>,
+        reply: oneshot::Sender<Result<MomentPage, RuntimeError>>,
+    },
+    GetMoment {
+        workspace_id: String,
+        moment_id: String,
+        reply: oneshot::Sender<Result<Option<MomentRecord>, RuntimeError>>,
+    },
+    ReadBinary {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        reply: oneshot::Sender<Result<Option<BinaryHead>, RuntimeError>>,
+    },
+    ReadBinaryMeta {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        reply: oneshot::Sender<Result<Option<BinaryHeadMeta>, RuntimeError>>,
+    },
+    ReadTextInband {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        cap: usize,
+        reply: oneshot::Sender<Result<Option<InbandText>, RuntimeError>>,
+    },
+    ReadBinaryInband {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        cap: usize,
+        reply: oneshot::Sender<Result<Option<InbandBinary>, RuntimeError>>,
+    },
+    MaterializeSecretInband {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        key: Box<SecretDataKey>,
+        cap: usize,
+        reply: oneshot::Sender<Result<Option<InbandSecret>, RuntimeError>>,
+    },
+    ListSecretFiles {
+        workspace_id: String,
+        version_id: String,
+        reply: oneshot::Sender<Result<Vec<SecretFileStat>, RuntimeError>>,
+    },
+    SecretFileLen {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        reply: oneshot::Sender<Result<Option<i64>, RuntimeError>>,
+    },
+    ListSecretFilesPage {
+        workspace_id: String,
+        version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+        reply: oneshot::Sender<Result<Vec<SecretFileStat>, RuntimeError>>,
+    },
+    MaterializeSecret {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        key: Box<SecretDataKey>,
+        reply: oneshot::Sender<Result<Option<String>, RuntimeError>>,
     },
     ActiveVersionId {
         workspace_id: String,
@@ -573,6 +660,21 @@ impl ActorHandle {
             .map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// Whether the workspace holds ANY encrypted secret state — the async
+    /// variant for RPC handlers (a missing key file over live secret rows
+    /// must fail closed, never read as "no secrets").
+    pub async fn secret_state_exists(&self, workspace_id: String) -> Result<bool, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::SecretStateExists {
+                workspace_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Whether the workspace holds ANY encrypted secret state. The capture
     /// layer consults this before ever MINTING a data key: a missing key file
     /// over live secret rows must fail closed, never silently strand the
@@ -719,6 +821,283 @@ impl ActorHandle {
                 input,
                 faults,
                 token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Every version record in the workspace, oldest-first
+    /// (`created_at_ms, name, version_id`) — the read behind `versions.list`.
+    pub async fn list_versions(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<VersionRecord>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ListVersions {
+                workspace_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn list_snapshots(
+        &self,
+        workspace_id: String,
+        version_id: String,
+    ) -> Result<Vec<SnapshotView>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ListSnapshots {
+                workspace_id,
+                version_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// One page of snapshot METADATA (no body hydration) — the listing read
+    /// behind `versionedText.list`.
+    pub async fn list_snapshot_metadata(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+    ) -> Result<Vec<SnapshotMetadata>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ListSnapshotMetadata {
+                workspace_id,
+                version_id,
+                after_path,
+                limit,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn list_moments(&self, query: ListMomentsQuery) -> Result<MomentPage, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ListMoments {
+                query: Box::new(query),
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn get_moment(
+        &self,
+        workspace_id: String,
+        moment_id: String,
+    ) -> Result<Option<MomentRecord>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::GetMoment {
+                workspace_id,
+                moment_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn read_binary(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+    ) -> Result<Option<BinaryHead>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReadBinary {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// The binary head's metadata (no bytes) — sized in SQL.
+    pub async fn read_binary_meta(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+    ) -> Result<Option<BinaryHeadMeta>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReadBinaryMeta {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Text head with the body hydrated only under `cap` — one actor turn.
+    pub async fn read_text_inband(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        cap: usize,
+    ) -> Result<Option<InbandText>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReadTextInband {
+                workspace_id,
+                version_id,
+                path,
+                cap,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Binary head with the bytes hydrated only under `cap` — one actor turn.
+    pub async fn read_binary_inband(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        cap: usize,
+    ) -> Result<Option<InbandBinary>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReadBinaryInband {
+                workspace_id,
+                version_id,
+                path,
+                cap,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Secret materialize with the cap decided in the SAME turn — an
+    /// over-cap tip is never decrypted.
+    pub async fn materialize_secret_inband(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        key: SecretDataKey,
+        cap: usize,
+    ) -> Result<Option<InbandSecret>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::MaterializeSecretInband {
+                workspace_id,
+                version_id,
+                path,
+                key: Box::new(key),
+                cap,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn list_secret_files(
+        &self,
+        workspace_id: String,
+        version_id: String,
+    ) -> Result<Vec<SecretFileStat>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ListSecretFiles {
+                workspace_id,
+                version_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// One secret tip's recorded byte length — keyless, no decrypt.
+    pub async fn secret_file_len(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+    ) -> Result<Option<i64>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::SecretFileLen {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// One page of secret-file tips (metadata only, keyset by path).
+    pub async fn list_secret_files_page(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+    ) -> Result<Vec<SecretFileStat>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ListSecretFilesPage {
+                workspace_id,
+                version_id,
+                after_path,
+                limit,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Decrypt one secret tip to UTF-8 plaintext. The KEY comes from the
+    /// caller (the daemon loads it from the workspace root), matching the
+    /// capture-secret pattern — the actor never holds key custody itself.
+    pub async fn materialize_secret(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        key: SecretDataKey,
+    ) -> Result<Option<String>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::MaterializeSecret {
+                workspace_id,
+                version_id,
+                path,
+                key: Box::new(key),
                 reply,
             })
             .await
@@ -1191,6 +1570,173 @@ fn worker_main(
             } => {
                 let outcome =
                     has_secret_state(&mut store, &workspace_id).map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ListVersions {
+                workspace_id,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .list_versions(&workspace_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ListSnapshots {
+                workspace_id,
+                version_id,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .list_snapshots(&workspace_id, &version_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ListSnapshotMetadata {
+                workspace_id,
+                version_id,
+                after_path,
+                limit,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .list_snapshot_metadata(
+                        &workspace_id,
+                        &version_id,
+                        after_path.as_deref(),
+                        limit,
+                    )
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ListMoments { query, reply } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .list_moments(&query)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::GetMoment {
+                workspace_id,
+                moment_id,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .get_moment(&workspace_id, &moment_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ReadBinary {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .read_binary(&workspace_id, &version_id, &path)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ReadBinaryMeta {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .read_binary_meta(&workspace_id, &version_id, &path)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ReadTextInband {
+                workspace_id,
+                version_id,
+                path,
+                cap,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .read_text_inband(&workspace_id, &version_id, &path, cap)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ReadBinaryInband {
+                workspace_id,
+                version_id,
+                path,
+                cap,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .read_binary_inband(&workspace_id, &version_id, &path, cap)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::MaterializeSecretInband {
+                workspace_id,
+                version_id,
+                path,
+                key,
+                cap,
+                reply,
+            } => {
+                let outcome = SecretFileStore::new(&mut store, &key)
+                    .materialize_secret_file_inband(&workspace_id, &version_id, &path, cap)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ListSecretFiles {
+                workspace_id,
+                version_id,
+                reply,
+            } => {
+                let outcome = list_secret_files_keyless(&store, &workspace_id, &version_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::SecretFileLen {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            } => {
+                let outcome = secret_file_len_keyless(&store, &workspace_id, &version_id, &path)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ListSecretFilesPage {
+                workspace_id,
+                version_id,
+                after_path,
+                limit,
+                reply,
+            } => {
+                let outcome = list_secret_files_keyless_page(
+                    &store,
+                    &workspace_id,
+                    &version_id,
+                    after_path.as_deref(),
+                    limit,
+                )
+                .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::MaterializeSecret {
+                workspace_id,
+                version_id,
+                path,
+                key,
+                reply,
+            } => {
+                let outcome = SecretFileStore::new(&mut store, &key)
+                    .materialize_secret_file(&workspace_id, &version_id, &path)
+                    .map_err(RuntimeError::from)
+                    .and_then(|plaintext| match plaintext {
+                        None => Ok(None),
+                        Some(plaintext) => plaintext.into_utf8().map(Some).map_err(|_| {
+                            RuntimeError::from(dohc_engine_domain::DomainError::StateCorrupt {
+                                reason: "secret plaintext is not utf-8",
+                            })
+                        }),
+                    });
                 let _ = reply.send(outcome);
             }
             Command::ActiveVersionId {

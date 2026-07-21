@@ -37,6 +37,50 @@ use std::{
 
 const MAX_OPEN_HANDLES: usize = 64;
 
+/// In-band CONTENT (binary bytes, secret plaintext) is bounded by the DOP1
+/// string limit (64 KiB per string): base64 expands 4/3, so this raw cap
+/// leaves headroom under it. Larger content needs the protocol's blob-chunk
+/// streaming (BlobStart exists in the wire contract; no daemon producer
+/// yet) — tracked in docs/superpowers/plans/rust-engine/RPC_GAP.md, which
+/// is maintained on the integrator branch (PR #216) until it merges.
+const MAX_INBAND_CONTENT_BYTES: usize = dohc_engine_domain::INBAND_CONTENT_CAP_BYTES;
+
+/// Approximate serialized-bytes budget for one moments.list page: a row
+/// can legitimately carry 64 KiB strings (authorJson), so a row COUNT can
+/// never bound the frame — the page cuts when the running estimate would
+/// pass this, well under the 1 MiB frame limit.
+const MOMENTS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
+
+/// How many leading serialized rows fit a byte budget (at least one always
+/// ships — every string is wire-capped, so a single row fits). MEASURED on
+/// the serialized JSON, not estimated from raw lengths: escaping can expand
+/// a control-character-heavy string up to 6x, and an estimate that ignores
+/// that can pass the budget while the encoded frame exceeds the limit.
+fn byte_budget_cut_serialized(rows: &[Value], budget: usize) -> usize {
+    let mut included = 0usize;
+    let mut remaining = budget as i64;
+    for row in rows {
+        let size = serde_json::to_string(row).map_or(0, |s| s.len());
+        // A first row may exceed the PAGE budget (progress guarantee) but
+        // never the hard single-row bound — beyond that it cannot ship
+        // in a frame at all, and the caller must surface the refusal
+        // rather than emit an over-frame response.
+        if included == 0 && size > SINGLE_ROW_HARD_CAP_BYTES {
+            break;
+        }
+        remaining -= size as i64;
+        if included > 0 && remaining < 0 {
+            break;
+        }
+        included += 1;
+    }
+    included
+}
+
+/// The most one serialized row may occupy: safely under the 1 MiB frame
+/// limit with envelope headroom.
+const SINGLE_ROW_HARD_CAP_BYTES: usize = 700 * 1024;
+
 #[derive(Clone)]
 struct OpenWorkspace {
     root: PathBuf,
@@ -138,6 +182,35 @@ impl EngineService {
             }
             "watcher.status" => self.watcher_status(request.workspace)?,
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
+            "versions.active" => self.versions_active(&ctx, request.workspace).await?,
+            "versions.list" => {
+                self.versions_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "versionedText.list" => {
+                self.versioned_text_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "versionedBinary.read" => {
+                self.versioned_binary_read(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "moments.list" => {
+                self.moments_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "moments.get" => {
+                self.moments_get(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.list" => {
+                self.secrets_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.materialize" => {
+                self.secrets_materialize(&ctx, request.workspace, request.params)
+                    .await?
+            }
             _ => return Err(wire(ErrorCode::MethodNotFound, "unknown method")),
         };
         Ok(Response { id, result })
@@ -363,19 +436,41 @@ impl EngineService {
         let params: VersionedTextReadParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let snapshot = open
-            .actor
-            .versioned_text_read(
+        // ONE actor turn decides the in-band cap: an over-cap body never
+        // leaves SQLite, and no concurrent write can grow the body between
+        // a size probe and the load (there is no probe).
+        let snapshot = Self::read_under_ctx(
+            &cancellation,
+            "versionedText.read",
+            open.actor.read_text_inband(
                 open.workspace_id,
                 params.version_id,
                 params.path,
-                cancellation.token(),
-            )
-            .await
-            .map_err(map_runtime)?;
+                MAX_INBAND_CONTENT_BYTES,
+            ),
+        )
+        .await?;
         Ok(match snapshot {
-            Some(snapshot) => snapshot_json(&snapshot),
             None => Value::Null,
+            Some(snapshot) => {
+                let over_cap = snapshot.text.is_none();
+                let mut body = json!({
+                    "workspaceId": snapshot.workspace_id,
+                    "versionId": snapshot.version_id,
+                    "objectId": snapshot.object_id,
+                    "path": snapshot.path,
+                    "text": snapshot.text,
+                    "byteLength": snapshot.byte_length,
+                    "blobSha256": snapshot.blob_sha256,
+                    "updatedAtMs": snapshot.updated_at_ms,
+                    "latestMomentId": snapshot.latest_moment_id,
+                    "metadataOrigin": snapshot.metadata_origin
+                });
+                if over_cap {
+                    body["inbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
+                }
+                body
+            }
         })
     }
 
@@ -462,6 +557,502 @@ impl EngineService {
                 Err(_) => Ok(unavailable),
             }
         }
+    }
+
+    /// Await an actor read under the request's cancellation/deadline — the
+    /// wait is abandoned (the actor's work completes and is discarded),
+    /// the same shape capture.flush uses. Read commands carry no token, so
+    /// abandoning the wait IS the cancellation semantics.
+    async fn read_under_ctx<T>(
+        cancellation: &OperationCancellation,
+        what: &str,
+        read: impl std::future::Future<Output = Result<T, RuntimeError>>,
+    ) -> Result<T, WireError> {
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => Err(cancellation.interruption(what)),
+            result = read => result.map_err(map_runtime),
+        }
+    }
+
+    async fn versions_active(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let version_id = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("versions.active"));
+            }
+            result = open.actor.active_version_id(open.workspace_id) => result,
+        };
+        Ok(match version_id {
+            Ok(version_id) => json!({ "versionId": version_id }),
+            // A workspace with no versioned rows yet has no active version:
+            // the TS getActiveVersion answers null there, not an error. The
+            // workspace_id came from the daemon's own handle table, so
+            // WorkspaceNotFound here can only mean "nothing versioned yet".
+            Err(RuntimeError::Domain(DomainError::WorkspaceNotFound)) => {
+                json!({ "versionId": Value::Null })
+            }
+            Err(error) => return Err(map_runtime(error)),
+        })
+    }
+
+    async fn versions_list(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionsListParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let mut versions = Self::read_under_ctx(
+            &cancellation,
+            "versions.list",
+            open.actor.list_versions(open.workspace_id),
+        )
+        .await?;
+        // Keyset resume over the domain's stable ordering: the composite
+        // sort key makes a SQL cursor awkward, and version counts are
+        // small — resuming positionally over the loaded ordered vector is
+        // exact (the id either exists at one position or the cursor is
+        // stale and reads from the start).
+        if let Some(after) = params.after_version_id.as_deref() {
+            if let Some(position) = versions
+                .iter()
+                .position(|version| version.version_id == after)
+            {
+                versions.drain(..=position);
+            }
+        }
+        // Versions are few in practice, but the frame limit does not care
+        // about practice: same measured budget + honest truncated flag as
+        // every other list family.
+        let row_values: Vec<Value> = versions
+            .iter()
+            .map(|version| {
+                json!({
+                    "versionId": version.version_id,
+                    "kind": version.kind.as_str(),
+                    "name": version.name,
+                    "createdAtMs": version.created_at_ms,
+                    "forkVersionId": version.fork_version_id,
+                    "forkMomentId": version.fork_moment_id,
+                })
+            })
+            .collect();
+        let included = byte_budget_cut_serialized(&row_values, MOMENTS_PAGE_BYTE_BUDGET);
+        if included == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
+        let truncated = included < row_values.len();
+        let next_after_version_id = truncated
+            .then(|| versions[..included].last().map(|v| v.version_id.clone()))
+            .flatten();
+        Ok(json!({
+            "versions": row_values[..included].to_vec(),
+            "nextAfterVersionId": next_after_version_id,
+        }))
+    }
+
+    async fn versioned_text_list(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedTextListParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        // METADATA ONLY, PAGED: bodies come one path at a time via
+        // versionedText.read (aggregated bodies trivially exceed the 1 MiB
+        // frame limit), and even metadata rows are paged so a large
+        // workspace cannot exceed it either. The +1 row probes for more.
+        let limit = params.limit.unwrap_or(200).clamp(1, 500);
+        let mut rows = Self::read_under_ctx(
+            &cancellation,
+            "versionedText.list",
+            open.actor.list_snapshot_metadata(
+                open.workspace_id.clone(),
+                params.version_id.clone(),
+                params.after_path.clone(),
+                limit + 1,
+            ),
+        )
+        .await?;
+        // An unknown version must REFUSE, never read as empty — on EVERY
+        // page: a stale cursor plus a typo'd version would otherwise read
+        // as "exhausted". A legitimately-empty tail page for a real
+        // version pays one extra membership read; correctness wins.
+        if rows.is_empty() {
+            let versions = Self::read_under_ctx(
+                &cancellation,
+                "versionedText.list",
+                open.actor.list_versions(open.workspace_id),
+            )
+            .await?;
+            if !versions
+                .iter()
+                .any(|version| version.version_id == params.version_id)
+            {
+                return Err(wire(ErrorCode::InvalidParams, "version not found"));
+            }
+        }
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        // Metadata rows can still be string-heavy (paths/origins are
+        // wire-legal up to 64 KiB): the byte budget cuts the page under
+        // the frame limit; the cursor resumes at the cut.
+        let row_values: Vec<Value> = rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "path": row.path,
+                    "objectId": row.object_id,
+                    "contentKind": row.content_kind,
+                    "byteLength": row.text_byte_length,
+                    "binarySha256": row.binary_sha256,
+                    "updatedAtMs": row.updated_at_ms,
+                    "latestMomentId": row.latest_moment_id,
+                    "metadataOrigin": row.metadata_origin,
+                })
+            })
+            .collect();
+        let byte_cut = byte_budget_cut_serialized(&row_values, MOMENTS_PAGE_BYTE_BUDGET);
+        if byte_cut == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
+        let byte_truncated = byte_cut < rows.len();
+        let next_after_path = (has_more || byte_truncated)
+            .then(|| rows[..byte_cut].last().map(|row| row.path.clone()))
+            .flatten();
+        Ok(json!({
+            "files": row_values[..byte_cut].to_vec(),
+            "nextAfterPath": next_after_path,
+        }))
+    }
+
+    async fn versioned_binary_read(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionPathParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        // ONE actor turn: the cap is decided in the query, so a replaced
+        // head can never smuggle an over-cap blob into memory, and the
+        // recorded length is integrity-checked against the stored bytes.
+        let head = Self::read_under_ctx(
+            &cancellation,
+            "versionedBinary.read",
+            open.actor.read_binary_inband(
+                open.workspace_id,
+                params.version_id,
+                params.path,
+                MAX_INBAND_CONTENT_BYTES,
+            ),
+        )
+        .await?;
+        Ok(match head {
+            None => Value::Null,
+            Some(head) => match head.bytes {
+                Some(bytes) => json!({
+                    "objectId": head.object_id,
+                    "sha256": head.sha256,
+                    "byteLength": head.byte_length,
+                    "bytesBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                }),
+                None => json!({
+                    "objectId": head.object_id,
+                    "sha256": head.sha256,
+                    "byteLength": head.byte_length,
+                    "bytesBase64": Value::Null,
+                    "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+                }),
+            },
+        })
+    }
+
+    async fn moments_list(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: MomentsListParams = parse(params)?;
+        // The filter rejects ONLY what the write path can never store
+        // (the empty string): every id versionedText.list or
+        // moments.list can return — whitespace/control-carrying
+        // included — must stay filterable verbatim.
+        if params.object_id.as_deref() == Some("") {
+            return Err(wire(ErrorCode::InvalidParams, "objectId must not be empty"));
+        }
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let page = Self::read_under_ctx(
+            &cancellation,
+            "moments.list",
+            open.actor
+                .list_moments(dohc_engine_domain::ListMomentsQuery {
+                    workspace_id: open.workspace_id,
+                    version_id: params.version_id,
+                    object_id: params.object_id,
+                    // Clamped: an unbounded page would load a workspace's whole
+                    // history in one actor turn and then fail the wire's
+                    // collection cap at encode anyway.
+                    // TS normalizeMomentListLimit contract: default 200, cap 500
+                    // — page boundaries and cursors must match across engines.
+                    limit: params.limit.unwrap_or(200).min(500),
+                    before_moment_order: params.before_moment_order,
+                }),
+        )
+        .await?;
+        // A row COUNT cannot bound the frame: authorJson alone may be a
+        // 64 KiB string. Cut the page when the running size estimate would
+        // pass the budget (at least one row always ships — a single row
+        // fits by construction, every string being wire-capped).
+        let mut rows: Vec<Value> = page.moments.iter().map(moment_json).collect();
+        // A single row can legitimately exceed the page budget (several
+        // wire-legal strings plus escaping). The page must still make
+        // progress: degrade THAT row to metadata (texts nulled — their
+        // byte lengths remain) rather than ship an over-frame page or
+        // dead-end the cursor.
+        if let Some(first) = rows.first_mut() {
+            if serde_json::to_string(first).map_or(0, |s| s.len()) > MOMENTS_PAGE_BYTE_BUDGET {
+                first["afterText"] = Value::Null;
+                first["beforeText"] = Value::Null;
+            }
+        }
+        let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
+        if included == 0 && !rows.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a moment row exceeds the response frame budget",
+            ));
+        }
+        let truncated = included < rows.len();
+        let next_before = if truncated {
+            page.moments[..included]
+                .last()
+                .map(|moment| moment.moment_order)
+        } else {
+            page.next_before_moment_order
+        };
+        Ok(json!({
+            "moments": rows[..included].to_vec(),
+            "nextBeforeMomentOrder": next_before,
+            // The TS contract's numeric sentinel: -1 for an empty timeline,
+            // never null (numeric comparisons drive polling/cursor state).
+            "latestMomentOrder": page.latest_moment_order.unwrap_or(-1),
+        }))
+    }
+
+    async fn moments_get(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: MomentsGetParams = parse(params)?;
+        // Reject ONLY what the write path can never store (the empty
+        // string): all-whitespace ids ARE storable and moments.list
+        // returns them verbatim — they must stay fetchable verbatim.
+        if params.moment_id.is_empty() {
+            return Err(wire(ErrorCode::InvalidParams, "momentId must not be empty"));
+        }
+        let moment_id = params.moment_id;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let moment = Self::read_under_ctx(
+            &cancellation,
+            "moments.get",
+            open.actor.get_moment(open.workspace_id, moment_id),
+        )
+        .await?;
+        Ok(match moment {
+            None => Value::Null,
+            Some(moment) => moment_json(&moment),
+        })
+    }
+
+    async fn secrets_list(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsListParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        // Paged at the DOMAIN (keyset by path): a many-secret workspace
+        // never loads every tip per request just for the RPC to discard
+        // the overflow.
+        let limit = params.limit.unwrap_or(200).clamp(1, 500);
+        let secrets = Self::read_under_ctx(
+            &cancellation,
+            "secrets.list",
+            open.actor.list_secret_files_page(
+                open.workspace_id,
+                params.version_id,
+                params.after_path.clone(),
+                limit + 1,
+            ),
+        )
+        .await?;
+        let has_more = secrets.len() > limit;
+        let secrets = &secrets[..secrets.len().min(limit)];
+        // Metadata-only AND keyset-paged (afterPath/nextAfterPath); the
+        // byte budget is the second bound so no page can outgrow the
+        // frame even when rows are string-heavy.
+        let row_values: Vec<Value> = secrets
+            .iter()
+            .map(|stat| {
+                json!({
+                    "path": stat.path,
+                    "byteLength": stat.byte_length,
+                    "updatedAtMs": stat.updated_at_ms,
+                    "latestMomentId": stat.latest_moment_id,
+                })
+            })
+            .collect();
+        let included = byte_budget_cut_serialized(&row_values, MOMENTS_PAGE_BYTE_BUDGET);
+        if included == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
+        let byte_truncated = included < row_values.len();
+        let next_after_path = (has_more || byte_truncated)
+            .then(|| secrets[..included].last().map(|stat| stat.path.clone()))
+            .flatten();
+        Ok(json!({
+            "secrets": row_values[..included].to_vec(),
+            "nextAfterPath": next_after_path,
+        }))
+    }
+
+    /// THE single authorized plaintext accessor over RPC (TS parity:
+    /// `materializeSecretFile`). The key is loaded from the workspace root
+    /// per call — the daemon holds no key custody — and a missing key with
+    /// live secret state fails closed rather than returning nothing.
+    async fn secrets_materialize(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionPathParams = parse(params)?;
+        // Normalize ONCE and use the normalized spelling everywhere: the
+        // policy stable-decodes percent disguises (%2eenv classifies as
+        // .env), and querying with the raw spelling would answer "absent
+        // secret" for a real one. This also runs the fail-closed secret
+        // gate up front, before ANY state-dependent branch, so the error
+        // surface is identical across key states.
+        if dohc_engine_files::policy::classify_engine_file_path(&params.path)
+            != dohc_engine_files::policy::PathClassification::Secret
+        {
+            return Err(wire(ErrorCode::InvalidParams, "not a secret path"));
+        }
+        // QUERY VERBATIM: the domain stores the spelling the write
+        // carried, and a path secrets.list returns must materialize
+        // verbatim — rewriting to the normalized spelling would orphan
+        // stored tips (the classification above still uses it, so the
+        // gate is disguise-proof).
+        let secret_path = params.path.clone();
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        // PRECEDENCE stat (keyless): validates the secret path and the
+        // version BEFORE any key work, so caller mistakes error
+        // identically regardless of local key-file state — and an ABSENT
+        // secret answers null right here: no key material is needed to
+        // say "nothing stored", and a stale malformed key file must not
+        // turn that answer into an error. The in-band cap itself is
+        // decided later, inside the decrypting actor turn.
+        let stat = Self::read_under_ctx(
+            &cancellation,
+            "secrets.materialize",
+            open.actor.secret_file_len(
+                open.workspace_id.clone(),
+                params.version_id.clone(),
+                secret_path.clone(),
+            ),
+        )
+        .await?;
+        if stat.is_none() {
+            return Ok(Value::Null);
+        }
+        // Blocking filesystem work stays off the tokio worker — and the
+        // WAIT for it is cancellation/deadline-raced like every other
+        // await on this surface (the blocking task finishes on its own;
+        // only the caller's wait abandons).
+        let key_root = open.root.clone();
+        let key_task =
+            tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_root));
+        let key = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("secrets.materialize (key load)"));
+            }
+            loaded = key_task => loaded
+                .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?
+                .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?,
+        };
+        let Some(key) = key else {
+            // Path and version already validated above (gate + stat).
+            // The state check: a workspace that never minted a key has no
+            // secrets; one WITH secret rows and no key is
+            // corrupt/misrestored state and fails closed.
+            let has_state = Self::read_under_ctx(
+                &cancellation,
+                "secrets.materialize",
+                open.actor.secret_state_exists(open.workspace_id.clone()),
+            )
+            .await?;
+            if has_state {
+                return Err(wire(ErrorCode::Internal, "secret key unavailable"));
+            }
+            return Ok(Value::Null);
+        };
+        // Key present and valid: the cap is decided IN the decrypting
+        // actor turn — a secret growing after any earlier read cannot be
+        // decrypted over-cap, and over-cap plaintext never exists.
+        let secret = Self::read_under_ctx(
+            &cancellation,
+            "secrets.materialize",
+            open.actor.materialize_secret_inband(
+                open.workspace_id,
+                params.version_id,
+                secret_path,
+                key,
+                MAX_INBAND_CONTENT_BYTES,
+            ),
+        )
+        .await?;
+        Ok(match secret {
+            None => Value::Null,
+            Some(secret) => match secret.text {
+                Some(text) => json!({ "text": text }),
+                None => json!({
+                    "text": Value::Null,
+                    "byteLength": secret.byte_length,
+                    "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+                }),
+            },
+        })
     }
 
     async fn ydoc_apply(
@@ -794,6 +1385,59 @@ struct VersionedTextReadParams {
     path: String,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionsListParams {
+    #[serde(default)]
+    after_version_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsListParams {
+    version_id: String,
+    #[serde(default)]
+    after_path: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextListParams {
+    version_id: String,
+    #[serde(default)]
+    after_path: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionPathParams {
+    version_id: String,
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MomentsListParams {
+    #[serde(default)]
+    version_id: Option<String>,
+    #[serde(default)]
+    object_id: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+    #[serde(default)]
+    before_moment_order: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MomentsGetParams {
+    moment_id: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct YdocApplyParams {
@@ -1009,6 +1653,88 @@ fn parse_resolution(raw: &str) -> Result<ConflictResolution, WireError> {
     }
 }
 
+fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
+    json!({
+        "momentOrder": moment.moment_order,
+        "momentId": moment.moment_id,
+        "versionId": moment.version_id,
+        "objectId": moment.object_id,
+        "path": moment.path,
+        "recordedAtMs": moment.recorded_at_ms,
+        "operation": moment.operation.as_str(),
+        "afterContentKind": moment.after_content_kind,
+        "afterBlobSha256": moment.after_blob_sha256,
+        "afterBinarySha256": moment.after_binary_sha256,
+        "beforePresent": moment.before_present,
+        "beforeContentKind": moment.before_content_kind,
+        "beforeBlobSha256": moment.before_blob_sha256,
+        "beforeBinarySha256": moment.before_binary_sha256,
+        "beforeLatestMomentId": moment.before_latest_moment_id,
+        "metadataOrigin": moment.metadata_origin,
+        // PARSED author (TS momentAuthorFromRow parity): absent column =
+        // actor-neutral; unparseable JSON surfaces as an explicit corrupt
+        // marker, never silently dropped and never trusted raw.
+        "author": moment.author_json.as_deref().map(parsed_moment_author),
+        "syncRecordOnly": moment.sync_record_only,
+        // Hydrated payload text (momentSelectSql parity), each body under
+        // the same self-describing in-band cap as every content read.
+        "afterText": inband_text(moment.after_text.as_deref()),
+        "afterByteLength": moment.after_byte_length,
+        "beforeText": inband_text(moment.before_text.as_deref()),
+        "beforeByteLength": moment.before_byte_length,
+    })
+}
+
+/// Fail-closed author parsing (TS assertMomentAuthor parity): only the
+/// exact agent-attribution shape renders as an author; anything else — bad
+/// JSON or a hand-edited/wrong shape — surfaces as an explicit corrupt
+/// marker, never a valid-looking attribution.
+fn parsed_moment_author(raw: &str) -> Value {
+    let corrupt = || json!({ "corrupt": true });
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return corrupt();
+    };
+    let Some(object) = value.as_object() else {
+        return corrupt();
+    };
+    let kind_ok = object.get("kind").and_then(Value::as_str) == Some("agent");
+    let nonempty = |key: &str| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.is_empty())
+    };
+    let run_ok = match object.get("agentRunId") {
+        None => true,
+        Some(Value::String(v)) => !v.is_empty(),
+        Some(_) => false,
+    };
+    if kind_ok && nonempty("agentId") && nonempty("onBehalfOf") && run_ok {
+        let mut author = json!({
+            "kind": "agent",
+            "agentId": object["agentId"],
+            "onBehalfOf": object["onBehalfOf"],
+        });
+        // The contract field is OPTIONAL (`agentRunId?: string`), never
+        // nullable — omit it when absent, exactly as pickMomentAuthor does.
+        if let Some(run_id) = object.get("agentRunId") {
+            author["agentRunId"] = run_id.clone();
+        }
+        author
+    } else {
+        corrupt()
+    }
+}
+
+/// A text body under the in-band cap, or null (the byte length beside it
+/// tells the caller what was withheld).
+fn inband_text(text: Option<&str>) -> Value {
+    match text {
+        Some(text) if text.len() <= MAX_INBAND_CONTENT_BYTES => json!(text),
+        _ => Value::Null,
+    }
+}
+
 fn snapshot_json(snapshot: &TextSnapshot) -> Value {
     json!({
         "workspaceId": snapshot.workspace_id,
@@ -1150,6 +1876,7 @@ fn map_domain_code(error: DomainError) -> ErrorCode {
         | DomainError::DuplicateMomentId
         | DomainError::FileNotFound
         | DomainError::BinaryHeadNotText
+        | DomainError::TextHeadNotBinary
         | DomainError::TargetPathExists
         | DomainError::ForkBaseNotFound
         | DomainError::ConflictNotFound

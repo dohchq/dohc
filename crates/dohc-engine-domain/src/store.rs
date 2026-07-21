@@ -16,11 +16,12 @@
 
 use crate::error::DomainError;
 use crate::records::{
-    CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
-    CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord,
-    ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
-    RollbackTextFileMutation, SnapshotContent, SnapshotRecord, SnapshotView, TextSnapshot,
-    VersionKind, VersionRecord, WriteResult, WriteText,
+    BinaryHead, BinaryHeadMeta, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
+    CaptureRetire, CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile,
+    FileObjectRecord, InbandBinary, InbandText, ListMomentsQuery, MomentOp, MomentPage,
+    MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation, SnapshotContent,
+    SnapshotMetadata, SnapshotRecord, SnapshotView, TextSnapshot, VersionKind, VersionRecord,
+    WriteResult, WriteText,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
@@ -34,6 +35,16 @@ use std::collections::{HashMap, HashSet};
 /// UTF-8 bytes. Mirrors the TS engine's 10 MB text cap
 /// (`versions-write-text-file`).
 pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
+
+/// The in-band content cap every capped read binds into its SQL and every
+/// RPC references — ONE definition, so the query guard and the wire
+/// contract can never drift apart.
+pub const INBAND_CONTENT_CAP_BYTES: usize = 48 * 1024;
+
+// The moment-hydration SQL embeds the cap as a literal (prepare_cached
+// wants a static string); this assertion pins the literal to the
+// constant so they cannot drift.
+const _: () = assert!(INBAND_CONTENT_CAP_BYTES == 49152);
 
 /// The versioning domain bound to one workspace store. Cheap to construct per
 /// call; holds only a mutable borrow of the writer.
@@ -322,26 +333,9 @@ impl<'a> VersionedTextStore<'a> {
                 object: object.clone(),
                 before: snapshot_text_view(&before),
                 after: snapshot_text_view(&after),
-                moment: MomentRecord {
-                    moment_order,
-                    moment_id: input.moment_id.clone(),
-                    version_id: input.version_id.clone(),
-                    object_id: before.object_id.clone(),
-                    path: input.to_path.clone(),
-                    recorded_at_ms: input.now_ms,
-                    operation: MomentOp::Rename,
-                    after_content_kind: before.content_kind.clone(),
-                    after_blob_sha256: before.blob_sha256.clone(),
-                    after_binary_sha256: before.binary_sha256.clone(),
-                    before_present: true,
-                    before_blob_sha256: before.blob_sha256.clone(),
-                    before_content_kind: before.content_kind.clone(),
-                    before_binary_sha256: before.binary_sha256.clone(),
-                    before_latest_moment_id: Some(before.latest_moment_id.clone()),
-                    metadata_origin: input.metadata_origin.clone(),
-                    author_json: input.author_json.clone(),
-                    sync_record_only: false,
-                },
+                moment: get_moment(tx, ws, &input.moment_id)?.ok_or(DomainError::StateCorrupt {
+                    reason: "moment vanished within its own write transaction",
+                })?,
             })
         })?;
         committed(outcome)
@@ -578,6 +572,248 @@ impl<'a> VersionedTextStore<'a> {
         })
     }
 
+    /// Read the BINARY head at `path`: the stored sha plus the blob bytes.
+    /// `Ok(None)` when the path has no head; a TEXT head is refused the same
+    /// way a binary head is refused by [`Self::read_text`] — the caller asked
+    /// the wrong question, and silently returning empty bytes would hide it.
+    pub fn read_binary(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+        path: &str,
+    ) -> Result<Option<BinaryHead>, DomainError> {
+        let path = validate_addressable_plaintext_path(path)?;
+        self.store.read_with(|conn| {
+            if !version_exists(conn, workspace_id, version_id)? {
+                return Err(DomainError::VersionNotFound);
+            }
+            let Some(object_id) = alias_object_id(conn, workspace_id, version_id, &path)? else {
+                return Ok(None);
+            };
+            let Some(snapshot) = get_snapshot(conn, workspace_id, version_id, &object_id)? else {
+                return Ok(None);
+            };
+            if snapshot.content_kind != "binary" {
+                return Err(DomainError::TextHeadNotBinary);
+            }
+            let sha256 = snapshot.binary_sha256.ok_or(DomainError::StateCorrupt {
+                reason: "binary head without a binary sha",
+            })?;
+            let bytes = dohc_engine_storage::get_binary_blob(conn, &sha256)
+                .map_err(DomainError::from)?
+                .ok_or(DomainError::StateCorrupt {
+                    reason: "binary head references a missing blob",
+                })?;
+            Ok(Some(BinaryHead {
+                object_id,
+                sha256,
+                bytes,
+            }))
+        })
+    }
+
+    /// The binary head's METADATA — object id, sha, and the blob's byte
+    /// length sized in SQL — without materializing a single content byte.
+    /// The over-cap in-band answer needs exactly this, and loading a large
+    /// blob just to discard it is a needless copy per request.
+    ///
+    /// DELIBERATELY NOT RE-HASHED: the sha IS the content address the blob
+    /// was stored and verified under at write; re-hashing here would load
+    /// the bytes and resurrect the hydration cost this read exists to
+    /// avoid. Metadata reads report the recorded content address; every
+    /// byte-SERVING path re-verifies before handing bytes out.
+    pub fn read_binary_meta(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+        path: &str,
+    ) -> Result<Option<BinaryHeadMeta>, DomainError> {
+        let path = validate_addressable_plaintext_path(path)?;
+        self.store.read_with(|conn| {
+            if !version_exists(conn, workspace_id, version_id)? {
+                return Err(DomainError::VersionNotFound);
+            }
+            let Some(object_id) = alias_object_id(conn, workspace_id, version_id, &path)? else {
+                return Ok(None);
+            };
+            let Some(snapshot) = get_snapshot(conn, workspace_id, version_id, &object_id)? else {
+                return Ok(None);
+            };
+            if snapshot.content_kind != "binary" {
+                return Err(DomainError::TextHeadNotBinary);
+            }
+            let sha256 = snapshot.binary_sha256.ok_or(DomainError::StateCorrupt {
+                reason: "binary head without a binary sha",
+            })?;
+            // Fail closed like get_binary_blob does: the RECORDED length
+            // must match the stored bytes, and the row must exist — for an
+            // over-cap read this is the only storage access that runs, so
+            // it carries the integrity check itself.
+            let lengths: Option<(i64, i64)> = conn
+                .query_row(
+                    "SELECT byte_length, LENGTH(bytes) FROM binary_blobs WHERE sha256 = ?1",
+                    [&sha256],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            let Some((recorded, actual)) = lengths else {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary head references a missing blob",
+                });
+            };
+            if recorded != actual {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary blob length does not match its bytes",
+                });
+            }
+            let byte_length = recorded;
+            Ok(Some(BinaryHeadMeta {
+                object_id,
+                sha256,
+                byte_length,
+            }))
+        })
+    }
+
+    /// Read a text head with the body hydrated ONLY under `cap` bytes —
+    /// the byte length always returns. One query, one actor turn: no
+    /// window where a concurrent write can grow the body between a size
+    /// probe and the load, and an over-cap body never leaves SQLite.
+    pub fn read_text_inband(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+        path: &str,
+        cap: usize,
+    ) -> Result<Option<InbandText>, DomainError> {
+        let path = validate_addressable_plaintext_path(path)?;
+        self.store.read_with(|conn| {
+            if !version_exists(conn, workspace_id, version_id)? {
+                return Err(DomainError::VersionNotFound);
+            }
+            let Some(object_id) = alias_object_id(conn, workspace_id, version_id, &path)? else {
+                return Ok(None);
+            };
+            let Some(snapshot) = get_snapshot_meta(conn, workspace_id, version_id, &object_id)?
+            else {
+                return Ok(None);
+            };
+            if snapshot.content_kind != "text" {
+                return Err(DomainError::BinaryHeadNotText);
+            }
+            let sha = snapshot.blob_sha256.ok_or(DomainError::StateCorrupt {
+                reason: "text head without a text blob",
+            })?;
+            let row: Option<(i64, i64, Option<String>)> = conn
+                .query_row(
+                    "SELECT byte_length, LENGTH(CAST(text AS BLOB)), \
+                     CASE WHEN byte_length <= ?2 AND LENGTH(CAST(text AS BLOB)) <= ?2 THEN text END \
+                     FROM blobs WHERE sha256 = ?1",
+                    rusqlite::params![sha, cap as i64],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            let Some((byte_length, actual_length, text)) = row else {
+                return Err(DomainError::StateCorrupt {
+                    reason: "text head references a missing blob",
+                });
+            };
+            if byte_length != actual_length {
+                return Err(DomainError::StateCorrupt {
+                    reason: "text blob length does not match its text",
+                });
+            }
+            Ok(Some(InbandText {
+                workspace_id: workspace_id.to_owned(),
+                version_id: version_id.to_owned(),
+                object_id,
+                path,
+                text,
+                byte_length,
+                blob_sha256: sha,
+                updated_at_ms: snapshot.updated_at_ms,
+                latest_moment_id: snapshot.latest_moment_id,
+                metadata_origin: snapshot.metadata_origin,
+            }))
+        })
+    }
+
+    /// Read a binary head with the bytes hydrated ONLY under `cap` — the
+    /// recorded byte length (integrity-checked against the stored bytes)
+    /// always returns. One query, one actor turn, same rationale as
+    /// [`Self::read_text_inband`].
+    pub fn read_binary_inband(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+        path: &str,
+        cap: usize,
+    ) -> Result<Option<InbandBinary>, DomainError> {
+        let path = validate_addressable_plaintext_path(path)?;
+        self.store.read_with(|conn| {
+            if !version_exists(conn, workspace_id, version_id)? {
+                return Err(DomainError::VersionNotFound);
+            }
+            let Some(object_id) = alias_object_id(conn, workspace_id, version_id, &path)? else {
+                return Ok(None);
+            };
+            let Some(snapshot) = get_snapshot_meta(conn, workspace_id, version_id, &object_id)?
+            else {
+                return Ok(None);
+            };
+            if snapshot.content_kind != "binary" {
+                return Err(DomainError::TextHeadNotBinary);
+            }
+            let sha256 = snapshot.binary_sha256.ok_or(DomainError::StateCorrupt {
+                reason: "binary head without a binary sha",
+            })?;
+            // BOTH guards in the hydration CASE: a corrupt row whose
+            // recorded length lies small must not smuggle big bytes into
+            // memory before the integrity check rejects it.
+            let row: Option<(i64, i64, Option<Vec<u8>>)> = conn
+                .query_row(
+                    "SELECT byte_length, LENGTH(bytes), \
+                     CASE WHEN byte_length <= ?2 AND LENGTH(bytes) <= ?2 THEN bytes END \
+                     FROM binary_blobs WHERE sha256 = ?1",
+                    rusqlite::params![sha256, cap as i64],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            let Some((recorded, actual, bytes)) = row else {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary head references a missing blob",
+                });
+            };
+            if recorded != actual {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary blob length does not match its bytes",
+                });
+            }
+            // Bytes that will be SERVED are re-hashed (get_binary_blob
+            // parity): bit-rot or tampering that preserves the length must
+            // fail closed, never ship under the original content address.
+            // Under-cap only — hashing <=48 KiB is trivial.
+            if let Some(bytes) = &bytes {
+                let mut hasher = Sha256::new();
+                hasher.update(bytes);
+                if hex(&hasher.finalize()) != sha256 {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "binary blob bytes do not match their content address",
+                    });
+                }
+            }
+            Ok(Some(InbandBinary {
+                object_id,
+                sha256,
+                byte_length: recorded,
+                bytes,
+            }))
+        })
+    }
+
     /// Read `path` in the workspace's currently-active version.
     pub fn read_text_active(
         &self,
@@ -636,10 +872,12 @@ impl<'a> VersionedTextStore<'a> {
                  operation, after_blob_sha256, before_present, before_blob_sha256, \
                  before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
                  COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-                 COALESCE(before_content_kind, 'text'), before_binary.sha256 \
+                 COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
+             COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
+             COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)) \
                  FROM moments m \
                  LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
-                 LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \
+                 LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
                  WHERE workspace_id = ?1",
             );
             let mut binds: Vec<Box<dyn rusqlite::ToSql>> =
@@ -697,6 +935,72 @@ impl<'a> VersionedTextStore<'a> {
             .iter()
             .map(snapshot_view)
             .collect()
+    }
+
+    /// One PAGE of snapshot metadata in `version`, ordered by path, with NO
+    /// body hydration — `LENGTH(CAST(text AS BLOB))` sizes a text head in
+    /// bytes without copying it out of the row. Keyset: strictly after
+    /// `after_path` (None = from the start).
+    pub fn list_snapshot_metadata(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+        after_path: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SnapshotMetadata>, DomainError> {
+        self.store.read_with(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT s.object_id, s.path, LENGTH(CAST(b.text AS BLOB)), \
+                     s.updated_at_ms, s.latest_moment_id, s.metadata_origin, \
+                     COALESCE(s.content_kind, 'text'), bb.sha256 FROM snapshots s \
+                     LEFT JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                     LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
+                     WHERE s.workspace_id = ?1 AND s.version_id = ?2 AND s.path > ?3 \
+                     ORDER BY s.path LIMIT ?4",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params![
+                        workspace_id,
+                        version_id,
+                        after_path.unwrap_or(""),
+                        limit as i64
+                    ],
+                    |row| {
+                        Ok(SnapshotMetadata {
+                            object_id: row.get(0)?,
+                            path: row.get(1)?,
+                            text_byte_length: row.get::<_, Option<i64>>(2)?,
+                            updated_at_ms: row.get(3)?,
+                            latest_moment_id: row.get(4)?,
+                            metadata_origin: row.get(5)?,
+                            content_kind: row.get(6)?,
+                            binary_sha256: row.get(7)?,
+                        })
+                    },
+                )
+                .map_err(DomainError::sql_corrupt)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DomainError::sql_corrupt)?;
+            // The LEFT JOINs exist to classify kind — never to launder a
+            // broken FK into nulls: a text head must have sized text, a
+            // binary head its sha (get_snapshot raises the same invariant).
+            for row in &rows {
+                let sound = match row.content_kind.as_str() {
+                    "text" => row.text_byte_length.is_some(),
+                    "binary" => row.binary_sha256.is_some(),
+                    _ => false,
+                };
+                if !sound {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "snapshot references a missing blob row",
+                    });
+                }
+            }
+            Ok(rows)
+        })
     }
 
     /// Durable snapshot records for `version`, ordered by path.
@@ -1854,26 +2158,9 @@ pub fn write_text_in_tx(
             latest_moment_id: input.moment_id.clone(),
             metadata_origin: input.metadata_origin.clone(),
         },
-        moment: MomentRecord {
-            moment_order,
-            moment_id: input.moment_id.clone(),
-            version_id: input.version_id.clone(),
-            object_id,
-            path: input.path.clone(),
-            recorded_at_ms: input.now_ms,
-            operation: MomentOp::Write,
-            after_content_kind: "text".to_owned(),
-            after_blob_sha256: Some(blob),
-            after_binary_sha256: None,
-            before_present: before.is_some(),
-            before_blob_sha256: before_blob,
-            before_content_kind,
-            before_binary_sha256,
-            before_latest_moment_id,
-            metadata_origin: input.metadata_origin.clone(),
-            author_json: input.author_json.clone(),
-            sync_record_only: false,
-        },
+        moment: get_moment(tx, ws, &input.moment_id)?.ok_or(DomainError::StateCorrupt {
+            reason: "moment vanished within its own write transaction",
+        })?,
         deduped: false,
     })
 }
@@ -2075,26 +2362,9 @@ pub fn delete_text_in_tx(
     Ok(DeleteResult {
         object,
         before: snapshot_text_view(&before),
-        moment: MomentRecord {
-            moment_order,
-            moment_id: input.moment_id.clone(),
-            version_id: input.version_id.clone(),
-            object_id: before.object_id.clone(),
-            path: input.path.clone(),
-            recorded_at_ms: input.now_ms,
-            operation: MomentOp::Delete,
-            after_content_kind: before.content_kind.clone(),
-            after_blob_sha256: before.blob_sha256.clone(),
-            after_binary_sha256: before.binary_sha256.clone(),
-            before_present: true,
-            before_blob_sha256: before.blob_sha256.clone(),
-            before_content_kind: before.content_kind.clone(),
-            before_binary_sha256: before.binary_sha256.clone(),
-            before_latest_moment_id: Some(before.latest_moment_id.clone()),
-            metadata_origin: input.metadata_origin.clone(),
-            author_json: input.author_json.clone(),
-            sync_record_only: false,
-        },
+        moment: get_moment(tx, ws, &input.moment_id)?.ok_or(DomainError::StateCorrupt {
+            reason: "moment vanished within its own write transaction",
+        })?,
     })
 }
 
@@ -2472,6 +2742,44 @@ fn latest_materialized_moment_id(
     .map_err(DomainError::sql_corrupt)
 }
 
+/// The snapshot row WITHOUT the text join — the in-band reads resolve
+/// heads through this so an over-cap body is never copied out of SQLite
+/// by the head lookup itself.
+struct SnapshotMeta {
+    content_kind: String,
+    blob_sha256: Option<String>,
+    binary_sha256: Option<String>,
+    updated_at_ms: i64,
+    latest_moment_id: String,
+    metadata_origin: String,
+}
+
+fn get_snapshot_meta(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<Option<SnapshotMeta>, DomainError> {
+    conn.query_row(
+        "SELECT COALESCE(content_kind, 'text'), blob_sha256, binary_sha256, \
+         updated_at_ms, latest_moment_id, metadata_origin FROM snapshots \
+         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+        params![workspace_id, version_id, object_id],
+        |row| {
+            Ok(SnapshotMeta {
+                content_kind: row.get(0)?,
+                blob_sha256: row.get(1)?,
+                binary_sha256: row.get(2)?,
+                updated_at_ms: row.get(3)?,
+                latest_moment_id: row.get(4)?,
+                metadata_origin: row.get(5)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)
+}
+
 fn get_snapshot(
     conn: &Connection,
     workspace_id: &str,
@@ -2659,10 +2967,12 @@ fn select_moment_by_order(
              operation, after_blob_sha256, before_present, before_blob_sha256, \
              before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256 \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
+             COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
+             COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)) \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
-             LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \
+             LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
                AND moment_order <= ?4 AND (sync_record_only IS NULL OR sync_record_only = 0) \
              ORDER BY moment_order DESC LIMIT 1",
@@ -3161,10 +3471,12 @@ fn get_moment(
              operation, after_blob_sha256, before_present, before_blob_sha256, \
              before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256 \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length), \
+             COALESCE(LENGTH(CAST(after_text_blob.text AS BLOB)), LENGTH(after_binary.bytes)), \
+             COALESCE(LENGTH(CAST(before_text_blob.text AS BLOB)), LENGTH(before_binary.bytes)) \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
-             LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \
+             LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
              WHERE workspace_id = ?1 AND moment_id = ?2",
             params![workspace_id, moment_id],
             map_moment_row,
@@ -3313,6 +3625,36 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
     let after_binary_sha256: Option<String> = row.get(15)?;
     let before_content_kind: String = row.get(16)?;
     let before_binary_sha256: Option<String> = row.get(17)?;
+    let after_text: Option<String> = row.get(18)?;
+    let after_byte_length: Option<i64> = row.get(19)?;
+    let before_text: Option<String> = row.get(20)?;
+    let before_byte_length: Option<i64> = row.get(21)?;
+    let after_actual_length: Option<i64> = row.get(22)?;
+    let before_actual_length: Option<i64> = row.get(23)?;
+    // Recorded and ACTUAL lengths must agree per side — a corrupted
+    // recorded length (lying small or large) fails closed for text and
+    // binary alike, matching the in-band reads.
+    if after_byte_length != after_actual_length || before_byte_length != before_actual_length {
+        return Ok(Err(DomainError::StateCorrupt {
+            reason: "moment blob length does not match its content",
+        }));
+    }
+    // Byte lengths ALWAYS hydrate (only the text is capped): a side whose
+    // sha is set but whose joined length is NULL references a missing
+    // blob row — corrupt state, never "over-cap".
+    if (after_blob_sha256.is_some() || after_binary_sha256.is_some()) && after_byte_length.is_none()
+    {
+        return Ok(Err(DomainError::StateCorrupt {
+            reason: "moment after side references a missing blob row",
+        }));
+    }
+    if (before_blob_sha256.is_some() || before_binary_sha256.is_some())
+        && before_byte_length.is_none()
+    {
+        return Ok(Err(DomainError::StateCorrupt {
+            reason: "moment before side references a missing blob row",
+        }));
+    }
     Ok(MomentOp::from_db(&op_str).and_then(|operation| {
         let before_state = MomentBeforeState::from_db(before_present_raw)?;
         match after_content_kind.as_str() {
@@ -3376,6 +3718,10 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
             // A record-only marker is a non-NULL, NON-ZERO value; NULL or 0 both
             // mean 'materialized' (PORTING.md §1, matching the aligned fork SQL).
             sync_record_only: matches!(sync_record_only, Some(v) if v != 0),
+            after_text,
+            after_byte_length,
+            before_text,
+            before_byte_length,
         })
     }))
 }

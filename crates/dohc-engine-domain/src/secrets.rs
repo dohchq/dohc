@@ -43,6 +43,7 @@
 //! possible enhancement for the sync/retention shard; see BEHAVIOR_DELTA.md.
 
 use crate::error::DomainError;
+use crate::records::InbandSecret;
 use crate::store::validate_path;
 use dohc_engine_crypto::{SealedSecret, SecretDataKey, SecretPlaintext, aead, seal};
 use dohc_engine_storage::{
@@ -523,6 +524,51 @@ impl<'a> SecretFileStore<'a> {
     /// tip exists. Fails closed (`decrypt-failed`) on tamper/wrong-key/AAD. The
     /// secret-aware materialization pipeline calls this to obtain the bytes it
     /// writes to disk.
+    /// Materialize with the in-band cap decided IN this read: an over-cap
+    /// tip answers its recorded length WITHOUT decrypting — no window
+    /// where the secret can grow between a size probe and the decrypt,
+    /// and over-cap plaintext never exists on the heap.
+    pub fn materialize_secret_file_inband(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+        path: &str,
+        cap: usize,
+    ) -> Result<Option<InbandSecret>, DomainError> {
+        validate_secret_path(path)?;
+        let key = self.key;
+        self.store.read_with(|conn| {
+            require_version(conn, workspace_id, version_id)?;
+            let Some(tip) = select_tip(conn, workspace_id, version_id, path)? else {
+                return Ok(None);
+            };
+            let byte_length = tip.byte_length() as i64;
+            if tip.byte_length() > cap {
+                // AUTHENTICATE even what we withhold: a wrong key,
+                // tampered ciphertext/tag, or AAD-spliced row must fail
+                // closed, never read as a valid over-cap secret. The
+                // plaintext is decrypted into a zeroizing buffer and
+                // dropped immediately — bounded by the 1 MiB domain cap,
+                // never converted to an ordinary String.
+                let _verified = aead::open(key, workspace_id, path, &tip)?;
+                return Ok(Some(InbandSecret {
+                    text: None,
+                    byte_length,
+                }));
+            }
+            let plaintext = aead::open(key, workspace_id, path, &tip)?;
+            let text = plaintext
+                .into_utf8()
+                .map_err(|_| DomainError::StateCorrupt {
+                    reason: "secret plaintext is not utf-8",
+                })?;
+            Ok(Some(InbandSecret {
+                byte_length,
+                text: Some(text),
+            }))
+        })
+    }
+
     pub fn materialize_secret_file(
         &self,
         workspace_id: &str,
@@ -549,33 +595,7 @@ impl<'a> SecretFileStore<'a> {
         workspace_id: &str,
         version_id: &str,
     ) -> Result<Vec<SecretFileStat>, DomainError> {
-        self.store.read_with(|conn| {
-            require_version(conn, workspace_id, version_id)?;
-            let mut stmt = conn
-                .prepare_cached(
-                    "SELECT workspace_id, version_id, path, byte_length, updated_at_ms, \
-                     latest_moment_id FROM secret_files \
-                     WHERE workspace_id = ?1 AND version_id = ?2 ORDER BY path",
-                )
-                .map_err(DomainError::sql_corrupt)?;
-            let rows = stmt
-                .query_map(params![workspace_id, version_id], |row| {
-                    Ok(SecretFileStat {
-                        workspace_id: row.get(0)?,
-                        version_id: row.get(1)?,
-                        path: row.get(2)?,
-                        byte_length: row.get(3)?,
-                        updated_at_ms: row.get(4)?,
-                        latest_moment_id: row.get(5)?,
-                    })
-                })
-                .map_err(DomainError::sql_corrupt)?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row.map_err(DomainError::sql_corrupt)?);
-            }
-            Ok(out)
-        })
+        list_secret_files_keyless(self.store, workspace_id, version_id)
     }
 
     /// List secret moments, newest first, optionally scoped to a version.
@@ -1222,4 +1242,112 @@ fn map_moment_row(
             metadata_correlation_id,
         }),
     )
+}
+/// Keyless tip listing: the metadata never touches the AEAD, so a caller
+/// without the data key (the RPC surface of a workspace that has never
+/// minted one) can still enumerate. ONE query definition — the keyed store
+/// method delegates here.
+/// One secret tip's RECORDED byte length — keyless, no ciphertext read, no
+/// decrypt. The RPC's in-band cap check runs on this so an over-cap secret
+/// is never decrypted into a heap String just to be discarded.
+pub fn secret_file_len_keyless(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<Option<i64>, DomainError> {
+    validate_secret_path(path)?;
+    store.read_with(|conn| {
+        require_version(conn, workspace_id, version_id)?;
+        conn.query_row(
+            "SELECT byte_length FROM secret_files \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+            rusqlite::params![workspace_id, version_id, path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)
+    })
+}
+
+/// One PAGE of secret-file tips (metadata only), ordered by path, keyset
+/// after `after_path` — the listing RPC pages here so a many-secret
+/// workspace never loads every tip per request.
+pub fn list_secret_files_keyless_page(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    after_path: Option<&str>,
+    limit: usize,
+) -> Result<Vec<SecretFileStat>, DomainError> {
+    store.read_with(|conn| {
+        require_version(conn, workspace_id, version_id)?;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT workspace_id, version_id, path, byte_length, updated_at_ms, \
+                 latest_moment_id FROM secret_files \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND path > ?3 \
+                 ORDER BY path LIMIT ?4",
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    workspace_id,
+                    version_id,
+                    after_path.unwrap_or(""),
+                    limit as i64
+                ],
+                |row| {
+                    Ok(SecretFileStat {
+                        workspace_id: row.get(0)?,
+                        version_id: row.get(1)?,
+                        path: row.get(2)?,
+                        byte_length: row.get(3)?,
+                        updated_at_ms: row.get(4)?,
+                        latest_moment_id: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(DomainError::sql_corrupt)?);
+        }
+        Ok(out)
+    })
+}
+
+pub fn list_secret_files_keyless(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<Vec<SecretFileStat>, DomainError> {
+    store.read_with(|conn| {
+        require_version(conn, workspace_id, version_id)?;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT workspace_id, version_id, path, byte_length, updated_at_ms, \
+                 latest_moment_id FROM secret_files \
+                 WHERE workspace_id = ?1 AND version_id = ?2 ORDER BY path",
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        let rows = stmt
+            .query_map(params![workspace_id, version_id], |row| {
+                Ok(SecretFileStat {
+                    workspace_id: row.get(0)?,
+                    version_id: row.get(1)?,
+                    path: row.get(2)?,
+                    byte_length: row.get(3)?,
+                    updated_at_ms: row.get(4)?,
+                    latest_moment_id: row.get(5)?,
+                })
+            })
+            .map_err(DomainError::sql_corrupt)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(DomainError::sql_corrupt)?);
+        }
+        Ok(out)
+    })
 }

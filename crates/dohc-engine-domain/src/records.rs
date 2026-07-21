@@ -98,6 +98,23 @@ pub enum SnapshotContent {
     Binary { sha256: String },
 }
 
+/// One snapshot's METADATA — everything a listing needs, with no body
+/// hydration (text is sized in SQL, never copied out).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotMetadata {
+    pub object_id: String,
+    pub path: String,
+    /// Byte length of a TEXT head; None for binary heads (their length
+    /// comes with `versionedBinary.read`'s metadata).
+    pub text_byte_length: Option<i64>,
+    pub updated_at_ms: i64,
+    pub latest_moment_id: String,
+    pub metadata_origin: String,
+    /// "text" | "binary" (the stored discriminant).
+    pub content_kind: String,
+    pub binary_sha256: Option<String>,
+}
+
 /// The materialized current state of an object within a version.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotView {
@@ -129,6 +146,55 @@ pub(crate) struct SnapshotRecord {
     pub updated_at_ms: i64,
     pub latest_moment_id: String,
     pub metadata_origin: String,
+}
+
+/// The binary head at a path: identity plus the blob bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryHead {
+    pub object_id: String,
+    pub sha256: String,
+    pub bytes: Vec<u8>,
+}
+
+/// A text head whose body hydrates only under the caller's in-band cap
+/// (the byte length always does).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InbandText {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub object_id: String,
+    pub path: String,
+    pub text: Option<String>,
+    pub byte_length: i64,
+    pub blob_sha256: String,
+    pub updated_at_ms: i64,
+    pub latest_moment_id: String,
+    pub metadata_origin: String,
+}
+
+/// A secret whose plaintext hydrates only under the caller's in-band cap
+/// (an over-cap tip is never decrypted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InbandSecret {
+    pub text: Option<String>,
+    pub byte_length: i64,
+}
+
+/// A binary head whose bytes hydrate only under the caller's in-band cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InbandBinary {
+    pub object_id: String,
+    pub sha256: String,
+    pub byte_length: i64,
+    pub bytes: Option<Vec<u8>>,
+}
+
+/// A binary head's metadata without its bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryHeadMeta {
+    pub object_id: String,
+    pub sha256: String,
+    pub byte_length: i64,
 }
 
 /// Stable file-object identity, independent of any version-local path alias.
@@ -167,6 +233,18 @@ pub struct MomentRecord {
     /// 'latest moment' fork-point selection (`PORTING.md` §1). `false` = a
     /// materialized moment.
     pub sync_record_only: bool,
+    /// HYDRATED payload fields (TS `momentSelectSql` parity): the after/
+    /// before TEXT bodies (None for binary, absent, or OVER-CAP sides —
+    /// bodies above the 48 KiB in-band cap are never loaded out of SQL;
+    /// the byte lengths always are) and the COALESCEd text/binary byte
+    /// lengths. The oracle's richer
+    /// payload-provenance columns (payload_before_*, before-snapshot
+    /// identity fields) are NOT in the Rust schema — a recorded pre-R15
+    /// schema obligation.
+    pub after_text: Option<String>,
+    pub after_byte_length: Option<i64>,
+    pub before_text: Option<String>,
+    pub before_byte_length: Option<i64>,
 }
 
 /// A keyset page of moments (newest first). Mirrors the inventory contract for

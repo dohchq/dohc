@@ -51,6 +51,9 @@ pub enum DomainError {
     /// from `FileNotFound` — the head exists, it just is not text.
     #[error("content at path is a binary head, not text")]
     BinaryHeadNotText,
+    /// A binary read hit a TEXT head — the caller asked the wrong question.
+    #[error("content at path is a text head, not binary")]
+    TextHeadNotBinary,
 
     /// The path current head was not written by capture, so a disk-driven
     /// capture write must not overwrite or retire it (it may legitimately
@@ -140,6 +143,7 @@ impl DomainError {
             DomainError::DuplicateMomentId => "duplicate-moment-id",
             DomainError::FileNotFound => "file-not-found",
             DomainError::BinaryHeadNotText => "binary-head-not-text",
+            DomainError::TextHeadNotBinary => "text-head-not-binary",
             DomainError::CaptureNotOwned => "capture-not-owned",
             DomainError::TargetPathExists => "target-path-exists",
             DomainError::ForkBaseNotFound => "fork-base-not-found",
