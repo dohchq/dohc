@@ -701,6 +701,7 @@ async fn main() {
         "tier": "cutoverBlocking",
         "verdict": verdict,
         "cyclesRequested": options.cycles,
+        "cyclesCompleted": counts.values().sum::<u64>(),
         "scenarioCounts": counts,
         "crashRestarts": crashes,
         "durationSecs": started.elapsed().as_secs(),
@@ -711,6 +712,23 @@ async fn main() {
         "trendEvaluated": trend_evaluated,
         "cleanShutdown": clean_shutdown,
         "hardCapped": hard_capped,
+        // Auditable tolerances: the exact bounds the assertions above used.
+        "tolerances": {
+            "handleSlack": HANDLE_SLACK,
+            "threadSlack": THREAD_SLACK,
+            "maxRssSlopeBytesPerSec": MAX_RSS_SLOPE_BYTES_PER_SEC,
+            "minTrendSamples": MIN_TREND_SAMPLES,
+            "minTrendSpanSecs": MIN_TREND_SPAN_SECS,
+        },
+        // Explicit tri-state memory disposition (phase 2 is a SINGLE process
+        // by design — no restart epochs in the series).
+        "rssDisposition": if !trend_evaluated {
+            "NOT-EVALUATED"
+        } else if slope <= MAX_RSS_SLOPE_BYTES_PER_SEC {
+            "PASS"
+        } else {
+            "FAIL"
+        },
         "final": { "rss": rss_end, "handles": handles_end, "threads": threads_end },
         "rssSlopeBytesPerSec": slope,
         "assertions": {
