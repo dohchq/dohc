@@ -868,10 +868,9 @@ impl EngineService {
         .await?;
         let has_more = secrets.len() > limit;
         let secrets = &secrets[..secrets.len().min(limit)];
-        // Metadata-only, but paths are wire-legal strings: the byte
-        // budget keeps a many-secret workspace under the frame limit.
-        // No cursor on this family yet — truncated says so honestly
-        // (RPC_GAP follow-up alongside the chat list families).
+        // Metadata-only AND keyset-paged (afterPath/nextAfterPath); the
+        // byte budget is the second bound so no page can outgrow the
+        // frame even when rows are string-heavy.
         let row_values: Vec<Value> = secrets
             .iter()
             .map(|stat| {
