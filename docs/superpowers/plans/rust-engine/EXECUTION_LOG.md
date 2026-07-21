@@ -1906,20 +1906,85 @@ next round caught. The compounding lesson became structure:
   seconds-long tail and no process was soaked long enough for a trend
   (scenario-correctness results stand: 819 crash/restart recoveries all
   settled; handles/threads at baseline). The runner was restructured
-  (two phases; tri-state trend verdict that cannot pass vacuously) and the
-  CORRECTED 30-minute release run replaces it as the GATE6 artifact:
-  - 2026-07-21T05:06:40Z | soak-cutoverBlocking | windows/x86_64 | PASS | cycles=7771 crashes=83 durationSecs=1805 rssSlopeB/s=12497.7 handles 110->112 threads 38->37
+  (two phases; tri-state trend verdict that cannot pass vacuously), and
+  after #215's nine review rounds hardened it further (recorded
+  tolerances, unmeasuredAssertions in-artifact, exit-status-checked
+  cleanShutdown, bounded requests, scenarios that PROVE what they count),
+  the run was REPEATED on the settled runner. The GATE6 artifact:
+  - 2026-07-21T10:46:48Z | soak-cutoverBlocking | windows/x86_64 | PASS | cycles=5078 crashes=83 durationSecs=1804 rssSlopeB/s=13017.4 handles 105->108 threads 38->38
   Sample series COMMITTED:
   tools/rust-engine-program/soak-evidence/2026-07-21-cutoverBlocking.json
-  (281 samples over 1791s, trendEvaluated:true). Curve shape, stated
-  honestly: 26.0 KiB/s first half -> 4.9 KiB/s second half (last quarter
-  9.3 KiB/s) — strongly decelerating, i.e. predominantly cache/WAL warmup,
-  47 MB absolute RSS at end. GATE6 disposition, stated precisely: scenario
-  correctness + handles/threads baseline = PASS; MEMORY = PASS-WITH-FLAG
-  (slope 12.5 KiB/s against the 20 KiB/s threshold, warmup-shaped curve),
-  conditional on dogfood-period monitoring — NOT an unconditional
-  leak-freedom claim. Real usage is orders of magnitude quieter than the
-  soak's ~4.3 cycles/sec.
+  (289 samples over 1797s, trendEvaluated:true, rssDisposition:PASS,
+  cleanShutdown:true, 83/83 crash cycles CAPTURE-PROVEN via exact-content
+  probes, 13916 cancellations observed, 951/1016 switch cycles genuinely
+  overlapped, unmeasuredAssertions named in the artifact). Curve shape,
+  stated honestly: 26.8 KiB/s first half -> 10.4 second half (last
+  quarter 6.6) — strongly decelerating, i.e. predominantly cache/WAL
+  warmup. THREE independent 30-minute runs measured the same shape
+  (12.5 / 13.5 / 13.0 KiB/s whole-run slopes; the interim artifacts are
+  superseded formats, not withdrawn results). GATE6 disposition, stated
+  precisely: scenario correctness + handles/threads baseline + clean
+  shutdown = PASS; MEMORY = PASS-WITH-FLAG (slope 13.0 KiB/s against the
+  20 KiB/s threshold, warmup-shaped and reproducible), conditional on
+  dogfood-period monitoring — NOT an unconditional leak-freedom claim.
+  Real usage is orders of magnitude quieter than the soak's ~2.8
+  cycles/sec.
 - Next: E (#215, in review: capture RPCs + the TS-vs-Rust differential —
   10 scenarios green + tamper-verified — + the soak runner + RPC_GAP.md),
   then RPC-A per RPC_GAP.md -> GATE6 -> R15 (ICE checkpoint — STOP).
+
+## 2026-07-21 — Files-composition E merged (#215): capture RPCs, the differential, the soak runner
+
+- E completes FCOMP (merged 10:11Z as 126d79eb; squash). The shard:
+  `watcher.status` + `capture.flush` RPCs (the determinism seam), the
+  TS-vs-Rust capture DIFFERENTIAL (10 scenarios, goldens committed,
+  tamper-verified — corrupt either side and the compare fails), shadow-scope
+  acceptance for the E surface, and the cutoverBlocking SOAK RUNNER (GATE6's
+  evidence instrument).
+- The flush contract, hardened across the rounds: drives to QUIESCENCE
+  (MAX_FLUSH_CYCLES bound), TickIo::Cancelled distinct from Converged
+  (teardown races answer settled:false), flush-polling can neither defeat
+  the restart backoff nor starve the rebuild (persistent sleep_until
+  deadline; paused-time mutation test with a 3–5 start-attempt window),
+  settled is REFUSED over a non-empty quarantine (share-locked-file E2E,
+  mutation-verified) and over a mid-debounce files.toml edit (PolicyChangedIdle
+  paused-time test, mutation-verified), and capture.flush honors
+  cancellation AND deadlines (OperationCancellation arms its token from
+  ctx.deadline; DEADLINE_EXCEEDED vs CANCELLED split preserved for
+  embedded callers).
+- The runner's evidence is honest BY CONSTRUCTION: recorded tolerances,
+  tri-state rssDisposition AND tri-state noMonotonicRssSlope (null when
+  unevaluated), unmeasuredAssertions named IN the artifact, cleanShutdown
+  requires a successful exit status, cyclesCompleted counts phase-2
+  workload only, the final RSS sample joins the fit, per-request 60s and
+  handshake 30s bounds with pending-drain on daemon death, scenarios that
+  PROVE what they count (storm/crash probes read back exact content;
+  switch overlap tallied separately; cancellations observed and counted;
+  the cancel-storm recovery probe reads back a per-cycle seeded write —
+  the strict probe exposed that the old .ok()'d read on an empty
+  workspace had been proving nothing), cross-platform sampling
+  (win32 / linux /proc / macos ps+lsof, loud panic elsewhere), and exit
+  codes CI can trust (only PASS, or a REQUESTED --quick smoke's
+  PASS-SCENARIOS-ONLY, exit 0; hard-cap and a cut-short crash prelude
+  degrade the verdict).
+- THE REVIEW STORY (9 fix rounds): Codex posted real findings on six
+  consecutive heads (flush-cancel contract; masked non-zero daemon exits,
+  reader-death hangs, unbounded awaits, env leak, config-vs-measured gap;
+  flush-polling backoff bypass — whose NAIVE fix would have livelocked the
+  rebuild; scenario-proof gaps; probe null-reads, deadline plumbing,
+  policy-debounce settle) and came back clean on the 9th. CodeRabbit
+  APPROVED at r3 and posted two later actionables (quick-run exit code;
+  the quarantined-flush E2E), both landed. A 3-minute --quick smoke ran
+  before EVERY runner-affecting push and caught three of my own fix bugs
+  pre-push (a DOP1 64 KiB string-limit trip, a consumed-oneshot
+  double-await, and the nothing-proving recovery read). RPC_GAP.md moved
+  wholly to this PR (#216) mid-review — a stale draft on #215 would have
+  conflicted at merge.
+- Gate (merge head): 2026-07-21T09:59:06.362Z | run-rust-checks |
+  win32/x64 | PASS | fmt --check=PASS clippy -D warnings=PASS
+  build --workspace=PASS test --workspace=PASS cargo-deny=PASS
+  cargo-audit=SKIP
+- SHARDS: FCOMP row -> E done. NEXT: RPC-A (rebased onto the merged main,
+  in review) -> RPC-B -> RPC-C (design v2 adversarially reviewed) ->
+  RPC-D per RPC_GAP.md, then GATE6 packet -> macOS evidence -> R15 (ICE
+  checkpoint — STOP).
