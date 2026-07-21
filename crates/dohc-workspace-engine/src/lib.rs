@@ -1235,6 +1235,7 @@ impl EngineService {
             .ydoc_open_state(
                 open.workspace_id.clone(),
                 now_ms()?,
+                false,
                 params.version_id.clone(),
                 params.path.clone(),
                 requested_kind,
@@ -1254,6 +1255,7 @@ impl EngineService {
             .ydoc_open_state(
                 open.workspace_id.clone(),
                 now_ms()?,
+                true,
                 params.version_id,
                 params.path.clone(),
                 requested_kind,
@@ -1281,7 +1283,22 @@ impl EngineService {
             } else {
                 "absent"
             },
-            seed_markdown: state.seed_markdown,
+            seed_markdown: {
+                // A seed past the in-band cap cannot cross the wire as one
+                // string, and a client that can't seed can't edit: refuse the
+                // open outright (blob streaming for large bodies is RPC-D).
+                if state
+                    .seed_markdown
+                    .as_ref()
+                    .is_some_and(|seed| seed.len() > MAX_INBAND_CONTENT_BYTES)
+                {
+                    return Err(wire(
+                        ErrorCode::InvalidParams,
+                        "ydoc-seed-exceeds-inband-cap",
+                    ));
+                }
+                state.seed_markdown
+            },
         };
         lock(&self.sessions).insert(
             session_id,
@@ -1409,10 +1426,14 @@ impl EngineService {
         if let Some(session) = lock(&self.sessions).get_mut(session_id) {
             session.last_settled_sha = Some(settled.sha256.clone());
         }
+        let byte_length = settled.markdown.len();
+        let over_cap = byte_length > MAX_INBAND_CONTENT_BYTES;
         serde_json::to_value(YdocSettleResult {
             moment_id: settled.moment_id,
             path: settled.path,
-            markdown: settled.markdown,
+            markdown: (!over_cap).then_some(settled.markdown),
+            byte_length,
+            inband_limit_bytes: over_cap.then_some(MAX_INBAND_CONTENT_BYTES),
             sha256: settled.sha256,
             projection: YdocProjectionProvenance {
                 content_kind: ydoc_content_kind_name(settled.projection.content_kind),
@@ -1973,7 +1994,13 @@ struct YdocProjectionProvenance {
 struct YdocSettleResult {
     moment_id: String,
     path: String,
-    markdown: String,
+    /// None when the settled body exceeds the in-band cap — the write is
+    /// durable; the body is fetchable via versionedText.read semantics and
+    /// the response self-describes with `inbandLimitBytes`.
+    markdown: Option<String>,
+    byte_length: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inband_limit_bytes: Option<usize>,
     sha256: String,
     projection: YdocProjectionProvenance,
 }

@@ -342,6 +342,7 @@ enum Command {
     YdocOpenState {
         workspace_id: String,
         now_ms: i64,
+        drain_deferred: bool,
         version_id: String,
         path: String,
         content_kind: Option<ContentKind>,
@@ -1334,10 +1335,12 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn ydoc_open_state(
         &self,
         workspace_id: String,
         now_ms: i64,
+        drain_deferred: bool,
         version_id: String,
         path: String,
         content_kind: Option<ContentKind>,
@@ -1348,6 +1351,7 @@ impl ActorHandle {
             .send(Command::YdocOpenState {
                 workspace_id,
                 now_ms,
+                drain_deferred,
                 version_id,
                 path,
                 content_kind,
@@ -2015,6 +2019,7 @@ fn worker_main(
             Command::YdocOpenState {
                 workspace_id,
                 now_ms,
+                drain_deferred,
                 version_id,
                 path,
                 content_kind,
@@ -2025,6 +2030,7 @@ fn worker_main(
                     &mut store,
                     &workspace_id,
                     now_ms,
+                    drain_deferred,
                     &version_id,
                     &path,
                     content_kind,
@@ -2238,10 +2244,12 @@ fn ydoc_marker_has_durable_state(marker: &dohc_engine_collab::Marker) -> bool {
     marker.head_update_seq > 0 || marker.head_snapshot_seq > 0 || marker.base_claimed
 }
 
+#[allow(clippy::too_many_arguments)]
 fn ydoc_open_state_on_store(
     store: &mut EngineStore,
     workspace_id: &str,
     now_ms: i64,
+    drain_deferred: bool,
     version_id: &str,
     path: &str,
     requested_content_kind: Option<ContentKind>,
@@ -2272,9 +2280,13 @@ fn ydoc_open_state_on_store(
     // queue, and replaying an already-applied row is content-deduped, so
     // draining on every open makes the parked update land on the next use
     // of the doc no matter how the previous session ended.
-    if dohc_engine_collab::read_marker(store, &key)?
-        .is_some_and(|marker| marker.regime == Regime::Replicated)
+    if drain_deferred
+        && dohc_engine_collab::read_marker(store, &key)?
+            .is_some_and(|marker| marker.regime == Regime::Replicated)
     {
+        // Only the POST-LEASE read drains: a pre-lease probe mutating the
+        // lineage while another session holds the lease would advance state
+        // behind the active editor with no event or resync signal.
         dohc_engine_sync::drain_deferred_ydoc_for_key(store, &key, &NoFaults)?;
     }
     let persisted = dohc_engine_collab::load_persisted(store, &key)?;
@@ -2461,6 +2473,31 @@ fn ydoc_settle_on_store(
         let current = VersionedTextStore::new(store)
             .read_text(&key.workspace_id, &key.version_id, path)?
             .ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
+        // The marker may have committed while the PRIOR settle's
+        // materialization crashed before the file replace: the no-op answer
+        // must first finish that pending job, or close(settle:false) could
+        // prune the CRDT while the disk still holds the old bytes.
+        let pending_job_id = format!("ydoc-mat_{}", current.latest_moment_id);
+        if let Some(job) = store.load_materialization_job(&pending_job_id)? {
+            match materialize_one(
+                store,
+                root_dir,
+                &job,
+                DurabilityPolicy::per_os(),
+                &StdReplacer,
+                &StdBackoff,
+                now_ms,
+                faults,
+            )? {
+                JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {
+                    self_writes.record(&key.workspace_id, &current.path, &current.blob_sha256);
+                }
+                JobOutcome::Conflict | JobOutcome::Superseded => {
+                    return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
+                }
+                JobOutcome::Crashed(_) => return Err(RuntimeError::OperationCrashed),
+            }
+        }
         return Ok(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,

@@ -649,3 +649,80 @@ async fn settle_refuses_after_the_path_changes_owners() {
     // workspace.close is the teardown path that releases its lease.
     call(&transport, &handle, 7, "workspace.close", json!({})).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn creating_a_new_file_through_a_ydoc_session_settles_to_disk() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "notes/seed.md", b"seed");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-create", 1).await;
+
+    // notes/created.md exists NOWHERE: not on disk, no head, no lineage. The
+    // seed path pre-creates the file_objects row for the marker FK; the
+    // settle's projected write must accept that preallocated object instead
+    // of refusing "already bound".
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "notes/created.md",
+            "contentKind": "plaintext"
+        }),
+    )
+    .await;
+    assert_eq!(opened["lineage"], json!("absent"));
+    assert_eq!(opened["seedMarkdown"], Value::Null);
+    let session_id = opened["sessionId"].as_str().expect("session id");
+
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": session_id,
+            "updateBase64": plaintext_update("fresh content")
+        }),
+    )
+    .await;
+    let settled = call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "create" }),
+    )
+    .await;
+    assert_eq!(settled["markdown"], json!("fresh content"));
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/created.md")).expect("created"),
+        "fresh content"
+    );
+    let head = call(
+        &transport,
+        &handle,
+        5,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": "notes/created.md" }),
+    )
+    .await;
+    assert_eq!(head["text"], json!("fresh content"));
+    assert_eq!(head["objectId"], opened["objectId"]);
+    assert_eq!(head["metadataOrigin"], json!("ydoc"));
+
+    call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.close",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    call(&transport, &handle, 7, "workspace.close", json!({})).await;
+}

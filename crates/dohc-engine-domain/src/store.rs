@@ -2011,7 +2011,7 @@ pub fn write_text_in_tx(
     tx: &Transaction<'_>,
     input: &WriteText,
 ) -> Result<WriteResult, DomainError> {
-    write_text_in_tx_with_journal(tx, input, true)
+    write_text_in_tx_with_journal(tx, input, true, false)
 }
 
 /// Apply a projected text write without appending `moment.append` to the
@@ -2023,13 +2023,18 @@ pub fn write_projected_text_in_tx(
     tx: &Transaction<'_>,
     input: &WriteText,
 ) -> Result<WriteResult, DomainError> {
-    write_text_in_tx_with_journal(tx, input, false)
+    // allow_preallocated_object: the live Y.Doc seed pre-creates the
+    // file_objects row (FK parent for the marker) before any snapshot or
+    // alias exists — the settle that follows is binding ITS OWN object,
+    // not colliding with another.
+    write_text_in_tx_with_journal(tx, input, false, true)
 }
 
 fn write_text_in_tx_with_journal(
     tx: &Transaction<'_>,
     input: &WriteText,
     journal: bool,
+    allow_preallocated_object: bool,
 ) -> Result<WriteResult, DomainError> {
     let normalized_input = normalized_write_input(input)?;
     let input = &normalized_input;
@@ -2067,9 +2072,13 @@ fn write_text_in_tx_with_journal(
                 });
             }
             if object_exists(tx, ws, &input.object_id)? {
-                return Err(DomainError::InvalidInput {
-                    reason: "object_id is already bound to another object",
-                });
+                let bare_preallocation =
+                    allow_preallocated_object && !object_has_any_binding(tx, ws, &input.object_id)?;
+                if !bare_preallocation {
+                    return Err(DomainError::InvalidInput {
+                        reason: "object_id is already bound to another object",
+                    });
+                }
             }
             None
         }
@@ -2086,8 +2095,10 @@ fn write_text_in_tx_with_journal(
     let moment_order = next_moment_order(tx)?;
 
     if is_new_object {
+        // OR IGNORE: the preallocated-object path (live Y.Doc seed) already
+        // holds this row; every other new-object path inserts fresh.
         tx.execute(
-            "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)              VALUES (?1, ?2, ?3)",
             params![ws, object_id, input.now_ms],
         )
         .map_err(DomainError::sql_persist)?;
@@ -2626,6 +2637,24 @@ pub(crate) fn moment_exists(
         .optional()
         .map_err(DomainError::sql_corrupt)?;
     Ok(found.is_some())
+}
+
+/// Whether an object owns ANY binding (a path alias in any version or a
+/// snapshot row). A bare row with none is a Y.Doc seed preallocation.
+fn object_has_any_binding(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<bool, DomainError> {
+    let bound: Option<i64> = tx
+        .query_row(
+            "SELECT 1 WHERE EXISTS (SELECT 1 FROM path_aliases WHERE workspace_id = ?1 AND object_id = ?2)              OR EXISTS (SELECT 1 FROM snapshots WHERE workspace_id = ?1 AND object_id = ?2)",
+            params![workspace_id, object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(bound.is_some())
 }
 
 fn object_exists(

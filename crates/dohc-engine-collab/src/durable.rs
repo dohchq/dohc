@@ -932,6 +932,21 @@ pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Mar
 
 /// The sha of the content the last settle materialized (or `None` if never
 /// settled) — the durable settle-handoff marker the local-only close guard reads.
+/// Full durable admission check for a remote update WITHOUT applying it:
+/// byte validation (empty/5 MiB cap/abort-safe prevalidation) plus the
+/// replay-parity gate against the lineage's current base. The sync defer
+/// path runs this BEFORE acking a coordinate it can only replay later —
+/// an update the drain would refuse must never be acked.
+pub fn validate_remote_update_for(
+    store: &EngineStore,
+    key: &DocKey,
+    bytes: &[u8],
+) -> Result<(), CollabError> {
+    validate_update_bytes(bytes)?;
+    let base = store.read_with(|conn| load_for_replay_gate(conn, key))?;
+    crate::validate_replay_parity(&base, bytes)
+}
+
 /// The content sha the lineage last durably settled (public read for the
 /// daemon settle path's idempotent no-op check).
 pub fn read_last_settled_sha(

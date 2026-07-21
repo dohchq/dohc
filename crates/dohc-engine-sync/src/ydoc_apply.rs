@@ -188,14 +188,16 @@ pub fn apply_ydoc_envelope(
     if dohc_engine_storage::hex_sha256(&bytes) != payload.update_blob_sha256 {
         return Err(SyncError::BlobInvalid);
     }
-    // Full update validation BEFORE any ack path: a hydrated-but-malformed or
-    // oversized update deferred under a live lease would advance the cursor
-    // onto a row every later drain refuses — unrefetchable and stuck. The
-    // non-live path re-validates inside apply; this cost is one prevalidation.
-    dohc_engine_collab::Ydoc::validate_update(&bytes).map_err(|_| SyncError::InvalidInput {
-        reason: "ydoc.update bytes fail validation",
-    })?;
     if leases.is_live(&key) {
+        // FULL durable validation BEFORE the ack: byte caps, abort-safe
+        // prevalidation, AND the replay-parity gate — exactly what the later
+        // drain's apply_remote_update enforces. Anything it would refuse must
+        // stay unacked here, or the cursor advances past an unapplyable row.
+        dohc_engine_collab::validate_remote_update_for(store, &key, &bytes).map_err(|_| {
+            SyncError::InvalidInput {
+                reason: "ydoc.update bytes fail durable validation",
+            }
+        })?;
         // A deferred coordinate is ACKED — it must be drainable later, which
         // the close/open drains only do for REPLICATED markers. A live lease
         // over an absent or local-only lineage cannot accept a remote update
@@ -234,13 +236,43 @@ pub fn apply_ydoc_envelope(
             })
         });
     }
+    // Base bootstrap: a fresh replica's FIRST op for a replicated doc is the
+    // base full-state — apply_remote_update requires an existing marker, so
+    // without this branch the pull wedges on NoMarker before the ack. The
+    // claim is idempotent (an existing claimed base resumes), so a crash
+    // between claim and ack replays safely; the coordinate then acks below.
+    if payload.is_base_state {
+        store
+            .write_with(faults, |tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                      VALUES (?1, ?2, ?3)",
+                    rusqlite::params![key.workspace_id, key.object_id, envelope.recorded_at_ms],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "ydoc.update base bootstrap failed",
+            })?;
+        let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind);
+        dohc_engine_collab::claim_base(store, &key, kind, &bytes, faults, envelope.recorded_at_ms)
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "ydoc.update base could not be claimed",
+            })?;
+        let outcome = crate::apply_envelope_with(store, envelope, faults, |_tx, _op| {
+            Ok(YdocApplyResult {
+                deferred: false,
+                reason: None,
+            })
+        })?;
+        return Ok(outcome);
+    }
     let remote = RemoteUpdate {
         origin_id: envelope.origin_id.clone(),
         origin_seq: envelope.origin_seq,
         bytes,
     };
     let outcome = crate::apply_envelope_with(store, envelope, faults, |tx, op| {
-        let _ = payload.is_base_state;
         apply_remote_update_in_transaction(tx, &key, &remote, op.recorded_at_ms).map_err(|_| {
             SyncError::InvalidInput {
                 reason: "ydoc.update could not be applied",

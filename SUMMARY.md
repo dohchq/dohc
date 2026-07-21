@@ -254,3 +254,34 @@ the raw result alongside the existing decoder.
 - P2 lease-before-state: ydoc.open derives the key, acquires the lease,
   then RE-READS state under it (key-change → busy refusal) — a legacy
   apply between read and lease can't hand the opener stale state.
+
+## Codex review round 5 (PR #220)
+
+- P1 create-new-file flow: write_projected accepts the Y.Doc seed's
+  preallocated bare object (exists in file_objects, zero bindings) —
+  open-absent -> edit -> settle on a brand-new path works and is covered
+  by a new acceptance test (created.md lands on disk, head object ==
+  session object, origin ydoc).
+- P1 no-op settle finishes pending jobs: the idempotent branch loads the
+  current head's materialization job and runs it before answering — a
+  marker-committed/materialize-crashed prior settle can't report success
+  over stale disk bytes.
+- P1 base bootstrap on pulls: an is_base_state ydoc.update with no local
+  marker claims the base (file_objects + claim_base, idempotent) before
+  acking — a fresh replica's first replicated doc no longer wedges the
+  stream.
+- P1 full durable validation before defer: the live-lease path runs
+  validate_remote_update_for (byte caps + abort-safe prevalidation +
+  replay-parity gate) pre-ack — nothing the drain would refuse gets
+  acked.
+- P2 probe drains removed: only the post-lease authoritative read drains
+  (drain_deferred flag through the open-state chain); a busy second open
+  can no longer mutate the lineage behind the active editor.
+- P2 wire caps on markdown: settle responses self-describe over-cap
+  bodies (markdown null + byteLength + inbandLimitBytes, mirroring the
+  read surface); ydoc.open refuses ydoc-seed-exceeds-inband-cap for
+  seeds past 48 KiB (blob streaming is RPC-D). Note: the frozen client
+  decoder requires string markdown, so a >48 KiB settle now fails at the
+  client decode instead of dying at the DOP1 framer post-write — C1
+  cannot round-trip such docs either way (the seed refusal blocks
+  opening them); recorded as RPC-D streaming scope.
