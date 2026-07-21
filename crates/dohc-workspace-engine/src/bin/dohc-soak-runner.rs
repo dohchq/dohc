@@ -162,7 +162,12 @@ impl Daemon {
                 last_session_generation: None,
             }))
             .await;
-        hello_rx.await.expect("helloAck");
+        // A daemon that starts but never completes the handshake must fail
+        // the run, not block it forever.
+        tokio::time::timeout(Duration::from_secs(30), hello_rx)
+            .await
+            .expect("daemon sent no HelloAck within 30s")
+            .expect("helloAck");
         daemon
     }
 
@@ -203,7 +208,11 @@ impl Daemon {
 
     async fn call(&self, method: &str, workspace: Option<Value>, params: Value) -> Value {
         let (_, rx) = self.begin(method, workspace, params).await;
-        rx.await
+        // A handler that hangs (alive but never answering) must become a
+        // failing verdict, not an eternal await.
+        tokio::time::timeout(Duration::from_secs(60), rx)
+            .await
+            .unwrap_or_else(|_| panic!("{method}: no response within 60s — daemon hang"))
             .expect("response channel")
             .unwrap_or_else(|error| panic!("{method} failed: {error}"))
     }
@@ -217,11 +226,14 @@ impl Daemon {
     /// stdin close — a shutdown deadlock is a soak FAILURE, not a footnote
     /// for kill_on_drop to paper over.
     async fn shutdown(mut self) -> bool {
-        // Closing stdin is the daemon's normal end-of-session signal.
+        // Closing stdin is the daemon's normal end-of-session signal. Clean
+        // means exited IN TIME and SUCCESSFULLY — a non-zero exit status is
+        // a reported shutdown failure, not a footnote.
         drop(self.stdin);
-        let clean = tokio::time::timeout(Duration::from_secs(30), self.child.wait())
-            .await
-            .is_ok();
+        let clean = match tokio::time::timeout(Duration::from_secs(30), self.child.wait()).await {
+            Ok(Ok(status)) => status.success(),
+            Ok(Err(_)) | Err(_) => false,
+        };
         self.reader.abort();
         clean
     }
@@ -249,7 +261,7 @@ async fn read_loop(
     let mut hello_tx = Some(hello_tx);
     loop {
         let read = match stdout.read(&mut buf).await {
-            Ok(0) | Err(_) => return,
+            Ok(0) | Err(_) => break,
             Ok(read) => read,
         };
         decoder.push(&buf[..read]);
@@ -285,6 +297,20 @@ async fn read_loop(
                 }
             }
         }
+    }
+    // The daemon closed stdout (crash or shutdown) — every request still in
+    // flight would await a sender that can never fire. Fail them so a daemon
+    // death mid-scenario is a failing run, not a hang.
+    let in_flight: Vec<_> = pending
+        .lock()
+        .expect("pending")
+        .drain()
+        .map(|(_, tx)| tx)
+        .collect();
+    for tx in in_flight {
+        let _ = tx.send(Err(
+            "daemon closed stdout with the request in flight".to_owned()
+        ));
     }
 }
 
@@ -435,8 +461,9 @@ async fn scenario_two_workspace_switch(daemon: &Daemon, root_a: &Path, root_b: &
         .await;
     let handle_b = open(daemon, root_b, "soak-switch-b").await;
     close(daemon, handle_b).await;
-    in_flight
+    tokio::time::timeout(Duration::from_secs(60), in_flight)
         .await
+        .expect("in-flight write answered within 60s")
         .expect("in-flight channel")
         .expect("in-flight write survives the switch");
     close(daemon, handle_a).await;
@@ -736,6 +763,14 @@ async fn main() {
             "threadsReturnToBaseline": threads_ok,
             "noMonotonicRssSlope": slope_ok,
         },
+        // Config assertions this runner does NOT measure, named in the
+        // artifact itself so a PASS can never be read as covering them
+        // (dispositions in soak-config.json).
+        "unmeasuredAssertions": [
+            "queue-steady-state",
+            "workspace-close-resource-return-beyond-actor-count",
+            "wal-update-log-index-growth",
+        ],
         "samples": samples,
     });
     std::fs::write(
@@ -760,7 +795,10 @@ async fn main() {
         thread_base,
         threads_end,
     );
-    if verdict != "PASS" {
+    // Only a hard FAIL is a failing exit: PASS-SCENARIOS-ONLY (quick runs
+    // that cannot evaluate a trend) and PASS-INCOMPLETE (hard-capped) are
+    // healthy runs whose evidence says exactly what was and wasn't checked.
+    if verdict == "FAIL" {
         std::process::exit(1);
     }
 }

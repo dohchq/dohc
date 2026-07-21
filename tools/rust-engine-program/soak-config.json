@@ -23,12 +23,16 @@
         "cancellation storms (many concurrent request cancellations against the protocol Supervisor and the daemon's request-admission path)",
         "editor open/update/close cycles (Y.Doc apply + settle under sustained load)"
       ],
-      "assertions": [
+      "assertionsMeasuredByRunner": [
         "threads/OS handles return to baseline after all workspaces close, within the runner's RECORDED tolerances (handleSlack 48, threadSlack 8 -- Windows OS handle counts jitter across a run from runtime/OS-owned handles, so exact-zero is not a stable cross-run assertion; the evidence JSON records absolute baseline/final counts so any drift is auditable, and the accepted slacks are emitted under 'tolerances')",
         "no monotonic RSS slope: simple linear fit over the full-duration sample series must stay at or under maxRssSlopeBytesPerSec 20480, evaluated only when >= 24 samples span >= 900s (otherwise the evidence records trendEvaluated:false and cannot be cited as leak evidence); emitted as tri-state rssDisposition PASS/FAIL/NOT-EVALUATED",
-        "queues return to steady state after bursts",
-        "workspace close returns owned resources to baseline plus a documented constant",
-        "no unbounded WAL/update-log/replication-log/index growth under compaction/retention scenarios"
+        "scenario correctness: every cycle's requests succeed (a failed or hung request panics the run -- per-request 60s bound, 30s handshake bound, in-flight requests failed on daemon death), and every crash/restart cycle recovers",
+        "clean daemon shutdown: exits within 30s of stdin close AND with a successful exit status (cleanShutdown in the evidence)"
+      ],
+      "assertionsNotMeasuredByThisRunner": [
+        "queues return to steady state after bursts -- NOT directly measured; queue depths are bounded by construction (bounded mpsc admission + command channels) and R14's daemon-liveness tests cover admission under pressure; a PASS verdict makes no claim here (the evidence lists this under unmeasuredAssertions)",
+        "workspace close returns owned resources to baseline plus a documented constant -- covered at unit scale by crates/dohc-engine-runtime/tests/soak_r14.rs (actor_count returns to exactly 0); the runner only observes process-level handles/threads, so the per-resource claim is NOT re-measured here",
+        "no unbounded WAL/update-log/replication-log/index growth under compaction/retention scenarios -- NOT yet measured by any runner; tracked for the postCutoverContinuous tier and dogfood-period monitoring"
       ],
       "trackedMetrics": [
         "RSS/allocator bytes",

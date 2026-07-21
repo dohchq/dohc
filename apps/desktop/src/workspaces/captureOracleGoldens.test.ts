@@ -212,22 +212,34 @@ async function runScenario(scenario: FixtureScenario): Promise<Record<string, Pa
 }
 
 it("capture goldens match the TypeScript oracle", { timeout: 120_000 }, async () => {
+  // Forcing the TS fallback path must not leak into other tests sharing
+  // this Vitest worker — restore whatever the environment had.
+  const priorSidecar = process.env.DOHC_KERNEL_SIDECAR;
   process.env.DOHC_KERNEL_SIDECAR = "0";
   resetWorkspaceKernelRuntimeForTests();
-  const fixtures = JSON.parse(await readFile(FIXTURES_PATH, "utf8")) as {
-    scenarios: FixtureScenario[];
-  };
-  const produced: Record<string, Record<string, PathProjection>> = {};
-  for (const scenario of fixtures.scenarios) {
-    produced[scenario.name] = await runScenario(scenario);
-  }
+  try {
+    const fixtures = JSON.parse(await readFile(FIXTURES_PATH, "utf8")) as {
+      scenarios: FixtureScenario[];
+    };
+    const produced: Record<string, Record<string, PathProjection>> = {};
+    for (const scenario of fixtures.scenarios) {
+      produced[scenario.name] = await runScenario(scenario);
+    }
 
-  if (process.env.DOHC_EMIT_CAPTURE_GOLDENS === "1") {
-    await writeFile(GOLDENS_PATH, `${JSON.stringify({ scenarios: produced }, null, 2)}\n`);
-    return;
+    if (process.env.DOHC_EMIT_CAPTURE_GOLDENS === "1") {
+      await writeFile(GOLDENS_PATH, `${JSON.stringify({ scenarios: produced }, null, 2)}\n`);
+      return;
+    }
+    const goldens = JSON.parse(await readFile(GOLDENS_PATH, "utf8")) as {
+      scenarios: Record<string, Record<string, PathProjection>>;
+    };
+    expect(produced).toEqual(goldens.scenarios);
+  } finally {
+    if (priorSidecar === undefined) {
+      delete process.env.DOHC_KERNEL_SIDECAR;
+    } else {
+      process.env.DOHC_KERNEL_SIDECAR = priorSidecar;
+    }
+    resetWorkspaceKernelRuntimeForTests();
   }
-  const goldens = JSON.parse(await readFile(GOLDENS_PATH, "utf8")) as {
-    scenarios: Record<string, Record<string, PathProjection>>;
-  };
-  expect(produced).toEqual(goldens.scenarios);
 });
