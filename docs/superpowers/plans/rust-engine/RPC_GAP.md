@@ -15,15 +15,15 @@ conflicts.list/open/resolve · search.query · watcher.status · capture.flush
 
 | desktop operation | daemon RPC | Rust logic |
 |---|---|---|
-| listTextFiles | MISSING | domain `store.rs list_snapshots` (not on actor) |
-| readBinaryFile | MISSING | domain read path exists |
+| listTextFiles | SHIPPED in RPC-A (#217): versionedText.list (paged, keyset afterPath cursor, measured byte budget) | domain `store.rs list_snapshot_metadata` |
+| readBinaryFile | SHIPPED in RPC-A (#217): versionedBinary.read (one-turn in-band cap, over-cap = metadata + inbandLimitBytes) | domain `store.rs read_binary_inband` |
 | rename/delete/rollback text | MISSING | domain `store.rs:203/216/353` |
 | compare/merge versions | MISSING | domain `merge.rs` |
 | getActiveVersion | MISSING | actor `active_version_id` is ID-ONLY; TS returns a full `VersionRecord \| null`. RPC-A ships the id (callers join via versions.list); a full-record passthrough is RPC-D work |
 | set/ensure active version | MISSING | domain exists |
-| listVersions / createNamedVersion / forkVersion | MISSING | domain `store.rs:593/823`, `secrets.rs:645` |
+| listVersions / createNamedVersion / forkVersion | listVersions SHIPPED in RPC-A (#217, versions.list); createNamedVersion/forkVersion remain MISSING (RPC-D) | domain `store.rs:593/823`, `secrets.rs:645` |
 | listMoments / getMoment | SHIPPED in RPC-A (#217, merged): moments.list/moments.get hydrate before/after TEXT plus actual byte lengths under the one-turn in-band cap (over-cap bodies come back as metadata + null text + inbandLimitBytes). What is NOT ported is the oracle's payload-provenance columns (payload_before_*/payload_after_* and before-snapshot identity) — the Rust schema lacks them; see the SCHEMA OBLIGATION below (pre-R15 migration candidate). RPC-D owes nothing here beyond that migration. | domain `store.rs:616/783` |
-| listSecretFiles / materializeSecretFile | MISSING | domain `secrets.rs:547/526` |
+| listSecretFiles / materializeSecretFile | SHIPPED in RPC-A (#217): secrets.list (keyless page) + secrets.materialize (in-band cap; over-cap tips authenticate then drop plaintext) | domain `secrets.rs:547/526` |
 | secret moments/compare/restore | MISSING | moments exist (`secrets.rs:582/614`); compare/restore are NOT ported — those line refs are TS `secretFileStore.ts:1468/1517/1584`. Real Rust domain work, not wiring |
 | CHATS (threads/messages/channels/feed/follows/bookmarks/reactions/mentions/decisions/dispatch) | ALL MISSING | `chats.rs:744-2004` covers channels/threads/messages/read-state/follows/feed/bookmarks/dispatch; reactions, decisions, and mention indexing were scoped OUT of R09 — unported domain work. Nothing on the actor |
 | ydoc SESSION protocol (open/recordUpdate/settle/applyExternalMarkdownEdit/close/resync + remoteUpdate events) | MISSING (only the `ydoc.apply` primitive) | session layer lives only in TS `ydocLoopbackEngine.ts`; contract at `packages/workspace-engine-client/src/ydoc/ydocWireContract.ts` |
