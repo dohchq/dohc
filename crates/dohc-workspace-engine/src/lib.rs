@@ -37,6 +37,13 @@ use std::{
 
 const MAX_OPEN_HANDLES: usize = 64;
 
+/// In-band binary reads are bounded by the DOP1 string limit (64 KiB per
+/// string): base64 expands 4/3, so this raw cap leaves headroom under it.
+/// Larger blobs need the protocol's blob-chunk streaming (BlobStart exists
+/// in the wire contract; no daemon producer yet — a recorded RPC_GAP.md
+/// obligation).
+const MAX_INBAND_BINARY_BYTES: usize = 48 * 1024;
+
 #[derive(Clone)]
 struct OpenWorkspace {
     root: PathBuf,
@@ -138,21 +145,30 @@ impl EngineService {
             }
             "watcher.status" => self.watcher_status(request.workspace)?,
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
-            "versions.active" => self.versions_active(request.workspace).await?,
-            "versions.list" => self.versions_list(request.workspace).await?,
+            "versions.active" => self.versions_active(&ctx, request.workspace).await?,
+            "versions.list" => self.versions_list(&ctx, request.workspace).await?,
             "versionedText.list" => {
-                self.versioned_text_list(request.workspace, request.params)
+                self.versioned_text_list(&ctx, request.workspace, request.params)
                     .await?
             }
             "versionedBinary.read" => {
-                self.versioned_binary_read(request.workspace, request.params)
+                self.versioned_binary_read(&ctx, request.workspace, request.params)
                     .await?
             }
-            "moments.list" => self.moments_list(request.workspace, request.params).await?,
-            "moments.get" => self.moments_get(request.workspace, request.params).await?,
-            "secrets.list" => self.secrets_list(request.workspace, request.params).await?,
+            "moments.list" => {
+                self.moments_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "moments.get" => {
+                self.moments_get(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.list" => {
+                self.secrets_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "secrets.materialize" => {
-                self.secrets_materialize(request.workspace, request.params)
+                self.secrets_materialize(&ctx, request.workspace, request.params)
                     .await?
             }
             _ => return Err(wire(ErrorCode::MethodNotFound, "unknown method")),
@@ -481,23 +497,62 @@ impl EngineService {
         }
     }
 
-    async fn versions_active(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
-        let open = self.open(handle.as_ref())?;
-        let version_id = open
-            .actor
-            .active_version_id(open.workspace_id)
-            .await
-            .map_err(map_runtime)?;
-        Ok(json!({ "versionId": version_id }))
+    /// Await an actor read under the request's cancellation/deadline — the
+    /// wait is abandoned (the actor's work completes and is discarded),
+    /// the same shape capture.flush uses. Read commands carry no token, so
+    /// abandoning the wait IS the cancellation semantics.
+    async fn read_under_ctx<T>(
+        cancellation: &OperationCancellation,
+        what: &str,
+        read: impl std::future::Future<Output = Result<T, RuntimeError>>,
+    ) -> Result<T, WireError> {
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => Err(cancellation.interruption(what)),
+            result = read => result.map_err(map_runtime),
+        }
     }
 
-    async fn versions_list(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
+    async fn versions_active(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
         let open = self.open(handle.as_ref())?;
-        let versions = open
-            .actor
-            .list_versions(open.workspace_id)
-            .await
-            .map_err(map_runtime)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let version_id = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("versions.active"));
+            }
+            result = open.actor.active_version_id(open.workspace_id) => result,
+        };
+        Ok(match version_id {
+            Ok(version_id) => json!({ "versionId": version_id }),
+            // A workspace with no versioned rows yet has no active version:
+            // the TS getActiveVersion answers null there, not an error. The
+            // workspace_id came from the daemon's own handle table, so
+            // WorkspaceNotFound here can only mean "nothing versioned yet".
+            Err(RuntimeError::Domain(DomainError::WorkspaceNotFound)) => {
+                json!({ "versionId": Value::Null })
+            }
+            Err(error) => return Err(map_runtime(error)),
+        })
+    }
+
+    async fn versions_list(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let versions = Self::read_under_ctx(
+            &cancellation,
+            "versions.list",
+            open.actor.list_versions(open.workspace_id),
+        )
+        .await?;
         Ok(json!({
             "versions": versions
                 .iter()
@@ -517,23 +572,50 @@ impl EngineService {
 
     async fn versioned_text_list(
         &self,
+        ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
         let params: VersionScopedParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
-        let snapshots = open
-            .actor
-            .list_snapshots(open.workspace_id, params.version_id)
-            .await
-            .map_err(map_runtime)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let snapshots = Self::read_under_ctx(
+            &cancellation,
+            "versionedText.list",
+            open.actor
+                .list_snapshots(open.workspace_id.clone(), params.version_id.clone()),
+        )
+        .await?;
+        // list_snapshots reads an unknown version as empty; every sibling
+        // read fails closed with VersionNotFound. Match them — a typo'd
+        // version must never masquerade as an empty one.
+        if snapshots.is_empty() {
+            let versions = Self::read_under_ctx(
+                &cancellation,
+                "versionedText.list",
+                open.actor.list_versions(open.workspace_id),
+            )
+            .await?;
+            if !versions
+                .iter()
+                .any(|version| version.version_id == params.version_id)
+            {
+                return Err(wire(ErrorCode::InvalidParams, "version not found"));
+            }
+        }
+        // METADATA ONLY — no bodies. A version's aggregated text trivially
+        // exceeds the DOP1 frame limit (64 KiB per string, 1 MiB per
+        // frame); bodies come one path at a time via versionedText.read.
         Ok(json!({
             "files": snapshots
                 .iter()
                 .map(|snapshot| {
-                    let (content_kind, text, binary_sha256) = match &snapshot.content {
+                    // byteLength only where the domain already holds it
+                    // (text); binary byte length comes with
+                    // versionedBinary.read's metadata.
+                    let (content_kind, byte_length, binary_sha256) = match &snapshot.content {
                         dohc_engine_domain::SnapshotContent::Text { text } => {
-                            ("text", Some(text.as_str()), None)
+                            ("text", Some(text.len()), None)
                         }
                         dohc_engine_domain::SnapshotContent::Binary { sha256 } => {
                             ("binary", None, Some(sha256.as_str()))
@@ -543,7 +625,7 @@ impl EngineService {
                         "path": snapshot.path,
                         "objectId": snapshot.object_id,
                         "contentKind": content_kind,
-                        "text": text,
+                        "byteLength": byte_length,
                         "binarySha256": binary_sha256,
                         "updatedAtMs": snapshot.updated_at_ms,
                         "latestMomentId": snapshot.latest_moment_id,
@@ -556,18 +638,34 @@ impl EngineService {
 
     async fn versioned_binary_read(
         &self,
+        ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
         let params: VersionPathParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
-        let head = open
-            .actor
-            .read_binary(open.workspace_id, params.version_id, params.path)
-            .await
-            .map_err(map_runtime)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let head = Self::read_under_ctx(
+            &cancellation,
+            "versionedBinary.read",
+            open.actor
+                .read_binary(open.workspace_id, params.version_id, params.path),
+        )
+        .await?;
         Ok(match head {
             None => Value::Null,
+            // The DOP1 wire caps strings at 64 KiB: base64 of anything over
+            // MAX_INBAND_BINARY_BYTES would fail at ENCODE, after the work
+            // was done. Answer with the metadata and a null body instead —
+            // self-describing, never silent — until the blob-chunk
+            // streaming surface exists (recorded in RPC_GAP.md).
+            Some(head) if head.bytes.len() > MAX_INBAND_BINARY_BYTES => json!({
+                "objectId": head.object_id,
+                "sha256": head.sha256,
+                "byteLength": head.bytes.len(),
+                "bytesBase64": Value::Null,
+                "inbandLimitBytes": MAX_INBAND_BINARY_BYTES,
+            }),
             Some(head) => json!({
                 "objectId": head.object_id,
                 "sha256": head.sha256,
@@ -579,22 +677,29 @@ impl EngineService {
 
     async fn moments_list(
         &self,
+        ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
         let params: MomentsListParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
-        let page = open
-            .actor
-            .list_moments(dohc_engine_domain::ListMomentsQuery {
-                workspace_id: open.workspace_id,
-                version_id: params.version_id,
-                object_id: params.object_id,
-                limit: params.limit.unwrap_or(100),
-                before_moment_order: params.before_moment_order,
-            })
-            .await
-            .map_err(map_runtime)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let page = Self::read_under_ctx(
+            &cancellation,
+            "moments.list",
+            open.actor
+                .list_moments(dohc_engine_domain::ListMomentsQuery {
+                    workspace_id: open.workspace_id,
+                    version_id: params.version_id,
+                    object_id: params.object_id,
+                    // Clamped: an unbounded page would load a workspace's whole
+                    // history in one actor turn and then fail the wire's
+                    // collection cap at encode anyway.
+                    limit: params.limit.unwrap_or(100).min(1000),
+                    before_moment_order: params.before_moment_order,
+                }),
+        )
+        .await?;
         Ok(json!({
             "moments": page.moments.iter().map(moment_json).collect::<Vec<_>>(),
             "nextBeforeMomentOrder": page.next_before_moment_order,
@@ -604,16 +709,19 @@ impl EngineService {
 
     async fn moments_get(
         &self,
+        ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
         let params: MomentsGetParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
-        let moment = open
-            .actor
-            .get_moment(open.workspace_id, params.moment_id)
-            .await
-            .map_err(map_runtime)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let moment = Self::read_under_ctx(
+            &cancellation,
+            "moments.get",
+            open.actor.get_moment(open.workspace_id, params.moment_id),
+        )
+        .await?;
         Ok(match moment {
             None => Value::Null,
             Some(moment) => moment_json(&moment),
@@ -622,16 +730,20 @@ impl EngineService {
 
     async fn secrets_list(
         &self,
+        ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
         let params: VersionScopedParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
-        let secrets = open
-            .actor
-            .list_secret_files(open.workspace_id, params.version_id)
-            .await
-            .map_err(map_runtime)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let secrets = Self::read_under_ctx(
+            &cancellation,
+            "secrets.list",
+            open.actor
+                .list_secret_files(open.workspace_id, params.version_id),
+        )
+        .await?;
         Ok(json!({
             "secrets": secrets
                 .iter()
@@ -653,30 +765,36 @@ impl EngineService {
     /// live secret state fails closed rather than returning nothing.
     async fn secrets_materialize(
         &self,
+        ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
         let params: VersionPathParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
         let key = dohc_engine_crypto::load_key_file(&open.root)
             .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?;
         let Some(key) = key else {
             // No key file: a workspace that never minted one has no secrets;
             // one WITH secret rows and no key is corrupt/misrestored state.
-            let has_state = open
-                .actor
-                .secret_state_exists_blocking(open.workspace_id.clone())
-                .map_err(map_runtime)?;
+            let has_state = Self::read_under_ctx(
+                &cancellation,
+                "secrets.materialize",
+                open.actor.secret_state_exists(open.workspace_id.clone()),
+            )
+            .await?;
             if has_state {
                 return Err(wire(ErrorCode::Internal, "secret key unavailable"));
             }
             return Ok(Value::Null);
         };
-        let plaintext = open
-            .actor
-            .materialize_secret(open.workspace_id, params.version_id, params.path, key)
-            .await
-            .map_err(map_runtime)?;
+        let plaintext = Self::read_under_ctx(
+            &cancellation,
+            "secrets.materialize",
+            open.actor
+                .materialize_secret(open.workspace_id, params.version_id, params.path, key),
+        )
+        .await?;
         Ok(match plaintext {
             None => Value::Null,
             Some(text) => json!({ "text": text }),
@@ -1424,6 +1542,7 @@ fn map_domain_code(error: DomainError) -> ErrorCode {
         | DomainError::DuplicateMomentId
         | DomainError::FileNotFound
         | DomainError::BinaryHeadNotText
+        | DomainError::TextHeadNotBinary
         | DomainError::TargetPathExists
         | DomainError::ForkBaseNotFound
         | DomainError::ConflictNotFound

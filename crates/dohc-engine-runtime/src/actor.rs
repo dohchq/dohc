@@ -611,6 +611,21 @@ impl ActorHandle {
             .map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// Whether the workspace holds ANY encrypted secret state — the async
+    /// variant for RPC handlers (a missing key file over live secret rows
+    /// must fail closed, never read as "no secrets").
+    pub async fn secret_state_exists(&self, workspace_id: String) -> Result<bool, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::SecretStateExists {
+                workspace_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Whether the workspace holds ANY encrypted secret state. The capture
     /// layer consults this before ever MINTING a data key: a missing key file
     /// over live secret rows must fail closed, never silently strand the
@@ -764,9 +779,8 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
-    /// The workspace's ACTIVE version id (falling back to main), read on the
-    /// actor thread. The capture driver targets this so captures land in the
-    /// version the user is actually on (TS oracle parity).
+    /// Every version record in the workspace, newest-first per the domain's
+    /// ordering — the read behind `versions.list`.
     pub async fn list_versions(
         &self,
         workspace_id: String,
@@ -888,6 +902,9 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// The workspace's ACTIVE version id (falling back to main), read on the
+    /// actor thread. The capture driver targets this so captures land in the
+    /// version the user is actually on (TS oracle parity).
     pub async fn active_version_id(&self, workspace_id: String) -> Result<String, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx

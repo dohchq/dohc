@@ -90,6 +90,10 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         "img.png",
         &[0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF, 0x01],
     );
+    // Binary over the in-band cap (48 KiB): PNG magic + 64 KiB total.
+    let mut big_png = vec![0x89, 0x50, 0x4E, 0x47];
+    big_png.resize(64 * 1024, 0xAB);
+    write_file(scratch.path(), "img-big.png", &big_png);
     write_file(scratch.path(), ".env", b"TOKEN=rpc-read");
 
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -209,9 +213,50 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
             ),
         )
         .await;
+    let refusal = text_as_binary.expect_err("a text head must refuse binary read");
+    assert_eq!(
+        refusal.code,
+        dohc_engine_protocol::error::ErrorCode::InvalidParams,
+        "asked-the-wrong-surface is a CALLER error, symmetric with BinaryHeadNotText"
+    );
+
+    // A blob over the in-band cap answers METADATA with a null body — the
+    // DOP1 string limit makes full bytes unencodable, and a silent failure
+    // at encode (after the read) would be strictly worse.
+    id += 1;
+    let big = call(
+        &transport,
+        &handle,
+        id,
+        "versionedBinary.read",
+        json!({ "versionId": "main", "path": "img-big.png" }),
+    )
+    .await;
+    assert_eq!(big["byteLength"], json!(64 * 1024));
     assert!(
-        text_as_binary.is_err(),
-        "a text head must refuse binary read"
+        big["bytesBase64"].is_null(),
+        "over-cap bytes stay out-of-band"
+    );
+    assert_eq!(big["inbandLimitBytes"], json!(48 * 1024));
+    assert!(big["sha256"].is_string());
+
+    // An unknown version fails closed on the listing too — a typo'd id must
+    // never masquerade as an empty version.
+    id += 1;
+    let unknown_version = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "versionedText.list",
+                Some(handle.clone()),
+                json!({ "versionId": "no-such-version" }),
+            ),
+        )
+        .await;
+    assert!(
+        unknown_version.is_err(),
+        "listing an unknown version must refuse, not read as empty"
     );
 
     // moments.list pages newest-first and moments.get roundtrips one.
@@ -291,6 +336,31 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     .await;
     assert!(absent.is_null(), "an absent secret materializes to null");
 
+    // FAIL CLOSED: live secret state with a MISSING key file is
+    // corrupt/misrestored — materialize must error, never read as empty.
+    std::fs::remove_file(
+        scratch
+            .path()
+            .join(dohc_engine_crypto::SECRET_KEY_FILE_RELATIVE),
+    )
+    .expect("remove key file");
+    id += 1;
+    let keyless = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "secrets.materialize",
+                Some(handle.clone()),
+                json!({ "versionId": "main", "path": ".env" }),
+            ),
+        )
+        .await;
+    assert!(
+        keyless.is_err(),
+        "secret state without a key must fail closed"
+    );
+
     id += 1;
     transport
         .call(
@@ -299,6 +369,58 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         )
         .await
         .expect("close");
+
+    // A BRAND-NEW workspace: nothing captured, nothing versioned, no key.
+    // versions.active answers null (TS getActiveVersion parity — not an
+    // error) and keyless materialize answers null (no state, fail open is
+    // correct here).
+    let fresh = ScratchDir::new().expect("fresh scratch");
+    write_shadow_marker_for_harness(fresh.path(), TOKEN).expect("marker");
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id + 1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": fresh.path().to_string_lossy(),
+                    "workspaceId": "rpc-read-fresh",
+                }),
+            ),
+        )
+        .await
+        .expect("fresh open");
+    let fresh_handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("fresh handle");
+    let active = call(
+        &transport,
+        &fresh_handle,
+        id + 2,
+        "versions.active",
+        json!({}),
+    )
+    .await;
+    assert!(
+        active["versionId"].is_null(),
+        "an empty workspace has no active version yet"
+    );
+    let no_state = call(
+        &transport,
+        &fresh_handle,
+        id + 3,
+        "secrets.materialize",
+        json!({ "versionId": "main", "path": ".env" }),
+    )
+    .await;
+    assert!(no_state.is_null(), "no key + no state materializes to null");
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(id + 4, "workspace.close", Some(fresh_handle), json!({})),
+        )
+        .await
+        .expect("fresh close");
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
