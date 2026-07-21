@@ -16,11 +16,11 @@
 
 use crate::error::DomainError;
 use crate::records::{
-    BinaryHead, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
-    CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord,
-    ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
-    RollbackTextFileMutation, SnapshotContent, SnapshotMetadata, SnapshotRecord, SnapshotView,
-    TextSnapshot, VersionKind, VersionRecord, WriteResult, WriteText,
+    BinaryHead, BinaryHeadMeta, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
+    CaptureRetire, CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile,
+    FileObjectRecord, ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult,
+    RenameTextFile, RollbackTextFileMutation, SnapshotContent, SnapshotMetadata, SnapshotRecord,
+    SnapshotView, TextSnapshot, VersionKind, VersionRecord, WriteResult, WriteText,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
@@ -614,6 +614,48 @@ impl<'a> VersionedTextStore<'a> {
                 object_id,
                 sha256,
                 bytes,
+            }))
+        })
+    }
+
+    /// The binary head's METADATA — object id, sha, and the blob's byte
+    /// length sized in SQL — without materializing a single content byte.
+    /// The over-cap in-band answer needs exactly this, and loading a large
+    /// blob just to discard it is a needless copy per request.
+    pub fn read_binary_meta(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+        path: &str,
+    ) -> Result<Option<BinaryHeadMeta>, DomainError> {
+        let path = validate_addressable_plaintext_path(path)?;
+        self.store.read_with(|conn| {
+            if !version_exists(conn, workspace_id, version_id)? {
+                return Err(DomainError::VersionNotFound);
+            }
+            let Some(object_id) = alias_object_id(conn, workspace_id, version_id, &path)? else {
+                return Ok(None);
+            };
+            let Some(snapshot) = get_snapshot(conn, workspace_id, version_id, &object_id)? else {
+                return Ok(None);
+            };
+            if snapshot.content_kind != "binary" {
+                return Err(DomainError::TextHeadNotBinary);
+            }
+            let sha256 = snapshot.binary_sha256.ok_or(DomainError::StateCorrupt {
+                reason: "binary head without a binary sha",
+            })?;
+            let byte_length: i64 = conn
+                .query_row(
+                    "SELECT LENGTH(bytes) FROM binary_blobs WHERE sha256 = ?1",
+                    [&sha256],
+                    |row| row.get(0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            Ok(Some(BinaryHeadMeta {
+                object_id,
+                sha256,
+                byte_length,
             }))
         })
     }

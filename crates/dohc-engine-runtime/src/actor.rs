@@ -32,7 +32,7 @@ use crate::search::{SearchResult, search_workspace};
 use dohc_engine_collab::{AppendOutcome, ContentKind, DocKey, Regime};
 use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
-    BinaryHead, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
+    BinaryHead, BinaryHeadMeta, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
     CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult, CaptureSecret,
     CaptureSecretRetire, ListMomentsQuery, MomentPage, MomentRecord, ResolveTextConflict,
     ResolveTextConflictResult, SecretFileStat, SecretFileStore, SecretMomentRecord,
@@ -228,6 +228,12 @@ enum Command {
         version_id: String,
         path: String,
         reply: oneshot::Sender<Result<Option<BinaryHead>, RuntimeError>>,
+    },
+    ReadBinaryMeta {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        reply: oneshot::Sender<Result<Option<BinaryHeadMeta>, RuntimeError>>,
     },
     ListSecretFiles {
         workspace_id: String,
@@ -786,8 +792,8 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
-    /// Every version record in the workspace, newest-first per the domain's
-    /// ordering — the read behind `versions.list`.
+    /// Every version record in the workspace, oldest-first
+    /// (`created_at_ms, name, version_id`) — the read behind `versions.list`.
     pub async fn list_versions(
         &self,
         workspace_id: String,
@@ -881,6 +887,26 @@ impl ActorHandle {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ReadBinary {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// The binary head's metadata (no bytes) — sized in SQL.
+    pub async fn read_binary_meta(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+    ) -> Result<Option<BinaryHeadMeta>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReadBinaryMeta {
                 workspace_id,
                 version_id,
                 path,
@@ -1459,6 +1485,17 @@ fn worker_main(
             } => {
                 let outcome = VersionedTextStore::new(&mut store)
                     .read_binary(&workspace_id, &version_id, &path)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ReadBinaryMeta {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .read_binary_meta(&workspace_id, &version_id, &path)
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }

@@ -51,13 +51,17 @@ const MAX_INBAND_CONTENT_BYTES: usize = 48 * 1024;
 /// pass this, well under the 1 MiB frame limit.
 const MOMENTS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
 
-/// How many leading rows fit a byte budget (at least one always ships —
-/// every string is wire-capped, so a single row fits by construction).
-fn byte_budget_cut<T>(rows: &[T], size_of: impl Fn(&T) -> usize, budget: usize) -> usize {
+/// How many leading serialized rows fit a byte budget (at least one always
+/// ships — every string is wire-capped, so a single row fits). MEASURED on
+/// the serialized JSON, not estimated from raw lengths: escaping can expand
+/// a control-character-heavy string up to 6x, and an estimate that ignores
+/// that can pass the budget while the encoded frame exceeds the limit.
+fn byte_budget_cut_serialized(rows: &[Value], budget: usize) -> usize {
     let mut included = 0usize;
     let mut remaining = budget as i64;
     for row in rows {
-        remaining -= size_of(row) as i64;
+        let size = serde_json::to_string(row).map_or(0, |s| s.len());
+        remaining -= size as i64;
         if included > 0 && remaining < 0 {
             break;
         }
@@ -575,20 +579,27 @@ impl EngineService {
             open.actor.list_versions(open.workspace_id),
         )
         .await?;
-        Ok(json!({
-            "versions": versions
-                .iter()
-                .map(|version| {
-                    json!({
-                        "versionId": version.version_id,
-                        "kind": version.kind.as_str(),
-                        "name": version.name,
-                        "createdAtMs": version.created_at_ms,
-                        "forkVersionId": version.fork_version_id,
-                        "forkMomentId": version.fork_moment_id,
-                    })
+        // Versions are few in practice, but the frame limit does not care
+        // about practice: same measured budget + honest truncated flag as
+        // every other list family.
+        let row_values: Vec<Value> = versions
+            .iter()
+            .map(|version| {
+                json!({
+                    "versionId": version.version_id,
+                    "kind": version.kind.as_str(),
+                    "name": version.name,
+                    "createdAtMs": version.created_at_ms,
+                    "forkVersionId": version.fork_version_id,
+                    "forkMomentId": version.fork_moment_id,
                 })
-                .collect::<Vec<_>>()
+            })
+            .collect();
+        let included = byte_budget_cut_serialized(&row_values, MOMENTS_PAGE_BYTE_BUDGET);
+        let truncated = included < row_values.len();
+        Ok(json!({
+            "versions": row_values[..included].to_vec(),
+            "truncated": truncated,
         }))
     }
 
@@ -640,38 +651,28 @@ impl EngineService {
         // Metadata rows can still be string-heavy (paths/origins are
         // wire-legal up to 64 KiB): the byte budget cuts the page under
         // the frame limit; the cursor resumes at the cut.
-        let byte_cut = byte_budget_cut(
-            &rows,
-            |row| {
-                160 + row.path.len()
-                    + row.object_id.len()
-                    + row.latest_moment_id.len()
-                    + row.metadata_origin.len()
-                    + row.binary_sha256.as_deref().map_or(0, str::len)
-            },
-            MOMENTS_PAGE_BYTE_BUDGET,
-        );
+        let row_values: Vec<Value> = rows
+            .iter()
+            .map(|row| {
+                json!({
+                    "path": row.path,
+                    "objectId": row.object_id,
+                    "contentKind": row.content_kind,
+                    "byteLength": row.text_byte_length,
+                    "binarySha256": row.binary_sha256,
+                    "updatedAtMs": row.updated_at_ms,
+                    "latestMomentId": row.latest_moment_id,
+                    "metadataOrigin": row.metadata_origin,
+                })
+            })
+            .collect();
+        let byte_cut = byte_budget_cut_serialized(&row_values, MOMENTS_PAGE_BYTE_BUDGET);
         let byte_truncated = byte_cut < rows.len();
-        rows.truncate(byte_cut);
         let next_after_path = (has_more || byte_truncated)
-            .then(|| rows.last().map(|row| row.path.clone()))
+            .then(|| rows[..byte_cut].last().map(|row| row.path.clone()))
             .flatten();
         Ok(json!({
-            "files": rows
-                .iter()
-                .map(|row| {
-                    json!({
-                        "path": row.path,
-                        "objectId": row.object_id,
-                        "contentKind": row.content_kind,
-                        "byteLength": row.text_byte_length,
-                        "binarySha256": row.binary_sha256,
-                        "updatedAtMs": row.updated_at_ms,
-                        "latestMomentId": row.latest_moment_id,
-                        "metadataOrigin": row.metadata_origin,
-                    })
-                })
-                .collect::<Vec<_>>(),
+            "files": row_values[..byte_cut].to_vec(),
             "nextAfterPath": next_after_path,
         }))
     }
@@ -685,33 +686,47 @@ impl EngineService {
         let params: VersionPathParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let head = Self::read_under_ctx(
+        let meta = Self::read_under_ctx(
             &cancellation,
             "versionedBinary.read",
-            open.actor
-                .read_binary(open.workspace_id, params.version_id, params.path),
+            open.actor.read_binary_meta(
+                open.workspace_id.clone(),
+                params.version_id.clone(),
+                params.path.clone(),
+            ),
         )
         .await?;
-        Ok(match head {
+        Ok(match meta {
             None => Value::Null,
-            // The DOP1 wire caps strings at 64 KiB: base64 of anything over
-            // MAX_INBAND_CONTENT_BYTES would fail at ENCODE, after the work
-            // was done. Answer with the metadata and a null body instead —
-            // self-describing, never silent — until the blob-chunk
-            // streaming surface exists (recorded in RPC_GAP.md).
-            Some(head) if head.bytes.len() > MAX_INBAND_CONTENT_BYTES => json!({
-                "objectId": head.object_id,
-                "sha256": head.sha256,
-                "byteLength": head.bytes.len(),
+            // Over the in-band cap: the metadata IS the answer — the bytes
+            // are never materialized, not loaded-then-discarded (a large
+            // blob per request would be a soft DoS vector).
+            Some(meta) if meta.byte_length as usize > MAX_INBAND_CONTENT_BYTES => json!({
+                "objectId": meta.object_id,
+                "sha256": meta.sha256,
+                "byteLength": meta.byte_length,
                 "bytesBase64": Value::Null,
                 "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
             }),
-            Some(head) => json!({
-                "objectId": head.object_id,
-                "sha256": head.sha256,
-                "byteLength": head.bytes.len(),
-                "bytesBase64": base64::engine::general_purpose::STANDARD.encode(&head.bytes),
-            }),
+            Some(_) => {
+                let head = Self::read_under_ctx(
+                    &cancellation,
+                    "versionedBinary.read",
+                    open.actor
+                        .read_binary(open.workspace_id, params.version_id, params.path),
+                )
+                .await?;
+                match head {
+                    None => Value::Null,
+                    Some(head) => json!({
+                        "objectId": head.object_id,
+                        "sha256": head.sha256,
+                        "byteLength": head.bytes.len(),
+                        "bytesBase64":
+                            base64::engine::general_purpose::STANDARD.encode(&head.bytes),
+                    }),
+                }
+            }
         })
     }
 
@@ -744,33 +759,18 @@ impl EngineService {
         // 64 KiB string. Cut the page when the running size estimate would
         // pass the budget (at least one row always ships — a single row
         // fits by construction, every string being wire-capped).
-        let mut included = 0usize;
-        let mut budget = MOMENTS_PAGE_BYTE_BUDGET as i64;
-        for moment in &page.moments {
-            let row_estimate = 220
-                + moment.moment_id.len()
-                + moment.version_id.len()
-                + moment.object_id.len()
-                + moment.path.len()
-                + moment.metadata_origin.len()
-                + moment.author_json.as_deref().map_or(0, str::len)
-                + moment.after_blob_sha256.as_deref().map_or(0, str::len)
-                + moment.before_blob_sha256.as_deref().map_or(0, str::len);
-            budget -= row_estimate as i64;
-            if included > 0 && budget < 0 {
-                break;
-            }
-            included += 1;
-        }
-        let truncated = included < page.moments.len();
-        let moments = &page.moments[..included];
+        let rows: Vec<Value> = page.moments.iter().map(moment_json).collect();
+        let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
+        let truncated = included < rows.len();
         let next_before = if truncated {
-            moments.last().map(|moment| moment.moment_order)
+            page.moments[..included]
+                .last()
+                .map(|moment| moment.moment_order)
         } else {
             page.next_before_moment_order
         };
         Ok(json!({
-            "moments": moments.iter().map(moment_json).collect::<Vec<_>>(),
+            "moments": rows[..included].to_vec(),
             "nextBeforeMomentOrder": next_before,
             // The TS contract's numeric sentinel: -1 for an empty timeline,
             // never null (numeric comparisons drive polling/cursor state).
@@ -819,24 +819,21 @@ impl EngineService {
         // budget keeps a many-secret workspace under the frame limit.
         // No cursor on this family yet — truncated says so honestly
         // (RPC_GAP follow-up alongside the chat list families).
-        let included = byte_budget_cut(
-            &secrets,
-            |stat| 140 + stat.path.len() + stat.latest_moment_id.len(),
-            MOMENTS_PAGE_BYTE_BUDGET,
-        );
-        let truncated = included < secrets.len();
-        Ok(json!({
-            "secrets": secrets[..included]
-                .iter()
-                .map(|stat| {
-                    json!({
-                        "path": stat.path,
-                        "byteLength": stat.byte_length,
-                        "updatedAtMs": stat.updated_at_ms,
-                        "latestMomentId": stat.latest_moment_id,
-                    })
+        let row_values: Vec<Value> = secrets
+            .iter()
+            .map(|stat| {
+                json!({
+                    "path": stat.path,
+                    "byteLength": stat.byte_length,
+                    "updatedAtMs": stat.updated_at_ms,
+                    "latestMomentId": stat.latest_moment_id,
                 })
-                .collect::<Vec<_>>(),
+            })
+            .collect();
+        let included = byte_budget_cut_serialized(&row_values, MOMENTS_PAGE_BYTE_BUDGET);
+        let truncated = included < row_values.len();
+        Ok(json!({
+            "secrets": row_values[..included].to_vec(),
             "truncated": truncated,
         }))
     }
@@ -854,7 +851,11 @@ impl EngineService {
         let params: VersionPathParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let key = dohc_engine_crypto::load_key_file(&open.root)
+        // Blocking filesystem work stays off the tokio worker.
+        let key_root = open.root.clone();
+        let key = tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_root))
+            .await
+            .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?
             .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?;
         let Some(key) = key else {
             // No key file: a workspace that never minted one has no secrets;
@@ -882,6 +883,14 @@ impl EngineService {
                 .any(|version| version.version_id == params.version_id)
             {
                 return Err(wire(ErrorCode::InvalidParams, "version not found"));
+            }
+            // The keyed path routes through the domain's fail-closed
+            // secret-path gate; keyless-and-stateless must refuse ordinary
+            // paths identically, never read them as "absent secrets".
+            if dohc_engine_files::policy::classify_engine_file_path(&params.path)
+                != dohc_engine_files::policy::PathClassification::Secret
+            {
+                return Err(wire(ErrorCode::InvalidParams, "not a secret path"));
             }
             return Ok(Value::Null);
         };
