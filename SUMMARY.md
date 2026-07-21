@@ -56,3 +56,15 @@ The RPC acceptance flow now covers unfollowable targets, feed page cursors/read 
 - Channel listing now fails closed on negative or non-integer persisted read-state sequence/revision values before calculating unread aggregates, while retaining the aggregate's zero clamp for valid over-count cursors.
 
 Round-2 regression coverage proves stable-policy write-time chat search (with a mutation-guard comment), duplicate/conflicting enqueue behavior, normalized run-id completion, and corrupt negative read-state rejection. Per the task constraint, no Cargo build, check, or test command was run; all changed Rust files passed direct `rustfmt --edition 2024 --check`, and `git diff --check` passed.
+
+## Review round 3
+
+- Bookmark re-saves now clear projection ownership when the destination changes or an archived row is reactivated, while same-destination active saves retain ownership. New bookmark ids are derived from `(ownerUserId, targetKind, targetId)` with the oracle's SHA-256/first-16-bytes/lowercase-unpadded-base32 algorithm; the save RPC no longer accepts `bookmarkId`.
+- Local follow writes without `atMs` read the prior register in the same transaction and use `max(nowMs, prior.updatedAtMs + 1)`, preserving follow-after-unfollow ordering within one millisecond.
+- Personal-feed RPC pages now use the measured chat byte budget. A byte-truncated page remints `nextCursor` from its last included feed coordinate.
+- Untitled start/list thread responses derive their display title from the first message's collapsed first line, apply the 80-character ellipsis bound, and fall back to `New chat` when no message exists.
+- Caller-supplied message id `__thread__` and the two well-known wire ids as channel ids are rejected as invalid input. Channel wire mappings now use first-writer-wins `INSERT OR IGNORE` behavior.
+- Dispatch failures reject non-string RPC values, whitespace-only reasons, and reasons above 16,384 UTF-16 code units; accepted reasons remain verbatim. No pause-reason RPC is wired on this Rust surface.
+- Dispatch claims now return the complete `{ dispatch, run }` projection with camelCase fields and nullable optional values. The existing schema already stores `command`, `log_path`, terminal metadata, and `failure_note_posted`, so no schema change or compatibility gap was needed.
+
+Round-3 domain and RPC regressions cover projection ownership transfer, exact bookmark-id/base32 vectors, same-millisecond follow toggles, feed byte-cut cursor continuity, untitled title derivation/fallback, reserved ids and FTS-header preservation, first-writer channel-wire mapping, failure-reason validation/verbatim storage, and the full persisted dispatch/run claim. Per the task constraint, no Cargo command was run; all changed Rust files passed direct `rustfmt --edition 2024 --check`, and `git diff --check` passed.

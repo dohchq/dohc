@@ -12,10 +12,11 @@
 //! `agentDispatchStore.ts` oracle behavior).
 //!
 //! Identity is caller-supplied, not RNG-minted: `channel_id`, `thread_id`,
-//! `message_id`, `bookmark_id`, `run_id` are inputs — the same determinism the
+//! `message_id`, and `run_id` are inputs — the same determinism the
 //! versioning domain uses (`object_id`/`moment_id` are inputs). This keeps the
 //! store free of a nondeterministic id source and lets the differential harness
-//! pin exact rows.
+//! pin exact rows. Bookmark ids are deterministically derived from their owner
+//! and target, matching the TS store.
 //!
 //! **Parity-critical, non-tautological surfaces** (validated against real TS
 //! output, not Rust's own):
@@ -374,10 +375,38 @@ pub struct ChatBookmarkTransition {
 /// A durable dispatch claim (ledger row + minted run record).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchClaim {
+    pub dispatch: DispatchRecord,
+    pub run: AgentRunRecord,
+}
+
+/// A durable dispatch-ledger row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchRecord {
+    pub workspace_id: String,
     pub trigger_message_id: String,
     pub thread_id: String,
-    pub run_id: String,
+    pub state: String,
+    pub run_id: Option<String>,
+    pub failure_reason: Option<String>,
     pub attempt_count: i64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+/// A durable agent-run row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentRunRecord {
+    pub workspace_id: String,
+    pub run_id: String,
+    pub thread_id: String,
+    pub trigger_message_id: String,
+    pub command: String,
+    pub started_at_ms: i64,
+    pub ended_at_ms: Option<i64>,
+    pub exit_code: Option<i64>,
+    pub failure_reason: Option<String>,
+    pub log_path: Option<String>,
+    pub failure_note_posted: bool,
 }
 
 // ---------------------------------------------------------------------- inputs
@@ -427,7 +456,10 @@ pub struct SetFollow {
     pub target_kind: FollowTargetKind,
     pub target_id: String,
     pub state: FollowState,
-    pub at_ms: i64,
+    /// An explicit replication/LWW timestamp. Local writes leave this absent and
+    /// advance from `now_ms` and the prior row inside the write transaction.
+    pub at_ms: Option<i64>,
+    pub now_ms: i64,
     pub origin_id: String,
     pub origin_seq: i64,
 }
@@ -436,7 +468,6 @@ pub struct SetFollow {
 #[derive(Debug, Clone)]
 pub struct SaveBookmark {
     pub workspace_id: String,
-    pub bookmark_id: String,
     pub owner_user_id: String,
     pub target_kind: BookmarkTargetKind,
     pub target_id: String,
@@ -496,7 +527,7 @@ pub fn channel_slug_for_name(name: &str) -> String {
 }
 
 /// base32 lowercase (RFC 4648, no padding) of `bytes` (`base32LowercaseNoPadding`).
-fn base32_lowercase_no_padding(bytes: &[u8]) -> String {
+pub fn base32_lowercase_no_padding(bytes: &[u8]) -> String {
     let mut out = String::with_capacity(bytes.len().saturating_mul(8).div_ceil(5));
     let mut value: u32 = 0;
     let mut bits: u32 = 0;
@@ -514,6 +545,23 @@ fn base32_lowercase_no_padding(bytes: &[u8]) -> String {
         out.push(BASE32_LOWERCASE_ALPHABET[idx] as char);
     }
     out
+}
+
+/// Stable bookmark identity: `bookmark_` plus lowercase unpadded base32 of the
+/// first 16 SHA-256 bytes of `owner\0target-kind\0target-id`.
+pub fn bookmark_id_for(
+    owner_user_id: &str,
+    target_kind: BookmarkTargetKind,
+    target_id: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(owner_user_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(target_kind.as_str().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(target_id.as_bytes());
+    let digest = hasher.finalize();
+    format!("bookmark_{}", base32_lowercase_no_padding(&digest[..16]))
 }
 
 /// A projection field must be non-empty, not `.`/`..`, contain no `/`, `\`, or
@@ -660,6 +708,18 @@ fn normalize_dispatch_run_id(run_id: &str) -> Result<String, DomainError> {
         ))
     } else {
         Ok(normalized.to_owned())
+    }
+}
+
+/// Failure reasons are validated using the TS store's UTF-16 length and
+/// JavaScript trim semantics, while the original string is stored verbatim.
+fn normalize_failure_reason(reason: &str) -> Result<String, DomainError> {
+    if reason.trim_matches(is_js_trim_ws).is_empty() || reason.encode_utf16().count() > 16_384 {
+        Err(DomainError::InvalidInput {
+            reason: "run failure reason is invalid",
+        })
+    } else {
+        Ok(reason.to_owned())
     }
 }
 
@@ -885,6 +945,11 @@ impl<'a> LinkedChatStore<'a> {
             "invalid-channel-name",
             "channel_id must not be empty",
         )?;
+        if matches!(channel_id, GENERAL_CHANNEL_WIRE_ID | AGENT_CHANNEL_WIRE_ID) {
+            return Err(DomainError::InvalidInput {
+                reason: "channel id is reserved",
+            });
+        }
         let name = normalize_channel_name(name)?;
         if kind == ChatChannelKind::Agent {
             return Err(DomainError::chat(
@@ -1156,6 +1221,11 @@ impl<'a> LinkedChatStore<'a> {
             "invalid-message-body",
             "message_id must not be empty",
         )?;
+        if input.message_id == CHAT_THREAD_HEADER_MESSAGE_ID {
+            return Err(DomainError::InvalidInput {
+                reason: "message id is reserved",
+            });
+        }
         let title = normalize_optional_thread_title(input.title.as_deref())?;
         let display_name = normalize_display_name(&input.author_display_name)?;
         let author_user_id = normalize_author_user_id(input.author_user_id.as_deref())?;
@@ -1257,7 +1327,7 @@ impl<'a> LinkedChatStore<'a> {
             let thread = ChatThread {
                 workspace_id: input.workspace_id.clone(),
                 thread_id: input.thread_id.clone(),
-                title: title_c.clone(),
+                title: display_title,
                 created_at_ms: now,
                 updated_at_ms: now,
                 channel_id: Some(channel.channel_id.clone()),
@@ -1303,6 +1373,11 @@ impl<'a> LinkedChatStore<'a> {
             "invalid-message-body",
             "message_id must not be empty",
         )?;
+        if input.message_id == CHAT_THREAD_HEADER_MESSAGE_ID {
+            return Err(DomainError::InvalidInput {
+                reason: "message id is reserved",
+            });
+        }
         let display_name = normalize_display_name(&input.author_display_name)?;
         let author_user_id = normalize_author_user_id(input.author_user_id.as_deref())?;
         let origin = normalize_origin(input.origin.as_deref())?;
@@ -1461,8 +1536,12 @@ impl<'a> LinkedChatStore<'a> {
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT workspace_id, thread_id, title, created_at_ms, updated_at_ms, \
-                     channel_id, linked_object_id FROM chat_threads WHERE workspace_id = ?1 \
+                    "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, t.updated_at_ms, \
+                     t.channel_id, t.linked_object_id, \
+                     (SELECT m.body FROM chat_messages m \
+                      WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
+                      ORDER BY m.created_at_ms, m.message_id LIMIT 1) \
+                     FROM chat_threads t WHERE t.workspace_id = ?1 \
                      ORDER BY created_at_ms, thread_id LIMIT ?2",
                 )
                 .map_err(DomainError::sql_corrupt)?;
@@ -1660,8 +1739,28 @@ impl<'a> LinkedChatStore<'a> {
                     }
                 }
             }
-            upsert_follow_lww(tx, &input)?;
-            journal(tx, &input.target_id, "chat.follow.set", input.at_ms)?;
+            let prior_at_ms: Option<i64> = tx
+                .query_row(
+                    "SELECT updated_at_ms FROM chat_follows \
+                     WHERE workspace_id = ?1 AND owner_user_id = ?2 \
+                       AND target_kind = ?3 AND target_id = ?4",
+                    params![
+                        input.workspace_id,
+                        input.owner_user_id,
+                        input.target_kind.as_str(),
+                        input.target_id
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            let at_ms = input.at_ms.unwrap_or_else(|| {
+                input
+                    .now_ms
+                    .max(prior_at_ms.map_or(0, |prior| prior.saturating_add(1)))
+            });
+            upsert_follow_lww(tx, &input, at_ms)?;
+            journal(tx, &input.target_id, "chat.follow.set", at_ms)?;
             require_follow(
                 tx,
                 &input.workspace_id,
@@ -1893,11 +1992,6 @@ impl<'a> LinkedChatStore<'a> {
             "invalid-bookmark-target",
             "Bookmark target is required.",
         )?;
-        non_empty(
-            &input.bookmark_id,
-            "invalid-bookmark-target",
-            "Bookmark id is required.",
-        )?;
         // The destination is a user-write path a projection worker later
         // materializes, so it must clear the path floor (no empty/absolute/
         // backslash/traversal/`.dohc` targets) BEFORE it is persisted and queued
@@ -1933,9 +2027,9 @@ impl<'a> LinkedChatStore<'a> {
                     (thread_id, Some(input.target_id.clone()))
                 }
             };
-            let existing: Option<String> = tx
+            let existing: Option<(String, String, String)> = tx
                 .query_row(
-                    "SELECT bookmark_id FROM chat_bookmarks \
+                    "SELECT bookmark_id, destination_path, state FROM chat_bookmarks \
                      WHERE workspace_id = ?1 AND owner_user_id = ?2 \
                        AND target_kind = ?3 AND target_id = ?4",
                     params![
@@ -1944,11 +2038,14 @@ impl<'a> LinkedChatStore<'a> {
                         input.target_kind.as_str(),
                         input.target_id
                     ],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()
                 .map_err(DomainError::sql_corrupt)?;
-            let bookmark_id = if let Some(existing_id) = existing {
+            let bookmark_id = if let Some((existing_id, prior_destination, prior_state)) = existing
+            {
+                let resets_projection =
+                    prior_destination != input.destination_path || prior_state == "archived";
                 tx.execute(
                     "UPDATE chat_bookmarks SET thread_id = ?3, message_id = ?4, mode = ?5, \
                        destination_path = ?6, state = 'active', updated_at_ms = ?7 \
@@ -1965,8 +2062,18 @@ impl<'a> LinkedChatStore<'a> {
                 )
                 .map_err(DomainError::sql_persist)?;
                 queue_bookmark_generation(tx, &input.workspace_id, &existing_id, now)?;
+                if resets_projection {
+                    tx.execute(
+                        "UPDATE chat_bookmark_outbox SET projection_object_id = NULL \
+                         WHERE workspace_id = ?1 AND bookmark_id = ?2",
+                        params![input.workspace_id, existing_id],
+                    )
+                    .map_err(DomainError::sql_persist)?;
+                }
                 existing_id
             } else {
+                let bookmark_id =
+                    bookmark_id_for(&input.owner_user_id, input.target_kind, &input.target_id);
                 tx.execute(
                     "INSERT INTO chat_bookmarks \
                      (workspace_id, bookmark_id, owner_user_id, target_kind, target_id, thread_id, \
@@ -1974,7 +2081,7 @@ impl<'a> LinkedChatStore<'a> {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', ?10, ?10)",
                     params![
                         input.workspace_id,
-                        input.bookmark_id,
+                        bookmark_id,
                         input.owner_user_id,
                         input.target_kind.as_str(),
                         input.target_id,
@@ -1990,10 +2097,10 @@ impl<'a> LinkedChatStore<'a> {
                     "INSERT INTO chat_bookmark_outbox \
                      (workspace_id, bookmark_id, generation, projected_generation, \
                       projection_state, updated_at_ms) VALUES (?1, ?2, 1, 0, 'pending', ?3)",
-                    params![input.workspace_id, input.bookmark_id, now],
+                    params![input.workspace_id, bookmark_id, now],
                 )
                 .map_err(DomainError::sql_persist)?;
-                input.bookmark_id.clone()
+                bookmark_id
             };
             require_bookmark(tx, &input.workspace_id, &input.owner_user_id, &bookmark_id)
         })?;
@@ -2220,20 +2327,20 @@ impl<'a> LinkedChatStore<'a> {
             if open_running > 0 {
                 return Ok::<_, DomainError>(None);
             }
-            let pending: Option<(String, String, i64)> = tx
+            let pending: Option<(String, String, i64, i64)> = tx
                 .query_row(
-                    "SELECT l.trigger_message_id, l.thread_id, l.attempt_count \
+                    "SELECT l.trigger_message_id, l.thread_id, l.attempt_count, l.created_at_ms \
                      FROM chat_dispatch_ledger l WHERE l.workspace_id = ?1 AND l.state = 'pending' \
                        AND NOT EXISTS (SELECT 1 FROM chat_dispatch_pause p \
                          WHERE p.workspace_id = l.workspace_id AND p.thread_id = l.thread_id \
                            AND p.paused = 1) \
                      ORDER BY l.created_at_ms, l.trigger_message_id LIMIT 1",
                     params![ws],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()
                 .map_err(DomainError::sql_corrupt)?;
-            let Some((trigger, thread_id, attempt_count)) = pending else {
+            let Some((trigger, thread_id, attempt_count, created_at_ms)) = pending else {
                 return Ok(None);
             };
             let updated = tx
@@ -2266,11 +2373,32 @@ impl<'a> LinkedChatStore<'a> {
                 params![ws, run, thread_id, trigger, cmd, now_ms, log],
             )
             .map_err(DomainError::sql_persist)?;
+            let next_attempt_count = attempt_count.saturating_add(1);
             Ok(Some(DispatchClaim {
-                trigger_message_id: trigger,
-                thread_id,
-                run_id: run.clone(),
-                attempt_count: attempt_count.saturating_add(1),
+                dispatch: DispatchRecord {
+                    workspace_id: ws.clone(),
+                    trigger_message_id: trigger.clone(),
+                    thread_id: thread_id.clone(),
+                    state: "running".to_owned(),
+                    run_id: Some(run.clone()),
+                    failure_reason: None,
+                    attempt_count: next_attempt_count,
+                    created_at_ms,
+                    updated_at_ms: now_ms,
+                },
+                run: AgentRunRecord {
+                    workspace_id: ws.clone(),
+                    run_id: run.clone(),
+                    thread_id,
+                    trigger_message_id: trigger,
+                    command: cmd.clone(),
+                    started_at_ms: now_ms,
+                    ended_at_ms: None,
+                    exit_code: None,
+                    failure_reason: None,
+                    log_path: log.clone(),
+                    failure_note_posted: false,
+                },
             }))
         })?;
         committed(outcome)
@@ -2312,13 +2440,14 @@ impl<'a> LinkedChatStore<'a> {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<(), DomainError> {
-        let reason = if reason.is_empty() { "failed" } else { reason };
+        let run = normalize_dispatch_run_id(run_id)?;
+        let reason = normalize_failure_reason(reason)?;
         self.finish_dispatch(
             workspace_id,
-            run_id,
+            &run,
             DispatchOutcomeKind::Failed,
             exit_code,
-            Some(reason),
+            Some(&reason),
             now_ms,
             faults,
         )
@@ -2659,9 +2788,8 @@ fn record_channel_wire_id(
     channel_id: &str,
 ) -> Result<(), DomainError> {
     conn.execute(
-        "INSERT INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) \
-         VALUES (?1, ?2, ?3) \
-         ON CONFLICT(workspace_id, wire_id) DO UPDATE SET channel_id = excluded.channel_id",
+        "INSERT OR IGNORE INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) \
+         VALUES (?1, ?2, ?3)",
         params![workspace_id, wire_id, channel_id],
     )
     .map_err(DomainError::sql_persist)?;
@@ -2723,8 +2851,12 @@ fn require_thread(
     thread_id: &str,
 ) -> Result<ChatThread, DomainError> {
     conn.query_row(
-        "SELECT workspace_id, thread_id, title, created_at_ms, updated_at_ms, channel_id, \
-         linked_object_id FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2",
+        "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, t.updated_at_ms, \
+         t.channel_id, t.linked_object_id, \
+         (SELECT m.body FROM chat_messages m \
+          WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
+          ORDER BY m.created_at_ms, m.message_id LIMIT 1) \
+         FROM chat_threads t WHERE t.workspace_id = ?1 AND t.thread_id = ?2",
         params![workspace_id, thread_id],
         map_thread_row,
     )
@@ -2882,7 +3014,11 @@ fn advance_read_cursor(
     Ok(next)
 }
 
-fn upsert_follow_lww(tx: &Transaction<'_>, input: &SetFollow) -> Result<(), DomainError> {
+fn upsert_follow_lww(
+    tx: &Transaction<'_>,
+    input: &SetFollow,
+    at_ms: i64,
+) -> Result<(), DomainError> {
     tx.execute(
         "INSERT INTO chat_follows \
          (workspace_id, owner_user_id, target_kind, target_id, state, updated_at_ms, \
@@ -2905,7 +3041,7 @@ fn upsert_follow_lww(tx: &Transaction<'_>, input: &SetFollow) -> Result<(), Doma
             input.target_kind.as_str(),
             input.target_id,
             input.state.as_str(),
-            input.at_ms,
+            at_ms,
             input.origin_id,
             input.origin_seq
         ],
@@ -3106,10 +3242,12 @@ fn map_channel_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatChann
 }
 
 fn map_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatThread, DomainError>> {
+    let stored_title: String = row.get(2)?;
+    let first_body: Option<String> = row.get(7)?;
     Ok(Ok(ChatThread {
         workspace_id: row.get(0)?,
         thread_id: row.get(1)?,
-        title: row.get(2)?,
+        title: chat_thread_display_title(&stored_title, first_body.as_deref()),
         created_at_ms: row.get(3)?,
         updated_at_ms: row.get(4)?,
         channel_id: row.get(5)?,

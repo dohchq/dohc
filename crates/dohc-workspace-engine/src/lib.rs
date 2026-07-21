@@ -15,9 +15,9 @@ use dohc_engine_domain::{
     BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatBookmark, ChatChannel, ChatChannelKind,
     ChatChannelSummary, ChatFeedReadState, ChatFollow, ChatMessage, ChatThread,
     ChatThreadReadState, ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata,
-    ConflictResolution, ConflictStatus, DispatchClaim, DomainError, FollowState, FollowTargetKind,
-    ResolveConflictKind, ResolveTextConflict, SaveBookmark, SendMessage, SetFollow,
-    StartChannelThread, TextConflict, TextSnapshot, WriteText,
+    ConflictResolution, ConflictStatus, DispatchClaim, DomainError, FeedCursorValue, FollowState,
+    FollowTargetKind, ResolveConflictKind, ResolveTextConflict, SaveBookmark, SendMessage,
+    SetFollow, StartChannelThread, TextConflict, TextSnapshot, WriteText,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -1497,6 +1497,11 @@ impl EngineService {
         reject_capture_origin(Some(&params.origin_id))?;
         let target_kind = parse_follow_target_kind(&params.target_kind)?;
         let state = parse_follow_state(&params.state)?;
+        let at_ms = params.at_ms;
+        let local_now_ms = match at_ms {
+            Some(explicit) => explicit,
+            None => now_ms()?,
+        };
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let follow = Self::read_under_ctx(
@@ -1509,7 +1514,8 @@ impl EngineService {
                     target_kind,
                     target_id: params.target_id,
                     state,
-                    at_ms: params.at_ms.unwrap_or(now_ms()?),
+                    at_ms,
+                    now_ms: local_now_ms,
                     origin_id: params.origin_id,
                     origin_seq: params.origin_seq,
                 },
@@ -1603,13 +1609,38 @@ impl EngineService {
             ),
         )
         .await?;
+        let row_values: Vec<Value> = page
+            .items
+            .iter()
+            .map(|item| {
+                json!({
+                    "messageId": item.message_id,
+                    "threadId": item.thread_id,
+                    "createdAtMs": item.created_at_ms,
+                })
+            })
+            .collect();
+        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
+        if included == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a feed row exceeds the response frame budget",
+            ));
+        }
+        let truncated = included < row_values.len();
+        let next_cursor = if truncated {
+            page.items[..included].last().map(|item| {
+                dohc_engine_domain::encode_feed_cursor(&FeedCursorValue {
+                    created_at_ms: item.created_at_ms,
+                    message_id: item.message_id.clone(),
+                })
+            })
+        } else {
+            page.next_cursor
+        };
         Ok(json!({
-            "items": page.items.iter().map(|item| json!({
-                "messageId": item.message_id,
-                "threadId": item.thread_id,
-                "createdAtMs": item.created_at_ms,
-            })).collect::<Vec<_>>(),
-            "nextCursor": page.next_cursor,
+            "items": row_values[..included].to_vec(),
+            "nextCursor": next_cursor,
             "headCursor": page.head_cursor,
             "readState": page.read_state.as_ref().map(feed_read_state_json),
         }))
@@ -1632,7 +1663,6 @@ impl EngineService {
             open.actor.chat_bookmark_save(
                 SaveBookmark {
                     workspace_id: open.workspace_id,
-                    bookmark_id: params.bookmark_id,
                     owner_user_id: params.owner_user_id,
                     target_kind,
                     target_id: params.target_id,
@@ -2367,7 +2397,6 @@ struct ChatFeedListParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatBookmarkSaveParams {
-    bookmark_id: String,
     owner_user_id: String,
     target_kind: String,
     target_id: String,
@@ -2766,10 +2795,30 @@ fn bookmark_json(bookmark: &ChatBookmark) -> Value {
 
 fn dispatch_claim_json(claim: &DispatchClaim) -> Value {
     json!({
-        "triggerMessageId": claim.trigger_message_id,
-        "threadId": claim.thread_id,
-        "runId": claim.run_id,
-        "attemptCount": claim.attempt_count,
+        "dispatch": {
+            "workspaceId": claim.dispatch.workspace_id,
+            "triggerMessageId": claim.dispatch.trigger_message_id,
+            "threadId": claim.dispatch.thread_id,
+            "state": claim.dispatch.state,
+            "runId": claim.dispatch.run_id,
+            "failureReason": claim.dispatch.failure_reason,
+            "attemptCount": claim.dispatch.attempt_count,
+            "createdAtMs": claim.dispatch.created_at_ms,
+            "updatedAtMs": claim.dispatch.updated_at_ms,
+        },
+        "run": {
+            "workspaceId": claim.run.workspace_id,
+            "runId": claim.run.run_id,
+            "threadId": claim.run.thread_id,
+            "triggerMessageId": claim.run.trigger_message_id,
+            "command": claim.run.command,
+            "startedAtMs": claim.run.started_at_ms,
+            "endedAtMs": claim.run.ended_at_ms,
+            "exitCode": claim.run.exit_code,
+            "failureReason": claim.run.failure_reason,
+            "logPath": claim.run.log_path,
+            "failureNotePosted": claim.run.failure_note_posted,
+        },
     })
 }
 
