@@ -11,12 +11,12 @@
 //! follow / bookmark / dispatch claim *means* (the TS `linkedChatStore.ts` +
 //! `agentDispatchStore.ts` oracle behavior).
 //!
-//! Identity is caller-supplied, not RNG-minted: `channel_id`, `thread_id`,
+//! Content identity is caller-supplied: `channel_id`, `thread_id`,
 //! `message_id`, and `run_id` are inputs — the same determinism the
 //! versioning domain uses (`object_id`/`moment_id` are inputs). This keeps the
-//! store free of a nondeterministic id source and lets the differential harness
-//! pin exact rows. Bookmark ids are deterministically derived from their owner
-//! and target, matching the TS store.
+//! differential harness able to pin exact rows. Local replication origins are
+//! store-owned and initialized lazily, while bookmark ids are deterministically
+//! derived from their owner and target, matching the TS store.
 //!
 //! **Parity-critical, non-tautological surfaces** (validated against real TS
 //! output, not Rust's own):
@@ -75,6 +75,8 @@ const MAX_FEED_CURSOR_LEN: usize = 512;
 const MAX_FEED_CURSOR_MESSAGE_ID_CHARS: usize = 256;
 /// Dispatch run ids are trimmed before storage; match the TS store's hard byte floor.
 const MAX_DISPATCH_RUN_ID_BYTES: usize = 512;
+/// Dispatch metadata uses the TS store's 16,384 UTF-16-code-unit text bound.
+const MAX_DISPATCH_METADATA_UTF16_UNITS: usize = 16_384;
 /// Sentinel message id for the synthetic per-thread header FTS row.
 pub const CHAT_THREAD_HEADER_MESSAGE_ID: &str = "__thread__";
 /// Untitled-thread snippet cap (`THREAD_SNIPPET_TITLE_MAX_CHARS`).
@@ -456,12 +458,7 @@ pub struct SetFollow {
     pub target_kind: FollowTargetKind,
     pub target_id: String,
     pub state: FollowState,
-    /// An explicit replication/LWW timestamp. Local writes leave this absent and
-    /// advance from `now_ms` and the prior row inside the write transaction.
-    pub at_ms: Option<i64>,
     pub now_ms: i64,
-    pub origin_id: String,
-    pub origin_seq: i64,
 }
 
 /// Inputs to [`LinkedChatStore::save_bookmark`].
@@ -694,6 +691,23 @@ fn non_empty(value: &str, code: &'static str, reason: &'static str) -> Result<()
     }
 }
 
+/// Message ids can become the second coordinate in an encoded personal-feed
+/// cursor. Keep caller-supplied ids within the exact cap enforced by
+/// [`decode_feed_cursor`], in addition to the existing empty/NUL floor, so an
+/// emitted page cursor is always accepted by the next page request.
+fn validate_message_id(message_id: &str) -> Result<(), DomainError> {
+    if message_id.is_empty()
+        || message_id.contains('\0')
+        || message_id.chars().count() > MAX_FEED_CURSOR_MESSAGE_ID_CHARS
+    {
+        Err(DomainError::InvalidInput {
+            reason: "message id is invalid",
+        })
+    } else {
+        Ok(())
+    }
+}
+
 /// Run ids are trimmed before persistence, then checked for empty, the
 /// 512-byte wire bound, and NUL (`normalizeRequiredId`).
 fn normalize_dispatch_run_id(run_id: &str) -> Result<String, DomainError> {
@@ -708,6 +722,39 @@ fn normalize_dispatch_run_id(run_id: &str) -> Result<String, DomainError> {
         ))
     } else {
         Ok(normalized.to_owned())
+    }
+}
+
+/// Claim metadata follows `normalizeCommand`: validate the trimmed shape but
+/// preserve the caller's original string in the run record.
+fn normalize_dispatch_command(command: &str) -> Result<String, DomainError> {
+    if command.trim_matches(is_js_trim_ws).is_empty()
+        || command.contains('\0')
+        || command.encode_utf16().count() > MAX_DISPATCH_METADATA_UTF16_UNITS
+    {
+        Err(DomainError::InvalidInput {
+            reason: "runner command is invalid",
+        })
+    } else {
+        Ok(command.to_owned())
+    }
+}
+
+/// Optional claim log paths follow `normalizeOptionalPath`: absent is allowed;
+/// present values are validated without rewriting what is persisted.
+fn normalize_optional_dispatch_path(log_path: Option<&str>) -> Result<Option<String>, DomainError> {
+    match log_path {
+        None => Ok(None),
+        Some(path)
+            if path.trim_matches(is_js_trim_ws).is_empty()
+                || path.contains('\0')
+                || path.encode_utf16().count() > MAX_DISPATCH_METADATA_UTF16_UNITS =>
+        {
+            Err(DomainError::InvalidInput {
+                reason: "run log path is invalid",
+            })
+        }
+        Some(path) => Ok(Some(path.to_owned())),
     }
 }
 
@@ -1216,11 +1263,7 @@ impl<'a> LinkedChatStore<'a> {
             "invalid-thread-title",
             "thread_id must not be empty",
         )?;
-        non_empty(
-            &input.message_id,
-            "invalid-message-body",
-            "message_id must not be empty",
-        )?;
+        validate_message_id(&input.message_id)?;
         if input.message_id == CHAT_THREAD_HEADER_MESSAGE_ID {
             return Err(DomainError::InvalidInput {
                 reason: "message id is reserved",
@@ -1368,11 +1411,7 @@ impl<'a> LinkedChatStore<'a> {
             "invalid-thread-title",
             "thread_id must not be empty",
         )?;
-        non_empty(
-            &input.message_id,
-            "invalid-message-body",
-            "message_id must not be empty",
-        )?;
+        validate_message_id(&input.message_id)?;
         if input.message_id == CHAT_THREAD_HEADER_MESSAGE_ID {
             return Err(DomainError::InvalidInput {
                 reason: "message id is reserved",
@@ -1652,7 +1691,9 @@ impl<'a> LinkedChatStore<'a> {
 
     /// LWW-upsert a follow register (`setFollow`). Journals `chat.follow.set`.
     /// The winner is decided by `(updated_at_ms, unfollowed>following,
-    /// origin_id, origin_seq)` — commutative, mirroring the replicated apply arm.
+    /// origin_id, origin_seq)` — commutative, mirroring the replicated apply
+    /// arm. Local LWW origins are derived in this write transaction and are
+    /// never accepted from an RPC caller.
     pub fn set_follow(
         &mut self,
         input: &SetFollow,
@@ -1754,12 +1795,12 @@ impl<'a> LinkedChatStore<'a> {
                 )
                 .optional()
                 .map_err(DomainError::sql_corrupt)?;
-            let at_ms = input.at_ms.unwrap_or_else(|| {
-                input
-                    .now_ms
-                    .max(prior_at_ms.map_or(0, |prior| prior.saturating_add(1)))
-            });
-            upsert_follow_lww(tx, &input, at_ms)?;
+            let at_ms = input
+                .now_ms
+                .max(prior_at_ms.map_or(0, |prior| prior.saturating_add(1)));
+            let (origin_id, origin_seq) =
+                local_replication_coordinate(tx, &input.workspace_id, at_ms)?;
+            upsert_follow_lww(tx, &input, at_ms, &origin_id, origin_seq)?;
             journal(tx, &input.target_id, "chat.follow.set", at_ms)?;
             require_follow(
                 tx,
@@ -1800,27 +1841,24 @@ impl<'a> LinkedChatStore<'a> {
 
     /// LWW-upsert the feed read state (`markPersonalFeedSeen`). Journals
     /// `chat.feed.read.set`.
-    #[allow(clippy::too_many_arguments)]
     pub fn mark_feed_seen(
         &mut self,
         workspace_id: &str,
         owner_user_id: &str,
-        last_seen_created_at_ms: i64,
-        last_seen_message_id: &str,
-        at_ms: i64,
-        origin_id: &str,
-        origin_seq: i64,
+        head_cursor: &str,
+        now_ms: i64,
         faults: &dyn FaultInjector,
-    ) -> Result<(), DomainError> {
+    ) -> Result<ChatFeedReadState, DomainError> {
         non_empty(
             owner_user_id,
             "invalid-follow-target",
             "Feed owner is required.",
         )?;
+        let cursor = decode_feed_cursor(head_cursor)?;
         let ws = workspace_id.to_owned();
         let owner = owner_user_id.to_owned();
-        let msg = last_seen_message_id.to_owned();
-        let origin = origin_id.to_owned();
+        let msg = cursor.message_id;
+        let last_seen_created_at_ms = cursor.created_at_ms;
         let outcome = self.store.write_with(faults, |tx| {
             // Receiver-private read state must not be advanced past a coordinate
             // the owner cannot actually see: prove the (created_at_ms, message_id)
@@ -1833,6 +1871,19 @@ impl<'a> LinkedChatStore<'a> {
                     "Feed cursor is stale or no longer visible.",
                 ));
             }
+            let current_updated_at_ms: Option<i64> = tx
+                .query_row(
+                    "SELECT updated_at_ms FROM chat_feed_read_state \
+                     WHERE workspace_id = ?1 AND owner_user_id = ?2",
+                    params![ws, owner],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            let at_ms = now_ms.max(
+                current_updated_at_ms.map_or(0, |current| current.saturating_add(1)),
+            );
+            let (origin_id, origin_seq) = local_replication_coordinate(tx, &ws, at_ms)?;
             tx.execute(
                 "INSERT INTO chat_feed_read_state \
                  (workspace_id, owner_user_id, last_seen_created_at_ms, last_seen_message_id, \
@@ -1844,12 +1895,19 @@ impl<'a> LinkedChatStore<'a> {
                    origin_id = excluded.origin_id, origin_seq = excluded.origin_seq \
                  WHERE excluded.last_seen_created_at_ms > chat_feed_read_state.last_seen_created_at_ms \
                     OR (excluded.last_seen_created_at_ms = chat_feed_read_state.last_seen_created_at_ms \
-                        AND excluded.last_seen_message_id > chat_feed_read_state.last_seen_message_id)",
-                params![ws, owner, last_seen_created_at_ms, msg, at_ms, origin, origin_seq],
+                        AND excluded.last_seen_message_id > chat_feed_read_state.last_seen_message_id) \
+                    OR (excluded.last_seen_created_at_ms = chat_feed_read_state.last_seen_created_at_ms \
+                        AND excluded.last_seen_message_id = chat_feed_read_state.last_seen_message_id \
+                        AND (excluded.updated_at_ms > chat_feed_read_state.updated_at_ms \
+                          OR (excluded.updated_at_ms = chat_feed_read_state.updated_at_ms \
+                              AND (excluded.origin_id > chat_feed_read_state.origin_id \
+                                OR (excluded.origin_id = chat_feed_read_state.origin_id \
+                                    AND excluded.origin_seq > chat_feed_read_state.origin_seq)))))",
+                params![ws, owner, last_seen_created_at_ms, msg, at_ms, origin_id, origin_seq],
             )
             .map_err(DomainError::sql_persist)?;
             journal(tx, &owner, "chat.feed.read.set", at_ms)?;
-            Ok::<_, DomainError>(())
+            require_feed_read_state(tx, &ws, &owner)
         })?;
         committed(outcome)
     }
@@ -2308,12 +2366,8 @@ impl<'a> LinkedChatStore<'a> {
     ) -> Result<Option<DispatchClaim>, DomainError> {
         let run = normalize_dispatch_run_id(run_id)?;
         let ws = workspace_id.to_owned();
-        let cmd = if command.is_empty() {
-            "agent".to_owned()
-        } else {
-            command.to_owned()
-        };
-        let log = log_path.map(str::to_owned);
+        let cmd = normalize_dispatch_command(command)?;
+        let log = normalize_optional_dispatch_path(log_path)?;
         let outcome = self.store.write_with(faults, |tx| {
             // Single-writer guard: a run already RUNNING means no new claim.
             let open_running: i64 = tx
@@ -3018,6 +3072,8 @@ fn upsert_follow_lww(
     tx: &Transaction<'_>,
     input: &SetFollow,
     at_ms: i64,
+    origin_id: &str,
+    origin_seq: i64,
 ) -> Result<(), DomainError> {
     tx.execute(
         "INSERT INTO chat_follows \
@@ -3042,12 +3098,85 @@ fn upsert_follow_lww(
             input.target_id,
             input.state.as_str(),
             at_ms,
-            input.origin_id,
-            input.origin_seq
+            origin_id,
+            origin_seq
         ],
     )
     .map_err(DomainError::sql_persist)?;
     Ok(())
+}
+
+/// Return the local origin and the next sequence from the replication journal.
+/// This is deliberately transaction-local: the LWW register must store the
+/// exact coordinate that a local replication op would use, and RPC callers
+/// must never be able to forge either half of it (`ensureOriginId` /
+/// `nextOriginSeq`). SQLite supplies the random bytes so the domain needs no
+/// caller-controlled or process-global identity seam.
+fn local_replication_coordinate(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    now_ms: i64,
+) -> Result<(String, i64), DomainError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO sync_identity \
+         (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+         VALUES (?1, 'origin_' || lower(hex(randomblob(16))), \
+                 'epoch_' || lower(hex(randomblob(16))), \
+                 'stream_' || lower(hex(randomblob(16))), ?2)",
+        params![workspace_id, now_ms],
+    )
+    .map_err(DomainError::sql_persist)?;
+    let origin_id: String = tx
+        .query_row(
+            "SELECT origin_id FROM sync_identity WHERE workspace_id = ?1",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let previous: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(origin_seq), -1) FROM replication_log \
+             WHERE workspace_id = ?1 AND origin_id = ?2",
+            params![workspace_id, origin_id],
+            |row| row.get(0),
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let origin_seq = previous.checked_add(1).ok_or(DomainError::StateCorrupt {
+        reason: "local replication origin sequence overflowed",
+    })?;
+    if origin_seq < 0 {
+        return Err(DomainError::StateCorrupt {
+            reason: "local replication origin sequence is corrupt",
+        });
+    }
+    Ok((origin_id, origin_seq))
+}
+
+fn require_feed_read_state(
+    conn: &Connection,
+    workspace_id: &str,
+    owner_user_id: &str,
+) -> Result<ChatFeedReadState, DomainError> {
+    conn.query_row(
+        "SELECT workspace_id, owner_user_id, last_seen_created_at_ms, \
+                last_seen_message_id, updated_at_ms \
+         FROM chat_feed_read_state WHERE workspace_id = ?1 AND owner_user_id = ?2",
+        params![workspace_id, owner_user_id],
+        |row| {
+            Ok(ChatFeedReadState {
+                workspace_id: row.get(0)?,
+                owner_user_id: row.get(1)?,
+                last_seen_created_at_ms: row.get(2)?,
+                last_seen_message_id: row.get(3)?,
+                updated_at_ms: row.get(4)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?
+    .ok_or(DomainError::StateCorrupt {
+        reason: "feed read-state upsert left no row",
+    })
 }
 
 fn require_follow(

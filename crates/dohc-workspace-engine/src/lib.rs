@@ -1494,15 +1494,10 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: ChatFollowSetParams = parse(params)?;
-        reject_capture_origin(Some(&params.origin_id))?;
         let target_kind = parse_follow_target_kind(&params.target_kind)?;
         let state = parse_follow_state(&params.state)?;
-        let at_ms = params.at_ms;
-        let local_now_ms = match at_ms {
-            Some(explicit) => explicit,
-            None => now_ms()?,
-        };
         let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
         let cancellation = OperationCancellation::new(ctx);
         let follow = Self::read_under_ctx(
             &cancellation,
@@ -1514,16 +1509,13 @@ impl EngineService {
                     target_kind,
                     target_id: params.target_id,
                     state,
-                    at_ms,
-                    now_ms: local_now_ms,
-                    origin_id: params.origin_id,
-                    origin_seq: params.origin_seq,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
                 cancellation.token(),
             ),
         )
         .await?;
-        Ok(follow_json(&follow))
+        Ok(follow_json(&workspace_id, &follow))
     }
 
     async fn chats_follows_list(
@@ -1534,6 +1526,7 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: ChatOwnerParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
         let cancellation = OperationCancellation::new(ctx);
         let follows = Self::read_under_ctx(
             &cancellation,
@@ -1546,7 +1539,10 @@ impl EngineService {
         // heavy: the byte budget keeps every page under the wire frame.
         // No cursor on this family yet (composite sort keys) — truncated
         // says so honestly; cursor pagination is RPC_GAP follow-up work.
-        let row_values: Vec<Value> = follows.iter().map(follow_json).collect();
+        let row_values: Vec<Value> = follows
+            .iter()
+            .map(|follow| follow_json(&workspace_id, follow))
+            .collect();
         let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
         if included == 0 && !row_values.is_empty() {
             return Err(wire(
@@ -1568,25 +1564,21 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: ChatFeedMarkSeenParams = parse(params)?;
-        reject_capture_origin(Some(&params.origin_id))?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        Self::read_under_ctx(
+        let state = Self::read_under_ctx(
             &cancellation,
             "chats.feed.markSeen",
             open.actor.chat_feed_mark_seen(
                 open.workspace_id,
                 params.owner_user_id,
-                params.last_seen_created_at_ms,
-                params.last_seen_message_id,
-                params.at_ms.unwrap_or(now_ms()?),
-                params.origin_id,
-                params.origin_seq,
+                params.head_cursor,
+                params.now_ms.unwrap_or(now_ms()?),
                 cancellation.token(),
             ),
         )
         .await?;
-        Ok(json!({ "marked": true }))
+        Ok(feed_read_state_json(&state))
     }
 
     async fn chats_feed_list_personal(
@@ -2364,9 +2356,7 @@ struct ChatFollowSetParams {
     target_kind: String,
     target_id: String,
     state: String,
-    at_ms: Option<i64>,
-    origin_id: String,
-    origin_seq: i64,
+    now_ms: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -2379,11 +2369,8 @@ struct ChatOwnerParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatFeedMarkSeenParams {
     owner_user_id: String,
-    last_seen_created_at_ms: i64,
-    last_seen_message_id: String,
-    at_ms: Option<i64>,
-    origin_id: String,
-    origin_seq: i64,
+    head_cursor: String,
+    now_ms: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -2751,8 +2738,9 @@ fn feed_read_state_json(state: &ChatFeedReadState) -> Value {
     })
 }
 
-fn follow_json(follow: &ChatFollow) -> Value {
+fn follow_json(workspace_id: &str, follow: &ChatFollow) -> Value {
     json!({
+        "workspaceId": workspace_id,
         "ownerUserId": follow.owner_user_id,
         "targetKind": match follow.target_kind {
             FollowTargetKind::Person => "person",
@@ -2766,8 +2754,6 @@ fn follow_json(follow: &ChatFollow) -> Value {
             FollowState::Unfollowed => "unfollowed",
         },
         "updatedAtMs": follow.updated_at_ms,
-        "originId": follow.origin_id,
-        "originSeq": follow.origin_seq,
     })
 }
 

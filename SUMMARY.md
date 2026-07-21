@@ -68,3 +68,12 @@ Round-2 regression coverage proves stable-policy write-time chat search (with a 
 - Dispatch claims now return the complete `{ dispatch, run }` projection with camelCase fields and nullable optional values. The existing schema already stores `command`, `log_path`, terminal metadata, and `failure_note_posted`, so no schema change or compatibility gap was needed.
 
 Round-3 domain and RPC regressions cover projection ownership transfer, exact bookmark-id/base32 vectors, same-millisecond follow toggles, feed byte-cut cursor continuity, untitled title derivation/fallback, reserved ids and FTS-header preservation, first-writer channel-wire mapping, failure-reason validation/verbatim storage, and the full persisted dispatch/run claim. Per the task constraint, no Cargo command was run; all changed Rust files passed direct `rustfmt --edition 2024 --check`, and `git diff --check` passed.
+
+## Review round 4
+
+- `chats.feed.markSeen` now accepts the opaque `headCursor` returned by `listPersonal`, decodes and visibility-checks it server-side, advances the local LWW read register, and returns the complete `ChatFeedReadState`. Raw read coordinates and replication bookkeeping are no longer accepted.
+- `chats.follows.set` no longer accepts caller-supplied LWW timestamps or origins. The domain derives the monotonic timestamp, persisted local origin, and next replication-log sequence inside the write transaction; follow responses expose only the TypeScript `ChatFollow` shape. The peer-origin replication-apply path remains separate.
+- Dispatch claims now reject whitespace-only, NUL-containing, or oversized commands and reject present-but-empty, NUL-containing, or oversized log paths before opening a persistence transaction. Accepted metadata is stored verbatim.
+- Thread-start and message-send ids now share the feed cursor decoder's 256-character cap (plus the empty/NUL floor), preventing an emitted feed cursor from becoming undecodable.
+
+Round-4 RPC and domain regressions cover list-to-mark-seen cursor flow and garbage refusal, forged follow-origin rejection plus server-derived journal coordinates, invalid dispatch metadata and verbatim persistence, 257-character message-id refusal on both write paths, and a 256-character id paging through `nextCursor`. Per the task constraint, no Cargo command was run; all changed Rust files passed direct `rustfmt --edition 2024 --check`, and `git diff --check` passed.

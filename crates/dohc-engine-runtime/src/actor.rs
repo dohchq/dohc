@@ -35,13 +35,13 @@ use dohc_engine_domain::{
     BinaryHead, BinaryHeadMeta, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
     CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult, CaptureSecret,
     CaptureSecretRetire, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
-    ChatChannelSummary, ChatFeedPage, ChatFollow, ChatMessage, ChatMessagePage, ChatThread,
-    ChatThreadReadState, DispatchClaim, InbandBinary, InbandSecret, InbandText, LinkedChatStore,
-    ListMomentsQuery, MomentPage, MomentRecord, ResolveTextConflict, ResolveTextConflictResult,
-    SaveBookmark, SecretFileStat, SecretFileStore, SecretMomentRecord, SecretWriteResult,
-    SendMessage, SetFollow, SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict,
-    TextSnapshot, VersionRecord, VersionedTextStore, WriteResult, WriteText, capture_manifest_seed,
-    capture_secret_retire, has_secret_state, insert_text_conflict_if_absent,
+    ChatChannelSummary, ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMessage, ChatMessagePage,
+    ChatThread, ChatThreadReadState, DispatchClaim, InbandBinary, InbandSecret, InbandText,
+    LinkedChatStore, ListMomentsQuery, MomentPage, MomentRecord, ResolveTextConflict,
+    ResolveTextConflictResult, SaveBookmark, SecretFileStat, SecretFileStore, SecretMomentRecord,
+    SecretWriteResult, SendMessage, SetFollow, SnapshotMetadata, SnapshotView, StartChannelThread,
+    TextConflict, TextSnapshot, VersionRecord, VersionedTextStore, WriteResult, WriteText,
+    capture_manifest_seed, capture_secret_retire, has_secret_state, insert_text_conflict_if_absent,
     list_secret_files_keyless, list_secret_files_keyless_page, secret_file_len_keyless,
 };
 use dohc_engine_storage::{
@@ -419,13 +419,10 @@ enum Command {
     ChatFeedMarkSeen {
         workspace_id: String,
         owner_user_id: String,
-        last_seen_created_at_ms: i64,
-        last_seen_message_id: String,
-        at_ms: i64,
-        origin_id: String,
-        origin_seq: i64,
+        head_cursor: String,
+        now_ms: i64,
         token: CancellationToken,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
+        reply: oneshot::Sender<Result<ChatFeedReadState, RuntimeError>>,
     },
     ChatFeedListPersonal {
         workspace_id: String,
@@ -1762,28 +1759,21 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub async fn chat_feed_mark_seen(
         &self,
         workspace_id: String,
         owner_user_id: String,
-        last_seen_created_at_ms: i64,
-        last_seen_message_id: String,
-        at_ms: i64,
-        origin_id: String,
-        origin_seq: i64,
+        head_cursor: String,
+        now_ms: i64,
         token: CancellationToken,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<ChatFeedReadState, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ChatFeedMarkSeen {
                 workspace_id,
                 owner_user_id,
-                last_seen_created_at_ms,
-                last_seen_message_id,
-                at_ms,
-                origin_id,
-                origin_seq,
+                head_cursor,
+                now_ms,
                 token,
                 reply,
             })
@@ -2674,11 +2664,8 @@ fn worker_main(
             Command::ChatFeedMarkSeen {
                 workspace_id,
                 owner_user_id,
-                last_seen_created_at_ms,
-                last_seen_message_id,
-                at_ms,
-                origin_id,
-                origin_seq,
+                head_cursor,
+                now_ms,
                 token,
                 reply,
             } => {
@@ -2689,11 +2676,8 @@ fn worker_main(
                         .mark_feed_seen(
                             &workspace_id,
                             &owner_user_id,
-                            last_seen_created_at_ms,
-                            &last_seen_message_id,
-                            at_ms,
-                            &origin_id,
-                            origin_seq,
+                            &head_cursor,
+                            now_ms,
                             &NoFaults,
                         )
                         .map_err(RuntimeError::from)

@@ -209,6 +209,25 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     .await;
     assert_eq!(reserved_first_message.code, ErrorCode::InvalidParams);
 
+    let overlong_message_id = "x".repeat(257);
+    let overlong_first_message = call_error(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel-project",
+            "threadId": "overlong-message-thread",
+            "messageId": overlong_message_id,
+            "authorKind": "human",
+            "authorDisplayName": "Alice",
+            "body": "must fail",
+            "nowMs": 22,
+        }),
+    )
+    .await;
+    assert_eq!(overlong_first_message.code, ErrorCode::InvalidParams);
+
     let started = call(
         &transport,
         &first_handle,
@@ -230,6 +249,102 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     .await;
     assert_eq!(started["thread"]["threadId"], json!("thread-1"));
     assert_eq!(started["message"]["messageOrder"], json!(0));
+
+    let overlong_send = call_error(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "thread-1",
+            "messageId": "x".repeat(257),
+            "authorKind": "agent",
+            "authorDisplayName": "My agent",
+            "body": "must fail",
+            "nowMs": 1001,
+        }),
+    )
+    .await;
+    assert_eq!(overlong_send.code, ErrorCode::InvalidParams);
+
+    let max_cursor_message_id = "m".repeat(256);
+    call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel-general",
+            "threadId": "cursor-cap-thread",
+            "messageId": max_cursor_message_id,
+            "authorKind": "human",
+            "authorDisplayName": "Alice",
+            "body": "cursor cap newest",
+            "nowMs": 1000,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "cursor-cap-thread",
+            "messageId": "cursor-cap-older",
+            "authorKind": "human",
+            "authorDisplayName": "Alice",
+            "body": "cursor cap older",
+            "nowMs": 999,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.follows.set",
+        json!({
+            "ownerUserId": "cursor-cap-owner",
+            "targetKind": "thread",
+            "targetId": "cursor-cap-thread",
+            "state": "following",
+            "nowMs": 1002,
+        }),
+    )
+    .await;
+    let cursor_cap_page = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.feed.listPersonal",
+        json!({ "ownerUserId": "cursor-cap-owner", "limit": 1 }),
+    )
+    .await;
+    assert_eq!(
+        cursor_cap_page["items"][0]["messageId"],
+        json!("m".repeat(256))
+    );
+    let cursor_cap_next = cursor_cap_page["nextCursor"]
+        .as_str()
+        .expect("256-character message-id cursor")
+        .to_owned();
+    let cursor_cap_remainder = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.feed.listPersonal",
+        json!({
+            "ownerUserId": "cursor-cap-owner",
+            "limit": 1,
+            "cursor": cursor_cap_next,
+        }),
+    )
+    .await;
+    assert_eq!(
+        cursor_cap_remainder["items"][0]["messageId"],
+        json!("cursor-cap-older")
+    );
 
     let search_started = call(
         &transport,
@@ -332,7 +447,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         json!({}),
     )
     .await;
-    assert_eq!(threads["threads"].as_array().expect("threads").len(), 2);
+    assert_eq!(threads["threads"].as_array().expect("threads").len(), 3);
     assert_eq!(
         threads["threads"]
             .as_array()
@@ -597,9 +712,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
                 "targetKind": target_kind,
                 "targetId": target_id,
                 "state": "following",
-                "atMs": 2090,
-                "originId": "device-owner-1",
-                "originSeq": 1,
+                "nowMs": 2090,
             }),
         )
         .await;
@@ -616,13 +729,29 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
             "targetKind": "thread",
             "targetId": "thread-1",
             "state": "following",
-            "atMs": 2100,
-            "originId": "device-owner-1",
-            "originSeq": 1,
+            "nowMs": 2100,
         }),
     )
     .await;
     assert_eq!(follow["state"], json!("following"));
+    assert_eq!(follow["workspaceId"], json!("rpc-chat-first"));
+    assert!(follow.get("originId").is_none());
+    assert!(follow.get("originSeq").is_none());
+    let forged_origin = call_error(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.follows.set",
+        json!({
+            "ownerUserId": "owner-1",
+            "targetKind": "thread",
+            "targetId": "thread-1",
+            "state": "following",
+            "originId": "forged-origin",
+        }),
+    )
+    .await;
+    assert_eq!(forged_origin.code, ErrorCode::InvalidParams);
     let follows = call(
         &transport,
         &first_handle,
@@ -648,6 +777,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     assert!(feed["headCursor"].is_string());
     assert!(feed["readState"].is_null());
     let newest = &feed["items"][0];
+    let head_cursor = feed["headCursor"].clone();
     let marked = call(
         &transport,
         &first_handle,
@@ -655,15 +785,26 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         "chats.feed.markSeen",
         json!({
             "ownerUserId": "owner-1",
-            "lastSeenCreatedAtMs": newest["createdAtMs"],
-            "lastSeenMessageId": newest["messageId"],
-            "atMs": 2200,
-            "originId": "device-owner-1",
-            "originSeq": 2,
+            "headCursor": head_cursor,
+            "nowMs": 2200,
         }),
     )
     .await;
-    assert_eq!(marked["marked"], json!(true));
+    assert_eq!(marked["ownerUserId"], json!("owner-1"));
+    assert_eq!(marked["lastSeenCreatedAtMs"], newest["createdAtMs"]);
+    assert_eq!(marked["lastSeenMessageId"], newest["messageId"]);
+    let garbage_cursor = call_error(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.feed.markSeen",
+        json!({
+            "ownerUserId": "owner-1",
+            "headCursor": "!!!not-a-feed-cursor!!!",
+        }),
+    )
+    .await;
+    assert_eq!(garbage_cursor.code, ErrorCode::InvalidParams);
     let feed_after_seen = call(
         &transport,
         &first_handle,
@@ -700,9 +841,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
             "targetKind": "channel",
             "targetId": "channel-project",
             "state": "following",
-            "atMs": 2250,
-            "originId": "device-feed-budget",
-            "originSeq": 1,
+            "nowMs": 2250,
         }),
     )
     .await;
@@ -942,6 +1081,37 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         .await;
         assert_eq!(error.code, ErrorCode::InvalidParams);
     }
+    for invalid_command in [
+        json!("bad\0command"),
+        json!("   "),
+        json!("x".repeat(16_385)),
+    ] {
+        let error = call_error(
+            &transport,
+            &first_handle,
+            &mut id,
+            "chats.dispatch.claimNextPending",
+            json!({ "runId": "run-1", "command": invalid_command, "nowMs": 2401 }),
+        )
+        .await;
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+    }
+    for invalid_path in [json!(""), json!("bad\0path"), json!("x".repeat(16_385))] {
+        let error = call_error(
+            &transport,
+            &first_handle,
+            &mut id,
+            "chats.dispatch.claimNextPending",
+            json!({
+                "runId": "run-1",
+                "command": "agent",
+                "logPath": invalid_path,
+                "nowMs": 2401,
+            }),
+        )
+        .await;
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+    }
     let claimed = call(
         &transport,
         &first_handle,
@@ -949,8 +1119,8 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         "chats.dispatch.claimNextPending",
         json!({
             "runId": " run-1 ",
-            "command": "runner --once",
-            "logPath": "logs/run-1.log",
+            "command": "  runner --once  ",
+            "logPath": "  logs/run-1.log  ",
             "nowMs": 2401,
         }),
     )
@@ -961,12 +1131,12 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     assert_eq!(claimed["dispatch"]["runId"], json!("run-1"));
     assert_eq!(claimed["dispatch"]["failureReason"], Value::Null);
     assert_eq!(claimed["run"]["runId"], json!("run-1"));
-    assert_eq!(claimed["run"]["command"], json!("runner --once"));
+    assert_eq!(claimed["run"]["command"], json!("  runner --once  "));
     assert_eq!(claimed["run"]["startedAtMs"], json!(2401));
     assert_eq!(claimed["run"]["endedAtMs"], Value::Null);
     assert_eq!(claimed["run"]["exitCode"], Value::Null);
     assert_eq!(claimed["run"]["failureReason"], Value::Null);
-    assert_eq!(claimed["run"]["logPath"], json!("logs/run-1.log"));
+    assert_eq!(claimed["run"]["logPath"], json!("  logs/run-1.log  "));
     assert_eq!(claimed["run"]["failureNotePosted"], json!(false));
     let cross_workspace = call_error(
         &transport,

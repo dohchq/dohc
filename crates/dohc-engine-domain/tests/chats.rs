@@ -456,6 +456,57 @@ fn thread_header_message_id_is_reserved_before_search_index_write() {
 }
 
 #[test]
+fn feed_cursor_message_id_cap_applies_to_start_and_send() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("general");
+
+    let too_long = "x".repeat(257);
+    let invalid_start = start_thread(
+        "gen-1",
+        "too-long",
+        &too_long,
+        "opening",
+        ChatActorKind::Human,
+        20,
+    );
+    assert_eq!(
+        chats
+            .start_channel_thread(&invalid_start, &NO_FAULTS)
+            .unwrap_err()
+            .code(),
+        "invalid-input"
+    );
+
+    let max_id = "m".repeat(256);
+    chats
+        .start_channel_thread(
+            &start_thread(
+                "gen-1",
+                "valid",
+                &max_id,
+                "opening",
+                ChatActorKind::Human,
+                21,
+            ),
+            &NO_FAULTS,
+        )
+        .expect("256-character id");
+    let invalid_send = send_msg("valid", &too_long, None, "reply", 22);
+    assert_eq!(
+        chats
+            .send_message(&invalid_send, &NO_FAULTS)
+            .unwrap_err()
+            .code(),
+        "invalid-input"
+    );
+}
+
+#[test]
 fn crash_mid_send_strands_no_empty_thread() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
@@ -641,33 +692,82 @@ fn follow_lww_last_write_wins_and_lists_active() {
         )
         .expect("thread");
 
-    let follow = |ts: i64, state: FollowState, seq: i64| SetFollow {
+    let follow = |ts: i64, state: FollowState| SetFollow {
         workspace_id: WS.to_owned(),
         owner_user_id: "owner".to_owned(),
         target_kind: FollowTargetKind::Thread,
         target_id: "t1".to_owned(),
         state,
-        at_ms: Some(ts),
         now_ms: ts,
-        origin_id: "origin-a".to_owned(),
-        origin_seq: seq,
     };
     chats
-        .set_follow(&follow(10, FollowState::Following, 1), &NO_FAULTS)
+        .set_follow(&follow(10, FollowState::Following), &NO_FAULTS)
         .expect("f1");
-    // Older unfollow loses (LWW on updated_at_ms).
+    // A local mutation advances past the prior register even if the wall clock
+    // moved backward, matching the TS store's monotonic local path.
     chats
-        .set_follow(&follow(5, FollowState::Unfollowed, 2), &NO_FAULTS)
+        .set_follow(&follow(5, FollowState::Unfollowed), &NO_FAULTS)
         .expect("f2");
-    let active = chats.list_follows(WS, "owner").expect("active");
-    assert_eq!(active.len(), 1, "older unfollow does not win");
-    assert_eq!(active[0].state, FollowState::Following);
-
-    // Newer unfollow wins → no active follows.
-    chats
-        .set_follow(&follow(20, FollowState::Unfollowed, 3), &NO_FAULTS)
-        .expect("f3");
     assert!(chats.list_follows(WS, "owner").expect("empty").is_empty());
+
+    let active = chats
+        .set_follow(&follow(20, FollowState::Following), &NO_FAULTS)
+        .expect("f3");
+    assert_eq!(active.state, FollowState::Following);
+    assert!(active.origin_id.starts_with("origin_"));
+    assert_eq!(active.origin_seq, 0);
+}
+
+#[test]
+fn local_follow_uses_persisted_origin_and_next_journal_sequence() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    {
+        let mut chats = LinkedChatStore::new(&mut store);
+        chats
+            .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+            .expect("general");
+        chats
+            .start_channel_thread(
+                &start_thread("gen-1", "t1", "m1", "opening", ChatActorKind::Human, 2),
+                &NO_FAULTS,
+            )
+            .expect("thread");
+    }
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "INSERT INTO sync_identity \
+                 (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+                 VALUES (?1, 'origin-fixed', 'epoch-fixed', 'stream-fixed', 3)",
+                [WS],
+            )?;
+            conn.execute(
+                "INSERT INTO replication_log \
+                 (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported) \
+                 VALUES (?1, 'origin-fixed', 7, 'seed', '{}', 4, 0)",
+                [WS],
+            )
+        })
+        .expect("seed local replication coordinate");
+
+    let mut chats = LinkedChatStore::new(&mut store);
+    let follow = chats
+        .set_follow(
+            &SetFollow {
+                workspace_id: WS.to_owned(),
+                owner_user_id: "owner".to_owned(),
+                target_kind: FollowTargetKind::Thread,
+                target_id: "t1".to_owned(),
+                state: FollowState::Following,
+                now_ms: 10,
+            },
+            &NO_FAULTS,
+        )
+        .expect("follow");
+    assert_eq!(follow.origin_id, "origin-fixed");
+    assert_eq!(follow.origin_seq, 8);
 }
 
 #[test]
@@ -685,22 +785,19 @@ fn local_follow_timestamp_advances_past_same_millisecond_unfollow() {
             &NO_FAULTS,
         )
         .expect("thread");
-    let local = |state, seq| SetFollow {
+    let local = |state| SetFollow {
         workspace_id: WS.to_owned(),
         owner_user_id: "owner".to_owned(),
         target_kind: FollowTargetKind::Thread,
         target_id: "t1".to_owned(),
         state,
-        at_ms: None,
         now_ms: 100,
-        origin_id: "origin-a".to_owned(),
-        origin_seq: seq,
     };
     let unfollowed = chats
-        .set_follow(&local(FollowState::Unfollowed, 1), &NO_FAULTS)
+        .set_follow(&local(FollowState::Unfollowed), &NO_FAULTS)
         .expect("unfollow");
     let followed = chats
-        .set_follow(&local(FollowState::Following, 2), &NO_FAULTS)
+        .set_follow(&local(FollowState::Following), &NO_FAULTS)
         .expect("follow");
     assert_eq!(unfollowed.updated_at_ms, 100);
     assert_eq!(followed.updated_at_ms, 101);
@@ -733,10 +830,7 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
                 target_kind: FollowTargetKind::Thread,
                 target_id: "t1".to_owned(),
                 state: FollowState::Following,
-                at_ms: Some(50),
                 now_ms: 50,
-                origin_id: "o".to_owned(),
-                origin_seq: 1,
             },
             &NO_FAULTS,
         )
@@ -761,10 +855,7 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
                 target_kind: FollowTargetKind::Channel,
                 target_id: GENERAL_CHANNEL_WIRE_ID.to_owned(),
                 state: FollowState::Following,
-                at_ms: Some(51),
                 now_ms: 51,
-                origin_id: "o".to_owned(),
-                origin_seq: 1,
             },
             &NO_FAULTS,
         )
@@ -954,12 +1045,35 @@ fn dispatch_claim_is_single_writer_idempotent() {
         );
     }
 
+    for invalid_command in [
+        "   ".to_owned(),
+        "bad\0command".to_owned(),
+        "x".repeat(16_385),
+    ] {
+        assert_eq!(
+            chats
+                .claim_next_pending(WS, "run-1", &invalid_command, None, 22, &NO_FAULTS)
+                .unwrap_err()
+                .code(),
+            "invalid-input"
+        );
+    }
+    for invalid_path in ["   ".to_owned(), "bad\0path".to_owned(), "x".repeat(16_385)] {
+        assert_eq!(
+            chats
+                .claim_next_pending(WS, "run-1", "agent", Some(&invalid_path), 22, &NO_FAULTS,)
+                .unwrap_err()
+                .code(),
+            "invalid-input"
+        );
+    }
+
     let claim = chats
         .claim_next_pending(
             WS,
             "run-1",
-            "agent --run",
-            Some("logs/run-1.log"),
+            "  agent --run  ",
+            Some("  logs/run-1.log  "),
             22,
             &NO_FAULTS,
         )
@@ -978,12 +1092,12 @@ fn dispatch_claim_is_single_writer_idempotent() {
     assert_eq!(claim.run.workspace_id, WS);
     assert_eq!(claim.run.thread_id, "t1");
     assert_eq!(claim.run.trigger_message_id, "m0");
-    assert_eq!(claim.run.command, "agent --run");
+    assert_eq!(claim.run.command, "  agent --run  ");
     assert_eq!(claim.run.started_at_ms, 22);
     assert_eq!(claim.run.ended_at_ms, None);
     assert_eq!(claim.run.exit_code, None);
     assert_eq!(claim.run.failure_reason, None);
-    assert_eq!(claim.run.log_path.as_deref(), Some("logs/run-1.log"));
+    assert_eq!(claim.run.log_path.as_deref(), Some("  logs/run-1.log  "));
     assert!(!claim.run.failure_note_posted);
 
     for invalid in [String::new(), "bad\0run".to_owned(), "x".repeat(513)] {
@@ -1527,8 +1641,12 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
         )
         .expect("start");
     // owner follows nothing → m0 is NOT visible; marking it seen fails closed.
+    let head = encode_feed_cursor(&FeedCursorValue {
+        created_at_ms: 100,
+        message_id: "m0".to_owned(),
+    });
     let err = chats
-        .mark_feed_seen(WS, "owner", 100, "m0", 200, "o", 1, &NO_FAULTS)
+        .mark_feed_seen(WS, "owner", &head, 200, &NO_FAULTS)
         .unwrap_err();
     assert_eq!(err.code(), "invalid-follow-target");
     // After following the thread, the same coordinate is visible and accepted.
@@ -1540,17 +1658,16 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
                 target_kind: FollowTargetKind::Thread,
                 target_id: "t1".to_owned(),
                 state: FollowState::Following,
-                at_ms: Some(150),
                 now_ms: 150,
-                origin_id: "o".to_owned(),
-                origin_seq: 1,
             },
             &NO_FAULTS,
         )
         .expect("follow");
-    chats
-        .mark_feed_seen(WS, "owner", 100, "m0", 200, "o", 1, &NO_FAULTS)
+    let state = chats
+        .mark_feed_seen(WS, "owner", &head, 200, &NO_FAULTS)
         .expect("now visible");
+    assert_eq!(state.last_seen_created_at_ms, 100);
+    assert_eq!(state.last_seen_message_id, "m0");
 }
 
 // ------------------------------------------------------ migration presence
