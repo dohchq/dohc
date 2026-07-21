@@ -111,3 +111,17 @@ protocol's blob-chunk streaming (BlobStart exists in the wire contract; NO
 daemon producer yet) — cutover-relevant for readBinaryFile and large text
 reads; slot with RPC-D or its own slice. The pre-existing
 versionedText.read carries the same 64 KiB bound for a single body.
+
+
+CROSS-ENGINE DELTA (RPC-A r18): secret path SPELLING — TS normalize-stores
+(percent-disguises collapse); Rust stores the spelling the write carried
+and resolves verbatim (the secretness gate still classifies via
+normalization, so disguises cannot bypass it). Moot for data post-R15
+(the reset wipes TS-written rows); differential/parity suites must expect
+it.
+
+SCHEMA OBLIGATION (RPC-A r11): the oracle's momentSelectSql payload
+provenance (payload_before_*/payload_after_*) and before-snapshot identity
+columns were never ported to the Rust moments table. Rust hydrates what
+its schema HAS (before/after text + byte lengths). Full parity = a
+migration — pre-R15 candidate, pairs with the secret ownership column.
