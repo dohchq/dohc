@@ -769,7 +769,11 @@ impl EngineService {
         // control-character ids — a malformed filter is an input error,
         // never an empty timeline.
         if params.object_id.as_deref().is_some_and(|id| {
-            id.trim().is_empty() || id.trim() != id || id.chars().any(char::is_control)
+            // TS normalizeObjectId rejects blank/untrimmed ids and the NUL
+            // key separator ONLY — other control bytes are TS-valid ids
+            // and must keep filtering (an id created there must stay
+            // addressable here).
+            id.trim().is_empty() || id.trim() != id || id.contains('\u{0}')
         }) {
             return Err(wire(ErrorCode::InvalidParams, "objectId is malformed"));
         }
@@ -934,15 +938,6 @@ impl EngineService {
             ),
         )
         .await?;
-        if let Some(len) = recorded_len {
-            if len as usize > MAX_INBAND_CONTENT_BYTES {
-                return Ok(json!({
-                    "text": Value::Null,
-                    "byteLength": len,
-                    "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
-                }));
-            }
-        }
         // Blocking filesystem work stays off the tokio worker.
         let key_root = open.root.clone();
         let key = tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_root))
@@ -965,6 +960,18 @@ impl EngineService {
             }
             return Ok(Value::Null);
         };
+        // Key present and valid: an over-cap secret answers from the
+        // RECORDED length WITHOUT decrypting — but only now, so key-state
+        // failures behave identically for secrets of every size.
+        if let Some(len) = recorded_len {
+            if len as usize > MAX_INBAND_CONTENT_BYTES {
+                return Ok(json!({
+                    "text": Value::Null,
+                    "byteLength": len,
+                    "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+                }));
+            }
+        }
         let plaintext = Self::read_under_ctx(
             &cancellation,
             "secrets.materialize",
@@ -1595,9 +1602,31 @@ fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
         "beforeBinarySha256": moment.before_binary_sha256,
         "beforeLatestMomentId": moment.before_latest_moment_id,
         "metadataOrigin": moment.metadata_origin,
-        "authorJson": moment.author_json,
+        // PARSED author (TS momentAuthorFromRow parity): absent column =
+        // actor-neutral; unparseable JSON surfaces as an explicit corrupt
+        // marker, never silently dropped and never trusted raw.
+        "author": moment
+            .author_json
+            .as_deref()
+            .map(|raw| serde_json::from_str::<Value>(raw)
+                .unwrap_or_else(|_| json!({ "corrupt": true }))),
         "syncRecordOnly": moment.sync_record_only,
+        // Hydrated payload text (momentSelectSql parity), each body under
+        // the same self-describing in-band cap as every content read.
+        "afterText": inband_text(moment.after_text.as_deref()),
+        "afterByteLength": moment.after_byte_length,
+        "beforeText": inband_text(moment.before_text.as_deref()),
+        "beforeByteLength": moment.before_byte_length,
     })
+}
+
+/// A text body under the in-band cap, or null (the byte length beside it
+/// tells the caller what was withheld).
+fn inband_text(text: Option<&str>) -> Value {
+    match text {
+        Some(text) if text.len() <= MAX_INBAND_CONTENT_BYTES => json!(text),
+        _ => Value::Null,
+    }
 }
 
 fn snapshot_json(snapshot: &TextSnapshot) -> Value {

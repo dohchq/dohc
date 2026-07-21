@@ -200,6 +200,16 @@ pub struct MomentRecord {
     /// 'latest moment' fork-point selection (`PORTING.md` §1). `false` = a
     /// materialized moment.
     pub sync_record_only: bool,
+    /// HYDRATED payload fields (TS `momentSelectSql` parity): the after/
+    /// before TEXT bodies (None for binary or absent sides) and the
+    /// COALESCEd text/binary byte lengths. The oracle's richer
+    /// payload-provenance columns (payload_before_*, before-snapshot
+    /// identity fields) are NOT in the Rust schema — a recorded pre-R15
+    /// schema obligation.
+    pub after_text: Option<String>,
+    pub after_byte_length: Option<i64>,
+    pub before_text: Option<String>,
+    pub before_byte_length: Option<i64>,
 }
 
 /// A keyset page of moments (newest first). Mirrors the inventory contract for

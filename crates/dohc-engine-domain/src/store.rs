@@ -322,26 +322,9 @@ impl<'a> VersionedTextStore<'a> {
                 object: object.clone(),
                 before: snapshot_text_view(&before),
                 after: snapshot_text_view(&after),
-                moment: MomentRecord {
-                    moment_order,
-                    moment_id: input.moment_id.clone(),
-                    version_id: input.version_id.clone(),
-                    object_id: before.object_id.clone(),
-                    path: input.to_path.clone(),
-                    recorded_at_ms: input.now_ms,
-                    operation: MomentOp::Rename,
-                    after_content_kind: before.content_kind.clone(),
-                    after_blob_sha256: before.blob_sha256.clone(),
-                    after_binary_sha256: before.binary_sha256.clone(),
-                    before_present: true,
-                    before_blob_sha256: before.blob_sha256.clone(),
-                    before_content_kind: before.content_kind.clone(),
-                    before_binary_sha256: before.binary_sha256.clone(),
-                    before_latest_moment_id: Some(before.latest_moment_id.clone()),
-                    metadata_origin: input.metadata_origin.clone(),
-                    author_json: input.author_json.clone(),
-                    sync_record_only: false,
-                },
+                moment: get_moment(tx, ws, &input.moment_id)?.ok_or(DomainError::StateCorrupt {
+                    reason: "moment vanished within its own write transaction",
+                })?,
             })
         })?;
         committed(outcome)
@@ -740,10 +723,10 @@ impl<'a> VersionedTextStore<'a> {
                  operation, after_blob_sha256, before_present, before_blob_sha256, \
                  before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
                  COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-                 COALESCE(before_content_kind, 'text'), before_binary.sha256 \
+                 COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             after_text_blob.text, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             before_text_blob.text, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length) \
                  FROM moments m \
                  LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
-                 LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \
+                 LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
                  WHERE workspace_id = ?1",
             );
             let mut binds: Vec<Box<dyn rusqlite::ToSql>> =
@@ -2024,26 +2007,9 @@ pub fn write_text_in_tx(
             latest_moment_id: input.moment_id.clone(),
             metadata_origin: input.metadata_origin.clone(),
         },
-        moment: MomentRecord {
-            moment_order,
-            moment_id: input.moment_id.clone(),
-            version_id: input.version_id.clone(),
-            object_id,
-            path: input.path.clone(),
-            recorded_at_ms: input.now_ms,
-            operation: MomentOp::Write,
-            after_content_kind: "text".to_owned(),
-            after_blob_sha256: Some(blob),
-            after_binary_sha256: None,
-            before_present: before.is_some(),
-            before_blob_sha256: before_blob,
-            before_content_kind,
-            before_binary_sha256,
-            before_latest_moment_id,
-            metadata_origin: input.metadata_origin.clone(),
-            author_json: input.author_json.clone(),
-            sync_record_only: false,
-        },
+        moment: get_moment(tx, ws, &input.moment_id)?.ok_or(DomainError::StateCorrupt {
+            reason: "moment vanished within its own write transaction",
+        })?,
         deduped: false,
     })
 }
@@ -2245,26 +2211,9 @@ pub fn delete_text_in_tx(
     Ok(DeleteResult {
         object,
         before: snapshot_text_view(&before),
-        moment: MomentRecord {
-            moment_order,
-            moment_id: input.moment_id.clone(),
-            version_id: input.version_id.clone(),
-            object_id: before.object_id.clone(),
-            path: input.path.clone(),
-            recorded_at_ms: input.now_ms,
-            operation: MomentOp::Delete,
-            after_content_kind: before.content_kind.clone(),
-            after_blob_sha256: before.blob_sha256.clone(),
-            after_binary_sha256: before.binary_sha256.clone(),
-            before_present: true,
-            before_blob_sha256: before.blob_sha256.clone(),
-            before_content_kind: before.content_kind.clone(),
-            before_binary_sha256: before.binary_sha256.clone(),
-            before_latest_moment_id: Some(before.latest_moment_id.clone()),
-            metadata_origin: input.metadata_origin.clone(),
-            author_json: input.author_json.clone(),
-            sync_record_only: false,
-        },
+        moment: get_moment(tx, ws, &input.moment_id)?.ok_or(DomainError::StateCorrupt {
+            reason: "moment vanished within its own write transaction",
+        })?,
     })
 }
 
@@ -2829,10 +2778,10 @@ fn select_moment_by_order(
              operation, after_blob_sha256, before_present, before_blob_sha256, \
              before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256 \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             after_text_blob.text, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             before_text_blob.text, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length) \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
-             LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \
+             LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 \
                AND moment_order <= ?4 AND (sync_record_only IS NULL OR sync_record_only = 0) \
              ORDER BY moment_order DESC LIMIT 1",
@@ -3331,10 +3280,10 @@ fn get_moment(
              operation, after_blob_sha256, before_present, before_blob_sha256, \
              before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256 \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             after_text_blob.text, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             before_text_blob.text, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length) \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
-             LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \
+             LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
              WHERE workspace_id = ?1 AND moment_id = ?2",
             params![workspace_id, moment_id],
             map_moment_row,
@@ -3483,6 +3432,10 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
     let after_binary_sha256: Option<String> = row.get(15)?;
     let before_content_kind: String = row.get(16)?;
     let before_binary_sha256: Option<String> = row.get(17)?;
+    let after_text: Option<String> = row.get(18)?;
+    let after_byte_length: Option<i64> = row.get(19)?;
+    let before_text: Option<String> = row.get(20)?;
+    let before_byte_length: Option<i64> = row.get(21)?;
     Ok(MomentOp::from_db(&op_str).and_then(|operation| {
         let before_state = MomentBeforeState::from_db(before_present_raw)?;
         match after_content_kind.as_str() {
@@ -3546,6 +3499,10 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
             // A record-only marker is a non-NULL, NON-ZERO value; NULL or 0 both
             // mean 'materialized' (PORTING.md §1, matching the aligned fork SQL).
             sync_record_only: matches!(sync_record_only, Some(v) if v != 0),
+            after_text,
+            after_byte_length,
+            before_text,
+            before_byte_length,
         })
     }))
 }
