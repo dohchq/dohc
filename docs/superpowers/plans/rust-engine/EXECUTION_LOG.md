@@ -1866,7 +1866,11 @@ same trigger deterministically (the sink reports them through its channel).
 DELIBERATE DEVIATION from the R14 sketch, argued in the PR: no escalation to
 WorkspaceSupervisor::restart. A store-actor restart cannot fix a dead OS
 watch and would drop in-flight RPC work for a healthy RPC surface;
-escalation is a SIGNAL (terminal via watcher.status) for the product layer.
+escalation is a SIGNAL (terminal via watcher.status) for the product layer
+— which OWNS the remaining obligation at cutover: surface a persistent
+warning while terminal (capture must never appear active over a dead
+watch), preserve the dirty workspace state, and offer recovery
+(close/reopen) driven by watcher.status.
 
 THE REVIEW STORY (12 rounds; CodeRabbit APPROVED, Codex clean at r12 after
 SEVEN consecutive rounds of real findings, plus 4 independent adversarial
@@ -1910,10 +1914,12 @@ next round caught. The compounding lesson became structure:
   (281 samples over 1791s, trendEvaluated:true). Curve shape, stated
   honestly: 26.0 KiB/s first half -> 4.9 KiB/s second half (last quarter
   9.3 KiB/s) — strongly decelerating, i.e. predominantly cache/WAL warmup,
-  47 MB absolute RSS at end. The residual second-half slope (~5 KiB/s under
-  sustained max-rate load) is FLAGGED for dogfood-period monitoring, not
-  alarming: real usage is orders of magnitude quieter than the soak's
-  ~4.3 cycles/sec.
+  47 MB absolute RSS at end. GATE6 disposition, stated precisely: scenario
+  correctness + handles/threads baseline = PASS; MEMORY = PASS-WITH-FLAG
+  (slope 12.5 KiB/s against the 20 KiB/s threshold, warmup-shaped curve),
+  conditional on dogfood-period monitoring — NOT an unconditional
+  leak-freedom claim. Real usage is orders of magnitude quieter than the
+  soak's ~4.3 cycles/sec.
 - Next: E (#215, in review: capture RPCs + the TS-vs-Rust differential —
   10 scenarios green + tamper-verified — + the soak runner + RPC_GAP.md),
   then RPC-A per RPC_GAP.md -> GATE6 -> R15 (ICE checkpoint — STOP).
