@@ -63,6 +63,11 @@ of scope here.
   Rust counterparts (no thread<->file link queries, no thread->markdown
   projection renderer in chats.rs). Real domain work; slots with the
   reactions/decisions follow-up (RPC-B2), NOT mechanical wiring.
+  ALSO production-called and unported: chat ATTACHMENT reads —
+  `listThreadAttachments` (graph mention enrichment) and the
+  `listChatThreadAttachments` IPC (apps/desktop/src/main.ts:3203/5312);
+  chats.rs scopes attachment indexing OUT of R09 explicitly. Slots with
+  RPC-B2.
   ALSO production-called and to VERIFY-THEN-ADD (Codex, 2026-07-21):
   `getChannelWireId` (wire-id RECORDING exists Rust-side —
   record_channel_wire_id, chats.rs:800 — the read accessor is unverified),
@@ -93,10 +98,15 @@ under the authenticated DOP1 session; desktop-supplied identifiers are never
 trusted for access.
 
 WIRE-LIMIT OBLIGATION (found in RPC-A review): in-band content is bounded
-by the DOP1 limits (64 KiB per string, 1 MiB per frame). RPC-A ships
+by the DOP1 limits (64 KiB per string, 1 MiB per frame). #217 (RPC-A, in
+review — nothing below is on main until it merges) ships
 versionedBinary.read with a 48 KiB in-band cap (over-cap answers metadata +
-null body, self-describing) and versionedText.list as METADATA-ONLY
-(bodies via versionedText.read). Real binaries and >64 KiB text need the
+null body, self-describing), versionedText.list as METADATA-ONLY
+(bodies via versionedText.read), and the SAME 48 KiB in-band contract for
+secrets.materialize: an over-cap secret answers {text: null, byteLength,
+inbandLimitBytes} — plaintext stays in-band or absent, NEVER partially
+delivered and never a post-decrypt encode failure; callers needing larger
+secrets wait on the same blob-streaming follow-up. Real binaries and >64 KiB text need the
 protocol's blob-chunk streaming (BlobStart exists in the wire contract; NO
 daemon producer yet) — cutover-relevant for readBinaryFile and large text
 reads; slot with RPC-D or its own slice. The pre-existing

@@ -1956,8 +1956,9 @@ next round caught. The compounding lesson became structure:
   ctx.deadline; DEADLINE_EXCEEDED vs CANCELLED split preserved for
   embedded callers).
 - The runner's evidence is honest BY CONSTRUCTION: recorded tolerances,
-  tri-state rssDisposition AND tri-state noMonotonicRssSlope (null when
-  unevaluated), unmeasuredAssertions named IN the artifact, cleanShutdown
+  tri-state rssDisposition AND the tri-state
+  assertions.rssSlopeWithinThreshold (null when unevaluated; the key was
+  later renamed from noMonotonicRssSlope to state its actual check), unmeasuredAssertions named IN the artifact, cleanShutdown
   requires a successful exit status, cyclesCompleted counts phase-2
   workload only, the final RSS sample joins the fit, per-request 60s and
   handshake 30s bounds with pending-drain on daemon death, scenarios that
