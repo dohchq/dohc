@@ -793,17 +793,12 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: MomentsListParams = parse(params)?;
-        // TS normalizeObjectId REJECTS blank, whitespace-padded, and
-        // control-character ids — a malformed filter is an input error,
-        // never an empty timeline.
-        if params.object_id.as_deref().is_some_and(|id| {
-            // TS normalizeObjectId rejects blank/untrimmed ids and the NUL
-            // key separator ONLY — other control bytes are TS-valid ids
-            // and must keep filtering (an id created there must stay
-            // addressable here).
-            id.trim().is_empty() || id.trim() != id || id.contains('\u{0}')
-        }) {
-            return Err(wire(ErrorCode::InvalidParams, "objectId is malformed"));
+        // The filter rejects ONLY what the write path can never store
+        // (the empty string): every id versionedText.list or
+        // moments.list can return — whitespace/control-carrying
+        // included — must stay filterable verbatim.
+        if params.object_id.as_deref() == Some("") {
+            return Err(wire(ErrorCode::InvalidParams, "objectId must not be empty"));
         }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
@@ -872,12 +867,11 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: MomentsGetParams = parse(params)?;
-        // Blank-after-trim is malformed input — but the QUERY uses the id
-        // AS STORED: the domain accepts whitespace-carrying ids at write,
-        // and an id returned by moments.list must stay fetchable verbatim
-        // (internal consistency beats imported trim behavior here).
-        if params.moment_id.trim().is_empty() {
-            return Err(wire(ErrorCode::InvalidParams, "momentId must not be blank"));
+        // Reject ONLY what the write path can never store (the empty
+        // string): all-whitespace ids ARE storable and moments.list
+        // returns them verbatim — they must stay fetchable verbatim.
+        if params.moment_id.is_empty() {
+            return Err(wire(ErrorCode::InvalidParams, "momentId must not be empty"));
         }
         let moment_id = params.moment_id;
         let open = self.open(handle.as_ref())?;
@@ -983,9 +977,12 @@ impl EngineService {
         let cancellation = OperationCancellation::new(ctx);
         // PRECEDENCE stat (keyless): validates the secret path and the
         // version BEFORE any key work, so caller mistakes error
-        // identically regardless of local key-file state. The in-band cap
-        // itself is decided later, inside the decrypting actor turn.
-        let _precedence = Self::read_under_ctx(
+        // identically regardless of local key-file state — and an ABSENT
+        // secret answers null right here: no key material is needed to
+        // say "nothing stored", and a stale malformed key file must not
+        // turn that answer into an error. The in-band cap itself is
+        // decided later, inside the decrypting actor turn.
+        let stat = Self::read_under_ctx(
             &cancellation,
             "secrets.materialize",
             open.actor.secret_file_len(
@@ -995,6 +992,9 @@ impl EngineService {
             ),
         )
         .await?;
+        if stat.is_none() {
+            return Ok(Value::Null);
+        }
         // Blocking filesystem work stays off the tokio worker — and the
         // WAIT for it is cancellation/deadline-raced like every other
         // await on this surface (the blocking task finishes on its own;
