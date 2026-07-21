@@ -46,6 +46,33 @@ impl LeaseProbe for AlwaysLive {
 #[test]
 fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
     let (_scratch, _path, mut engine) = store();
+    // A MISSING blob must refuse BEFORE any ack — a deferred coordinate is
+    // already acknowledged, and a blob that can never load would strand the
+    // drain forever while the peer cursor is past the row.
+    let missing = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-1",
+            "path": "notes/live.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "isBaseState": false
+        }),
+    );
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &missing, &NoFaults, &AlwaysLive),
+        Err(SyncError::BlobInvalid)
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "peer").expect("ack"),
+        -1,
+        "an unloadable blob must leave the coordinate unacked"
+    );
+    let update_bytes = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "live edit");
+    let blob_sha = engine.put_binary_blob(&update_bytes).expect("store blob");
     let op = envelope(
         "peer",
         0,
@@ -55,7 +82,7 @@ fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
             "objectId": "object-1",
             "path": "notes/live.md",
             "contentKind": "plaintext",
-            "updateBlobSha256": "not-read-while-live",
+            "updateBlobSha256": blob_sha,
             "isBaseState": false
         }),
     );

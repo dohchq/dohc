@@ -2351,6 +2351,15 @@ fn ydoc_settle_on_store(
         if current.binary_sha256.is_some() {
             return Err(dohc_engine_domain::DomainError::BinaryHeadNotText);
         }
+        // The path may have changed owners since ydoc.open (another write
+        // claimed it with a different object). Settling anyway would overwrite
+        // the OTHER object's head with this session's stale projection while
+        // marking this lineage settled — refuse as a stale target instead.
+        if let Some(snapshot) = current.snapshot.as_ref()
+            && snapshot.object_id != key.object_id
+        {
+            return Err(dohc_engine_domain::DomainError::ConflictStaleTarget);
+        }
         let preimage = current
             .snapshot
             .as_ref()
@@ -2421,9 +2430,11 @@ fn ydoc_settle_on_store(
         TxnOutcome::Committed(write) => write,
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
-    if token.is_cancelled() {
-        return Err(RuntimeError::Cancelled);
-    }
+    // NO cancellation checks past this point: the settle marker committed
+    // with the moment above, so a Cancelled return here would report failure
+    // for a settle the lineage already records — and close(settle:false)
+    // could then prune the CRDT with the artifact never materialized or
+    // suppressed. Once committed, the settle runs to completion.
     let job_id = format!("ydoc-mat_{}", write.moment.moment_id);
     let job = store.load_materialization_job(&job_id)?.ok_or_else(|| {
         RuntimeError::Domain(dohc_engine_domain::DomainError::StateCorrupt {

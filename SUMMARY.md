@@ -135,3 +135,28 @@ the raw result alongside the existing decoder.
   generation (collab `settle()` never runs on daemon lineages in C1);
   lease-on-actor-panic recovers via workspace reopen eviction (noted, not
   changed).
+
+## Codex review round 1 (PR #220)
+
+- **P1 cancel-after-commit**: no cancellation checks after the settle
+  transaction commits — a Cancelled return there reported failure for a
+  settle the lineage already records, and close(settle:false) could then
+  prune the CRDT with the artifact never materialized/suppressed. Once
+  committed, the settle runs to completion.
+- **P1 owner change**: the settle transaction now refuses
+  (ConflictStaleTarget) when the path's current head belongs to a
+  different object than the session key — a rival write claiming the path
+  can no longer be overwritten by a stale session projection.
+  Mutation-verified via versionedText.write claiming the path mid-session.
+- **P1 defer-ack blob validation**: the live-lease defer now loads and
+  hash-checks the update blob BEFORE acking; a missing/tampered blob
+  leaves the coordinate unacked instead of stranding the drain. The sync
+  test proves a missing blob refuses with the ack still at -1.
+- **P2 suppression vs teardown**: workspace close/eviction clears the
+  suppression registry only AFTER the capture drain completes, so an
+  in-flight reconcile apply cannot re-ingest the daemon's own settled
+  file during teardown.
+- **P2 resync window**: an event arriving while a resync is in flight
+  marks the session dropped-while-stale; the resync then runs one more
+  pass instead of resetting the baseline past the missed update.
+  Mutation-verified (22nd client test fails with the re-resync disabled).

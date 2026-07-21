@@ -489,6 +489,47 @@ describe("YdocLiveAdapter", () => {
     adapter.dispose();
   });
 
+  it("resyncs again when a remote event arrives during the resync window", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    const source = new Y.Doc();
+    Y.applyUpdate(source, session.initialUpdate);
+    const text = source.getText("plainText");
+    const beforeFirst = Y.encodeStateVector(source);
+    text.insert(0, "A");
+    const first = Y.encodeStateAsUpdate(source, beforeFirst);
+    const beforeSecond = Y.encodeStateVector(source);
+    text.insert(1, "B");
+    const second = Y.encodeStateAsUpdate(source, beforeSecond);
+    const beforeThird = Y.encodeStateVector(source);
+    text.insert(2, "C");
+    const third = Y.encodeStateAsUpdate(source, beforeThird);
+
+    engine.applyRemoteUpdate(session.sessionId, first);
+    // seq gap -> stale; the resync request is in flight after this call.
+    engine.applyRemoteUpdate(session.sessionId, second, { seq: 3 });
+    // An event landing INSIDE the resync window: its update cannot be ordered
+    // against the in-flight state, so the session must resync once more
+    // instead of silently resetting the baseline past it.
+    engine.applyRemoteUpdate(session.sessionId, third, { seq: 4 });
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const resyncCalls = engine.requests.filter(
+      (request) => request.method === YDOC_METHOD.resync,
+    );
+    expect(resyncCalls).toHaveLength(2);
+    expect(session.doc.getText("plainText").toString()).toBe("ABC");
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
   it("surfaces remote event decode errors without throwing into dispatch", async () => {
     const engine = seedPlaintextEngine();
     const adapter = new YdocLiveAdapter(engine);

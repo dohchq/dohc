@@ -149,14 +149,12 @@ pub fn apply_ydoc_envelope(
     .map_err(|_| SyncError::InvalidInput {
         reason: "ydoc.update coordinates are invalid",
     })?;
-    if leases.is_live(&key) {
-        return crate::apply_envelope_with(store, envelope, faults, |_tx, _op| {
-            Ok(YdocApplyResult {
-                deferred: true,
-                reason: Some("ydoc-session-live"),
-            })
-        });
-    }
+    // The blob is validated BEFORE any ack path — including the live-lease
+    // defer. A defer acks the coordinate with the imported log as the durable
+    // queue; if the referenced blob were missing or tampered, the peer cursor
+    // would already be past a row the drain can never apply, and the bad
+    // coordinate cannot be re-fetched. Missing/corrupt blob leaves the
+    // coordinate unacked instead.
     let bytes: Vec<u8> = store.read_with(|conn| {
         conn.query_row(
             "SELECT bytes FROM binary_blobs WHERE sha256=?1",
@@ -169,6 +167,14 @@ pub fn apply_ydoc_envelope(
     })?;
     if dohc_engine_storage::hex_sha256(&bytes) != payload.update_blob_sha256 {
         return Err(SyncError::BlobInvalid);
+    }
+    if leases.is_live(&key) {
+        return crate::apply_envelope_with(store, envelope, faults, |_tx, _op| {
+            Ok(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-session-live"),
+            })
+        });
     }
     let remote = RemoteUpdate {
         origin_id: envelope.origin_id.clone(),

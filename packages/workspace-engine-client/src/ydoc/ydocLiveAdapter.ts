@@ -440,6 +440,7 @@ export class YdocAdapterSession {
   // Structured text edits reject before a transaction and do not quarantine.
   private quarantinedError: YdocSessionQuarantinedError | null = null;
   private staleError: YdocResyncNeededError | null = null;
+  private droppedWhileStale = false;
   private nextLocalUpdateSeq = 1;
   private readonly remoteUpdateListeners = new Set<(update: Uint8Array) => void>();
   private readonly remoteApplyErrorListeners = new Set<
@@ -625,7 +626,15 @@ export class YdocAdapterSession {
   }
 
   receiveRemoteUpdate(update: Uint8Array): void {
-    if (this.closed || this.staleError !== null) return;
+    if (this.closed) return;
+    if (this.staleError !== null) {
+      // The engine emitted an update we cannot order against the in-flight
+      // resync state. Dropping it silently would leave the doc permanently
+      // behind (the reset baseline hides the gap) — remember it happened so
+      // the current resync pass runs once more when it lands.
+      this.droppedWhileStale = true;
+      return;
+    }
     try {
       Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
     } catch (cause) {
@@ -673,6 +682,13 @@ export class YdocAdapterSession {
     Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
     this.adapter.resetEventBaseline(this.sessionId);
     this.staleError = null;
+    if (this.droppedWhileStale) {
+      // An update arrived after the engine produced this resync state but
+      // before it was applied here; its content is durable engine-side, so
+      // one more pass folds it in.
+      this.droppedWhileStale = false;
+      return await this.resync();
+    }
     return update;
   }
 

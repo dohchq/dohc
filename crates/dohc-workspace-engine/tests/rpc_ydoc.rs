@@ -527,3 +527,94 @@ async fn settle_without_a_seeded_lineage_refuses_and_leaves_the_file_intact() {
     .await;
     call(&transport, &handle, 6, "workspace.close", json!({})).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settle_refuses_after_the_path_changes_owners() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    // An unrelated captured file establishes the main version; the contested
+    // path itself stays absent until the rival write claims it.
+    write_file(scratch.path(), "notes/seed.md", b"seed");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-owner", 1).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "notes/claimed.md",
+            "contentKind": "plaintext"
+        }),
+    )
+    .await;
+    assert_eq!(opened["lineage"], json!("absent"));
+    let session_id = opened["sessionId"].as_str().expect("session id");
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": session_id,
+            "updateBase64": plaintext_update("session text")
+        }),
+    )
+    .await;
+
+    // Another writer claims the same path with a DIFFERENT object before the
+    // session settles.
+    call(
+        &transport,
+        &handle,
+        4,
+        "versionedText.write",
+        json!({
+            "versionId": "main",
+            "objectId": "other-object",
+            "path": "notes/claimed.md",
+            "text": "the other owner's content",
+            "momentId": "moment-other-owner",
+            "metadataOrigin": "agent"
+        }),
+    )
+    .await;
+
+    // Mutation check: drop the object_id ownership comparison in
+    // ydoc_settle_on_store to restore the bug — the stale session projection
+    // then overwrites the other object's head and this refusal assertion
+    // fails (and the content assertion below would read "session text").
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                5,
+                "ydoc.settle",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id, "summary": "stale owner" }),
+            ),
+        )
+        .await
+        .expect_err("settling after the path changed owners must refuse");
+    assert_eq!(refused.code, ErrorCode::InvalidParams);
+
+    let head = call(
+        &transport,
+        &handle,
+        6,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": "notes/claimed.md" }),
+    )
+    .await;
+    assert_eq!(head["text"], json!("the other owner's content"));
+    assert_eq!(head["objectId"], json!("other-object"));
+
+    // The session cannot settle (stale owner) and cannot prune-close
+    // (UnsettledClose guard: recorded edits with no matching artifact) —
+    // workspace.close is the teardown path that releases its lease.
+    call(&transport, &handle, 7, "workspace.close", json!({})).await;
+}

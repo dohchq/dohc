@@ -342,9 +342,11 @@ impl EngineService {
             }
             lock(&self.handles).remove(&handle);
             lock(&self.sessions).retain(|_, session| session.workspace != handle);
-            self.self_writes.clear_workspace(&open.workspace_id);
-            // The evicted binding's files layer must not outlive it.
+            // The evicted binding's files layer must not outlive it. Clear
+            // suppression only AFTER the shutdown drain — an in-flight
+            // reconcile apply still consults the registry.
             open.shutdown_capture().await;
+            self.self_writes.clear_workspace(&open.workspace_id);
         }
         if lock(&self.handles).len() >= MAX_OPEN_HANDLES {
             return Err(wire(
@@ -450,16 +452,23 @@ impl EngineService {
         // at ANY await point leaves the #201 backstop semantics intact while
         // the teardown order stays strictly files-then-actor: the driver
         // drains its in-flight apply BEFORE the store actor goes down.
-        if let Some(removed) = removed.as_ref() {
-            self.self_writes.clear_workspace(&removed.workspace_id);
-        }
         let capture_drain = removed
             .as_ref()
             .and_then(OpenWorkspace::begin_capture_shutdown);
         let closed = closing.is_some();
+        // Suppression entries clear AFTER the capture drain: an in-flight
+        // reconcile apply still consults the registry, and clearing first
+        // would let it re-ingest the daemon's own just-settled file as a
+        // capture write (provenance flip) during teardown.
+        let clear_suppression = removed
+            .as_ref()
+            .map(|removed| (self.self_writes.clone(), removed.workspace_id.clone()));
         let close_task = tokio::spawn(async move {
             if let Some(drain) = capture_drain {
                 let _ = drain.await;
+            }
+            if let Some((self_writes, workspace_id)) = clear_suppression {
+                self_writes.clear_workspace(&workspace_id);
             }
             tokio::task::spawn_blocking(move || match closing {
                 Some(closing) => closing.finish(),
