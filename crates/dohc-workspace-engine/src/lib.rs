@@ -407,7 +407,10 @@ impl EngineService {
     /// Drive capture to quiescence and report what was achieved. THE
     /// determinism seam for the capture differential: without it a harness
     /// can only sleep and hope, which turns timing blips into parity
-    /// failures. `settled: false` is an honest answer (layer down, teardown
+    /// failures. Quiescence covers every change the WATCHER has noticed — a
+    /// write still inside the OS debounce is invisible to flush too; callers
+    /// needing a specific write poll for it (flush + check), which the
+    /// differential does. `settled: false` is an honest answer (layer down, teardown
     /// race, or a workspace under continuous mutation hitting the cycle
     /// bound) — callers must treat it as "state not comparable", never as
     /// "clean".

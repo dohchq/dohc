@@ -585,6 +585,8 @@ mod drive_loop_tests {
         Healthy,
         /// Nothing dirty: the reconcile round-trips CONVERGED.
         Idle,
+        /// The reconcile is CANCELLED mid-scan (teardown racing the tick).
+        CancelledTick,
         HealthyButDirtyApply,
         /// A healthy tick during which the watcher records ONE more
         /// disruption (backend error / root-identity blip that re-attached).
@@ -730,6 +732,7 @@ mod drive_loop_tests {
                     TickIo::Applied { clean: true }
                 }
                 Script::Idle => TickIo::Converged,
+                Script::CancelledTick => TickIo::Cancelled,
                 _ => TickIo::Applied { clean: true },
             }
         }
@@ -1120,6 +1123,27 @@ mod drive_loop_tests {
             journal.starts.len() >= 2,
             "recovering from an unknown policy while degraded must rebuild: {} starts",
             journal.starts.len()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flush_racing_teardown_never_claims_settled() {
+        // A cancelled reconcile COMMITS NOTHING (dirty stays put), so a
+        // flush answered off one must say settled:false — reading the
+        // cancelled scan as quiescence would hand the differential a
+        // half-captured workspace as "clean".
+        let (outcome, waited) = flush_after(
+            vec![Script::CancelledTick],
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            !outcome.settled,
+            "a teardown-raced flush must never claim quiescence"
+        );
+        assert!(
+            waited < std::time::Duration::from_secs(1),
+            "and it answers promptly, waited {waited:?}"
         );
     }
 
@@ -1530,6 +1554,11 @@ enum TickIo {
     /// work pending (an apply's own side effects, a change that landed
     /// mid-scan).
     Converged,
+    /// The reconcile was CANCELLED mid-scan (teardown): nothing committed,
+    /// dirty stays put. Deliberately distinct from `Converged` — a flush
+    /// racing teardown must answer `settled: false`, never read a cancelled
+    /// scan as quiescence.
+    Cancelled,
     /// Reconciled and applied one plan; `clean` is false when the apply
     /// reported failures or the scan itself was degraded.
     Applied { clean: bool },
@@ -1766,6 +1795,13 @@ async fn drive_loop<E: DriverEnv>(
                         });
                         break;
                     }
+                    TickIo::Cancelled => {
+                        // Teardown raced this pass: nothing settled, and the
+                        // next loop iteration exits on the cancel token. No
+                        // supervision observation either — a cancelled tick
+                        // proves nothing about the layer's health.
+                        break;
+                    }
                     TickIo::Applied { clean } => {
                         all_clean &= clean;
                         outcome = Some(TickObservation::Healthy {
@@ -1785,8 +1821,16 @@ async fn drive_loop<E: DriverEnv>(
                     break;
                 }
             }
-            // `cycles >= 1`, so at least one arm set it.
-            outcome.expect("at least one tick ran")
+            match outcome {
+                Some(observation) => observation,
+                // Every tick this pass was cancelled: answer the flush
+                // honestly (settled stays false) and let the next iteration
+                // exit on the cancel token — no health claim either way.
+                None => {
+                    answer_flush(&mut pending_flush, &status, false);
+                    continue;
+                }
+            }
         };
 
         if restart.observe(observation, &status) == LayerAction::Drop {
@@ -1938,16 +1982,17 @@ impl DriverEnv for RealEnv {
             .reconcile_if_dirty(cancel.child_token())
             .await
         {
-            // Converged means at quiescence; Cancelled only happens on the
-            // way down, where the distinction no longer matters.
-            //
-            // EXCEPT converged with a NON-EMPTY quarantine: the controller
+            // Converged means at quiescence — EXCEPT with a NON-EMPTY
+            // quarantine: the controller
             // parks persistently failing paths on its own degraded-rescan
             // backoff and stops self-forcing scans, so "nothing dirty"
             // coexists with "capture has not recovered" — reading that as
             // clean would clear `degraded` over live failures, and would let
             // a flush claim `settled` over them.
-            Ok(ReconcileRun::Converged | ReconcileRun::Cancelled) => {
+            // Cancelled commits nothing (dirty stays put): teardown is
+            // racing this tick, and it must not be mistaken for quiescence.
+            Ok(ReconcileRun::Cancelled) => TickIo::Cancelled,
+            Ok(ReconcileRun::Converged) => {
                 if self.status.degraded() {
                     match layer.files.handle().stats().await {
                         Ok(stats) if stats.quarantined > 0 => TickIo::Applied { clean: false },

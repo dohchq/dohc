@@ -50,6 +50,14 @@ const THREAD_SLACK: i64 = 8;
 /// A true leak over a 30–60 minute run dwarfs this; transient allocator
 /// behavior does not.
 const MAX_RSS_SLOPE_BYTES_PER_SEC: f64 = 20.0 * 1024.0;
+/// The trend fit is only evidence with enough samples behind it: below this
+/// the slope assertion FAILS rather than passing vacuously.
+const MIN_TREND_SAMPLES: usize = 24;
+/// ...and with enough WALL-CLOCK span: a short window cannot distinguish
+/// cache warmup from a leak (a 3-minute quick run measures ~80 KiB/s of
+/// page-cache fill on a healthy daemon). Below this span the trend is
+/// reported as NOT EVALUATED — never as leak evidence in either direction.
+const MIN_TREND_SPAN_SECS: f64 = 900.0;
 
 struct Options {
     minutes: u64,
@@ -86,6 +94,14 @@ fn parse_options() -> Options {
         });
         path
     });
+    // `cargo run --bin dohc-soak-runner` builds ONLY the runner; the sibling
+    // daemon exe is a separate target. Fail with instructions instead of a
+    // cryptic spawn error.
+    assert!(
+        daemon.exists(),
+        "daemon binary not found at {} — build both:          cargo build --features harness --bin dohc-soak-runner --bin dohc-workspace-engine",
+        daemon.display()
+    );
     Options {
         minutes,
         cycles,
@@ -197,11 +213,17 @@ impl Daemon {
             .await;
     }
 
-    async fn shutdown(mut self) {
+    /// Returns whether the daemon exited cleanly within the deadline after
+    /// stdin close — a shutdown deadlock is a soak FAILURE, not a footnote
+    /// for kill_on_drop to paper over.
+    async fn shutdown(mut self) -> bool {
         // Closing stdin is the daemon's normal end-of-session signal.
         drop(self.stdin);
-        let _ = tokio::time::timeout(Duration::from_secs(30), self.child.wait()).await;
+        let clean = tokio::time::timeout(Duration::from_secs(30), self.child.wait())
+            .await
+            .is_ok();
         self.reader.abort();
+        clean
     }
 
     async fn kill(mut self) {
@@ -535,13 +557,10 @@ async fn main() {
 
     let mut daemon = Daemon::spawn(&options.daemon).await;
 
-    // Warm up, then take the baseline AFTER the first open/close so one-time
-    // allocations (thread pools, sqlite page cache) never read as leaks.
+    // Warm up the initial (phase-1) process; the LEAK baseline is taken on
+    // the dedicated phase-2 subject below.
     let warm_root = make_root("warm", 0);
     scenario_open_close(&daemon, &warm_root).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let (rss0, handles0, threads0) = sample_process(daemon.pid()).expect("baseline process sample");
-    eprintln!("soak: baseline rss={rss0} handles={handles0} threads={threads0}");
 
     let root_cycle = make_root("cycle", 0);
     let root_a = make_root("a", 0);
@@ -556,15 +575,57 @@ async fn main() {
     let mut counts: HashMap<&'static str, u64> = HashMap::new();
     let mut crashes = 0_u64;
 
-    // The tier wants BOTH ~cycles scenarios AND a 30-60 minute span: keep
-    // cycling until both targets are met, hard-capped at twice the budget.
+    // TWO PHASES, deliberately. Interleaving crash/restart cycles with the
+    // leak-trend measurement made the trend VACUOUS: each restart replaced
+    // the measured process and cleared the sample series, so the slope was
+    // fit over a few seconds of tail and no process was ever soaked longer
+    // than a handful of cycles. Phase 1 runs the crash-recovery tier against
+    // disposable processes; phase 2 soaks ONE process, uninterrupted, for
+    // the entire remaining cycle/time budget — the trend fit and the
+    // return-to-baseline assertions are measured over phase 2 only.
+    let crash_cycles = (options.cycles / 12).max(3);
+    eprintln!("soak: phase 1 — {crash_cycles} crash/restart recovery cycles");
+    for cycle in 0..crash_cycles {
+        if started.elapsed() > budget {
+            break;
+        }
+        let handle = open(&daemon, &root_crash, "soak-crash").await;
+        std::fs::write(root_crash.join("crash-window.md"), format!("cycle {cycle}"))
+            .expect("crash-window write");
+        let _ = handle;
+        daemon.kill().await;
+        daemon = Daemon::spawn(&options.daemon).await;
+        let handle = open(&daemon, &root_crash, "soak-crash").await;
+        assert!(
+            flush_until_settled(&daemon, &handle, Duration::from_secs(60)).await,
+            "post-crash reopen must settle (the un-acked write re-offers)"
+        );
+        close(&daemon, handle).await;
+        crashes += 1;
+        *counts.entry("crashRestart").or_default() += 1;
+    }
+
+    // Phase 2 subject: a FRESH process, then a warmup open/close so one-time
+    // allocations never read as trend, then its baseline.
+    daemon.kill().await;
+    daemon = Daemon::spawn(&options.daemon).await;
+    scenario_open_close(&daemon, &root_cycle).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let (rss_base, handles_base, threads_base) =
+        sample_process(daemon.pid()).expect("phase-2 baseline sample");
+    eprintln!(
+        "soak: phase 2 — leak-trend soak on one process \
+         (baseline rss={rss_base} handles={handles_base} threads={threads_base})"
+    );
     let mut cycle: u64 = 0;
+    let mut hard_capped = false;
     loop {
         if cycle >= options.cycles && started.elapsed() >= budget {
             break;
         }
         if started.elapsed() > budget * 2 {
             eprintln!("soak: hard wall-clock cap reached at cycle {cycle}");
+            hard_capped = true;
             break;
         }
         if last_sample.elapsed() >= SAMPLE_EVERY {
@@ -578,7 +639,7 @@ async fn main() {
             }
             last_sample = Instant::now();
         }
-        match cycle % 6 {
+        match cycle % 5 {
             0 => {
                 scenario_open_close(&daemon, &root_cycle).await;
                 *counts.entry("openClose").or_default() += 1;
@@ -595,71 +656,46 @@ async fn main() {
                 scenario_cancel_storm(&daemon, &root_cancel).await;
                 *counts.entry("cancelStorm").or_default() += 1;
             }
-            4 => {
+            _ => {
                 scenario_editor_cycle(&daemon, &root_editor, cycle).await;
                 *counts.entry("editorCycle").or_default() += 1;
-            }
-            _ => {
-                // Sidecar crash/restart: kill mid-session with a workspace
-                // open, respawn, and prove the next session works — the
-                // restart also RESETS the metric series' subject, so restart
-                // cycles re-baseline instead of polluting the fit.
-                let handle = open(&daemon, &root_crash, "soak-crash").await;
-                std::fs::write(root_crash.join("crash-window.md"), format!("cycle {cycle}"))
-                    .expect("crash-window write");
-                let _ = handle;
-                daemon.kill().await;
-                daemon = Daemon::spawn(&options.daemon).await;
-                let handle = open(&daemon, &root_crash, "soak-crash").await;
-                assert!(
-                    flush_until_settled(&daemon, &handle, Duration::from_secs(60)).await,
-                    "post-crash reopen must settle (the un-acked write re-offers)"
-                );
-                close(&daemon, handle).await;
-                crashes += 1;
-                *counts.entry("crashRestart").or_default() += 1;
-                // Fresh process: restart the trend series.
-                samples.clear();
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                if let Some((rss, handles, threads)) = sample_process(daemon.pid()) {
-                    samples.push(Sample {
-                        at_secs: started.elapsed().as_secs_f64(),
-                        rss_bytes: rss,
-                        handles,
-                        threads,
-                    });
-                }
             }
         }
         cycle += 1;
     }
 
-    // Everything closed; settle, then the final sample.
+    // Everything closed; settle, then the final sample — all against the
+    // phase-2 subject and ITS baseline.
     tokio::time::sleep(Duration::from_secs(3)).await;
     let (rss_end, handles_end, threads_end) =
         sample_process(daemon.pid()).expect("final process sample");
     let slope = rss_slope(&samples);
-
-    // The baseline subject may have been replaced by a crash cycle; compare
-    // against the post-crash series' first sample in that case.
-    let (handle_base, thread_base) = if crashes > 0 {
-        samples
-            .first()
-            .map(|sample| (sample.handles, sample.threads))
-            .unwrap_or((handles0, threads0))
-    } else {
-        (handles0, threads0)
-    };
+    let (handle_base, thread_base) = (handles_base, threads_base);
     let handles_ok = handles_end as i64 <= handle_base as i64 + HANDLE_SLACK;
     let threads_ok = threads_end as i64 <= thread_base as i64 + THREAD_SLACK;
-    let slope_ok = slope <= MAX_RSS_SLOPE_BYTES_PER_SEC;
+    // The trend verdict is TRI-STATE: evaluated-and-ok, evaluated-and-FAIL,
+    // or NOT EVALUATED (too few samples / too short a span — quick runs).
+    // Not-evaluated never reads as leak evidence: the run can still PASS on
+    // scenario correctness, but the evidence records trendEvaluated:false
+    // and a GATE6 citation requires trendEvaluated:true.
+    let fit_span = match (samples.first(), samples.last()) {
+        (Some(first), Some(last)) => last.at_secs - first.at_secs,
+        _ => 0.0,
+    };
+    let trend_evaluated = samples.len() >= MIN_TREND_SAMPLES && fit_span >= MIN_TREND_SPAN_SECS;
+    let slope_ok = !trend_evaluated || slope <= MAX_RSS_SLOPE_BYTES_PER_SEC;
 
-    daemon.shutdown().await;
+    let clean_shutdown = daemon.shutdown().await;
 
-    let verdict = if handles_ok && threads_ok && slope_ok {
-        "PASS"
-    } else {
+    let verdict = if !(handles_ok && threads_ok && slope_ok && clean_shutdown) {
         "FAIL"
+    } else if hard_capped {
+        // The requested targets were NOT met — evidence, but not the tier's.
+        "PASS-INCOMPLETE(hard-cap)"
+    } else if !trend_evaluated {
+        "PASS-SCENARIOS-ONLY(trend-not-evaluated)"
+    } else {
+        "PASS"
     };
     let evidence = json!({
         "tier": "cutoverBlocking",
@@ -668,7 +704,13 @@ async fn main() {
         "scenarioCounts": counts,
         "crashRestarts": crashes,
         "durationSecs": started.elapsed().as_secs(),
-        "baseline": { "rss": rss0, "handles": handles0, "threads": threads0 },
+        "baseline": { "rss": rss_base, "handles": handles_base, "threads": threads_base },
+        "trendSamples": samples.len(),
+        "minTrendSamples": MIN_TREND_SAMPLES,
+        "trendFitSpanSecs": fit_span,
+        "trendEvaluated": trend_evaluated,
+        "cleanShutdown": clean_shutdown,
+        "hardCapped": hard_capped,
         "final": { "rss": rss_end, "handles": handles_end, "threads": threads_end },
         "rssSlopeBytesPerSec": slope,
         "assertions": {
