@@ -708,7 +708,7 @@ impl<'a> VersionedTextStore<'a> {
             let row: Option<(i64, Option<String>)> = conn
                 .query_row(
                     "SELECT byte_length, \
-                     CASE WHEN byte_length <= ?2 THEN text END \
+                     CASE WHEN byte_length <= ?2 AND LENGTH(CAST(text AS BLOB)) <= ?2 THEN text END \
                      FROM blobs WHERE sha256 = ?1",
                     rusqlite::params![sha, cap as i64],
                     |row| Ok((row.get(0)?, row.get(1)?)),
@@ -787,6 +787,19 @@ impl<'a> VersionedTextStore<'a> {
                     reason: "binary blob length does not match its bytes",
                 });
             }
+            // Bytes that will be SERVED are re-hashed (get_binary_blob
+            // parity): bit-rot or tampering that preserves the length must
+            // fail closed, never ship under the original content address.
+            // Under-cap only — hashing <=48 KiB is trivial.
+            if let Some(bytes) = &bytes {
+                let mut hasher = Sha256::new();
+                hasher.update(bytes);
+                if hex(&hasher.finalize()) != sha256 {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "binary blob bytes do not match their content address",
+                    });
+                }
+            }
             Ok(Some(InbandBinary {
                 object_id,
                 sha256,
@@ -854,7 +867,7 @@ impl<'a> VersionedTextStore<'a> {
                  operation, after_blob_sha256, before_present, before_blob_sha256, \
                  before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
                  COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-                 COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length) \
+                 COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length) \
                  FROM moments m \
                  LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
                  LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
@@ -2947,7 +2960,7 @@ fn select_moment_by_order(
              operation, after_blob_sha256, before_present, before_blob_sha256, \
              before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length) \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length) \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
              LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
@@ -3449,7 +3462,7 @@ fn get_moment(
              operation, after_blob_sha256, before_present, before_blob_sha256, \
              before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length) \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 AND LENGTH(CAST(after_text_blob.text AS BLOB)) <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 AND LENGTH(CAST(before_text_blob.text AS BLOB)) <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length) \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
              LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
@@ -3605,6 +3618,22 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
     let after_byte_length: Option<i64> = row.get(19)?;
     let before_text: Option<String> = row.get(20)?;
     let before_byte_length: Option<i64> = row.get(21)?;
+    // Byte lengths ALWAYS hydrate (only the text is capped): a side whose
+    // sha is set but whose joined length is NULL references a missing
+    // blob row — corrupt state, never "over-cap".
+    if (after_blob_sha256.is_some() || after_binary_sha256.is_some()) && after_byte_length.is_none()
+    {
+        return Ok(Err(DomainError::StateCorrupt {
+            reason: "moment after side references a missing blob row",
+        }));
+    }
+    if (before_blob_sha256.is_some() || before_binary_sha256.is_some())
+        && before_byte_length.is_none()
+    {
+        return Ok(Err(DomainError::StateCorrupt {
+            reason: "moment before side references a missing blob row",
+        }));
+    }
     Ok(MomentOp::from_db(&op_str).and_then(|operation| {
         let before_state = MomentBeforeState::from_db(before_present_raw)?;
         match after_content_kind.as_str() {
