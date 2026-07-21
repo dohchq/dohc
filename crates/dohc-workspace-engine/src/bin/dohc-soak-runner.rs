@@ -759,7 +759,10 @@ async fn main() {
                 .await
                 .expect("crash probe read resolves")
                 .expect("response channel");
-            if matches!(&answer, Ok(value) if !value.is_null()) {
+            // THIS cycle's bytes, not a stale head from an earlier cycle —
+            // every cycle rewrites the same path, so non-null alone could
+            // certify recovery while the write under test was lost.
+            if matches!(&answer, Ok(value) if value["text"] == json!(format!("cycle {cycle}"))) {
                 break;
             }
             assert!(
@@ -775,6 +778,9 @@ async fn main() {
         crashes += 1;
         *counts.entry("crashRestart").or_default() += 1;
     }
+    // A crash prelude the budget cut short must SHOW: the verdict degrades
+    // to PASS-INCOMPLETE rather than silently dropping crash coverage.
+    let crash_prelude_complete = crashes == crash_cycles;
 
     // Phase 2 subject: a FRESH process, then a warmup open/close so one-time
     // allocations never read as trend, then its baseline.
@@ -877,6 +883,8 @@ async fn main() {
     } else if hard_capped {
         // The requested targets were NOT met — evidence, but not the tier's.
         "PASS-INCOMPLETE(hard-cap)"
+    } else if !crash_prelude_complete {
+        "PASS-INCOMPLETE(crash-prelude)"
     } else if !trend_evaluated {
         "PASS-SCENARIOS-ONLY(trend-not-evaluated)"
     } else {
@@ -896,6 +904,7 @@ async fn main() {
         // be visible as such, not assumed covered.
         "cancelStormCancellationsObserved": cancellations_observed,
         "crashRestarts": crashes,
+        "crashCyclesPlanned": crash_cycles,
         "durationSecs": started.elapsed().as_secs(),
         "baseline": { "rss": rss_base, "handles": handles_base, "threads": threads_base },
         "trendSamples": samples.len(),

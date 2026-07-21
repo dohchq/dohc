@@ -682,9 +682,23 @@ impl OperationCancellation {
             token.cancel();
         }
         let signal = ctx.cancel.clone();
+        let deadline = ctx.deadline;
         let child = token.clone();
         let bridge = tokio::spawn(async move {
-            signal.cancelled().await;
+            // The supervisor enforces deadlines non-cooperatively for wire
+            // requests; EMBEDDED callers (InProcessTransport, future
+            // mobile/WASM hosts) have no supervisor, so the deadline arms
+            // the same token here — a deadlined operation cancels exactly
+            // like a cancelled one.
+            match deadline {
+                Some(deadline) => {
+                    tokio::select! {
+                        () = signal.cancelled() => {}
+                        () = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
+                    }
+                }
+                None => signal.cancelled().await,
+            }
             child.cancel();
         });
         OperationCancellation { token, bridge }
