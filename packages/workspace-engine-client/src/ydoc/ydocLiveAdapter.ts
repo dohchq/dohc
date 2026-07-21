@@ -564,9 +564,25 @@ export class YdocAdapterSession {
       sessionId: this.sessionId,
       ...(options?.summary ? { summary: options.summary } : {}),
     };
-    const result = decodeYdocSettleResult(
-      await this.adapter.request(this.workspace, YDOC_METHOD.settle, params),
-    );
+    let raw: unknown;
+    try {
+      raw = await this.adapter.request(this.workspace, YDOC_METHOD.settle, params);
+    } catch (error) {
+      // Remote edits were drained under this session's lease: this doc is
+      // BEHIND the durable lineage. Resync (which returns the full drained
+      // state) and settle exactly once more — the daemon refuses rather
+      // than materializing content this editor never saw.
+      if (
+        error instanceof Error &&
+        error.message.includes("ydoc-remote-updates-pending")
+      ) {
+        await this.resync();
+        raw = await this.adapter.request(this.workspace, YDOC_METHOD.settle, params);
+      } else {
+        throw error;
+      }
+    }
+    const result = decodeYdocSettleResult(raw as Parameters<typeof decodeYdocSettleResult>[0]);
     this.lastSettledSha = result.sha256;
     return result;
   }

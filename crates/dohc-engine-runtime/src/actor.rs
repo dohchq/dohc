@@ -2358,28 +2358,10 @@ fn ydoc_record_update_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    // Validate BEFORE the parent-row transaction: a malformed first seed
+    // Validate BEFORE anything touches the store: a malformed first seed
     // must not strand a bare file_objects row for the deterministic object
     // id (which regular writes then treat as already existing).
     Ydoc::validate_update(update)?;
-    if require_empty_lineage
-        && dohc_engine_collab::read_marker(store, key)?
-            .is_some_and(|marker| marker.head_update_seq > 0)
-    {
-        return Err(dohc_engine_collab::CollabError::SeedOntoExistingLineage.into());
-    }
-    let parent = store.write_with(faults, |tx| {
-        tx.execute(
-            "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
-             VALUES (?1, ?2, ?3)",
-            params![key.workspace_id, key.object_id, now_ms],
-        )
-        .map_err(StorageError::persist_public)?;
-        Ok::<_, StorageError>(())
-    })?;
-    if matches!(parent, TxnOutcome::Crashed { .. }) {
-        return Err(RuntimeError::OperationCrashed);
-    }
     // A replicated, base-claimed lineage journals the ydoc.update DELTA in
     // the SAME transaction as the append (blob-before-log holds; TS parity:
     // ydocEngineDriver journals inside the recordUpdate write). Local-only
@@ -2388,13 +2370,19 @@ fn ydoc_record_update_on_store(
     let journal_key = key.clone();
     let journal_path = path.to_owned();
     let journal_kind = content_kind;
-    match dohc_engine_collab::record_local_update_creating_marker_with_hook(
+    match dohc_engine_collab::record_local_update_creating_marker_guarded(
         store,
         key,
         content_kind,
         regime,
         update,
         actor_origin_id.as_deref(),
+        // Parent row, seed guard, marker, append, and outbound journal all
+        // commit in ONE transaction — no bare-parent crash window, and a
+        // timed-out-commit seed retry DEDUPES inside the guard instead of
+        // refusing seed-onto-existing-lineage.
+        true,
+        require_empty_lineage,
         faults,
         now_ms,
         move |tx, outcome| {
@@ -2505,6 +2493,14 @@ fn ydoc_settle_on_store(
     // ConflictStaleTarget even when the projection itself is unchanged —
     // otherwise settle reports success and a close can prune without the
     // client ever resyncing over the divergence.
+    //
+    // The expectation derives from DURABLE state (the lineage's last settle
+    // sha) falling back to the caller-supplied OPEN-TIME head sha — never
+    // from RPC-side session fields mutated after awaits, which a dropped
+    // future (deadline firing after the actor committed a settle) leaves
+    // stale and would turn every retry into a false conflict.
+    let expected_head_sha =
+        dohc_engine_collab::read_last_settled_sha(store, key)?.or(expected_head_sha);
     let head_probe =
         VersionedTextStore::new(store).read_text(&key.workspace_id, &key.version_id, path)?;
     let probe_sha = head_probe

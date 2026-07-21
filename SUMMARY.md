@@ -342,3 +342,27 @@ the raw result alongside the existing decoder.
 - P2 defer validation replays the QUEUED deferred predecessors onto the
   gate doc first — a later update that only breaks after they apply
   stays unacked.
+
+## Codex review round 9 (PR #220)
+
+Dropped-future hardening (deadline fires after the actor committed):
+- Seed retries DEDUPE: parent row, empty-lineage guard, marker, append,
+  and outbound journal commit in ONE transaction
+  (record_local_update_creating_marker_guarded); the blob dedup check
+  precedes the guard, so a timed-out-commit retry of the same first
+  update answers Deduped instead of seed-onto-existing-lineage — and a
+  crash can no longer strand a bare parent row.
+- Settle expectations derive from DURABLE state (last_settled_sha ||
+  the immutable open-time head sha) inside the actor — RPC-side session
+  fields mutated after awaits no longer participate.
+- ydoc.close TAKES the session entry before the await: a dropped future
+  releases the lease via the local guard drop; a close refusal reinserts
+  the entry under the still-held session_ops serial.
+- Leases reserve per (workspace, OBJECT) across versions — a fork can't
+  host a second canonical editor for the same object.
+- The manifest seed excludes only rows with PENDING ydoc-mat_ jobs
+  (completed jobs persist with status='complete' — the earlier NOT
+  EXISTS would have stopped seeding every settled head after restart).
+- "ydoc-remote-updates-pending" is a DISTINCT wire message and the
+  client auto-recovers: resync (returns the drained full state) then
+  exactly one settle retry.

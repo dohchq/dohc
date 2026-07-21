@@ -370,7 +370,69 @@ pub fn record_local_update_creating_marker_with_hook<F>(
 where
     F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
 {
+    record_local_update_creating_marker_guarded(
+        store,
+        key,
+        content_kind,
+        regime,
+        update,
+        actor_origin_id,
+        false,
+        false,
+        faults,
+        now_ms,
+        post_append,
+    )
+}
+
+/// The full first-seed form: optionally ensures the `file_objects` parent row
+/// and enforces the empty-lineage seed guard — all in ONE transaction with the
+/// append, so a crash cannot strand a bare parent row and a timed-out-commit
+/// RETRY of the same seed bytes DEDUPES (the blob check precedes the guard)
+/// instead of refusing seed-onto-existing-lineage.
+#[allow(clippy::too_many_arguments)]
+pub fn record_local_update_creating_marker_guarded<F>(
+    store: &mut EngineStore,
+    key: &DocKey,
+    content_kind: ContentKind,
+    regime: Regime,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    ensure_parent_row: bool,
+    require_empty_lineage: bool,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+    post_append: F,
+) -> Result<TxnOutcome<AppendOutcome>, CollabError>
+where
+    F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
+{
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
+        if ensure_parent_row {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES (?1, ?2, ?3)",
+                rusqlite::params![key.workspace_id, key.object_id, now_ms],
+            )
+            .map_err(map_sql)?;
+        }
+        let guarded_marker = if require_empty_lineage {
+            query_marker(tx, key)?
+        } else {
+            None
+        };
+        if guarded_marker.is_some_and(|marker| marker.head_update_seq > 0) {
+            // A retry of the SAME first update after a timed-out commit must
+            // dedupe, not refuse: check the blob before the guard.
+            let sha = crate::hex_sha256(update);
+            if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
+                return Ok(AppendOutcome {
+                    seq: existing,
+                    deduped: true,
+                    emit_outbound: false,
+                });
+            }
+            return Err(CollabError::SeedOntoExistingLineage);
+        }
         validate_update_bytes(update)?;
         let marker = match query_marker(tx, key)? {
             Some(marker) => {

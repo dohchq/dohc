@@ -131,7 +131,6 @@ struct YdocSessionView {
     regime: Regime,
     lineage_absent: bool,
     first_update_pending: bool,
-    last_settled_sha: Option<String>,
     open_head_sha: Option<String>,
 }
 
@@ -1433,10 +1432,7 @@ impl EngineService {
                 session.key,
                 session.path.clone(),
                 session.content_kind,
-                session
-                    .last_settled_sha
-                    .clone()
-                    .or_else(|| session.open_head_sha.clone()),
+                session.open_head_sha.clone(),
                 session_id.to_owned(),
                 Arc::new(self.self_writes.clone()),
                 now_ms()?,
@@ -1444,7 +1440,23 @@ impl EngineService {
                 cancellation.token(),
             )
             .await
-            .map_err(map_runtime)?;
+            .map_err(|error| {
+                // A distinct wire message the client acts on: remote edits
+                // drained under this session's lease mean the client's doc is
+                // BEHIND — it must resync (which returns the full drained
+                // state) and settle again. The generic mapping would bury
+                // the signal as "workspace operation failed".
+                if matches!(
+                    &error,
+                    RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
+                        reason: "ydoc-remote-updates-pending",
+                    })
+                ) {
+                    wire(ErrorCode::InvalidParams, "ydoc-remote-updates-pending")
+                } else {
+                    map_runtime(error)
+                }
+            })?;
         if let Some(session) = lock(&self.sessions).get_mut(session_id) {
             session.last_settled_sha = Some(settled.sha256.clone());
         }
@@ -1531,16 +1543,29 @@ impl EngineService {
         // session/lease held, and the retried close would re-settle over the
         // already-settled content (the fingerprint's previous-moment input
         // changed) — duplicate moments for one close.
-        open.actor
+        //
+        // The session entry (and with it the lease guard) is TAKEN before
+        // the await: if a deadline drops this future while the actor still
+        // compacts/prunes, dropping the entry releases the lease — the doc
+        // can't stay ydoc-session-busy forever. A close REFUSAL (e.g.
+        // UnsettledClose on a dirty prune-close) reinserts the entry under
+        // the session_ops serial we still hold.
+        let taken = lock(&self.sessions).remove(&params.session_id);
+        let close_result = open
+            .actor
             .ydoc_close_session(
                 session.key,
                 now_ms()?,
                 Arc::new(NoFaults),
                 CancellationToken::new(),
             )
-            .await
-            .map_err(map_runtime)?;
-        lock(&self.sessions).remove(&params.session_id);
+            .await;
+        if let Err(error) = close_result {
+            if let Some(entry) = taken {
+                lock(&self.sessions).insert(params.session_id.clone(), entry);
+            }
+            return Err(map_runtime(error));
+        }
         serde_json::to_value(YdocCloseResult { closed: true })
             .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
     }
@@ -1593,7 +1618,6 @@ impl EngineService {
                 regime: session.regime,
                 lineage_absent: session.lineage_absent,
                 first_update_pending: session.first_update_pending,
-                last_settled_sha: session.last_settled_sha.clone(),
                 open_head_sha: session.open_head_sha.clone(),
             },
         ))

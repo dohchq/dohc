@@ -27,9 +27,18 @@ use crate::DocKey;
 
 /// An in-process registry of held document leases. Cheap to clone (shares the
 /// held set); pass one clone per actor that opens sessions.
+///
+/// Reservation is per (workspace, OBJECT) — not per version: forks copy the
+/// same object id into new versions, and two live canonical editors for one
+/// object (main + fork) would journal divergent CRDT lineages that both
+/// settle to the same workspace path. One object, one live session.
 #[derive(Clone, Default)]
 pub struct LeaseRegistry {
-    held: Arc<Mutex<HashSet<DocKey>>>,
+    held: Arc<Mutex<HashSet<(String, String)>>>,
+}
+
+fn object_scope(key: &DocKey) -> (String, String) {
+    (key.workspace_id.clone(), key.object_id.clone())
 }
 
 impl LeaseRegistry {
@@ -44,36 +53,36 @@ impl LeaseRegistry {
         let mut held = self.held.lock().map_err(|_| CollabError::Corrupt {
             reason: "lease registry mutex poisoned".to_string(),
         })?;
-        if !held.insert(key.clone()) {
+        if !held.insert(object_scope(key)) {
             return Err(CollabError::LeaseHeld);
         }
         Ok(Lease {
             held: self.held.clone(),
-            key: key.clone(),
+            key: object_scope(key),
             released: false,
         })
     }
 
-    /// Whether a lease for `key` is currently held.
+    /// Whether a lease for `key`'s object is currently held (any version).
     pub fn is_held(&self, key: &DocKey) -> bool {
         self.held
             .lock()
-            .map(|held| held.contains(key))
+            .map(|held| held.contains(&object_scope(key)))
             .unwrap_or(false)
     }
 }
 
 /// An RAII lease guard. Dropping it releases the lease deterministically.
 pub struct Lease {
-    held: Arc<Mutex<HashSet<DocKey>>>,
-    key: DocKey,
+    held: Arc<Mutex<HashSet<(String, String)>>>,
+    key: (String, String),
     released: bool,
 }
 
 impl Lease {
-    /// The leased document key.
-    pub fn key(&self) -> &DocKey {
-        &self.key
+    /// The leased (workspace, object) scope.
+    pub fn scope(&self) -> (&str, &str) {
+        (&self.key.0, &self.key.1)
     }
 
     /// Release the lease early (idempotent; `Drop` also releases).
