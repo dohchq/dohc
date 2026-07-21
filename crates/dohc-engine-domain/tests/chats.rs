@@ -546,6 +546,7 @@ fn feed_cursor_message_id_cap_applies_to_start_and_send() {
             &SetFollow {
                 workspace_id: WS.to_owned(),
                 owner_user_id: "cursor-owner".to_owned(),
+                replication_owner_user_id: None,
                 target_kind: FollowTargetKind::Thread,
                 target_id: "valid".to_owned(),
                 state: FollowState::Following,
@@ -557,10 +558,10 @@ fn feed_cursor_message_id_cap_applies_to_start_and_send() {
     let page = chats
         .list_personal_feed(WS, "cursor-owner", Some(1), None)
         .expect("feed page");
-    assert_eq!(page.items[0].message_id, max_id);
+    assert_eq!(page.items[0].message.message_id, max_id);
     let next = page.next_cursor.expect("exact-budget next cursor");
     let seen = chats
-        .mark_feed_seen(WS, "cursor-owner", &next, 24, &NO_FAULTS)
+        .mark_feed_seen(WS, "cursor-owner", None, &next, 24, &NO_FAULTS)
         .expect("next cursor marks seen");
     assert_eq!(seen.last_seen_message_id, max_id);
 }
@@ -754,6 +755,7 @@ fn follow_lww_last_write_wins_and_lists_active() {
     let follow = |ts: i64, state: FollowState| SetFollow {
         workspace_id: WS.to_owned(),
         owner_user_id: "owner".to_owned(),
+        replication_owner_user_id: None,
         target_kind: FollowTargetKind::Thread,
         target_id: "t1".to_owned(),
         state,
@@ -774,7 +776,7 @@ fn follow_lww_last_write_wins_and_lists_active() {
         .expect("f3");
     assert_eq!(active.state, FollowState::Following);
     assert!(active.origin_id.starts_with("origin_"));
-    assert_eq!(active.origin_seq, 2);
+    assert_eq!(active.origin_seq, 3);
 }
 
 #[test]
@@ -797,9 +799,9 @@ fn local_follow_uses_persisted_origin_and_next_journal_sequence() {
     store
         .read_with(|conn| {
             conn.execute(
-                "INSERT INTO sync_identity \
-                 (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
-                 VALUES (?1, 'origin-fixed', 'epoch-fixed', 'stream-fixed', 3)",
+                "UPDATE sync_identity SET origin_id = 'origin-fixed', \
+                 replication_epoch = 'epoch-fixed', stream_identity = 'stream-fixed' \
+                 WHERE workspace_id = ?1",
                 [WS],
             )?;
             conn.execute(
@@ -817,6 +819,7 @@ fn local_follow_uses_persisted_origin_and_next_journal_sequence() {
             &SetFollow {
                 workspace_id: WS.to_owned(),
                 owner_user_id: "owner".to_owned(),
+                replication_owner_user_id: None,
                 target_kind: FollowTargetKind::Thread,
                 target_id: "t1".to_owned(),
                 state: FollowState::Following,
@@ -847,6 +850,7 @@ fn local_follow_timestamp_advances_past_same_millisecond_unfollow() {
     let local = |state| SetFollow {
         workspace_id: WS.to_owned(),
         owner_user_id: "owner".to_owned(),
+        replication_owner_user_id: Some("owner".to_owned()),
         target_kind: FollowTargetKind::Thread,
         target_id: "t1".to_owned(),
         state,
@@ -862,8 +866,7 @@ fn local_follow_timestamp_advances_past_same_millisecond_unfollow() {
     assert_eq!(followed.updated_at_ms, 101);
     assert_eq!(followed.state, FollowState::Following);
     assert_eq!(unfollowed.origin_id, followed.origin_id);
-    assert_eq!(unfollowed.origin_seq, 0);
-    assert_eq!(followed.origin_seq, 1);
+    assert_eq!(followed.origin_seq, unfollowed.origin_seq + 1);
     let rows: Vec<(i64, String, i64)> = store
         .read_with(|conn| {
             let mut stmt = conn.prepare(
@@ -875,8 +878,7 @@ fn local_follow_timestamp_advances_past_same_millisecond_unfollow() {
         })
         .expect("follow replication rows");
     assert_eq!(rows.len(), 2);
-    assert_eq!(rows[0].0, 0);
-    assert_eq!(rows[1].0, 1);
+    assert_eq!(rows[1].0, rows[0].0 + 1);
     assert_eq!(rows[0].2, 0);
     assert_eq!(rows[1].2, 0);
     assert_eq!(
@@ -897,6 +899,252 @@ fn local_follow_timestamp_advances_past_same_millisecond_unfollow() {
             "targetId": "t1",
             "state": "following",
             "atMs": 101,
+        })
+    );
+}
+
+#[test]
+fn follow_and_feed_read_journaling_require_matching_replication_owner() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 1, &NO_FAULTS)
+        .expect("general");
+    chats
+        .start_channel_thread(
+            &start_thread("gen-1", "t1", "m1", "opening", ChatActorKind::Human, 2),
+            &NO_FAULTS,
+        )
+        .expect("thread");
+
+    let signed_out = chats
+        .set_follow(
+            &SetFollow {
+                workspace_id: WS.to_owned(),
+                owner_user_id: "owner".to_owned(),
+                replication_owner_user_id: None,
+                target_kind: FollowTargetKind::Thread,
+                target_id: "t1".to_owned(),
+                state: FollowState::Following,
+                now_ms: 10,
+            },
+            &NO_FAULTS,
+        )
+        .expect("signed-out follow is durable");
+    assert_eq!(signed_out.state, FollowState::Following);
+    let follow_ops = |store: &EngineStore| {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id = ?1 AND op_kind = 'chat.follow.set'",
+                    [WS],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .expect("follow op count")
+    };
+    assert_eq!(follow_ops(&store), 0);
+
+    let mut chats = LinkedChatStore::new(&mut store);
+    let mismatch = chats
+        .set_follow(
+            &SetFollow {
+                workspace_id: WS.to_owned(),
+                owner_user_id: "owner".to_owned(),
+                replication_owner_user_id: Some("someone-else".to_owned()),
+                target_kind: FollowTargetKind::Thread,
+                target_id: "t1".to_owned(),
+                state: FollowState::Unfollowed,
+                now_ms: 11,
+            },
+            &NO_FAULTS,
+        )
+        .unwrap_err();
+    assert_eq!(mismatch.code(), "invalid-follow-target");
+    assert_eq!(follow_ops(&store), 0);
+
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .set_follow(
+            &SetFollow {
+                workspace_id: WS.to_owned(),
+                owner_user_id: "owner".to_owned(),
+                replication_owner_user_id: Some("owner".to_owned()),
+                target_kind: FollowTargetKind::Thread,
+                target_id: "t1".to_owned(),
+                state: FollowState::Following,
+                now_ms: 12,
+            },
+            &NO_FAULTS,
+        )
+        .expect("verified follow");
+    assert_eq!(follow_ops(&store), 1);
+
+    let mut chats = LinkedChatStore::new(&mut store);
+    let head = chats
+        .list_personal_feed(WS, "owner", Some(10), None)
+        .expect("feed")
+        .head_cursor
+        .expect("head");
+    chats
+        .mark_feed_seen(WS, "owner", None, &head, 20, &NO_FAULTS)
+        .expect("signed-out read is durable");
+    let read_ops = |store: &EngineStore| {
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id = ?1 AND op_kind = 'chat.feed.read.set'",
+                    [WS],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .expect("feed-read op count")
+    };
+    assert_eq!(read_ops(&store), 0);
+    let mut chats = LinkedChatStore::new(&mut store);
+    let mismatch = chats
+        .mark_feed_seen(WS, "owner", Some("someone-else"), &head, 21, &NO_FAULTS)
+        .unwrap_err();
+    assert_eq!(mismatch.code(), "invalid-follow-target");
+    assert_eq!(read_ops(&store), 0);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .mark_feed_seen(WS, "owner", Some("owner"), &head, 22, &NO_FAULTS)
+        .expect("verified feed read");
+    assert_eq!(read_ops(&store), 1);
+}
+
+#[test]
+fn core_chat_creates_journal_exact_relay_payloads() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    chats
+        .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
+        .expect("general");
+    let mut opening = start_thread(
+        "gen-1",
+        "thread-1",
+        "message-1",
+        "opening",
+        ChatActorKind::Human,
+        20,
+    );
+    opening.title = Some("Launch".to_owned());
+    opening.author_user_id = None;
+    chats
+        .start_channel_thread(&opening, &NO_FAULTS)
+        .expect("thread");
+    let mut reply = send_msg("thread-1", "message-2", Some("message-1"), "reply", 30);
+    reply.origin = Some("cli".to_owned());
+    chats.send_message(&reply, &NO_FAULTS).expect("reply");
+    chats
+        .set_follow(
+            &SetFollow {
+                workspace_id: WS.to_owned(),
+                owner_user_id: "owner".to_owned(),
+                replication_owner_user_id: None,
+                target_kind: FollowTargetKind::Thread,
+                target_id: "thread-1".to_owned(),
+                state: FollowState::Following,
+                now_ms: 31,
+            },
+            &NO_FAULTS,
+        )
+        .expect("follow thread");
+    let feed = chats
+        .list_personal_feed(WS, "owner", Some(10), None)
+        .expect("hydrated feed");
+    assert_eq!(feed.items[0].message.message_id, "message-2");
+    assert_eq!(
+        feed.items[0]
+            .parent_message
+            .as_ref()
+            .expect("parent")
+            .message_id,
+        "message-1"
+    );
+    assert_eq!(
+        feed.items[0]
+            .opening_message
+            .as_ref()
+            .expect("opening")
+            .message_id,
+        "message-1"
+    );
+    assert_eq!(feed.items[0].matched_by, vec![FollowTargetKind::Thread]);
+
+    let ops: Vec<(String, serde_json::Value)> = store
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT op_kind, payload_json FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind IN \
+                   ('chat.channel.create', 'chat.thread.create', 'chat.message.append') \
+                 ORDER BY origin_seq",
+            )?;
+            let rows = stmt.query_map([WS], |row| {
+                let kind: String = row.get(0)?;
+                let payload: String = row.get(1)?;
+                Ok((kind, serde_json::from_str(&payload).expect("payload json")))
+            })?;
+            rows.collect()
+        })
+        .expect("core replication ops");
+    assert_eq!(ops.len(), 4);
+    assert_eq!(ops[0].0, "chat.channel.create");
+    assert_eq!(
+        ops[0].1,
+        json!({
+            "channelId": "gen-1",
+            "name": "general",
+            "slug": "general",
+            "kind": "channel",
+            "createdAtMs": 10,
+            "wireId": GENERAL_CHANNEL_WIRE_ID,
+        })
+    );
+    assert_eq!(ops[1].0, "chat.thread.create");
+    assert_eq!(
+        ops[1].1,
+        json!({
+            "threadId": "thread-1",
+            "title": "Launch",
+            "createdAtMs": 20,
+            "channelSlug": "general",
+            "channelWireId": GENERAL_CHANNEL_WIRE_ID,
+        })
+    );
+    assert_eq!(ops[2].0, "chat.message.append");
+    assert_eq!(
+        ops[2].1,
+        json!({
+            "messageId": "message-1",
+            "threadId": "thread-1",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "opening",
+            "createdAtMs": 20,
+        })
+    );
+    assert!(ops[2].1.get("authorUserId").is_none());
+    assert_eq!(ops[3].0, "chat.message.append");
+    assert_eq!(
+        ops[3].1,
+        json!({
+            "messageId": "message-2",
+            "threadId": "thread-1",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "authorUserId": "user-ada",
+            "parentMessageId": "message-1",
+            "origin": "cli",
+            "body": "reply",
+            "createdAtMs": 30,
         })
     );
 }
@@ -924,6 +1172,7 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
             &SetFollow {
                 workspace_id: WS.to_owned(),
                 owner_user_id: "owner".to_owned(),
+                replication_owner_user_id: None,
                 target_kind: FollowTargetKind::Thread,
                 target_id: "t1".to_owned(),
                 state: FollowState::Following,
@@ -936,12 +1185,29 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
     let page = chats
         .list_personal_feed(WS, "owner", Some(20), None)
         .expect("feed");
-    let ids: Vec<&str> = page.items.iter().map(|i| i.message_id.as_str()).collect();
+    let ids: Vec<&str> = page
+        .items
+        .iter()
+        .map(|i| i.message.message_id.as_str())
+        .collect();
     assert_eq!(
         ids,
         vec!["m1"],
         "only the followed thread's message is visible"
     );
+    assert_eq!(page.items[0].thread.thread_id, "t1");
+    assert_eq!(
+        page.items[0]
+            .channel
+            .as_ref()
+            .expect("hydrated channel")
+            .channel_id,
+        "gen-1"
+    );
+    assert!(page.items[0].parent_message.is_none());
+    assert!(page.items[0].opening_message.is_none());
+    assert!(page.items[0].reactions.is_empty());
+    assert_eq!(page.items[0].matched_by, vec![FollowTargetKind::Thread]);
 
     // A followed CHANNEL surfaces its threads' opening messages.
     chats
@@ -949,6 +1215,7 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
             &SetFollow {
                 workspace_id: WS.to_owned(),
                 owner_user_id: "owner2".to_owned(),
+                replication_owner_user_id: None,
                 target_kind: FollowTargetKind::Channel,
                 target_id: GENERAL_CHANNEL_WIRE_ID.to_owned(),
                 state: FollowState::Following,
@@ -961,6 +1228,10 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
         .list_personal_feed(WS, "owner2", Some(1), None)
         .expect("chan feed");
     assert_eq!(chan_feed.items.len(), 1);
+    assert_eq!(
+        chan_feed.items[0].matched_by,
+        vec![FollowTargetKind::Channel]
+    );
     // With a limit of 1 and two visible opening messages, a keyset cursor is set.
     assert!(
         chan_feed.next_cursor.is_some(),
@@ -969,13 +1240,16 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
     let next = chan_feed.next_cursor.expect("cursor");
     // The Rust-minted cursor decodes back to the last item's coordinate.
     let decoded = decode_feed_cursor(&next).expect("decode");
-    assert_eq!(decoded.message_id, chan_feed.items[0].message_id);
+    assert_eq!(decoded.message_id, chan_feed.items[0].message.message_id);
     // And continuing from it yields the remaining opening message.
     let page2 = chats
         .list_personal_feed(WS, "owner2", Some(1), Some(&next))
         .expect("feed page 2");
     assert_eq!(page2.items.len(), 1);
-    assert_ne!(page2.items[0].message_id, chan_feed.items[0].message_id);
+    assert_ne!(
+        page2.items[0].message.message_id,
+        chan_feed.items[0].message.message_id
+    );
 }
 
 // ---------------------------------------------- bookmark generation-CAS
@@ -1749,7 +2023,7 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
         message_id: "m0".to_owned(),
     });
     let err = chats
-        .mark_feed_seen(WS, "owner", &head, 200, &NO_FAULTS)
+        .mark_feed_seen(WS, "owner", None, &head, 200, &NO_FAULTS)
         .unwrap_err();
     assert_eq!(err.code(), "invalid-follow-target");
     // After following the thread, the same coordinate is visible and accepted.
@@ -1758,6 +2032,7 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
             &SetFollow {
                 workspace_id: WS.to_owned(),
                 owner_user_id: "owner".to_owned(),
+                replication_owner_user_id: None,
                 target_kind: FollowTargetKind::Thread,
                 target_id: "t1".to_owned(),
                 state: FollowState::Following,
@@ -1767,12 +2042,12 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
         )
         .expect("follow");
     let state = chats
-        .mark_feed_seen(WS, "owner", &head, 200, &NO_FAULTS)
+        .mark_feed_seen(WS, "owner", Some("owner"), &head, 200, &NO_FAULTS)
         .expect("now visible");
     assert_eq!(state.last_seen_created_at_ms, 100);
     assert_eq!(state.last_seen_message_id, "m0");
     let repeated = chats
-        .mark_feed_seen(WS, "owner", &head, 200, &NO_FAULTS)
+        .mark_feed_seen(WS, "owner", Some("owner"), &head, 200, &NO_FAULTS)
         .expect("repeat mark");
     assert_eq!(repeated.updated_at_ms, 201);
     let rows: Vec<(i64, String, i64)> = store

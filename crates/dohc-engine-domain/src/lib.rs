@@ -41,7 +41,7 @@ pub use chats::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, AgentRunRecord, BookmarkMode, BookmarkTargetKind,
     ChatActorKind, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
     ChatChannelSummary, ChatFeedItem, ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMessage,
-    ChatMessagePage, ChatThread, ChatThreadReadState, DispatchClaim, DispatchRecord,
+    ChatMessagePage, ChatReaction, ChatThread, ChatThreadReadState, DispatchClaim, DispatchRecord,
     FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_NAME, GENERAL_CHANNEL_WIRE_ID,
     LINKED_CHAT_PROJECTION_KIND, LinkedChatStore, MAX_MESSAGE_BODY_BYTES, MAX_MESSAGE_PAGE,
     SaveBookmark, SendMessage, SetFollow, StartChannelThread, base32_lowercase_no_padding,

@@ -239,6 +239,10 @@ impl EngineService {
                 self.chats_channels_find_by_slug(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.channels.getWireId" => {
+                self.chats_channels_get_wire_id(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.threads.start" => {
                 self.chats_threads_start(
                     &ctx,
@@ -299,6 +303,18 @@ impl EngineService {
             }
             "chats.bookmarks.markReady" => {
                 self.chats_bookmarks_mark_ready(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.bookmarks.archive" => {
+                self.chats_bookmarks_archive(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.bookmarks.markFailed" => {
+                self.chats_bookmarks_mark_failed(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.bookmarks.markStale" => {
+                self.chats_bookmarks_mark_stale(&ctx, request.workspace, request.params)
                     .await?
             }
             "chats.dispatch.enqueue" => {
@@ -1294,6 +1310,25 @@ impl EngineService {
         Ok(channel.as_ref().map(channel_json).unwrap_or(Value::Null))
     }
 
+    async fn chats_channels_get_wire_id(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatChannelIdParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let wire_id = Self::read_under_ctx(
+            &cancellation,
+            "chats.channels.getWireId",
+            open.actor
+                .chat_channel_get_wire_id(open.workspace_id, params.channel_id),
+        )
+        .await?;
+        Ok(json!({ "wireId": wire_id }))
+    }
+
     async fn chats_threads_start(
         &self,
         ctx: &RequestContext,
@@ -1506,6 +1541,7 @@ impl EngineService {
                 SetFollow {
                     workspace_id: open.workspace_id,
                     owner_user_id: params.owner_user_id,
+                    replication_owner_user_id: params.replication_owner_user_id,
                     target_kind,
                     target_id: params.target_id,
                     state,
@@ -1572,6 +1608,7 @@ impl EngineService {
             open.actor.chat_feed_mark_seen(
                 open.workspace_id,
                 params.owner_user_id,
+                params.replication_owner_user_id,
                 params.head_cursor,
                 params.now_ms.unwrap_or(now_ms()?),
                 cancellation.token(),
@@ -1605,11 +1642,31 @@ impl EngineService {
             .items
             .iter()
             .map(|item| {
-                json!({
-                    "messageId": item.message_id,
-                    "threadId": item.thread_id,
-                    "createdAtMs": item.created_at_ms,
-                })
+                let mut value = json!({
+                    "message": feed_message_json(&item.message),
+                    "thread": feed_thread_json(&item.thread),
+                    // Reactions are an unported RPC-B2 domain; the contract field
+                    // still exists and must be an empty array for shape validation.
+                    "reactions": [],
+                    "matchedBy": item.matched_by.iter().map(follow_target_kind_json).collect::<Vec<_>>(),
+                });
+                let object = value.as_object_mut().expect("feed item is an object");
+                if let Some(channel) = &item.channel {
+                    object.insert("channel".to_owned(), feed_channel_json(channel));
+                }
+                if let Some(parent_message) = &item.parent_message {
+                    object.insert(
+                        "parentMessage".to_owned(),
+                        feed_message_json(parent_message),
+                    );
+                }
+                if let Some(opening_message) = &item.opening_message {
+                    object.insert(
+                        "openingMessage".to_owned(),
+                        feed_message_json(opening_message),
+                    );
+                }
+                value
             })
             .collect();
         let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
@@ -1623,8 +1680,8 @@ impl EngineService {
         let next_cursor = if truncated {
             page.items[..included].last().map(|item| {
                 dohc_engine_domain::encode_feed_cursor(&FeedCursorValue {
-                    created_at_ms: item.created_at_ms,
-                    message_id: item.message_id.clone(),
+                    created_at_ms: item.message.created_at_ms,
+                    message_id: item.message.message_id.clone(),
                 })
             })
         } else {
@@ -1730,6 +1787,91 @@ impl EngineService {
                 params.projected_at_ms.unwrap_or(now_ms()?),
                 params.projection_object_id,
                 params.projection_path,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!({
+            "bookmark": bookmark_json(&workspace_id, &transition.bookmark),
+            "applied": transition.applied,
+        }))
+    }
+
+    async fn chats_bookmarks_archive(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatBookmarkArchiveParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let bookmark = Self::read_under_ctx(
+            &cancellation,
+            "chats.bookmarks.archive",
+            open.actor.chat_bookmark_archive(
+                workspace_id.clone(),
+                params.owner_user_id,
+                params.bookmark_id,
+                now_ms()?,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(bookmark_json(&workspace_id, &bookmark))
+    }
+
+    async fn chats_bookmarks_mark_failed(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatBookmarkMarkFailedParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let transition = Self::read_under_ctx(
+            &cancellation,
+            "chats.bookmarks.markFailed",
+            open.actor.chat_bookmark_mark_failed(
+                workspace_id.clone(),
+                params.owner_user_id,
+                params.bookmark_id,
+                params.generation,
+                params.failure_reason,
+                now_ms()?,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!({
+            "bookmark": bookmark_json(&workspace_id, &transition.bookmark),
+            "applied": transition.applied,
+        }))
+    }
+
+    async fn chats_bookmarks_mark_stale(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatBookmarkMarkStaleParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let transition = Self::read_under_ctx(
+            &cancellation,
+            "chats.bookmarks.markStale",
+            open.actor.chat_bookmark_mark_stale(
+                workspace_id.clone(),
+                params.owner_user_id,
+                params.bookmark_id,
+                params.generation,
+                params.failure_reason,
+                now_ms()?,
                 cancellation.token(),
             ),
         )
@@ -2305,6 +2447,12 @@ struct ChatChannelFindParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatChannelIdParams {
+    channel_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatThreadStartParams {
     channel_id: String,
     thread_id: String,
@@ -2359,6 +2507,8 @@ struct ChatReadStateMarkParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatFollowSetParams {
     owner_user_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    replication_owner_user_id: Option<String>,
     target_kind: String,
     target_id: String,
     state: String,
@@ -2375,6 +2525,8 @@ struct ChatOwnerParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatFeedMarkSeenParams {
     owner_user_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    replication_owner_user_id: Option<String>,
     head_cursor: String,
     now_ms: Option<i64>,
 }
@@ -2407,6 +2559,32 @@ struct ChatBookmarkMarkReadyParams {
     projected_at_ms: Option<i64>,
     projection_object_id: Option<String>,
     projection_path: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatBookmarkArchiveParams {
+    owner_user_id: String,
+    bookmark_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatBookmarkMarkFailedParams {
+    owner_user_id: String,
+    bookmark_id: String,
+    generation: i64,
+    failure_reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatBookmarkMarkStaleParams {
+    owner_user_id: String,
+    bookmark_id: String,
+    generation: i64,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    failure_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2683,6 +2861,77 @@ fn channel_json(channel: &ChatChannel) -> Value {
         },
         "createdAtMs": channel.created_at_ms,
         "updatedAtMs": channel.updated_at_ms,
+    })
+}
+
+fn feed_channel_json(channel: &ChatChannel) -> Value {
+    json!({
+        "id": channel.channel_id,
+        "workspaceId": channel.workspace_id,
+        "name": channel.name,
+        "slug": channel.slug,
+        "kind": match channel.kind {
+            ChatChannelKind::Channel => "channel",
+            ChatChannelKind::Dm => "dm",
+            ChatChannelKind::Agent => "agent",
+        },
+        "createdAtMs": channel.created_at_ms,
+        "updatedAtMs": channel.updated_at_ms,
+    })
+}
+
+fn feed_thread_json(thread: &ChatThread) -> Value {
+    let mut value = json!({
+        "id": thread.thread_id,
+        "workspaceId": thread.workspace_id,
+        "title": thread.title,
+        "createdAtMs": thread.created_at_ms,
+        "updatedAtMs": thread.updated_at_ms,
+    });
+    if let Some(channel_id) = &thread.channel_id {
+        value
+            .as_object_mut()
+            .expect("feed thread is an object")
+            .insert("channelId".to_owned(), json!(channel_id));
+    }
+    value
+}
+
+fn feed_message_json(message: &ChatMessage) -> Value {
+    let mut value = json!({
+        "id": message.message_id,
+        "workspaceId": message.workspace_id,
+        "threadId": message.thread_id,
+        "author": {
+            "kind": match message.author_kind {
+                ChatActorKind::Human => "human",
+                ChatActorKind::Agent => "agent",
+            },
+            "displayName": message.author_display_name,
+        },
+        "body": message.body,
+        "createdAtMs": message.created_at_ms,
+        "attachments": [],
+    });
+    let object = value.as_object_mut().expect("feed message is an object");
+    if let Some(author_user_id) = &message.author_user_id {
+        object.insert("authorUserId".to_owned(), json!(author_user_id));
+    }
+    if let Some(parent_message_id) = &message.parent_message_id {
+        object.insert("parentMessageId".to_owned(), json!(parent_message_id));
+    }
+    if let Some(origin) = &message.origin {
+        object.insert("origin".to_owned(), json!(origin));
+    }
+    value
+}
+
+fn follow_target_kind_json(kind: &FollowTargetKind) -> Value {
+    json!(match kind {
+        FollowTargetKind::Person => "person",
+        FollowTargetKind::Agent => "agent",
+        FollowTargetKind::Channel => "channel",
+        FollowTargetKind::Thread => "thread",
     })
 }
 
@@ -2972,6 +3221,13 @@ fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value
             "committed": committed
         }),
     }
+}
+
+fn deserialize_optional_non_null_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, WireError> {

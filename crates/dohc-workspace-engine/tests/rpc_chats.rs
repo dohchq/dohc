@@ -133,6 +133,24 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         json!({ "channelId": "channel-general", "nowMs": 11 }),
     )
     .await;
+    let general_wire = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.channels.getWireId",
+        json!({ "channelId": "channel-general" }),
+    )
+    .await;
+    assert_eq!(general_wire["wireId"], json!("channel_wire_general_v1"));
+    let unknown_wire = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.channels.getWireId",
+        json!({ "channelId": "missing-channel" }),
+    )
+    .await;
+    assert_eq!(unknown_wire["wireId"], Value::Null);
     assert_eq!(general["slug"], json!("general"));
     let agent = call(
         &transport,
@@ -357,7 +375,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     )
     .await;
     assert_eq!(
-        cursor_cap_page["items"][0]["messageId"],
+        cursor_cap_page["items"][0]["message"]["id"],
         json!(max_cursor_message_id)
     );
     let cursor_cap_next = cursor_cap_page["nextCursor"]
@@ -393,7 +411,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     )
     .await;
     assert_eq!(
-        cursor_cap_remainder["items"][0]["messageId"],
+        cursor_cap_remainder["items"][0]["message"]["id"],
         json!("cursor-cap-older")
     );
 
@@ -788,6 +806,36 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     assert_eq!(follow["workspaceId"], json!("rpc-chat-first"));
     assert!(follow.get("originId").is_none());
     assert!(follow.get("originSeq").is_none());
+    let mismatched_replication_owner = call_error(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.follows.set",
+        json!({
+            "ownerUserId": "owner-1",
+            "replicationOwnerUserId": "someone-else",
+            "targetKind": "thread",
+            "targetId": "thread-1",
+            "state": "following",
+        }),
+    )
+    .await;
+    assert_eq!(mismatched_replication_owner.code, ErrorCode::InvalidParams);
+    call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.follows.set",
+        json!({
+            "ownerUserId": "owner-1",
+            "replicationOwnerUserId": "owner-1",
+            "targetKind": "thread",
+            "targetId": "thread-1",
+            "state": "following",
+            "nowMs": 2101,
+        }),
+    )
+    .await;
     let forged_origin = call_error(
         &transport,
         &first_handle,
@@ -828,7 +876,25 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     assert!(feed["headCursor"].is_string());
     assert!(feed["readState"].is_null());
     let newest = &feed["items"][0];
+    assert!(newest["message"].is_object());
+    assert!(newest["thread"].is_object());
+    assert!(newest["channel"].is_object());
+    assert_eq!(newest["reactions"], json!([]));
+    assert_eq!(newest["matchedBy"], json!(["thread"]));
     let head_cursor = feed["headCursor"].clone();
+    let mismatched_read_owner = call_error(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.feed.markSeen",
+        json!({
+            "ownerUserId": "owner-1",
+            "replicationOwnerUserId": "someone-else",
+            "headCursor": head_cursor.clone(),
+        }),
+    )
+    .await;
+    assert_eq!(mismatched_read_owner.code, ErrorCode::InvalidParams);
     let marked = call(
         &transport,
         &first_handle,
@@ -836,14 +902,18 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         "chats.feed.markSeen",
         json!({
             "ownerUserId": "owner-1",
+            "replicationOwnerUserId": "owner-1",
             "headCursor": head_cursor,
             "nowMs": 2200,
         }),
     )
     .await;
     assert_eq!(marked["ownerUserId"], json!("owner-1"));
-    assert_eq!(marked["lastSeenCreatedAtMs"], newest["createdAtMs"]);
-    assert_eq!(marked["lastSeenMessageId"], newest["messageId"]);
+    assert_eq!(
+        marked["lastSeenCreatedAtMs"],
+        newest["message"]["createdAtMs"]
+    );
+    assert_eq!(marked["lastSeenMessageId"], newest["message"]["id"]);
     let garbage_cursor = call_error(
         &transport,
         &first_handle,
@@ -875,11 +945,11 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     );
     assert_eq!(
         feed_after_seen["readState"]["lastSeenCreatedAtMs"],
-        newest["createdAtMs"]
+        newest["message"]["createdAtMs"]
     );
     assert_eq!(
         feed_after_seen["readState"]["lastSeenMessageId"],
-        newest["messageId"]
+        newest["message"]["id"]
     );
 
     call(
@@ -924,30 +994,37 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     )
     .await;
     let budget_first_count = budget_page["items"].as_array().expect("budget feed").len();
+    // Hydrated items embed the huge thread id several times (message.threadId,
+    // thread.id, opening message), so the exact per-page count is a function
+    // of the serialization shape — assert the structural property instead:
+    // the byte budget cuts the page, and cursor pages walk to the full total.
     assert!(
-        (3..=5).contains(&budget_first_count),
+        (1..8).contains(&budget_first_count),
         "large thread ids must cut the feed page by serialized bytes"
     );
-    let budget_cursor = budget_page["nextCursor"]
-        .as_str()
-        .expect("byte-cut feed cursor")
-        .to_owned();
-    let budget_rest = call(
-        &transport,
-        &first_handle,
-        &mut id,
-        "chats.feed.listPersonal",
-        json!({
-            "ownerUserId": "feed-budget-owner",
-            "limit": 100,
-            "cursor": budget_cursor,
-        }),
-    )
-    .await;
+    let mut budget_total = budget_first_count;
+    let mut budget_cursor = budget_page["nextCursor"].as_str().map(str::to_owned);
+    while let Some(cursor) = budget_cursor {
+        let page = call(
+            &transport,
+            &first_handle,
+            &mut id,
+            "chats.feed.listPersonal",
+            json!({
+                "ownerUserId": "feed-budget-owner",
+                "limit": 100,
+                "cursor": cursor,
+            }),
+        )
+        .await;
+        let count = page["items"].as_array().expect("budget page").len();
+        assert!(count >= 1, "every byte-cut page carries at least one item");
+        budget_total += count;
+        budget_cursor = page["nextCursor"].as_str().map(str::to_owned);
+    }
     assert_eq!(
-        budget_first_count + budget_rest["items"].as_array().expect("budget rest").len(),
-        8,
-        "the byte-cut cursor must resume after the last included coordinate"
+        budget_total, 8,
+        "the byte-cut cursor pages must walk the full feed exactly once"
     );
 
     let caller_supplied_bookmark_id = call_error(
@@ -1097,6 +1174,127 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         moved_ready["bookmark"]["projectionObjectId"],
         json!("bookmark-object-2")
     );
+
+    let archived = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.bookmarks.archive",
+        json!({ "ownerUserId": "owner-1", "bookmarkId": &bookmark_id }),
+    )
+    .await;
+    assert_eq!(archived["state"], json!("archived"));
+    assert_eq!(archived["generation"], json!(3));
+    assert_eq!(archived["projectionState"], json!("pending"));
+    let archived_again = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.bookmarks.archive",
+        json!({ "ownerUserId": "owner-1", "bookmarkId": &bookmark_id }),
+    )
+    .await;
+    assert_eq!(archived_again["generation"], json!(3));
+
+    let stale_failure = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.bookmarks.markFailed",
+        json!({
+            "ownerUserId": "owner-1",
+            "bookmarkId": &bookmark_id,
+            "generation": 2,
+            "failureReason": "old worker",
+        }),
+    )
+    .await;
+    assert_eq!(stale_failure["applied"], json!(false));
+    assert_eq!(
+        stale_failure["bookmark"]["projectionState"],
+        json!("pending")
+    );
+    let failed = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.bookmarks.markFailed",
+        json!({
+            "ownerUserId": "owner-1",
+            "bookmarkId": &bookmark_id,
+            "generation": 3,
+            "failureReason": "  disk unavailable  ",
+        }),
+    )
+    .await;
+    assert_eq!(failed["applied"], json!(true));
+    assert_eq!(failed["bookmark"]["projectionState"], json!("failed"));
+    assert_eq!(
+        failed["bookmark"]["failureReason"],
+        json!("disk unavailable")
+    );
+
+    let reactivated = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.bookmarks.save",
+        json!({
+            "ownerUserId": "owner-1",
+            "targetKind": "thread",
+            "targetId": "thread-1",
+            "mode": "live",
+            "destinationPath": "bookmarks/moved.md",
+            "nowMs": 2305,
+        }),
+    )
+    .await;
+    assert_eq!(reactivated["state"], json!("active"));
+    assert_eq!(reactivated["generation"], json!(4));
+    let stale_stale = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.bookmarks.markStale",
+        json!({
+            "ownerUserId": "owner-1",
+            "bookmarkId": &bookmark_id,
+            "generation": 3,
+            "failureReason": "old access check",
+        }),
+    )
+    .await;
+    assert_eq!(stale_stale["applied"], json!(false));
+    assert_eq!(stale_stale["bookmark"]["projectionState"], json!("pending"));
+    let stale = call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.bookmarks.markStale",
+        json!({
+            "ownerUserId": "owner-1",
+            "bookmarkId": &bookmark_id,
+            "generation": 4,
+        }),
+    )
+    .await;
+    assert_eq!(stale["applied"], json!(true));
+    assert_eq!(stale["bookmark"]["projectionState"], json!("stale"));
+    assert_eq!(stale["bookmark"]["failureReason"], Value::Null);
+    let invalid_generation = call_error(
+        &transport,
+        &first_handle,
+        &mut id,
+        "chats.bookmarks.markFailed",
+        json!({
+            "ownerUserId": "owner-1",
+            "bookmarkId": &bookmark_id,
+            "generation": 0,
+            "failureReason": "invalid generation",
+        }),
+    )
+    .await;
+    assert_eq!(invalid_generation.code, ErrorCode::InvalidParams);
 
     // Complete, fail, and close/reopen reclaim each exercise a distinct
     // terminal/recovery transition. A claim while another is running is null.

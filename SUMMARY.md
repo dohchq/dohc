@@ -86,3 +86,14 @@ Round-4 RPC and domain regressions cover list-to-mark-seen cursor flow and garba
 - Local `chat.follow.set` and `chat.feed.read.set` writes now insert their exact TypeScript apply payloads into `replication_log` with `imported = 0` in the same transaction as the LWW register and compatibility journal write. Repeated writes therefore consume distinct local origin sequences and are relay-visible; tests inspect both rows and payload shapes.
 
 Per the task constraint, no Cargo command was run. The changed Rust files were parsed and formatted directly with `rustfmt --edition 2024`; final checks also include `rustfmt --check` and `git diff --check`.
+
+## Review round 6
+
+- Follow and personal-feed read LWW writes now accept an optional `replicationOwnerUserId`, normalize it with the oracle's feed-identity rules, reject a value that differs from `ownerUserId`, and write relay-visible ops only when the verified owner is present. Signed-out writes remain durable locally without a `replication_log` entry.
+- Local channel creation/provisioning, channel-thread starts, and message appends now insert exact `chat.channel.create`, `chat.thread.create`, and `chat.message.append` payloads into `replication_log` with `imported = 0` in the same transaction as their rows. Optional author, parent, origin, and channel-wire fields are omitted rather than serialized as null.
+- Personal-feed items are fully hydrated as contract-shaped message/thread records with optional channel, parent, and opening-message records, follow-match kinds, and the required empty reactions array. Byte-budget truncation and keyset cursors continue to use the hydrated message coordinate.
+- Added the remaining bookmark RPC transitions: idempotent active-to-archived generation queueing, required-reason pending-to-failed generation CAS, and optional-reason pending-to-stale generation CAS. Invalid generations fail closed and stale generations return `applied: false` without mutation.
+- Added `chats.channels.getWireId`, returning only `{ wireId }`; channel responses remain unchanged. The well-known general mapping resolves through the point lookup and an unknown local channel id returns null.
+- Domain and in-process RPC regressions cover both replication-owner gates, exact core payloads, hydrated feed joins/matches, bookmark archive/failure/stale transitions, stale-generation no-ops, and well-known/unknown wire-id lookups.
+
+Per the task constraint, no Cargo build, check, or test command was run. All changed Rust files passed direct `rustfmt --edition 2024` parsing/formatting and `rustfmt --check`; `git diff --check` also passes.

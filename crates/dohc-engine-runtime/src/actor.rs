@@ -371,6 +371,11 @@ enum Command {
         slug: String,
         reply: oneshot::Sender<Result<Option<ChatChannel>, RuntimeError>>,
     },
+    ChatChannelGetWireId {
+        workspace_id: String,
+        channel_id: String,
+        reply: oneshot::Sender<Result<Option<String>, RuntimeError>>,
+    },
     ChatThreadStart {
         input: Box<StartChannelThread>,
         token: CancellationToken,
@@ -419,6 +424,7 @@ enum Command {
     ChatFeedMarkSeen {
         workspace_id: String,
         owner_user_id: String,
+        replication_owner_user_id: Option<String>,
         head_cursor: String,
         now_ms: i64,
         token: CancellationToken,
@@ -449,6 +455,34 @@ enum Command {
         projected_at_ms: i64,
         projection_object_id: Option<String>,
         projection_path: Option<String>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<ChatBookmarkTransition, RuntimeError>>,
+    },
+    ChatBookmarkArchive {
+        workspace_id: String,
+        owner_user_id: String,
+        bookmark_id: String,
+        now_ms: i64,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<ChatBookmark, RuntimeError>>,
+    },
+    ChatBookmarkMarkFailed {
+        workspace_id: String,
+        owner_user_id: String,
+        bookmark_id: String,
+        generation: i64,
+        failure_reason: String,
+        now_ms: i64,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<ChatBookmarkTransition, RuntimeError>>,
+    },
+    ChatBookmarkMarkStale {
+        workspace_id: String,
+        owner_user_id: String,
+        bookmark_id: String,
+        generation: i64,
+        failure_reason: Option<String>,
+        now_ms: i64,
         token: CancellationToken,
         reply: oneshot::Sender<Result<ChatBookmarkTransition, RuntimeError>>,
     },
@@ -1612,6 +1646,23 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    pub async fn chat_channel_get_wire_id(
+        &self,
+        workspace_id: String,
+        channel_id: String,
+    ) -> Result<Option<String>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChatChannelGetWireId {
+                workspace_id,
+                channel_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     pub async fn chat_thread_start(
         &self,
         input: StartChannelThread,
@@ -1763,6 +1814,7 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         owner_user_id: String,
+        replication_owner_user_id: Option<String>,
         head_cursor: String,
         now_ms: i64,
         token: CancellationToken,
@@ -1772,6 +1824,7 @@ impl ActorHandle {
             .send(Command::ChatFeedMarkSeen {
                 workspace_id,
                 owner_user_id,
+                replication_owner_user_id,
                 head_cursor,
                 now_ms,
                 token,
@@ -1859,6 +1912,85 @@ impl ActorHandle {
                 projected_at_ms,
                 projection_object_id,
                 projection_path,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn chat_bookmark_archive(
+        &self,
+        workspace_id: String,
+        owner_user_id: String,
+        bookmark_id: String,
+        now_ms: i64,
+        token: CancellationToken,
+    ) -> Result<ChatBookmark, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChatBookmarkArchive {
+                workspace_id,
+                owner_user_id,
+                bookmark_id,
+                now_ms,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn chat_bookmark_mark_failed(
+        &self,
+        workspace_id: String,
+        owner_user_id: String,
+        bookmark_id: String,
+        generation: i64,
+        failure_reason: String,
+        now_ms: i64,
+        token: CancellationToken,
+    ) -> Result<ChatBookmarkTransition, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChatBookmarkMarkFailed {
+                workspace_id,
+                owner_user_id,
+                bookmark_id,
+                generation,
+                failure_reason,
+                now_ms,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn chat_bookmark_mark_stale(
+        &self,
+        workspace_id: String,
+        owner_user_id: String,
+        bookmark_id: String,
+        generation: i64,
+        failure_reason: Option<String>,
+        now_ms: i64,
+        token: CancellationToken,
+    ) -> Result<ChatBookmarkTransition, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChatBookmarkMarkStale {
+                workspace_id,
+                owner_user_id,
+                bookmark_id,
+                generation,
+                failure_reason,
+                now_ms,
                 token,
                 reply,
             })
@@ -2553,6 +2685,16 @@ fn worker_main(
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
+            Command::ChatChannelGetWireId {
+                workspace_id,
+                channel_id,
+                reply,
+            } => {
+                let outcome = LinkedChatStore::new(&mut store)
+                    .get_channel_wire_id(&workspace_id, &channel_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
             Command::ChatThreadStart {
                 input,
                 token,
@@ -2664,6 +2806,7 @@ fn worker_main(
             Command::ChatFeedMarkSeen {
                 workspace_id,
                 owner_user_id,
+                replication_owner_user_id,
                 head_cursor,
                 now_ms,
                 token,
@@ -2676,6 +2819,7 @@ fn worker_main(
                         .mark_feed_seen(
                             &workspace_id,
                             &owner_user_id,
+                            replication_owner_user_id.as_deref(),
                             &head_cursor,
                             now_ms,
                             &NoFaults,
@@ -2743,6 +2887,83 @@ fn worker_main(
                             projected_at_ms,
                             projection_object_id.as_deref(),
                             projection_path.as_deref(),
+                            &NoFaults,
+                        )
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::ChatBookmarkArchive {
+                workspace_id,
+                owner_user_id,
+                bookmark_id,
+                now_ms,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    LinkedChatStore::new(&mut store)
+                        .archive_bookmark(
+                            &workspace_id,
+                            &owner_user_id,
+                            &bookmark_id,
+                            now_ms,
+                            &NoFaults,
+                        )
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::ChatBookmarkMarkFailed {
+                workspace_id,
+                owner_user_id,
+                bookmark_id,
+                generation,
+                failure_reason,
+                now_ms,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    LinkedChatStore::new(&mut store)
+                        .mark_bookmark_failed(
+                            &workspace_id,
+                            &owner_user_id,
+                            &bookmark_id,
+                            generation,
+                            &failure_reason,
+                            now_ms,
+                            &NoFaults,
+                        )
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::ChatBookmarkMarkStale {
+                workspace_id,
+                owner_user_id,
+                bookmark_id,
+                generation,
+                failure_reason,
+                now_ms,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    LinkedChatStore::new(&mut store)
+                        .mark_bookmark_stale(
+                            &workspace_id,
+                            &owner_user_id,
+                            &bookmark_id,
+                            generation,
+                            failure_reason.as_deref(),
+                            now_ms,
                             &NoFaults,
                         )
                         .map_err(RuntimeError::from)

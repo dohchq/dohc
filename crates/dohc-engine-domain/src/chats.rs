@@ -291,12 +291,30 @@ pub struct FeedCursorValue {
     pub message_id: String,
 }
 
-/// One personal-feed candidate row (the visibility-gated message coordinate).
+/// One fully hydrated personal-feed item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatFeedItem {
-    pub message_id: String,
-    pub thread_id: String,
-    pub created_at_ms: i64,
+    pub message: ChatMessage,
+    pub thread: ChatThread,
+    pub channel: Option<ChatChannel>,
+    pub parent_message: Option<ChatMessage>,
+    pub opening_message: Option<ChatMessage>,
+    /// Reactions are an RPC-B2 domain; keep the required feed field empty until
+    /// that domain is ported rather than returning the old coordinate-only shape.
+    pub reactions: Vec<ChatReaction>,
+    pub matched_by: Vec<FollowTargetKind>,
+}
+
+/// Placeholder for the unported RPC-B2 reaction domain. Feed hydration always
+/// returns an empty vector today, but the typed field prevents shape regression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatReaction;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FeedCandidate {
+    message_id: String,
+    thread_id: String,
+    created_at_ms: i64,
 }
 
 /// The personal feed's receiver-private, monotonic read cursor.
@@ -460,6 +478,7 @@ pub struct SendMessage {
 pub struct SetFollow {
     pub workspace_id: String,
     pub owner_user_id: String,
+    pub replication_owner_user_id: Option<String>,
     pub target_kind: FollowTargetKind,
     pub target_id: String,
     pub state: FollowState,
@@ -782,6 +801,41 @@ fn normalize_failure_reason(reason: &str) -> Result<String, DomainError> {
     }
 }
 
+fn normalize_feed_identity(value: &str, label: &str) -> Result<String, DomainError> {
+    let normalized = value.trim_matches(is_js_trim_ws);
+    if normalized.is_empty()
+        || normalized.encode_utf16().count() > 256
+        || has_projection_control_char(normalized)
+    {
+        let reason = match label {
+            "Feed owner" => "Feed owner is invalid.",
+            "Replication feed owner" => "Replication feed owner is invalid.",
+            "Follow target" => "Follow target is invalid.",
+            _ => "Feed identity is invalid.",
+        };
+        return Err(DomainError::chat("invalid-follow-target", reason));
+    }
+    Ok(normalized.to_owned())
+}
+
+fn normalize_bookmark_reason(
+    reason: Option<&str>,
+    required: bool,
+) -> Result<Option<String>, DomainError> {
+    let normalized = reason.map(|reason| reason.trim_matches(is_js_trim_ws));
+    if normalized.is_some_and(|reason| reason.encode_utf16().count() > 2_000)
+        || (required && normalized.is_none_or(str::is_empty))
+    {
+        return Err(DomainError::chat(
+            "invalid-message-body",
+            "Bookmark failure reason is invalid.",
+        ));
+    }
+    Ok(normalized
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_owned))
+}
+
 /// Stored title (`""` = untitled) + first message body -> display title. This
 /// is shared with the runtime rebuild so write-time and repair header rows stay
 /// byte-identical (`chatThreadTitle.ts`).
@@ -1047,6 +1101,20 @@ impl<'a> LinkedChatStore<'a> {
             insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, now_ms)?;
             // A locally created channel's wire identity is its own id.
             record_channel_wire_id(tx, &ws, &cid, &cid)?;
+            journal_local_op_in_tx(
+                tx,
+                &ws,
+                "chat.channel.create",
+                &serde_json::json!({
+                    "channelId": cid,
+                    "name": name_c,
+                    "slug": slug_c,
+                    "kind": kind.as_str(),
+                    "createdAtMs": now_ms,
+                    "wireId": cid,
+                }),
+                now_ms,
+            )?;
             journal(tx, &cid, "chat.channel.create", now_ms)?;
             Ok::<_, DomainError>(ChatChannel {
                 workspace_id: ws.clone(),
@@ -1144,6 +1212,20 @@ impl<'a> LinkedChatStore<'a> {
             }
             insert_channel(tx, &ws, &cid, &name_c, &slug_c, kind, now_ms)?;
             record_channel_wire_id(tx, &ws, &wire, &cid)?;
+            journal_local_op_in_tx(
+                tx,
+                &ws,
+                "chat.channel.create",
+                &serde_json::json!({
+                    "channelId": cid,
+                    "name": name_c,
+                    "slug": slug_c,
+                    "kind": kind.as_str(),
+                    "createdAtMs": now_ms,
+                    "wireId": wire,
+                }),
+                now_ms,
+            )?;
             journal(tx, &cid, "chat.channel.create", now_ms)?;
             Ok::<_, DomainError>(ChatChannel {
                 workspace_id: ws.clone(),
@@ -1251,6 +1333,17 @@ impl<'a> LinkedChatStore<'a> {
                 _ => Ok(None),
             }
         })
+    }
+
+    /// Return the stable cross-machine wire identity for a local channel id.
+    /// Unknown channels and channels without a mapping both resolve to `None`.
+    pub fn get_channel_wire_id(
+        &self,
+        workspace_id: &str,
+        channel_id: &str,
+    ) -> Result<Option<String>, DomainError> {
+        self.store
+            .read_with(|conn| wire_id_for_channel_id(conn, workspace_id, channel_id))
     }
 
     // ------------------------------------------------------- threads/messages
@@ -1376,6 +1469,54 @@ impl<'a> LinkedChatStore<'a> {
                 &message_search_text,
             )
             .map_err(DomainError::sql_persist)?;
+            let channel_wire_id = wire_id_for_channel_id(
+                tx,
+                &input.workspace_id,
+                &channel.channel_id,
+            )?;
+            let mut thread_payload = serde_json::json!({
+                "threadId": input.thread_id,
+                "title": title_c,
+                "createdAtMs": now,
+                "channelSlug": channel.slug,
+            });
+            if let Some(channel_wire_id) = channel_wire_id {
+                thread_payload
+                    .as_object_mut()
+                    .expect("thread payload is an object")
+                    .insert("channelWireId".to_owned(), serde_json::json!(channel_wire_id));
+            }
+            journal_local_op_in_tx(
+                tx,
+                &input.workspace_id,
+                "chat.thread.create",
+                &thread_payload,
+                now,
+            )?;
+            let mut message_payload = serde_json::json!({
+                "messageId": input.message_id,
+                "threadId": input.thread_id,
+                "authorKind": input.author_kind.as_str(),
+                "authorDisplayName": display_c,
+                "body": body_c,
+                "createdAtMs": now,
+            });
+            let message_payload = message_payload
+                .as_object_mut()
+                .expect("message payload is an object");
+            if let Some(author_user_id) = &author_user_c {
+                message_payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
+            }
+            if let Some(origin) = &origin_c {
+                message_payload.insert("origin".to_owned(), serde_json::json!(origin));
+            }
+            journal_local_op_in_tx(
+                tx,
+                &input.workspace_id,
+                "chat.message.append",
+                &serde_json::Value::Object(message_payload.clone()),
+                now,
+            )?;
             journal(tx, &input.thread_id, "chat.thread.create", now)?;
             journal(tx, &input.message_id, "chat.message.append", now)?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
@@ -1538,6 +1679,36 @@ impl<'a> LinkedChatStore<'a> {
                 &message_search_text,
             )
             .map_err(DomainError::sql_persist)?;
+            let mut payload = serde_json::json!({
+                "messageId": input.message_id,
+                "threadId": input.thread_id,
+                "authorKind": input.author_kind.as_str(),
+                "authorDisplayName": display_c,
+                "body": body_c,
+                "createdAtMs": now,
+            });
+            let payload = payload
+                .as_object_mut()
+                .expect("message payload is an object");
+            if let Some(author_user_id) = &author_user_c {
+                payload.insert("authorUserId".to_owned(), serde_json::json!(author_user_id));
+            }
+            if let Some(parent_message_id) = &parent_c {
+                payload.insert(
+                    "parentMessageId".to_owned(),
+                    serde_json::json!(parent_message_id),
+                );
+            }
+            if let Some(origin) = &origin_c {
+                payload.insert("origin".to_owned(), serde_json::json!(origin));
+            }
+            journal_local_op_in_tx(
+                tx,
+                &input.workspace_id,
+                "chat.message.append",
+                &serde_json::Value::Object(payload.clone()),
+                now,
+            )?;
             journal(tx, &input.message_id, "chat.message.append", now)?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
             Ok::<_, DomainError>(ChatMessage {
@@ -1701,7 +1872,8 @@ impl<'a> LinkedChatStore<'a> {
 
     // ---------------------------------------------------------- follows/feed
 
-    /// LWW-upsert a follow register (`setFollow`). Journals `chat.follow.set`.
+    /// LWW-upsert a follow register (`setFollow`). Relay journaling is gated on
+    /// a verified replication owner matching the local feed owner.
     /// The winner is decided by `(updated_at_ms, unfollowed>following,
     /// origin_id, origin_seq)` — commutative, mirroring the replicated apply
     /// arm. Local LWW origins are derived in this write transaction and are
@@ -1711,17 +1883,25 @@ impl<'a> LinkedChatStore<'a> {
         input: &SetFollow,
         faults: &dyn FaultInjector,
     ) -> Result<ChatFollow, DomainError> {
-        non_empty(
-            &input.owner_user_id,
-            "invalid-follow-target",
-            "Follow owner is required.",
-        )?;
-        non_empty(
-            &input.target_id,
-            "invalid-follow-target",
-            "Follow target is required.",
-        )?;
-        let input = input.clone();
+        let owner_user_id = normalize_feed_identity(&input.owner_user_id, "Feed owner")?;
+        let replication_owner_user_id = input
+            .replication_owner_user_id
+            .as_deref()
+            .map(|owner| normalize_feed_identity(owner, "Replication feed owner"))
+            .transpose()?;
+        if let Some(replication_owner_user_id) = &replication_owner_user_id {
+            if replication_owner_user_id != &owner_user_id {
+                return Err(DomainError::chat(
+                    "invalid-follow-target",
+                    "Replication feed owner must match the local feed owner.",
+                ));
+            }
+        }
+        let target_id = normalize_feed_identity(&input.target_id, "Follow target")?;
+        let mut input = input.clone();
+        input.owner_user_id = owner_user_id;
+        input.replication_owner_user_id = replication_owner_user_id;
+        input.target_id = target_id;
         let outcome = self.store.write_with(faults, |tx| {
             match input.target_kind {
                 FollowTargetKind::Channel => {
@@ -1813,22 +1993,24 @@ impl<'a> LinkedChatStore<'a> {
             let (origin_id, origin_seq) =
                 local_replication_coordinate(tx, &input.workspace_id, at_ms)?;
             upsert_follow_lww(tx, &input, at_ms, &origin_id, origin_seq)?;
-            insert_local_replication_op(
-                tx,
-                &input.workspace_id,
-                &origin_id,
-                origin_seq,
-                "chat.follow.set",
-                &serde_json::json!({
-                    "ownerUserId": input.owner_user_id,
-                    "targetKind": input.target_kind.as_str(),
-                    "targetId": input.target_id,
-                    "state": input.state.as_str(),
-                    "atMs": at_ms,
-                }),
-                at_ms,
-            )?;
-            journal(tx, &input.target_id, "chat.follow.set", at_ms)?;
+            if input.replication_owner_user_id.is_some() {
+                insert_local_replication_op(
+                    tx,
+                    &input.workspace_id,
+                    &origin_id,
+                    origin_seq,
+                    "chat.follow.set",
+                    &serde_json::json!({
+                        "ownerUserId": input.owner_user_id,
+                        "targetKind": input.target_kind.as_str(),
+                        "targetId": input.target_id,
+                        "state": input.state.as_str(),
+                        "atMs": at_ms,
+                    }),
+                    at_ms,
+                )?;
+                journal(tx, &input.target_id, "chat.follow.set", at_ms)?;
+            }
             require_follow(
                 tx,
                 &input.workspace_id,
@@ -1872,18 +2054,26 @@ impl<'a> LinkedChatStore<'a> {
         &mut self,
         workspace_id: &str,
         owner_user_id: &str,
+        replication_owner_user_id: Option<&str>,
         head_cursor: &str,
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<ChatFeedReadState, DomainError> {
-        non_empty(
-            owner_user_id,
-            "invalid-follow-target",
-            "Feed owner is required.",
-        )?;
+        let owner_user_id = normalize_feed_identity(owner_user_id, "Feed owner")?;
+        let replication_owner_user_id = replication_owner_user_id
+            .map(|owner| normalize_feed_identity(owner, "Replication feed owner"))
+            .transpose()?;
+        if let Some(replication_owner_user_id) = &replication_owner_user_id {
+            if replication_owner_user_id != &owner_user_id {
+                return Err(DomainError::chat(
+                    "invalid-follow-target",
+                    "Replication feed owner must match the local feed owner.",
+                ));
+            }
+        }
         let cursor = decode_feed_cursor(head_cursor)?;
         let ws = workspace_id.to_owned();
-        let owner = owner_user_id.to_owned();
+        let owner = owner_user_id;
         let msg = cursor.message_id;
         let last_seen_created_at_ms = cursor.created_at_ms;
         let outcome = self.store.write_with(faults, |tx| {
@@ -1933,21 +2123,23 @@ impl<'a> LinkedChatStore<'a> {
                 params![ws, owner, last_seen_created_at_ms, msg, at_ms, origin_id, origin_seq],
             )
             .map_err(DomainError::sql_persist)?;
-            insert_local_replication_op(
-                tx,
-                &ws,
-                &origin_id,
-                origin_seq,
-                "chat.feed.read.set",
-                &serde_json::json!({
-                    "ownerUserId": owner,
-                    "lastSeenCreatedAtMs": last_seen_created_at_ms,
-                    "lastSeenMessageId": msg,
-                    "atMs": at_ms,
-                }),
-                at_ms,
-            )?;
-            journal(tx, &owner, "chat.feed.read.set", at_ms)?;
+            if replication_owner_user_id.is_some() {
+                insert_local_replication_op(
+                    tx,
+                    &ws,
+                    &origin_id,
+                    origin_seq,
+                    "chat.feed.read.set",
+                    &serde_json::json!({
+                        "ownerUserId": owner,
+                        "lastSeenCreatedAtMs": last_seen_created_at_ms,
+                        "lastSeenMessageId": msg,
+                        "atMs": at_ms,
+                    }),
+                    at_ms,
+                )?;
+                journal(tx, &owner, "chat.feed.read.set", at_ms)?;
+            }
             require_feed_read_state(tx, &ws, &owner)
         })?;
         committed(outcome)
@@ -1957,9 +2149,8 @@ impl<'a> LinkedChatStore<'a> {
     /// first, gated by the exact TS visibility predicate (DM/placeholder hidden;
     /// author/thread/channel follows). The cursor is unpadded base64url
     /// ([`encode_feed_cursor`]); a bad cursor fails closed as
-    /// `invalid-follow-target`. Returns the visibility-gated candidate
-    /// coordinates (message hydration/attachment enrichment is presentation and
-    /// is deferred).
+    /// `invalid-follow-target`. Returns fully hydrated feed items while retaining
+    /// the visibility query's coordinates for cursor semantics.
     pub fn list_personal_feed(
         &self,
         workspace_id: &str,
@@ -2004,7 +2195,7 @@ impl<'a> LinkedChatStore<'a> {
                         probe
                     ],
                     |row| {
-                        Ok(ChatFeedItem {
+                        Ok(FeedCandidate {
                             message_id: row.get(0)?,
                             thread_id: row.get(1)?,
                             created_at_ms: row.get(2)?,
@@ -2012,14 +2203,14 @@ impl<'a> LinkedChatStore<'a> {
                     },
                 )
                 .map_err(DomainError::sql_corrupt)?;
-            let mut items: Vec<ChatFeedItem> = Vec::new();
+            let mut candidates: Vec<FeedCandidate> = Vec::new();
             for row in rows {
-                items.push(row.map_err(DomainError::sql_corrupt)?);
+                candidates.push(row.map_err(DomainError::sql_corrupt)?);
             }
             drop(stmt);
-            let next_cursor = if items.len() as i64 > limit {
-                items.truncate(limit as usize);
-                items.last().map(|last| {
+            let next_cursor = if candidates.len() as i64 > limit {
+                candidates.truncate(limit as usize);
+                candidates.last().map(|last| {
                     encode_feed_cursor(&FeedCursorValue {
                         created_at_ms: last.created_at_ms,
                         message_id: last.message_id.clone(),
@@ -2028,6 +2219,101 @@ impl<'a> LinkedChatStore<'a> {
             } else {
                 None
             };
+            let mut items = Vec::with_capacity(candidates.len());
+            for candidate in candidates {
+                let message = require_message(conn, workspace_id, &candidate.message_id)?;
+                if message.thread_id != candidate.thread_id
+                    || message.created_at_ms != candidate.created_at_ms
+                {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "personal feed candidate changed during hydration",
+                    });
+                }
+                let thread = require_thread(conn, workspace_id, &message.thread_id)?;
+                let channel = match &thread.channel_id {
+                    Some(channel_id) => Some(require_channel(conn, workspace_id, channel_id)?),
+                    None => None,
+                };
+                if channel
+                    .as_ref()
+                    .is_some_and(|channel| channel.kind == ChatChannelKind::Dm)
+                {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "personal feed hydrated a DM channel",
+                    });
+                }
+                let opening_message =
+                    first_message_for_thread(conn, workspace_id, &thread.thread_id)?;
+                let is_opening = opening_message
+                    .as_ref()
+                    .is_some_and(|opening| opening.message_id == message.message_id);
+                let opening_message =
+                    opening_message.filter(|opening| opening.message_id != message.message_id);
+                let parent_message = match &message.parent_message_id {
+                    Some(parent_message_id) => {
+                        let parent = message_by_id(conn, workspace_id, parent_message_id)?;
+                        if parent
+                            .as_ref()
+                            .is_some_and(|parent| parent.thread_id != thread.thread_id)
+                        {
+                            return Err(DomainError::StateCorrupt {
+                                reason: "personal feed parent belongs to another thread",
+                            });
+                        }
+                        parent
+                    }
+                    None => None,
+                };
+                let mut matched_by = Vec::new();
+                if let Some(author_user_id) = &message.author_user_id {
+                    let kind = match message.author_kind {
+                        ChatActorKind::Agent => FollowTargetKind::Agent,
+                        ChatActorKind::Human => FollowTargetKind::Person,
+                    };
+                    if active_follow_exists(
+                        conn,
+                        workspace_id,
+                        owner_user_id,
+                        kind,
+                        author_user_id,
+                    )? {
+                        matched_by.push(kind);
+                    }
+                }
+                if active_follow_exists(
+                    conn,
+                    workspace_id,
+                    owner_user_id,
+                    FollowTargetKind::Thread,
+                    &thread.thread_id,
+                )? {
+                    matched_by.push(FollowTargetKind::Thread);
+                }
+                if is_opening
+                    && let Some(channel) = &channel
+                    && let Some(wire_id) =
+                        wire_id_for_channel_id(conn, workspace_id, &channel.channel_id)?
+                    && active_follow_exists(
+                        conn,
+                        workspace_id,
+                        owner_user_id,
+                        FollowTargetKind::Channel,
+                        &wire_id,
+                    )?
+                {
+                    matched_by.push(FollowTargetKind::Channel);
+                }
+                items.push(ChatFeedItem {
+                    message,
+                    thread,
+                    channel,
+                    parent_message,
+                    opening_message,
+                    // Reactions are deliberately empty until the RPC-B2 domain is ported.
+                    reactions: Vec::new(),
+                    matched_by,
+                });
+            }
             let head = conn
                 .query_row(
                     PERSONAL_FEED_SQL,
@@ -2227,6 +2513,147 @@ impl<'a> LinkedChatStore<'a> {
                 .map_err(DomainError::sql_corrupt)?;
             collect(rows)
         })
+    }
+
+    /// Archive an active bookmark and queue the archive projection generation.
+    /// Repeating the transition on an archived bookmark is idempotent.
+    pub fn archive_bookmark(
+        &mut self,
+        workspace_id: &str,
+        owner_user_id: &str,
+        bookmark_id: &str,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatBookmark, DomainError> {
+        non_empty(
+            owner_user_id,
+            "invalid-bookmark-target",
+            "Bookmark owner is required.",
+        )?;
+        non_empty(
+            bookmark_id,
+            "invalid-bookmark-target",
+            "Bookmark id is required.",
+        )?;
+        let ws = workspace_id.to_owned();
+        let owner = owner_user_id.to_owned();
+        let bid = bookmark_id.to_owned();
+        let outcome = self.store.write_with(faults, |tx| {
+            let current = require_bookmark(tx, &ws, &owner, &bid)?;
+            if current.state == "active" {
+                tx.execute(
+                    "UPDATE chat_bookmarks SET state = 'archived', updated_at_ms = ?3 \
+                     WHERE workspace_id = ?1 AND bookmark_id = ?2",
+                    params![ws, bid, now_ms],
+                )
+                .map_err(DomainError::sql_persist)?;
+                queue_bookmark_generation(tx, &ws, &bid, now_ms)?;
+            }
+            require_bookmark(tx, &ws, &owner, &bid)
+        })?;
+        committed(outcome)
+    }
+
+    /// Fence a pending bookmark generation into the failed state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mark_bookmark_failed(
+        &mut self,
+        workspace_id: &str,
+        owner_user_id: &str,
+        bookmark_id: &str,
+        generation: i64,
+        failure_reason: &str,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatBookmarkTransition, DomainError> {
+        self.mark_bookmark_terminal(
+            workspace_id,
+            owner_user_id,
+            bookmark_id,
+            generation,
+            Some(failure_reason),
+            true,
+            "failed",
+            now_ms,
+            faults,
+        )
+    }
+
+    /// Fence a pending bookmark generation into the stale state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mark_bookmark_stale(
+        &mut self,
+        workspace_id: &str,
+        owner_user_id: &str,
+        bookmark_id: &str,
+        generation: i64,
+        failure_reason: Option<&str>,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatBookmarkTransition, DomainError> {
+        self.mark_bookmark_terminal(
+            workspace_id,
+            owner_user_id,
+            bookmark_id,
+            generation,
+            failure_reason,
+            false,
+            "stale",
+            now_ms,
+            faults,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mark_bookmark_terminal(
+        &mut self,
+        workspace_id: &str,
+        owner_user_id: &str,
+        bookmark_id: &str,
+        generation: i64,
+        failure_reason: Option<&str>,
+        reason_required: bool,
+        projection_state: &'static str,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatBookmarkTransition, DomainError> {
+        let ws = workspace_id.to_owned();
+        let owner = owner_user_id.to_owned();
+        let bid = bookmark_id.to_owned();
+        let failure_reason = failure_reason.map(str::to_owned);
+        let outcome = self.store.write_with(faults, |tx| {
+            require_bookmark(tx, &ws, &owner, &bid)?;
+            if !(1..=9_007_199_254_740_991).contains(&generation) {
+                return Err(DomainError::chat(
+                    "invalid-bookmark-target",
+                    "Bookmark generation is invalid.",
+                ));
+            }
+            let failure_reason =
+                normalize_bookmark_reason(failure_reason.as_deref(), reason_required)?;
+            let changed = tx
+                .execute(
+                    "UPDATE chat_bookmark_outbox \
+                     SET projection_state = ?4, failure_reason = ?5, updated_at_ms = ?6 \
+                     WHERE workspace_id = ?1 AND bookmark_id = ?2 AND generation = ?3 \
+                       AND projection_state = 'pending'",
+                    params![
+                        ws,
+                        bid,
+                        generation,
+                        projection_state,
+                        failure_reason,
+                        now_ms
+                    ],
+                )
+                .map_err(DomainError::sql_persist)?;
+            let bookmark = require_bookmark(tx, &ws, &owner, &bid)?;
+            Ok::<_, DomainError>(ChatBookmarkTransition {
+                bookmark,
+                applied: changed == 1,
+            })
+        })?;
+        committed(outcome)
     }
 
     /// Mark a bookmark projection ready, fenced by a generation CAS
@@ -2896,6 +3323,21 @@ fn record_channel_wire_id(
     Ok(())
 }
 
+fn wire_id_for_channel_id(
+    conn: &Connection,
+    workspace_id: &str,
+    channel_id: &str,
+) -> Result<Option<String>, DomainError> {
+    conn.query_row(
+        "SELECT wire_id FROM chat_channel_wire_ids \
+         WHERE workspace_id = ?1 AND channel_id = ?2 ORDER BY wire_id LIMIT 1",
+        params![workspace_id, channel_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)
+}
+
 fn channel_by_slug(
     conn: &Connection,
     workspace_id: &str,
@@ -3226,6 +3668,28 @@ fn insert_local_replication_op(
     Ok(())
 }
 
+/// Allocate and insert an ordinary relay-visible local op in the caller's
+/// transaction. Unlike the receiver-private follow/read registers, core chat
+/// creates are always exported.
+fn journal_local_op_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    op_kind: &str,
+    payload: &serde_json::Value,
+    recorded_at_ms: i64,
+) -> Result<(), DomainError> {
+    let (origin_id, origin_seq) = local_replication_coordinate(tx, workspace_id, recorded_at_ms)?;
+    insert_local_replication_op(
+        tx,
+        workspace_id,
+        &origin_id,
+        origin_seq,
+        op_kind,
+        payload,
+        recorded_at_ms,
+    )
+}
+
 fn require_feed_read_state(
     conn: &Connection,
     workspace_id: &str,
@@ -3334,6 +3798,59 @@ fn require_message(
     .map_err(DomainError::sql_corrupt)?
     .transpose()?
     .ok_or_else(|| DomainError::chat("message-not-found", "Chat message was not found."))
+}
+
+fn message_by_id(
+    conn: &Connection,
+    workspace_id: &str,
+    message_id: &str,
+) -> Result<Option<ChatMessage>, DomainError> {
+    conn.query_row(
+        "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
+         author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms \
+         FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
+        params![workspace_id, message_id],
+        map_message_row,
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?
+    .transpose()
+}
+
+fn first_message_for_thread(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<Option<ChatMessage>, DomainError> {
+    conn.query_row(
+        "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
+         author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms \
+         FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
+         ORDER BY created_at_ms, message_id LIMIT 1",
+        params![workspace_id, thread_id],
+        map_message_row,
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?
+    .transpose()
+}
+
+fn active_follow_exists(
+    conn: &Connection,
+    workspace_id: &str,
+    owner_user_id: &str,
+    target_kind: FollowTargetKind,
+    target_id: &str,
+) -> Result<bool, DomainError> {
+    conn.query_row(
+        "SELECT 1 FROM chat_follows WHERE workspace_id = ?1 AND owner_user_id = ?2 \
+         AND target_kind = ?3 AND target_id = ?4 AND state = 'following' LIMIT 1",
+        params![workspace_id, owner_user_id, target_kind.as_str(), target_id],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|row| row.is_some())
+    .map_err(DomainError::sql_corrupt)
 }
 
 /// Rehydrate a lost-response retry from the one RUNNING ledger row and its
