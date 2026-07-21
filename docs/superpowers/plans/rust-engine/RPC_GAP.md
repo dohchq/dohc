@@ -117,8 +117,7 @@ MAX_INBAND_CONTENT_BYTES = INBAND_CONTENT_CAP_BYTES = 48 KiB — NOT the
 Real binaries and text past the 48 KiB cap need the protocol's blob-chunk
 streaming (BlobStart exists in the wire contract; NO daemon producer
 yet) — cutover-relevant for readBinaryFile and large text reads; owned by
-RPC-D. The pre-existing
-versionedText.read carries the same 64 KiB bound for a single body.
+RPC-D.
 
 
 CROSS-ENGINE DELTA (RPC-A r18): secret path SPELLING — TS normalize-stores
