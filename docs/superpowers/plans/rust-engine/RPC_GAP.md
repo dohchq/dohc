@@ -7,9 +7,11 @@ This scopes the "grow daemon RPCs for cutover-needed desktop surfaces" shard
 
 ## Daemon methods dispatched today
 
-workspace.open/close · versionedText.write/read · ydoc.apply ·
-conflicts.list/open/resolve · search.query · watcher.status · capture.flush
-(the last two landed with #215, merged 2026-07-21).
+workspace.open/close · versionedText.write/read/list · versionedBinary.read ·
+versions.active/list · moments.list/get · secrets.list/materialize ·
+ydoc.apply · conflicts.list/open/resolve · search.query · watcher.status ·
+capture.flush (watcher.status/capture.flush landed with #215; the RPC-A
+read surface with #217, both merged 2026-07-21).
 
 ## The gaps, by domain
 
@@ -22,7 +24,7 @@ conflicts.list/open/resolve · search.query · watcher.status · capture.flush
 | getActiveVersion | MISSING | actor `active_version_id` is ID-ONLY; TS returns a full `VersionRecord \| null`. RPC-A ships the id (callers join via versions.list); a full-record passthrough is RPC-D work |
 | readTextFile binary-head metadata | PARTIAL | TS readTextFile's snapshot exposes binary heads (contentKind/sha256/byteLength) in the SAME call; Rust versionedText.read refuses binary heads and callers must pivot to versionedBinary.read. Single-call snapshot introspection parity is RPC-D work |
 | set/ensure active version | MISSING | domain exists |
-| listVersions / createNamedVersion / forkVersion | listVersions SHIPPED in RPC-A (#217, versions.list); createNamedVersion/forkVersion remain MISSING (RPC-D) | domain `store.rs:593/823`, `secrets.rs:645` |
+| listVersions / createNamedVersion / forkVersion | listVersions SHIPPED in RPC-A (#217, versions.list); createNamedVersion/forkVersion remain MISSING (RPC-D) | domain `store.rs list_versions`/`create_named_version`, `secrets.rs` fork section |
 | listMoments / getMoment | SHIPPED in RPC-A (#217, merged): moments.list/moments.get hydrate before/after TEXT plus actual byte lengths under the one-turn in-band cap (over-cap bodies come back as metadata + null text + inbandLimitBytes). What is NOT ported is the oracle's payload-provenance columns (payload_before_*/payload_after_* and before-snapshot identity) — the Rust schema lacks them; see the SCHEMA OBLIGATION below (pre-R15 migration candidate). RPC-D owes nothing here beyond that migration. | domain `store.rs:616/783` |
 | listSecretFiles / materializeSecretFile | SHIPPED in RPC-A (#217): secrets.list (keyless page) + secrets.materialize (in-band cap; over-cap tips authenticate then drop plaintext) | domain `secrets.rs:547/526` |
 | secret moments/compare/restore | MISSING | moments exist (`secrets.rs:582/614`); compare/restore are NOT ported — those line refs are TS `secretFileStore.ts:1468/1517/1584`. Real Rust domain work, not wiring |
@@ -89,7 +91,8 @@ of scope here.
   orchestration. Coordinate with the backend-modes doc; may be post-cutover
   depending on the R15 scope Ice picks.
 
-Cutover-blocking order per desktop usage weight: A → B → C, then D; E per
+Cutover-blocking order per desktop usage weight: A → B → C, then D and
+B2 (production-called chat follow-ups — a GATE6 dependency like the rest); E per
 Ice's R15 scope decision.
 
 Standing contract for EVERY slice (already the daemon's shape, recorded so
