@@ -1225,6 +1225,30 @@ impl EngineService {
             }
             serial = self.session_ops.lock() => serial,
         };
+        // The first read only DERIVES the key (head resolution can't happen
+        // without it). The lease is then taken on that key and the state is
+        // RE-READ under it — a legacy ydoc.apply landing between read one and
+        // the lease can no longer hand the opener stale initial state (the
+        // second read is the authoritative one; apply refuses while leased).
+        let probe = open
+            .actor
+            .ydoc_open_state(
+                open.workspace_id.clone(),
+                now_ms()?,
+                params.version_id.clone(),
+                params.path.clone(),
+                requested_kind,
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        let lease = self
+            .leases
+            .acquire(&probe.key)
+            .map_err(|error| match error {
+                CollabError::LeaseHeld => wire(ErrorCode::InvalidParams, "ydoc-session-busy"),
+                other => map_runtime(RuntimeError::Collab(other)),
+            })?;
         let state = open
             .actor
             .ydoc_open_state(
@@ -1237,13 +1261,11 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
-        let lease = self
-            .leases
-            .acquire(&state.key)
-            .map_err(|error| match error {
-                CollabError::LeaseHeld => wire(ErrorCode::InvalidParams, "ydoc-session-busy"),
-                other => map_runtime(RuntimeError::Collab(other)),
-            })?;
+        if state.key != probe.key {
+            // The path's owner changed between the probe and the lease: the
+            // held lease guards the WRONG key. Refuse; the client retries.
+            return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
+        }
         let sequence = self
             .next_session
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -2485,6 +2507,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::BaseAlreadyClaimed
         | CollabError::LeaseHeld
         | CollabError::NoMarker
+        | CollabError::MissingDependencies
         | CollabError::SeedOntoExistingLineage
         | CollabError::UnsettledClose => ErrorCode::InvalidParams,
     }

@@ -2087,7 +2087,7 @@ fn worker_main(
                 let _ = reply.send(outcome);
             }
             Command::YdocResync { key, token, reply } => {
-                let outcome = ydoc_resync_on_store(&store, &key, &token);
+                let outcome = ydoc_resync_on_store(&mut store, &key, &token);
                 let _ = reply.send(outcome);
             }
             Command::YdocCloseSession {
@@ -2231,7 +2231,11 @@ fn ydoc_apply_on_store(
 /// it absent and settles refuse it (an empty projection must never clobber
 /// the artifact).
 fn ydoc_marker_has_durable_state(marker: &dohc_engine_collab::Marker) -> bool {
-    marker.head_update_seq > 0 || marker.head_snapshot_seq > 0
+    // base_claimed covers the replicated base-only lineage: claim_base inserts
+    // the base snapshot at up_to_seq 0 WITHOUT advancing head_snapshot_seq, so
+    // the seq pair alone would misread a claimed base as absent (double-seed +
+    // NoMarker settle refusals on a valid lineage).
+    marker.head_update_seq > 0 || marker.head_snapshot_seq > 0 || marker.base_claimed
 }
 
 fn ydoc_open_state_on_store(
@@ -2437,7 +2441,34 @@ fn ydoc_settle_on_store(
         Some(persisted) => persisted.doc,
         None => return Err(dohc_engine_collab::CollabError::NoMarker.into()),
     };
+    // A doc holding unintegrated remote updates (missing cross-origin
+    // dependency) must not settle: the projection would omit pending remote
+    // content and last_settled_sha would record that incomplete artifact as
+    // settled — the CRDT then advances past a stale file.
+    if doc.has_pending_dependencies() {
+        return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
+    }
     let projection = doc.project(content_kind);
+    // Idempotent no-op: when the lineage's last settled content is exactly
+    // this projection, re-settling would mint a duplicate moment (the
+    // fingerprint's previous-moment input changed) and a redundant
+    // materialization job — the TS driver only settles when the projection
+    // differs. Answer with the current head instead.
+    let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
+    if dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
+        == Some(projected_sha.as_str())
+    {
+        let current = VersionedTextStore::new(store)
+            .read_text(&key.workspace_id, &key.version_id, path)?
+            .ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
+        return Ok(YdocSettlement {
+            moment_id: current.latest_moment_id,
+            path: current.path,
+            markdown: current.text,
+            sha256: current.blob_sha256,
+            projection,
+        });
+    }
     let projection_for_write = projection.clone();
     let outcome = store.write_with(faults, |tx| {
         let current = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)?;
@@ -2614,12 +2645,20 @@ fn ydoc_settle_on_store(
 }
 
 fn ydoc_resync_on_store(
-    store: &EngineStore,
+    store: &mut EngineStore,
     key: &DocKey,
     token: &CancellationToken,
 ) -> Result<Vec<u8>, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
+    }
+    // Resync is the staleness RECOVERY path: an envelope acked-but-deferred
+    // because THIS session held the lease may be the very edit that made the
+    // client stale — drain it first or the recovery response still misses it.
+    if dohc_engine_collab::read_marker(store, key)?
+        .is_some_and(|marker| marker.regime == Regime::Replicated)
+    {
+        dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, &NoFaults)?;
     }
     Ok(match dohc_engine_collab::load_persisted(store, key)? {
         Some(persisted) => persisted.doc.encode_full_state(),

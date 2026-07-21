@@ -932,6 +932,15 @@ pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Mar
 
 /// The sha of the content the last settle materialized (or `None` if never
 /// settled) — the durable settle-handoff marker the local-only close guard reads.
+/// The content sha the lineage last durably settled (public read for the
+/// daemon settle path's idempotent no-op check).
+pub fn read_last_settled_sha(
+    store: &EngineStore,
+    key: &DocKey,
+) -> Result<Option<String>, CollabError> {
+    store.read_with(|conn| last_settled_sha(conn, key))
+}
+
 fn last_settled_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, CollabError> {
     conn.query_row(
         "SELECT last_settled_sha FROM ydoc_docs \

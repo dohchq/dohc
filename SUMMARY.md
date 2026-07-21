@@ -226,3 +226,31 @@ the raw result alongside the existing decoder.
 - P2 close cancellation: after the default settle materialized, the close
   command runs on a fresh token — a caller cancel can no longer strand
   the session/lease and force a duplicate re-settle.
+
+## Codex review round 4 (PR #220)
+
+- P1 claimed base lineage: the durable-state predicate includes
+  base_claimed (claim_base inserts the base snapshot at up_to_seq 0
+  without advancing head_snapshot_seq) — a base-only replicated lineage
+  reads EXISTING and settles.
+- P1 defer prevalidation: apply_ydoc_envelope runs Ydoc::validate_update
+  before ANY ack path — a hydrated-but-malformed update can no longer be
+  acked into the deferred queue where every drain would refuse it.
+- P1 pull dispatch: pull_chat_workspace dispatches ydoc.update envelopes
+  to apply_ydoc_envelope (with a LeaseProbe param) — peers pulling a live
+  replicated edit no longer wedge on UnsupportedOperation.
+- P1 richdoc provider close (client): the pre-close settle is skipped for
+  richdoc sessions (the C1 refusal belongs to explicit settles; the
+  daemon close persists the closed CRDT).
+- P1 resync drains: ydoc.resync drains the replicated doc's deferred
+  queue before encoding full state — recovery can't miss the very edit
+  that made the client stale.
+- P1 missing-dependency settles refuse: a reconstructed doc holding
+  unintegrated remote updates refuses ydoc-missing-remote-dependencies
+  instead of recording an incomplete projection as settled.
+- P2 idempotent settle: when the projection sha equals last_settled_sha
+  the settle answers with the current head, minting nothing — a default
+  close after an explicit settle no longer duplicates moments/jobs.
+- P2 lease-before-state: ydoc.open derives the key, acquires the lease,
+  then RE-READS state under it (key-change → busy refusal) — a legacy
+  apply between read and lease can't hand the opener stale state.

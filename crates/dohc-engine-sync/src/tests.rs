@@ -647,7 +647,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
     let client = RelaySyncClient::new(fake);
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncBetweenApplyAndCursorCommit);
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", faults.as_ref())
+        .pull_chat_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases)
         .expect("pull fault");
     assert!(matches!(
         first,
@@ -661,7 +661,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
             .is_none()
     );
     let retry = client
-        .pull_chat_workspace(&mut reopened, "ws", &NoFaults)
+        .pull_chat_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases)
         .expect("retry pull");
     let pending = match retry {
         SyncPassOutcome::Complete {
@@ -851,7 +851,7 @@ fn pull_rejects_op_for_foreign_workspace() {
     };
     let client = RelaySyncClient::new(fake);
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults),
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
         Err(RelayError::InvalidResponse)
     ));
     // Fail closed: the cursor was never persisted, so the pass is retryable.

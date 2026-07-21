@@ -202,6 +202,13 @@ impl Ydoc {
         self.doc.transact().has_missing_updates()
     }
 
+    /// Whether the doc holds updates it could not integrate yet (a
+    /// cross-origin missing dependency durably parked in the log). A
+    /// projection taken in this state omits pending remote content.
+    pub fn has_pending_dependencies(&self) -> bool {
+        self.pending_update_v1().is_some()
+    }
+
     pub(crate) fn pending_update_v1(&self) -> Option<Vec<u8>> {
         let txn = self.doc.transact();
         txn.store()

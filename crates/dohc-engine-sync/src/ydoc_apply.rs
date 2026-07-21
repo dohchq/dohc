@@ -188,6 +188,13 @@ pub fn apply_ydoc_envelope(
     if dohc_engine_storage::hex_sha256(&bytes) != payload.update_blob_sha256 {
         return Err(SyncError::BlobInvalid);
     }
+    // Full update validation BEFORE any ack path: a hydrated-but-malformed or
+    // oversized update deferred under a live lease would advance the cursor
+    // onto a row every later drain refuses — unrefetchable and stuck. The
+    // non-live path re-validates inside apply; this cost is one prevalidation.
+    dohc_engine_collab::Ydoc::validate_update(&bytes).map_err(|_| SyncError::InvalidInput {
+        reason: "ydoc.update bytes fail validation",
+    })?;
     if leases.is_live(&key) {
         // A deferred coordinate is ACKED — it must be drainable later, which
         // the close/open drains only do for REPLICATED markers. A live lease
