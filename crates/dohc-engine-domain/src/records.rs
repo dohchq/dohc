@@ -156,6 +156,39 @@ pub struct BinaryHead {
     pub bytes: Vec<u8>,
 }
 
+/// A text head whose body hydrates only under the caller's in-band cap
+/// (the byte length always does).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InbandText {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub object_id: String,
+    pub path: String,
+    pub text: Option<String>,
+    pub byte_length: i64,
+    pub blob_sha256: String,
+    pub updated_at_ms: i64,
+    pub latest_moment_id: String,
+    pub metadata_origin: String,
+}
+
+/// A secret whose plaintext hydrates only under the caller's in-band cap
+/// (an over-cap tip is never decrypted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InbandSecret {
+    pub text: Option<String>,
+    pub byte_length: i64,
+}
+
+/// A binary head whose bytes hydrate only under the caller's in-band cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InbandBinary {
+    pub object_id: String,
+    pub sha256: String,
+    pub byte_length: i64,
+    pub bytes: Option<Vec<u8>>,
+}
+
 /// A binary head's metadata without its bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinaryHeadMeta {

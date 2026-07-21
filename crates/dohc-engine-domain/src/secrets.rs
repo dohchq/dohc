@@ -43,6 +43,7 @@
 //! possible enhancement for the sync/retention shard; see BEHAVIOR_DELTA.md.
 
 use crate::error::DomainError;
+use crate::records::InbandSecret;
 use crate::store::validate_path;
 use dohc_engine_crypto::{SealedSecret, SecretDataKey, SecretPlaintext, aead, seal};
 use dohc_engine_storage::{
@@ -523,6 +524,44 @@ impl<'a> SecretFileStore<'a> {
     /// tip exists. Fails closed (`decrypt-failed`) on tamper/wrong-key/AAD. The
     /// secret-aware materialization pipeline calls this to obtain the bytes it
     /// writes to disk.
+    /// Materialize with the in-band cap decided IN this read: an over-cap
+    /// tip answers its recorded length WITHOUT decrypting — no window
+    /// where the secret can grow between a size probe and the decrypt,
+    /// and over-cap plaintext never exists on the heap.
+    pub fn materialize_secret_file_inband(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+        path: &str,
+        cap: usize,
+    ) -> Result<Option<InbandSecret>, DomainError> {
+        validate_secret_path(path)?;
+        let key = self.key;
+        self.store.read_with(|conn| {
+            require_version(conn, workspace_id, version_id)?;
+            let Some(tip) = select_tip(conn, workspace_id, version_id, path)? else {
+                return Ok(None);
+            };
+            let byte_length = tip.byte_length() as i64;
+            if tip.byte_length() > cap {
+                return Ok(Some(InbandSecret {
+                    text: None,
+                    byte_length,
+                }));
+            }
+            let plaintext = aead::open(key, workspace_id, path, &tip)?;
+            let text = plaintext
+                .into_utf8()
+                .map_err(|_| DomainError::StateCorrupt {
+                    reason: "secret plaintext is not utf-8",
+                })?;
+            Ok(Some(InbandSecret {
+                byte_length,
+                text: Some(text),
+            }))
+        })
+    }
+
     pub fn materialize_secret_file(
         &self,
         workspace_id: &str,

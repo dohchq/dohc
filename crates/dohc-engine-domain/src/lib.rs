@@ -64,9 +64,10 @@ pub use normalize::NormalizedState;
 pub use records::{
     BinaryHead, BinaryHeadMeta, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
     CaptureRetire, CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile,
-    FileObjectRecord, ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult,
-    RenameTextFile, RollbackTextFileMutation, SnapshotContent, SnapshotMetadata, SnapshotView,
-    TextSnapshot, VersionKind, VersionRecord, WriteResult, WriteText,
+    FileObjectRecord, InbandBinary, InbandSecret, InbandText, ListMomentsQuery, MomentOp,
+    MomentPage, MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation,
+    SnapshotContent, SnapshotMetadata, SnapshotView, TextSnapshot, VersionKind, VersionRecord,
+    WriteResult, WriteText,
 };
 pub use secrets::{
     CaptureSecret, CaptureSecretRetire, SecretDelete, SecretDiskIntent, SecretFileStat,

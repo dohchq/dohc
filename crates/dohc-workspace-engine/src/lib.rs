@@ -425,37 +425,41 @@ impl EngineService {
         let params: VersionedTextReadParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let snapshot = open
-            .actor
-            .versioned_text_read(
+        // ONE actor turn decides the in-band cap: an over-cap body never
+        // leaves SQLite, and no concurrent write can grow the body between
+        // a size probe and the load (there is no probe).
+        let snapshot = Self::read_under_ctx(
+            &cancellation,
+            "versionedText.read",
+            open.actor.read_text_inband(
                 open.workspace_id,
                 params.version_id,
                 params.path,
-                cancellation.token(),
-            )
-            .await
-            .map_err(map_runtime)?;
+                MAX_INBAND_CONTENT_BYTES,
+            ),
+        )
+        .await?;
         Ok(match snapshot {
-            // The framed transport caps every response string at 64 KiB:
-            // an over-cap body answers its metadata (the listing directs
-            // callers here for bodies, so the read carries the same
-            // self-describing over-cap contract as binary and secrets).
-            // Large-text delivery is the recorded blob-streaming follow-up.
-            Some(snapshot) if snapshot.text.len() > MAX_INBAND_CONTENT_BYTES => json!({
-                "workspaceId": snapshot.workspace_id,
-                "versionId": snapshot.version_id,
-                "objectId": snapshot.object_id,
-                "path": snapshot.path,
-                "text": Value::Null,
-                "byteLength": snapshot.text.len(),
-                "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
-                "blobSha256": snapshot.blob_sha256,
-                "updatedAtMs": snapshot.updated_at_ms,
-                "latestMomentId": snapshot.latest_moment_id,
-                "metadataOrigin": snapshot.metadata_origin
-            }),
-            Some(snapshot) => snapshot_json(&snapshot),
             None => Value::Null,
+            Some(snapshot) => {
+                let over_cap = snapshot.text.is_none();
+                let mut body = json!({
+                    "workspaceId": snapshot.workspace_id,
+                    "versionId": snapshot.version_id,
+                    "objectId": snapshot.object_id,
+                    "path": snapshot.path,
+                    "text": snapshot.text,
+                    "byteLength": snapshot.byte_length,
+                    "blobSha256": snapshot.blob_sha256,
+                    "updatedAtMs": snapshot.updated_at_ms,
+                    "latestMomentId": snapshot.latest_moment_id,
+                    "metadataOrigin": snapshot.metadata_origin
+                });
+                if over_cap {
+                    body["inbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
+                }
+                body
+            }
         })
     }
 
@@ -725,57 +729,37 @@ impl EngineService {
         let params: VersionPathParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let meta = Self::read_under_ctx(
+        // ONE actor turn: the cap is decided in the query, so a replaced
+        // head can never smuggle an over-cap blob into memory, and the
+        // recorded length is integrity-checked against the stored bytes.
+        let head = Self::read_under_ctx(
             &cancellation,
             "versionedBinary.read",
-            open.actor.read_binary_meta(
-                open.workspace_id.clone(),
-                params.version_id.clone(),
-                params.path.clone(),
+            open.actor.read_binary_inband(
+                open.workspace_id,
+                params.version_id,
+                params.path,
+                MAX_INBAND_CONTENT_BYTES,
             ),
         )
         .await?;
-        Ok(match meta {
+        Ok(match head {
             None => Value::Null,
-            // Over the in-band cap: the metadata IS the answer — the bytes
-            // are never materialized, not loaded-then-discarded (a large
-            // blob per request would be a soft DoS vector).
-            Some(meta) if meta.byte_length as usize > MAX_INBAND_CONTENT_BYTES => json!({
-                "objectId": meta.object_id,
-                "sha256": meta.sha256,
-                "byteLength": meta.byte_length,
-                "bytesBase64": Value::Null,
-                "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
-            }),
-            Some(_) => {
-                let head = Self::read_under_ctx(
-                    &cancellation,
-                    "versionedBinary.read",
-                    open.actor
-                        .read_binary(open.workspace_id, params.version_id, params.path),
-                )
-                .await?;
-                match head {
-                    None => Value::Null,
-                    // The head can change BETWEEN the two actor turns (a
-                    // concurrent capture can replace it with a bigger
-                    // blob): recheck the cap on what was actually read.
-                    Some(head) if head.bytes.len() > MAX_INBAND_CONTENT_BYTES => json!({
-                        "objectId": head.object_id,
-                        "sha256": head.sha256,
-                        "byteLength": head.bytes.len(),
-                        "bytesBase64": Value::Null,
-                        "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
-                    }),
-                    Some(head) => json!({
-                        "objectId": head.object_id,
-                        "sha256": head.sha256,
-                        "byteLength": head.bytes.len(),
-                        "bytesBase64":
-                            base64::engine::general_purpose::STANDARD.encode(&head.bytes),
-                    }),
-                }
-            }
+            Some(head) => match head.bytes {
+                Some(bytes) => json!({
+                    "objectId": head.object_id,
+                    "sha256": head.sha256,
+                    "byteLength": head.byte_length,
+                    "bytesBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                }),
+                None => json!({
+                    "objectId": head.object_id,
+                    "sha256": head.sha256,
+                    "byteLength": head.byte_length,
+                    "bytesBase64": Value::Null,
+                    "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+                }),
+            },
         })
     }
 
@@ -822,7 +806,18 @@ impl EngineService {
         // 64 KiB string. Cut the page when the running size estimate would
         // pass the budget (at least one row always ships — a single row
         // fits by construction, every string being wire-capped).
-        let rows: Vec<Value> = page.moments.iter().map(moment_json).collect();
+        let mut rows: Vec<Value> = page.moments.iter().map(moment_json).collect();
+        // A single row can legitimately exceed the page budget (several
+        // wire-legal strings plus escaping). The page must still make
+        // progress: degrade THAT row to metadata (texts nulled — their
+        // byte lengths remain) rather than ship an over-frame page or
+        // dead-end the cursor.
+        if let Some(first) = rows.first_mut() {
+            if serde_json::to_string(first).map_or(0, |s| s.len()) > MOMENTS_PAGE_BYTE_BUDGET {
+                first["afterText"] = Value::Null;
+                first["beforeText"] = Value::Null;
+            }
+        }
         let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
         let truncated = included < rows.len();
         let next_before = if truncated {
@@ -944,12 +939,11 @@ impl EngineService {
             normalized.ok_or_else(|| wire(ErrorCode::InvalidParams, "not a secret path"))?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        // The RECORDED length gates the in-band cap BEFORE any key or
-        // decrypt work: an over-cap secret is answered from metadata and
-        // its plaintext never exists as a heap String. This stat also
-        // validates version membership up front, so caller mistakes error
-        // identically regardless of local key-file state.
-        let recorded_len = Self::read_under_ctx(
+        // PRECEDENCE stat (keyless): validates the secret path and the
+        // version BEFORE any key work, so caller mistakes error
+        // identically regardless of local key-file state. The in-band cap
+        // itself is decided later, inside the decrypting actor turn.
+        let _precedence = Self::read_under_ctx(
             &cancellation,
             "secrets.materialize",
             open.actor.secret_file_len(
@@ -981,36 +975,31 @@ impl EngineService {
             }
             return Ok(Value::Null);
         };
-        // Key present and valid: an over-cap secret answers from the
-        // RECORDED length WITHOUT decrypting — but only now, so key-state
-        // failures behave identically for secrets of every size.
-        if let Some(len) = recorded_len {
-            if len as usize > MAX_INBAND_CONTENT_BYTES {
-                return Ok(json!({
-                    "text": Value::Null,
-                    "byteLength": len,
-                    "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
-                }));
-            }
-        }
-        let plaintext = Self::read_under_ctx(
+        // Key present and valid: the cap is decided IN the decrypting
+        // actor turn — a secret growing after any earlier read cannot be
+        // decrypted over-cap, and over-cap plaintext never exists.
+        let secret = Self::read_under_ctx(
             &cancellation,
             "secrets.materialize",
-            open.actor
-                .materialize_secret(open.workspace_id, params.version_id, secret_path, key),
+            open.actor.materialize_secret_inband(
+                open.workspace_id,
+                params.version_id,
+                secret_path,
+                key,
+                MAX_INBAND_CONTENT_BYTES,
+            ),
         )
         .await?;
-        Ok(match plaintext {
+        Ok(match secret {
             None => Value::Null,
-            // The stat gate above makes this the TOCTOU backstop (a write
-            // can grow the secret between the two actor turns): recheck on
-            // what was actually decrypted.
-            Some(text) if text.len() > MAX_INBAND_CONTENT_BYTES => json!({
-                "text": Value::Null,
-                "byteLength": text.len(),
-                "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
-            }),
-            Some(text) => json!({ "text": text }),
+            Some(secret) => match secret.text {
+                Some(text) => json!({ "text": text }),
+                None => json!({
+                    "text": Value::Null,
+                    "byteLength": secret.byte_length,
+                    "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+                }),
+            },
         })
     }
 
@@ -1669,12 +1658,17 @@ fn parsed_moment_author(raw: &str) -> Value {
         Some(_) => false,
     };
     if kind_ok && nonempty("agentId") && nonempty("onBehalfOf") && run_ok {
-        json!({
+        let mut author = json!({
             "kind": "agent",
             "agentId": object["agentId"],
             "onBehalfOf": object["onBehalfOf"],
-            "agentRunId": object.get("agentRunId"),
-        })
+        });
+        // The contract field is OPTIONAL (`agentRunId?: string`), never
+        // nullable — omit it when absent, exactly as pickMomentAuthor does.
+        if let Some(run_id) = object.get("agentRunId") {
+            author["agentRunId"] = run_id.clone();
+        }
+        author
     } else {
         corrupt()
     }

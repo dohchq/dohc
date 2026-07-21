@@ -34,12 +34,12 @@ use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
     BinaryHead, BinaryHeadMeta, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
     CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult, CaptureSecret,
-    CaptureSecretRetire, ListMomentsQuery, MomentPage, MomentRecord, ResolveTextConflict,
-    ResolveTextConflictResult, SecretFileStat, SecretFileStore, SecretMomentRecord,
-    SecretWriteResult, SnapshotMetadata, SnapshotView, TextConflict, TextSnapshot, VersionRecord,
-    VersionedTextStore, WriteResult, WriteText, capture_manifest_seed, capture_secret_retire,
-    has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
-    list_secret_files_keyless_page, secret_file_len_keyless,
+    CaptureSecretRetire, InbandBinary, InbandSecret, InbandText, ListMomentsQuery, MomentPage,
+    MomentRecord, ResolveTextConflict, ResolveTextConflictResult, SecretFileStat, SecretFileStore,
+    SecretMomentRecord, SecretWriteResult, SnapshotMetadata, SnapshotView, TextConflict,
+    TextSnapshot, VersionRecord, VersionedTextStore, WriteResult, WriteText, capture_manifest_seed,
+    capture_secret_retire, has_secret_state, insert_text_conflict_if_absent,
+    list_secret_files_keyless, list_secret_files_keyless_page, secret_file_len_keyless,
 };
 use dohc_engine_storage::{
     CompoundWrite, Document, EngineStore, FaultInjector, StorageError, TxnOutcome, WriteOutcome,
@@ -235,6 +235,28 @@ enum Command {
         version_id: String,
         path: String,
         reply: oneshot::Sender<Result<Option<BinaryHeadMeta>, RuntimeError>>,
+    },
+    ReadTextInband {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        cap: usize,
+        reply: oneshot::Sender<Result<Option<InbandText>, RuntimeError>>,
+    },
+    ReadBinaryInband {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        cap: usize,
+        reply: oneshot::Sender<Result<Option<InbandBinary>, RuntimeError>>,
+    },
+    MaterializeSecretInband {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        key: SecretDataKey,
+        cap: usize,
+        reply: oneshot::Sender<Result<Option<InbandSecret>, RuntimeError>>,
     },
     ListSecretFiles {
         workspace_id: String,
@@ -931,6 +953,75 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// Text head with the body hydrated only under `cap` — one actor turn.
+    pub async fn read_text_inband(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        cap: usize,
+    ) -> Result<Option<InbandText>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReadTextInband {
+                workspace_id,
+                version_id,
+                path,
+                cap,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Binary head with the bytes hydrated only under `cap` — one actor turn.
+    pub async fn read_binary_inband(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        cap: usize,
+    ) -> Result<Option<InbandBinary>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReadBinaryInband {
+                workspace_id,
+                version_id,
+                path,
+                cap,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Secret materialize with the cap decided in the SAME turn — an
+    /// over-cap tip is never decrypted.
+    pub async fn materialize_secret_inband(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        key: SecretDataKey,
+        cap: usize,
+    ) -> Result<Option<InbandSecret>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::MaterializeSecretInband {
+                workspace_id,
+                version_id,
+                path,
+                key,
+                cap,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     pub async fn list_secret_files(
         &self,
         workspace_id: String,
@@ -1552,6 +1643,43 @@ fn worker_main(
             } => {
                 let outcome = VersionedTextStore::new(&mut store)
                     .read_binary_meta(&workspace_id, &version_id, &path)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ReadTextInband {
+                workspace_id,
+                version_id,
+                path,
+                cap,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .read_text_inband(&workspace_id, &version_id, &path, cap)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ReadBinaryInband {
+                workspace_id,
+                version_id,
+                path,
+                cap,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .read_binary_inband(&workspace_id, &version_id, &path, cap)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::MaterializeSecretInband {
+                workspace_id,
+                version_id,
+                path,
+                key,
+                cap,
+                reply,
+            } => {
+                let outcome = SecretFileStore::new(&mut store, &key)
+                    .materialize_secret_file_inband(&workspace_id, &version_id, &path, cap)
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }

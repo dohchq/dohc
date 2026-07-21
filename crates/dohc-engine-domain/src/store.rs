@@ -18,9 +18,10 @@ use crate::error::DomainError;
 use crate::records::{
     BinaryHead, BinaryHeadMeta, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
     CaptureRetire, CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile,
-    FileObjectRecord, ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult,
-    RenameTextFile, RollbackTextFileMutation, SnapshotContent, SnapshotMetadata, SnapshotRecord,
-    SnapshotView, TextSnapshot, VersionKind, VersionRecord, WriteResult, WriteText,
+    FileObjectRecord, InbandBinary, InbandText, ListMomentsQuery, MomentOp, MomentPage,
+    MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation, SnapshotContent,
+    SnapshotMetadata, SnapshotRecord, SnapshotView, TextSnapshot, VersionKind, VersionRecord,
+    WriteResult, WriteText,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
@@ -661,6 +662,121 @@ impl<'a> VersionedTextStore<'a> {
                 object_id,
                 sha256,
                 byte_length,
+            }))
+        })
+    }
+
+    /// Read a text head with the body hydrated ONLY under `cap` bytes —
+    /// the byte length always returns. One query, one actor turn: no
+    /// window where a concurrent write can grow the body between a size
+    /// probe and the load, and an over-cap body never leaves SQLite.
+    pub fn read_text_inband(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+        path: &str,
+        cap: usize,
+    ) -> Result<Option<InbandText>, DomainError> {
+        let path = validate_addressable_plaintext_path(path)?;
+        self.store.read_with(|conn| {
+            if !version_exists(conn, workspace_id, version_id)? {
+                return Err(DomainError::VersionNotFound);
+            }
+            let Some(object_id) = alias_object_id(conn, workspace_id, version_id, &path)? else {
+                return Ok(None);
+            };
+            let Some(snapshot) = get_snapshot(conn, workspace_id, version_id, &object_id)? else {
+                return Ok(None);
+            };
+            if snapshot.content_kind != "text" {
+                return Err(DomainError::BinaryHeadNotText);
+            }
+            let sha = snapshot.blob_sha256.ok_or(DomainError::StateCorrupt {
+                reason: "text head without a text blob",
+            })?;
+            let row: Option<(i64, Option<String>)> = conn
+                .query_row(
+                    "SELECT byte_length, \
+                     CASE WHEN byte_length <= ?2 THEN text END \
+                     FROM blobs WHERE sha256 = ?1",
+                    rusqlite::params![sha, cap as i64],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            let Some((byte_length, text)) = row else {
+                return Err(DomainError::StateCorrupt {
+                    reason: "text head references a missing blob",
+                });
+            };
+            Ok(Some(InbandText {
+                workspace_id: workspace_id.to_owned(),
+                version_id: version_id.to_owned(),
+                object_id,
+                path,
+                text,
+                byte_length,
+                blob_sha256: sha,
+                updated_at_ms: snapshot.updated_at_ms,
+                latest_moment_id: snapshot.latest_moment_id,
+                metadata_origin: snapshot.metadata_origin,
+            }))
+        })
+    }
+
+    /// Read a binary head with the bytes hydrated ONLY under `cap` — the
+    /// recorded byte length (integrity-checked against the stored bytes)
+    /// always returns. One query, one actor turn, same rationale as
+    /// [`Self::read_text_inband`].
+    pub fn read_binary_inband(
+        &self,
+        workspace_id: &str,
+        version_id: &str,
+        path: &str,
+        cap: usize,
+    ) -> Result<Option<InbandBinary>, DomainError> {
+        let path = validate_addressable_plaintext_path(path)?;
+        self.store.read_with(|conn| {
+            if !version_exists(conn, workspace_id, version_id)? {
+                return Err(DomainError::VersionNotFound);
+            }
+            let Some(object_id) = alias_object_id(conn, workspace_id, version_id, &path)? else {
+                return Ok(None);
+            };
+            let Some(snapshot) = get_snapshot(conn, workspace_id, version_id, &object_id)? else {
+                return Ok(None);
+            };
+            if snapshot.content_kind != "binary" {
+                return Err(DomainError::TextHeadNotBinary);
+            }
+            let sha256 = snapshot.binary_sha256.ok_or(DomainError::StateCorrupt {
+                reason: "binary head without a binary sha",
+            })?;
+            let row: Option<(i64, i64, Option<Vec<u8>>)> = conn
+                .query_row(
+                    "SELECT byte_length, LENGTH(bytes), \
+                     CASE WHEN byte_length <= ?2 THEN bytes END \
+                     FROM binary_blobs WHERE sha256 = ?1",
+                    rusqlite::params![sha256, cap as i64],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            let Some((recorded, actual, bytes)) = row else {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary head references a missing blob",
+                });
+            };
+            if recorded != actual {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary blob length does not match its bytes",
+                });
+            }
+            Ok(Some(InbandBinary {
+                object_id,
+                sha256,
+                byte_length: recorded,
+                bytes,
             }))
         })
     }
