@@ -1,6 +1,6 @@
 # Daemon RPC gap analysis — desktop surface vs dispatched methods
 
-Snapshot 2026-07-20 (FCOMP-E on branch, #215 in review). Source: full sweep of the R13b dormant
+Snapshot 2026-07-21 (RPC-A MERGED #217; FCOMP-E merged #215; RPC-B in review #218; RPC-C open #220). Source: full sweep of the R13b dormant
 adapter, every desktop engine call site, and the daemon/actor/domain layers.
 This scopes the "grow daemon RPCs for cutover-needed desktop surfaces" shard
 (R13b-rest). Sub-shard split at the bottom.
@@ -119,6 +119,13 @@ and resolves verbatim (the secretness gate still classifies via
 normalization, so disguises cannot bypass it). Moot for data post-R15
 (the reset wipes TS-written rows); differential/parity suites must expect
 it.
+
+R15 IS A DESTRUCTIVE CUTOVER GATE, not a parity note: the reset wipes
+TS-written rows in Ice's dogfood workspace. Policy (R15/R15-REHEARSE
+shards): full pre-reset backup of the TS engine state, a rehearsed
+restore path, and the flip happens ONLY on Ice's explicit go/no-go
+confirmation — the one mandatory human stop in the program. Data-loss
+surface and rollback are part of the go/no-go package, never implied.
 
 SCHEMA OBLIGATION (RPC-A r11): the oracle's momentSelectSql payload
 provenance (payload_before_*/payload_after_*) and before-snapshot identity

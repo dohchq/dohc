@@ -1996,7 +1996,8 @@ next round caught. The compounding lesson became structure:
 
 ## 2026-07-21 — RPC-A merged (#217, 19 rounds): the read surface, hardened to fixed points
 
-- RPC-A merged 17:14Z as 2d9c9837 (squash; no migration): 8 read RPCs —
+- RPC-A merged 17:14Z as 2d9c9837 (squash; no migration): 8 NEW read
+  RPCs plus the pre-existing versionedText.read hardened in place —
   versions.active (null on nothing-versioned)/versions.list (cursor),
   versionedText.list (paged zero-hydration metadata query),
   versionedBinary.read + versionedText.read (ONE-TURN in-band caps),
@@ -2021,8 +2022,10 @@ next round caught. The compounding lesson became structure:
   ownership column); (2) cross-engine secret path SPELLING delta (TS
   normalize-stores, Rust stores verbatim with a disguise-proof
   classification gate — moot for data post-reset, parity suites must
-  expect it); (3) the blob-chunk streaming obligation for >48 KiB
-  content (BlobStart exists, no daemon producer).
+  expect it); (3) the blob-chunk streaming obligation for content past the
+  in-band caps — precisely: the 48 KiB INBAND_CONTENT_CAP_BYTES on
+  text/binary/secret BODIES (one-turn SQL cap), all inside DOP1's 64 KiB
+  per-string wire limit (BlobStart exists, no daemon producer).
 - SHARDS: RPC-A done (#217). RPC-B open (#218, codex-implemented,
   adversarially pre-reviewed). NEXT: RPC-C (design v2 reviewed) -> RPC-D
   -> GATE6 -> R15 (ICE STOP).
