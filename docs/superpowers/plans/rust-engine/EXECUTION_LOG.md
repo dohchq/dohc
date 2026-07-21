@@ -1844,3 +1844,62 @@ Ice decision at GATE6.
 - Next: D (bounded watcher-restart backoff + escalation on the seam C built),
   then E (status/flush RPCs + the TS capture differential), full-soak,
   RPC-growth, GATE6, R15 (ICE checkpoint — STOP).
+
+
+## 2026-07-21 — Files-composition D merged (#214): watcher supervision — and the status became ONE WORD
+
+Capture now SUPERVISES its files layer instead of blindly retrying: an
+escalating backoff (500ms -> 8s cap) between rebuilds for every failure mode
+(failed start, dead watch, dead files actor, persistently failing
+reconcile), a TERMINAL report after 8 consecutive failures (~30s), and a 30s
+recovery probe so a root that comes back is picked up without a
+close/reopen. A policy-edit DEBOUNCE (a new fingerprint must hold one tick)
+stops an agent rewriting files.toml at 2Hz from driving a full rescan every
+500ms; an UNREADABLE files.toml makes ownership UNKNOWN — capture holds
+(fail, stay dirty, retry) rather than widening over user exclusions or
+retiring heads the policy may still track (malformed stays WS-F floor-only —
+that split is by DiagnosticReason). Recovery from an unknown-policy window
+re-offers everything that was held, even when the recovered bytes equal the
+layer's fingerprint, and holds observed only inside the apply window arm the
+same trigger deterministically (the sink reports them through its channel).
+
+DELIBERATE DEVIATION from the R14 sketch, argued in the PR: no escalation to
+WorkspaceSupervisor::restart. A store-actor restart cannot fix a dead OS
+watch and would drop in-flight RPC work for a healthy RPC surface;
+escalation is a SIGNAL (terminal via watcher.status) for the product layer.
+
+THE REVIEW STORY (12 rounds; CodeRabbit APPROVED, Codex clean at r12 after
+SEVEN consecutive rounds of real findings, plus 4 independent adversarial
+Claude reviews): nearly every fix round's own fixes contained defects the
+next round caught. The compounding lesson became structure:
+
+- Tests were repeatedly TRUE-BY-CONSTRUCTION (asserting on the tracker while
+  the defect lived in the loop; a fake whose fidelity gap hid an infinite
+  rebuild). The loop is now generic over a DriverEnv seam and the tests
+  drive the REAL loop under paused virtual time, asserting what it actually
+  WAITS on — with mutation evidence: every defect-restoring mutation kills
+  at least one test (several previously survived the whole suite).
+- The running&&terminal contradiction survived FOUR rounds of store-order
+  fixes because writer-side ordering can never stop a READER from sampling
+  across a two-atomic transition. DriverStatus is now ONE AtomicU8 bitfield
+  with a snapshot() API: reads are consistent snapshots, transitions are
+  single stores, and the whole ordering dance is deleted. Multi-flag
+  consumers MUST use the snapshot (per-flag getters are single-flag only).
+- Also fixed on the way: converged-with-quarantine read as health (the
+  controller parks persistently failing paths and stops self-forcing scans,
+  so "nothing dirty" is not "recovered" — FilesStats now exposes the
+  quarantine), a failed over-cap retire that was invisible and unretried,
+  and a pre-existing gate flake (migration tempdirs keyed on pid+clock;
+  Windows clock granularity let parallel tests share one engine.db).
+
+- Gate: full-workspace PASS on every pushed head (13 runs). Final:
+  - 2026-07-20T18:31:28.392Z | run-rust-checks | win32/x64 | PASS | fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS cargo-deny=PASS cargo-audit=SKIP
+- SOAK (cutoverBlocking tier, GATE6 artifact; runner lands with E #215):
+  full 30-minute RELEASE-build run against the composed daemon —
+  - 2026-07-20T18:33:44Z | soak-cutoverBlocking | windows/x86_64 | PASS | cycles=4914 crashes=819 durationSecs=1804 rssSlopeB/s=0.0 handles 109->109 threads 38->38
+  (4,914 scenario cycles incl. 819 kill/restart loops; zero RSS trend;
+  handles/threads exactly at baseline. Sample series preserved:
+  C:/w/soak-evidence-cutoverBlocking-2026-07-20.json.)
+- Next: E (#215, in review: capture RPCs + the TS-vs-Rust differential —
+  10 scenarios green + tamper-verified — + the soak runner + RPC_GAP.md),
+  then RPC-A per RPC_GAP.md -> GATE6 -> R15 (ICE checkpoint — STOP).
