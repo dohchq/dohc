@@ -39,6 +39,7 @@ use dohc_engine_domain::{
     SecretWriteResult, SnapshotMetadata, SnapshotView, TextConflict, TextSnapshot, VersionRecord,
     VersionedTextStore, WriteResult, WriteText, capture_manifest_seed, capture_secret_retire,
     has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
+    secret_file_len_keyless,
 };
 use dohc_engine_storage::{
     CompoundWrite, Document, EngineStore, FaultInjector, StorageError, TxnOutcome, WriteOutcome,
@@ -239,6 +240,12 @@ enum Command {
         workspace_id: String,
         version_id: String,
         reply: oneshot::Sender<Result<Vec<SecretFileStat>, RuntimeError>>,
+    },
+    SecretFileLen {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        reply: oneshot::Sender<Result<Option<i64>, RuntimeError>>,
     },
     MaterializeSecret {
         workspace_id: String,
@@ -934,6 +941,26 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// One secret tip's recorded byte length — keyless, no decrypt.
+    pub async fn secret_file_len(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+    ) -> Result<Option<i64>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::SecretFileLen {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Decrypt one secret tip to UTF-8 plaintext. The KEY comes from the
     /// caller (the daemon loads it from the workspace root), matching the
     /// capture-secret pattern — the actor never holds key custody itself.
@@ -1505,6 +1532,16 @@ fn worker_main(
                 reply,
             } => {
                 let outcome = list_secret_files_keyless(&store, &workspace_id, &version_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::SecretFileLen {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            } => {
+                let outcome = secret_file_len_keyless(&store, &workspace_id, &version_id, &path)
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }

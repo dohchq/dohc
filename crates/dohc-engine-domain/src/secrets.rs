@@ -1201,6 +1201,29 @@ fn map_moment_row(
 /// without the data key (the RPC surface of a workspace that has never
 /// minted one) can still enumerate. ONE query definition — the keyed store
 /// method delegates here.
+/// One secret tip's RECORDED byte length — keyless, no ciphertext read, no
+/// decrypt. The RPC's in-band cap check runs on this so an over-cap secret
+/// is never decrypted into a heap String just to be discarded.
+pub fn secret_file_len_keyless(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<Option<i64>, DomainError> {
+    validate_secret_path(path)?;
+    store.read_with(|conn| {
+        require_version(conn, workspace_id, version_id)?;
+        conn.query_row(
+            "SELECT byte_length FROM secret_files \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+            rusqlite::params![workspace_id, version_id, path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)
+    })
+}
+
 pub fn list_secret_files_keyless(
     store: &EngineStore,
     workspace_id: &str,

@@ -622,6 +622,12 @@ impl<'a> VersionedTextStore<'a> {
     /// length sized in SQL — without materializing a single content byte.
     /// The over-cap in-band answer needs exactly this, and loading a large
     /// blob just to discard it is a needless copy per request.
+    ///
+    /// DELIBERATELY NOT RE-HASHED: the sha IS the content address the blob
+    /// was stored and verified under at write; re-hashing here would load
+    /// the bytes and resurrect the hydration cost this read exists to
+    /// avoid. Metadata reads report the recorded content address; every
+    /// byte-SERVING path re-verifies before handing bytes out.
     pub fn read_binary_meta(
         &self,
         workspace_id: &str,

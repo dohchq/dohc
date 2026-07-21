@@ -889,6 +889,30 @@ impl EngineService {
             normalized.ok_or_else(|| wire(ErrorCode::InvalidParams, "not a secret path"))?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
+        // The RECORDED length gates the in-band cap BEFORE any key or
+        // decrypt work: an over-cap secret is answered from metadata and
+        // its plaintext never exists as a heap String. This stat also
+        // validates version membership up front, so caller mistakes error
+        // identically regardless of local key-file state.
+        let recorded_len = Self::read_under_ctx(
+            &cancellation,
+            "secrets.materialize",
+            open.actor.secret_file_len(
+                open.workspace_id.clone(),
+                params.version_id.clone(),
+                secret_path.clone(),
+            ),
+        )
+        .await?;
+        if let Some(len) = recorded_len {
+            if len as usize > MAX_INBAND_CONTENT_BYTES {
+                return Ok(json!({
+                    "text": Value::Null,
+                    "byteLength": len,
+                    "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+                }));
+            }
+        }
         // Blocking filesystem work stays off the tokio worker.
         let key_root = open.root.clone();
         let key = tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_root))
@@ -896,23 +920,9 @@ impl EngineService {
             .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?
             .map_err(|_| wire(ErrorCode::Internal, "secret key unavailable"))?;
         let Some(key) = key else {
-            // The path gate already ran above; the VERSION must also
-            // validate before any state-dependent answer — the error
-            // surface for caller mistakes never changes with key state.
-            let versions = Self::read_under_ctx(
-                &cancellation,
-                "secrets.materialize",
-                open.actor.list_versions(open.workspace_id.clone()),
-            )
-            .await?;
-            if !versions
-                .iter()
-                .any(|version| version.version_id == params.version_id)
-            {
-                return Err(wire(ErrorCode::InvalidParams, "version not found"));
-            }
-            // Only NOW the state check: a workspace that never minted a key
-            // has no secrets; one WITH secret rows and no key is
+            // Path and version already validated above (gate + stat).
+            // The state check: a workspace that never minted a key has no
+            // secrets; one WITH secret rows and no key is
             // corrupt/misrestored state and fails closed.
             let has_state = Self::read_under_ctx(
                 &cancellation,
@@ -934,9 +944,9 @@ impl EngineService {
         .await?;
         Ok(match plaintext {
             None => Value::Null,
-            // Same in-band bound as binary reads: an over-cap secret
-            // answers its SIZE, never a post-decrypt encode failure and
-            // never silence.
+            // The stat gate above makes this the TOCTOU backstop (a write
+            // can grow the secret between the two actor turns): recheck on
+            // what was actually decrypted.
             Some(text) if text.len() > MAX_INBAND_CONTENT_BYTES => json!({
                 "text": Value::Null,
                 "byteLength": text.len(),

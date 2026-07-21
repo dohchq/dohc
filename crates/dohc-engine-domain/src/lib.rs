@@ -73,6 +73,7 @@ pub use secrets::{
     SecretFileStore, SecretMomentRecord, SecretOp, SecretWrite, SecretWriteResult,
     capture_secret_retire, delete_secret_file_keyless, derive_capture_secret_moment_id,
     derive_capture_secret_retire_moment_id, has_secret_state, list_secret_files_keyless,
+    secret_file_len_keyless,
 };
 pub use store::{
     CaptureManifestSeedEntry, MAX_CAPTURE_BINARY_FILE_BYTES, MAX_TEXT_BYTES,
