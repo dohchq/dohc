@@ -723,7 +723,7 @@ impl<'a> VersionedTextStore<'a> {
                  operation, after_blob_sha256, before_present, before_blob_sha256, \
                  before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
                  COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-                 COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             after_text_blob.text, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             before_text_blob.text, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length) \
+                 COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length) \
                  FROM moments m \
                  LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
                  LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
@@ -2778,7 +2778,7 @@ fn select_moment_by_order(
              operation, after_blob_sha256, before_present, before_blob_sha256, \
              before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             after_text_blob.text, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             before_text_blob.text, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length) \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length) \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
              LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \
@@ -3280,7 +3280,7 @@ fn get_moment(
              operation, after_blob_sha256, before_present, before_blob_sha256, \
              before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
              COALESCE(after_content_kind, 'text'), after_binary.sha256, \
-             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             after_text_blob.text, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             before_text_blob.text, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length) \
+             COALESCE(before_content_kind, 'text'), before_binary.sha256, \n             CASE WHEN after_text_blob.byte_length <= 49152 THEN after_text_blob.text END, \n             COALESCE(after_text_blob.byte_length, after_binary.byte_length), \n             CASE WHEN before_text_blob.byte_length <= 49152 THEN before_text_blob.text END, \n             COALESCE(before_text_blob.byte_length, before_binary.byte_length) \
              FROM moments m \
              LEFT JOIN binary_blobs after_binary ON after_binary.sha256 = m.after_binary_sha256 \
              LEFT JOIN binary_blobs before_binary ON before_binary.sha256 = m.before_binary_sha256 \n             LEFT JOIN blobs after_text_blob ON after_text_blob.sha256 = m.after_blob_sha256 \n             LEFT JOIN blobs before_text_blob ON before_text_blob.sha256 = m.before_blob_sha256 \

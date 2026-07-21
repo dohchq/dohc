@@ -201,8 +201,10 @@ pub struct MomentRecord {
     /// materialized moment.
     pub sync_record_only: bool,
     /// HYDRATED payload fields (TS `momentSelectSql` parity): the after/
-    /// before TEXT bodies (None for binary or absent sides) and the
-    /// COALESCEd text/binary byte lengths. The oracle's richer
+    /// before TEXT bodies (None for binary, absent, or OVER-CAP sides —
+    /// bodies above the 48 KiB in-band cap are never loaded out of SQL;
+    /// the byte lengths always are) and the COALESCEd text/binary byte
+    /// lengths. The oracle's richer
     /// payload-provenance columns (payload_before_*, before-snapshot
     /// identity fields) are NOT in the Rust schema — a recorded pre-R15
     /// schema obligation.

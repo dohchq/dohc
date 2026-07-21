@@ -172,7 +172,10 @@ impl EngineService {
             "watcher.status" => self.watcher_status(request.workspace)?,
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
             "versions.active" => self.versions_active(&ctx, request.workspace).await?,
-            "versions.list" => self.versions_list(&ctx, request.workspace).await?,
+            "versions.list" => {
+                self.versions_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "versionedText.list" => {
                 self.versioned_text_list(&ctx, request.workspace, request.params)
                     .await?
@@ -588,15 +591,30 @@ impl EngineService {
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
+        params: Value,
     ) -> Result<Value, WireError> {
+        let params: VersionsListParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let versions = Self::read_under_ctx(
+        let mut versions = Self::read_under_ctx(
             &cancellation,
             "versions.list",
             open.actor.list_versions(open.workspace_id),
         )
         .await?;
+        // Keyset resume over the domain's stable ordering: the composite
+        // sort key makes a SQL cursor awkward, and version counts are
+        // small — resuming positionally over the loaded ordered vector is
+        // exact (the id either exists at one position or the cursor is
+        // stale and reads from the start).
+        if let Some(after) = params.after_version_id.as_deref() {
+            if let Some(position) = versions
+                .iter()
+                .position(|version| version.version_id == after)
+            {
+                versions.drain(..=position);
+            }
+        }
         // Versions are few in practice, but the frame limit does not care
         // about practice: same measured budget + honest truncated flag as
         // every other list family.
@@ -615,9 +633,12 @@ impl EngineService {
             .collect();
         let included = byte_budget_cut_serialized(&row_values, MOMENTS_PAGE_BYTE_BUDGET);
         let truncated = included < row_values.len();
+        let next_after_version_id = truncated
+            .then(|| versions[..included].last().map(|v| v.version_id.clone()))
+            .flatten();
         Ok(json!({
             "versions": row_values[..included].to_vec(),
-            "truncated": truncated,
+            "nextAfterVersionId": next_after_version_id,
         }))
     }
 
@@ -1323,6 +1344,13 @@ struct VersionedTextReadParams {
     path: String,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionsListParams {
+    #[serde(default)]
+    after_version_id: Option<String>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SecretsListParams {
@@ -1605,11 +1633,7 @@ fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
         // PARSED author (TS momentAuthorFromRow parity): absent column =
         // actor-neutral; unparseable JSON surfaces as an explicit corrupt
         // marker, never silently dropped and never trusted raw.
-        "author": moment
-            .author_json
-            .as_deref()
-            .map(|raw| serde_json::from_str::<Value>(raw)
-                .unwrap_or_else(|_| json!({ "corrupt": true }))),
+        "author": moment.author_json.as_deref().map(parsed_moment_author),
         "syncRecordOnly": moment.sync_record_only,
         // Hydrated payload text (momentSelectSql parity), each body under
         // the same self-describing in-band cap as every content read.
@@ -1618,6 +1642,42 @@ fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
         "beforeText": inband_text(moment.before_text.as_deref()),
         "beforeByteLength": moment.before_byte_length,
     })
+}
+
+/// Fail-closed author parsing (TS assertMomentAuthor parity): only the
+/// exact agent-attribution shape renders as an author; anything else — bad
+/// JSON or a hand-edited/wrong shape — surfaces as an explicit corrupt
+/// marker, never a valid-looking attribution.
+fn parsed_moment_author(raw: &str) -> Value {
+    let corrupt = || json!({ "corrupt": true });
+    let Ok(value) = serde_json::from_str::<Value>(raw) else {
+        return corrupt();
+    };
+    let Some(object) = value.as_object() else {
+        return corrupt();
+    };
+    let kind_ok = object.get("kind").and_then(Value::as_str) == Some("agent");
+    let nonempty = |key: &str| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.is_empty())
+    };
+    let run_ok = match object.get("agentRunId") {
+        None => true,
+        Some(Value::String(v)) => !v.is_empty(),
+        Some(_) => false,
+    };
+    if kind_ok && nonempty("agentId") && nonempty("onBehalfOf") && run_ok {
+        json!({
+            "kind": "agent",
+            "agentId": object["agentId"],
+            "onBehalfOf": object["onBehalfOf"],
+            "agentRunId": object.get("agentRunId"),
+        })
+    } else {
+        corrupt()
+    }
 }
 
 /// A text body under the in-band cap, or null (the byte length beside it
