@@ -2413,8 +2413,16 @@ fn ydoc_record_update_on_store(
                     }),
                     now_ms,
                 )
-                .map_err(|_| dohc_engine_collab::CollabError::Corrupt {
-                    reason: "outbound ydoc.update journal append failed".to_string(),
+                .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+                    // Named explicitly: a base-claimed replicated lineage
+                    // with NO sync identity is a half-initialized state
+                    // (every real replicated flow runs sync init first —
+                    // pulls require the identity and the TS driver creates
+                    // it when journaling the base). Fail closed with a
+                    // diagnosable reason rather than a generic failure; an
+                    // identity cannot be seeded down here (origin identity
+                    // is minted by sync init, not the collab layer).
+                    reason: format!("outbound ydoc.update journal append failed: {error}"),
                 })?;
             }
             Ok(())
