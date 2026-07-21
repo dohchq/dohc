@@ -43,7 +43,7 @@ const MAX_OPEN_HANDLES: usize = 64;
 /// streaming (BlobStart exists in the wire contract; no daemon producer
 /// yet) — tracked in docs/superpowers/plans/rust-engine/RPC_GAP.md, which
 /// is maintained on the integrator branch (PR #216) until it merges.
-const MAX_INBAND_CONTENT_BYTES: usize = 48 * 1024;
+const MAX_INBAND_CONTENT_BYTES: usize = dohc_engine_domain::INBAND_CONTENT_CAP_BYTES;
 
 /// Approximate serialized-bytes budget for one moments.list page: a row
 /// can legitimately carry 64 KiB strings (authorJson), so a row COUNT can
@@ -61,6 +61,13 @@ fn byte_budget_cut_serialized(rows: &[Value], budget: usize) -> usize {
     let mut remaining = budget as i64;
     for row in rows {
         let size = serde_json::to_string(row).map_or(0, |s| s.len());
+        // A first row may exceed the PAGE budget (progress guarantee) but
+        // never the hard single-row bound — beyond that it cannot ship
+        // in a frame at all, and the caller must surface the refusal
+        // rather than emit an over-frame response.
+        if included == 0 && size > SINGLE_ROW_HARD_CAP_BYTES {
+            break;
+        }
         remaining -= size as i64;
         if included > 0 && remaining < 0 {
             break;
@@ -69,6 +76,10 @@ fn byte_budget_cut_serialized(rows: &[Value], budget: usize) -> usize {
     }
     included
 }
+
+/// The most one serialized row may occupy: safely under the 1 MiB frame
+/// limit with envelope headroom.
+const SINGLE_ROW_HARD_CAP_BYTES: usize = 700 * 1024;
 
 #[derive(Clone)]
 struct OpenWorkspace {
@@ -636,6 +647,12 @@ impl EngineService {
             })
             .collect();
         let included = byte_budget_cut_serialized(&row_values, MOMENTS_PAGE_BYTE_BUDGET);
+        if included == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
         let truncated = included < row_values.len();
         let next_after_version_id = truncated
             .then(|| versions[..included].last().map(|v| v.version_id.clone()))
@@ -710,6 +727,12 @@ impl EngineService {
             })
             .collect();
         let byte_cut = byte_budget_cut_serialized(&row_values, MOMENTS_PAGE_BYTE_BUDGET);
+        if byte_cut == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
         let byte_truncated = byte_cut < rows.len();
         let next_after_path = (has_more || byte_truncated)
             .then(|| rows[..byte_cut].last().map(|row| row.path.clone()))
@@ -819,6 +842,12 @@ impl EngineService {
             }
         }
         let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
+        if included == 0 && !rows.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a moment row exceeds the response frame budget",
+            ));
+        }
         let truncated = included < rows.len();
         let next_before = if truncated {
             page.moments[..included]
@@ -903,6 +932,12 @@ impl EngineService {
             })
             .collect();
         let included = byte_budget_cut_serialized(&row_values, MOMENTS_PAGE_BYTE_BUDGET);
+        if included == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
         let byte_truncated = included < row_values.len();
         let next_after_path = (has_more || byte_truncated)
             .then(|| secrets[..included].last().map(|stat| stat.path.clone()))

@@ -77,10 +77,10 @@ pub use secrets::{
     list_secret_files_keyless_page, secret_file_len_keyless,
 };
 pub use store::{
-    CaptureManifestSeedEntry, MAX_CAPTURE_BINARY_FILE_BYTES, MAX_TEXT_BYTES,
-    SECRET_SEED_SENTINEL_SHA, VersionedTextStore, capture_manifest_seed, delete_text_in_tx,
-    derive_capture_moment_id, derive_capture_object_id, derive_capture_retire_moment_id,
-    validate_delete_input, validate_write_input, write_text_in_tx,
+    CaptureManifestSeedEntry, INBAND_CONTENT_CAP_BYTES, MAX_CAPTURE_BINARY_FILE_BYTES,
+    MAX_TEXT_BYTES, SECRET_SEED_SENTINEL_SHA, VersionedTextStore, capture_manifest_seed,
+    delete_text_in_tx, derive_capture_moment_id, derive_capture_object_id,
+    derive_capture_retire_moment_id, validate_delete_input, validate_write_input, write_text_in_tx,
 };
 
 // Re-export the storage surface a domain caller needs on the common path.

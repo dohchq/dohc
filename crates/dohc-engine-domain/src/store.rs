@@ -36,6 +36,16 @@ use std::collections::{HashMap, HashSet};
 /// (`versions-write-text-file`).
 pub const MAX_TEXT_BYTES: usize = 10 * 1024 * 1024;
 
+/// The in-band content cap every capped read binds into its SQL and every
+/// RPC references — ONE definition, so the query guard and the wire
+/// contract can never drift apart.
+pub const INBAND_CONTENT_CAP_BYTES: usize = 48 * 1024;
+
+// The moment-hydration SQL embeds the cap as a literal (prepare_cached
+// wants a static string); this assertion pins the literal to the
+// constant so they cannot drift.
+const _: () = assert!(INBAND_CONTENT_CAP_BYTES == 49152);
+
 /// The versioning domain bound to one workspace store. Cheap to construct per
 /// call; holds only a mutable borrow of the writer.
 pub struct VersionedTextStore<'a> {
@@ -685,7 +695,8 @@ impl<'a> VersionedTextStore<'a> {
             let Some(object_id) = alias_object_id(conn, workspace_id, version_id, &path)? else {
                 return Ok(None);
             };
-            let Some(snapshot) = get_snapshot(conn, workspace_id, version_id, &object_id)? else {
+            let Some(snapshot) = get_snapshot_meta(conn, workspace_id, version_id, &object_id)?
+            else {
                 return Ok(None);
             };
             if snapshot.content_kind != "text" {
@@ -743,7 +754,8 @@ impl<'a> VersionedTextStore<'a> {
             let Some(object_id) = alias_object_id(conn, workspace_id, version_id, &path)? else {
                 return Ok(None);
             };
-            let Some(snapshot) = get_snapshot(conn, workspace_id, version_id, &object_id)? else {
+            let Some(snapshot) = get_snapshot_meta(conn, workspace_id, version_id, &object_id)?
+            else {
                 return Ok(None);
             };
             if snapshot.content_kind != "binary" {
@@ -752,10 +764,13 @@ impl<'a> VersionedTextStore<'a> {
             let sha256 = snapshot.binary_sha256.ok_or(DomainError::StateCorrupt {
                 reason: "binary head without a binary sha",
             })?;
+            // BOTH guards in the hydration CASE: a corrupt row whose
+            // recorded length lies small must not smuggle big bytes into
+            // memory before the integrity check rejects it.
             let row: Option<(i64, i64, Option<Vec<u8>>)> = conn
                 .query_row(
                     "SELECT byte_length, LENGTH(bytes), \
-                     CASE WHEN byte_length <= ?2 THEN bytes END \
+                     CASE WHEN byte_length <= ?2 AND LENGTH(bytes) <= ?2 THEN bytes END \
                      FROM binary_blobs WHERE sha256 = ?1",
                     rusqlite::params![sha256, cap as i64],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
@@ -2702,6 +2717,44 @@ fn latest_materialized_moment_id(
          ORDER BY moment_order DESC LIMIT 1",
         params![workspace_id, version_id],
         |row| row.get(0),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)
+}
+
+/// The snapshot row WITHOUT the text join — the in-band reads resolve
+/// heads through this so an over-cap body is never copied out of SQLite
+/// by the head lookup itself.
+struct SnapshotMeta {
+    content_kind: String,
+    blob_sha256: Option<String>,
+    binary_sha256: Option<String>,
+    updated_at_ms: i64,
+    latest_moment_id: String,
+    metadata_origin: String,
+}
+
+fn get_snapshot_meta(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<Option<SnapshotMeta>, DomainError> {
+    conn.query_row(
+        "SELECT COALESCE(content_kind, 'text'), blob_sha256, binary_sha256, \
+         updated_at_ms, latest_moment_id, metadata_origin FROM snapshots \
+         WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+        params![workspace_id, version_id, object_id],
+        |row| {
+            Ok(SnapshotMeta {
+                content_kind: row.get(0)?,
+                blob_sha256: row.get(1)?,
+                binary_sha256: row.get(2)?,
+                updated_at_ms: row.get(3)?,
+                latest_moment_id: row.get(4)?,
+                metadata_origin: row.get(5)?,
+            })
+        },
     )
     .optional()
     .map_err(DomainError::sql_corrupt)

@@ -254,7 +254,7 @@ enum Command {
         workspace_id: String,
         version_id: String,
         path: String,
-        key: SecretDataKey,
+        key: Box<SecretDataKey>,
         cap: usize,
         reply: oneshot::Sender<Result<Option<InbandSecret>, RuntimeError>>,
     },
@@ -1013,7 +1013,7 @@ impl ActorHandle {
                 workspace_id,
                 version_id,
                 path,
-                key,
+                key: Box::new(key),
                 cap,
                 reply,
             })
