@@ -58,6 +58,15 @@ pub enum CollabError {
     #[error("the Y.Doc has unintegrated remote updates (missing dependency)")]
     MissingDependencies,
 
+    /// An absent path's deterministic derived object id is still live at
+    /// another alias (the file was renamed away): reusing it would graft a
+    /// new document onto the renamed file's lineage, and open-time cannot
+    /// reserve capture's order-disambiguated id pre-commit. The path becomes
+    /// creatable again once a capture/local write mints the disambiguated
+    /// object (write caps over the wire are RPC-D scope).
+    #[error("the derived object id is live at another alias; write the file first")]
+    ObjectAliasCollision,
+
     /// A session opened an absent lineage, but another writer established a
     /// durable update head before that session could record its seed.
     #[error("cannot seed onto an existing Y.Doc lineage")]
@@ -94,6 +103,7 @@ impl CollabError {
             CollabError::LeaseHeld => "lease-held",
             CollabError::NoMarker => "no-marker",
             CollabError::MissingDependencies => "ydoc-missing-remote-dependencies",
+            CollabError::ObjectAliasCollision => "object-alias-collision",
             CollabError::SeedOntoExistingLineage => "seed-onto-existing-lineage",
             CollabError::UnsettledClose => "unsettled-close",
             CollabError::Corrupt { .. } => "corrupt-lineage",

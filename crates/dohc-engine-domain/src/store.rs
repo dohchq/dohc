@@ -2673,7 +2673,10 @@ fn object_exists(
     Ok(found.is_some())
 }
 
-fn object_has_live_alias(
+/// True when the object id owns a live `path_aliases` row anywhere in the
+/// workspace. Public so ydoc.open can refuse reusing a derived id that
+/// capture's locked resolution would disambiguate instead (rename edge).
+pub fn object_has_live_alias(
     conn: &Connection,
     workspace_id: &str,
     object_id: &str,

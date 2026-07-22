@@ -2507,6 +2507,12 @@ fn map_runtime(error: RuntimeError) -> WireError {
     ) {
         return wire(ErrorCode::InvalidParams, "Y.Doc replay parity violation");
     }
+    if matches!(
+        &error,
+        RuntimeError::Collab(CollabError::ObjectAliasCollision)
+    ) {
+        return wire(ErrorCode::InvalidParams, "ydoc-object-alias-collision");
+    }
     let code = match error {
         RuntimeError::Overloaded => ErrorCode::Overloaded,
         RuntimeError::Cancelled => ErrorCode::Cancelled,
@@ -2573,6 +2579,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::LeaseHeld
         | CollabError::NoMarker
         | CollabError::MissingDependencies
+        | CollabError::ObjectAliasCollision
         | CollabError::SeedOntoExistingLineage
         | CollabError::UnsettledClose => ErrorCode::InvalidParams,
     }

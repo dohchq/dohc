@@ -2277,10 +2277,27 @@ fn ydoc_open_state_on_store(
     )?;
     let head = VersionedTextStore::new(store).read_text(workspace_id, version_id, path)?;
     let head_sha = head.as_ref().map(|snapshot| snapshot.blob_sha256.clone());
-    let object_id = head.as_ref().map_or_else(
-        || derive_capture_object_id(workspace_id, version_id, path),
-        |snapshot| snapshot.object_id.clone(),
-    );
+    let object_id = match head.as_ref() {
+        Some(snapshot) => snapshot.object_id.clone(),
+        None => {
+            let derived = derive_capture_object_id(workspace_id, version_id, path);
+            // A derived id still LIVE at another alias means this path's
+            // former file was renamed away: capture's locked resolution mints
+            // an order-disambiguated id for that case, which open-time cannot
+            // reserve pre-commit. Reusing the derived id would graft the new
+            // document onto the renamed file's lineage, so refuse; a capture
+            // or local write creates the path and reopening resumes normally.
+            let collides = store.read_with(|conn| {
+                dohc_engine_domain::object_has_live_alias(conn, workspace_id, &derived)
+            })?;
+            if collides {
+                return Err(RuntimeError::Collab(
+                    dohc_engine_collab::CollabError::ObjectAliasCollision,
+                ));
+            }
+            derived
+        }
+    };
     let key = DocKey::new(workspace_id, version_id, object_id)?;
     // Re-converge BEFORE loading state: an envelope acked-but-deferred while
     // a previous session held the lease is only guaranteed to drain on that
@@ -2544,21 +2561,12 @@ fn ydoc_settle_on_store(
             let replay_outcome = match replay_outcome {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    // Same compensation as the conflict arm: the artifact
-                    // never reached disk, so neither the suppression entry
-                    // nor the settled marker may stand.
+                    // Same crash posture as the fresh settle's transient-Err
+                    // arm: the job stays pending for startup replay and the
+                    // committed marker keeps a retry on this idempotent
+                    // branch; only the in-memory suppression is retracted
+                    // (re-recorded before the next replay attempt).
                     self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);
-                    let cleared = store.write_with(faults, |tx| {
-                        tx.execute(
-                            "UPDATE ydoc_docs SET last_settled_sha = NULL, updated_at_ms = ?4                              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                            params![key.workspace_id, key.version_id, key.object_id, now_ms],
-                        )
-                        .map_err(StorageError::persist_public)?;
-                        Ok::<_, StorageError>(())
-                    })?;
-                    if matches!(cleared, TxnOutcome::Crashed { .. }) {
-                        return Err(RuntimeError::OperationCrashed);
-                    }
                     return Err(error.into());
                 }
             };
@@ -2738,33 +2746,23 @@ fn ydoc_settle_on_store(
     let job_outcome = match job_outcome {
         Ok(outcome) => outcome,
         Err(error) => {
-            // ANY materialization error (symlink target, lock exhaustion,
-            // IO) gets the same compensation as a conflict: the marker must
-            // not claim a settled artifact that never reached disk, and the
-            // suppression identity must not outlive the failed replace.
+            // A transient materialization ERROR (sharing violation, IO)
+            // leaves the crash-consistent state on purpose: the settle
+            // committed durably (marker, moment, snapshot) and the job stays
+            // pending for startup replay, exactly as if the process had died
+            // between the commit and the replace. Rolling the marker back to
+            // the PRIOR head would make every retry compare the advanced
+            // head against a stale expectation — permanent
+            // ConflictStaleTarget — while the committed marker routes a
+            // retry through the idempotent no-op branch, which replays the
+            // pending job. Only the in-memory suppression identity is
+            // retracted; the no-op replay re-records it before the replace.
+            let _ = prior_marker;
             self_writes.retract(
                 &key.workspace_id,
                 &write.snapshot.path,
                 &write.snapshot.blob_sha256,
             );
-            let compensated = store.write_with(faults, |tx| {
-                tx.execute(
-                    "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5,                      updated_at_ms = ?6                      WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                    params![
-                        key.workspace_id,
-                        key.version_id,
-                        key.object_id,
-                        prior_marker.0,
-                        prior_marker.1,
-                        now_ms,
-                    ],
-                )
-                .map_err(StorageError::persist_public)?;
-                Ok::<_, StorageError>(())
-            })?;
-            if matches!(compensated, TxnOutcome::Crashed { .. }) {
-                return Err(RuntimeError::OperationCrashed);
-            }
             return Err(error.into());
         }
     };

@@ -878,12 +878,23 @@ export class YdocLiveAdapter {
         await session.applyLocalUpdate(Y.encodeStateAsUpdate(seedDoc));
       } catch (error) {
         // A failed seed must not leak the registered session (and with it
-        // the daemon lease) — release before surfacing the failure.
+        // the daemon lease). settle:false is refused precisely when the
+        // seed COMMITTED before the failure surfaced (dirty lineage — e.g.
+        // a request timeout on an applied update): fall back to a settling
+        // close so the committed seed becomes the artifact and the daemon
+        // entry actually releases instead of wedging until workspace close.
         this.releaseSession(result.sessionId);
-        await this.request(input.workspace, YDOC_METHOD.close, {
-          sessionId: result.sessionId,
-          settle: false,
-        }).catch(() => undefined);
+        try {
+          await this.request(input.workspace, YDOC_METHOD.close, {
+            sessionId: result.sessionId,
+            settle: false,
+          });
+        } catch {
+          await this.request(input.workspace, YDOC_METHOD.close, {
+            sessionId: result.sessionId,
+            settle: true,
+          }).catch(() => undefined);
+        }
         throw error;
       }
     }

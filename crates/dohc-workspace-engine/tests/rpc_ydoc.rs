@@ -726,3 +726,190 @@ async fn creating_a_new_file_through_a_ydoc_session_settles_to_disk() {
     .await;
     call(&transport, &handle, 7, "workspace.close", json!({})).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn opening_an_absent_path_whose_derived_object_lives_elsewhere_refuses() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "notes/seed.md", b"seed");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-alias", 1).await;
+
+    // Plant notes/old.md's DERIVED object id at a different alias — the state a
+    // rename leaves behind: the deterministic id is live at notes/new.md while
+    // notes/old.md itself is absent.
+    let derived =
+        dohc_engine_domain::derive_capture_object_id("ws-rpc-ydoc-alias", "main", "notes/old.md");
+    call(
+        &transport,
+        &handle,
+        2,
+        "versionedText.write",
+        json!({
+            "versionId": "main",
+            "objectId": derived,
+            "path": "notes/new.md",
+            "text": "moved content",
+            "momentId": "moment-planted",
+            "metadataOrigin": "agent"
+        }),
+    )
+    .await;
+
+    // Mutation check: drop the object_has_live_alias probe in
+    // ydoc_open_state_on_store's absent branch (reuse the derived id
+    // unconditionally) to restore the bug — the open then succeeds and grafts
+    // a new document onto notes/new.md's lineage, failing this refusal.
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                3,
+                "ydoc.open",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "path": "notes/old.md",
+                    "contentKind": "plaintext"
+                }),
+            ),
+        )
+        .await
+        .expect_err("opening the absent path over a migrated derived id must refuse");
+    assert_eq!(refused.code, ErrorCode::InvalidParams);
+    assert_eq!(refused.message, "ydoc-object-alias-collision");
+
+    // The refusal must leave the migrated file untouched.
+    let head = call(
+        &transport,
+        &handle,
+        4,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": "notes/new.md" }),
+    )
+    .await;
+    assert_eq!(head["text"], json!("moved content"));
+
+    call(&transport, &handle, 5, "workspace.close", json!({})).await;
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settle_recovers_after_a_transient_replace_failure() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "notes/seed.md", b"seed");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-transient", 1).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "notes/locked.md",
+            "contentKind": "plaintext"
+        }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id");
+
+    let doc = Ydoc::wire();
+    let first =
+        base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "locked v1"));
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": first }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "v1" }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/locked.md")).expect("v1 on disk"),
+        "locked v1"
+    );
+
+    // Hold the target with NO sharing: the settle's atomic replace hits
+    // sharing violations until its bounded retry budget exhausts (FileLocked),
+    // AFTER the settle transaction committed the new head.
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(scratch.path().join("notes/locked.md"))
+        .expect("exclusive lock");
+
+    let second = base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "v2 "));
+    call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": second }),
+    )
+    .await;
+    let failed = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                6,
+                "ydoc.settle",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id, "summary": "v2 blocked" }),
+            ),
+        )
+        .await
+        .expect_err("a locked target must fail the settle");
+    assert_eq!(failed.code, ErrorCode::Internal);
+    drop(lock);
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/locked.md")).expect("still v1"),
+        "locked v1",
+        "the failed replace must leave the old bytes"
+    );
+
+    // Mutation check: restore the prior-marker rollback (settle_seq/
+    // last_settled_sha = prior) in ydoc_settle_on_store's transient-Err arm to
+    // bring the bug back — the durable expectation then trails the committed
+    // head and this retry refuses ConflictStaleTarget forever.
+    let retried = call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "v2 retry" }),
+    )
+    .await;
+    assert_eq!(retried["markdown"], json!("v2 locked v1"));
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/locked.md")).expect("v2 on disk"),
+        "v2 locked v1",
+        "the retry must replay the pending materialization"
+    );
+
+    call(
+        &transport,
+        &handle,
+        8,
+        "ydoc.close",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    call(&transport, &handle, 9, "workspace.close", json!({})).await;
+}

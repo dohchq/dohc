@@ -764,4 +764,50 @@ describe("YdocLiveAdapter", () => {
     await sessionB.close({ settle: false });
     adapter.dispose();
   });
+
+  it("escalates seed-failure cleanup to a settling close when the plain close refuses", async () => {
+    // A seed apply can fail AFTER the daemon committed it (request timeout on
+    // an applied update): close settle:false then refuses UnsettledClose. The
+    // cleanup must fall back to a settling close so the daemon entry releases
+    // instead of wedging until workspace close.
+    const engine = seedPlaintextEngine("seeded body");
+    const seedFailure = new Error("injected seed timeout");
+    const refusal = new Error("unsettled-close");
+    const closes: Array<boolean | undefined> = [];
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.open) {
+          const response = await engine.sendRequest(request);
+          return {
+            id: response.id,
+            result: {
+              ...(response.result as Record<string, unknown>),
+              lineage: "absent",
+              seedMarkdown: "seeded body",
+            },
+          };
+        }
+        if (request.method === YDOC_METHOD.recordUpdate) throw seedFailure;
+        if (request.method === YDOC_METHOD.close) {
+          const params = request.params as { settle?: boolean };
+          closes.push(params.settle);
+          if (params.settle === false) throw refusal;
+          return { id: request.id, result: null };
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    await expect(
+      adapter.openSession({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: PATH,
+        contentKind: "plaintext",
+      }),
+    ).rejects.toBe(seedFailure);
+    expect(closes).toEqual([false, true]);
+    adapter.dispose();
+  });
 });
