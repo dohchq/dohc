@@ -38,7 +38,7 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
 
     // A captured head gives the path a real owner object.
     let supervisor = WorkspaceSupervisor::new();
-    let handle = supervisor.open(&db, 1).expect("open actor");
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let written = handle
         .capture_ingest(
             CaptureIngest {
@@ -100,7 +100,7 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
     // check: drop the `expected_key_matches` gate in ydoc_open_state_on_store
     // — this open then drains the parked row and the assertion below fails.
     let supervisor = WorkspaceSupervisor::new();
-    let handle = supervisor.open(&db, 2).expect("reopen actor");
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
     let wrong_key = DocKey::new(WS, "main", "object-someone-else").expect("wrong key");
     handle
         .ydoc_open_state(
@@ -124,7 +124,7 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
 
     // The same open with the MATCHING expected key drains the parked update.
     let supervisor = WorkspaceSupervisor::new();
-    let handle = supervisor.open(&db, 3).expect("reopen actor");
+    let handle = supervisor.open(&db, 3).expect("reopen actor").actor;
     handle
         .ydoc_open_state(
             WS.to_owned(),

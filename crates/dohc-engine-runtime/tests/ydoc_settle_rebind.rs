@@ -29,7 +29,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
 
     // The session creates and settles PATH ("same text").
     let supervisor = WorkspaceSupervisor::new();
-    let handle = supervisor.open(&db, 1).expect("open actor");
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let state = handle
         .ydoc_open_state(
             WS.to_owned(),
@@ -101,7 +101,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
             .expect("rename");
     }
     let supervisor = WorkspaceSupervisor::new();
-    let handle = supervisor.open(&db, 2).expect("reopen actor");
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
     let rival = handle
         .capture_ingest(
             CaptureIngest {
@@ -166,7 +166,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
     let db = scratch.engine_db_path().expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
-    let handle = supervisor.open(&db, 1).expect("open actor");
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let state = handle
         .ydoc_open_state(
             WS.to_owned(),
@@ -312,7 +312,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
     let db = scratch.engine_db_path().expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
-    let handle = supervisor.open(&db, 1).expect("open actor");
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let state = handle
         .ydoc_open_state(
             WS.to_owned(),
@@ -453,7 +453,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
     let db = scratch.engine_db_path().expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
-    let handle = supervisor.open(&db, 1).expect("open actor");
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let state = handle
         .ydoc_open_state(
             WS.to_owned(),
