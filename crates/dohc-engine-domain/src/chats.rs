@@ -1210,6 +1210,17 @@ impl<'a> LinkedChatStore<'a> {
         // channel journals chat.channel.create too, and a control-bearing or
         // over-long id would wedge every receiving replica.
         let channel_id = normalize_replicated_chat_id(channel_id, "channel id is invalid")?;
+        // Same reservation create_channel enforces: a LOCAL channel id equal
+        // to a well-known WIRE id would poison channel-wire lookups and
+        // thread payloads under sync.
+        if matches!(
+            channel_id.as_str(),
+            GENERAL_CHANNEL_WIRE_ID | AGENT_CHANNEL_WIRE_ID
+        ) {
+            return Err(DomainError::InvalidInput {
+                reason: "channel id is reserved",
+            });
+        }
         let slug = channel_slug_for_name(name);
         let ws = workspace_id.to_owned();
         let cid = channel_id.clone();
@@ -2048,23 +2059,36 @@ impl<'a> LinkedChatStore<'a> {
         &self,
         workspace_id: &str,
         owner_user_id: &str,
+        state: Option<&str>,
     ) -> Result<Vec<ChatFollow>, DomainError> {
         // The write path stores TRIMMED owners: a padded lookup must resolve
         // the same identity or the caller sees a silently empty list.
         let owner_user_id = normalize_feed_identity(owner_user_id, "follow owner")?;
         let owner_user_id = owner_user_id.as_str();
+        // Oracle `listFollows`: an omitted state returns ALL rows — unfollow
+        // tombstones included, which reseeding flows inspect — and a present
+        // state must be one of the two follow states.
+        if let Some(state) = state {
+            if state != "following" && state != "unfollowed" {
+                return Err(DomainError::chat(
+                    "invalid-follow-target",
+                    "Follow state is invalid.",
+                ));
+            }
+        }
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT owner_user_id, target_kind, target_id, state, updated_at_ms, \
                      origin_id, origin_seq FROM chat_follows \
-                     WHERE workspace_id = ?1 AND owner_user_id = ?2 AND state = 'following' \
-                     ORDER BY target_kind, target_id LIMIT ?3",
+                     WHERE workspace_id = ?1 AND owner_user_id = ?2 \
+                       AND (?3 IS NULL OR state = ?3) \
+                     ORDER BY target_kind, target_id LIMIT ?4",
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
                 .query_map(
-                    params![workspace_id, owner_user_id, MAX_LIST_ROWS],
+                    params![workspace_id, owner_user_id, state, MAX_LIST_ROWS],
                     map_follow_row,
                 )
                 .map_err(DomainError::sql_corrupt)?;
@@ -2552,6 +2576,61 @@ impl<'a> LinkedChatStore<'a> {
                     params![workspace_id, owner_user_id, state, MAX_LIST_ROWS],
                     map_bookmark_row,
                 )
+                .map_err(DomainError::sql_corrupt)?;
+            collect(rows)
+        })
+    }
+
+    /// Point lookup (`findBookmark`): `None` when the bookmark does not
+    /// exist for this owner.
+    pub fn find_bookmark(
+        &self,
+        workspace_id: &str,
+        owner_user_id: &str,
+        bookmark_id: &str,
+    ) -> Result<Option<ChatBookmark>, DomainError> {
+        let owner_user_id = normalize_feed_identity(owner_user_id, "Bookmark owner")?;
+        let bookmark_id = normalize_feed_identity(bookmark_id, "Bookmark id")?;
+        self.store.read_with(|conn| {
+            let mut stmt = conn
+                .prepare_cached(&format!(
+                    "{BOOKMARK_SELECT} WHERE b.workspace_id = ?1 AND b.owner_user_id = ?2                      AND b.bookmark_id = ?3"
+                ))
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![workspace_id, owner_user_id, bookmark_id],
+                    map_bookmark_row,
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            Ok(collect(rows)?.into_iter().next())
+        })
+    }
+
+    /// The projection worker's poll (`listPendingBookmarks`): pending-outbox
+    /// bookmarks, oldest outbox update first, limit 1..=200 (default 50).
+    pub fn list_pending_bookmarks(
+        &self,
+        workspace_id: &str,
+        owner_user_id: &str,
+        limit: Option<i64>,
+    ) -> Result<Vec<ChatBookmark>, DomainError> {
+        let owner_user_id = normalize_feed_identity(owner_user_id, "Bookmark owner")?;
+        let limit = limit.unwrap_or(50);
+        if !(1..=200).contains(&limit) {
+            return Err(DomainError::chat(
+                "invalid-bookmark-target",
+                "Bookmark limit is invalid.",
+            ));
+        }
+        self.store.read_with(|conn| {
+            let mut stmt = conn
+                .prepare_cached(&format!(
+                    "{BOOKMARK_SELECT} WHERE b.workspace_id = ?1 AND b.owner_user_id = ?2                      AND o.projection_state = 'pending'                      ORDER BY o.updated_at_ms, b.bookmark_id LIMIT ?3"
+                ))
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(params![workspace_id, owner_user_id, limit], map_bookmark_row)
                 .map_err(DomainError::sql_corrupt)?;
             collect(rows)
         })

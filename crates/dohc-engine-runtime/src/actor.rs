@@ -419,7 +419,20 @@ enum Command {
     ChatFollowsList {
         workspace_id: String,
         owner_user_id: String,
+        state: Option<String>,
         reply: oneshot::Sender<Result<Vec<ChatFollow>, RuntimeError>>,
+    },
+    ChatBookmarkFind {
+        workspace_id: String,
+        owner_user_id: String,
+        bookmark_id: String,
+        reply: oneshot::Sender<Result<Option<ChatBookmark>, RuntimeError>>,
+    },
+    ChatBookmarksListPending {
+        workspace_id: String,
+        owner_user_id: String,
+        limit: Option<i64>,
+        reply: oneshot::Sender<Result<Vec<ChatBookmark>, RuntimeError>>,
     },
     ChatFeedMarkSeen {
         workspace_id: String,
@@ -1798,12 +1811,52 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         owner_user_id: String,
+        state: Option<String>,
     ) -> Result<Vec<ChatFollow>, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ChatFollowsList {
                 workspace_id,
                 owner_user_id,
+                state,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn chat_bookmark_find(
+        &self,
+        workspace_id: String,
+        owner_user_id: String,
+        bookmark_id: String,
+    ) -> Result<Option<ChatBookmark>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChatBookmarkFind {
+                workspace_id,
+                owner_user_id,
+                bookmark_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn chat_bookmarks_list_pending(
+        &self,
+        workspace_id: String,
+        owner_user_id: String,
+        limit: Option<i64>,
+    ) -> Result<Vec<ChatBookmark>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChatBookmarksListPending {
+                workspace_id,
+                owner_user_id,
+                limit,
                 reply,
             })
             .await
@@ -2799,10 +2852,33 @@ fn worker_main(
             Command::ChatFollowsList {
                 workspace_id,
                 owner_user_id,
+                state,
                 reply,
             } => {
                 let outcome = LinkedChatStore::new(&mut store)
-                    .list_follows(&workspace_id, &owner_user_id)
+                    .list_follows(&workspace_id, &owner_user_id, state.as_deref())
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ChatBookmarkFind {
+                workspace_id,
+                owner_user_id,
+                bookmark_id,
+                reply,
+            } => {
+                let outcome = LinkedChatStore::new(&mut store)
+                    .find_bookmark(&workspace_id, &owner_user_id, &bookmark_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ChatBookmarksListPending {
+                workspace_id,
+                owner_user_id,
+                limit,
+                reply,
+            } => {
+                let outcome = LinkedChatStore::new(&mut store)
+                    .list_pending_bookmarks(&workspace_id, &owner_user_id, limit)
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }

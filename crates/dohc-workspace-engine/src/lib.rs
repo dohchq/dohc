@@ -301,6 +301,14 @@ impl EngineService {
                 self.chats_bookmarks_list(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.bookmarks.find" => {
+                self.chats_bookmarks_find(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.bookmarks.listPending" => {
+                self.chats_bookmarks_list_pending(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.bookmarks.markReady" => {
                 self.chats_bookmarks_mark_ready(&ctx, request.workspace, request.params)
                     .await?
@@ -1569,7 +1577,7 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: ChatOwnerParams = parse(params)?;
+        let params: ChatFollowListParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id.clone();
         let cancellation = OperationCancellation::new(ctx);
@@ -1577,7 +1585,7 @@ impl EngineService {
             &cancellation,
             "chats.follows.list",
             open.actor
-                .chat_follows_list(open.workspace_id, params.owner_user_id),
+                .chat_follows_list(open.workspace_id, params.owner_user_id, params.state),
         )
         .await?;
         // Bounded domain-side (10k rows) but a row can still be string-
@@ -1734,6 +1742,74 @@ impl EngineService {
         )
         .await?;
         Ok(bookmark_json(&workspace_id, &bookmark))
+    }
+
+    async fn chats_bookmarks_find(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatBookmarkFindParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let bookmark = Self::read_under_ctx(
+            &cancellation,
+            "chats.bookmarks.find",
+            open.actor.chat_bookmark_find(
+                workspace_id.clone(),
+                params.owner_user_id,
+                params.bookmark_id,
+            ),
+        )
+        .await?;
+        Ok(json!({
+            "bookmark": bookmark
+                .as_ref()
+                .map(|bookmark| bookmark_json(&workspace_id, bookmark))
+                .unwrap_or(Value::Null)
+        }))
+    }
+
+    async fn chats_bookmarks_list_pending(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatBookmarkListPendingParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let bookmarks = Self::read_under_ctx(
+            &cancellation,
+            "chats.bookmarks.listPending",
+            open.actor.chat_bookmarks_list_pending(
+                workspace_id.clone(),
+                params.owner_user_id,
+                params.limit,
+            ),
+        )
+        .await?;
+        // Domain-bounded to 200 rows; the byte budget still fences
+        // string-heavy rows like the other list families.
+        let row_values: Vec<Value> = bookmarks
+            .iter()
+            .map(|bookmark| bookmark_json(&workspace_id, bookmark))
+            .collect();
+        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
+        if included == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
+        let truncated = included < row_values.len();
+        Ok(json!({
+            "bookmarks": row_values[..included].to_vec(),
+            "truncated": truncated,
+        }))
     }
 
     async fn chats_bookmarks_list(
@@ -2529,15 +2605,30 @@ struct ChatFollowSetParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ChatOwnerParams {
+struct ChatBookmarkListParams {
     owner_user_id: String,
+    state: Option<String>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ChatBookmarkListParams {
+struct ChatFollowListParams {
     owner_user_id: String,
     state: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatBookmarkFindParams {
+    owner_user_id: String,
+    bookmark_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatBookmarkListPendingParams {
+    owner_user_id: String,
+    limit: Option<i64>,
 }
 
 #[derive(Deserialize)]

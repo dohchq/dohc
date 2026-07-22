@@ -793,7 +793,12 @@ fn follow_lww_last_write_wins_and_lists_active() {
     chats
         .set_follow(&follow(5, FollowState::Unfollowed), &NO_FAULTS)
         .expect("f2");
-    assert!(chats.list_follows(WS, "owner").expect("empty").is_empty());
+    assert!(
+        chats
+            .list_follows(WS, "owner", Some("following"))
+            .expect("empty")
+            .is_empty()
+    );
 
     let active = chats
         .set_follow(&follow(20, FollowState::Following), &NO_FAULTS)

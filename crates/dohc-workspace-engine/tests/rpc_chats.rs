@@ -2256,3 +2256,196 @@ async fn review_round_12_rejects_malformed_ready_generation_and_null_claim_metad
 
     call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_round_16_reserved_ensure_ids_follow_states_and_bookmark_polling() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-chat-r16").await;
+    let mut id = 10;
+
+    // Reserved wire ids refuse on the ENSURE paths exactly like create.
+    // Mutation check: drop the reserved guard from ensure_well_known_channel
+    // — both refusals below fail.
+    for (method, reserved) in [
+        ("chats.channels.ensureGeneral", "channel_wire_general_v1"),
+        ("chats.channels.ensureAgent", "channel_wire_agent_v1"),
+    ] {
+        let error = call_error(
+            &transport,
+            &handle,
+            &mut id,
+            method,
+            json!({ "channelId": reserved, "nowMs": 10 }),
+        )
+        .await;
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+    }
+
+    // follows.list: omitted state returns ALL rows (tombstones included),
+    // a state filter narrows, an invalid state refuses. Mutation check:
+    // parse ChatOwnerParams again (or restore the hardcoded
+    // state='following' SQL) — the tombstone and filter assertions fail.
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({ "channelId": "channel-r16", "name": "R16", "kind": "channel", "nowMs": 11 }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.follows.set",
+        json!({
+            "ownerUserId": "owner-1",
+            "targetKind": "channel",
+            "targetId": "channel-r16",
+            "state": "following",
+            "nowMs": 12,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.follows.set",
+        json!({
+            "ownerUserId": "owner-1",
+            "targetKind": "channel",
+            "targetId": "channel-r16",
+            "state": "unfollowed",
+            "nowMs": 13,
+        }),
+    )
+    .await;
+    let all = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.follows.list",
+        json!({ "ownerUserId": "owner-1" }),
+    )
+    .await;
+    assert_eq!(all["follows"].as_array().expect("all").len(), 1);
+    assert_eq!(all["follows"][0]["state"], json!("unfollowed"));
+    let following = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.follows.list",
+        json!({ "ownerUserId": "owner-1", "state": "following" }),
+    )
+    .await;
+    assert_eq!(following["follows"].as_array().expect("following").len(), 0);
+    let bogus = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.follows.list",
+        json!({ "ownerUserId": "owner-1", "state": "bogus" }),
+    )
+    .await;
+    assert_eq!(bogus.code, ErrorCode::InvalidParams);
+
+    // Bookmark polling: listPending sees the pending outbox generation,
+    // find returns the row (and null for a miss). Mutation check: route
+    // listPending to the plain list (drop the projection_state filter) —
+    // the post-markReady emptiness assertion fails.
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel-r16",
+            "threadId": "thread-r16",
+            "messageId": "message-r16",
+            "authorKind": "human",
+            "authorDisplayName": "Alice",
+            "body": "r16",
+            "nowMs": 14,
+        }),
+    )
+    .await;
+    let bookmark = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.save",
+        json!({
+            "ownerUserId": "owner-1",
+            "targetKind": "thread",
+            "targetId": "thread-r16",
+            "mode": "live",
+            "destinationPath": "bookmarks/r16.md",
+            "nowMs": 15,
+        }),
+    )
+    .await;
+    let bookmark_id = bookmark["bookmarkId"].as_str().expect("id").to_owned();
+    let pending = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.listPending",
+        json!({ "ownerUserId": "owner-1" }),
+    )
+    .await;
+    assert_eq!(pending["bookmarks"].as_array().expect("pending").len(), 1);
+    assert_eq!(pending["bookmarks"][0]["bookmarkId"], json!(&bookmark_id));
+    let bad_limit = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.listPending",
+        json!({ "ownerUserId": "owner-1", "limit": 0 }),
+    )
+    .await;
+    assert_eq!(bad_limit.code, ErrorCode::InvalidParams);
+    let found = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.find",
+        json!({ "ownerUserId": "owner-1", "bookmarkId": &bookmark_id }),
+    )
+    .await;
+    assert_eq!(found["bookmark"]["bookmarkId"], json!(&bookmark_id));
+    let missing = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.find",
+        json!({ "ownerUserId": "owner-1", "bookmarkId": "bookmark_nope" }),
+    )
+    .await;
+    assert_eq!(missing["bookmark"], Value::Null);
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.markReady",
+        json!({
+            "ownerUserId": "owner-1",
+            "bookmarkId": &bookmark_id,
+            "generation": 1,
+            "projectedAtMs": 16,
+        }),
+    )
+    .await;
+    let drained = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.listPending",
+        json!({ "ownerUserId": "owner-1" }),
+    )
+    .await;
+    assert_eq!(drained["bookmarks"].as_array().expect("drained").len(), 0);
+
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
