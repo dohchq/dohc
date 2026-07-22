@@ -11,8 +11,8 @@ use crate::records::{
 };
 use crate::store::{
     VersionedTextStore, delete_result_from_moment, delete_text_in_tx, get_moment, hash_fields,
-    lookup_request, record_request, validate_delete_input, validate_path, validate_write_input,
-    write_result_from_moment, write_text_in_tx,
+    lookup_request, record_merge_request, validate_delete_input, validate_path,
+    validate_write_input, write_result_from_moment, write_text_in_tx,
 };
 use dohc_engine_storage::{FaultInjector, Preimage, StorageError, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -597,7 +597,7 @@ where
     let ledger_json = serde_json::to_string(&ledger).map_err(|_| DomainError::StateCorrupt {
         reason: "merge ledger outcome could not be encoded",
     })?;
-    record_request(
+    record_merge_request(
         tx,
         input.request_id.as_deref(),
         &ledger_json,

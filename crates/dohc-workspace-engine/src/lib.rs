@@ -980,8 +980,8 @@ impl EngineService {
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
-                open.root,
-                Arc::new(self.self_writes.clone()),
+                open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
@@ -1187,8 +1187,8 @@ impl EngineService {
                     metadata_origin: origin,
                     author_json,
                 },
-                open.root,
-                Arc::new(self.self_writes.clone()),
+                open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
@@ -6107,6 +6107,80 @@ mod tests {
                 "reason": "binary-unhydrated"
             })
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn binary_write_records_suppression_in_the_root_scoped_registry() {
+        // MUTATION: pass the process-global suppression registry to the actor
+        // instead of the root-scoped view -> the scoped lookup is empty.
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let service = EngineService::new();
+        let workspace_id = "binary-root-scoped-suppression";
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+
+        // Keep the assertion deterministic: no watcher remains to consume the
+        // suppression identity between materialization and inspection.
+        let open = service.open(Some(&handle)).expect("open workspace");
+        let canonical_root = open.root.clone();
+        open.shutdown_capture().await;
+
+        let request = Request {
+            id: 1,
+            method: "versionedBinary.write".to_owned(),
+            workspace: Some(handle.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            params: json!({
+                "versionId": "main",
+                "path": "scoped.bin",
+                "bytes": [7, 8, 9],
+                "origin": "api",
+            }),
+        };
+        let result = service
+            .versioned_binary_write(
+                &RequestContext::unbounded(),
+                &request,
+                request.params.clone(),
+            )
+            .await
+            .expect("binary write");
+        let sha256 = result["snapshot"]["sha256"]
+            .as_str()
+            .expect("binary sha256");
+
+        assert!(
+            service.self_writes.scoped(&canonical_root).has_pending(
+                workspace_id,
+                "scoped.bin",
+                sha256
+            ),
+            "binary materialization must register in the capture driver's root-scoped view"
+        );
+        assert!(
+            !service
+                .self_writes
+                .has_pending(workspace_id, "scoped.bin", sha256),
+            "the process-global unscoped namespace must remain empty"
+        );
+
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
     }
 
     #[tokio::test]

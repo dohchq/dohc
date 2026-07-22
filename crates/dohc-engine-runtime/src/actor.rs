@@ -42,21 +42,21 @@ use dohc_engine_domain::{
     CaptureSecret, CaptureSecretRetire, ChatBookmark, ChatBookmarkTransition, ChatChannel,
     ChatChannelKind, ChatChannelSummary, ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMessage,
     ChatMessagePage, ChatThread, ChatThreadReadState, CompareTextFileVersions, CreateNamedVersion,
-    DeleteResult, DeleteTextFile, DispatchClaim, InbandBinary, InbandSecret, InbandText,
-    LinkedChatStore, ListMomentsQuery, MergeTextFileFromVersion, MergeTextFileResult, MomentPage,
-    MomentRecord, RenameResult, RenameTextFile, ResolveTextConflict, ResolveTextConflictResult,
-    RollbackTextFileMutation, SaveBookmark, SecretComparePage, SecretDelete, SecretFileStat,
-    SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretRestoreResult, SecretWrite,
-    SecretWriteResult, SendMessage, SetFollow, SnapshotMetadata, SnapshotView, StartChannelThread,
-    TextConflict, TextSnapshot, VersionFileChangePage, VersionRecord, VersionedTextComparison,
-    VersionedTextStore, WriteBinary, WriteResult, WriteText, apply_secret_file_from_version,
-    capture_manifest_seed, capture_secret_retire, compare_secret_files_page_keyless,
-    delete_secret_file_keyless, derive_capture_object_id, enqueue_write, fork_version_keyless,
-    get_secret_moment_keyless, has_secret_state, insert_text_conflict_if_absent,
-    list_secret_files_keyless, list_secret_files_keyless_page, list_secret_moments_page_keyless,
-    restore_secret_file_verbatim, secret_file_len_keyless, select_snapshot_by_path_in_tx,
-    validate_addressable_plaintext_path, write_binary_in_tx, write_projected_text_in_tx,
-    write_text_in_tx,
+    DeleteResult, DeleteTextFile, DispatchClaim, DomainError, InbandBinary, InbandSecret,
+    InbandText, LinkedChatStore, ListMomentsQuery, MergeTextFileFromVersion, MergeTextFileResult,
+    MomentPage, MomentRecord, RenameResult, RenameTextFile, ResolveTextConflict,
+    ResolveTextConflictResult, RollbackTextFileMutation, SaveBookmark, SecretComparePage,
+    SecretDelete, SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord,
+    SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage, SetFollow, SnapshotMetadata,
+    SnapshotView, StartChannelThread, TextConflict, TextSnapshot, VersionFileChangePage,
+    VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult,
+    WriteText, apply_secret_file_from_version, capture_manifest_seed, capture_secret_retire,
+    compare_secret_files_page_keyless, delete_secret_file_keyless, derive_capture_object_id,
+    enqueue_write, fork_version_keyless, get_secret_moment_keyless, has_secret_state,
+    insert_text_conflict_if_absent, list_secret_files_keyless, list_secret_files_keyless_page,
+    list_secret_moments_page_keyless, restore_secret_file_verbatim, secret_file_len_keyless,
+    select_snapshot_by_path_in_tx, validate_addressable_plaintext_path, write_binary_in_tx,
+    write_projected_text_in_tx, write_text_in_tx,
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, StdBackoff, StdReplacer, materialize_one};
 use dohc_engine_storage::{
@@ -4743,6 +4743,24 @@ fn ydoc_marker_has_durable_state(marker: &dohc_engine_collab::Marker) -> bool {
     marker.head_update_seq > 0 || marker.head_snapshot_seq > 0 || marker.base_claimed
 }
 
+fn ensure_mutation_version_on_store(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    let mut versions = VersionedTextStore::new(store);
+    if versions.get_main_version(workspace_id)?.is_some() {
+        return Ok(());
+    }
+    if version_id != "main" {
+        return Err(DomainError::VersionNotFound.into());
+    }
+    versions.ensure_main_version(workspace_id, "main", now_ms, faults)?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ydoc_open_state_on_store(
     store: &mut EngineStore,
@@ -4762,12 +4780,7 @@ fn ydoc_open_state_on_store(
     // Bootstrap: the first live doc in an EMPTY workspace must be creatable —
     // without this, read_text errors VersionNotFound before the absent-path
     // flow can run (capture normally creates main, but nothing has captured).
-    VersionedTextStore::new(store).ensure_main_version(
-        workspace_id,
-        version_id,
-        now_ms,
-        &NoFaults,
-    )?;
+    ensure_mutation_version_on_store(store, workspace_id, version_id, now_ms, &NoFaults)?;
     let head =
         VersionedTextStore::new(store).read_text(workspace_id, version_id, &canonical_path)?;
     let head_sha = head.as_ref().map(|snapshot| snapshot.blob_sha256.clone());
@@ -5457,7 +5470,8 @@ fn versioned_text_write_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store).ensure_main_version(
+    ensure_mutation_version_on_store(
+        store,
         &input.workspace_id,
         &input.version_id,
         input.now_ms,
@@ -5504,7 +5518,8 @@ fn versioned_binary_write_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store).ensure_main_version(
+    ensure_mutation_version_on_store(
+        store,
         &input.workspace_id,
         &input.version_id,
         input.now_ms,
@@ -5850,7 +5865,8 @@ fn capture_ingest_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store).ensure_main_version(
+    ensure_mutation_version_on_store(
+        store,
         &input.workspace_id,
         &input.version_id,
         input.now_ms,
@@ -5873,7 +5889,8 @@ fn capture_ingest_binary_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store).ensure_main_version(
+    ensure_mutation_version_on_store(
+        store,
         &input.workspace_id,
         &input.version_id,
         input.now_ms,
@@ -5897,7 +5914,8 @@ fn capture_secret_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store).ensure_main_version(
+    ensure_mutation_version_on_store(
+        store,
         &input.workspace_id,
         &input.version_id,
         input.now_ms,
@@ -5920,7 +5938,8 @@ fn capture_secret_retire_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store).ensure_main_version(
+    ensure_mutation_version_on_store(
+        store,
         &input.workspace_id,
         &input.version_id,
         input.now_ms,
@@ -5941,7 +5960,8 @@ fn capture_retire_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store).ensure_main_version(
+    ensure_mutation_version_on_store(
+        store,
         &input.workspace_id,
         &input.version_id,
         input.now_ms,

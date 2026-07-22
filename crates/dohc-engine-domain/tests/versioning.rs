@@ -7,7 +7,7 @@ use dohc_engine_domain::{
     CreateNamedVersion, DeleteTextFile, ListMomentsQuery, MomentOp, NoFaults, RenameTextFile,
     RollbackTextFileMutation, SnapshotContent, VersionKind, VersionedTextStore, WriteText,
 };
-use dohc_engine_storage::EngineStore;
+use dohc_engine_storage::{CompoundWrite, EngineStore, WriteOutcome};
 use dohc_engine_testkit::ScratchDir;
 
 const NO_FAULTS: NoFaults = NoFaults;
@@ -399,6 +399,74 @@ fn rollback_clears_idempotency_ledger_so_stale_retry_does_not_replay() {
     assert!(!second_retry.deduped);
     assert_eq!(second_retry.snapshot.text, "two");
     assert_eq!(second_retry.moment.moment_id, "m2");
+}
+
+#[test]
+fn rollback_purges_only_the_rolled_back_versioned_request() {
+    // MUTATION: drop the `kind = 'versioned'` rollback predicate -> the
+    // compound request with the colliding sequence is deleted and re-executes.
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+
+    VersionedTextStore::new(&mut store)
+        .write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("first versioned write");
+
+    // The first versioned write consumed replication seq 1. This compound
+    // write therefore records result_seq 2, which intentionally collides with
+    // the next versioned moment_order.
+    let compound = CompoundWrite {
+        request_id: "compound-collision".to_owned(),
+        doc_id: "compound-document".to_owned(),
+        body: "durable body".to_owned(),
+        op_kind: "compound-write".to_owned(),
+        now_ms: 15,
+    };
+    assert_eq!(
+        store
+            .commit_compound(&compound, &NO_FAULTS)
+            .expect("compound write"),
+        WriteOutcome::Acked {
+            seq: 2,
+            deduped: false,
+        }
+    );
+
+    let mut second = write("main", "a.md", "two", "m2", "o1", 20);
+    second.request_id = Some("versioned-collision".to_owned());
+    {
+        let mut versions = VersionedTextStore::new(&mut store);
+        let written = versions
+            .write_text(&second, &NO_FAULTS)
+            .expect("second versioned write");
+        assert_eq!(written.moment.moment_order, 2);
+        versions
+            .rollback_text_file_mutation(&rollback("main", "a.md", "m2"), &NO_FAULTS)
+            .expect("rollback second versioned write");
+    }
+
+    let surviving_kind: Option<String> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT kind FROM engine_requests WHERE request_id = 'compound-collision'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("compound ledger survives");
+    assert_eq!(surviving_kind.as_deref(), Some("compound"));
+
+    assert_eq!(
+        store
+            .commit_compound(&compound, &NO_FAULTS)
+            .expect("compound replay"),
+        WriteOutcome::Acked {
+            seq: 2,
+            deduped: true,
+        }
+    );
 }
 
 // oracle: a reserved / absolute / traversal path is rejected.

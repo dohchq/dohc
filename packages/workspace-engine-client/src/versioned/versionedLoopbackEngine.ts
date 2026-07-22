@@ -670,7 +670,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private binaryReadBlob(state: WorkspaceState, params: JsonObject): JsonValue {
-    const digest = requiredString(params, "sha256", "readBlob");
+    const digest = requiredString(params, "sha256", "readBlob").toLowerCase();
+    if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error("invalid-input");
     const bytes = state.blobs.get(digest);
     if (!bytes) throw new Error("file-not-found");
     return bytes.length <= INBAND_LIMIT_BYTES

@@ -54,6 +54,8 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
       return "Sync";
     case "api":
       return "dohc";
+    case "ydoc":
+      return "Live edit";
     default:
       return "Unknown source";
   }

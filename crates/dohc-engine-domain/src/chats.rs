@@ -4109,8 +4109,9 @@ fn record_request(
         // so a sentinel that can never equal an order is immune by
         // construction, not by the current numbering convention.
         tx.execute(
-            "INSERT INTO engine_requests (request_id, payload_hash, result_seq, committed_at) \
-             VALUES (?1, ?2, -1, ?3)",
+            "INSERT INTO engine_requests \
+             (request_id, payload_hash, result_seq, committed_at, kind) \
+             VALUES (?1, ?2, -1, ?3, 'chat')",
             params![request_id, payload_hash, now_ms],
         )
         .map_err(DomainError::sql_persist)?;

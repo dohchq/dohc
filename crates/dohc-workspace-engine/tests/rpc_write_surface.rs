@@ -124,6 +124,74 @@ async fn write_response_shape_contains_object_snapshot_moment_and_deduped() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fresh_workspace_bootstraps_only_the_canonical_main_version() {
+    // MUTATION: let ensure_main_version bootstrap the caller's arbitrary id ->
+    // either draft write succeeds and creates versioned state.
+    let (scratch, transport, handle) = fixture("fresh-main-only").await;
+    for (id, method, params) in [
+        (
+            2,
+            "versionedText.write",
+            json!({
+                "versionId": "draft",
+                "path": "draft.md",
+                "text": "must refuse",
+                "origin": "api",
+            }),
+        ),
+        (
+            3,
+            "versionedBinary.write",
+            json!({
+                "versionId": "draft",
+                "path": "draft.bin",
+                "bytes": [1, 2, 3],
+                "origin": "api",
+            }),
+        ),
+    ] {
+        let error = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, method, Some(handle.clone()), params),
+            )
+            .await
+            .expect_err("an unknown first version must fail closed");
+        assert_eq!(error.message, "version-not-found");
+    }
+
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let created_rows: i64 = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM versioned_workspaces) + \
+                    (SELECT COUNT(*) FROM versions) + \
+                    (SELECT COUNT(*) FROM moments) + \
+                    (SELECT COUNT(*) FROM snapshots)",
+            [],
+            |row| row.get(0),
+        )
+        .expect("versioned row count");
+    assert_eq!(
+        created_rows, 0,
+        "refused writes must create no versioned state"
+    );
+
+    let main = write(
+        &transport,
+        &handle,
+        4,
+        "main.md",
+        "bootstrapped",
+        "main-first",
+    )
+    .await;
+    assert_eq!(main["snapshot"]["path"], "main.md");
+    let active = call(&transport, &handle, 5, "versions.active", json!({})).await;
+    assert_eq!(active["id"], "main");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_write_enqueues_no_materialization_and_binary_write_enqueues_one() {
     // MUTATION: enqueue text materialization or omit binary materialization -> moment/disk assertions fail.
     let (scratch, transport, handle) = fixture("materialize").await;

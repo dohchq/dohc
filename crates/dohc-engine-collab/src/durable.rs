@@ -522,8 +522,8 @@ where
                 // be swept out from under a retry.
                 tx.execute(
                     "INSERT INTO engine_requests \
-                     (request_id, payload_hash, result_seq, committed_at) \
-                     VALUES (?1, ?2, ?3, ?4)",
+                     (request_id, payload_hash, result_seq, committed_at, kind) \
+                     VALUES (?1, ?2, ?3, ?4, 'ydoc')",
                     rusqlite::params![request_id, hash, -outcome.seq, now_ms],
                 )
                 .map_err(map_sql)?;

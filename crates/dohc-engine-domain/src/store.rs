@@ -514,7 +514,7 @@ impl<'a> VersionedTextStore<'a> {
             )
             .map_err(DomainError::sql_persist)?;
             tx.execute(
-                "DELETE FROM engine_requests WHERE result_seq = ?1",
+                "DELETE FROM engine_requests WHERE result_seq = ?1 AND kind = 'versioned'",
                 params![prep.moment.moment_order],
             )
             .map_err(DomainError::sql_persist)?;
@@ -4260,8 +4260,28 @@ pub(crate) fn record_request(
 ) -> Result<(), DomainError> {
     if let Some(request_id) = request_id {
         tx.execute(
-            "INSERT INTO engine_requests (request_id, payload_hash, result_seq, committed_at) \
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO engine_requests \
+             (request_id, payload_hash, result_seq, committed_at, kind) \
+             VALUES (?1, ?2, ?3, ?4, 'versioned')",
+            params![request_id, payload_hash, result_seq, now_ms],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn record_merge_request(
+    tx: &Connection,
+    request_id: Option<&str>,
+    payload_hash: &str,
+    result_seq: i64,
+    now_ms: i64,
+) -> Result<(), DomainError> {
+    if let Some(request_id) = request_id {
+        tx.execute(
+            "INSERT INTO engine_requests \
+             (request_id, payload_hash, result_seq, committed_at, kind) \
+             VALUES (?1, ?2, ?3, ?4, 'merge')",
             params![request_id, payload_hash, result_seq, now_ms],
         )
         .map_err(DomainError::sql_persist)?;

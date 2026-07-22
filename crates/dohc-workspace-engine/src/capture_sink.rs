@@ -137,6 +137,16 @@ impl SelfWriteSuppression {
         suppressed
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_pending(&self, workspace_id: &str, path: &str, sha256: &str) -> bool {
+        let Ok(entries) = self.entries.lock() else {
+            return false;
+        };
+        entries
+            .get(&(self.scoped_workspace(workspace_id), path.to_owned()))
+            .is_some_and(|pending| pending.iter().any(|recorded| recorded == sha256))
+    }
+
     /// Clear every pending identity for a path — a `Changed` observation
     /// that resolves to non-text (binary/untracked/over-cap) means the path
     /// is no longer daemon-settled text; stale identities must not survive

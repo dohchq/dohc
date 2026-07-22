@@ -47,6 +47,7 @@ describe("engineOriginLabel", () => {
     expect(engineOriginLabel("restore")).toBe("Restore");
     expect(engineOriginLabel("sync")).toBe("Sync");
     expect(engineOriginLabel("api")).toBe("dohc");
+    expect(engineOriginLabel("ydoc")).toBe("Live edit");
     expect(engineOriginLabel("unknown")).toBe("Unknown source");
   });
 });

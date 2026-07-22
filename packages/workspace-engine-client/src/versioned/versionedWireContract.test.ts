@@ -1159,7 +1159,9 @@ describe("loopback contract enforcement", () => {
     });
     const blobParams: VersionedBinaryReadBlobParams = {
       workspaceId: WORKSPACE,
-      sha256: read?.sha256 ?? "",
+      // MUTATION: look up the caller's digest verbatim -> uppercase misses the
+      // canonical lowercase blob key.
+      sha256: (read?.sha256 ?? "").toUpperCase(),
     };
     expect(
       decodeVersionedBinaryReadBlobResult(
