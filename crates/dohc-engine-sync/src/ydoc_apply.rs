@@ -131,7 +131,7 @@ pub fn drain_deferred_ydoc_for_key(
             TxnOutcome::Committed(ReplicationApplyOutcome::Deduped { .. }) => {}
             TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
         }
-        store.write_with(faults, |tx| {
+        let cleared = store.write_with(faults, |tx| {
             tx.execute(
                 "DELETE FROM ydoc_deferred_updates \
                  WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
@@ -140,6 +140,13 @@ pub fn drain_deferred_ydoc_for_key(
             .map_err(SyncError::persist)?;
             Ok::<_, SyncError>(())
         })?;
+        // A crash seam firing on this delete must surface like the
+        // preceding remote-apply transaction's — reporting the drain as
+        // successful would let settle/close proceed as if the pending row
+        // were durably handled.
+        if matches!(cleared, TxnOutcome::Crashed { .. }) {
+            return Err(SyncError::FaultCrash);
+        }
     }
     Ok(applied)
 }
@@ -196,13 +203,28 @@ pub fn project_and_write_in_tx(
         });
     }
     // Idempotent skip: a redelivered (or content-converged) envelope whose
-    // projection already IS the head mints no duplicate moment/job.
+    // projection already IS the head mints no duplicate moment/job — but the
+    // MARKER still advances: the head may have reached these bytes via
+    // capture/local write while last_settled_sha points at an older settle,
+    // and leaving it stale would wedge the next settle in
+    // ConflictStaleTarget over a converged doc.
     let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
-    if current
+    if let Some(snapshot) = current
         .snapshot
         .as_ref()
-        .is_some_and(|snapshot| snapshot.blob_sha256 == projected_sha)
+        .filter(|snapshot| snapshot.blob_sha256 == projected_sha)
     {
+        tx.execute(
+            "UPDATE ydoc_docs SET last_settled_sha = ?4, updated_at_ms = ?5              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                snapshot.blob_sha256,
+                now_ms,
+            ],
+        )
+        .map_err(SyncError::persist)?;
         return Ok(());
     }
     let preimage = current

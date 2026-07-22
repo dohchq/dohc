@@ -3064,6 +3064,11 @@ fn ydoc_close_session_on_store(
             })?;
             if let Some(path) = path
                 && let Some(persisted) = dohc_engine_collab::load_persisted(store, key)?
+                // A doc still holding unintegrated cross-origin content must
+                // not project: the markdown would omit the parked remote
+                // updates. The dependency's own envelope projects the full
+                // doc when it lands.
+                && !persisted.doc.has_pending_dependencies()
             {
                 let projected = store.write_with(faults, |tx| {
                     dohc_engine_sync::project_and_write_in_tx(

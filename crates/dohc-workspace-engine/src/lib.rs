@@ -401,6 +401,13 @@ impl EngineService {
             .next_handle
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let handle = WorkspaceHandle(format!("ws-{sequence:016x}"));
+        // The guard arms BEFORE any fallible await past the shadow binding:
+        // an error in the startup replay below must close the actor rather
+        // than leak an unowned, handle-less binding in the supervisor.
+        let open_guard = OpenGuard {
+            supervisor: self.supervisor,
+            db_path: Some(db_path.clone()),
+        };
         // Startup replay BEFORE the files layer exists: jobs left pending by
         // a crash, a transient settle failure, or a pulled replication apply
         // land on disk while nothing is watching (no suppression window),
@@ -424,13 +431,10 @@ impl EngineService {
         // stale disk bytes.
         //
         // CANCELLATION: nothing owns the store actor yet (the handle is
-        // inserted below), so an abort here would leak it. `OpenGuard` closes
-        // the actor on an early drop and is disarmed once the handle is
-        // inserted; `CaptureDriver`'s own Drop cancels the files layer.
-        let open_guard = OpenGuard {
-            supervisor: self.supervisor,
-            db_path: Some(db_path.clone()),
-        };
+        // inserted below), so an abort here would leak it. The `open_guard`
+        // armed above the startup replay closes the actor on an early drop
+        // and is disarmed once the handle is inserted; `CaptureDriver`'s own
+        // Drop cancels the files layer.
         capture.wait_for_baseline().await;
         open_guard.disarm();
         lock(&self.handles).insert(
