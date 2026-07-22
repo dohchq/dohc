@@ -5,9 +5,9 @@
 
 use dohc_engine_crypto::{SecretDataKey, aead};
 use dohc_engine_domain::{
-    NoFaults, SecretDiskIntent, SecretFileStore, SecretOp, SecretWrite, VersionFileChangeStatus,
-    VersionedTextStore, apply_secret_file_verbatim, compare_secret_files_page_keyless,
-    fork_version_keyless, restore_secret_file_verbatim,
+    ApplySecretFileVerbatim, NoFaults, SecretDiskIntent, SecretFileStore, SecretOp, SecretWrite,
+    VersionFileChangeStatus, VersionedTextStore, apply_secret_file_verbatim,
+    compare_secret_files_page_keyless, fork_version_keyless, restore_secret_file_verbatim,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint};
 use dohc_engine_testkit::harness::wal_sidecar;
@@ -608,6 +608,17 @@ fn ts_written_ciphertext_decrypts_in_the_rust_store() {
     );
 }
 
+fn apply_input(moment_id: &str, now_ms: i64) -> ApplySecretFileVerbatim {
+    ApplySecretFileVerbatim {
+        workspace_id: WS.to_owned(),
+        path: ".env".to_owned(),
+        from_version_id: "main".to_owned(),
+        to_version_id: "feat".to_owned(),
+        moment_id: moment_id.to_owned(),
+        now_ms,
+    }
+}
+
 #[test]
 fn secret_apply_verbatim_copy_is_content_equality_no_op() {
     // MUTATION: re-encrypt on apply or mint on equal ciphertext -> IV/moment assertions fail.
@@ -619,16 +630,12 @@ fn secret_apply_verbatim_copy_is_content_equality_no_op() {
     create_feature(&mut store);
     write_version(&mut store, &key, "main", ".env", "TOKEN=one", "main-1", 10);
 
-    let first = apply_secret_file_verbatim(
-        &mut store, WS, ".env", "main", "feat", "apply-1", 20, &NO_FAULTS,
-    )
-    .unwrap();
+    let first =
+        apply_secret_file_verbatim(&mut store, &apply_input("apply-1", 20), &NO_FAULTS).unwrap();
     assert!(first.changed);
     let moments_after_first = store.table_row_count("secret_moments").unwrap();
-    let second = apply_secret_file_verbatim(
-        &mut store, WS, ".env", "main", "feat", "apply-2", 21, &NO_FAULTS,
-    )
-    .unwrap();
+    let second =
+        apply_secret_file_verbatim(&mut store, &apply_input("apply-2", 21), &NO_FAULTS).unwrap();
     assert!(!second.changed);
     assert_eq!(
         store.table_row_count("secret_moments").unwrap(),

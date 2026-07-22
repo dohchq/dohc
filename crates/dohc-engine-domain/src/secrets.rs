@@ -44,7 +44,7 @@
 
 use crate::error::DomainError;
 use crate::merge::VersionFileChangeStatus;
-use crate::records::InbandSecret;
+use crate::records::{ApplySecretFileVerbatim, InbandSecret};
 use crate::store::validate_path;
 use dohc_engine_crypto::{SealedSecret, SecretDataKey, SecretPlaintext, aead, seal};
 use dohc_engine_storage::{
@@ -973,14 +973,18 @@ pub fn compare_secret_files_page_keyless(
 /// copying the sealed fields verbatim. No plaintext or data key is involved.
 pub fn apply_secret_file_verbatim(
     store: &mut EngineStore,
-    workspace_id: &str,
-    path: &str,
-    from_version_id: &str,
-    to_version_id: &str,
-    moment_id: &str,
-    now_ms: i64,
+    input: &ApplySecretFileVerbatim,
     faults: &dyn FaultInjector,
 ) -> Result<SecretWriteResult, DomainError> {
+    let ApplySecretFileVerbatim {
+        workspace_id,
+        path,
+        from_version_id,
+        to_version_id,
+        moment_id,
+        now_ms,
+    } = input;
+    let now_ms = *now_ms;
     non_empty(workspace_id, "workspace_id")?;
     non_empty(from_version_id, "version_id")?;
     non_empty(to_version_id, "version_id")?;

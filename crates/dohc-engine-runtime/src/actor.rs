@@ -3666,12 +3666,14 @@ fn worker_main(
                 } else {
                     apply_secret_file_verbatim(
                         &mut store,
-                        &workspace_id,
-                        &path,
-                        &from_version_id,
-                        &to_version_id,
-                        &moment_id,
-                        now_ms,
+                        &dohc_engine_domain::ApplySecretFileVerbatim {
+                            workspace_id,
+                            path,
+                            from_version_id,
+                            to_version_id,
+                            moment_id,
+                            now_ms,
+                        },
                         faults.as_ref(),
                     )
                     .map_err(RuntimeError::from)

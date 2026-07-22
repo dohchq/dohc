@@ -488,3 +488,14 @@ pub struct RenameResult {
     pub moment: MomentRecord,
     pub deduped: bool,
 }
+
+/// Inputs to [`crate::apply_secret_file_verbatim`].
+#[derive(Debug, Clone)]
+pub struct ApplySecretFileVerbatim {
+    pub workspace_id: String,
+    pub path: String,
+    pub from_version_id: String,
+    pub to_version_id: String,
+    pub moment_id: String,
+    pub now_ms: i64,
+}

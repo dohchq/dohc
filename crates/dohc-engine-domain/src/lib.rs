@@ -64,10 +64,10 @@ pub use merge::{
 };
 pub use normalize::NormalizedState;
 pub use records::{
-    BinaryHead, BinaryHeadMeta, BinaryWriteResult, CaptureIngest, CaptureIngestBinary,
-    CaptureIngestBinaryResult, CaptureRetire, CaptureRetireResult, CreateNamedVersion,
-    DeleteResult, DeleteTextFile, FileObjectRecord, InbandBinary, InbandSecret, InbandText,
-    ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
+    ApplySecretFileVerbatim, BinaryHead, BinaryHeadMeta, BinaryWriteResult, CaptureIngest,
+    CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire, CaptureRetireResult,
+    CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord, InbandBinary, InbandSecret,
+    InbandText, ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
     RollbackTextFileMutation, SnapshotContent, SnapshotMetadata, SnapshotView, TextSnapshot,
     VersionKind, VersionRecord, WriteBinary, WriteResult, WriteText,
 };
