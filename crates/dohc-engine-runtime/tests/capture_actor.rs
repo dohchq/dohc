@@ -10,7 +10,7 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let supervisor = WorkspaceSupervisor::new();
-    let handle = supervisor.open(&db, 1).expect("open actor");
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
 
     let written = handle
         .capture_ingest_blocking(
@@ -55,7 +55,7 @@ async fn async_capture_variants_round_trip_and_honor_precancellation() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let supervisor = WorkspaceSupervisor::new();
-    let handle = supervisor.open(&db, 1).expect("open actor");
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
 
     let written = handle
         .capture_ingest(
@@ -228,7 +228,7 @@ async fn binary_capture_round_trips_through_the_actor_both_ways() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let supervisor = WorkspaceSupervisor::new();
-    let handle = supervisor.open(&db, 1).expect("open actor");
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let input = |bytes: &[u8], now_ms: i64| CaptureIngestBinary {
         workspace_id: "ws-actor-capture-bin".to_owned(),
         version_id: "main".to_owned(),

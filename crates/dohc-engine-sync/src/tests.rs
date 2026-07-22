@@ -247,6 +247,65 @@ fn exact_duplicate_is_noop_and_gap_is_rejected() {
 }
 
 #[test]
+fn imported_opening_message_uses_zero_based_order() {
+    let (_scratch, _path, mut engine) = store();
+    let channel = envelope(
+        "opening-order",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "channel-1",
+            "name": "General",
+            "slug": "general",
+            "kind": "channel",
+            "createdAtMs": 10
+        }),
+    );
+    let thread = envelope(
+        "opening-order",
+        1,
+        "chat.thread.create",
+        json!({
+            "threadId": "thread-1",
+            "title": "",
+            "createdAtMs": 20,
+            "channelSlug": "general",
+            "channelWireId": "channel-1"
+        }),
+    );
+    let opening = envelope(
+        "opening-order",
+        2,
+        "chat.message.append",
+        json!({
+            "messageId": "message-1",
+            "threadId": "thread-1",
+            "authorKind": "human",
+            "authorDisplayName": "Alice",
+            "body": "Opening",
+            "createdAtMs": 20
+        }),
+    );
+    for op in [&channel, &thread, &opening] {
+        assert_eq!(
+            apply_chat_envelope(&mut engine, op, &NoFaults).expect("apply chat op"),
+            ApplyOutcome::Applied(())
+        );
+    }
+    let order: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT message_order FROM chat_messages \
+                 WHERE workspace_id = 'ws' AND message_id = 'message-1'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("opening message order");
+    assert_eq!(order, 0);
+}
+
+#[test]
 fn chat_reaction_lww_converges_across_origin_arrival_order() {
     let (_a, _path_a, mut first) = store();
     let (_b, _path_b, mut second) = store();

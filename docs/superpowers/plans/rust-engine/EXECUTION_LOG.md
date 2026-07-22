@@ -1992,3 +1992,41 @@ next round caught. The compounding lesson became structure:
   in review) -> RPC-B -> RPC-C (design v2 adversarially reviewed) ->
   RPC-D per RPC_GAP.md, then GATE6 packet -> macOS evidence -> R15 (ICE
   checkpoint — STOP).
+
+
+## 2026-07-21 — RPC-A merged (#217, 19 rounds): the read surface, hardened to fixed points
+
+- RPC-A merged 17:14Z as 2d9c9837 (squash; no migration): 8 NEW read
+  RPCs plus the pre-existing versionedText.read hardened in place —
+  versions.active (null on nothing-versioned)/versions.list (cursor),
+  versionedText.list (paged zero-hydration metadata query),
+  versionedBinary.read + versionedText.read (ONE-TURN in-band caps),
+  moments.list/get (hydrated like the oracle's momentSelectSql, parsed
+  fail-closed authors, byte-budgeted pages), secrets.list (domain-paged) +
+  secrets.materialize (one-turn capped decrypt; withheld tips still
+  AUTHENTICATE; absent answers before any key work).
+- THE REVIEW ARC (19 rounds; CodeRabbit APPROVED + Codex clean at r19;
+  1 opus adversarial pre-review): design (the wire-limit discovery — the
+  InProcessTransport harness structurally cannot see encode failures) ->
+  failure paths -> ORACLE CORRECTIONS (the moments-payload decline was
+  WRONG — cited getMoment's body without reading momentSelectSql's blob
+  joins; owned publicly; write paths now RE-READ their own moments in-tx
+  so mutation results equal reads forever) -> one-turn caps (no
+  probe-then-load window anywhere; recorded==actual at every trusted
+  length; verbatim resolution: everything a listing returns is a valid
+  input) -> a phantom-edit catch (a commit message claimed edits an
+  aborted script never wrote; Codex checked claims against the diff).
+- DISCOVERIES for the R15 decision list: (1) the oracle's
+  payload_before_*/before-snapshot-identity moment columns were never
+  ported (schema obligation, cheap pre-reset, pairs with the secret
+  ownership column); (2) cross-engine secret path SPELLING delta (TS
+  normalize-stores, Rust stores verbatim with a disguise-proof
+  classification gate — moot for data post-reset, parity suites must
+  expect it); (3) the blob-chunk streaming obligation for content past the
+  in-band caps — precisely: the 48 KiB INBAND_CONTENT_CAP_BYTES on
+  text/binary/secret BODIES (one-turn SQL cap), all inside DOP1's 64 KiB
+  per-string wire limit (BlobStart exists, no daemon producer).
+- SHARDS: RPC-A done (#217). RPC-B open (#218, codex-implemented,
+  adversarially pre-reviewed). NEXT: RPC-C (design v2 reviewed) -> RPC-D
+  and RPC-B2 (production chat follow-ups; both GATE6 deps) -> GATE6 -> R15
+  (ICE STOP).
