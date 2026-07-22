@@ -823,6 +823,78 @@ fn secret_restore_verbatim_copy_is_content_equality_no_op() {
 }
 
 #[test]
+fn secret_restore_to_absent_records_a_completed_generation_marker() {
+    // MUTATION: delete the restored-away tip without recording its completed generation -> fails.
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    write(
+        &mut store,
+        &key,
+        ".env",
+        "TOKEN=one",
+        "restore-absent-one",
+        10,
+    );
+    write(
+        &mut store,
+        &key,
+        ".env",
+        "TOKEN=two",
+        "restore-absent-two",
+        11,
+    );
+    let outgoing_sha: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT content_sha256 FROM materialization_jobs \
+                 WHERE job_id = 'secret-mat_restore-absent-two'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+
+    let restored = restore_secret_file_verbatim(
+        &mut store,
+        WS,
+        ".env",
+        "restore-absent-one",
+        "restore-to-absent",
+        20,
+        &NO_FAULTS,
+    )
+    .unwrap();
+    assert_eq!(restored.restored, "deleted");
+
+    let marker: (String, String, i64, i64) = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT status, content_sha256, preimage_present, target_generation \
+                 FROM materialization_jobs WHERE job_id = 'secret-mat_restore-to-absent'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+        })
+        .unwrap();
+    let restored_order: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT moment_order FROM secret_moments WHERE moment_id = 'restore-to-absent'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(marker.0, "complete");
+    assert_eq!(marker.1, outgoing_sha);
+    assert_eq!(marker.2, 0, "the restore marker uses an absent preimage");
+    assert_eq!(marker.3, restored_order);
+}
+
+#[test]
 fn secret_compare_is_whole_version_no_path_param() {
     // MUTATION: add a single-path filter -> one of the two classifications disappears.
     let scratch = ScratchDir::new().unwrap();

@@ -331,10 +331,17 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (utf8Length(text) > INBAND_LIMIT_BYTES) throw new Error("content-exceeds-inband-cap");
     const origin = requiredOrigin(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
-    const replay = this.replay(state, requestId, params);
+    const objectId = optionalString(params, "objectId") ??
+      (requestId
+        ? this.generatedWriteId("object", requestId, path)
+        : version.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`);
+    const momentId = optionalString(params, "momentId") ??
+      (requestId
+        ? this.generatedWriteId("moment", requestId, path)
+        : `moment-${this.nextMomentId++}`);
+    const replayFingerprint = this.textWriteFingerprint(params, origin, objectId, momentId);
+    const replay = this.replay(state, requestId, params, replayFingerprint);
     if (replay) return replay;
-    const objectId = optionalString(params, "objectId") ?? version.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`;
-    const momentId = optionalString(params, "momentId") ?? `moment-${this.nextMomentId++}`;
     this.assertFreshMoment(state, momentId);
     const before = version.files.get(path);
     const now = optionalNumber(params, "nowMs") ?? this.clock++;
@@ -358,7 +365,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       moment: this.capMoment(moment),
       deduped: false,
     };
-    this.recordReplay(state, requestId, params, result);
+    this.recordReplay(state, requestId, params, result, replayFingerprint);
     return result;
   }
 
@@ -389,10 +396,31 @@ export class VersionedLoopbackEngine implements EngineTransport {
     }
     if (bytes.length > INBAND_LIMIT_BYTES) throw new Error("content-exceeds-inband-cap");
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
-    const replay = this.replay(state, requestId, params);
-    if (replay) return replay;
-    const objectId = optionalString(params, "objectId") ?? version.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`;
-    const momentId = optionalString(params, "momentId") ?? `moment-${this.nextMomentId++}`;
+    const objectId = optionalString(params, "objectId") ??
+      (requestId
+        ? this.generatedWriteId("object", requestId, path)
+        : version.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`);
+    const momentId = optionalString(params, "momentId") ??
+      (requestId
+        ? this.generatedWriteId("moment", requestId, path)
+        : `moment-${this.nextMomentId++}`);
+    const replayFingerprint = this.binaryWriteFingerprint(
+      workspace,
+      params,
+      bytes,
+      origin,
+      objectId,
+      momentId,
+    );
+    const replay = this.replay(state, requestId, params, replayFingerprint);
+    if (replay) {
+      return {
+        ...replay,
+        materializeEnqueued: false,
+        materialized: false,
+        materializeOutcome: "skipped",
+      };
+    }
     this.assertFreshMoment(state, momentId);
     const before = version.files.get(path);
     const now = optionalNumber(params, "nowMs") ?? this.clock++;
@@ -431,7 +459,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       materialized: true,
       materializeOutcome: "applied",
     };
-    this.recordReplay(state, requestId, params, result);
+    this.recordReplay(state, requestId, params, result, replayFingerprint);
     return result;
   }
 
@@ -750,8 +778,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private secretApply(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
-    const source = this.version(state, requiredString(params, "sourceVersionId", "secret apply"));
-    const target = this.version(state, requiredString(params, "targetVersionId", "secret apply"));
+    const source = state.versions.get(requiredString(params, "sourceVersionId", "secret apply"));
+    const target = state.versions.get(requiredString(params, "targetVersionId", "secret apply"));
+    if (!source || !target) throw new Error("invalid-version");
     const path = requiredString(params, "path", "secret apply");
     const momentId = requiredString(params, "momentId", "secret apply");
     this.assertFreshSecretMoment(state, momentId);
@@ -794,19 +823,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private secretMomentsList(state: WorkspaceState, params: JsonObject): JsonValue {
-    const versionId = requiredString(params, "versionId", "secret moments list");
+    const versionId = optionalString(params, "versionId");
     const path = optionalString(params, "path");
     const before = optionalNumber(params, "beforeMomentOrder");
-    const requestedLimit = optionalNumber(params, "limit");
-    if (requestedLimit !== undefined && requestedLimit <= 0) {
-      throw new Error("invalid-input");
-    }
-    const limit = Math.min(500, requestedLimit ?? 200);
+    const limit = Math.min(500, Math.max(1, optionalNumber(params, "limit") ?? 200));
     const filtered = [...state.secretMoments.values()]
       .map((moment) => moment.wire)
       .filter(
         (moment) =>
-          moment.versionId === versionId && (path === undefined || moment.path === path),
+          (versionId === undefined || moment.versionId === versionId) &&
+          (path === undefined || moment.path === path),
       )
       .filter((moment) => before === undefined || moment.momentOrder < before)
       .sort((left, right) => right.momentOrder - left.momentOrder);
@@ -826,11 +852,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const versionId = optionalString(params, "versionId");
     const objectId = optionalString(params, "objectId");
     const before = optionalNumber(params, "beforeMomentOrder");
-    const requestedLimit = optionalNumber(params, "limit");
-    if (requestedLimit !== undefined && requestedLimit <= 0) {
-      throw new Error("invalid-input");
-    }
-    const limit = Math.min(500, requestedLimit ?? 200);
+    const limit = Math.min(500, Math.max(1, optionalNumber(params, "limit") ?? 200));
     const all = [...state.moments.values()]
       .map((moment) => moment.wire)
       .filter((moment) => versionId === undefined || moment.versionId === versionId)
@@ -913,11 +935,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     state: WorkspaceState,
     requestId: string | undefined,
     params: JsonObject,
+    fingerprint = JSON.stringify(params),
   ): JsonObject | undefined {
     if (!requestId) return undefined;
     const recorded = state.replays.get(requestId);
     if (!recorded) return undefined;
-    if (recorded.fingerprint !== JSON.stringify(params)) {
+    if (recorded.fingerprint !== fingerprint) {
       throw new Error("idempotency-key-reuse-mismatch");
     }
     return { ...recorded.result, deduped: true };
@@ -928,13 +951,75 @@ export class VersionedLoopbackEngine implements EngineTransport {
     requestId: string | undefined,
     params: JsonObject,
     result: JsonObject,
+    fingerprint = JSON.stringify(params),
   ): void {
     if (requestId) {
       state.replays.set(requestId, {
-        fingerprint: JSON.stringify(params),
+        fingerprint,
         result,
       });
     }
+  }
+
+  private textWriteFingerprint(
+    params: JsonObject,
+    origin: VersionedOrigin,
+    objectId: string,
+    momentId: string,
+  ): string {
+    return JSON.stringify({
+      versionId: params.versionId,
+      path: params.path,
+      text: params.text,
+      momentId,
+      objectId,
+      metadataOrigin: origin,
+      authorJson: this.writeAuthorFingerprint(params),
+    });
+  }
+
+  private binaryWriteFingerprint(
+    workspace: string,
+    params: JsonObject,
+    bytes: number[],
+    origin: VersionedOrigin,
+    objectId: string,
+    momentId: string,
+  ): string {
+    return JSON.stringify({
+      operation: "versioned-binary-write",
+      workspaceId: workspace,
+      versionId: params.versionId,
+      path: params.path,
+      sha256: sha256(bytes),
+      momentId,
+      objectId,
+      metadataOrigin: origin,
+      authorJson: this.writeAuthorFingerprint(params),
+    });
+  }
+
+  private writeAuthorFingerprint(params: JsonObject): string | null {
+    if (params.author !== undefined) return JSON.stringify(params.author);
+    const legacy = params.authorJson;
+    if (typeof legacy !== "string") return null;
+    try {
+      return JSON.stringify(JSON.parse(legacy));
+    } catch {
+      return legacy;
+    }
+  }
+
+  private generatedWriteId(prefix: "object" | "moment", requestId: string, path: string): string {
+    const digest = createHash("sha256");
+    for (const field of [requestId, path]) {
+      const bytes = Buffer.from(field, "utf8");
+      const length = Buffer.alloc(8);
+      length.writeBigUInt64LE(BigInt(bytes.length));
+      digest.update(length);
+      digest.update(bytes);
+    }
+    return `${prefix}-${digest.digest("hex")}`;
   }
 
   private fileObject(workspace: string, objectId: string, createdAtMs: number): JsonObject {

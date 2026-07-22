@@ -197,14 +197,14 @@ async fn binary_self_write_suppression_prevents_a_spurious_capture_moment() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn binary_write_request_id_replays_once_and_rejects_mismatch() {
-    // MUTATION: ignore the binary request ledger -> the retry appends a second moment.
+    // MUTATION: seed generated ids from the wire request id instead of requestId -> retry mismatches.
     let (_scratch, transport, handle) = fixture("binary-request-ledger").await;
     let params = json!({
         "versionId": "main",
+        "objectId": "binary-ledger-object",
         "path": "ledger.bin",
         "bytes": [1, 2, 3],
         "origin": "api",
-        "momentId": "binary-ledger-moment",
         "requestId": "binary-ledger-request",
     });
     let first = call(
@@ -241,7 +241,28 @@ async fn binary_write_request_id_replays_once_and_rejects_mismatch() {
         .await
         .expect_err("request id reuse with different bytes must fail");
     assert_eq!(mismatch.message, "idempotency-key-reuse-mismatch");
-    assert_eq!(moments(&transport, &handle, 6).await.len(), 1);
+    // MUTATION: omit object_id from the binary ledger hash -> this silently replays.
+    let object_mismatch = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                6,
+                "versionedBinary.write",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "objectId": "binary-ledger-object-flipped",
+                    "path": "ledger.bin",
+                    "bytes": [1, 2, 3],
+                    "origin": "api",
+                    "requestId": "binary-ledger-request",
+                }),
+            ),
+        )
+        .await
+        .expect_err("request id reuse with a different object id must fail");
+    assert_eq!(object_mismatch.message, "idempotency-key-reuse-mismatch");
+    assert_eq!(moments(&transport, &handle, 7).await.len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -480,6 +501,77 @@ async fn secret_moments_version_wide_pages_across_paths_newest_first() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_moments_without_version_list_workspace_history_newest_first() {
+    // MUTATION: require versionId or always scope the actor query to one version -> fails.
+    let (_scratch, transport, handle) = fixture("secret-workspace-history").await;
+    let workspace_id = "ws-rpcd-secret-workspace-history";
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace_id,
+            "versionId": "main",
+            "path": ".env",
+            "text": "MAIN=1",
+            "origin": "api",
+            "momentId": "secret-workspace-main",
+        }),
+    )
+    .await;
+    let feature = call(
+        &transport,
+        &handle,
+        4,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace_id,
+            "name": "feature",
+            "fromVersionId": "main",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        5,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace_id,
+            "versionId": feature["id"],
+            "path": ".env",
+            "text": "FEATURE=1",
+            "origin": "api",
+            "momentId": "secret-workspace-feature",
+        }),
+    )
+    .await;
+    let listed = call(
+        &transport,
+        &handle,
+        6,
+        "secrets.moments.list",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    let rows = listed["moments"].as_array().expect("workspace history");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["id"], "secret-workspace-feature");
+    assert_eq!(rows[0]["versionId"], feature["id"]);
+    assert_eq!(rows[1]["id"], "secret-workspace-main");
+    assert_eq!(rows[1]["versionId"], "main");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secrets_apply_arm_uses_the_explicit_target_version() {
     // MUTATION: derive the apply target from versions.active -> the moment lands in feature.
     let (_scratch, transport, handle) = fixture("secret-apply-target").await;
@@ -563,7 +655,7 @@ async fn secrets_apply_arm_uses_the_explicit_target_version() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn secrets_apply_fresh_workspace_returns_version_not_found() {
+async fn secrets_apply_fresh_workspace_returns_invalid_version() {
     // MUTATION: return the no-key/no-state early answer before validating versions -> this succeeds.
     let (_scratch, transport, handle) = fixture("secret-apply-fresh").await;
     let error = transport
@@ -584,7 +676,71 @@ async fn secrets_apply_fresh_workspace_returns_version_not_found() {
         )
         .await
         .expect_err("fresh workspace has no target version");
-    assert_eq!(error.message, "version-not-found");
+    assert_eq!(error.message, "invalid-version");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rpc_secret_delete_records_a_completed_generation_marker() {
+    // MUTATION: gate the delete marker on capture-retire only -> this row is absent.
+    let (scratch, transport, handle) = fixture("secret-delete-marker").await;
+    let workspace_id = "ws-rpcd-secret-delete-marker";
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace_id,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=delete-me",
+            "origin": "api",
+            "momentId": "rpc-secret-write-before-delete",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "secrets.delete",
+        json!({
+            "workspaceId": workspace_id,
+            "versionId": "main",
+            "path": ".env",
+            "origin": "api",
+            "momentId": "rpc-secret-delete",
+        }),
+    )
+    .await;
+
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let marker: (String, i64) = connection
+        .query_row(
+            "SELECT status, target_generation FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_rpc-secret-delete'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("completed secret delete marker");
+    let moment_order: i64 = connection
+        .query_row(
+            "SELECT moment_order FROM secret_moments WHERE moment_id = 'rpc-secret-delete'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("delete moment");
+    assert_eq!(marker.0, "complete");
+    assert_eq!(marker.1, moment_order);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1571,6 +1727,59 @@ async fn merge_request_id_replay_after_target_moves_returns_recorded_outcome() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn merge_rejects_a_request_id_recorded_by_a_text_write() {
+    // MUTATION: treat a foreign-operation ledger payload as a merge replay -> this call succeeds.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    seed_versions(scratch.path(), "ws-rpcd-merge-cross-kind");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "ws-rpcd-merge-cross-kind",
+                }),
+            ),
+        )
+        .await
+        .expect("open");
+    let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    write(
+        &transport,
+        &handle,
+        2,
+        "cross-kind.md",
+        "text ledger payload",
+        "cross-kind-request",
+    )
+    .await;
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                3,
+                "versionedText.merge",
+                Some(handle),
+                json!({
+                    "path": "merge.md",
+                    "sourceVersionId": "feature",
+                    "targetVersionId": "main",
+                    "origin": "api",
+                    "requestId": "cross-kind-request",
+                }),
+            ),
+        )
+        .await
+        .expect_err("cross-kind request id reuse must fail");
+    assert_eq!(error.message, "idempotency-key-reuse-mismatch");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_on_a_leased_target_is_refused() {
     // MUTATION: omit the merge lease guard -> the merge lands behind the editor.
     let scratch = ScratchDir::new().expect("scratch");
@@ -1937,7 +2146,7 @@ async fn text_read_returns_binary_head_and_read_blob_reads_by_sha() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_blob_requires_a_reference_from_the_handle_workspace() {
-    // MUTATION: drop the workspace reference check -> workspace B reads workspace A's blob.
+    // MUTATION: drop the workspace reference check -> workspace B reads workspace A's blobs.
     let (scratch, transport, handle_a) = fixture("blob-scope-a").await;
     let workspace_a = "ws-rpcd-blob-scope-a";
     call(
@@ -1986,11 +2195,77 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
     assert_eq!(happy["bytesBase64"], "BAMCAQ==");
 
     call(&transport, &handle_a, 6, "workspace.close", json!({})).await;
-    let opened_b = transport
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let conflict_bytes = [8_u8, 6, 7, 5, 3, 0, 9];
+    let conflict_sha =
+        dohc_engine_storage::put_binary_blob(&connection, &conflict_bytes).expect("conflict blob");
+    connection
+        .execute(
+            "INSERT INTO conflicts (\
+                workspace_id, conflict_id, path, target_version_id, source_version_id, \
+                created_at_ms, updated_at_ms, status, chosen_from, resolution, metadata_origin, \
+                base_exists, base_path, current_exists, current_path, \
+                incoming_exists, incoming_path, incoming_content_kind, incoming_binary_sha256\
+             ) VALUES (?1, 'conflict-only-binary', 'conflict.bin', 'main', ?2, \
+                10, 10, 'open', 'current', NULL, 'sync', \
+                0, 'conflict.bin', 0, 'conflict.bin', 1, 'conflict.bin', 'binary', ?3)",
+            rusqlite::params![
+                workspace_a,
+                named["id"].as_str().expect("named id"),
+                conflict_sha
+            ],
+        )
+        .expect("seed conflict-side-only binary reference");
+    let ordinary_references: i64 = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM snapshots WHERE binary_sha256 = ?1) + \
+                    (SELECT COUNT(*) FROM moments \
+                     WHERE after_binary_sha256 = ?1 OR before_binary_sha256 = ?1)",
+            [&conflict_sha],
+            |row| row.get(0),
+        )
+        .expect("count ordinary blob references");
+    assert_eq!(
+        ordinary_references, 0,
+        "the conflict is the blob's only reference"
+    );
+    drop(connection);
+
+    let reopened_a = transport
         .call(
             RequestContext::unbounded(),
             request(
                 7,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_a,
+                }),
+            ),
+        )
+        .await
+        .expect("reopen workspace A");
+    let handle_a: WorkspaceHandle = serde_json::from_value(reopened_a.result["workspace"].clone())
+        .expect("reopened workspace A handle");
+    // MUTATION: drop the conflicts EXISTS branch -> this conflict-side-only read fails.
+    let conflict_happy = call(
+        &transport,
+        &handle_a,
+        8,
+        "versionedBinary.readBlob",
+        json!({ "workspaceId": workspace_a, "sha256": conflict_sha }),
+    )
+    .await;
+    assert_eq!(conflict_happy["bytesBase64"], "CAYHBQMACQ==");
+    call(&transport, &handle_a, 9, "workspace.close", json!({})).await;
+
+    let opened_b = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
                 "workspace.open",
                 None,
                 json!({
@@ -2007,9 +2282,9 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
         .call(
             RequestContext::unbounded(),
             request(
-                8,
+                11,
                 "versionedBinary.readBlob",
-                Some(handle_b),
+                Some(handle_b.clone()),
                 json!({
                     "workspaceId": "ws-rpcd-blob-scope-b",
                     "sha256": sha256,
@@ -2019,4 +2294,20 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
         .await
         .expect_err("workspace B must not read workspace A's blob");
     assert_eq!(refused.message, "file-not-found");
+    let conflict_refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                12,
+                "versionedBinary.readBlob",
+                Some(handle_b),
+                json!({
+                    "workspaceId": "ws-rpcd-blob-scope-b",
+                    "sha256": conflict_sha,
+                }),
+            ),
+        )
+        .await
+        .expect_err("workspace B must not read workspace A's conflict-only blob");
+    assert_eq!(conflict_refused.message, "file-not-found");
 }

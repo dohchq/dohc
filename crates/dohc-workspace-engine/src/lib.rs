@@ -2299,7 +2299,7 @@ impl EngineService {
             match validation {
                 Ok(_) => {}
                 Err(error) if error.message == "invalid-version" => {
-                    return Err(wire(ErrorCode::InvalidParams, "version-not-found"));
+                    return Err(wire(ErrorCode::InvalidParams, "invalid-version"));
                 }
                 Err(error) => return Err(error),
             }
@@ -4447,7 +4447,8 @@ struct SecretsForkParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SecretsMomentsListParams {
     workspace_id: String,
-    version_id: String,
+    #[serde(default)]
+    version_id: Option<String>,
     #[serde(default)]
     path: Option<String>,
     #[serde(default)]

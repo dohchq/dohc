@@ -735,8 +735,8 @@ impl<'a> VersionedTextStore<'a> {
         })
     }
 
-    /// Read a binary blob only when the caller's workspace has a durable head
-    /// or moment reference to it. An unreferenced digest is indistinguishable
+    /// Read a binary blob only when the caller's workspace has a durable head,
+    /// moment, or conflict-side reference to it. An unreferenced digest is indistinguishable
     /// from an unknown digest so this content-addressed read is not an
     /// existence oracle across workspace boundaries.
     pub fn read_binary_blob(
@@ -755,6 +755,12 @@ impl<'a> VersionedTextStore<'a> {
                          SELECT 1 FROM moments \
                          WHERE workspace_id = ?1 \
                            AND (after_binary_sha256 = ?2 OR before_binary_sha256 = ?2)\
+                     ) OR EXISTS(\
+                         SELECT 1 FROM conflicts \
+                         WHERE workspace_id = ?1 \
+                           AND (base_binary_sha256 = ?2 \
+                                OR current_binary_sha256 = ?2 \
+                                OR incoming_binary_sha256 = ?2)\
                      )",
                     params![workspace_id, sha256],
                     |row| row.get(0),
@@ -2462,6 +2468,7 @@ pub fn write_binary_in_tx(
         path.as_bytes(),
         sha256.as_bytes(),
         input.moment_id.as_bytes(),
+        input.object_id.as_bytes(),
         input.metadata_origin.as_bytes(),
         author_kind,
         author_json,

@@ -147,16 +147,25 @@ describe("versioned typed loopback", () => {
       origin: "api",
       momentId: "moment-binary",
       requestId: "request-binary",
+      nowMs: 10,
     };
     const binaryWrite = decodeVersionedBinaryWriteResult(
       await call(engine, 6, VERSIONED_METHOD.binaryWrite, binaryParams),
     );
     // MUTATION: ignore the binary request ledger -> a replay appends another moment.
-    expect(
-      decodeVersionedBinaryWriteResult(
-        await call(engine, 61, VERSIONED_METHOD.binaryWrite, binaryParams),
-      ).deduped,
-    ).toBe(true);
+    const binaryReplay = decodeVersionedBinaryWriteResult(
+      await call(engine, 61, VERSIONED_METHOD.binaryWrite, {
+        ...binaryParams,
+        nowMs: 20,
+      }),
+    );
+    // MUTATION: include nowMs in the binary fingerprint or replay the first materialization result -> fails.
+    expect(binaryReplay).toMatchObject({
+      deduped: true,
+      materializeEnqueued: false,
+      materialized: false,
+      materializeOutcome: "skipped",
+    });
     await expect(
       call(engine, 62, VERSIONED_METHOD.binaryWrite, {
         ...binaryParams,
@@ -594,13 +603,15 @@ describe("loopback contract enforcement", () => {
       text: "stable",
       origin: "api",
       requestId: "stable-request",
+      nowMs: 10,
     };
     const first = decodeVersionedTextWriteResult(
       await call(engine, 1, VERSIONED_METHOD.textWrite, params),
     );
     const replay = decodeVersionedTextWriteResult(
-      await call(engine, 2, VERSIONED_METHOD.textWrite, params),
+      await call(engine, 2, VERSIONED_METHOD.textWrite, { ...params, nowMs: 20 }),
     );
+    // MUTATION: include nowMs in the text-write fingerprint -> this retry refuses.
     expect(first.deduped).toBe(false);
     expect(replay).toMatchObject({
       object: first.object,
@@ -608,6 +619,54 @@ describe("loopback contract enforcement", () => {
       moment: first.moment,
       deduped: true,
     });
+  });
+
+  it("clamps zero moment limits to one on both loopback histories", async () => {
+    const engine = new VersionedLoopbackEngine();
+    for (const index of [0, 1]) {
+      await call(engine, index + 1, VERSIONED_METHOD.textWrite, {
+        versionId: "main",
+        path: `limit-${index}.md`,
+        text: `${index}`,
+        origin: "api",
+        momentId: `limit-text-${index}`,
+      });
+      await call(engine, index + 3, VERSIONED_METHOD.secretsWrite, {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: ".env",
+        text: `${index}`,
+        origin: "api",
+        momentId: `limit-secret-${index}`,
+      });
+    }
+
+    // MUTATION: refuse limit <= 0 instead of clamping it to the daemon's floor -> fails.
+    const ordinary = decodeMomentsListResult(
+      await call(engine, 5, VERSIONED_METHOD.momentsList, { limit: 0 }),
+    );
+    const secret = decodeSecretsMomentsListResult(
+      await call(engine, 6, VERSIONED_METHOD.secretsMomentsList, {
+        workspaceId: WORKSPACE,
+        limit: 0,
+      }),
+    );
+    expect(ordinary.moments).toHaveLength(1);
+    expect(secret.moments).toHaveLength(1);
+  });
+
+  it("reports invalid-version for loopback secret apply", async () => {
+    const engine = new VersionedLoopbackEngine();
+    // MUTATION: retain the loopback's generic version-not-found spelling -> fails.
+    await expect(
+      call(engine, 1, VERSIONED_METHOD.secretsApply, {
+        workspaceId: WORKSPACE,
+        sourceVersionId: "missing",
+        targetVersionId: "main",
+        path: ".env",
+        momentId: "missing-apply",
+      }),
+    ).rejects.toThrow("invalid-version");
   });
 
   it("rejects requestId reuse with different parameters", async () => {
@@ -746,6 +805,44 @@ describe("loopback contract enforcement", () => {
     );
     expect(second.moments.map((moment) => moment.id)).toEqual(["secret-wide-0"]);
     expect(second.nextBeforeMomentOrder).toBeNull();
+  });
+
+  it("lists protected history across versions when versionId is omitted", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: ".env",
+      text: "main",
+      origin: "api",
+      momentId: "workspace-secret-main",
+    });
+    const feature = decodeVersionRecord(
+      await call(engine, 2, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        name: "feature",
+        fromVersionId: "main",
+      }),
+    );
+    await call(engine, 3, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: feature.id,
+      path: ".env",
+      text: "feature",
+      origin: "api",
+      momentId: "workspace-secret-feature",
+    });
+
+    // MUTATION: require/filter by versionId -> the main-version row disappears or the call refuses.
+    const history = decodeSecretsMomentsListResult(
+      await call(engine, 4, VERSIONED_METHOD.secretsMomentsList, {
+        workspaceId: WORKSPACE,
+      }),
+    );
+    expect(history.moments.map((moment) => [moment.id, moment.versionId])).toEqual([
+      ["workspace-secret-feature", feature.id],
+      ["workspace-secret-main", "main"],
+    ]);
   });
 
   it("paginates compareFiles by afterPath/nextCursor without overlap", async () => {

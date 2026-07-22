@@ -421,7 +421,7 @@ enum Command {
     },
     ListSecretMoments {
         workspace_id: String,
-        version_id: String,
+        version_id: Option<String>,
         path: Option<String>,
         before_moment_order: Option<i64>,
         limit: usize,
@@ -1770,7 +1770,7 @@ impl ActorHandle {
     pub async fn list_secret_moments(
         &self,
         workspace_id: String,
-        version_id: String,
+        version_id: Option<String>,
         path: Option<String>,
         before_moment_order: Option<i64>,
         limit: usize,
@@ -3626,7 +3626,7 @@ fn worker_main(
                 let outcome = list_secret_moments_page_keyless(
                     &store,
                     &workspace_id,
-                    Some(&version_id),
+                    version_id.as_deref(),
                     path.as_deref(),
                     before_moment_order,
                     limit,

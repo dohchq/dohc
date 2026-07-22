@@ -1294,6 +1294,21 @@ pub fn restore_secret_file_verbatim(
             )?;
             journal(tx, &record.path, "secret.file.put", now_ms)?;
         } else {
+            let outgoing = current.as_ref().ok_or(DomainError::StateCorrupt {
+                reason: "secret restore delete has no outgoing tip",
+            })?;
+            let content_sha256 = put_binary_blob(tx, outgoing.ciphertext())?;
+            dohc_engine_storage::record_completed_job(
+                tx,
+                &MaterializationJobSpec {
+                    job_id: format!("secret-mat_{moment_id}"),
+                    target_path: record.path.clone(),
+                    content_sha256,
+                    preimage: Preimage::Absent,
+                    target_generation: moment_order,
+                    now_ms,
+                },
+            )?;
             tx.execute(
                 "DELETE FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
                 params![workspace_id, record.version_id, record.path],

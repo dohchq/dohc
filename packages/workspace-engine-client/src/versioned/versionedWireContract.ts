@@ -191,7 +191,7 @@ export type SecretsRestoreParams = JsonObject & {
 
 export type SecretsMomentsListParams = JsonObject & {
   workspaceId: string;
-  versionId: string;
+  versionId?: string;
   path?: string;
   beforeMomentOrder?: number;
   limit?: number;

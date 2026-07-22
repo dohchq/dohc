@@ -138,6 +138,10 @@ at replay time), so the materialized workspace file stays absent/stale
 until the executor lands. Pre-cutover no production caller reads the
 materialized secret path through the daemon; the recorded jobs/markers
 let the executor settle disk state exactly once when it arrives.
+The executor must also decide the CROSS-VERSION disk semantics: marker
+generations are workspace-wide orders keyed by path, and a delete in a
+non-active version records a marker that outranks an older pending job
+for the ACTIVE version's same path — which job wins disk is its call.
 GATE6-blocking.
 
 
