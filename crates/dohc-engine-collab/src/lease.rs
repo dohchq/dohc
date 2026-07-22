@@ -34,11 +34,16 @@ use crate::DocKey;
 /// settle to the same workspace path. One object, one live session.
 #[derive(Clone, Default)]
 pub struct LeaseRegistry {
+    /// Root-path scope prefixed onto the workspace component of every key.
+    /// One process-wide registry serves EVERY open root (multi-service
+    /// exclusion on the same root), but two roots can carry the same
+    /// workspace id AND the same derived object id (two clones of one
+    /// workspace) — unscoped keys would refuse the second root's open as
+    /// ydoc-session-busy against a lease in a DIFFERENT engine DB. The
+    /// default instance has an empty scope; per-root users hold a
+    /// [`Self::scoped`] view sharing the same held-set.
+    scope: String,
     held: Arc<Mutex<HashSet<(String, String)>>>,
-}
-
-fn object_scope(key: &DocKey) -> (String, String) {
-    (key.workspace_id.clone(), key.object_id.clone())
 }
 
 impl LeaseRegistry {
@@ -47,18 +52,36 @@ impl LeaseRegistry {
         LeaseRegistry::default()
     }
 
+    /// A view over the SAME shared held-set whose keys carry the workspace
+    /// root, so identical (workspace, object) pairs under different roots
+    /// cannot exclude each other.
+    pub fn scoped(&self, root: &std::path::Path) -> LeaseRegistry {
+        LeaseRegistry {
+            scope: root.to_string_lossy().into_owned(),
+            held: Arc::clone(&self.held),
+        }
+    }
+
+    fn object_scope(&self, key: &DocKey) -> (String, String) {
+        // NUL never appears in a path or workspace id — an unambiguous join.
+        (
+            format!("{}{}{}", self.scope, char::from(0), key.workspace_id),
+            key.object_id.clone(),
+        )
+    }
+
     /// Acquire an exclusive lease for `key`. Fails with [`CollabError::LeaseHeld`]
     /// if another live lease for the same lineage is outstanding.
     pub fn acquire(&self, key: &DocKey) -> Result<Lease, CollabError> {
         let mut held = self.held.lock().map_err(|_| CollabError::Corrupt {
             reason: "lease registry mutex poisoned".to_string(),
         })?;
-        if !held.insert(object_scope(key)) {
+        if !held.insert(self.object_scope(key)) {
             return Err(CollabError::LeaseHeld);
         }
         Ok(Lease {
             held: self.held.clone(),
-            key: object_scope(key),
+            key: self.object_scope(key),
             released: false,
         })
     }
@@ -67,7 +90,7 @@ impl LeaseRegistry {
     pub fn is_held(&self, key: &DocKey) -> bool {
         self.held
             .lock()
-            .map(|held| held.contains(&object_scope(key)))
+            .map(|held| held.contains(&self.object_scope(key)))
             .unwrap_or(false)
     }
 }

@@ -105,9 +105,13 @@ pub fn drain_deferred_ydoc_for_key(
         }
         Ok::<_, SyncError>(pending)
     })?;
+    if pending.is_empty() {
+        return Ok(0);
+    }
     let mut applied = 0usize;
     let mut last_payload: Option<YdocUpdatePayload> = None;
     let mut payload_recorded_at = 0_i64;
+    let mut drained_coordinates: Vec<(String, i64)> = Vec::new();
     for (origin_id, origin_seq, recorded_at_ms, payload) in pending {
         let bytes = store
             .get_binary_blob(&payload.update_blob_sha256)?
@@ -129,30 +133,17 @@ pub fn drain_deferred_ydoc_for_key(
         .map_err(|_| SyncError::InvalidInput {
             reason: "parked ydoc.update could not be applied",
         })? {
-            TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. }) => {
-                applied += 1;
-                payload_recorded_at = recorded_at_ms;
-                last_payload = Some(payload);
-            }
+            TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. }) => applied += 1,
             TxnOutcome::Committed(ReplicationApplyOutcome::Deduped { .. }) => {}
             TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
         }
-        let cleared = store.write_with(faults, |tx| {
-            tx.execute(
-                "DELETE FROM ydoc_deferred_updates \
-                 WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
-                params![key.workspace_id, origin_id, origin_seq],
-            )
-            .map_err(SyncError::persist)?;
-            Ok::<_, SyncError>(())
-        })?;
-        // A crash seam firing on this delete must surface like the
-        // preceding remote-apply transaction's — reporting the drain as
-        // successful would let settle/close proceed as if the pending row
-        // were durably handled.
-        if matches!(cleared, TxnOutcome::Crashed { .. }) {
-            return Err(SyncError::FaultCrash);
-        }
+        // The payload tracks for DEDUPED rows too: a crash between an
+        // earlier drain's apply and its marker delete redelivers the row as
+        // a dedupe, and the projection below must still run or the visible
+        // head stays behind the already-applied CRDT forever.
+        payload_recorded_at = recorded_at_ms;
+        last_payload = Some(payload);
+        drained_coordinates.push((origin_id, origin_seq));
     }
     // Drained content must reach the VISIBLE head here, not only the CRDT
     // log: the drain runs outside `apply_envelope_with`, so a redelivery of
@@ -160,8 +151,7 @@ pub fn drain_deferred_ydoc_for_key(
     // did not project, the snapshot/materialization would stay stale until
     // some unrelated open/settle. Same idempotent-by-sha write as the pull
     // path; skipped while cross-origin dependencies are still pending.
-    if applied > 0
-        && let Some(payload) = last_payload
+    if let Some(payload) = last_payload
         && let Some(persisted) =
             dohc_engine_collab::load_persisted(store, key).map_err(|_| SyncError::InvalidInput {
                 reason: "ydoc lineage load failed",
@@ -183,6 +173,24 @@ pub fn drain_deferred_ydoc_for_key(
         if matches!(projected, TxnOutcome::Crashed { .. }) {
             return Err(SyncError::FaultCrash);
         }
+    }
+    // The durable markers clear LAST — after the projection committed. A
+    // crash anywhere above leaves the rows in place, and the retry re-runs
+    // apply (content-deduped) AND the projection; deleting first opened a
+    // window where the CRDT held the edit but nothing would ever project it.
+    let cleared = store.write_with(faults, |tx| {
+        for (origin_id, origin_seq) in &drained_coordinates {
+            tx.execute(
+                "DELETE FROM ydoc_deferred_updates \
+                 WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
+                params![key.workspace_id, origin_id, origin_seq],
+            )
+            .map_err(SyncError::persist)?;
+        }
+        Ok::<_, SyncError>(())
+    })?;
+    if matches!(cleared, TxnOutcome::Crashed { .. }) {
+        return Err(SyncError::FaultCrash);
     }
     Ok(applied)
 }

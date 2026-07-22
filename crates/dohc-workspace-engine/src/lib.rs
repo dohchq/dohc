@@ -173,6 +173,12 @@ pub struct EngineService {
     session_ops: Arc<tokio::sync::Mutex<()>>,
     leases: LeaseRegistry,
     next_session: std::sync::atomic::AtomicU64,
+    /// Unique per service INSTANCE (process id + construction time):
+    /// session ids seed client-side idempotency keys that persist in
+    /// `engine_requests`, so ids restarting from 1 each daemon lifetime
+    /// would collide a fresh session's first requests with a prior
+    /// lifetime's ledger rows (hash-mismatch refusals or false dedupes).
+    session_epoch: String,
     self_writes: SelfWriteSuppression,
 }
 
@@ -206,6 +212,13 @@ impl EngineService {
                 GLOBAL_LEASES.clone()
             },
             next_session: std::sync::atomic::AtomicU64::new(1),
+            session_epoch: {
+                let boot_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|elapsed| elapsed.as_millis())
+                    .unwrap_or(0);
+                format!("{:x}-{boot_ms:x}", std::process::id())
+            },
             self_writes: {
                 // Process-wide for the same reason as the lease registry: a
                 // settle through service A must suppress the capture ingest
@@ -2238,7 +2251,7 @@ impl EngineService {
         // must not advance the durable CRDT behind an open editor (no
         // remoteUpdate delivery, no forced resync). Same refusal shape as a
         // second ydoc.open.
-        if self.leases.is_held(&key) {
+        if self.leases.scoped(&open.root).is_held(&key) {
             return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
         }
         let content_kind = match params.content_kind.as_str() {
@@ -2307,13 +2320,14 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
-        let lease = self
-            .leases
-            .acquire(&probe.key)
-            .map_err(|error| match error {
-                CollabError::LeaseHeld => wire(ErrorCode::InvalidParams, "ydoc-session-busy"),
-                other => map_runtime(RuntimeError::Collab(other)),
-            })?;
+        let lease =
+            self.leases
+                .scoped(&open.root)
+                .acquire(&probe.key)
+                .map_err(|error| match error {
+                    CollabError::LeaseHeld => wire(ErrorCode::InvalidParams, "ydoc-session-busy"),
+                    other => map_runtime(RuntimeError::Collab(other)),
+                })?;
         let state = open
             .actor
             .ydoc_open_state(
@@ -2336,7 +2350,7 @@ impl EngineService {
         let sequence = self
             .next_session
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let session_id = format!("ydoc-{sequence:016x}");
+        let session_id = format!("ydoc-{}-{sequence:016x}", self.session_epoch);
         let result = YdocOpenResult {
             session_id: session_id.clone(),
             object_id: state.key.object_id.clone(),

@@ -132,7 +132,14 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     let session_id = opened["sessionId"].as_str().expect("session id");
     let object_id = opened["objectId"].as_str().expect("object id");
     assert!(session_id.starts_with("ydoc-"));
-    assert_eq!(session_id.len(), "ydoc-".len() + 16);
+    // ydoc-<pid:x>-<boot_ms:x>-<seq:016x>: the epoch keeps ids unique
+    // across daemon lifetimes (they seed persisted idempotency keys).
+    assert!(
+        session_id
+            .rsplit('-')
+            .next()
+            .is_some_and(|seq| seq.len() == 16 && seq.chars().all(|c| c.is_ascii_hexdigit()))
+    );
 
     let busy = transport
         .call(
