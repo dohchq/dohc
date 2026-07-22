@@ -5913,6 +5913,7 @@ fn map_runtime(error: RuntimeError) -> WireError {
             DomainError::DuplicateId => Some("duplicate-id"),
             DomainError::ForkBaseNotFound => Some("fork-base-not-found"),
             DomainError::ConflictStaleTarget => Some("conflict-stale-target"),
+            DomainError::BinaryHeadNotText => Some("binary-head-not-text"),
             DomainError::InvalidPath { .. } => Some("invalid-path"),
             DomainError::InvalidText { .. } => Some("invalid-text"),
             DomainError::NotSecretPath => Some("not-secret-path"),

@@ -2,6 +2,7 @@
 //! in-process transport and actor-owned store.
 
 use dohc_engine_protocol::{
+    ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Request, WorkspaceHandle},
 };
@@ -2379,6 +2380,66 @@ async fn merge_classifies_and_never_inlines_the_merged_body() {
     )
     .await;
     assert_eq!(indexed[0]["path"], "merge.md");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compare_and_merge_map_binary_heads_to_the_stable_wire_error() {
+    // MUTATION: omit BinaryHeadNotText from map_runtime -> both calls fall
+    // through to the generic "workspace operation failed" wire message.
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    seed_versions(scratch.path(), "ws-rpcd-binary-merge-wire");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "ws-rpcd-binary-merge-wire"
+                }),
+            ),
+        )
+        .await
+        .expect("open");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+
+    for (id, method, params) in [
+        (
+            2,
+            "versionedText.compare",
+            json!({
+                "path": "asset.bin",
+                "sourceVersionId": "feature",
+                "targetVersionId": "main"
+            }),
+        ),
+        (
+            3,
+            "versionedText.merge",
+            json!({
+                "path": "asset.bin",
+                "sourceVersionId": "feature",
+                "targetVersionId": "main",
+                "origin": "api",
+                "requestId": "binary-merge-wire"
+            }),
+        ),
+    ] {
+        let error = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, method, Some(handle.clone()), params),
+            )
+            .await
+            .expect_err("binary head must refuse the text operation");
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert_eq!(error.message, "binary-head-not-text");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

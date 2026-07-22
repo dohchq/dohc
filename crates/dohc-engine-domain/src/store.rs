@@ -14,7 +14,10 @@
 //! no concurrent writer can invalidate a check between the read and the
 //! transaction (`STATE_OWNERSHIP.tsv` `sqlite-conn-versioned-text`).
 
-use crate::conflicts::{WriteBinaryFile, write_binary_file_in_tx};
+use crate::conflicts::{
+    WriteBinaryFile, binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
+    write_binary_file_in_tx,
+};
 use crate::error::DomainError;
 use crate::records::{
     BinaryBlobRead, BinaryHead, BinaryHeadMeta, BinaryWriteResult, CaptureIngest,
@@ -529,16 +532,64 @@ impl<'a> VersionedTextStore<'a> {
                 params![ws, input.version_id, prep.moment.object_id],
             )
             .map_err(DomainError::sql_persist)?;
-            // Reconcile DISK with the rolled-back head — but ONLY for a binary
-            // WRITE moment, the sole domain mutation that enqueues its own
-            // materialization job (text reaches disk via the collab layer, not a
-            // domain job; Delete/Rename enqueue nothing here). Gating on the
-            // moment's operation + content kind AND matching the job's content
-            // against THIS write's bytes makes a text/delete/rename rollback
-            // provably unable to touch an unrelated job that merely shares the
-            // moment id. For a genuine binary write:
-            // Restore disk to the rolled-back-to state UNCONDITIONALLY for a
-            // genuine binary write, then cancel a still-pending job:
+            // Cancel every pending disk intent produced by the moment being
+            // removed. This is deliberately NOT active-version-gated: a job was
+            // enqueued while this version was active and can otherwise replay
+            // after another version becomes active. Match the moment generation,
+            // path, and content so a malformed same-id row is never swept.
+            let merge_sha = match prep.moment.operation {
+                MomentOp::Write if prep.moment.after_content_kind == "text" => {
+                    prep.moment.after_blob_sha256.as_deref()
+                }
+                MomentOp::Delete if prep.moment.before_content_kind == "text" => {
+                    prep.moment.before_blob_sha256.as_deref()
+                }
+                MomentOp::Write | MomentOp::Delete | MomentOp::Rename => None,
+            };
+            if let Some(sha256) = merge_sha {
+                cancel_pending_materialization(
+                    tx,
+                    &format!("merge-mat_{}", input.mutation_moment_id),
+                    &prep.moment.path,
+                    prep.moment.moment_order,
+                    sha256,
+                )?;
+            }
+            if prep.moment.operation == MomentOp::Delete
+                && prep.moment.before_content_kind == "binary"
+                && let Some(sha256) = prep.moment.before_binary_sha256.as_deref()
+            {
+                cancel_pending_materialization(
+                    tx,
+                    &binary_delete_job_id(input.mutation_moment_id.as_str()),
+                    &prep.moment.path,
+                    prep.moment.moment_order,
+                    sha256,
+                )?;
+            }
+            if prep.moment.operation == MomentOp::Rename
+                && prep.moment.after_content_kind == "binary"
+                && let Some(sha256) = prep.moment.after_binary_sha256.as_deref()
+            {
+                cancel_pending_materialization(
+                    tx,
+                    &binary_rename_write_job_id(input.mutation_moment_id.as_str()),
+                    &prep.moment.path,
+                    prep.moment.moment_order,
+                    sha256,
+                )?;
+                if let Some(before) = &prep.before {
+                    cancel_pending_materialization(
+                        tx,
+                        &binary_rename_delete_job_id(input.mutation_moment_id.as_str()),
+                        &before.path,
+                        prep.moment.moment_order,
+                        sha256,
+                    )?;
+                }
+            }
+
+            // Reconcile DISK with an active-version rolled-back binary WRITE:
             //   * a PENDING job does NOT prove disk is clean — the materializer
             //     can crash AFTER the atomic rename lands but BEFORE marking the
             //     job complete (`MaterializeAfterRenameBeforeComplete`), leaving
@@ -550,15 +601,23 @@ impl<'a> VersionedTextStore<'a> {
             //     race the compensator and re-materialize the rolled-back bytes.
             if prep.moment.operation == MomentOp::Write
                 && prep.moment.after_content_kind == "binary"
-                && version_is_active(tx, ws, &input.version_id)?
                 && let Some(written_moment_sha) = prep.moment.after_binary_sha256.as_deref()
             {
-                let job: Option<(String, i64, String)> = tx
+                let active = version_is_active(tx, ws, &input.version_id)?;
+                let job: Option<(String, i64, String, String, String)> = tx
                     .query_row(
-                        "SELECT status, target_generation, content_sha256 \
+                        "SELECT status, target_generation, content_sha256, target_path, operation \
                          FROM materialization_jobs WHERE job_id = ?1",
                         params![input.mutation_moment_id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                            ))
+                        },
                     )
                     .optional()
                     .map_err(DomainError::sql_corrupt)?;
@@ -566,17 +625,22 @@ impl<'a> VersionedTextStore<'a> {
                     // Only cancel/compensate against a job whose content is
                     // exactly this write's bytes — never an unrelated
                     // same-id job.
-                    Some((status, generation, written_sha256))
-                        if written_sha256.as_str() == written_moment_sha =>
+                    Some((status, generation, written_sha256, target_path, operation))
+                        if generation == prep.moment.moment_order
+                            && written_sha256.as_str() == written_moment_sha
+                            && target_path == prep.moment.path
+                            && operation == "write" =>
                     {
-                        enqueue_binary_rollback_restore(
-                            tx,
-                            input,
-                            &prep.before,
-                            generation,
-                            &written_sha256,
-                            prep.moment.recorded_at_ms,
-                        )?;
+                        if active {
+                            enqueue_binary_rollback_restore(
+                                tx,
+                                input,
+                                &prep.before,
+                                generation,
+                                &written_sha256,
+                                prep.moment.recorded_at_ms,
+                            )?;
+                        }
                         if status == "pending" {
                             tx.execute(
                                 "DELETE FROM materialization_jobs WHERE job_id = ?1",
@@ -594,7 +658,7 @@ impl<'a> VersionedTextStore<'a> {
                     // the DB head would silently diverge forever. Restore
                     // against the write's own generation (the same peer rule
                     // BINHEAD uses for its compensators).
-                    None => {
+                    None if active => {
                         enqueue_binary_rollback_restore(
                             tx,
                             input,
@@ -604,6 +668,7 @@ impl<'a> VersionedTextStore<'a> {
                             prep.moment.recorded_at_ms,
                         )?;
                     }
+                    None => {}
                 }
             }
 
@@ -3610,6 +3675,25 @@ fn enqueue_binary_rollback_restore(
             .map_err(DomainError::from)?;
         }
     }
+    Ok(())
+}
+
+/// Remove a still-replayable disk intent only when it is provably owned by the
+/// moment being rolled back. Terminal rows remain as generation evidence.
+fn cancel_pending_materialization(
+    tx: &Transaction<'_>,
+    job_id: &str,
+    target_path: &str,
+    target_generation: i64,
+    content_sha256: &str,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "DELETE FROM materialization_jobs \
+         WHERE job_id = ?1 AND target_path = ?2 AND target_generation = ?3 \
+           AND content_sha256 = ?4 AND status = 'pending'",
+        params![job_id, target_path, target_generation, content_sha256],
+    )
+    .map_err(DomainError::sql_persist)?;
     Ok(())
 }
 

@@ -1394,12 +1394,18 @@ pub(crate) const YDOC_DEFERRED_MIGRATION_ID: &str = "v1-ydoc-deferred-updates";
 /// cannot evict an unrelated subsystem's idempotency record. Nullable by
 /// design: legacy `result_seq = -1` is ambiguous between chats and the first
 /// Y.Doc update, while zero is shared by chats and versioned no-op results, so
-/// raw-hash rows at either sentinel remain fail-safe unclassified.
+/// raw-hash rows at either sentinel remain fail-safe unclassified. Positive
+/// raw-hash rows are versioned only when the database has no `documents` rows:
+/// every CAL-1 compound commit creates one, so their presence makes positive
+/// legacy request rows ambiguous and the fail-safe classification is `NULL`.
 const V1_ENGINE_REQUEST_KIND_DDL: &str = "\
 ALTER TABLE engine_requests ADD COLUMN kind TEXT;
 UPDATE engine_requests SET kind = 'ydoc' WHERE result_seq < -1;
 UPDATE engine_requests SET kind = 'merge' WHERE payload_hash LIKE '{%';
-UPDATE engine_requests SET kind = 'versioned' WHERE result_seq > 0 AND kind IS NULL;
+UPDATE engine_requests SET kind = 'versioned'
+ WHERE result_seq > 0
+   AND kind IS NULL
+   AND NOT EXISTS (SELECT 1 FROM documents);
 ";
 
 /// The `id` of the request-ledger kind migration.
@@ -1858,47 +1864,61 @@ mod tests {
 
     #[test]
     fn request_kind_migration_backfills_provable_legacy_rows() {
-        let dir = tempdir();
-        let path = dir.join("engine.db");
         let ctx = MigrationContext::current(1_250);
-        let mut conn = open_bare(&path);
-
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..13], &ctx, &NoFaults)
-            .expect("pre-kind migrations");
-        conn.execute_batch(
-            "INSERT INTO engine_requests
-             (request_id, payload_hash, result_seq, committed_at) VALUES
-             ('ydoc', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', -2, 1),
-             ('merge', '{\"payload_hash\":\"hash\",\"outcome\":{\"kind\":\"unchanged\",\"reason\":\"already-same\"}}', 9, 2),
-             ('chat-or-versioned-noop', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 0, 3),
-             ('chat-or-first-ydoc', 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', -1, 4),
-             ('versioned', 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', 7, 5);",
-        )
-        .expect("legacy request rows");
-
-        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("kind migration");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-        let kind = |request_id: &str| {
-            conn.query_row(
-                "SELECT kind FROM engine_requests WHERE request_id = ?1",
-                [request_id],
-                |row| row.get::<_, Option<String>>(0),
+        let migrate = |name: &str, seed_document: bool| {
+            let dir = tempdir();
+            let path = dir.join(format!("{name}.db"));
+            let mut conn = open_bare(&path);
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..13], &ctx, &NoFaults)
+                .expect("pre-kind migrations");
+            conn.execute_batch(
+                "INSERT INTO engine_requests
+                 (request_id, payload_hash, result_seq, committed_at) VALUES
+                 ('ydoc', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', -2, 1),
+                 ('merge', '{\"payload_hash\":\"hash\",\"outcome\":{\"kind\":\"unchanged\",\"reason\":\"already-same\"}}', 9, 2),
+                 ('chat-or-versioned-noop', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 0, 3),
+                 ('chat-or-first-ydoc', 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', -1, 4),
+                 ('positive', 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', 7, 5);",
             )
-            .expect("legacy kind")
+            .expect("legacy request rows");
+            if seed_document {
+                conn.execute(
+                    "INSERT INTO documents (doc_id, body, updated_at_ms) VALUES ('cal-1', 'body', 6)",
+                    [],
+                )
+                .expect("CAL-1 document discriminator");
+            }
+            let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+                .expect("kind migration");
+            assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+            let kind = |request_id: &str| {
+                conn.query_row(
+                    "SELECT kind FROM engine_requests WHERE request_id = ?1",
+                    [request_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .expect("legacy kind")
+            };
+            // MUTATION: remove the negative-sequence classification -> fails.
+            assert_eq!(kind("ydoc").as_deref(), Some("ydoc"));
+            // MUTATION: classify by positive result_seq before JSON shape -> fails.
+            assert_eq!(kind("merge").as_deref(), Some("merge"));
+            // MUTATION: guess that zero belongs to chats or versioning -> fails.
+            assert_eq!(kind("chat-or-versioned-noop"), None);
+            // MUTATION: guess that -1 belongs to chats or Y.Doc -> fails.
+            assert_eq!(kind("chat-or-first-ydoc"), None);
+            kind("positive")
         };
-        // MUTATION: remove the negative-sequence classification -> fails.
-        assert_eq!(kind("ydoc").as_deref(), Some("ydoc"));
-        // MUTATION: classify by positive result_seq before JSON shape -> fails.
-        assert_eq!(kind("merge").as_deref(), Some("merge"));
-        // MUTATION: guess that zero belongs to chats or versioning -> fails.
-        // Both writers used this exact sequence and raw SHA-256 payload shape.
-        assert_eq!(kind("chat-or-versioned-noop"), None);
-        // MUTATION: guess that -1 belongs to chats or Y.Doc -> fails. Both
-        // writers used this exact sequence and raw SHA-256 payload shape.
-        assert_eq!(kind("chat-or-first-ydoc"), None);
-        // MUTATION: leave positive production rows unclassified -> fails.
-        assert_eq!(kind("versioned").as_deref(), Some("versioned"));
+
+        // MUTATION: ignore the documents-table discriminator -> this becomes
+        // `versioned` and can later evict an ambiguous compound ledger row.
+        assert_eq!(migrate("with-documents", true), None);
+        // MUTATION: invert the zero-documents branch -> the provably versioned
+        // positive row remains unclassified.
+        assert_eq!(
+            migrate("without-documents", false).as_deref(),
+            Some("versioned")
+        );
     }
 
     #[test]
