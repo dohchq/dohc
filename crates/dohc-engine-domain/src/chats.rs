@@ -2712,7 +2712,10 @@ impl<'a> LinkedChatStore<'a> {
             "invalid-bookmark-target",
             "Bookmark id is required.",
         )?;
-        if generation < 1 {
+        // Same bound as the failed/stale transitions: a generation above
+        // JS Number.MAX_SAFE_INTEGER is a malformed coordinate (worker or
+        // serialization bug) and must REFUSE, not read as merely stale.
+        if !(1..=9_007_199_254_740_991).contains(&generation) {
             return Err(DomainError::chat(
                 "invalid-bookmark-target",
                 "Bookmark generation is invalid.",
@@ -3128,8 +3131,8 @@ impl<'a> LinkedChatStore<'a> {
                     tx.execute(
                         "UPDATE agent_run_records SET ended_at_ms = ?2, exit_code = -1, \
                            failure_reason = 'reclaimed-crashed' \
-                         WHERE run_id = ?1 AND ended_at_ms IS NULL",
-                        params![run, now_ms],
+                         WHERE workspace_id = ?3 AND run_id = ?1 AND ended_at_ms IS NULL",
+                        params![run, now_ms, ws],
                     )
                     .map_err(DomainError::sql_persist)?;
                 }

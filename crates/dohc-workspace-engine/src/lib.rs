@@ -2612,7 +2612,9 @@ struct ChatDispatchEnqueueParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatDispatchClaimParams {
     run_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
     command: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
     log_path: Option<String>,
     now_ms: Option<i64>,
 }

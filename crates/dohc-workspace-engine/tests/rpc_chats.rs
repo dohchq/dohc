@@ -2142,3 +2142,94 @@ async fn review_round_11_bookmark_state_filter_command_default_and_path_floor() 
 
     call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_round_12_rejects_malformed_ready_generation_and_null_claim_metadata() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-chat-r12").await;
+    let mut id = 10;
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({ "channelId": "channel-r12", "name": "R12", "kind": "channel", "nowMs": 10 }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel-r12",
+            "threadId": "thread-r12",
+            "messageId": "message-r12",
+            "authorKind": "human",
+            "authorDisplayName": "Alice",
+            "body": "r12",
+            "nowMs": 11,
+        }),
+    )
+    .await;
+    let bookmark = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.save",
+        json!({
+            "ownerUserId": "owner-1",
+            "targetKind": "thread",
+            "targetId": "thread-r12",
+            "mode": "live",
+            "destinationPath": "bookmarks/r12.md",
+            "nowMs": 12,
+        }),
+    )
+    .await;
+    let bookmark_id = bookmark["bookmarkId"].as_str().expect("id").to_owned();
+
+    // A generation above JS Number.MAX_SAFE_INTEGER is a malformed coordinate
+    // and must REFUSE like the failed/stale transitions, not read as merely
+    // stale. Mutation check: restore the bare `generation < 1` floor in
+    // `mark_bookmark_ready` — the call then succeeds with applied:false and
+    // this refusal assertion fails.
+    let unsafe_generation = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.markReady",
+        json!({
+            "ownerUserId": "owner-1",
+            "bookmarkId": &bookmark_id,
+            "generation": 9_007_199_254_740_992_i64,
+            "projectedAtMs": 13,
+        }),
+    )
+    .await;
+    assert_eq!(unsafe_generation.code, ErrorCode::InvalidParams);
+
+    // Explicit JSON null is malformed runner metadata, distinct from omission.
+    // Mutation check: drop the non-null deserializers on
+    // ChatDispatchClaimParams — null then reads as None and the claim
+    // proceeds, failing both refusal assertions.
+    for field in ["command", "logPath"] {
+        let mut params = serde_json::Map::new();
+        params.insert("runId".into(), json!("run-r12"));
+        params.insert(field.into(), Value::Null);
+        params.insert("nowMs".into(), json!(20));
+        let error = call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.claimNextPending",
+            Value::Object(params),
+        )
+        .await;
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+    }
+
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}

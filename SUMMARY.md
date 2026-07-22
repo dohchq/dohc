@@ -33,7 +33,7 @@ Dispatch completion/failure now resolve the run under the handle-derived workspa
 
 Per the task constraint, no `cargo build`, `cargo check`, or `cargo test` command was run. The changed Rust files were parsed/formatted with `rustfmt`, and `git diff --check` passes. Compilation and execution remain for the orchestrator gate.
 
-Replication apply arms and reactions/decisions/attachment/mention indexing were intentionally left out: `crates/dohc-engine-domain/src/chats.rs:32-35` explicitly defers those surfaces to RPC-B2 (the gated follow-up shard; formerly labeled R10-scope). No additional chat query or presentation surface was invented beyond the R09 methods at `chats.rs:744-2019`.
+Replication apply arms, file-linked reads, and reactions/decisions/attachment/mention indexing were intentionally left out: `crates/dohc-engine-domain/src/chats.rs:32-35` explicitly defers those surfaces to RPC-B2 (the gated follow-up shard; formerly labeled R10-scope). No additional chat query or presentation surface was invented beyond the R09 methods at `chats.rs:744-2019`.
 
 ## Review round 1
 
