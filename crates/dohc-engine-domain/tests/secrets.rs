@@ -634,10 +634,24 @@ fn secret_apply_verbatim_copy_is_content_equality_no_op() {
     create_feature(&mut store);
     write_version(&mut store, &key, "main", ".env", "TOKEN=one", "main-1", 10);
 
+    let mut provenance_input = apply_input("apply-1", 20);
+    provenance_input.metadata_origin = "api".to_owned();
+    provenance_input.metadata_summary = Some("Merged .env from main".to_owned());
+    provenance_input.metadata_correlation_id = Some("corr-apply-1".to_owned());
     let first =
-        apply_secret_file_from_version(&mut store, &key, &apply_input("apply-1", 20), &NO_FAULTS)
-            .unwrap();
+        apply_secret_file_from_version(&mut store, &key, &provenance_input, &NO_FAULTS).unwrap();
     assert!(first.changed);
+    // MUTATION: hardcode sync/none provenance -> the caller metadata vanishes.
+    let moment = first.moment.as_ref().expect("apply moment");
+    assert_eq!(moment.metadata_origin, "api");
+    assert_eq!(
+        moment.metadata_summary.as_deref(),
+        Some("Merged .env from main")
+    );
+    assert_eq!(
+        moment.metadata_correlation_id.as_deref(),
+        Some("corr-apply-1")
+    );
     let moments_after_first = store.table_row_count("secret_moments").unwrap();
     let second =
         apply_secret_file_from_version(&mut store, &key, &apply_input("apply-2", 21), &NO_FAULTS)
@@ -735,14 +749,25 @@ fn secret_apply_propagates_source_delete() {
         from_version_id: "feat".to_owned(),
         to_version_id: "main".to_owned(),
         moment_id: "apply-delete".to_owned(),
-        metadata_origin: "sync".to_owned(),
-        metadata_summary: None,
-        metadata_correlation_id: None,
+        metadata_origin: "api".to_owned(),
+        metadata_summary: Some("Removed .env in feature".to_owned()),
+        metadata_correlation_id: Some("corr-apply-delete".to_owned()),
         now_ms: 20,
     };
     let result = apply_secret_file_from_version(&mut store, &key, &input, &NO_FAULTS).unwrap();
     assert!(result.changed);
-    assert_eq!(result.moment.unwrap().operation, SecretOp::Delete);
+    let moment = result.moment.unwrap();
+    assert_eq!(moment.operation, SecretOp::Delete);
+    // MUTATION: hardcode sync/none provenance on the delete arm -> vanishes.
+    assert_eq!(moment.metadata_origin, "api");
+    assert_eq!(
+        moment.metadata_summary.as_deref(),
+        Some("Removed .env in feature")
+    );
+    assert_eq!(
+        moment.metadata_correlation_id.as_deref(),
+        Some("corr-apply-delete")
+    );
     assert!(
         SecretFileStore::new(&mut store, &key)
             .materialize_secret_file(WS, "main", ".env")

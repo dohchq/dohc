@@ -152,11 +152,13 @@ TEXT store normalizes slashes too. Edge spellings ("a//b.env") create
 two Rust secret rows where the oracle collapses to one, and both
 materialize onto the same disk file. Self-consistent within Rust
 (write/read/list all verbatim); owed a ruling alongside the RPC-D2
-secret disk executor. ALSO recorded (same review): the daemon
-rollback's engine_requests purge filters by bare result_seq in a table
-shared with the collab durable ledger and the storage compound-write
-ledger — a numeric collision would evict an unrelated idempotency row;
-audit when the ledgers next change.
+secret disk executor — GATE6-BLOCKING (two secret rows materializing
+onto one disk file is a plaintext clobber/mask hazard). ALSO recorded
+(same review): the daemon rollback's engine_requests purge filters by
+bare result_seq in a table shared with the collab durable ledger and
+the storage compound-write ledger — a numeric collision would evict an
+unrelated idempotency row; audit owed, GATE6-BLOCKING (idempotency
+correctness is first-order pre-cutover).
 
 CROSS-ENGINE DELTA (RPC-A r18): secret path SPELLING — TS normalize-stores
 (percent-disguises collapse); Rust stores the spelling the write carried
