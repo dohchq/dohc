@@ -2346,6 +2346,13 @@ fn write_text_in_tx_with_journal(
         // idempotency-mismatch code).
         return Err(DomainError::DuplicateMomentId);
     }
+    // Text and protected history share one workspace-wide moment-id namespace.
+    // `get_moment` intentionally resolves only plaintext history, so retain
+    // the exact-text replay above and then reject a secret-table collision in
+    // this same transaction before inserting the text row.
+    if moment_exists(tx, ws, &input.moment_id)? {
+        return Err(DomainError::DuplicateMomentId);
+    }
 
     let existing_object = alias_object_id(tx, ws, &input.version_id, &input.path)?;
     let before = match &existing_object {
@@ -3295,7 +3302,9 @@ pub(crate) fn moment_exists(
 ) -> Result<bool, DomainError> {
     let found: Option<i64> = conn
         .query_row(
-            "SELECT 1 FROM moments WHERE workspace_id = ?1 AND moment_id = ?2",
+            "SELECT 1 WHERE \
+             EXISTS (SELECT 1 FROM moments WHERE workspace_id = ?1 AND moment_id = ?2) OR \
+             EXISTS (SELECT 1 FROM secret_moments WHERE workspace_id = ?1 AND moment_id = ?2)",
             params![workspace_id, moment_id],
             |row| row.get(0),
         )

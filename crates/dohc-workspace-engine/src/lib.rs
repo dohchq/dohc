@@ -811,6 +811,24 @@ impl EngineService {
         format!("{prefix}-{:x}", digest.finalize())
     }
 
+    /// Acquire the ordering guard shared with `ydoc.open` before probing a
+    /// path lease. The caller must retain the returned OWNED guard until its
+    /// actor mutation has completed: check-without-lease -> mutation and
+    /// probe -> lease -> authoritative re-read are mutually exclusive orders.
+    async fn mutation_session_guard(
+        &self,
+        cancellation: &OperationCancellation,
+        operation: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, WireError> {
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                Err(cancellation.interruption(operation))
+            }
+            serial = Arc::clone(&self.session_ops).lock_owned() => Ok(serial),
+        }
+    }
+
     async fn ensure_path_not_leased(
         &self,
         open: &OpenWorkspace,
@@ -865,6 +883,10 @@ impl EngineService {
         }
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let session_serial = self
+            .mutation_session_guard(&cancellation, "versionedText.write (queued)")
+            .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
         let request_id = params
@@ -876,7 +898,6 @@ impl EngineService {
         let moment_id = params.moment_id.unwrap_or_else(|| {
             self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path)
         });
-        let cancellation = OperationCancellation::new(ctx);
         let result = open
             .actor
             .versioned_text_write_indexed(
@@ -896,8 +917,9 @@ impl EngineService {
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
-            .await
-            .map_err(map_runtime)?;
+            .await;
+        drop(session_serial);
+        let result = result.map_err(map_runtime)?;
         Ok(json!({
             "object": file_object_json(&result.object),
             "snapshot": snapshot_json(&result.snapshot),
@@ -928,6 +950,10 @@ impl EngineService {
         }
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let session_serial = self
+            .mutation_session_guard(&cancellation, "versionedBinary.write (queued)")
+            .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
         let request_id = params
@@ -939,7 +965,6 @@ impl EngineService {
         let moment_id = params.moment_id.unwrap_or_else(|| {
             self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path)
         });
-        let cancellation = OperationCancellation::new(ctx);
         let execution = open
             .actor
             .versioned_binary_write(
@@ -960,8 +985,9 @@ impl EngineService {
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
-            .await
-            .map_err(map_runtime)?;
+            .await;
+        drop(session_serial);
+        let execution = execution.map_err(map_runtime)?;
         let result = execution.write;
         Ok(json!({
             "object": file_object_json(&result.object),
@@ -996,6 +1022,10 @@ impl EngineService {
         let to_path = params.to_path.clone();
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let session_serial = self
+            .mutation_session_guard(&cancellation, "versionedText.rename (queued)")
+            .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &from_path)
             .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &to_path)
@@ -1005,7 +1035,6 @@ impl EngineService {
             .or_else(|| request.idempotency_key.clone());
         let moment_id =
             self.generated_rpc_id("moment", request.id, request_id.as_deref(), &to_path);
-        let cancellation = OperationCancellation::new(ctx);
         let result = open
             .actor
             .versioned_text_rename(
@@ -1024,8 +1053,9 @@ impl EngineService {
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
-            .await
-            .map_err(map_runtime)?;
+            .await;
+        drop(session_serial);
+        let result = result.map_err(map_runtime)?;
         Ok(json!({
             "object": file_object_json(&result.object),
             "before": snapshot_metadata_json(
@@ -1057,13 +1087,16 @@ impl EngineService {
         let path = params.path.clone();
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let session_serial = self
+            .mutation_session_guard(&cancellation, "versionedText.delete (queued)")
+            .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
         let request_id = params
             .request_id
             .or_else(|| request.idempotency_key.clone());
         let moment_id = self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path);
-        let cancellation = OperationCancellation::new(ctx);
         let result = open
             .actor
             .versioned_text_delete(
@@ -1081,8 +1114,9 @@ impl EngineService {
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
-            .await
-            .map_err(map_runtime)?;
+            .await;
+        drop(session_serial);
+        let result = result.map_err(map_runtime)?;
         Ok(json!({
             "object": file_object_json(&result.object),
             "before": snapshot_metadata_json(
@@ -1109,6 +1143,10 @@ impl EngineService {
             .map_err(|error| map_runtime(RuntimeError::Domain(error)))?;
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let session_serial = self
+            .mutation_session_guard(&cancellation, "versionedText.rollback (queued)")
+            .await?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
         let restore_path = open
@@ -1136,7 +1174,6 @@ impl EngineService {
         let request_id = params
             .request_id
             .or_else(|| request.idempotency_key.clone());
-        let cancellation = OperationCancellation::new(ctx);
         let result = open
             .actor
             .versioned_text_rollback(
@@ -1155,8 +1192,9 @@ impl EngineService {
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
-            .await
-            .map_err(map_runtime)?;
+            .await;
+        drop(session_serial);
+        let result = result.map_err(map_runtime)?;
         Ok(json!({
             "rolledBack": true,
             "deduped": result.deduped,
@@ -1202,6 +1240,10 @@ impl EngineService {
         let path = params.path.clone();
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let session_serial = self
+            .mutation_session_guard(&cancellation, "versions.merge (queued)")
+            .await?;
         self.ensure_path_not_leased(&open, &params.target_version_id, &path)
             .await?;
         let request_id = params
@@ -1211,7 +1253,6 @@ impl EngineService {
         let moment_id = self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path);
         let conflict_id =
             self.generated_rpc_id("conflict", request.id, request_id.as_deref(), &path);
-        let cancellation = OperationCancellation::new(ctx);
         let result = open
             .actor
             .versioned_text_merge(
@@ -1232,8 +1273,9 @@ impl EngineService {
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
-            .await
-            .map_err(map_runtime)?;
+            .await;
+        drop(session_serial);
+        let result = result.map_err(map_runtime)?;
         Ok(match result {
             MergeTextFileResult::Unchanged { deduped, .. } => json!({
                 "status": "unchanged",
@@ -6095,6 +6137,71 @@ mod tests {
             .expect_err("cancelled queued open must fail");
         assert_eq!(result.code, ErrorCode::Cancelled);
         drop(held);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mutation_write_waits_for_session_ops_before_lease_check_and_commit() {
+        // MUTATION: remove the versionedText.write session_ops acquisition ->
+        // the write completes while this test still holds the ydoc ordering guard.
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = Arc::new(EngineService::with_supervisor(supervisor));
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "mutation-session-serial"
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+
+        let held = Arc::clone(&service.session_ops).lock_owned().await;
+        let writing_service = Arc::clone(&service);
+        let writing_handle = handle.clone();
+        let mut writing = tokio::spawn(async move {
+            let ctx = RequestContext::unbounded();
+            let request = Request {
+                id: 1,
+                method: "versionedText.write".to_owned(),
+                workspace: Some(writing_handle),
+                deadline_ms: None,
+                idempotency_key: None,
+                params: json!({
+                    "versionId": "main",
+                    "path": "serialized.md",
+                    "text": "must wait",
+                    "origin": "api",
+                    "requestId": "mutation-session-serial-write"
+                }),
+            };
+            writing_service
+                .versioned_text_write(&ctx, &request, request.params.clone())
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut writing)
+                .await
+                .is_err(),
+            "the write path must block behind the same guard held by ydoc.open"
+        );
+
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(10), writing)
+            .await
+            .expect("write completed after guard release")
+            .expect("write task")
+            .expect("versioned text write");
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

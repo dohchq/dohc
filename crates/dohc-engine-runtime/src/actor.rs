@@ -60,8 +60,8 @@ use dohc_engine_domain::{
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, StdBackoff, StdReplacer, materialize_one};
 use dohc_engine_storage::{
-    CompoundWrite, Document, EngineStore, FaultInjector, NoFaults, Preimage, StorageError,
-    TxnOutcome, WriteOutcome,
+    CompoundWrite, Document, EngineStore, FaultInjector, JobStatus, MaterializationJob, NoFaults,
+    Preimage, StorageError, TxnOutcome, WriteOutcome,
 };
 use dohc_engine_sync::{
     ApplyOutcome, ConflictApplyResult, ReplicationEnvelope, apply_conflict_envelope,
@@ -5527,10 +5527,9 @@ fn versioned_binary_write_on_store(
         TxnOutcome::Committed(result) => result,
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
-    if result.deduped || !result.materialize_enqueued {
-        // Deduped, or a NON-ACTIVE version write: DB-only. Disk mirrors the
-        // active version, so there is no job to run and no self-write to
-        // suppress.
+    if !result.deduped && !result.materialize_enqueued {
+        // A NON-ACTIVE version write is DB-only. Disk mirrors the active
+        // version, so there is no job to run and no self-write to suppress.
         return Ok(BinaryWriteExecutionResult {
             write: result,
             materialized: false,
@@ -5538,25 +5537,26 @@ fn versioned_binary_write_on_store(
         });
     }
 
-    // Register before replacement: the watcher may observe the write as soon
-    // as the atomic rename lands. A failed/conflicted materialization retracts
-    // the identity because no self-write is then available to consume it.
-    self_writes.record(&input.workspace_id, &result.path, &result.sha256);
-    let job = match store.load_materialization_job(&input.moment_id) {
+    // Request-ledger reconstruction returns the ORIGINAL moment. A replay must
+    // probe that moment's durable job, not the caller's newly supplied id: a
+    // transient first materialization can leave the original job pending.
+    let job = match store.load_materialization_job(&result.moment.moment_id) {
         Ok(Some(job)) => job,
+        Ok(None) if result.deduped => {
+            return Ok(BinaryWriteExecutionResult {
+                write: result,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+            });
+        }
         Ok(None) => {
-            // No job will ever consume the identity — it must not survive to
-            // suppress a genuine external write of the same path+sha.
-            self_writes.retract(&input.workspace_id, &result.path, &result.sha256);
             return Ok(BinaryWriteExecutionResult {
                 write: result,
                 materialized: false,
                 materialize_outcome: PostCommitMaterializeOutcome::Error,
             });
         }
-        Err(error) => {
-            self_writes.retract(&input.workspace_id, &result.path, &result.sha256);
-            let _ = error;
+        Err(_) => {
             return Ok(BinaryWriteExecutionResult {
                 write: result,
                 materialized: false,
@@ -5564,59 +5564,64 @@ fn versioned_binary_write_on_store(
             });
         }
     };
-    let materialized = materialize_one(
+    if result.deduped && job.status != JobStatus::Pending {
+        return Ok(BinaryWriteExecutionResult {
+            write: result,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
+    }
+    let (materialized, materialize_outcome) = materialize_pending_job(
         store,
         root_dir,
+        &input.workspace_id,
         &job,
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &StdBackoff,
+        self_writes,
         input.now_ms,
         faults,
     );
-    let materialized = match materialized {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            self_writes.retract(&input.workspace_id, &result.path, &result.sha256);
-            let _ = error;
-            return Ok(BinaryWriteExecutionResult {
-                write: result,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Error,
-            });
+    Ok(BinaryWriteExecutionResult {
+        write: result,
+        materialized,
+        materialize_outcome,
+    })
+}
+
+fn materialize_pending_job(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    workspace_id: &str,
+    job: &MaterializationJob,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> (bool, PostCommitMaterializeOutcome) {
+    // Register before replacement: the watcher may observe the write as soon
+    // as the atomic rename lands. Every non-applied outcome retracts the
+    // identity because no self-write is then available to consume it.
+    self_writes.record(workspace_id, &job.target_path, &job.content_sha256);
+    let outcome = materialize_one(
+        store,
+        root_dir,
+        job,
+        DurabilityPolicy::per_os(),
+        &StdReplacer,
+        &StdBackoff,
+        now_ms,
+        faults,
+    );
+    let (materialized, reported) = match outcome {
+        Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
+            (true, PostCommitMaterializeOutcome::Applied)
         }
+        Ok(JobOutcome::Conflict) => (false, PostCommitMaterializeOutcome::Conflict),
+        Ok(JobOutcome::Superseded) => (false, PostCommitMaterializeOutcome::Superseded),
+        Ok(JobOutcome::Crashed(_)) | Err(_) => (false, PostCommitMaterializeOutcome::Error),
     };
-    match materialized {
-        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => Ok(BinaryWriteExecutionResult {
-            write: result,
-            materialized: true,
-            materialize_outcome: PostCommitMaterializeOutcome::Applied,
-        }),
-        JobOutcome::Conflict => {
-            self_writes.retract(&input.workspace_id, &result.path, &result.sha256);
-            Ok(BinaryWriteExecutionResult {
-                write: result,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Conflict,
-            })
-        }
-        JobOutcome::Superseded => {
-            self_writes.retract(&input.workspace_id, &result.path, &result.sha256);
-            Ok(BinaryWriteExecutionResult {
-                write: result,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Superseded,
-            })
-        }
-        JobOutcome::Crashed(_) => {
-            self_writes.retract(&input.workspace_id, &result.path, &result.sha256);
-            Ok(BinaryWriteExecutionResult {
-                write: result,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Error,
-            })
-        }
+    if !materialized {
+        self_writes.retract(workspace_id, &job.target_path, &job.content_sha256);
     }
+    (materialized, reported)
 }
 
 fn search_domain(error: crate::search::SearchError) -> dohc_engine_domain::DomainError {
@@ -5730,7 +5735,38 @@ fn versioned_text_rollback_on_store(
             Ok(())
         },
     )?;
-    if deduped {
+    let job_id = format!("rollback-restore_{}", input.mutation_moment_id);
+    // The rollback tx is already committed: a failed job load must not turn
+    // into an RPC refusal — the caller would believe a durable rollback
+    // failed. Mirror the binary-write seam and self-describe the outcome.
+    let job = match store.load_materialization_job(&job_id) {
+        Ok(Some(job)) => job,
+        Ok(None) if deduped => {
+            return Ok(RollbackExecutionResult {
+                deduped: true,
+                materialize_enqueued: false,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+            });
+        }
+        Ok(None) => {
+            return Ok(RollbackExecutionResult {
+                deduped,
+                materialize_enqueued: false,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+            });
+        }
+        Err(_) => {
+            return Ok(RollbackExecutionResult {
+                deduped,
+                materialize_enqueued: true,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
+        }
+    };
+    if deduped && job.status != JobStatus::Pending {
         return Ok(RollbackExecutionResult {
             deduped: true,
             materialize_enqueued: false,
@@ -5738,90 +5774,21 @@ fn versioned_text_rollback_on_store(
             materialize_outcome: PostCommitMaterializeOutcome::Skipped,
         });
     }
-
-    let job_id = format!("rollback-restore_{}", input.mutation_moment_id);
-    // The rollback tx is already committed: a failed job load must not turn
-    // into an RPC refusal — the caller would believe a durable rollback
-    // failed. Mirror the binary-write seam and self-describe the outcome.
-    let job = match store.load_materialization_job(&job_id) {
-        Ok(Some(job)) => job,
-        Ok(None) => {
-            return Ok(RollbackExecutionResult {
-                deduped: false,
-                materialize_enqueued: false,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
-            });
-        }
-        Err(error) => {
-            let _ = error;
-            return Ok(RollbackExecutionResult {
-                deduped: false,
-                materialize_enqueued: true,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Error,
-            });
-        }
-    };
-    self_writes.record(&input.workspace_id, &job.target_path, &job.content_sha256);
-    let outcome = materialize_one(
+    let (materialized, materialize_outcome) = materialize_pending_job(
         store,
         root_dir,
+        &input.workspace_id,
         &job,
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &StdBackoff,
+        self_writes,
         job.created_at_ms,
         faults,
     );
-    let outcome = match outcome {
-        Ok(outcome) => outcome,
-        Err(error) => {
-            self_writes.retract(&input.workspace_id, &job.target_path, &job.content_sha256);
-            let _ = error;
-            return Ok(RollbackExecutionResult {
-                deduped: false,
-                materialize_enqueued: true,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Error,
-            });
-        }
-    };
-    match outcome {
-        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => Ok(RollbackExecutionResult {
-            deduped: false,
-            materialize_enqueued: true,
-            materialized: true,
-            materialize_outcome: PostCommitMaterializeOutcome::Applied,
-        }),
-        JobOutcome::Conflict => {
-            self_writes.retract(&input.workspace_id, &job.target_path, &job.content_sha256);
-            Ok(RollbackExecutionResult {
-                deduped: false,
-                materialize_enqueued: true,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Conflict,
-            })
-        }
-        JobOutcome::Superseded => {
-            self_writes.retract(&input.workspace_id, &job.target_path, &job.content_sha256);
-            Ok(RollbackExecutionResult {
-                deduped: false,
-                materialize_enqueued: true,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Superseded,
-            })
-        }
-        JobOutcome::Crashed(_) => {
-            self_writes.retract(&input.workspace_id, &job.target_path, &job.content_sha256);
-            Ok(RollbackExecutionResult {
-                deduped: false,
-                materialize_enqueued: true,
-                materialized: false,
-                materialize_outcome: PostCommitMaterializeOutcome::Error,
-            })
-        }
-    }
+    Ok(RollbackExecutionResult {
+        deduped,
+        materialize_enqueued: true,
+        materialized,
+        materialize_outcome,
+    })
 }
 
 fn versioned_text_merge_on_store(

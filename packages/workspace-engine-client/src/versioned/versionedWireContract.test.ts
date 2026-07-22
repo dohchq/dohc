@@ -988,6 +988,50 @@ describe("loopback contract enforcement", () => {
     );
   });
 
+  it("rejects a secret moment id already owned by text history", async () => {
+    // MUTATION: make the secret freshness guard consult only secretMoments -> succeeds.
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "plain.md",
+      text: "plaintext owner",
+      origin: "api",
+      momentId: "cross-table-text-first",
+    });
+    await expect(
+      call(engine, 2, VERSIONED_METHOD.secretsWrite, {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: ".env",
+        text: "TOKEN=protected",
+        origin: "api",
+        momentId: "cross-table-text-first",
+      }),
+    ).rejects.toThrow("duplicate-id");
+  });
+
+  it("rejects a text moment id already owned by secret history", async () => {
+    // MUTATION: make the text freshness guard consult only moments -> succeeds.
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: ".env",
+      text: "TOKEN=protected",
+      origin: "api",
+      momentId: "cross-table-secret-first",
+    });
+    await expect(
+      call(engine, 2, VERSIONED_METHOD.textWrite, {
+        versionId: "main",
+        path: "plain.md",
+        text: "must not shadow protected history",
+        origin: "api",
+        momentId: "cross-table-secret-first",
+      }),
+    ).rejects.toThrow("duplicate-id");
+  });
+
   it("replays requestId results with deduped true", async () => {
     const engine = new VersionedLoopbackEngine();
     const params: VersionedTextWriteParams = {

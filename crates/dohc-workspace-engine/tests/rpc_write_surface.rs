@@ -971,6 +971,98 @@ async fn moment_id_collision_rejects_different_payload_and_replays_exact_payload
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn text_moment_id_blocks_a_secret_moment_with_the_same_id() {
+    // MUTATION: drop `moments` from the secret-domain collision query -> the
+    // protected row is admitted and becomes shadowed by text history.
+    let (_scratch, transport, handle) = fixture("text-then-secret-moment-id").await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versionedText.write",
+        json!({
+            "versionId": "main",
+            "path": "plain.md",
+            "text": "plaintext history owns this id",
+            "origin": "api",
+            "momentId": "cross-table-text-first",
+        }),
+    )
+    .await;
+
+    let collision = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                3,
+                "secrets.write",
+                Some(handle),
+                json!({
+                    "workspaceId": "ws-rpcd-text-then-secret-moment-id",
+                    "versionId": "main",
+                    "path": ".env",
+                    "text": "TOKEN=protected",
+                    "origin": "api",
+                    "momentId": "cross-table-text-first",
+                }),
+            ),
+        )
+        .await
+        .expect_err("text moment id must block secret history");
+    assert_eq!(collision.message, "duplicate-id");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_moment_id_blocks_a_text_moment_with_the_same_id() {
+    // MUTATION: drop `secret_moments` from the text-domain collision query ->
+    // the plaintext row is admitted and shadows the protected history.
+    let (_scratch, transport, handle) = fixture("secret-then-text-moment-id").await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": "ws-rpcd-secret-then-text-moment-id" }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "secrets.write",
+        json!({
+            "workspaceId": "ws-rpcd-secret-then-text-moment-id",
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=protected",
+            "origin": "api",
+            "momentId": "cross-table-secret-first",
+        }),
+    )
+    .await;
+
+    let collision = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "versionedText.write",
+                Some(handle),
+                json!({
+                    "versionId": "main",
+                    "path": "plain.md",
+                    "text": "must not shadow protected history",
+                    "origin": "api",
+                    "momentId": "cross-table-secret-first",
+                }),
+            ),
+        )
+        .await
+        .expect_err("secret moment id must block text history");
+    assert_eq!(collision.message, "duplicate-id");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn origin_closed_set_rejects_capture_and_ydoc() {
     // MUTATION: admit reserved origins or reject one of the public five -> this test fails.
     let (_scratch, transport, handle) = fixture("origins").await;

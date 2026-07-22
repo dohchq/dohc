@@ -1723,7 +1723,9 @@ fn secret_moment_exists(
 ) -> Result<bool, DomainError> {
     let found: Option<i64> = conn
         .query_row(
-            "SELECT 1 FROM secret_moments WHERE workspace_id = ?1 AND moment_id = ?2",
+            "SELECT 1 WHERE \
+             EXISTS (SELECT 1 FROM secret_moments WHERE workspace_id = ?1 AND moment_id = ?2) OR \
+             EXISTS (SELECT 1 FROM moments WHERE workspace_id = ?1 AND moment_id = ?2)",
             params![workspace_id, moment_id],
             |row| row.get(0),
         )
