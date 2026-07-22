@@ -4478,8 +4478,10 @@ pub(crate) fn hash_framed_fields(fields: &[&[u8]]) -> String {
 pub(crate) fn hash_fields(fields: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
     for field in fields {
+        // Length-framed: a NUL inside a caller-supplied field must not shift
+        // field boundaries and collide two different payloads.
+        hasher.update((field.len() as u64).to_le_bytes());
         hasher.update(field);
-        hasher.update([0u8]);
     }
     hex(&hasher.finalize())
 }

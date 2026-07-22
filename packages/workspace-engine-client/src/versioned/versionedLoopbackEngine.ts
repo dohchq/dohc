@@ -347,9 +347,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (replay) return replay;
     this.assertFreshMoment(state, momentId);
     const before = version.files.get(path);
+    // The daemon binds the input object id to NEW paths only — an existing
+    // head keeps its identity (store.rs existing_object.unwrap_or).
+    const effectiveObjectId = before?.objectId ?? objectId;
     const now = optionalNumber(params, "nowMs") ?? this.clock++;
     const file: LoopbackFile = {
-      objectId,
+      objectId: effectiveObjectId,
       contentKind: "text",
       text,
       updatedAtMs: now,
@@ -363,7 +366,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     version.files.set(path, file);
     state.moments.set(momentId, internal);
     const result: JsonObject = {
-      object: this.fileObject(workspace, objectId, now),
+      object: this.fileObject(workspace, effectiveObjectId, now),
       snapshot: this.textSnapshot(workspace, version.id, path, file),
       moment: this.capMoment(moment),
       deduped: false,
@@ -453,10 +456,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     }
     this.assertFreshMoment(state, momentId);
     const before = version.files.get(path);
+    // Daemon parity: an existing head keeps its object identity.
+    const effectiveObjectId = before?.objectId ?? objectId;
     const now = optionalNumber(params, "nowMs") ?? this.clock++;
     const binarySha = sha256(bytes);
     const file: LoopbackFile = {
-      objectId,
+      objectId: effectiveObjectId,
       contentKind: "binary",
       bytes,
       binarySha,
@@ -472,9 +477,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     state.moments.set(momentId, internal);
     state.blobs.set(binarySha, [...bytes]);
     const result: JsonObject = {
-      object: this.fileObject(workspace, objectId, now),
+      object: this.fileObject(workspace, effectiveObjectId, now),
       snapshot: {
-        objectId,
+        objectId: effectiveObjectId,
         path,
         contentKind: "binary",
         text: "",
@@ -593,6 +598,19 @@ export class VersionedLoopbackEngine implements EngineTransport {
       : path;
     if (mutation.before) version.files.set(restorePath, copyFile(mutation.before));
     state.moments.delete(mutationId);
+    // Daemon parity: the rolled-back mutation's request-ledger row is deleted
+    // too, so a retry of its requestId re-executes instead of replaying.
+    for (const [ledgerRequestId, entry] of state.replays) {
+      const moment = entry.result.moment;
+      if (
+        moment !== null &&
+        typeof moment === "object" &&
+        !Array.isArray(moment) &&
+        (moment as JsonObject).momentId === mutationId
+      ) {
+        state.replays.delete(ledgerRequestId);
+      }
+    }
     const result: JsonObject = {
       rolledBack: true,
       deduped: false,
@@ -745,6 +763,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const momentId = `moment-${this.nextMomentId++}`;
     const copied: LoopbackFile = {
       ...copyFile(incoming),
+      // Daemon parity: a path that already exists in the target keeps its
+      // object identity; the source id binds only NEW target paths.
+      objectId: before?.objectId ?? incoming.objectId,
       updatedAtMs: now,
       latestMomentId: momentId,
       metadataOrigin: origin,
@@ -899,6 +920,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   private secretMomentsList(state: WorkspaceState, params: JsonObject): JsonValue {
     const versionId = optionalString(params, "versionId");
+    // Daemon parity: a PRESENT but unknown versionId refuses invalid-version
+    // (require_version inside the keyless domain query) instead of answering
+    // an empty page.
+    if (versionId !== undefined && !state.versions.has(versionId)) {
+      throw new Error("invalid-version");
+    }
     const path = optionalString(params, "path");
     const before = optionalNumber(params, "beforeMomentOrder");
     const limit = Math.min(500, Math.max(1, optionalNumber(params, "limit") ?? 200));

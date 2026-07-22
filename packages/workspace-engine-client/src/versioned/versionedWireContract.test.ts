@@ -161,10 +161,28 @@ describe("versioned typed loopback", () => {
     expect(written.snapshot.text).toBe("alpha");
     expect(written.moment.momentId).toBe("moment-a");
 
+    // Daemon parity: overwriting an existing head with a requestId (and no
+    // explicit objectId) keeps the file's ORIGINAL object identity — the
+    // generated id binds new paths only.
+    // MUTATION: apply the requestId-generated object id to existing heads -> fails.
+    const overwrite = decodeVersionedTextWriteResult(
+      await call(engine, 21, VERSIONED_METHOD.textWrite, {
+        versionId: "main",
+        path: "a.md",
+        text: "alpha-2",
+        origin: "api",
+        requestId: "request-a-overwrite",
+        nowMs: 11,
+      }),
+    );
+    expect(overwrite.object.id).toBe("object-a");
+    expect(overwrite.snapshot.objectId).toBe("object-a");
+    expect(overwrite.moment.objectId).toBe("object-a");
+
     const listParams: VersionedTextListParams = { versionId: "main" };
     const listed = await call(engine, 2, VERSIONED_METHOD.textList, listParams);
     expect(listed).toMatchObject({
-      files: [{ path: "a.md", contentKind: "text", byteLength: 5 }],
+      files: [{ path: "a.md", contentKind: "text", byteLength: 7 }],
       nextAfterPath: null,
     });
 
