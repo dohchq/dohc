@@ -2030,3 +2030,42 @@ next round caught. The compounding lesson became structure:
   adversarially pre-reviewed). NEXT: RPC-C (design v2 reviewed) -> RPC-D
   and RPC-B2 (production chat follow-ups; both GATE6 deps) -> GATE6 -> R15
   (ICE STOP).
+
+
+## 2026-07-22 — RPC-B merged (#218, 17 rounds) + RPC-C merged (#220, 21 rounds); RPC-D in flight
+
+- RPC-B merged 05:01Z as 99579b13 (squash): 23 chat daemon methods over
+  LinkedChatStore (channels/threads/messages/read-state/follows/feed/
+  bookmarks/dispatch), server-side workspace scoping throughout. The
+  standing identity posture (chat RPC identity params sit in the main
+  process's trust position; per-user socket auth is R15+) is recorded in
+  RPC_GAP.md and was declined-with-citation four times before being
+  accepted as recorded posture.
+- RPC-C merged 06:52Z as 82d34c02 (squash): daemon-owned CANONICAL live
+  Y.Doc sessions — ydoc.open/recordUpdate/settle/close/resync plus the
+  ydoc.remoteUpdate event. Endgame architecture: root-scoped self-write
+  suppression + lease registry, ordered multi-sha suppression, deferred
+  ydoc drains that apply -> project -> clear markers LAST with real
+  (origin,seq) moment coordinates, collision-free session ids
+  (pid-bootms-instance-seq), a recordUpdate idempotency ledger, prune-close
+  refusal on pending ydoc materialization, and startup replay at
+  workspace.open that compensates conflicted ydoc jobs.
+- CROSS-ENGINE OBLIGATION recorded in RPC_GAP.md (#218 r12, declined on
+  oracle parity): well-known channel wire-id backfills are journal-less in
+  BOTH engines (oracle linkedChatStore.ts:2241-2250 records the mapping
+  without journalLocalReplicationOp; Rust mirrors). A backfilled wire id
+  stays peer-invisible until an authoritative create arrives. Owned by
+  RPC-E/sync; any fix lands in both engines or is scoped post-cutover.
+- AGENTS.md product-philosophy refresh merged as 7d2b9eaf (#221, Ice's
+  edits, committed on request).
+- RPC-D IN FLIGHT (codex/rust-engine-rpc-d): steps 1-7 committed and
+  gate-passed (full mutating text/version/secret surface — widened
+  writes, binary write with active-version-gated materialization,
+  rename/delete/rollback with lease guards, merge/compare + compareFiles
+  DB-level keyset, atomic createNamed+secret-fork, full-record version
+  RPCs, readBlob 48 KiB split, cross-mutation requestId ledger, the whole
+  secrets RPC surface with verbatim-ciphertext apply/restore,
+  moments inbandLimitBytes, search.ensureIndex). Step 8 (client typed
+  wrappers + loopback parity) building; then adversarial pre-review ->
+  PR -> review loop. NEXT after RPC-D: RPC-B2 -> GATE6 packet -> macOS
+  evidence -> R15 go/no-go package (ICE STOP).

@@ -1,6 +1,8 @@
 # Daemon RPC gap analysis — desktop surface vs dispatched methods
 
-Snapshot 2026-07-21 (RPC-A MERGED #217; FCOMP-E merged #215; RPC-B in review #218; RPC-C open #220). Source: full sweep of the R13b dormant
+Snapshot 2026-07-22 (RPC-A MERGED #217; FCOMP-E merged #215; RPC-B MERGED
+#218; RPC-C MERGED #220; RPC-D in flight on codex/rust-engine-rpc-d).
+Source: full sweep of the R13b dormant
 adapter, every desktop engine call site, and the daemon/actor/domain layers.
 This scopes the "grow daemon RPCs for cutover-needed desktop surfaces" shard
 (R13b-rest). Sub-shard split at the bottom.
@@ -11,7 +13,9 @@ workspace.open/close · versionedText.write/read/list · versionedBinary.read ·
 versions.active/list · moments.list/get · secrets.list/materialize ·
 ydoc.apply · conflicts.list/open/resolve · search.query · watcher.status ·
 capture.flush (watcher.status/capture.flush landed with #215; the RPC-A
-read surface with #217, both merged 2026-07-21).
+read surface with #217, both merged 2026-07-21) · chats.* (23 methods,
+#218 merged 2026-07-22) · ydoc.open/recordUpdate/settle/close/resync +
+the ydoc.remoteUpdate event (#220 merged 2026-07-22).
 
 ## The gaps, by domain
 
@@ -29,8 +33,8 @@ read surface with #217, both merged 2026-07-21).
 | listMoments / getMoment | SHIPPED in RPC-A (#217, merged): moments.list/moments.get hydrate before/after TEXT plus actual byte lengths under the one-turn in-band cap. Over-cap moment bodies today = null text + byte lengths WITHOUT an inbandLimitBytes field (unlike the other read RPCs). What is NOT ported is the oracle's payload-provenance columns (payload_before_*/payload_after_* and before-snapshot identity) — the Rust schema lacks them; see the SCHEMA OBLIGATION below (pre-R15 migration candidate). RPC-D owes ONE more thing: over-cap moment bodies return null text + byte lengths but NO inbandLimitBytes field (versionedText.read/versionedBinary.read/secrets.materialize all self-describe their cap) — RPC-D adds the field for contract uniformity. | domain `store.rs:616/783` |
 | listSecretFiles / materializeSecretFile | SHIPPED in RPC-A (#217): secrets.list (keyless page) + secrets.materialize (in-band cap; over-cap tips authenticate then drop plaintext) | domain `secrets.rs:547/526` |
 | secret moments/compare/restore | MISSING | moments exist (`secrets.rs:582/614`); compare/restore are NOT ported — those line refs are TS `secretFileStore.ts:1468/1517/1584`. Real Rust domain work, not wiring |
-| CHATS (threads/messages/channels/feed/follows/bookmarks/reactions/mentions/decisions/dispatch) | ALL MISSING | `chats.rs:744-2004` covers channels/threads/messages/read-state/follows/feed/bookmarks/dispatch; reactions, decisions, and mention indexing were scoped OUT of R09 — unported domain work. Nothing on the actor |
-| ydoc SESSION protocol (open/recordUpdate/settle/applyExternalMarkdownEdit/close/resync + remoteUpdate events) | MISSING (only the `ydoc.apply` primitive) | session layer lives only in TS `ydocLoopbackEngine.ts`; contract at `packages/workspace-engine-client/src/ydoc/ydocWireContract.ts` |
+| CHATS (threads/messages/channels/feed/follows/bookmarks/dispatch) | SHIPPED in RPC-B (#218 merged 2026-07-22): 23 chat methods over LinkedChatStore. Reactions, decisions, mention/attachment indexing, and the file-linked reads (listThreadsForFile/getThreadProjection) remain RPC-B2 (unported domain work). | `chats.rs:744-2004`; B2 items have no Rust domain counterparts yet |
+| ydoc SESSION protocol (open/recordUpdate/settle/close/resync + remoteUpdate events) | SHIPPED in RPC-C (#220 merged 2026-07-22): daemon-owned canonical Y.Doc sessions; applyExternalMarkdownEdit is subsumed by the external-edit/self-write-suppression path. | runtime session layer + `packages/workspace-engine-client/src/ydoc/ydocWireContract.ts` |
 | applyReplicationOp (general) / relay sync orchestration | MISSING (conflict envelopes only) | `dohc-engine-sync` exists |
 | search index writes | MISSING (query only) | runtime `search/index.rs:157/193/218/436` |
 | legacy changeSetStore | not a cutover target (superseded by capture) | — |
@@ -129,8 +133,8 @@ normalization, so disguises cannot bypass it). Moot for data post-R15
 (the reset wipes TS-written rows); differential/parity suites must expect
 it.
 
-CROSS-ENGINE DELTA (PENDING #220, in review — NOT a shipped daemon
-contract until RPC-C merges; recorded 2026-07-21): daemon Y.Doc settles
+CROSS-ENGINE DELTA (SHIPPED with #220, merged 2026-07-22; recorded
+2026-07-21): daemon Y.Doc settles
 mint moments with metadata_origin "ydoc"; the TS oracle's ydocEngineDriver
 settles with "local-file" (ydocEngineDriver.ts:920) because TS's origin
 contract is the closed 5-set {api, local-file, restore, sync, unknown}
@@ -161,6 +165,18 @@ trust position as the oracle's function arguments — per-user
 authorization on the socket becomes meaningful only if the daemon ever
 accepts multi-principal clients, which is R15+ scope and recorded here so
 review rounds stop re-litigating it.
+
+CROSS-ENGINE OBLIGATION (declined-with-citation at #218 round 12; owned
+by RPC-E/sync, recorded so it is owned rather than lost): well-known
+channel wire-id BACKFILLS are not journaled. The oracle's
+`ensureGeneralChannel` backfill path (linkedChatStore.ts:2241-2250)
+records the wire mapping and returns WITHOUT `journalLocalReplicationOp`
+— journaling runs only on the create path (:2270-2282), and
+`ensureAgentChannel` has the same shape; the Rust port mirrors both
+exactly. Consequence: a backfilled wire id is invisible to peers until
+some authoritative create for that channel reaches them. Changing that
+convergence semantic is sync/replication-shard work (RPC-E), not a port
+concern — any fix must land in BOTH engines or be scoped post-cutover.
 
 R15 IS A DESTRUCTIVE CUTOVER GATE, not a parity note: the reset wipes
 TS-written rows in Ice's dogfood workspace. Policy (R15/R15-REHEARSE
