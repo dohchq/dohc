@@ -2,6 +2,7 @@ import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 
 export const VERSIONED_METHOD = {
   textWrite: "versionedText.write",
+  textRead: "versionedText.read",
   textRename: "versionedText.rename",
   textDelete: "versionedText.delete",
   textRollback: "versionedText.rollback",
@@ -64,6 +65,11 @@ export type VersionedTextWriteParams = MutationMetadata & {
   path: string;
   text: string;
   momentId?: string;
+};
+
+export type VersionedTextReadParams = JsonObject & {
+  versionId: string;
+  path: string;
 };
 
 export type VersionedBinaryWriteParams = MutationMetadata & {
@@ -287,6 +293,29 @@ export type VersionedTextWriteResult = JsonObject & {
   moment: MomentRecord;
   deduped: boolean;
 };
+
+type VersionedTextReadMetadata = SnapshotMetadata & {
+  blobSha256: string;
+};
+
+export type VersionedTextReadValue =
+  | (VersionedTextReadMetadata & {
+      contentKind: "text";
+      text: string;
+      inbandLimitBytes?: never;
+    })
+  | (VersionedTextReadMetadata & {
+      contentKind: "text";
+      text: null;
+      inbandLimitBytes: number;
+    })
+  | (VersionedTextReadMetadata & {
+      contentKind: "binary";
+      text: "";
+      inbandLimitBytes?: never;
+    });
+
+export type VersionedTextReadResult = VersionedTextReadValue | null;
 
 export type VersionedBinaryWriteResult = JsonObject & {
   object: FileObject;
@@ -680,6 +709,43 @@ export function decodeVersionedTextWriteResult(value: JsonValue): VersionedTextW
     moment: momentValue(object.moment ?? null, `${label}.moment`),
     deduped: booleanValue(object, "deduped", label),
   };
+}
+
+export function decodeVersionedTextReadResult(value: JsonValue): VersionedTextReadResult {
+  if (value === null) return null;
+  const label = "versionedText.read result";
+  const object = objectValue(value, label);
+  const metadata = snapshotMetadataValue(value, label);
+  const blobSha256 = stringValue(object, "blobSha256", label);
+  const text = nullableStringValue(object, "text", label);
+
+  if (metadata.contentKind === "binary") {
+    if (text !== "") {
+      throw new VersionedProtocolShapeError(`${label}.text must be empty for binary content.`);
+    }
+    if (object.inbandLimitBytes !== undefined) {
+      throw new VersionedProtocolShapeError(
+        `${label}.inbandLimitBytes is invalid for binary content.`,
+      );
+    }
+    return { ...metadata, contentKind: "binary", text: "", blobSha256 };
+  }
+
+  if (text === null) {
+    return {
+      ...metadata,
+      contentKind: "text",
+      text: null,
+      blobSha256,
+      inbandLimitBytes: numberValue(object, "inbandLimitBytes", label),
+    };
+  }
+  if (object.inbandLimitBytes !== undefined) {
+    throw new VersionedProtocolShapeError(
+      `${label}.inbandLimitBytes is invalid for in-band text.`,
+    );
+  }
+  return { ...metadata, contentKind: "text", text, blobSha256 };
 }
 
 export function decodeVersionedBinaryWriteResult(value: JsonValue): VersionedBinaryWriteResult {

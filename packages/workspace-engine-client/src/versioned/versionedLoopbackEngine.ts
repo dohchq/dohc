@@ -40,6 +40,7 @@ interface InternalMoment {
   wire: MomentRecord;
   before?: LoopbackFile;
   after?: LoopbackFile;
+  beforePath?: string;
 }
 
 interface LoopbackVersion {
@@ -259,6 +260,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     switch (request.method) {
       case VERSIONED_METHOD.textWrite:
         return this.textWrite(state, workspace, params, request);
+      case VERSIONED_METHOD.textRead:
+        return this.textRead(state, workspace, params);
       case VERSIONED_METHOD.binaryWrite:
         return this.binaryWrite(state, workspace, params, request);
       case VERSIONED_METHOD.textRename:
@@ -367,6 +370,33 @@ export class VersionedLoopbackEngine implements EngineTransport {
     };
     this.recordReplay(state, requestId, params, result, replayFingerprint);
     return result;
+  }
+
+  private textRead(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
+    const version = this.version(state, requiredString(params, "versionId", "text read"));
+    const path = requiredString(params, "path", "text read");
+    const file = version.files.get(path);
+    if (!file) return null;
+
+    const metadata = this.snapshotMetadata(workspace, version.id, path, file);
+    if (file.contentKind === "binary") {
+      return {
+        ...metadata,
+        text: "",
+        blobSha256: file.binarySha ?? sha256([]),
+      };
+    }
+
+    const text = file.text ?? "";
+    if (utf8Length(text) > INBAND_LIMIT_BYTES) {
+      return {
+        ...metadata,
+        text: null,
+        blobSha256: sha256(text),
+        inbandLimitBytes: INBAND_LIMIT_BYTES,
+      };
+    }
+    return { ...metadata, text, blobSha256: sha256(text) };
   }
 
   private binaryWrite(
@@ -487,7 +517,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
       metadataOrigin: origin,
     };
     const moment = this.makeMoment(version, toPath, momentId, "rename", after, before, now);
-    const internal = { wire: moment, before: copyFile(before), after: copyFile(after) };
+    const internal = {
+      wire: moment,
+      before: copyFile(before),
+      after: copyFile(after),
+      beforePath: fromPath,
+    };
     after.momentLog.push(internal);
     version.files.delete(fromPath);
     version.files.set(toPath, after);
@@ -552,8 +587,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const mutationId = requiredString(params, "mutationMomentId", "rollback");
     const mutation = state.moments.get(mutationId);
     if (!mutation) throw new Error("moment not found");
-    if (mutation.before) version.files.set(path, copyFile(mutation.before));
-    else version.files.delete(path);
+    version.files.delete(path);
+    const restorePath = mutation.wire.operation === "rename"
+      ? mutation.beforePath ?? path
+      : path;
+    if (mutation.before) version.files.set(restorePath, copyFile(mutation.before));
+    state.moments.delete(mutationId);
     const result: JsonObject = {
       rolledBack: true,
       deduped: false,
@@ -661,7 +700,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     params: JsonObject,
     request: Request,
   ): JsonValue {
-    requiredOrigin(params);
+    const origin = requiredOrigin(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const replay = this.replay(state, requestId, params);
     if (replay) return replay;
@@ -676,19 +715,55 @@ export class VersionedLoopbackEngine implements EngineTransport {
     }
     // The loopback intentionally models only a conflict-free fast-forward.
     if (!incoming) {
+      const before = this.file(target, path);
+      const now = optionalNumber(params, "nowMs") ?? this.clock++;
+      const momentId = `moment-${this.nextMomentId++}`;
+      const tombstone: LoopbackFile = {
+        objectId: before.objectId,
+        contentKind: before.contentKind,
+        updatedAtMs: now,
+        latestMomentId: momentId,
+        metadataOrigin: origin,
+        momentLog: [...before.momentLog],
+      };
+      const moment = this.makeMoment(target, path, momentId, "delete", tombstone, before, now);
+      const internal: InternalMoment = { wire: moment, before: copyFile(before) };
       target.files.delete(path);
-      const result: JsonObject = { status: "merged", writeKind: "delete", object: this.fileObject(workspace, `object-${this.nextObjectId++}`, this.clock++), moment: this.syntheticMergeMoment(target, path), deduped: false };
+      state.moments.set(momentId, internal);
+      const result: JsonObject = {
+        status: "merged",
+        writeKind: "delete",
+        object: this.fileObject(workspace, before.objectId, now),
+        moment: this.capMoment(moment),
+        deduped: false,
+      };
       this.recordReplay(state, requestId, params, result);
       return result;
     }
-    const copied = copyFile(incoming);
+    const before = target.files.get(path);
+    const now = optionalNumber(params, "nowMs") ?? this.clock++;
+    const momentId = `moment-${this.nextMomentId++}`;
+    const copied: LoopbackFile = {
+      ...copyFile(incoming),
+      updatedAtMs: now,
+      latestMomentId: momentId,
+      metadataOrigin: origin,
+    };
+    const moment = this.makeMoment(target, path, momentId, "write", copied, before, now);
+    const internal: InternalMoment = {
+      wire: moment,
+      before: before && copyFile(before),
+      after: copyFile(copied),
+    };
+    copied.momentLog.push(internal);
     target.files.set(path, copied);
+    state.moments.set(momentId, internal);
     const result: JsonObject = {
       status: "merged",
       writeKind: "write",
-      object: this.fileObject(workspace, copied.objectId, copied.updatedAtMs),
+      object: this.fileObject(workspace, copied.objectId, now),
       snapshot: this.snapshotMetadata(workspace, target.id, path, copied),
-      moment: this.syntheticMergeMoment(target, path, copied),
+      moment: this.capMoment(moment),
       deduped: false,
     };
     this.recordReplay(state, requestId, params, result);
@@ -726,9 +801,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (utf8Length(text) > INBAND_LIMIT_BYTES) throw new Error("content-exceeds-inband-cap");
     const origin = requiredOrigin(params);
     const momentId = requiredString(params, "momentId", "secret write");
-    this.assertFreshSecretMoment(state, momentId);
     const before = version.secrets.get(path);
     if (before === text) return { changed: false, moment: null };
+    this.assertFreshSecretMoment(state, momentId);
     version.secrets.set(path, text);
     const wire = this.makeSecretMoment(workspace, version.id, path, momentId, "write", origin);
     state.secretMoments.set(momentId, { wire, before, after: text });
@@ -805,7 +880,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     this.assertFreshSecretMoment(state, momentId);
     const sourceMoment = state.secretMoments.get(beforeMomentId);
     if (!sourceMoment) throw new Error("moment not found");
-    const version = this.version(state, state.activeVersionId);
+    const version = this.version(state, sourceMoment.wire.versionId);
     const prior = version.secrets.get(path);
     if (prior === sourceMoment.before) {
       return {
@@ -1160,16 +1235,4 @@ export class VersionedLoopbackEngine implements EngineTransport {
       : left.binarySha === right.binarySha;
   }
 
-  private syntheticMergeMoment(version: LoopbackVersion, path: string, file?: LoopbackFile): MomentRecord {
-    const target = file ?? {
-      objectId: `object-${this.nextObjectId++}`,
-      contentKind: "text" as const,
-      text: "",
-      updatedAtMs: this.clock++,
-      latestMomentId: `moment-${this.nextMomentId++}`,
-      metadataOrigin: "api",
-      momentLog: [],
-    };
-    return this.capMoment(this.makeMoment(version, path, target.latestMomentId, file ? "write" : "delete", target, undefined));
-  }
 }
