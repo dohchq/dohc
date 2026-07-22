@@ -434,7 +434,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
- "unicode-normalization",
  "yrs",
 ]
 
