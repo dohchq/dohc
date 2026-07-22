@@ -672,6 +672,19 @@ export class VersionedLoopbackEngine implements EngineTransport {
   private binaryReadBlob(state: WorkspaceState, params: JsonObject): JsonValue {
     const digest = requiredString(params, "sha256", "readBlob").toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error("invalid-input");
+    // Daemon parity: only workspace-REFERENCED digests are served — a rolled-
+    // back mutation's orphaned bytes answer file-not-found like the daemon's
+    // reference gate.
+    const referenced =
+      [...state.versions.values()].some((version) =>
+        [...version.files.values()].some((file) => file.binarySha === digest),
+      ) ||
+      [...state.moments.values()].some(
+        (moment) =>
+          moment.wire.afterBinarySha256 === digest ||
+          moment.wire.beforeBinarySha256 === digest,
+      );
+    if (!referenced) throw new Error("file-not-found");
     const bytes = state.blobs.get(digest);
     if (!bytes) throw new Error("file-not-found");
     return bytes.length <= INBAND_LIMIT_BYTES

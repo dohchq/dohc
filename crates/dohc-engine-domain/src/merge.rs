@@ -453,6 +453,11 @@ impl VersionedTextStore<'_> {
                 reason: "limit must be positive",
             });
         }
+        // `usize as i64` wraps on overflow and SQLite treats a negative LIMIT
+        // as unbounded — refuse instead of full-scanning.
+        let limit_i64 = i64::try_from(limit).map_err(|_| DomainError::InvalidInput {
+            reason: "limit must be positive",
+        })?;
         self.store.read_with(|conn| {
             validate_compare_versions(conn, workspace_id, source_version_id, target_version_id)?;
             let mut stmt = conn
@@ -476,7 +481,7 @@ impl VersionedTextStore<'_> {
                         target_version_id,
                         source_version_id,
                         after_path.unwrap_or(""),
-                        limit as i64
+                        limit_i64
                     ],
                     |row| {
                         Ok((
