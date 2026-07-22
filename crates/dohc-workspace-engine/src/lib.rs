@@ -1374,34 +1374,55 @@ impl EngineService {
             .decode(params.update_base64)
             .map_err(|_| wire(ErrorCode::InvalidParams, "invalid update encoding"))?;
         let require_empty = session.lineage_absent && session.first_update_pending;
-        let outcome = open
-            .actor
-            .ydoc_record_update(
-                session.key,
-                session.path,
-                session.content_kind,
-                session.regime,
-                update,
-                params.actor_origin_id,
-                require_empty,
-                now_ms()?,
-                Arc::new(NoFaults),
-                cancellation.token(),
-            )
-            .await
-            .map_err(|error| {
-                if matches!(
-                    error,
-                    RuntimeError::Collab(CollabError::SeedOntoExistingLineage)
-                ) {
-                    wire(ErrorCode::InvalidParams, "seed-onto-existing-lineage")
-                } else {
-                    map_runtime(error)
+        // The record and the first-seed flag transition run in a SPAWNED
+        // task: if the seed COMMITS but a deadline/cancel drops this future
+        // before the post-await assignment, the session would keep
+        // `first_update_pending` and send its next distinct edit with
+        // `require_empty_lineage = true` — a spurious
+        // seed-onto-existing-lineage quarantine for a healthy session. The
+        // spawned task runs to completion regardless of this future.
+        let outcome = {
+            let sessions = Arc::clone(&self.sessions);
+            let session_id = params.session_id.clone();
+            let actor = open.actor.clone();
+            let now = now_ms()?;
+            let token = cancellation.token();
+            let record_task = tokio::spawn(async move {
+                let outcome = actor
+                    .ydoc_record_update(
+                        session.key,
+                        session.path,
+                        session.content_kind,
+                        session.regime,
+                        update,
+                        params.actor_origin_id,
+                        require_empty,
+                        now,
+                        Arc::new(NoFaults),
+                        token,
+                    )
+                    .await;
+                if outcome.is_ok()
+                    && let Some(session) = lock(&sessions).get_mut(&session_id)
+                {
+                    session.first_update_pending = false;
                 }
-            })?;
-        if let Some(session) = lock(&self.sessions).get_mut(&params.session_id) {
-            session.first_update_pending = false;
-        }
+                outcome
+            });
+            record_task
+                .await
+                .map_err(|_| wire(ErrorCode::Internal, "ydoc record task failed"))?
+                .map_err(|error| {
+                    if matches!(
+                        error,
+                        RuntimeError::Collab(CollabError::SeedOntoExistingLineage)
+                    ) {
+                        wire(ErrorCode::InvalidParams, "seed-onto-existing-lineage")
+                    } else {
+                        map_runtime(error)
+                    }
+                })?
+        };
         serde_json::to_value(YdocRecordUpdateResult {
             seq: outcome.seq,
             deduped: outcome.deduped,

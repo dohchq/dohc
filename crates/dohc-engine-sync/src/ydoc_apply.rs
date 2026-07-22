@@ -215,7 +215,7 @@ fn project_and_write_in_tx(
     // cursor advance redelivers the envelope, whose re-apply lands in the
     // idempotent skip above (same projection) — the id can never collide.
     let fingerprint = format!(
-        "{} {} {} {} {} {}",
+        "{}\0{}\0{}\0{}\0{}\0{}",
         key.workspace_id, key.version_id, key.object_id, path, origin_id, origin_seq
     );
     let moment_id = format!(
@@ -391,8 +391,19 @@ pub fn apply_ydoc_envelope(
         };
         let claim_key = key.clone();
         let claim_bytes = bytes.clone();
+        // The claim can PROMOTE a local-only lineage that already holds
+        // update rows (a crash left them behind): the projection must be the
+        // reconstructed lineage PLUS the base, or the visible snapshot would
+        // drop local content that is still durably part of the CRDT.
         let base_doc = {
-            let doc = dohc_engine_collab::Ydoc::wire();
+            let doc = match dohc_engine_collab::load_persisted(store, &key).map_err(|_| {
+                SyncError::InvalidInput {
+                    reason: "ydoc lineage load failed",
+                }
+            })? {
+                Some(persisted) => persisted.doc,
+                None => dohc_engine_collab::Ydoc::wire(),
+            };
             doc.apply(&claim_bytes)
                 .map_err(|_| SyncError::InvalidInput {
                     reason: "ydoc.update base bytes fail validation",
@@ -478,16 +489,22 @@ pub fn apply_ydoc_envelope(
             .map_err(|_| SyncError::InvalidInput {
                 reason: "ydoc.update could not be applied",
             })?;
-        project_and_write_in_tx(
-            tx,
-            &key,
-            &update_path,
-            &projected_doc.doc,
-            update_kind,
-            &op.origin_id,
-            op.origin_seq,
-            op.recorded_at_ms,
-        )?;
+        // An out-of-order cross-origin update parks durably with missing
+        // dependencies; a projection taken NOW would omit the pending remote
+        // content and materialize an incomplete view. Skip — the envelope
+        // that completes the dependency projects the full doc.
+        if !projected_doc.doc.has_pending_dependencies() {
+            project_and_write_in_tx(
+                tx,
+                &key,
+                &update_path,
+                &projected_doc.doc,
+                update_kind,
+                &op.origin_id,
+                op.origin_seq,
+                op.recorded_at_ms,
+            )?;
+        }
         Ok(applied)
     })?;
     if matches!(

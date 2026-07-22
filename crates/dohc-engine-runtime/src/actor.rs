@@ -52,7 +52,7 @@ use dohc_engine_storage::{
 use dohc_engine_sync::{
     ApplyOutcome, ConflictApplyResult, ReplicationEnvelope, apply_conflict_envelope,
 };
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -2160,19 +2160,53 @@ fn worker_main(
                     let jobs = store.list_pending_materialization_jobs()?;
                     let mut completed = 0_usize;
                     for job in jobs {
-                        if let Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) =
-                            materialize_one(
-                                &store,
-                                &root_dir,
-                                &job,
-                                DurabilityPolicy::per_os(),
-                                &StdReplacer,
-                                &StdBackoff,
-                                now_ms,
-                                &NoFaults,
-                            )
-                        {
-                            completed += 1;
+                        match materialize_one(
+                            &store,
+                            &root_dir,
+                            &job,
+                            DurabilityPolicy::per_os(),
+                            &StdReplacer,
+                            &StdBackoff,
+                            now_ms,
+                            &NoFaults,
+                        ) {
+                            Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
+                                completed += 1;
+                            }
+                            Ok(JobOutcome::Conflict | JobOutcome::Superseded) => {
+                                // The disk moved while the daemon was down:
+                                // a settle job's marker still claims bytes
+                                // that never replaced the file. Leave the
+                                // stale sha and every later settle inherits
+                                // a poisoned preimage expectation (and a
+                                // prune-close could discard the CRDT over an
+                                // unmaterialized artifact) — NULL it, the
+                                // same compensation the settle-time replay
+                                // arms apply.
+                                if let Some(moment_id) = job.job_id.strip_prefix("ydoc-mat_") {
+                                    let coords: Option<(String, String, String)> = store
+                                        .read_with(|conn| {
+                                            conn.query_row(
+                                                "SELECT workspace_id, version_id, object_id                                                  FROM moments WHERE moment_id = ?1",
+                                                [moment_id],
+                                                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                                            )
+                                            .optional()
+                                            .map_err(StorageError::corrupt_public)
+                                        })?;
+                                    if let Some((ws, version, object)) = coords {
+                                        store.write_with(&NoFaults, |tx| {
+                                            tx.execute(
+                                                "UPDATE ydoc_docs SET last_settled_sha = NULL,                                                  updated_at_ms = ?4                                                  WHERE workspace_id = ?1 AND version_id = ?2                                                    AND object_id = ?3",
+                                                params![ws, version, object, now_ms],
+                                            )
+                                            .map_err(StorageError::persist_public)?;
+                                            Ok::<_, StorageError>(())
+                                        })?;
+                                    }
+                                }
+                            }
+                            Ok(_) | Err(_) => {}
                         }
                     }
                     Ok::<_, RuntimeError>(completed)

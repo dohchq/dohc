@@ -1217,3 +1217,82 @@ fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
         .expect("updated head");
     assert_eq!(updated_text, "updated base seed");
 }
+
+#[test]
+fn a_pulled_base_over_leftover_local_rows_projects_the_merged_lineage() {
+    // A crash can leave LOCAL-ONLY update rows before the base envelope
+    // arrives; the claim promotes that lineage, and the projection must be
+    // the RECONSTRUCTED doc plus the base — not the base alone, which would
+    // drop durable local content from the visible head. Mutation check:
+    // rebuild base_doc from `Ydoc::wire()` instead of `load_persisted` in
+    // `apply_ydoc_envelope`'s base arm — the local-content assertion fails.
+    let (_scratch, _path, mut engine) = store();
+    dohc_engine_domain::VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES ('ws','object-promote',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-promote").expect("key");
+    dohc_engine_collab::ensure_marker(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        dohc_engine_collab::Regime::LocalOnly,
+        &NoFaults,
+        1_450,
+    )
+    .expect("local-only marker");
+    let local_update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "local-part ");
+    dohc_engine_collab::record_local_update(&mut engine, &key, &local_update, &NoFaults, 1_460)
+        .expect("local row");
+
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    base_doc.plaintext_insert(0, "base-part");
+    let base_bytes = base_doc.encode_full_state();
+    let base_sha = engine.put_binary_blob(&base_bytes).expect("base blob");
+    let base_op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-promote",
+            "path": "notes/promoted.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha,
+            "isBaseState": true
+        }),
+    );
+    apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+
+    let head_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM path_aliases a \
+                 JOIN snapshots s ON s.workspace_id = a.workspace_id AND s.object_id = a.object_id \
+                 JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE a.workspace_id = 'ws' AND a.version_id = 'main' \
+                   AND a.path = 'notes/promoted.md'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("promoted head");
+    assert!(
+        head_text.contains("base-part"),
+        "head must contain the base: {head_text}"
+    );
+    assert!(
+        head_text.contains("local-part"),
+        "head must keep the leftover local rows: {head_text}"
+    );
+}

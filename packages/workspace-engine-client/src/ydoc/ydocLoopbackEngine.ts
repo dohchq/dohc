@@ -358,7 +358,10 @@ export class YdocLoopbackEngine implements EngineTransport {
     const session = this.requireSession(
       requiredString(params, "sessionId", "ydoc.resync params"),
     );
-    session.eventSeq = 0;
+    // The live adapter preserves its event position across a resync, so the
+    // loopback sequence stays MONOTONIC — resetting it would make the next
+    // remote update emit seq 1 and re-mark the freshly-resynced session
+    // stale.
     return {
       initialUpdateBase64: encodeBase64(Y.encodeStateAsUpdate(session.doc)),
     };
