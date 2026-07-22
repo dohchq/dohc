@@ -359,6 +359,7 @@ enum Command {
         content_kind: ContentKind,
         regime: Regime,
         update: Vec<u8>,
+        request_id: Option<String>,
         actor_origin_id: Option<String>,
         require_empty_lineage: bool,
         now_ms: i64,
@@ -1385,6 +1386,7 @@ impl ActorHandle {
         update: Vec<u8>,
         actor_origin_id: Option<String>,
         require_empty_lineage: bool,
+        request_id: Option<String>,
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
@@ -1397,6 +1399,7 @@ impl ActorHandle {
                 content_kind,
                 regime,
                 update,
+                request_id,
                 actor_origin_id,
                 require_empty_lineage,
                 now_ms,
@@ -2079,6 +2082,7 @@ fn worker_main(
                 content_kind,
                 regime,
                 update,
+                request_id,
                 actor_origin_id,
                 require_empty_lineage,
                 now_ms,
@@ -2095,6 +2099,7 @@ fn worker_main(
                     &update,
                     actor_origin_id,
                     require_empty_lineage,
+                    request_id,
                     now_ms,
                     faults.as_ref(),
                     &token,
@@ -2528,6 +2533,7 @@ fn ydoc_record_update_on_store(
     update: &[u8],
     actor_origin_id: Option<String>,
     require_empty_lineage: bool,
+    request_id: Option<String>,
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
@@ -2560,6 +2566,7 @@ fn ydoc_record_update_on_store(
         // refusing seed-onto-existing-lineage.
         true,
         require_empty_lineage,
+        request_id.as_deref(),
         faults,
         now_ms,
         move |tx, outcome| {
@@ -3044,49 +3051,10 @@ fn ydoc_close_session_on_store(
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
     if marker.regime == Regime::Replicated {
-        let drained = dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?;
-        // Remote content that landed via THIS close-time drain must reach
-        // the visible head too: the session is gone, so nothing else will
-        // settle it — without this projection the CRDT and relay cursor
-        // advance while the markdown head and disk stay at the pre-close
-        // settle until some later reopen. The write rides the same
-        // idempotent-by-sha projection the pull path uses; its job lands
-        // via the open-time replay.
-        if drained > 0 {
-            let path: Option<String> = store.read_with(|conn| {
-                conn.query_row(
-                    "SELECT path FROM path_aliases                      WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
-                    params![key.workspace_id, key.version_id, key.object_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(StorageError::corrupt_public)
-            })?;
-            if let Some(path) = path
-                && let Some(persisted) = dohc_engine_collab::load_persisted(store, key)?
-                // A doc still holding unintegrated cross-origin content must
-                // not project: the markdown would omit the parked remote
-                // updates. The dependency's own envelope projects the full
-                // doc when it lands.
-                && !persisted.doc.has_pending_dependencies()
-            {
-                let projected = store.write_with(faults, |tx| {
-                    dohc_engine_sync::project_and_write_in_tx(
-                        tx,
-                        key,
-                        &path,
-                        &persisted.doc,
-                        marker.content_kind,
-                        "close-drain",
-                        now_ms,
-                        now_ms,
-                    )
-                })?;
-                if matches!(projected, TxnOutcome::Crashed { .. }) {
-                    return Err(RuntimeError::OperationCrashed);
-                }
-            }
-        }
+        // The drain PROJECTS internally now (idempotent-by-sha, dependency-
+        // gated): drained remote content reaches the visible head with no
+        // session left to settle it.
+        dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?;
     }
     Ok(Some(outcome))
 }

@@ -424,7 +424,7 @@ interface LocalRecordCapture {
 
 export class YdocAdapterSession {
   readonly doc: Y.Doc;
-  readonly initialUpdate: Uint8Array;
+  initialUpdate: Uint8Array;
   readonly objectId: string;
   readonly path: string;
   readonly contentKind: YdocContentKind;
@@ -709,14 +709,17 @@ export class YdocAdapterSession {
     // would be accepted as a fresh baseline). Positions recorded during the
     // stale window keep the continuity; a genuine gap after this resync
     // marks stale again and converges through one more pass.
-    this.staleError = null;
     if (this.droppedWhileStale) {
       // An update arrived after the engine produced this resync state but
       // before it was applied here; its content is durable engine-side, so
-      // one more pass folds it in.
+      // one more pass folds it in. The stale guard stays SET across the
+      // recursive pass: clearing it first would open an await-window where
+      // local edits journal against a baseline the second pass immediately
+      // advances past.
       this.droppedWhileStale = false;
       return await this.resync();
     }
+    this.staleError = null;
     return update;
   }
 
@@ -876,6 +879,11 @@ export class YdocLiveAdapter {
             ? createPlaintextSeedDoc(rawResult.seedMarkdown)
             : markdownToYDoc(rawResult.seedMarkdown);
         await session.applyLocalUpdate(Y.encodeStateAsUpdate(seedDoc));
+        // The exposed initial state must INCLUDE the seed: consumers (the
+        // desktop bridge) forward session.initialUpdate to the renderer,
+        // and the pre-seed encoding would render an empty document and
+        // baseline subsequent edits wrongly.
+        session.initialUpdate = Y.encodeStateAsUpdate(session.doc);
       } catch (error) {
         // A failed seed must not leak the registered session (and with it
         // the daemon lease). settle:false is refused precisely when the

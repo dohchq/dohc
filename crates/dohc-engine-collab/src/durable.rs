@@ -379,6 +379,7 @@ where
         actor_origin_id,
         false,
         false,
+        None,
         faults,
         now_ms,
         post_append,
@@ -400,6 +401,7 @@ pub fn record_local_update_creating_marker_guarded<F>(
     actor_origin_id: Option<&str>,
     ensure_parent_row: bool,
     require_empty_lineage: bool,
+    request_id: Option<&str>,
     faults: &dyn FaultInjector,
     now_ms: i64,
     post_append: F,
@@ -407,7 +409,48 @@ pub fn record_local_update_creating_marker_guarded<F>(
 where
     F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
 {
+    // The caller's idempotency key hashes over the DOC COORDINATES and the
+    // update bytes: content-addressed dedupe alone only holds while the
+    // original row survives compaction — a retry after the fold would
+    // re-append the edit (and re-journal an outbound op on a replicated
+    // lineage) instead of replaying the original result.
+    let request_hash = request_id.map(|_| {
+        crate::hex_sha256(
+            format!(
+                "ydoc-record{sep}{}{sep}{}{sep}{}{sep}{}",
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                crate::hex_sha256(update),
+                sep = char::from(0),
+            )
+            .as_bytes(),
+        )
+    });
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
+        if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
+            let recorded: Option<(String, i64)> = tx
+                .query_row(
+                    "SELECT payload_hash, result_seq FROM engine_requests                      WHERE request_id = ?1",
+                    rusqlite::params![request_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(map_sql)?;
+            if let Some((payload_hash, result_seq)) = recorded {
+                if payload_hash != hash {
+                    return Err(CollabError::Corrupt {
+                        reason: "idempotency key reused with different content".to_owned(),
+                    });
+                }
+                // Negative namespace: -seq (see the insert below).
+                return Ok(AppendOutcome {
+                    seq: -result_seq,
+                    deduped: true,
+                    emit_outbound: false,
+                });
+            }
+        }
         if ensure_parent_row {
             tx.execute(
                 "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES (?1, ?2, ?3)",
@@ -472,6 +515,18 @@ where
                 append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)?;
             if !outcome.deduped {
                 post_append(tx, &outcome)?;
+            }
+            if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
+                // NEGATIVE namespace (-seq): rollback cleanup deletes ledger
+                // rows by POSITIVE moment_order, so a stored -seq can never
+                // be swept out from under a retry.
+                tx.execute(
+                    "INSERT INTO engine_requests \
+                     (request_id, payload_hash, result_seq, committed_at) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![request_id, hash, -outcome.seq, now_ms],
+                )
+                .map_err(map_sql)?;
             }
             Ok(outcome)
         }

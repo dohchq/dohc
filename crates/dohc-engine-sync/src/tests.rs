@@ -1044,7 +1044,12 @@ fn reserved_agent_channel_shapes_rejected() {
 fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
     let (_scratch, _path, mut engine) = store();
     // The replicated lineage exists before envelopes arrive (base claim);
-    // apply_remote_update refuses NoMarker rather than conjuring one.
+    // apply_remote_update refuses NoMarker rather than conjuring one. The
+    // version row exists because the drain now PROJECTS drained content to
+    // the visible head (a real workspace always has its version).
+    dohc_engine_domain::VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
     engine
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -1099,6 +1104,20 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
     // land the acked-but-parked envelope in the durable lineage.
     let drained = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("drain");
     assert_eq!(drained, 1, "the parked envelope must apply");
+    // The drain PROJECTS: the drained content is the visible head, not just
+    // CRDT rows (a redelivery of the acked coordinate skips the apply
+    // closure, so nothing else would ever project it).
+    let head_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM path_aliases a                  JOIN snapshots s ON s.workspace_id = a.workspace_id AND s.object_id = a.object_id                  JOIN blobs b ON b.sha256 = s.blob_sha256                  WHERE a.workspace_id = 'ws' AND a.version_id = 'main'                    AND a.path = 'notes/live.md'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("drained head");
+    assert_eq!(head_text, "parked edit");
     let update_rows: i64 = engine
         .read_with(|conn| {
             conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))

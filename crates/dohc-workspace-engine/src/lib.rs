@@ -233,8 +233,13 @@ impl EngineService {
                     .await?
             }
             "ydoc.recordUpdate" => {
-                self.ydoc_record_update(&ctx, request.workspace, request.params)
-                    .await?
+                self.ydoc_record_update(
+                    &ctx,
+                    request.workspace,
+                    request.idempotency_key.clone(),
+                    request.params.clone(),
+                )
+                .await?
             }
             "ydoc.settle" => {
                 self.ydoc_settle(&ctx, request.workspace, request.params)
@@ -367,7 +372,9 @@ impl EngineService {
             // suppression only AFTER the shutdown drain — an in-flight
             // reconcile apply still consults the registry.
             open.shutdown_capture().await;
-            self.self_writes.clear_workspace(&open.workspace_id);
+            self.self_writes
+                .scoped(&open.root)
+                .clear_workspace(&open.workspace_id);
         }
         if lock(&self.handles).len() >= MAX_OPEN_HANDLES {
             return Err(wire(
@@ -423,7 +430,7 @@ impl EngineService {
             root.clone(),
             actor.clone(),
             params.workspace_id.clone(),
-            self.self_writes.clone(),
+            self.self_writes.scoped(&root),
         );
         // STARTUP ORDERING BARRIER: the baseline reconcile (closed-period
         // disk state) must apply before the handle is handed out, or a
@@ -498,9 +505,12 @@ impl EngineService {
         // reconcile apply still consults the registry, and clearing first
         // would let it re-ingest the daemon's own just-settled file as a
         // capture write (provenance flip) during teardown.
-        let clear_suppression = removed
-            .as_ref()
-            .map(|removed| (self.self_writes.clone(), removed.workspace_id.clone()));
+        let clear_suppression = removed.as_ref().map(|removed| {
+            (
+                self.self_writes.scoped(&removed.root),
+                removed.workspace_id.clone(),
+            )
+        });
         let close_task = tokio::spawn(async move {
             if let Some(drain) = capture_drain {
                 let _ = drain.await;
@@ -1362,6 +1372,7 @@ impl EngineService {
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
+        idempotency_key: Option<String>,
         params: Value,
     ) -> Result<Value, WireError> {
         let params: YdocRecordUpdateParams = parse(params)?;
@@ -1407,6 +1418,7 @@ impl EngineService {
                         update,
                         params.actor_origin_id,
                         require_empty,
+                        idempotency_key,
                         now,
                         Arc::new(NoFaults),
                         token,
@@ -1484,7 +1496,7 @@ impl EngineService {
                 session.content_kind,
                 session.open_head_sha.clone(),
                 session_id.to_owned(),
-                Arc::new(self.self_writes.clone()),
+                Arc::new(self.self_writes.scoped(&open.root)),
                 now_ms()?,
                 Arc::new(NoFaults),
                 cancellation.token(),

@@ -64,21 +64,44 @@ const SECRET_KEY_UNAVAILABLE: CaptureError = CaptureError {
 /// claiming the just-settled head as a new external edit.
 #[derive(Clone, Default)]
 pub struct SelfWriteSuppression {
-    /// Per (workspace, path): the ORDERED pending settle identities. Two
-    /// settles can land before capture consumes the first watcher event;
-    /// a single-slot map would let the first `Changed` consume the SECOND
-    /// sha as a mismatch and ingest the daemon's own write as external.
+    /// Root-path scope prefixed onto every workspace key. The registry is
+    /// process-global (multi-service suppression), but two ROOTS can carry
+    /// the SAME workspaceId — an unscoped key would let root A's settle
+    /// swallow root B's genuine capture of identical bytes. The global
+    /// instance has an empty scope; per-workspace users hold a
+    /// [`Self::scoped`] view sharing the same map.
+    scope: String,
+    /// Per (scoped workspace, path): the ORDERED pending settle identities.
+    /// Two settles can land before capture consumes the first watcher
+    /// event; a single-slot map would let the first `Changed` consume the
+    /// SECOND sha as a mismatch and ingest the daemon's own write as
+    /// external.
     entries: Arc<Mutex<PendingWriteIdentities>>,
 }
 
-/// (workspace, path) → ordered pending settle shas.
+/// (scoped workspace, path) → ordered pending settle shas.
 type PendingWriteIdentities = HashMap<(String, String), Vec<String>>;
 
 impl SelfWriteSuppression {
+    /// A view over the SAME shared registry whose keys are prefixed with
+    /// the workspace root, so identical workspace ids under different roots
+    /// cannot collide.
+    pub fn scoped(&self, root: &std::path::Path) -> SelfWriteSuppression {
+        SelfWriteSuppression {
+            scope: root.to_string_lossy().into_owned(),
+            entries: Arc::clone(&self.entries),
+        }
+    }
+
+    fn scoped_workspace(&self, workspace_id: &str) -> String {
+        // NUL never appears in a path or workspace id — an unambiguous join.
+        format!("{}{}{workspace_id}", self.scope, char::from(0))
+    }
+
     pub fn record(&self, workspace_id: &str, path: &str, sha256: &str) {
         if let Ok(mut entries) = self.entries.lock() {
             entries
-                .entry((workspace_id.to_owned(), path.to_owned()))
+                .entry((self.scoped_workspace(workspace_id), path.to_owned()))
                 .or_default()
                 .push(sha256.to_owned());
         }
@@ -94,7 +117,7 @@ impl SelfWriteSuppression {
         let Ok(mut entries) = self.entries.lock() else {
             return false;
         };
-        let key = (workspace_id.to_owned(), path.to_owned());
+        let key = (self.scoped_workspace(workspace_id), path.to_owned());
         let Some(pending) = entries.get_mut(&key) else {
             return false;
         };
@@ -120,7 +143,7 @@ impl SelfWriteSuppression {
     /// to suppress a later revert.
     fn clear_path(&self, workspace_id: &str, path: &str) {
         if let Ok(mut entries) = self.entries.lock() {
-            entries.remove(&(workspace_id.to_owned(), path.to_owned()));
+            entries.remove(&(self.scoped_workspace(workspace_id), path.to_owned()));
         }
     }
 
@@ -128,7 +151,8 @@ impl SelfWriteSuppression {
     /// or its handle is evicted; the registry outlives workspaces.
     pub fn clear_workspace(&self, workspace_id: &str) {
         if let Ok(mut entries) = self.entries.lock() {
-            entries.retain(|(workspace, _), _| workspace != workspace_id);
+            let scoped = self.scoped_workspace(workspace_id);
+            entries.retain(|(workspace, _), _| workspace != &scoped);
         }
     }
 }
@@ -142,7 +166,7 @@ impl dohc_engine_runtime::SelfWriteRecorder for SelfWriteSuppression {
         // Remove ONE matching identity (the failed settle's own) — every
         // other pending settle's entry must survive a stale retract.
         if let Ok(mut entries) = self.entries.lock() {
-            let key = (workspace_id.to_owned(), path.to_owned());
+            let key = (self.scoped_workspace(workspace_id), path.to_owned());
             if let Some(pending) = entries.get_mut(&key) {
                 if let Some(index) = pending.iter().rposition(|recorded| recorded == sha256) {
                     pending.remove(index);

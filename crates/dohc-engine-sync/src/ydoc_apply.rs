@@ -106,6 +106,8 @@ pub fn drain_deferred_ydoc_for_key(
         Ok::<_, SyncError>(pending)
     })?;
     let mut applied = 0usize;
+    let mut last_payload: Option<YdocUpdatePayload> = None;
+    let mut payload_recorded_at = 0_i64;
     for (origin_id, origin_seq, recorded_at_ms, payload) in pending {
         let bytes = store
             .get_binary_blob(&payload.update_blob_sha256)?
@@ -127,7 +129,11 @@ pub fn drain_deferred_ydoc_for_key(
         .map_err(|_| SyncError::InvalidInput {
             reason: "parked ydoc.update could not be applied",
         })? {
-            TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. }) => applied += 1,
+            TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. }) => {
+                applied += 1;
+                payload_recorded_at = recorded_at_ms;
+                last_payload = Some(payload);
+            }
             TxnOutcome::Committed(ReplicationApplyOutcome::Deduped { .. }) => {}
             TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
         }
@@ -145,6 +151,36 @@ pub fn drain_deferred_ydoc_for_key(
         // successful would let settle/close proceed as if the pending row
         // were durably handled.
         if matches!(cleared, TxnOutcome::Crashed { .. }) {
+            return Err(SyncError::FaultCrash);
+        }
+    }
+    // Drained content must reach the VISIBLE head here, not only the CRDT
+    // log: the drain runs outside `apply_envelope_with`, so a redelivery of
+    // an already-acked coordinate skips its mutation closure — if the drain
+    // did not project, the snapshot/materialization would stay stale until
+    // some unrelated open/settle. Same idempotent-by-sha write as the pull
+    // path; skipped while cross-origin dependencies are still pending.
+    if applied > 0
+        && let Some(payload) = last_payload
+        && let Some(persisted) =
+            dohc_engine_collab::load_persisted(store, key).map_err(|_| SyncError::InvalidInput {
+                reason: "ydoc lineage load failed",
+            })?
+        && !persisted.doc.has_pending_dependencies()
+    {
+        let projected = store.write_with(faults, |tx| {
+            project_and_write_in_tx(
+                tx,
+                key,
+                &payload.path,
+                &persisted.doc,
+                persisted.marker.content_kind,
+                "deferred-drain",
+                payload_recorded_at,
+                payload_recorded_at,
+            )
+        })?;
+        if matches!(projected, TxnOutcome::Crashed { .. }) {
             return Err(SyncError::FaultCrash);
         }
     }
