@@ -5556,7 +5556,12 @@ fn versioned_binary_write_on_store(
                 materialize_outcome: PostCommitMaterializeOutcome::Error,
             });
         }
-        Err(_) => {
+        Err(error) => {
+            // The wire result self-describes the outcome; stderr keeps the
+            // server-side trail (the DOP1 wire owns stdin/stdout).
+            eprintln!(
+                "engine: binary write committed but loading its materialization job failed: {error}"
+            );
             return Ok(BinaryWriteExecutionResult {
                 write: result,
                 materialized: false,
@@ -5616,7 +5621,14 @@ fn materialize_pending_job(
         }
         Ok(JobOutcome::Conflict) => (false, PostCommitMaterializeOutcome::Conflict),
         Ok(JobOutcome::Superseded) => (false, PostCommitMaterializeOutcome::Superseded),
-        Ok(JobOutcome::Crashed(_)) | Err(_) => (false, PostCommitMaterializeOutcome::Error),
+        Ok(JobOutcome::Crashed(_)) => (false, PostCommitMaterializeOutcome::Error),
+        Err(error) => {
+            eprintln!(
+                "engine: post-commit materialization failed for {}: {error}",
+                job.target_path
+            );
+            (false, PostCommitMaterializeOutcome::Error)
+        }
     };
     if !materialized {
         self_writes.retract(workspace_id, &job.target_path, &job.content_sha256);
@@ -5757,7 +5769,8 @@ fn versioned_text_rollback_on_store(
                 materialize_outcome: PostCommitMaterializeOutcome::Skipped,
             });
         }
-        Err(_) => {
+        Err(error) => {
+            eprintln!("engine: rollback committed but loading its restore job failed: {error}");
             return Ok(RollbackExecutionResult {
                 deduped,
                 materialize_enqueued: true,
