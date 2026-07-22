@@ -346,6 +346,7 @@ enum Command {
         workspace_id: String,
         now_ms: i64,
         drain_deferred: bool,
+        expected_key: Option<DocKey>,
         version_id: String,
         path: String,
         content_kind: Option<ContentKind>,
@@ -1345,6 +1346,7 @@ impl ActorHandle {
         workspace_id: String,
         now_ms: i64,
         drain_deferred: bool,
+        expected_key: Option<DocKey>,
         version_id: String,
         path: String,
         content_kind: Option<ContentKind>,
@@ -1356,6 +1358,7 @@ impl ActorHandle {
                 workspace_id,
                 now_ms,
                 drain_deferred,
+                expected_key,
                 version_id,
                 path,
                 content_kind,
@@ -2026,6 +2029,7 @@ fn worker_main(
                 workspace_id,
                 now_ms,
                 drain_deferred,
+                expected_key,
                 version_id,
                 path,
                 content_kind,
@@ -2037,6 +2041,7 @@ fn worker_main(
                     &workspace_id,
                     now_ms,
                     drain_deferred,
+                    expected_key.as_ref(),
                     &version_id,
                     &path,
                     content_kind,
@@ -2258,6 +2263,7 @@ fn ydoc_open_state_on_store(
     workspace_id: &str,
     now_ms: i64,
     drain_deferred: bool,
+    expected_key: Option<&DocKey>,
     version_id: &str,
     path: &str,
     requested_content_kind: Option<ContentKind>,
@@ -2306,7 +2312,16 @@ fn ydoc_open_state_on_store(
     // queue, and replaying an already-applied row is content-deduped, so
     // draining on every open makes the parked update land on the next use
     // of the doc no matter how the previous session ended.
+    // The drain only runs for the key the CALLER'S LEASE covers: if the
+    // path's owner changed between the RPC's probe and this post-lease read,
+    // the derived key belongs to a different object — possibly one a live
+    // session already holds — and draining it here would mutate that doc
+    // behind its active editor with no event or resync signal. The RPC layer
+    // rejects the mismatched open right after; skipping the drain keeps this
+    // read side-effect-free for the foreign key.
+    let expected_key_matches = expected_key.is_none_or(|expected| *expected == key);
     if drain_deferred
+        && expected_key_matches
         && dohc_engine_collab::read_marker(store, &key)?
             .is_some_and(|marker| marker.regime == Regime::Replicated)
     {
@@ -2526,22 +2541,24 @@ fn ydoc_settle_on_store(
     if probe_sha != expected_head_sha {
         return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
     }
-    // Idempotent no-op: when the lineage's last settled content is exactly
-    // this projection, re-settling would mint a duplicate moment (the
-    // fingerprint's previous-moment input changed) and a redundant
-    // materialization job — the TS driver only settles when the projection
-    // differs. Answer with the current head instead.
-    let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
-    if dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
-        == Some(projected_sha.as_str())
-    {
-        let current = VersionedTextStore::new(store)
-            .read_text(&key.workspace_id, &key.version_id, path)?
-            .ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
+    if let Some(current) = head_probe.as_ref() {
+        // Ownership must hold even when the CONTENT matches the expectation:
+        // a path rebound to another object whose blob happens to equal this
+        // session's expected sha would otherwise pass the stale guard and be
+        // answered (or replayed) as if this session still owned it — and a
+        // later close could prune this object's CRDT while the artifact
+        // belongs to the other owner. Mirror the fresh path's in-tx check.
+        if current.object_id != key.object_id {
+            return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
+        }
         // The marker may have committed while the PRIOR settle's
-        // materialization crashed before the file replace: the no-op answer
-        // must first finish that pending job, or close(settle:false) could
-        // prune the CRDT while the disk still holds the old bytes.
+        // materialization failed transiently before the file replace: the
+        // head and last_settled_sha are advanced, the job is still pending,
+        // and the DISK holds the old preimage. That job must replay BEFORE
+        // any settle answer — the idempotent no-op (or close could prune
+        // over stale disk bytes) AND a changed-projection settle (whose new
+        // job's preimage is the unmaterialized head; skipping the replay
+        // would strand it in a permanent materialization conflict).
         let pending_job_id = format!("ydoc-mat_{}", current.latest_moment_id);
         if let Some(job) = store.load_materialization_job(&pending_job_id)? {
             // Suppression BEFORE the replace, exactly like the fresh path —
@@ -2594,6 +2611,18 @@ fn ydoc_settle_on_store(
                 JobOutcome::Crashed(_) => return Err(RuntimeError::OperationCrashed),
             }
         }
+    }
+    // Idempotent no-op: when the lineage's last settled content is exactly
+    // this projection, re-settling would mint a duplicate moment (the
+    // fingerprint's previous-moment input changed) and a redundant
+    // materialization job — the TS driver only settles when the projection
+    // differs. Answer with the current head instead (its pending job, if
+    // any, was replayed above).
+    let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
+    if dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
+        == Some(projected_sha.as_str())
+    {
+        let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
         return Ok(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,

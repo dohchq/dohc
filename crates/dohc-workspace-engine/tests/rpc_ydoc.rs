@@ -913,3 +913,117 @@ async fn settle_recovers_after_a_transient_replace_failure() {
     .await;
     call(&transport, &handle, 9, "workspace.close", json!({})).await;
 }
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn changed_settle_replays_the_pending_job_left_by_a_transient_failure() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    write_file(scratch.path(), "notes/seed.md", b"seed");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(service);
+    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-changed", 1).await;
+
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({
+            "versionId": "main",
+            "path": "notes/changed.md",
+            "contentKind": "plaintext"
+        }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id");
+
+    let doc = Ydoc::wire();
+    let first = base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "v1"));
+    call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": first }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "v1" }),
+    )
+    .await;
+
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(scratch.path().join("notes/changed.md"))
+        .expect("exclusive lock");
+    let second = base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "v2 "));
+    call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": second }),
+    )
+    .await;
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                6,
+                "ydoc.settle",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id, "summary": "v2 blocked" }),
+            ),
+        )
+        .await
+        .expect_err("a locked target must fail the settle");
+    drop(lock);
+
+    // The user KEEPS EDITING: the retry settles a CHANGED projection, so it
+    // takes the full write path, whose new job's preimage is the v2 head that
+    // never reached disk. Mutation check: re-scope the pending-job replay in
+    // ydoc_settle_on_store back to the unchanged-projection branch only —
+    // this settle then hits a materialization conflict and both assertions
+    // below fail.
+    let third = base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "v3 "));
+    call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": third }),
+    )
+    .await;
+    let settled = call(
+        &transport,
+        &handle,
+        8,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "v3 after replay" }),
+    )
+    .await;
+    assert_eq!(settled["markdown"], json!("v3 v2 v1"));
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes/changed.md")).expect("on disk"),
+        "v3 v2 v1"
+    );
+
+    call(
+        &transport,
+        &handle,
+        9,
+        "ydoc.close",
+        json!({ "sessionId": session_id }),
+    )
+    .await;
+    call(&transport, &handle, 10, "workspace.close", json!({})).await;
+}

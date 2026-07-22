@@ -161,7 +161,7 @@ pub struct EngineService {
     handles: Mutex<HashMap<WorkspaceHandle, OpenWorkspace>>,
     open_lock: tokio::sync::Mutex<()>,
     next_handle: std::sync::atomic::AtomicU64,
-    sessions: Mutex<HashMap<String, YdocSession>>,
+    sessions: Arc<Mutex<HashMap<String, YdocSession>>>,
     session_ops: tokio::sync::Mutex<()>,
     leases: LeaseRegistry,
     next_session: std::sync::atomic::AtomicU64,
@@ -185,7 +185,7 @@ impl EngineService {
             handles: Mutex::new(HashMap::new()),
             open_lock: tokio::sync::Mutex::new(()),
             next_handle: std::sync::atomic::AtomicU64::new(1),
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
             session_ops: tokio::sync::Mutex::new(()),
             leases: {
                 // ONE process-wide registry: the supervisor lets multiple
@@ -1252,6 +1252,7 @@ impl EngineService {
                 open.workspace_id.clone(),
                 now_ms()?,
                 false,
+                None,
                 params.version_id.clone(),
                 params.path.clone(),
                 requested_kind,
@@ -1272,6 +1273,7 @@ impl EngineService {
                 open.workspace_id.clone(),
                 now_ms()?,
                 true,
+                Some(probe.key.clone()),
                 params.version_id,
                 params.path.clone(),
                 requested_kind,
@@ -1548,22 +1550,41 @@ impl EngineService {
         // the await: if a deadline drops this future while the actor still
         // compacts/prunes, dropping the entry releases the lease — the doc
         // can't stay ydoc-session-busy forever. A close REFUSAL (e.g.
-        // UnsettledClose on a dirty prune-close) reinserts the entry under
-        // the session_ops serial we still hold.
-        let taken = lock(&self.sessions).remove(&params.session_id);
-        let close_result = open
-            .actor
-            .ydoc_close_session(
-                session.key,
-                now_ms()?,
-                Arc::new(NoFaults),
-                CancellationToken::new(),
-            )
-            .await;
-        if let Err(error) = close_result {
-            if let Some(entry) = taken {
-                lock(&self.sessions).insert(params.session_id.clone(), entry);
+        // UnsettledClose on a dirty prune-close) reinserts the entry.
+        //
+        // The take→close→reinsert sequence runs in a SPAWNED task, not this
+        // RPC future: the protocol supervisor can drop this future on a
+        // caller cancel/deadline, and a drop between the take and the
+        // actor's refusal would skip the reinsert — the session and lease
+        // would vanish over a still-dirty lineage with the refusal never
+        // observable. A spawned task runs to completion regardless of what
+        // happens to this future (dropping a JoinHandle does not cancel).
+        let now = now_ms()?;
+        let sessions = Arc::clone(&self.sessions);
+        let actor = open.actor.clone();
+        let session_id = params.session_id.clone();
+        let session_key = session.key.clone();
+        let close_task = tokio::spawn(async move {
+            let taken = lock(&sessions).remove(&session_id);
+            let close_result = actor
+                .ydoc_close_session(
+                    session_key,
+                    now,
+                    Arc::new(NoFaults),
+                    CancellationToken::new(),
+                )
+                .await;
+            if close_result.is_err()
+                && let Some(entry) = taken
+            {
+                lock(&sessions).insert(session_id, entry);
             }
+            close_result
+        });
+        let close_result = close_task
+            .await
+            .map_err(|_| wire(ErrorCode::Internal, "ydoc close task failed"))?;
+        if let Err(error) = close_result {
             return Err(map_runtime(error));
         }
         serde_json::to_value(YdocCloseResult { closed: true })
