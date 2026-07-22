@@ -34,7 +34,7 @@ pub use actor::{ActorHandle, LifecycleState, StoreSnapshot, UnitsOutcome, Worksp
 pub use error::RuntimeError;
 pub use identity::EngineDbIdentity;
 pub use search::{SearchCandidate, SearchError, SearchResult, SearchSurface};
-pub use supervisor::WorkspaceSupervisor;
+pub use supervisor::{SupervisorOpen, WorkspaceSupervisor};
 
 // Re-export the storage surface callers need so a downstream host depends on
 // one crate for the common path.

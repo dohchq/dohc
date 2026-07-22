@@ -12,9 +12,12 @@ pub use capture_sink::StoreCaptureSink;
 use base64::Engine as _;
 use dohc_engine_collab::{CollabError, ContentKind, DocKey};
 use dohc_engine_domain::{
-    ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
-    ConflictStatus, DomainError, ResolveConflictKind, ResolveTextConflict, TextConflict,
-    TextSnapshot, WriteText,
+    BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatBookmark, ChatChannel, ChatChannelKind,
+    ChatChannelSummary, ChatFeedReadState, ChatFollow, ChatMessage, ChatThread,
+    ChatThreadReadState, ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata,
+    ConflictResolution, ConflictStatus, DispatchClaim, DomainError, FeedCursorValue, FollowState,
+    FollowTargetKind, ResolveConflictKind, ResolveTextConflict, SaveBookmark, SendMessage,
+    SetFollow, StartChannelThread, TextConflict, TextSnapshot, WriteText,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -36,6 +39,7 @@ use std::{
 };
 
 const MAX_OPEN_HANDLES: usize = 64;
+const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 
 /// In-band CONTENT (binary bytes, secret plaintext) is bounded by the DOP1
 /// string limit (64 KiB per string): base64 expands 4/3, so this raw cap
@@ -80,6 +84,10 @@ fn byte_budget_cut_serialized(rows: &[Value], budget: usize) -> usize {
 /// The most one serialized row may occupy: safely under the 1 MiB frame
 /// limit with envelope headroom.
 const SINGLE_ROW_HARD_CAP_BYTES: usize = 700 * 1024;
+
+/// Approximate serialized-bytes budget for one chat list/messages page —
+/// the same measured discipline as every other list family.
+const CHAT_PAGE_BYTE_BUDGET: usize = 256 * 1024;
 
 #[derive(Clone)]
 struct OpenWorkspace {
@@ -211,6 +219,128 @@ impl EngineService {
                 self.secrets_materialize(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.channels.create" => {
+                self.chats_channels_create(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.channels.ensureGeneral" => {
+                self.chats_channels_ensure_general(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.channels.ensureAgent" => {
+                self.chats_channels_ensure_agent(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.channels.list" => {
+                self.chats_channels_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.channels.findBySlug" => {
+                self.chats_channels_find_by_slug(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.channels.getWireId" => {
+                self.chats_channels_get_wire_id(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.threads.start" => {
+                self.chats_threads_start(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                    request.idempotency_key,
+                )
+                .await?
+            }
+            "chats.threads.list" => {
+                self.chats_threads_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.messages.send" => {
+                self.chats_messages_send(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                    request.idempotency_key,
+                )
+                .await?
+            }
+            "chats.messages.list" => {
+                self.chats_messages_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.readState.markThreadRead" => {
+                self.chats_read_state_mark_thread_read(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.readState.get" => {
+                self.chats_read_state_get(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.follows.set" => {
+                self.chats_follows_set(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.follows.list" => {
+                self.chats_follows_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.feed.markSeen" => {
+                self.chats_feed_mark_seen(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.feed.listPersonal" => {
+                self.chats_feed_list_personal(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.bookmarks.save" => {
+                self.chats_bookmarks_save(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.bookmarks.list" => {
+                self.chats_bookmarks_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.bookmarks.find" => {
+                self.chats_bookmarks_find(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.bookmarks.listPending" => {
+                self.chats_bookmarks_list_pending(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.bookmarks.markReady" => {
+                self.chats_bookmarks_mark_ready(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.bookmarks.archive" => {
+                self.chats_bookmarks_archive(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.bookmarks.markFailed" => {
+                self.chats_bookmarks_mark_failed(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.bookmarks.markStale" => {
+                self.chats_bookmarks_mark_stale(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.enqueue" => {
+                self.chats_dispatch_enqueue(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.claimNextPending" => {
+                self.chats_dispatch_claim_next_pending(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.complete" => {
+                self.chats_dispatch_complete(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.fail" => {
+                self.chats_dispatch_fail(&ctx, request.workspace, request.params)
+                    .await?
+            }
             _ => return Err(wire(ErrorCode::MethodNotFound, "unknown method")),
         };
         Ok(Response { id, result })
@@ -282,10 +412,11 @@ impl EngineService {
         let supervisor = self.supervisor;
         let actor_path = db_path.clone();
         let now_ms = now_ms()?;
-        let actor = tokio::task::spawn_blocking(move || supervisor.open(&actor_path, now_ms))
+        let actor_open = tokio::task::spawn_blocking(move || supervisor.open(&actor_path, now_ms))
             .await
             .map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?
             .map_err(map_runtime)?;
+        let actor = actor_open.actor;
         let binding = actor.bind_shadow_clone(validated.token).await;
         let binding_error = match binding {
             Ok(true) => None,
@@ -325,6 +456,22 @@ impl EngineService {
             supervisor: self.supervisor,
             db_path: Some(db_path.clone()),
         };
+        if actor_open.created_actor {
+            // Cancellation-aware like every other actor wait in this flow:
+            // a caller abort stops WAITING promptly (the actor still finishes
+            // the reclaim it already accepted — it is idempotent on the next
+            // open) and the OpenGuard above closes the actor on early drop.
+            Self::read_under_ctx(
+                &cancellation,
+                "workspace.open (dispatch reclaim)",
+                actor.chat_dispatch_reclaim_running(
+                    params.workspace_id.clone(),
+                    CHAT_DISPATCH_MAX_ATTEMPTS,
+                    now_ms,
+                ),
+            )
+            .await?;
+        }
         capture.wait_for_baseline().await;
         open_guard.disarm();
         lock(&self.handles).insert(
@@ -1055,6 +1202,875 @@ impl EngineService {
         })
     }
 
+    async fn chats_channels_create(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatChannelCreateParams = parse(params)?;
+        let kind = parse_channel_kind(&params.kind)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let channel = Self::read_under_ctx(
+            &cancellation,
+            "chats.channels.create",
+            open.actor.chat_channel_create(
+                open.workspace_id,
+                params.channel_id,
+                params.name,
+                kind,
+                params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(channel_json(&channel))
+    }
+
+    async fn chats_channels_ensure_general(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatChannelEnsureParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let channel = Self::read_under_ctx(
+            &cancellation,
+            "chats.channels.ensureGeneral",
+            open.actor.chat_channel_ensure_general(
+                open.workspace_id,
+                params.channel_id,
+                params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(channel_json(&channel))
+    }
+
+    async fn chats_channels_ensure_agent(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatChannelEnsureParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let channel = Self::read_under_ctx(
+            &cancellation,
+            "chats.channels.ensureAgent",
+            open.actor.chat_channel_ensure_agent(
+                open.workspace_id,
+                params.channel_id,
+                params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(channel_json(&channel))
+    }
+
+    async fn chats_channels_list(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let _: EmptyParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let channels = Self::read_under_ctx(
+            &cancellation,
+            "chats.channels.list",
+            open.actor.chat_channels_list(open.workspace_id),
+        )
+        .await?;
+        // Bounded domain-side (10k rows) but a row can still be string-
+        // heavy: the byte budget keeps every page under the wire frame.
+        // No cursor on this family yet (composite sort keys) — truncated
+        // says so honestly; cursor pagination is RPC_GAP follow-up work.
+        let row_values: Vec<Value> = channels.iter().map(channel_summary_json).collect();
+        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
+        if included == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
+        let truncated = included < row_values.len();
+        Ok(json!({
+            "channels": row_values[..included].to_vec(),
+            "truncated": truncated,
+        }))
+    }
+
+    async fn chats_channels_find_by_slug(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatChannelFindParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let channel = Self::read_under_ctx(
+            &cancellation,
+            "chats.channels.findBySlug",
+            open.actor
+                .chat_channel_find_by_slug(open.workspace_id, params.slug),
+        )
+        .await?;
+        Ok(channel.as_ref().map(channel_json).unwrap_or(Value::Null))
+    }
+
+    async fn chats_channels_get_wire_id(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatChannelIdParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let wire_id = Self::read_under_ctx(
+            &cancellation,
+            "chats.channels.getWireId",
+            open.actor
+                .chat_channel_get_wire_id(open.workspace_id, params.channel_id),
+        )
+        .await?;
+        Ok(json!({ "wireId": wire_id }))
+    }
+
+    async fn chats_threads_start(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+        request_id: Option<String>,
+    ) -> Result<Value, WireError> {
+        let params: ChatThreadStartParams = parse(params)?;
+        reject_capture_origin(params.origin.as_deref())?;
+        let author_kind = parse_actor_kind(&params.author_kind)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let (thread, message) = Self::read_under_ctx(
+            &cancellation,
+            "chats.threads.start",
+            open.actor.chat_thread_start(
+                StartChannelThread {
+                    workspace_id: open.workspace_id,
+                    channel_id: params.channel_id,
+                    thread_id: params.thread_id,
+                    message_id: params.message_id,
+                    title: params.title,
+                    author_kind,
+                    author_display_name: params.author_display_name,
+                    author_user_id: params.author_user_id,
+                    origin: params.origin,
+                    body: params.body,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                    request_id,
+                },
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!({ "thread": thread_json(&thread), "message": message_json(&message) }))
+    }
+
+    async fn chats_threads_list(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let _: EmptyParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let threads = Self::read_under_ctx(
+            &cancellation,
+            "chats.threads.list",
+            open.actor.chat_threads_list(open.workspace_id),
+        )
+        .await?;
+        // Bounded domain-side (10k rows) but a row can still be string-
+        // heavy: the byte budget keeps every page under the wire frame.
+        // No cursor on this family yet (composite sort keys) — truncated
+        // says so honestly; cursor pagination is RPC_GAP follow-up work.
+        let row_values: Vec<Value> = threads.iter().map(thread_json).collect();
+        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
+        if included == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
+        let truncated = included < row_values.len();
+        Ok(json!({
+            "threads": row_values[..included].to_vec(),
+            "truncated": truncated,
+        }))
+    }
+
+    async fn chats_messages_send(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+        request_id: Option<String>,
+    ) -> Result<Value, WireError> {
+        let params: ChatMessageSendParams = parse(params)?;
+        reject_capture_origin(params.origin.as_deref())?;
+        let author_kind = parse_actor_kind(&params.author_kind)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let message = Self::read_under_ctx(
+            &cancellation,
+            "chats.messages.send",
+            open.actor.chat_message_send(
+                SendMessage {
+                    workspace_id: open.workspace_id,
+                    thread_id: params.thread_id,
+                    message_id: params.message_id,
+                    author_kind,
+                    author_display_name: params.author_display_name,
+                    author_user_id: params.author_user_id,
+                    parent_message_id: params.parent_message_id,
+                    origin: params.origin,
+                    body: params.body,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                    request_id,
+                },
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(message_json(&message))
+    }
+
+    async fn chats_messages_list(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatMessagesListParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let page = Self::read_under_ctx(
+            &cancellation,
+            "chats.messages.list",
+            open.actor.chat_messages_list(
+                open.workspace_id,
+                params.thread_id,
+                params.limit.unwrap_or(100).min(500),
+                params.after_message_order,
+            ),
+        )
+        .await?;
+        let row_values: Vec<Value> = page.messages.iter().map(message_json).collect();
+        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
+        if included == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a message row exceeds the response frame budget",
+            ));
+        }
+        let truncated = included < row_values.len();
+        let next_after = if truncated {
+            page.messages[..included]
+                .last()
+                .map(|message| message.message_order)
+        } else {
+            page.next_after_message_order
+        };
+        Ok(json!({
+            "messages": row_values[..included].to_vec(),
+            "nextAfterMessageOrder": next_after,
+        }))
+    }
+
+    async fn chats_read_state_mark_thread_read(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatReadStateMarkParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let state = Self::read_under_ctx(
+            &cancellation,
+            "chats.readState.markThreadRead",
+            open.actor.chat_read_state_mark_thread_read(
+                open.workspace_id,
+                params.thread_id,
+                params.up_to_sequence,
+                params.expected_revision,
+                params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(read_state_json(&state))
+    }
+
+    async fn chats_read_state_get(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatThreadParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let state = Self::read_under_ctx(
+            &cancellation,
+            "chats.readState.get",
+            open.actor
+                .chat_read_state_get(open.workspace_id, params.thread_id),
+        )
+        .await?;
+        Ok(read_state_json(&state))
+    }
+
+    async fn chats_follows_set(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatFollowSetParams = parse(params)?;
+        let target_kind = parse_follow_target_kind(&params.target_kind)?;
+        let state = parse_follow_state(&params.state)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let follow = Self::read_under_ctx(
+            &cancellation,
+            "chats.follows.set",
+            open.actor.chat_follow_set(
+                SetFollow {
+                    workspace_id: open.workspace_id,
+                    owner_user_id: params.owner_user_id,
+                    replication_owner_user_id: params.replication_owner_user_id,
+                    target_kind,
+                    target_id: params.target_id,
+                    state,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                },
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(follow_json(&workspace_id, &follow))
+    }
+
+    async fn chats_follows_list(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatFollowListParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let follows = Self::read_under_ctx(
+            &cancellation,
+            "chats.follows.list",
+            open.actor
+                .chat_follows_list(open.workspace_id, params.owner_user_id, params.state),
+        )
+        .await?;
+        // Bounded domain-side (10k rows) but a row can still be string-
+        // heavy: the byte budget keeps every page under the wire frame.
+        // No cursor on this family yet (composite sort keys) — truncated
+        // says so honestly; cursor pagination is RPC_GAP follow-up work.
+        let row_values: Vec<Value> = follows
+            .iter()
+            .map(|follow| follow_json(&workspace_id, follow))
+            .collect();
+        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
+        if included == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
+        let truncated = included < row_values.len();
+        Ok(json!({
+            "follows": row_values[..included].to_vec(),
+            "truncated": truncated,
+        }))
+    }
+
+    async fn chats_feed_mark_seen(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatFeedMarkSeenParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let state = Self::read_under_ctx(
+            &cancellation,
+            "chats.feed.markSeen",
+            open.actor.chat_feed_mark_seen(
+                open.workspace_id,
+                params.owner_user_id,
+                params.replication_owner_user_id,
+                params.head_cursor,
+                params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(feed_read_state_json(&state))
+    }
+
+    async fn chats_feed_list_personal(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatFeedListParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let page = Self::read_under_ctx(
+            &cancellation,
+            "chats.feed.listPersonal",
+            open.actor.chat_feed_list_personal(
+                open.workspace_id,
+                params.owner_user_id,
+                params.limit.map(|limit| limit.min(100)),
+                params.cursor,
+            ),
+        )
+        .await?;
+        let row_values: Vec<Value> = page
+            .items
+            .iter()
+            .map(|item| {
+                let mut value = json!({
+                    "message": feed_message_json(&item.message),
+                    "thread": feed_thread_json(&item.thread),
+                    // Reactions are an unported RPC-B2 domain; the contract field
+                    // still exists and must be an empty array for shape validation.
+                    "reactions": [],
+                    "matchedBy": item.matched_by.iter().map(follow_target_kind_json).collect::<Vec<_>>(),
+                });
+                let object = value.as_object_mut().expect("feed item is an object");
+                if let Some(channel) = &item.channel {
+                    object.insert("channel".to_owned(), feed_channel_json(channel));
+                }
+                if let Some(parent_message) = &item.parent_message {
+                    object.insert(
+                        "parentMessage".to_owned(),
+                        feed_message_json(parent_message),
+                    );
+                }
+                if let Some(opening_message) = &item.opening_message {
+                    object.insert(
+                        "openingMessage".to_owned(),
+                        feed_message_json(opening_message),
+                    );
+                }
+                value
+            })
+            .collect();
+        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
+        if included == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a feed row exceeds the response frame budget",
+            ));
+        }
+        let truncated = included < row_values.len();
+        let next_cursor = if truncated {
+            page.items[..included].last().map(|item| {
+                dohc_engine_domain::encode_feed_cursor(&FeedCursorValue {
+                    created_at_ms: item.message.created_at_ms,
+                    message_id: item.message.message_id.clone(),
+                })
+            })
+        } else {
+            page.next_cursor
+        };
+        Ok(json!({
+            "items": row_values[..included].to_vec(),
+            "nextCursor": next_cursor,
+            "headCursor": page.head_cursor,
+            "readState": page.read_state.as_ref().map(feed_read_state_json),
+        }))
+    }
+
+    async fn chats_bookmarks_save(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatBookmarkSaveParams = parse(params)?;
+        let target_kind = parse_bookmark_target_kind(&params.target_kind)?;
+        let mode = parse_bookmark_mode(&params.mode)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let bookmark = Self::read_under_ctx(
+            &cancellation,
+            "chats.bookmarks.save",
+            open.actor.chat_bookmark_save(
+                SaveBookmark {
+                    workspace_id: workspace_id.clone(),
+                    owner_user_id: params.owner_user_id,
+                    target_kind,
+                    target_id: params.target_id,
+                    mode,
+                    destination_path: params.destination_path,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                },
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(bookmark_json(&workspace_id, &bookmark))
+    }
+
+    async fn chats_bookmarks_find(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatBookmarkFindParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let bookmark = Self::read_under_ctx(
+            &cancellation,
+            "chats.bookmarks.find",
+            open.actor.chat_bookmark_find(
+                workspace_id.clone(),
+                params.owner_user_id,
+                params.bookmark_id,
+            ),
+        )
+        .await?;
+        Ok(json!({
+            "bookmark": bookmark
+                .as_ref()
+                .map(|bookmark| bookmark_json(&workspace_id, bookmark))
+                .unwrap_or(Value::Null)
+        }))
+    }
+
+    async fn chats_bookmarks_list_pending(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatBookmarkListPendingParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let bookmarks = Self::read_under_ctx(
+            &cancellation,
+            "chats.bookmarks.listPending",
+            open.actor.chat_bookmarks_list_pending(
+                workspace_id.clone(),
+                params.owner_user_id,
+                params.limit,
+            ),
+        )
+        .await?;
+        // Domain-bounded to 200 rows; the byte budget still fences
+        // string-heavy rows like the other list families.
+        let row_values: Vec<Value> = bookmarks
+            .iter()
+            .map(|bookmark| bookmark_json(&workspace_id, bookmark))
+            .collect();
+        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
+        if included == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
+        let truncated = included < row_values.len();
+        Ok(json!({
+            "bookmarks": row_values[..included].to_vec(),
+            "truncated": truncated,
+        }))
+    }
+
+    async fn chats_bookmarks_list(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatBookmarkListParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let bookmarks = Self::read_under_ctx(
+            &cancellation,
+            "chats.bookmarks.list",
+            open.actor.chat_bookmarks_list(
+                workspace_id.clone(),
+                params.owner_user_id,
+                params.state,
+            ),
+        )
+        .await?;
+        // Bounded domain-side (10k rows) but a row can still be string-
+        // heavy: the byte budget keeps every page under the wire frame.
+        // No cursor on this family yet (composite sort keys) — truncated
+        // says so honestly; cursor pagination is RPC_GAP follow-up work.
+        let row_values: Vec<Value> = bookmarks
+            .iter()
+            .map(|bookmark| bookmark_json(&workspace_id, bookmark))
+            .collect();
+        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
+        if included == 0 && !row_values.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
+        let truncated = included < row_values.len();
+        Ok(json!({
+            "bookmarks": row_values[..included].to_vec(),
+            "truncated": truncated,
+        }))
+    }
+
+    async fn chats_bookmarks_mark_ready(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatBookmarkMarkReadyParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let transition = Self::read_under_ctx(
+            &cancellation,
+            "chats.bookmarks.markReady",
+            open.actor.chat_bookmark_mark_ready(
+                workspace_id.clone(),
+                params.owner_user_id,
+                params.bookmark_id,
+                params.generation,
+                params.projected_at_ms.unwrap_or(now_ms()?),
+                params.projection_object_id,
+                params.projection_path,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!({
+            "bookmark": bookmark_json(&workspace_id, &transition.bookmark),
+            "applied": transition.applied,
+        }))
+    }
+
+    async fn chats_bookmarks_archive(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatBookmarkArchiveParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let bookmark = Self::read_under_ctx(
+            &cancellation,
+            "chats.bookmarks.archive",
+            open.actor.chat_bookmark_archive(
+                workspace_id.clone(),
+                params.owner_user_id,
+                params.bookmark_id,
+                now_ms()?,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(bookmark_json(&workspace_id, &bookmark))
+    }
+
+    async fn chats_bookmarks_mark_failed(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatBookmarkMarkFailedParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let transition = Self::read_under_ctx(
+            &cancellation,
+            "chats.bookmarks.markFailed",
+            open.actor.chat_bookmark_mark_failed(
+                workspace_id.clone(),
+                params.owner_user_id,
+                params.bookmark_id,
+                params.generation,
+                params.failure_reason,
+                now_ms()?,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!({
+            "bookmark": bookmark_json(&workspace_id, &transition.bookmark),
+            "applied": transition.applied,
+        }))
+    }
+
+    async fn chats_bookmarks_mark_stale(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatBookmarkMarkStaleParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let transition = Self::read_under_ctx(
+            &cancellation,
+            "chats.bookmarks.markStale",
+            open.actor.chat_bookmark_mark_stale(
+                workspace_id.clone(),
+                params.owner_user_id,
+                params.bookmark_id,
+                params.generation,
+                params.failure_reason,
+                now_ms()?,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!({
+            "bookmark": bookmark_json(&workspace_id, &transition.bookmark),
+            "applied": transition.applied,
+        }))
+    }
+
+    async fn chats_dispatch_enqueue(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchEnqueueParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let enqueued = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.enqueue",
+            open.actor.chat_dispatch_enqueue(
+                open.workspace_id,
+                params.trigger_message_id,
+                params.thread_id,
+                params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!({ "enqueued": enqueued }))
+    }
+
+    async fn chats_dispatch_claim_next_pending(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchClaimParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let claim = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.claimNextPending",
+            open.actor.chat_dispatch_claim_next_pending(
+                open.workspace_id,
+                params.run_id,
+                params.command.unwrap_or_default(),
+                params.log_path,
+                params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(claim
+            .as_ref()
+            .map(dispatch_claim_json)
+            .unwrap_or(Value::Null))
+    }
+
+    async fn chats_dispatch_complete(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchCompleteParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.complete",
+            open.actor.chat_dispatch_complete(
+                open.workspace_id,
+                params.run_id,
+                params.exit_code,
+                params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!({ "completed": true }))
+    }
+
+    async fn chats_dispatch_fail(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchFailParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.fail",
+            open.actor.chat_dispatch_fail(
+                open.workspace_id,
+                params.run_id,
+                params.reason,
+                params.exit_code,
+                params.now_ms.unwrap_or(now_ms()?),
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!({ "failed": true }))
+    }
+
     async fn ydoc_apply(
         &self,
         ctx: &RequestContext,
@@ -1493,6 +2509,232 @@ struct SearchParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EmptyParams {}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatChannelCreateParams {
+    channel_id: String,
+    name: String,
+    kind: String,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatChannelEnsureParams {
+    channel_id: String,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatChannelFindParams {
+    slug: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatChannelIdParams {
+    channel_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatThreadStartParams {
+    channel_id: String,
+    thread_id: String,
+    message_id: String,
+    title: Option<String>,
+    author_kind: String,
+    author_display_name: String,
+    author_user_id: Option<String>,
+    origin: Option<String>,
+    body: String,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatMessageSendParams {
+    thread_id: String,
+    message_id: String,
+    author_kind: String,
+    author_display_name: String,
+    author_user_id: Option<String>,
+    parent_message_id: Option<String>,
+    origin: Option<String>,
+    body: String,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatMessagesListParams {
+    thread_id: String,
+    limit: Option<i64>,
+    after_message_order: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatThreadParams {
+    thread_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatReadStateMarkParams {
+    thread_id: String,
+    up_to_sequence: i64,
+    expected_revision: Option<i64>,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatFollowSetParams {
+    owner_user_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    replication_owner_user_id: Option<String>,
+    target_kind: String,
+    target_id: String,
+    state: String,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatBookmarkListParams {
+    owner_user_id: String,
+    state: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatFollowListParams {
+    owner_user_id: String,
+    state: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatBookmarkFindParams {
+    owner_user_id: String,
+    bookmark_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatBookmarkListPendingParams {
+    owner_user_id: String,
+    limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatFeedMarkSeenParams {
+    owner_user_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    replication_owner_user_id: Option<String>,
+    head_cursor: String,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatFeedListParams {
+    owner_user_id: String,
+    limit: Option<i64>,
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatBookmarkSaveParams {
+    owner_user_id: String,
+    target_kind: String,
+    target_id: String,
+    mode: String,
+    destination_path: String,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatBookmarkMarkReadyParams {
+    owner_user_id: String,
+    bookmark_id: String,
+    generation: i64,
+    projected_at_ms: Option<i64>,
+    projection_object_id: Option<String>,
+    projection_path: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatBookmarkArchiveParams {
+    owner_user_id: String,
+    bookmark_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatBookmarkMarkFailedParams {
+    owner_user_id: String,
+    bookmark_id: String,
+    generation: i64,
+    failure_reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatBookmarkMarkStaleParams {
+    owner_user_id: String,
+    bookmark_id: String,
+    generation: i64,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    failure_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchEnqueueParams {
+    trigger_message_id: String,
+    thread_id: String,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchClaimParams {
+    run_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    command: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    log_path: Option<String>,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchCompleteParams {
+    run_id: String,
+    exit_code: i64,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchFailParams {
+    run_id: String,
+    reason: String,
+    exit_code: Option<i64>,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ConflictDto {
     id: String,
     workspace_id: String,
@@ -1651,6 +2893,287 @@ fn parse_resolution(raw: &str) -> Result<ConflictResolution, WireError> {
             "unknown conflict resolution",
         )),
     }
+}
+
+fn parse_channel_kind(raw: &str) -> Result<ChatChannelKind, WireError> {
+    match raw {
+        "channel" => Ok(ChatChannelKind::Channel),
+        "dm" => Ok(ChatChannelKind::Dm),
+        "agent" => Ok(ChatChannelKind::Agent),
+        _ => Err(wire(ErrorCode::InvalidParams, "unknown chat channel kind")),
+    }
+}
+
+fn parse_actor_kind(raw: &str) -> Result<ChatActorKind, WireError> {
+    match raw {
+        "human" => Ok(ChatActorKind::Human),
+        "agent" => Ok(ChatActorKind::Agent),
+        _ => Err(wire(ErrorCode::InvalidParams, "unknown chat actor kind")),
+    }
+}
+
+fn parse_follow_target_kind(raw: &str) -> Result<FollowTargetKind, WireError> {
+    match raw {
+        "person" => Ok(FollowTargetKind::Person),
+        "agent" => Ok(FollowTargetKind::Agent),
+        "channel" => Ok(FollowTargetKind::Channel),
+        "thread" => Ok(FollowTargetKind::Thread),
+        _ => Err(wire(ErrorCode::InvalidParams, "unknown follow target kind")),
+    }
+}
+
+fn parse_follow_state(raw: &str) -> Result<FollowState, WireError> {
+    match raw {
+        "following" => Ok(FollowState::Following),
+        "unfollowed" => Ok(FollowState::Unfollowed),
+        _ => Err(wire(ErrorCode::InvalidParams, "unknown follow state")),
+    }
+}
+
+fn parse_bookmark_target_kind(raw: &str) -> Result<BookmarkTargetKind, WireError> {
+    match raw {
+        "message" => Ok(BookmarkTargetKind::Message),
+        "thread" => Ok(BookmarkTargetKind::Thread),
+        _ => Err(wire(
+            ErrorCode::InvalidParams,
+            "unknown bookmark target kind",
+        )),
+    }
+}
+
+fn parse_bookmark_mode(raw: &str) -> Result<BookmarkMode, WireError> {
+    match raw {
+        "live" => Ok(BookmarkMode::Live),
+        "snapshot" => Ok(BookmarkMode::Snapshot),
+        _ => Err(wire(ErrorCode::InvalidParams, "unknown bookmark mode")),
+    }
+}
+
+fn reject_capture_origin(origin: Option<&str>) -> Result<(), WireError> {
+    if origin == Some("capture") {
+        Err(wire(
+            ErrorCode::InvalidParams,
+            "capture is a reserved origin",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn channel_json(channel: &ChatChannel) -> Value {
+    json!({
+        "workspaceId": channel.workspace_id,
+        "channelId": channel.channel_id,
+        "name": channel.name,
+        "slug": channel.slug,
+        "kind": match channel.kind {
+            ChatChannelKind::Channel => "channel",
+            ChatChannelKind::Dm => "dm",
+            ChatChannelKind::Agent => "agent",
+        },
+        "createdAtMs": channel.created_at_ms,
+        "updatedAtMs": channel.updated_at_ms,
+    })
+}
+
+fn feed_channel_json(channel: &ChatChannel) -> Value {
+    json!({
+        "id": channel.channel_id,
+        "workspaceId": channel.workspace_id,
+        "name": channel.name,
+        "slug": channel.slug,
+        "kind": match channel.kind {
+            ChatChannelKind::Channel => "channel",
+            ChatChannelKind::Dm => "dm",
+            ChatChannelKind::Agent => "agent",
+        },
+        "createdAtMs": channel.created_at_ms,
+        "updatedAtMs": channel.updated_at_ms,
+    })
+}
+
+fn feed_thread_json(thread: &ChatThread) -> Value {
+    let mut value = json!({
+        "id": thread.thread_id,
+        "workspaceId": thread.workspace_id,
+        "title": thread.title,
+        "createdAtMs": thread.created_at_ms,
+        "updatedAtMs": thread.updated_at_ms,
+    });
+    if let Some(channel_id) = &thread.channel_id {
+        value
+            .as_object_mut()
+            .expect("feed thread is an object")
+            .insert("channelId".to_owned(), json!(channel_id));
+    }
+    value
+}
+
+fn feed_message_json(message: &ChatMessage) -> Value {
+    let mut value = json!({
+        "id": message.message_id,
+        "workspaceId": message.workspace_id,
+        "threadId": message.thread_id,
+        "author": {
+            "kind": match message.author_kind {
+                ChatActorKind::Human => "human",
+                ChatActorKind::Agent => "agent",
+            },
+            "displayName": message.author_display_name,
+        },
+        "body": message.body,
+        "createdAtMs": message.created_at_ms,
+        "attachments": [],
+    });
+    let object = value.as_object_mut().expect("feed message is an object");
+    if let Some(author_user_id) = &message.author_user_id {
+        object.insert("authorUserId".to_owned(), json!(author_user_id));
+    }
+    if let Some(parent_message_id) = &message.parent_message_id {
+        object.insert("parentMessageId".to_owned(), json!(parent_message_id));
+    }
+    if let Some(origin) = &message.origin {
+        object.insert("origin".to_owned(), json!(origin));
+    }
+    value
+}
+
+fn follow_target_kind_json(kind: &FollowTargetKind) -> Value {
+    json!(match kind {
+        FollowTargetKind::Person => "person",
+        FollowTargetKind::Agent => "agent",
+        FollowTargetKind::Channel => "channel",
+        FollowTargetKind::Thread => "thread",
+    })
+}
+
+fn channel_summary_json(summary: &ChatChannelSummary) -> Value {
+    let mut value = channel_json(&summary.channel);
+    value["threadCount"] = json!(summary.thread_count);
+    value["unreadCount"] = json!(summary.unread_count);
+    value
+}
+
+fn thread_json(thread: &ChatThread) -> Value {
+    json!({
+        "workspaceId": thread.workspace_id,
+        "threadId": thread.thread_id,
+        "title": thread.title,
+        "createdAtMs": thread.created_at_ms,
+        "updatedAtMs": thread.updated_at_ms,
+        "channelId": thread.channel_id,
+        "linkedObjectId": thread.linked_object_id,
+    })
+}
+
+fn message_json(message: &ChatMessage) -> Value {
+    json!({
+        "workspaceId": message.workspace_id,
+        "threadId": message.thread_id,
+        "messageId": message.message_id,
+        "messageOrder": message.message_order,
+        "authorKind": match message.author_kind {
+            ChatActorKind::Human => "human",
+            ChatActorKind::Agent => "agent",
+        },
+        "authorDisplayName": message.author_display_name,
+        "authorUserId": message.author_user_id,
+        "parentMessageId": message.parent_message_id,
+        "origin": message.origin,
+        "body": message.body,
+        "createdAtMs": message.created_at_ms,
+    })
+}
+
+fn read_state_json(state: &ChatThreadReadState) -> Value {
+    json!({
+        "workspaceId": state.workspace_id,
+        "threadId": state.thread_id,
+        "lastReadSequence": state.last_read_sequence,
+        "revision": state.revision,
+        "updatedAtMs": state.updated_at_ms,
+    })
+}
+
+fn feed_read_state_json(state: &ChatFeedReadState) -> Value {
+    json!({
+        "workspaceId": state.workspace_id,
+        "ownerUserId": state.owner_user_id,
+        "lastSeenCreatedAtMs": state.last_seen_created_at_ms,
+        "lastSeenMessageId": state.last_seen_message_id,
+        "updatedAtMs": state.updated_at_ms,
+    })
+}
+
+fn follow_json(workspace_id: &str, follow: &ChatFollow) -> Value {
+    json!({
+        "workspaceId": workspace_id,
+        "ownerUserId": follow.owner_user_id,
+        "targetKind": match follow.target_kind {
+            FollowTargetKind::Person => "person",
+            FollowTargetKind::Agent => "agent",
+            FollowTargetKind::Channel => "channel",
+            FollowTargetKind::Thread => "thread",
+        },
+        "targetId": follow.target_id,
+        "state": match follow.state {
+            FollowState::Following => "following",
+            FollowState::Unfollowed => "unfollowed",
+        },
+        "updatedAtMs": follow.updated_at_ms,
+    })
+}
+
+fn bookmark_json(workspace_id: &str, bookmark: &ChatBookmark) -> Value {
+    json!({
+        "bookmarkId": bookmark.bookmark_id,
+        "workspaceId": workspace_id,
+        "ownerUserId": bookmark.owner_user_id,
+        "targetKind": bookmark.target_kind,
+        "targetId": bookmark.target_id,
+        "threadId": bookmark.thread_id,
+        "messageId": bookmark.message_id,
+        "mode": bookmark.mode,
+        "destinationPath": bookmark.destination_path,
+        "state": bookmark.state,
+        "generation": bookmark.generation,
+        "projectedGeneration": bookmark.projected_generation,
+        "projectionState": bookmark.projection_state,
+        "projectionObjectId": bookmark.projection_object_id,
+        "createdAtMs": bookmark.created_at_ms,
+        "updatedAtMs": bookmark.updated_at_ms,
+        "lastProjectedAtMs": bookmark.last_projected_at_ms,
+        "failureReason": bookmark.failure_reason,
+    })
+}
+
+fn dispatch_claim_json(claim: &DispatchClaim) -> Value {
+    json!({
+        "dispatch": {
+            "workspaceId": claim.dispatch.workspace_id,
+            "triggerMessageId": claim.dispatch.trigger_message_id,
+            "threadId": claim.dispatch.thread_id,
+            "state": claim.dispatch.state,
+            "runId": claim.dispatch.run_id,
+            "failureReason": claim.dispatch.failure_reason,
+            "attemptCount": claim.dispatch.attempt_count,
+            "createdAtMs": claim.dispatch.created_at_ms,
+            "updatedAtMs": claim.dispatch.updated_at_ms,
+        },
+        "run": {
+            "workspaceId": claim.run.workspace_id,
+            "runId": claim.run.run_id,
+            "threadId": claim.run.thread_id,
+            "triggerMessageId": claim.run.trigger_message_id,
+            "command": claim.run.command,
+            "startedAtMs": claim.run.started_at_ms,
+            "endedAtMs": claim.run.ended_at_ms,
+            "exitCode": claim.run.exit_code,
+            "failureReason": claim.run.failure_reason,
+            "logPath": claim.run.log_path,
+            "failureNotePosted": claim.run.failure_note_posted,
+        },
+    })
 }
 
 fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
@@ -1812,6 +3335,13 @@ fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value
     }
 }
 
+fn deserialize_optional_non_null_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
+}
+
 fn parse<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, WireError> {
     serde_json::from_value(value).map_err(|_| wire(ErrorCode::InvalidParams, "invalid parameters"))
 }
@@ -1857,7 +3387,12 @@ fn map_runtime(error: RuntimeError) -> WireError {
 
 fn map_domain_code(error: DomainError) -> ErrorCode {
     match error {
-        DomainError::Storage(_) | DomainError::StateCorrupt { .. } => ErrorCode::Internal,
+        DomainError::Storage(_)
+        | DomainError::StateCorrupt { .. }
+        | DomainError::Chat {
+            code: "state-corrupt",
+            ..
+        } => ErrorCode::Internal,
         DomainError::Crypto(error) => match error {
             dohc_engine_crypto::CryptoError::InvalidIvLength
             | dohc_engine_crypto::CryptoError::InvalidTagLength

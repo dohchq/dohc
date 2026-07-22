@@ -47,8 +47,8 @@ use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::Path;
 
-/// The sentinel message id for a thread's header row.
-pub(crate) const THREAD_HEADER_MESSAGE_ID: &str = "__thread__";
+/// The sentinel message id for a thread's header row, shared with domain writes.
+pub(crate) use dohc_engine_domain::chats::CHAT_THREAD_HEADER_MESSAGE_ID as THREAD_HEADER_MESSAGE_ID;
 
 /// Minimum query length the trigram index can serve (`MIN_TRIGRAM_QUERY_CHARS`).
 pub const MIN_TRIGRAM_QUERY_CHARS: usize = 3;

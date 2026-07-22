@@ -460,7 +460,7 @@ fn apply_message(
     }
     let previous: i64 = tx
         .query_row(
-            "SELECT COALESCE(MAX(message_order), 0) FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2",
+            "SELECT COALESCE(MAX(message_order), -1) FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2",
             params![op.workspace_id, payload.thread_id],
             |row| row.get(0),
         )

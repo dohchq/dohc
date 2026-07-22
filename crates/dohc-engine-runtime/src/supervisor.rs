@@ -47,6 +47,14 @@ pub struct WorkspaceSupervisor {
     ready: Condvar,
 }
 
+/// Result of opening a workspace actor. `created_actor` is true only for the
+/// caller that installed a newly-spawned actor in the process-wide registry;
+/// attachers to an existing live actor receive false.
+pub struct SupervisorOpen {
+    pub actor: ActorHandle,
+    pub created_actor: bool,
+}
+
 /// An actor removed from the registry while its `Closing` marker remains held.
 /// Dropping the operation finishes the close before releasing the marker.
 pub struct WorkspaceClose<'a> {
@@ -118,7 +126,7 @@ impl WorkspaceSupervisor {
     /// live actor for that identity already exists — its handle is returned
     /// without opening a second connection. A dead actor (its worker panicked)
     /// is evicted and re-opened.
-    pub fn open(&self, db_path: &Path, now_ms: i64) -> Result<ActorHandle, RuntimeError> {
+    pub fn open(&self, db_path: &Path, now_ms: i64) -> Result<SupervisorOpen, RuntimeError> {
         ensure_parent_dir(db_path)?;
 
         let mut dead: Option<WorkspaceActor> = None;
@@ -141,7 +149,10 @@ impl WorkspaceSupervisor {
                 match action {
                     Action::Return => {
                         if let Some(Slot::Active(actor)) = guard.get(&identity) {
-                            return Ok(actor.handle());
+                            return Ok(SupervisorOpen {
+                                actor: actor.handle(),
+                                created_actor: false,
+                            });
                         }
                         continue; // slot changed under us; re-evaluate
                     }
@@ -168,6 +179,10 @@ impl WorkspaceSupervisor {
 
         let spawned = WorkspaceActor::spawn(db_path.to_path_buf(), identity.clone(), 1, now_ms);
         self.finalize_reservation(identity, spawned)
+            .map(|actor| SupervisorOpen {
+                actor,
+                created_actor: true,
+            })
     }
 
     /// Close and reopen the actor for `db_path`, incrementing its session
