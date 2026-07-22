@@ -1736,15 +1736,18 @@ impl EngineService {
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let params: ChatOwnerParams = parse(params)?;
+        let params: ChatBookmarkListParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id.clone();
         let cancellation = OperationCancellation::new(ctx);
         let bookmarks = Self::read_under_ctx(
             &cancellation,
             "chats.bookmarks.list",
-            open.actor
-                .chat_bookmarks_list(workspace_id.clone(), params.owner_user_id),
+            open.actor.chat_bookmarks_list(
+                workspace_id.clone(),
+                params.owner_user_id,
+                params.state,
+            ),
         )
         .await?;
         // Bounded domain-side (10k rows) but a row can still be string-
@@ -1924,7 +1927,7 @@ impl EngineService {
             open.actor.chat_dispatch_claim_next_pending(
                 open.workspace_id,
                 params.run_id,
-                params.command.unwrap_or_else(|| "agent".to_owned()),
+                params.command.unwrap_or_default(),
                 params.log_path,
                 params.now_ms.unwrap_or(now_ms()?),
                 cancellation.token(),
@@ -2522,6 +2525,13 @@ struct ChatFollowSetParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatOwnerParams {
     owner_user_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatBookmarkListParams {
+    owner_user_id: String,
+    state: Option<String>,
 }
 
 #[derive(Deserialize)]

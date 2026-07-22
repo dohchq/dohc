@@ -777,12 +777,11 @@ fn normalize_replicated_chat_id(value: &str, reason: &'static str) -> Result<Str
     }
 }
 
-/// Claim metadata follows `normalizeCommand`: validate the trimmed shape but
-/// preserve the caller's original string in the run record.
+/// Claim metadata follows `normalizeCommand`: an omitted command is the EMPTY
+/// string (the oracle's default) and empty/whitespace commands are preserved
+/// verbatim — only NUL (and the daemon's metadata length cap) refuse.
 fn normalize_dispatch_command(command: &str) -> Result<String, DomainError> {
-    if command.trim_matches(is_js_trim_ws).is_empty()
-        || command.contains('\0')
-        || command.encode_utf16().count() > MAX_DISPATCH_METADATA_UTF16_UNITS
+    if command.contains('\0') || command.encode_utf16().count() > MAX_DISPATCH_METADATA_UTF16_UNITS
     {
         Err(DomainError::InvalidInput {
             reason: "runner command is invalid",
@@ -2391,17 +2390,29 @@ impl<'a> LinkedChatStore<'a> {
         let owner_user_id = normalize_feed_identity(&input.owner_user_id, "Bookmark owner")?;
         let target_id = normalize_feed_identity(&input.target_id, "Bookmark target")?;
         // The destination is a user-write path a projection worker later
-        // materializes, so it must clear the path floor (no empty/absolute/
-        // backslash/traversal/`.dohc` targets) BEFORE it is persisted and queued
-        // (`normalizePathHint` → `validateUserWritePath`). Otherwise an unsafe
-        // path like `../outside.md` would ride into `chat_bookmarks`/outbox and
-        // break the materialization safety boundary.
-        crate::store::validate_path(&input.destination_path).map_err(|_| {
-            DomainError::chat("invalid-path", "Bookmark destination path is invalid.")
-        })?;
+        // materializes, so it must clear the CANONICAL Check-A floor
+        // (`normalizePathHint` → `validateUserWritePath`): iterative percent
+        // decoding (%25/%2e/%2f/%5c until stable), absolute/traversal
+        // rejection, and the full reserved/ignored set — and the NORMALIZED
+        // form is what persists, exactly like the oracle stores
+        // `result.normalized`. A weaker floor here would let a disguised path
+        // like `%2e%2e/outside.md` ride into `chat_bookmarks`/outbox that the
+        // TS projection writer then refuses, wedging the bookmark.
+        let destination_path = match dohc_engine_files::classify_engine_file_path_normalized(
+            &input.destination_path,
+        ) {
+            (_, Some(normalized)) => normalized,
+            _ => {
+                return Err(DomainError::chat(
+                    "invalid-path",
+                    "Bookmark destination path is invalid.",
+                ));
+            }
+        };
         let mut input = input.clone();
         input.owner_user_id = owner_user_id;
         input.target_id = target_id;
+        input.destination_path = destination_path;
         let now = input.now_ms;
         let outcome = self.store.write_with(faults, |tx| {
             // Resolve the thread (+ message) the bookmark targets.
@@ -2512,18 +2523,28 @@ impl<'a> LinkedChatStore<'a> {
         &self,
         workspace_id: &str,
         owner_user_id: &str,
+        state: Option<&str>,
     ) -> Result<Vec<ChatBookmark>, DomainError> {
         let owner_user_id = normalize_feed_identity(owner_user_id, "Bookmark owner")?;
+        if let Some(state) = state {
+            if state != "active" && state != "archived" {
+                return Err(DomainError::chat(
+                    "invalid-bookmark-target",
+                    "Bookmark state is invalid.",
+                ));
+            }
+        }
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(&format!(
                     "{BOOKMARK_SELECT} WHERE b.workspace_id = ?1 AND b.owner_user_id = ?2 \
-                     ORDER BY b.updated_at_ms DESC, b.bookmark_id LIMIT ?3"
+                     AND (?3 IS NULL OR b.state = ?3) \
+                     ORDER BY b.updated_at_ms DESC, b.bookmark_id LIMIT ?4"
                 ))
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
                 .query_map(
-                    params![workspace_id, owner_user_id, MAX_LIST_ROWS],
+                    params![workspace_id, owner_user_id, state, MAX_LIST_ROWS],
                     map_bookmark_row,
                 )
                 .map_err(DomainError::sql_corrupt)?;

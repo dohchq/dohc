@@ -1661,11 +1661,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         .await;
         assert_eq!(error.code, ErrorCode::InvalidParams);
     }
-    for invalid_command in [
-        json!("bad\0command"),
-        json!("   "),
-        json!("x".repeat(16_385)),
-    ] {
+    for invalid_command in [json!("bad\0command"), json!("x".repeat(16_385))] {
         let error = call_error(
             &transport,
             &first_handle,
@@ -1952,4 +1948,197 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         json!({}),
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn review_round_11_bookmark_state_filter_command_default_and_path_floor() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-chat-r11").await;
+    let mut id = 10;
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({ "channelId": "channel-r11", "name": "R11", "kind": "channel", "nowMs": 10 }),
+    )
+    .await;
+    for (thread_id, message_id) in [
+        ("thread-r11", "message-r11"),
+        ("thread-r11b", "message-r11b"),
+    ] {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.threads.start",
+            json!({
+                "channelId": "channel-r11",
+                "threadId": thread_id,
+                "messageId": message_id,
+                "authorKind": "human",
+                "authorDisplayName": "Alice",
+                "body": "r11",
+                "nowMs": 11,
+            }),
+        )
+        .await;
+    }
+
+    // Canonical Check-A floor: a percent-DISGUISED traversal has no literal
+    // ".." bytes, so the old `validate_path` floor accepted it. Mutation
+    // check: restore `crate::store::validate_path` in `save_bookmark` — this
+    // refusal fails (the save succeeds) and the dotted destination below
+    // persists un-normalized.
+    let disguised = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.save",
+        json!({
+            "ownerUserId": "owner-1",
+            "targetKind": "thread",
+            "targetId": "thread-r11",
+            "mode": "live",
+            "destinationPath": "%2e%2e/outside.md",
+            "nowMs": 12,
+        }),
+    )
+    .await;
+    assert_eq!(disguised.code, ErrorCode::InvalidParams);
+    let bookmark_a = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.save",
+        json!({
+            "ownerUserId": "owner-1",
+            "targetKind": "thread",
+            "targetId": "thread-r11",
+            "mode": "live",
+            "destinationPath": "notes/./deep//a.md",
+            "nowMs": 13,
+        }),
+    )
+    .await;
+    assert_eq!(bookmark_a["destinationPath"], json!("notes/deep/a.md"));
+    let bookmark_b = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.save",
+        json!({
+            "ownerUserId": "owner-1",
+            "targetKind": "thread",
+            "targetId": "thread-r11b",
+            "mode": "live",
+            "destinationPath": "bookmarks/b.md",
+            "nowMs": 14,
+        }),
+    )
+    .await;
+    let bookmark_b_id = bookmark_b["bookmarkId"].as_str().expect("b id").to_owned();
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.archive",
+        json!({ "ownerUserId": "owner-1", "bookmarkId": &bookmark_b_id }),
+    )
+    .await;
+
+    // The documented optional `state` filter. Mutation check: parse the list
+    // params as `ChatOwnerParams` again (deny_unknown_fields) — every
+    // filtered call below refuses unknown-field and the test fails.
+    let all = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.list",
+        json!({ "ownerUserId": "owner-1" }),
+    )
+    .await;
+    assert_eq!(all["bookmarks"].as_array().expect("all").len(), 2);
+    let active = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.list",
+        json!({ "ownerUserId": "owner-1", "state": "active" }),
+    )
+    .await;
+    let active_rows = active["bookmarks"].as_array().expect("active");
+    assert_eq!(active_rows.len(), 1);
+    assert_eq!(active_rows[0]["bookmarkId"], bookmark_a["bookmarkId"]);
+    let archived = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.list",
+        json!({ "ownerUserId": "owner-1", "state": "archived" }),
+    )
+    .await;
+    let archived_rows = archived["bookmarks"].as_array().expect("archived");
+    assert_eq!(archived_rows.len(), 1);
+    assert_eq!(archived_rows[0]["bookmarkId"], json!(&bookmark_b_id));
+    let bogus = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.list",
+        json!({ "ownerUserId": "owner-1", "state": "bogus" }),
+    )
+    .await;
+    assert_eq!(bogus.code, ErrorCode::InvalidParams);
+
+    // An omitted claim command is the oracle's EMPTY-string default, and a
+    // whitespace-only command is preserved verbatim. Mutation check: restore
+    // `unwrap_or_else(|| "agent".to_owned())` in the claim arm — the empty
+    // command assertion fails.
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.enqueue",
+        json!({ "triggerMessageId": "message-r11", "threadId": "thread-r11", "nowMs": 20 }),
+    )
+    .await;
+    let claimed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "runId": "run-r11", "nowMs": 21 }),
+    )
+    .await;
+    assert_eq!(claimed["run"]["command"], json!(""));
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.complete",
+        json!({ "runId": "run-r11", "exitCode": 0, "nowMs": 22 }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.enqueue",
+        json!({ "triggerMessageId": "message-r11b", "threadId": "thread-r11b", "nowMs": 23 }),
+    )
+    .await;
+    let whitespace = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "runId": "run-r11b", "command": "   ", "nowMs": 24 }),
+    )
+    .await;
+    assert_eq!(whitespace["run"]["command"], json!("   "));
+
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
 }

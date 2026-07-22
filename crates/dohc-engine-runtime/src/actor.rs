@@ -445,6 +445,7 @@ enum Command {
     ChatBookmarksList {
         workspace_id: String,
         owner_user_id: String,
+        state: Option<String>,
         reply: oneshot::Sender<Result<Vec<ChatBookmark>, RuntimeError>>,
     },
     ChatBookmarkMarkReady {
@@ -1877,12 +1878,14 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         owner_user_id: String,
+        state: Option<String>,
     ) -> Result<Vec<ChatBookmark>, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ChatBookmarksList {
                 workspace_id,
                 owner_user_id,
+                state,
                 reply,
             })
             .await
@@ -2857,10 +2860,11 @@ fn worker_main(
             Command::ChatBookmarksList {
                 workspace_id,
                 owner_user_id,
+                state,
                 reply,
             } => {
                 let outcome = LinkedChatStore::new(&mut store)
-                    .list_bookmarks(&workspace_id, &owner_user_id)
+                    .list_bookmarks(&workspace_id, &owner_user_id, state.as_deref())
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }

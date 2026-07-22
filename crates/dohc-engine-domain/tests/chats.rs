@@ -1400,7 +1400,7 @@ fn bookmark_lifecycle_lookups_normalize_owner() {
     assert_eq!(archived.state, "archived");
     assert_eq!(
         chats
-            .list_bookmarks(WS, "  alice  ")
+            .list_bookmarks(WS, "  alice  ", None)
             .expect("padded-owner list")
             .len(),
         1
@@ -1564,11 +1564,10 @@ fn dispatch_claim_is_single_writer_idempotent() {
         );
     }
 
-    for invalid_command in [
-        "   ".to_owned(),
-        "bad\0command".to_owned(),
-        "x".repeat(16_385),
-    ] {
+    // Whitespace-only commands are VALID (the oracle's `normalizeCommand`
+    // preserves them verbatim; an omitted command is the empty string) —
+    // only NUL and the metadata length cap refuse.
+    for invalid_command in ["bad\0command".to_owned(), "x".repeat(16_385)] {
         assert_eq!(
             chats
                 .claim_next_pending(WS, "run-1", &invalid_command, None, 22, &NO_FAULTS)
@@ -2142,7 +2141,7 @@ fn message_append_requeues_active_live_bookmark() {
     chats
         .send_message(&send_msg("t1", "m1", None, "more", 31), &NO_FAULTS)
         .expect("send");
-    let after = chats.list_bookmarks(WS, "owner").expect("list");
+    let after = chats.list_bookmarks(WS, "owner", None).expect("list");
     assert_eq!(
         after[0].generation, 2,
         "live bookmark requeued after a message"
