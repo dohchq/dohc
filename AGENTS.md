@@ -1,10 +1,10 @@
 # dohc
 
-This is the repository for dohc, the easiest way for agents to build and maintain the workspace around your real work.
+This is the repository for dohc, the easiest way for humans to work with their agents to build and maintain workspaces around real work.
 
 The goal is a full end-to-end AI operating system for documents, data, dashboards, workflows, and decisions. The user stays in control, while agents do the heavy lifting of organizing, updating, and making the work ready.
 
-dohc is basically rethinking notion, obsidian, google docs, spreadsheets, jira, and other operations tools and packaging it into an obvious AI-native workspace by having text as the primitive for binding input/output communication methods between the agent and human/s. Hence, at its core dohc is a really powerful tool capable of turning many kinds of work into obvious inspectable systems- similar to what spreadsheets were like when it first came out.
+dohc is basically rethinking notion, obsidian, google docs, spreadsheets, jira, and other operations tools and packaging it into an obvious AI-native workspace by having text as the primitive for binding input/output communication methods between the agent and human/s. It's basically the vscode for the AI era. Hence, at its core dohc is a really powerful tool capable of turning many kinds of work into obvious inspectable systems- similar to what spreadsheets were like when it first came out.
 
 ## Current status
 
@@ -72,6 +72,8 @@ We provide the structure, conventions, UI, permissions, sync, organization manag
 
 The magic is not hidden state. The magic is giving agents and humans a shared text substrate they can both inspect, edit, and trust.
 
+Don't get me wrong, having dohc is supposed to be much more empowering to a user than just having files on your computer. The point of this is that even if dohc disappears, a user's workspace should still essentially be usable/navigatable (albeit a worse experience but workable).
+
 ### dohc and the AI company playbook
 
 dohc exists to make the AI-native company/person possible.
@@ -84,7 +86,7 @@ A folder of well-structured text files plus a capable agent can approximate this
 
 ### Individual first
 
-We should focus on doch being magical and obvious for one person first before it is for a team. This might seem counter-intuitive as the benefit of dohc grows as more teammates adopt it, but without one person using it first and finding value in it on its own, then no one will use it and we won't even get to teams using it.
+We should focus on dohc being magical and obvious for one person first before it is for a team. This might seem counter-intuitive as the benefit of dohc grows as more teammates adopt it, but without one person using it first and finding value in it on its own, then no one will use it and we won't even get to teams using it.
 
 A single user should be able to use dohc for personal life, work, projects, research, planning, finances, health, writing, learning, or anything else they want to organize with an agent.
 
@@ -94,7 +96,13 @@ If dohc only works after a whole company adopts it, we built the wrong thing.
 
 The product should feel valuable even when the entire "organization" is just one human and their agents.
 
-### Product invariants
+### Open when shared, private when personal
+
+dohc should encourage visibility where work is intentionally shared, because people learn from seeing how agents and teammates work.
+
+But personal workspaces are personal. Transparency must come from explicit workspace boundaries, sharing, provenance, and consent — not accidental leakage.
+
+## Product invariants
 
 Do not weaken authorization, ownership, or review gates for convenience.
 
@@ -108,23 +116,17 @@ Do not weaken authorization, ownership, or review gates for convenience.
   before setting UI state. A slow response for workspace A must never repaint
   workspace B after the user switches workspaces.
 
-### Repeated work should become skills
+## Repeated work should become skills
 
 When a user likes how an agent handled something, dohc should make it easy to turn that process into a reusable skill, workflow, or playbook.
 
 The best version of dohc does not just complete tasks. It helps users and teams compound how they work. Every repeated process is a candidate to become clearer, more inspectable, and easier for agents to run next time.
 
-### Agents wrap tools, not the other way around
+## Agents wrap tools, not the other way around
 
 dohc should feel like an agent operating a set of reliable tools, not old software with a little AI sprinkled inside.
 
 Deterministic software should provide the sturdy pieces: permissions, storage, sync, rendering, search, diffs, logs, provenance, and review gates. The agent should use those pieces to build the user's actual workspace around their intent.
-
-### Open when shared, private when personal
-
-dohc should encourage visibility where work is intentionally shared, because people learn from seeing how agents and teammates work.
-
-But personal workspaces are personal. Transparency must come from explicit workspace boundaries, sharing, provenance, and consent — not accidental leakage.
 
 ## Guidelines when creating PRs and merging them
 
