@@ -371,6 +371,7 @@ enum Command {
         reply: oneshot::Sender<Result<Option<BinaryHeadMeta>, RuntimeError>>,
     },
     ReadBinaryBlob {
+        workspace_id: String,
         sha256: String,
         reply: oneshot::Sender<Result<Option<Vec<u8>>, RuntimeError>>,
     },
@@ -421,7 +422,7 @@ enum Command {
     ListSecretMoments {
         workspace_id: String,
         version_id: String,
-        path: String,
+        path: Option<String>,
         before_moment_order: Option<i64>,
         limit: usize,
         reply: oneshot::Sender<Result<SecretMomentPage, RuntimeError>>,
@@ -1615,10 +1616,18 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
-    pub async fn read_binary_blob(&self, sha256: String) -> Result<Option<Vec<u8>>, RuntimeError> {
+    pub async fn read_binary_blob(
+        &self,
+        workspace_id: String,
+        sha256: String,
+    ) -> Result<Option<Vec<u8>>, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
-            .send(Command::ReadBinaryBlob { sha256, reply })
+            .send(Command::ReadBinaryBlob {
+                workspace_id,
+                sha256,
+                reply,
+            })
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
@@ -1762,7 +1771,7 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         version_id: String,
-        path: String,
+        path: Option<String>,
         before_moment_order: Option<i64>,
         limit: usize,
     ) -> Result<SecretMomentPage, RuntimeError> {
@@ -3505,9 +3514,13 @@ fn worker_main(
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
-            Command::ReadBinaryBlob { sha256, reply } => {
-                let outcome = store
-                    .read_with(|conn| dohc_engine_storage::get_binary_blob(conn, &sha256))
+            Command::ReadBinaryBlob {
+                workspace_id,
+                sha256,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .read_binary_blob(&workspace_id, &sha256)
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
@@ -3614,7 +3627,7 @@ fn worker_main(
                     &store,
                     &workspace_id,
                     Some(&version_id),
-                    Some(&path),
+                    path.as_deref(),
                     before_moment_order,
                     limit,
                 )

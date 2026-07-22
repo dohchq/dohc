@@ -735,6 +735,38 @@ impl<'a> VersionedTextStore<'a> {
         })
     }
 
+    /// Read a binary blob only when the caller's workspace has a durable head
+    /// or moment reference to it. An unreferenced digest is indistinguishable
+    /// from an unknown digest so this content-addressed read is not an
+    /// existence oracle across workspace boundaries.
+    pub fn read_binary_blob(
+        &self,
+        workspace_id: &str,
+        sha256: &str,
+    ) -> Result<Option<Vec<u8>>, DomainError> {
+        non_empty(workspace_id, "workspace_id")?;
+        self.store.read_with(|conn| {
+            let referenced: bool = conn
+                .query_row(
+                    "SELECT EXISTS(\
+                         SELECT 1 FROM snapshots \
+                         WHERE workspace_id = ?1 AND binary_sha256 = ?2\
+                     ) OR EXISTS(\
+                         SELECT 1 FROM moments \
+                         WHERE workspace_id = ?1 \
+                           AND (after_binary_sha256 = ?2 OR before_binary_sha256 = ?2)\
+                     )",
+                    params![workspace_id, sha256],
+                    |row| row.get(0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            if !referenced {
+                return Ok(None);
+            }
+            dohc_engine_storage::get_binary_blob(conn, sha256).map_err(DomainError::from)
+        })
+    }
+
     /// The binary head's METADATA — object id, sha, and the blob's byte
     /// length sized in SQL — without materializing a single content byte.
     /// The over-cap in-band answer needs exactly this, and loading a large
@@ -2418,7 +2450,31 @@ pub fn write_binary_in_tx(
     non_empty(&input.version_id, "version_id")?;
     non_empty(&input.moment_id, "moment_id")?;
     let path = validate_plaintext_storable_path(&input.path)?;
-    let sha256 = put_binary_blob(tx, &input.bytes).map_err(DomainError::from)?;
+    if !version_exists(tx, &input.workspace_id, &input.version_id)? {
+        return Err(DomainError::VersionNotFound);
+    }
+    let sha256 = dohc_engine_storage::hex_sha256(&input.bytes);
+    let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
+    let payload_hash = hash_fields(&[
+        b"versioned-binary-write",
+        input.workspace_id.as_bytes(),
+        input.version_id.as_bytes(),
+        path.as_bytes(),
+        sha256.as_bytes(),
+        input.moment_id.as_bytes(),
+        input.metadata_origin.as_bytes(),
+        author_kind,
+        author_json,
+    ]);
+    if let Some(request_id) = &input.request_id
+        && let Some(recorded) = lookup_request(tx, request_id)?
+    {
+        if recorded.payload_hash != payload_hash {
+            return Err(DomainError::IdempotencyKeyReuseMismatch);
+        }
+        return reconstruct_binary_write(tx, &input.workspace_id, recorded.result_seq);
+    }
+    put_binary_blob(tx, &input.bytes).map_err(DomainError::from)?;
     let existing_object = alias_object_id(tx, &input.workspace_id, &input.version_id, &path)?;
     let before = existing_object
         .as_deref()
@@ -2439,6 +2495,13 @@ pub fn write_binary_in_tx(
             DomainError::StateCorrupt {
                 reason: "deduped binary write points at a missing object",
             },
+        )?;
+        record_request(
+            tx,
+            input.request_id.as_deref(),
+            &payload_hash,
+            moment.moment_order,
+            input.now_ms,
         )?;
         return Ok(BinaryWriteResult {
             object,
@@ -2498,6 +2561,13 @@ pub fn write_binary_in_tx(
         get_file_object(tx, &input.workspace_id, &object_id)?.ok_or(DomainError::StateCorrupt {
             reason: "binary write snapshot points at a missing object",
         })?;
+    record_request(
+        tx,
+        input.request_id.as_deref(),
+        &payload_hash,
+        moment.moment_order,
+        input.now_ms,
+    )?;
     Ok(BinaryWriteResult {
         object,
         object_id,
@@ -2508,6 +2578,55 @@ pub fn write_binary_in_tx(
         moment,
         deduped: false,
         materialize_enqueued: version_is_active,
+    })
+}
+
+fn reconstruct_binary_write(
+    conn: &Connection,
+    workspace_id: &str,
+    moment_order: i64,
+) -> Result<BinaryWriteResult, DomainError> {
+    let moment =
+        moment_by_order(conn, workspace_id, moment_order)?.ok_or(DomainError::StateCorrupt {
+            reason: "deduped binary write has no recorded moment",
+        })?;
+    if moment.after_content_kind != "binary" {
+        return Err(DomainError::StateCorrupt {
+            reason: "deduped binary write points at non-binary content",
+        });
+    }
+    let sha256 = moment
+        .after_binary_sha256
+        .clone()
+        .ok_or(DomainError::StateCorrupt {
+            reason: "deduped binary write moment has no binary blob",
+        })?;
+    let byte_length: i64 = conn
+        .query_row(
+            "SELECT byte_length FROM binary_blobs WHERE sha256 = ?1",
+            [&sha256],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?
+        .ok_or(DomainError::StateCorrupt {
+            reason: "deduped binary write moment blob missing",
+        })?;
+    let object = get_file_object(conn, workspace_id, &moment.object_id)?.ok_or(
+        DomainError::StateCorrupt {
+            reason: "deduped binary write moment object missing",
+        },
+    )?;
+    Ok(BinaryWriteResult {
+        object,
+        object_id: moment.object_id.clone(),
+        path: moment.path.clone(),
+        sha256,
+        byte_length,
+        updated_at_ms: moment.recorded_at_ms,
+        moment,
+        deduped: true,
+        materialize_enqueued: false,
     })
 }
 

@@ -925,12 +925,15 @@ impl EngineService {
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
-        let object_id = params
-            .object_id
-            .unwrap_or_else(|| self.generated_rpc_id("object", request.id, None, &path));
-        let moment_id = params
-            .moment_id
-            .unwrap_or_else(|| self.generated_rpc_id("moment", request.id, None, &path));
+        let request_id = params
+            .request_id
+            .or_else(|| request.idempotency_key.clone());
+        let object_id = params.object_id.unwrap_or_else(|| {
+            self.generated_rpc_id("object", request.id, request_id.as_deref(), &path)
+        });
+        let moment_id = params.moment_id.unwrap_or_else(|| {
+            self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path)
+        });
         let cancellation = OperationCancellation::new(ctx);
         let execution = open
             .actor
@@ -945,6 +948,7 @@ impl EngineService {
                     metadata_origin: origin,
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
+                    request_id,
                 },
                 open.root,
                 Arc::new(self.self_writes.clone()),
@@ -1751,7 +1755,8 @@ impl EngineService {
         let bytes = Self::read_under_ctx(
             &cancellation,
             "versionedBinary.readBlob",
-            open.actor.read_binary_blob(params.sha256),
+            open.actor
+                .read_binary_blob(open.workspace_id, params.sha256),
         )
         .await?
         .ok_or_else(|| wire(ErrorCode::InvalidParams, "file-not-found"))?;
@@ -2097,7 +2102,7 @@ impl EngineService {
         let params: SecretsMomentsListParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
-        let path = normalize_rpc_path(&params.path);
+        let path = params.path.as_deref().map(normalize_rpc_path);
         let cancellation = OperationCancellation::new(ctx);
         let limit = params.limit.unwrap_or(200).clamp(1, 500);
         let mut page = Self::read_under_ctx(
@@ -2276,33 +2281,29 @@ impl EngineService {
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let path = normalize_rpc_path(&params.path);
         let cancellation = OperationCancellation::new(ctx);
-        let active = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption("secrets.apply (active version)"));
-            }
-            result = open.actor.active_version(open.workspace_id.clone()) => match result {
-                Ok(version) => version,
-                // A workspace with no versioned rows yet has no active
-                // version: the caller named a target that does not exist —
-                // a caller condition, not engine corruption.
-                Err(RuntimeError::Domain(DomainError::WorkspaceNotFound)) => {
+        for (operation, version_id) in [
+            ("secrets.apply (source version)", &params.source_version_id),
+            ("secrets.apply (target version)", &params.target_version_id),
+        ] {
+            let validation = Self::read_under_ctx(
+                &cancellation,
+                operation,
+                open.actor.list_secret_files_page(
+                    open.workspace_id.clone(),
+                    version_id.clone(),
+                    None,
+                    1,
+                ),
+            )
+            .await;
+            match validation {
+                Ok(_) => {}
+                Err(error) if error.message == "invalid-version" => {
                     return Err(wire(ErrorCode::InvalidParams, "version-not-found"));
                 }
-                Err(error) => return Err(map_runtime(error)),
-            },
-        };
-        Self::read_under_ctx(
-            &cancellation,
-            "secrets.apply (source version)",
-            open.actor.list_secret_files_page(
-                open.workspace_id.clone(),
-                params.from_version_id.clone(),
-                None,
-                1,
-            ),
-        )
-        .await?;
+                Err(error) => return Err(error),
+            }
+        }
         let key_root = open.root.clone();
         let key_task =
             tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_root));
@@ -2332,8 +2333,8 @@ impl EngineService {
             .apply_secret_file(
                 open.workspace_id,
                 path,
-                params.from_version_id,
-                active.version_id,
+                params.source_version_id,
+                params.target_version_id,
                 params.moment_id,
                 now_ms()?,
                 key,
@@ -4251,6 +4252,8 @@ struct VersionedBinaryWriteParams {
     #[serde(default)]
     moment_id: Option<String>,
     #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
     now_ms: Option<i64>,
 }
 
@@ -4445,7 +4448,8 @@ struct SecretsForkParams {
 struct SecretsMomentsListParams {
     workspace_id: String,
     version_id: String,
-    path: String,
+    #[serde(default)]
+    path: Option<String>,
     #[serde(default)]
     before_moment_order: Option<i64>,
     #[serde(default)]
@@ -4476,7 +4480,8 @@ struct SecretsCompareParams {
 struct SecretsApplyParams {
     workspace_id: String,
     path: String,
-    from_version_id: String,
+    source_version_id: String,
+    target_version_id: String,
     moment_id: String,
 }
 

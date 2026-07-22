@@ -129,6 +129,17 @@ needed pre-cutover, NOT pre-PR — a GATE6 dependency). RPC-D ships
 readBlob's metadata-only over-cap answer and refuses inbound BlobStart
 with "blob-ingest-unsupported".
 
+RPC-D2 ALSO owns the secret-aware DISK executor (recorded at PR #223
+review): RPC-D's secret surface is DB-authoritative — secrets.write/
+apply/restore enqueue secret-mat_ jobs and every delete flavor records
+its completed generation marker, but the generic job replayer SKIPS
+secret jobs (plaintext requires the key, which the daemon never holds
+at replay time), so the materialized workspace file stays absent/stale
+until the executor lands. Pre-cutover no production caller reads the
+materialized secret path through the daemon; the recorded jobs/markers
+let the executor settle disk state exactly once when it arrives.
+GATE6-blocking.
+
 
 CROSS-ENGINE DELTA (RPC-A r18): secret path SPELLING — TS normalize-stores
 (percent-disguises collapse); Rust stores the spelling the write carried

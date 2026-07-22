@@ -196,6 +196,55 @@ async fn binary_self_write_suppression_prevents_a_spurious_capture_moment() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binary_write_request_id_replays_once_and_rejects_mismatch() {
+    // MUTATION: ignore the binary request ledger -> the retry appends a second moment.
+    let (_scratch, transport, handle) = fixture("binary-request-ledger").await;
+    let params = json!({
+        "versionId": "main",
+        "path": "ledger.bin",
+        "bytes": [1, 2, 3],
+        "origin": "api",
+        "momentId": "binary-ledger-moment",
+        "requestId": "binary-ledger-request",
+    });
+    let first = call(
+        &transport,
+        &handle,
+        2,
+        "versionedBinary.write",
+        params.clone(),
+    )
+    .await;
+    assert_eq!(first["deduped"], false);
+    let replay = call(&transport, &handle, 3, "versionedBinary.write", params).await;
+    assert_eq!(replay["deduped"], true);
+    assert_eq!(replay["moment"]["momentId"], first["moment"]["momentId"]);
+    assert_eq!(moments(&transport, &handle, 4).await.len(), 1);
+
+    let mismatch = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                5,
+                "versionedBinary.write",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "path": "ledger.bin",
+                    "bytes": [9, 9, 9],
+                    "origin": "api",
+                    "momentId": "binary-ledger-moment",
+                    "requestId": "binary-ledger-request",
+                }),
+            ),
+        )
+        .await
+        .expect_err("request id reuse with different bytes must fail");
+    assert_eq!(mismatch.message, "idempotency-key-reuse-mismatch");
+    assert_eq!(moments(&transport, &handle, 6).await.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn over_cap_write_refuses_before_commit() {
     // MUTATION: commit text/binary and only then refuse -> the moment count changes.
     let (_scratch, transport, handle) = fixture("cap").await;
@@ -357,6 +406,211 @@ async fn secret_moments_keyset_pages_round_trip_without_overlap() {
     assert_eq!(second_rows.len(), 1);
     assert_ne!(second_rows[0]["id"], first_rows[1]["id"]);
     assert!(second["nextBeforeMomentOrder"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_moments_version_wide_pages_across_paths_newest_first() {
+    // MUTATION: require or unconditionally filter by path -> the mixed-path page loses a row.
+    let (_scratch, transport, handle) = fixture("secret-version-history").await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": "ws-rpcd-secret-version-history" }),
+    )
+    .await;
+    for (index, (path, text)) in [(".env", "one"), (".env.local", "two"), (".env", "three")]
+        .into_iter()
+        .enumerate()
+    {
+        call(
+            &transport,
+            &handle,
+            3 + index as u64,
+            "secrets.write",
+            json!({
+                "workspaceId": "ws-rpcd-secret-version-history",
+                "versionId": "main",
+                "path": path,
+                "text": text,
+                "origin": "api",
+                "momentId": format!("secret-history-{index}"),
+            }),
+        )
+        .await;
+    }
+    let first = call(
+        &transport,
+        &handle,
+        6,
+        "secrets.moments.list",
+        json!({
+            "workspaceId": "ws-rpcd-secret-version-history",
+            "versionId": "main",
+            "limit": 2,
+        }),
+    )
+    .await;
+    let first_rows = first["moments"].as_array().expect("first page");
+    assert_eq!(first_rows.len(), 2);
+    assert_eq!(first_rows[0]["id"], "secret-history-2");
+    assert_eq!(first_rows[1]["id"], "secret-history-1");
+    assert_eq!(first_rows[0]["path"], ".env");
+    assert_eq!(first_rows[1]["path"], ".env.local");
+    assert_eq!(first["nextBeforeMomentOrder"], first_rows[1]["momentOrder"]);
+
+    let second = call(
+        &transport,
+        &handle,
+        7,
+        "secrets.moments.list",
+        json!({
+            "workspaceId": "ws-rpcd-secret-version-history",
+            "versionId": "main",
+            "beforeMomentOrder": first["nextBeforeMomentOrder"],
+            "limit": 2,
+        }),
+    )
+    .await;
+    let second_rows = second["moments"].as_array().expect("second page");
+    assert_eq!(second_rows.len(), 1);
+    assert_eq!(second_rows[0]["id"], "secret-history-0");
+    assert!(second["nextBeforeMomentOrder"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secrets_apply_arm_uses_the_explicit_target_version() {
+    // MUTATION: derive the apply target from versions.active -> the moment lands in feature.
+    let (_scratch, transport, handle) = fixture("secret-apply-target").await;
+    let workspace_id = "ws-rpcd-secret-apply-target";
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace_id,
+            "versionId": "main",
+            "path": ".env",
+            "text": "MAIN=1",
+            "origin": "api",
+            "momentId": "secret-main-before-apply",
+        }),
+    )
+    .await;
+    let feature = call(
+        &transport,
+        &handle,
+        4,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace_id,
+            "name": "feature",
+            "fromVersionId": "main",
+        }),
+    )
+    .await;
+    let feature_id = feature["id"].as_str().expect("feature id");
+    call(
+        &transport,
+        &handle,
+        5,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace_id,
+            "versionId": feature_id,
+            "path": ".env",
+            "text": "FEATURE=1",
+            "origin": "api",
+            "momentId": "secret-feature-before-apply",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        6,
+        "versions.setActive",
+        json!({ "workspaceId": workspace_id, "versionId": feature_id }),
+    )
+    .await;
+    let applied = call(
+        &transport,
+        &handle,
+        7,
+        "secrets.apply",
+        json!({
+            "workspaceId": workspace_id,
+            "path": ".env",
+            "sourceVersionId": feature_id,
+            "targetVersionId": "main",
+            "momentId": "secret-explicit-target-apply",
+        }),
+    )
+    .await;
+    assert_eq!(applied["changed"], true);
+    assert_eq!(applied["moment"]["id"], "secret-explicit-target-apply");
+    assert_eq!(applied["moment"]["versionId"], "main");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secrets_apply_fresh_workspace_returns_version_not_found() {
+    // MUTATION: return the no-key/no-state early answer before validating versions -> this succeeds.
+    let (_scratch, transport, handle) = fixture("secret-apply-fresh").await;
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                2,
+                "secrets.apply",
+                Some(handle),
+                json!({
+                    "workspaceId": "ws-rpcd-secret-apply-fresh",
+                    "path": ".env",
+                    "sourceVersionId": "feature",
+                    "targetVersionId": "main",
+                    "momentId": "secret-fresh-apply",
+                }),
+            ),
+        )
+        .await
+        .expect_err("fresh workspace has no target version");
+    assert_eq!(error.message, "version-not-found");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secrets_apply_rejects_non_secret_path_before_key_handling() {
+    // MUTATION: move the secret-path gate after key/version handling -> the two errors diverge.
+    let (scratch, transport, handle) = fixture("secret-apply-path-gate").await;
+    let params = json!({
+        "workspaceId": "ws-rpcd-secret-apply-path-gate",
+        "path": "plain.txt",
+        "sourceVersionId": "feature",
+        "targetVersionId": "main",
+        "momentId": "secret-non-secret-apply",
+    });
+    for (id, key_present) in [(2, false), (3, true)] {
+        if key_present {
+            dohc_engine_crypto::create_key_file(scratch.path()).expect("create key file");
+        }
+        let error = transport
+            .call(
+                RequestContext::unbounded(),
+                request(id, "secrets.apply", Some(handle.clone()), params.clone()),
+            )
+            .await
+            .expect_err("non-secret path must be refused");
+        assert_eq!(error.message, "not-secret-path");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1230,6 +1484,7 @@ fn seed_versions(root: &Path, workspace_id: &str) {
                 metadata_origin: "api".to_owned(),
                 author_json: None,
                 now_ms: 5,
+                request_id: None,
             },
             &faults,
         )
@@ -1678,4 +1933,90 @@ async fn text_read_returns_binary_head_and_read_blob_reads_by_sha() {
     // Base64 in-band, matching versionedBinary.read's encoding (one payload
     // convention for binary bytes across adjacent RPCs).
     assert_eq!(blob["bytesBase64"], json!("AQIDBA=="));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_blob_requires_a_reference_from_the_handle_workspace() {
+    // MUTATION: drop the workspace reference check -> workspace B reads workspace A's blob.
+    let (scratch, transport, handle_a) = fixture("blob-scope-a").await;
+    let workspace_a = "ws-rpcd-blob-scope-a";
+    call(
+        &transport,
+        &handle_a,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace_a }),
+    )
+    .await;
+    let named = call(
+        &transport,
+        &handle_a,
+        3,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace_a,
+            "name": "private-binary",
+            "fromVersionId": "main",
+        }),
+    )
+    .await;
+    let written = call(
+        &transport,
+        &handle_a,
+        4,
+        "versionedBinary.write",
+        json!({
+            "versionId": named["id"],
+            "path": "private.bin",
+            "bytes": [4, 3, 2, 1],
+            "origin": "api",
+            "requestId": "private-binary-write",
+        }),
+    )
+    .await;
+    let sha256 = written["snapshot"]["sha256"].clone();
+    let happy = call(
+        &transport,
+        &handle_a,
+        5,
+        "versionedBinary.readBlob",
+        json!({ "workspaceId": workspace_a, "sha256": sha256 }),
+    )
+    .await;
+    assert_eq!(happy["bytesBase64"], "BAMCAQ==");
+
+    call(&transport, &handle_a, 6, "workspace.close", json!({})).await;
+    let opened_b = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                7,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "ws-rpcd-blob-scope-b",
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace B");
+    let handle_b: WorkspaceHandle =
+        serde_json::from_value(opened_b.result["workspace"].clone()).expect("workspace B handle");
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                8,
+                "versionedBinary.readBlob",
+                Some(handle_b),
+                json!({
+                    "workspaceId": "ws-rpcd-blob-scope-b",
+                    "sha256": sha256,
+                }),
+            ),
+        )
+        .await
+        .expect_err("workspace B must not read workspace A's blob");
+    assert_eq!(refused.message, "file-not-found");
 }

@@ -66,7 +66,7 @@ export type VersionedTextWriteParams = MutationMetadata & {
   momentId?: string;
 };
 
-export type VersionedBinaryWriteParams = Omit<MutationMetadata, "requestId"> & {
+export type VersionedBinaryWriteParams = MutationMetadata & {
   versionId: string;
   objectId?: string;
   path: string;
@@ -177,7 +177,8 @@ export type SecretsCompareParams = JsonObject & {
 export type SecretsApplyParams = JsonObject & {
   workspaceId: string;
   path: string;
-  fromVersionId: string;
+  sourceVersionId: string;
+  targetVersionId: string;
   momentId: string;
 };
 
@@ -191,7 +192,7 @@ export type SecretsRestoreParams = JsonObject & {
 export type SecretsMomentsListParams = JsonObject & {
   workspaceId: string;
   versionId: string;
-  path: string;
+  path?: string;
   beforeMomentOrder?: number;
   limit?: number;
 };

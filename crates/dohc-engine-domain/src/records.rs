@@ -306,6 +306,8 @@ pub struct WriteBinary {
     pub metadata_origin: String,
     pub author_json: Option<String>,
     pub now_ms: i64,
+    /// Optional idempotency key: a same-payload retry replays exactly-once.
+    pub request_id: Option<String>,
 }
 
 /// Inputs to [`crate::VersionedTextStore::capture_ingest`].

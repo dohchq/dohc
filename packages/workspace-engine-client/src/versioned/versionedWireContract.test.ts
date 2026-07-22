@@ -146,10 +146,23 @@ describe("versioned typed loopback", () => {
       bytes: [0, 1, 254, 255],
       origin: "api",
       momentId: "moment-binary",
+      requestId: "request-binary",
     };
     const binaryWrite = decodeVersionedBinaryWriteResult(
       await call(engine, 6, VERSIONED_METHOD.binaryWrite, binaryParams),
     );
+    // MUTATION: ignore the binary request ledger -> a replay appends another moment.
+    expect(
+      decodeVersionedBinaryWriteResult(
+        await call(engine, 61, VERSIONED_METHOD.binaryWrite, binaryParams),
+      ).deduped,
+    ).toBe(true);
+    await expect(
+      call(engine, 62, VERSIONED_METHOD.binaryWrite, {
+        ...binaryParams,
+        bytes: [9, 9, 9],
+      }),
+    ).rejects.toThrow("idempotency-key-reuse-mismatch");
     const binaryReadParams: VersionedBinaryReadParams = {
       versionId: "main",
       path: "asset.bin",
@@ -286,19 +299,31 @@ describe("versioned typed loopback", () => {
       ).entries,
     ).toEqual([{ path: ".env", status: "modified" }]);
 
+    await call(engine, 41, VERSIONED_METHOD.versionsSetActive, {
+      workspaceId: WORKSPACE,
+      versionId: named.id,
+    });
+
     const applyParams: SecretsApplyParams = {
       workspaceId: WORKSPACE,
       path: ".env",
-      fromVersionId: named.id,
+      sourceVersionId: named.id,
+      targetVersionId: "main",
       momentId: "secret-apply",
     };
     const applied = decodeSecretApplyResult(
       await call(engine, 5, VERSIONED_METHOD.secretsApply, applyParams),
     );
     expect(applied.changed).toBe(true);
+    // MUTATION: derive the target from the active version -> this moment is not in main.
+    expect(applied.moment?.versionId).toBe("main");
     expect(engine.secretValue(WORKSPACE, "main", ".env")).toBe(
       "opaque-ciphertext-B",
     );
+    await call(engine, 42, VERSIONED_METHOD.versionsSetActive, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+    });
 
     const restoreParams: SecretsRestoreParams = {
       workspaceId: WORKSPACE,
@@ -429,7 +454,8 @@ describe("loopback contract enforcement", () => {
       decodeSecretApplyResult(
         await call(engine, 4, VERSIONED_METHOD.secretsApply, {
           workspaceId: WORKSPACE,
-          fromVersionId: feature.id,
+          sourceVersionId: feature.id,
+          targetVersionId: "main",
           path: ".env",
           momentId: "unchanged-source-apply",
         }),
@@ -466,7 +492,8 @@ describe("loopback contract enforcement", () => {
     const applied = decodeSecretApplyResult(
       await call(engine, 4, VERSIONED_METHOD.secretsApply, {
         workspaceId: WORKSPACE,
-        fromVersionId: feature.id,
+        sourceVersionId: feature.id,
+        targetVersionId: "main",
         path: ".env",
         momentId: "delete-apply",
       }),
@@ -679,6 +706,45 @@ describe("loopback contract enforcement", () => {
     );
     expect(second.moments).toHaveLength(1);
     expect(second.moments[0]?.id).not.toBe(first.moments[1]?.id);
+    expect(second.nextBeforeMomentOrder).toBeNull();
+  });
+
+  it("pages version-wide secret moments across paths newest-first", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
+    for (const [index, path] of [".env", ".env.local", ".env"].entries()) {
+      await call(engine, index + 2, VERSIONED_METHOD.secretsWrite, {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path,
+        text: `secret-${index}`,
+        origin: "api",
+        momentId: `secret-wide-${index}`,
+      });
+    }
+    const first = decodeSecretsMomentsListResult(
+      await call(engine, 5, VERSIONED_METHOD.secretsMomentsList, {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        limit: 2,
+      }),
+    );
+    // MUTATION: require/filter an absent path -> the cross-path history is incomplete.
+    expect(first.moments.map((moment) => [moment.id, moment.path])).toEqual([
+      ["secret-wide-2", ".env"],
+      ["secret-wide-1", ".env.local"],
+    ]);
+    const second = decodeSecretsMomentsListResult(
+      await call(engine, 6, VERSIONED_METHOD.secretsMomentsList, {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        beforeMomentOrder: first.nextBeforeMomentOrder ?? undefined,
+        limit: 2,
+      }),
+    );
+    expect(second.moments.map((moment) => moment.id)).toEqual(["secret-wide-0"]);
     expect(second.nextBeforeMomentOrder).toBeNull();
   });
 

@@ -260,7 +260,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       case VERSIONED_METHOD.textWrite:
         return this.textWrite(state, workspace, params, request);
       case VERSIONED_METHOD.binaryWrite:
-        return this.binaryWrite(state, workspace, params);
+        return this.binaryWrite(state, workspace, params, request);
       case VERSIONED_METHOD.textRename:
         return this.textRename(state, workspace, params, request);
       case VERSIONED_METHOD.textDelete:
@@ -362,7 +362,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return result;
   }
 
-  private binaryWrite(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
+  private binaryWrite(
+    state: WorkspaceState,
+    workspace: string,
+    params: JsonObject,
+    request: Request,
+  ): JsonValue {
     state.versioned = true;
     const version = this.version(state, requiredString(params, "versionId", "binary write"));
     const path = requiredString(params, "path", "binary write");
@@ -383,6 +388,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
       throw new Error("invalid-input");
     }
     if (bytes.length > INBAND_LIMIT_BYTES) throw new Error("content-exceeds-inband-cap");
+    const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
+    const replay = this.replay(state, requestId, params);
+    if (replay) return replay;
     const objectId = optionalString(params, "objectId") ?? version.files.get(path)?.objectId ?? `object-${this.nextObjectId++}`;
     const momentId = optionalString(params, "momentId") ?? `moment-${this.nextMomentId++}`;
     this.assertFreshMoment(state, momentId);
@@ -405,7 +413,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     version.files.set(path, file);
     state.moments.set(momentId, internal);
     state.blobs.set(binarySha, [...bytes]);
-    return {
+    const result: JsonObject = {
       object: this.fileObject(workspace, objectId, now),
       snapshot: {
         objectId,
@@ -423,6 +431,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       materialized: true,
       materializeOutcome: "applied",
     };
+    this.recordReplay(state, requestId, params, result);
+    return result;
   }
 
   private textRename(
@@ -740,8 +750,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private secretApply(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
-    const source = this.version(state, requiredString(params, "fromVersionId", "secret apply"));
-    const target = this.version(state, state.activeVersionId);
+    const source = this.version(state, requiredString(params, "sourceVersionId", "secret apply"));
+    const target = this.version(state, requiredString(params, "targetVersionId", "secret apply"));
     const path = requiredString(params, "path", "secret apply");
     const momentId = requiredString(params, "momentId", "secret apply");
     this.assertFreshSecretMoment(state, momentId);
@@ -785,7 +795,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   private secretMomentsList(state: WorkspaceState, params: JsonObject): JsonValue {
     const versionId = requiredString(params, "versionId", "secret moments list");
-    const path = requiredString(params, "path", "secret moments list");
+    const path = optionalString(params, "path");
     const before = optionalNumber(params, "beforeMomentOrder");
     const requestedLimit = optionalNumber(params, "limit");
     if (requestedLimit !== undefined && requestedLimit <= 0) {
@@ -794,7 +804,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const limit = Math.min(500, requestedLimit ?? 200);
     const filtered = [...state.secretMoments.values()]
       .map((moment) => moment.wire)
-      .filter((moment) => moment.versionId === versionId && moment.path === path)
+      .filter(
+        (moment) =>
+          moment.versionId === versionId && (path === undefined || moment.path === path),
+      )
       .filter((moment) => before === undefined || moment.momentOrder < before)
       .sort((left, right) => right.momentOrder - left.momentOrder);
     const page = filtered.slice(0, limit);
