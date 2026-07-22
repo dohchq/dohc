@@ -454,12 +454,39 @@ export class VersionedLoopbackEngine implements EngineTransport {
         materializeOutcome: "skipped",
       };
     }
-    this.assertFreshMoment(state, momentId);
     const before = version.files.get(path);
+    const binarySha = sha256(bytes);
+    // Daemon parity: writing the SAME bytes over an equal binary head is a
+    // content-equality dedup — no new moment, no materialization work.
+    if (before?.contentKind === "binary" && before.binarySha === binarySha) {
+      const result: JsonObject = {
+        object: this.fileObject(workspace, before.objectId, before.updatedAtMs),
+        snapshot: {
+          objectId: before.objectId,
+          path,
+          contentKind: "binary",
+          text: "",
+          sha256: binarySha,
+          byteLength: bytes.length,
+          workspaceId: workspace,
+          versionId: version.id,
+          updatedAtMs: before.updatedAtMs,
+          latestMomentId: before.latestMomentId,
+          metadataOrigin: before.metadataOrigin,
+        },
+        moment: null,
+        deduped: true,
+        materializeEnqueued: false,
+        materialized: false,
+        materializeOutcome: "skipped",
+      };
+      this.recordReplay(state, requestId, params, result, replayFingerprint);
+      return result;
+    }
+    this.assertFreshMoment(state, momentId);
     // Daemon parity: an existing head keeps its object identity.
     const effectiveObjectId = before?.objectId ?? objectId;
     const now = optionalNumber(params, "nowMs") ?? this.clock++;
-    const binarySha = sha256(bytes);
     const file: LoopbackFile = {
       objectId: effectiveObjectId,
       contentKind: "binary",
@@ -822,8 +849,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     });
     let included = Math.min(COMPARE_PAGE_SIZE, changes.length);
     const budget = Math.max(1, optionalNumber(params, "byteBudget") ?? Number.MAX_SAFE_INTEGER);
-    while (included > 0 && Buffer.byteLength(JSON.stringify(changes.slice(0, included))) > budget) included -= 1;
-    if (included === 0 && changes.length > 0) throw new Error("invalid-input");
+    // Daemon parity: the byte-budget cut has a PROGRESS GUARANTEE — the first
+    // row always ships under a tiny budget (only the hard frame cap refuses).
+    while (included > 1 && Buffer.byteLength(JSON.stringify(changes.slice(0, included))) > budget) included -= 1;
     const entries = changes.slice(0, included);
     return { entries, nextCursor: included < changes.length ? paths[included - 1] ?? null : null };
   }

@@ -1475,3 +1475,35 @@ fn rollback_legacy_moment_without_preimage_or_text_is_rejected() {
         "invalid-input"
     );
 }
+
+#[test]
+fn binary_write_rejects_the_reserved_capture_origin_at_the_domain_door() {
+    // MUTATION: drop the binary-door reservation -> an internal caller can
+    // mark DB-only bytes capture-owned and the next disk pass retires them.
+    let scratch = ScratchDir::new().unwrap();
+    let mut store = EngineStore::open(&scratch.engine_db_path().unwrap(), 1).unwrap();
+    bootstrap(&mut store);
+    let error = VersionedTextStore::new(&mut store)
+        .write_binary(
+            &dohc_engine_domain::WriteBinary {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "bin-object".to_owned(),
+                path: "asset.bin".to_owned(),
+                bytes: vec![1, 2, 3],
+                moment_id: "bin-capture-origin".to_owned(),
+                metadata_origin: "capture".to_owned(),
+                author_json: None,
+                now_ms: 10,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect_err("reserved origin must refuse");
+    assert!(
+        error
+            .to_string()
+            .contains("reserved for autonomous capture"),
+        "unexpected error: {error}"
+    );
+}

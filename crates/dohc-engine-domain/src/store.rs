@@ -2510,6 +2510,10 @@ pub fn write_binary_in_tx(
     tx: &Transaction<'_>,
     input: &WriteBinary,
 ) -> Result<BinaryWriteResult, DomainError> {
+    // RESERVED ORIGIN at the door, like the text write: capture's binary
+    // primitive never routes through this fn, so the reservation cannot be
+    // forged while capture keeps stamping its own origin.
+    reject_reserved_capture_origin(&input.metadata_origin)?;
     non_empty(&input.workspace_id, "workspace_id")?;
     non_empty(&input.version_id, "version_id")?;
     non_empty(&input.moment_id, "moment_id")?;
