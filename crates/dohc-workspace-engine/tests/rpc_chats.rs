@@ -2008,6 +2008,29 @@ async fn review_round_11_bookmark_state_filter_command_default_and_path_floor() 
     )
     .await;
     assert_eq!(disguised.code, ErrorCode::InvalidParams);
+    // Secret-classified destinations refuse even when structurally valid: a
+    // plaintext bookmark projection can never land in secret space, so
+    // persisting one would wedge the outbox. Mutation check: accept any
+    // `Some(normalized)` classification (drop the Tracked requirement) in
+    // `save_bookmark` — both refusals below fail.
+    for secret_destination in [".env", "secrets%252eenv"] {
+        let refused = call_error(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.bookmarks.save",
+            json!({
+                "ownerUserId": "owner-1",
+                "targetKind": "thread",
+                "targetId": "thread-r11",
+                "mode": "live",
+                "destinationPath": secret_destination,
+                "nowMs": 12,
+            }),
+        )
+        .await;
+        assert_eq!(refused.code, ErrorCode::InvalidParams);
+    }
     let bookmark_a = call(
         &transport,
         &handle,

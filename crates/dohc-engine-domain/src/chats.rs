@@ -2398,10 +2398,15 @@ impl<'a> LinkedChatStore<'a> {
         // `result.normalized`. A weaker floor here would let a disguised path
         // like `%2e%2e/outside.md` ride into `chat_bookmarks`/outbox that the
         // TS projection writer then refuses, wedging the bookmark.
+        // TRACKED only: a secret-classified destination (`.env`,
+        // `secrets%252eenv`, ...) is structurally valid but the plaintext
+        // projection flow refuses secret paths — persisting it would queue a
+        // bookmark whose projection can only fail, and a plaintext bookmark
+        // body must never be invited into secret space in the first place.
         let destination_path = match dohc_engine_files::classify_engine_file_path_normalized(
             &input.destination_path,
         ) {
-            (_, Some(normalized)) => normalized,
+            (dohc_engine_files::PathClassification::Tracked, Some(normalized)) => normalized,
             _ => {
                 return Err(DomainError::chat(
                     "invalid-path",
