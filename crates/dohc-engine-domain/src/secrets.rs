@@ -683,46 +683,57 @@ impl<'a> SecretFileStore<'a> {
             require_version(conn, &ws, &from)?;
             require_version(conn, &ws, &to)
         })?;
-        let outcome = self.store.write_with(faults, |tx| {
-            tx.execute(
-                "DELETE FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2",
-                params![ws, to],
-            )
-            .map_err(DomainError::sql_persist)?;
-            tx.execute(
-                "DELETE FROM secret_fork_bases WHERE workspace_id = ?1 AND version_id = ?2",
-                params![ws, to],
-            )
-            .map_err(DomainError::sql_persist)?;
-            let copied = tx
-                .execute(
-                    "INSERT INTO secret_files (workspace_id, version_id, path, iv_base64, \
-                     auth_tag_base64, ciphertext_base64, byte_length, updated_at_ms, \
-                     latest_moment_id) \
-                     SELECT workspace_id, ?2, path, iv_base64, auth_tag_base64, ciphertext_base64, \
-                     byte_length, updated_at_ms, latest_moment_id FROM secret_files \
-                     WHERE workspace_id = ?1 AND version_id = ?3",
-                    params![ws, to, from],
-                )
-                .map_err(DomainError::sql_persist)?;
-            tx.execute(
-                "INSERT INTO secret_fork_bases (workspace_id, version_id, path, iv_base64, \
-                 auth_tag_base64, ciphertext_base64, byte_length) \
-                 SELECT workspace_id, ?2, path, iv_base64, auth_tag_base64, ciphertext_base64, \
-                 byte_length FROM secret_files WHERE workspace_id = ?1 AND version_id = ?3",
-                params![ws, to, from],
-            )
-            .map_err(DomainError::sql_persist)?;
-            // Empty secret forks are a no-op for replicas: skip the journal.
-            if copied > 0 {
-                journal(tx, &to, "secret.version.fork", now_ms)?;
-            }
-            Ok::<(), DomainError>(())
-        })?;
+        let outcome = self
+            .store
+            .write_with(faults, |tx| fork_version_in_tx(tx, &ws, &from, &to, now_ms))?;
         committed(outcome)
     }
 
     // ------------------------------------------------------------- internals
+}
+
+/// Copy a version's secret tips and fork bases inside a caller-owned
+/// transaction. Used by named-version creation so plaintext and secret heads
+/// cannot be forked in separate commits.
+pub(crate) fn fork_version_in_tx(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    from_version_id: &str,
+    to_version_id: &str,
+    now_ms: i64,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "DELETE FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2",
+        params![workspace_id, to_version_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+    tx.execute(
+        "DELETE FROM secret_fork_bases WHERE workspace_id = ?1 AND version_id = ?2",
+        params![workspace_id, to_version_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+    let copied = tx
+        .execute(
+            "INSERT INTO secret_files (workspace_id, version_id, path, iv_base64, \
+             auth_tag_base64, ciphertext_base64, byte_length, updated_at_ms, latest_moment_id) \
+             SELECT workspace_id, ?2, path, iv_base64, auth_tag_base64, ciphertext_base64, \
+             byte_length, updated_at_ms, latest_moment_id FROM secret_files \
+             WHERE workspace_id = ?1 AND version_id = ?3",
+            params![workspace_id, to_version_id, from_version_id],
+        )
+        .map_err(DomainError::sql_persist)?;
+    tx.execute(
+        "INSERT INTO secret_fork_bases (workspace_id, version_id, path, iv_base64, \
+         auth_tag_base64, ciphertext_base64, byte_length) \
+         SELECT workspace_id, ?2, path, iv_base64, auth_tag_base64, ciphertext_base64, \
+         byte_length FROM secret_files WHERE workspace_id = ?1 AND version_id = ?3",
+        params![workspace_id, to_version_id, from_version_id],
+    )
+    .map_err(DomainError::sql_persist)?;
+    if copied > 0 {
+        journal(tx, to_version_id, "secret.version.fork", now_ms)?;
+    }
+    Ok(())
 }
 
 // ============================================================================

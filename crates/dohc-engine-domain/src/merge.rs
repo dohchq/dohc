@@ -2,7 +2,7 @@
 
 use crate::conflicts::{
     ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus, TextConflict,
-    enqueue_delete, enqueue_write, insert_text_conflict_if_absent,
+    enqueue_delete, enqueue_write, insert_text_conflict_if_absent, load_text_conflict_in_tx,
 };
 use crate::error::DomainError;
 use crate::records::{
@@ -10,8 +10,9 @@ use crate::records::{
     WriteText,
 };
 use crate::store::{
-    VersionedTextStore, delete_text_in_tx, validate_delete_input, validate_path,
-    validate_write_input, write_text_in_tx,
+    VersionedTextStore, delete_result_from_moment, delete_text_in_tx, get_moment, hash_fields,
+    lookup_request, record_request, validate_delete_input, validate_path, validate_write_input,
+    write_result_from_moment, write_text_in_tx,
 };
 use dohc_engine_storage::{FaultInjector, Preimage, StorageError, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -61,6 +62,7 @@ pub struct MergeTextFileFromVersion {
     pub path: String,
     pub object_id: String,
     pub moment_id: String,
+    pub request_id: Option<String>,
     pub conflict_id: String,
     pub metadata_origin: String,
     pub author_json: Option<String>,
@@ -78,6 +80,7 @@ pub enum MergeTextFileResult {
     Unchanged {
         reason: MergeUnchangedReason,
         comparison: VersionedTextComparison,
+        deduped: bool,
     },
     Write {
         comparison: VersionedTextComparison,
@@ -90,6 +93,7 @@ pub enum MergeTextFileResult {
     Conflict {
         comparison: VersionedTextComparison,
         conflict: Box<TextConflict>,
+        deduped: bool,
     },
 }
 
@@ -221,9 +225,23 @@ impl VersionedTextStore<'_> {
     where
         F: Fn(&Connection, &MergeTextFileResult) -> Result<(), DomainError>,
     {
-        // note: request-id replay is deferred until all four result variants can be reconstructed.
         validate_path(&input.path)?;
+        let payload_hash = hash_fields(&[
+            input.workspace_id.as_bytes(),
+            input.target_version_id.as_bytes(),
+            input.source_version_id.as_bytes(),
+            input.path.as_bytes(),
+            input.moment_id.as_bytes(),
+        ]);
         let outcome = self.store.write_with(faults, |tx| {
+            if let Some(request_id) = &input.request_id
+                && let Some(recorded) = lookup_request(tx, request_id)?
+            {
+                if recorded.payload_hash != payload_hash {
+                    return Err(DomainError::IdempotencyKeyReuseMismatch);
+                }
+                return reconstruct_merge(tx, input);
+            }
             let compare_input = CompareTextFileVersions {
                 workspace_id: input.workspace_id.clone(),
                 target_version_id: input.target_version_id.clone(),
@@ -235,17 +253,17 @@ impl VersionedTextStore<'_> {
                 let result = MergeTextFileResult::Unchanged {
                     reason: MergeUnchangedReason::AlreadySame,
                     comparison,
+                    deduped: false,
                 };
-                after(tx, &result)?;
-                return Ok(result);
+                return finish_merge(tx, input, &payload_hash, result, &after);
             }
             if file_states_equal(&comparison.incoming, &comparison.base) {
                 let result = MergeTextFileResult::Unchanged {
                     reason: MergeUnchangedReason::SourceUnchanged,
                     comparison,
+                    deduped: false,
                 };
-                after(tx, &result)?;
-                return Ok(result);
+                return finish_merge(tx, input, &payload_hash, result, &after);
             }
 
             if file_states_equal(&comparison.current, &comparison.base) {
@@ -261,16 +279,14 @@ impl VersionedTextStore<'_> {
                         });
                     enqueue_write(tx, &write, preimage, "merge")?;
                     let result = MergeTextFileResult::Write { comparison, write };
-                    after(tx, &result)?;
-                    return Ok(result);
+                    return finish_merge(tx, input, &payload_hash, result, &after);
                 }
                 let delete_input = merge_delete_input(input);
                 validate_delete_input(&delete_input)?;
                 let delete = delete_text_in_tx(tx, &delete_input)?;
                 enqueue_delete(tx, &delete, "merge")?;
                 let result = MergeTextFileResult::Delete { comparison, delete };
-                after(tx, &result)?;
-                return Ok(result);
+                return finish_merge(tx, input, &payload_hash, result, &after);
             }
 
             if let (Some(base), Some(current), Some(incoming)) =
@@ -288,8 +304,7 @@ impl VersionedTextStore<'_> {
                     "merge",
                 )?;
                 let result = MergeTextFileResult::Write { comparison, write };
-                after(tx, &result)?;
-                return Ok(result);
+                return finish_merge(tx, input, &payload_hash, result, &after);
             }
 
             if input.conflict_id.is_empty() {
@@ -312,9 +327,9 @@ impl VersionedTextStore<'_> {
             let result = MergeTextFileResult::Conflict {
                 comparison,
                 conflict: Box::new(conflict),
+                deduped: false,
             };
-            after(tx, &result)?;
-            Ok(result)
+            finish_merge(tx, input, &payload_hash, result, &after)
         })?;
         committed(outcome)
     }
@@ -384,6 +399,90 @@ impl VersionedTextStore<'_> {
         }
         Ok(changes)
     }
+}
+
+fn finish_merge<F>(
+    tx: &Connection,
+    input: &MergeTextFileFromVersion,
+    payload_hash: &str,
+    result: MergeTextFileResult,
+    after: &F,
+) -> Result<MergeTextFileResult, DomainError>
+where
+    F: Fn(&Connection, &MergeTextFileResult) -> Result<(), DomainError>,
+{
+    after(tx, &result)?;
+    let result_seq = match &result {
+        MergeTextFileResult::Write { write, .. } => write.moment.moment_order,
+        MergeTextFileResult::Delete { delete, .. } => delete.moment.moment_order,
+        MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => 0,
+    };
+    record_request(
+        tx,
+        input.request_id.as_deref(),
+        payload_hash,
+        result_seq,
+        input.now_ms,
+    )?;
+    Ok(result)
+}
+
+fn reconstruct_merge(
+    conn: &Connection,
+    input: &MergeTextFileFromVersion,
+) -> Result<MergeTextFileResult, DomainError> {
+    let compare_input = CompareTextFileVersions {
+        workspace_id: input.workspace_id.clone(),
+        target_version_id: input.target_version_id.clone(),
+        source_version_id: input.source_version_id.clone(),
+        path: input.path.clone(),
+    };
+    let comparison = compare_text_file_versions_in_db(conn, &compare_input)?;
+    if let Some(moment) = get_moment(conn, &input.workspace_id, &input.moment_id)? {
+        if moment.version_id != input.target_version_id || moment.path != input.path {
+            return Err(DomainError::StateCorrupt {
+                reason: "deduped merge moment does not match its request",
+            });
+        }
+        return match moment.operation {
+            crate::records::MomentOp::Write => Ok(MergeTextFileResult::Write {
+                comparison,
+                write: write_result_from_moment(conn, &input.workspace_id, moment, true)?,
+            }),
+            crate::records::MomentOp::Delete => Ok(MergeTextFileResult::Delete {
+                comparison,
+                delete: delete_result_from_moment(conn, &input.workspace_id, moment, true)?,
+            }),
+            crate::records::MomentOp::Rename => Err(DomainError::StateCorrupt {
+                reason: "deduped merge points at a rename moment",
+            }),
+        };
+    }
+
+    if file_states_equal(&comparison.current, &comparison.incoming) {
+        return Ok(MergeTextFileResult::Unchanged {
+            reason: MergeUnchangedReason::AlreadySame,
+            comparison,
+            deduped: true,
+        });
+    }
+    if file_states_equal(&comparison.incoming, &comparison.base) {
+        return Ok(MergeTextFileResult::Unchanged {
+            reason: MergeUnchangedReason::SourceUnchanged,
+            comparison,
+            deduped: true,
+        });
+    }
+    let conflict = load_text_conflict_in_tx(conn, &input.workspace_id, &input.conflict_id)?.ok_or(
+        DomainError::StateCorrupt {
+            reason: "deduped merge has neither a moment nor a conflict",
+        },
+    )?;
+    Ok(MergeTextFileResult::Conflict {
+        comparison,
+        conflict: Box::new(conflict),
+        deduped: true,
+    })
 }
 
 fn compare_text_file_versions_in_db(
@@ -569,6 +668,7 @@ fn merge_delete_input(input: &MergeTextFileFromVersion) -> DeleteTextFile {
         version_id: input.target_version_id.clone(),
         path: input.path.clone(),
         moment_id: input.moment_id.clone(),
+        request_id: None,
         metadata_origin: input.metadata_origin.clone(),
         author_json: input.author_json.clone(),
         now_ms: input.now_ms,

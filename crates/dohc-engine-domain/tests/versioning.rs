@@ -40,6 +40,7 @@ fn delete(version: &str, path: &str, moment: &str, now: i64) -> DeleteTextFile {
         version_id: version.to_owned(),
         path: path.to_owned(),
         moment_id: moment.to_owned(),
+        request_id: None,
         metadata_origin: "user".to_owned(),
         author_json: None,
         now_ms: now,
@@ -53,6 +54,7 @@ fn rename(version: &str, from: &str, to: &str, moment: &str, now: i64) -> Rename
         from_path: from.to_owned(),
         to_path: to.to_owned(),
         moment_id: moment.to_owned(),
+        request_id: None,
         metadata_origin: "user".to_owned(),
         author_json: None,
         now_ms: now,
@@ -65,6 +67,7 @@ fn rollback(version: &str, path: &str, moment: &str) -> RollbackTextFileMutation
         version_id: version.to_owned(),
         path: path.to_owned(),
         mutation_moment_id: moment.to_owned(),
+        request_id: None,
         legacy_before_text: None,
     }
 }

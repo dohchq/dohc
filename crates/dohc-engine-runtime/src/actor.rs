@@ -40,10 +40,10 @@ use dohc_engine_domain::{
     CaptureIngestBinaryResult, CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult,
     CaptureSecret, CaptureSecretRetire, ChatBookmark, ChatBookmarkTransition, ChatChannel,
     ChatChannelKind, ChatChannelSummary, ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMessage,
-    ChatMessagePage, ChatThread, ChatThreadReadState, CompareTextFileVersions, DeleteResult,
-    DeleteTextFile, DispatchClaim, InbandBinary, InbandSecret, InbandText, LinkedChatStore,
-    ListMomentsQuery, MergeTextFileFromVersion, MergeTextFileResult, MomentPage, MomentRecord,
-    RenameResult, RenameTextFile, ResolveTextConflict, ResolveTextConflictResult,
+    ChatMessagePage, ChatThread, ChatThreadReadState, CompareTextFileVersions, CreateNamedVersion,
+    DeleteResult, DeleteTextFile, DispatchClaim, InbandBinary, InbandSecret, InbandText,
+    LinkedChatStore, ListMomentsQuery, MergeTextFileFromVersion, MergeTextFileResult, MomentPage,
+    MomentRecord, RenameResult, RenameTextFile, ResolveTextConflict, ResolveTextConflictResult,
     RollbackTextFileMutation, SaveBookmark, SecretFileStat, SecretFileStore, SecretMomentRecord,
     SecretWriteResult, SendMessage, SetFollow, SnapshotMetadata, SnapshotView, StartChannelThread,
     TextConflict, TextSnapshot, VersionFileChange, VersionRecord, VersionedTextComparison,
@@ -235,7 +235,7 @@ enum Command {
         self_writes: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
+        reply: oneshot::Sender<Result<bool, RuntimeError>>,
     },
     VersionedTextCompare {
         input: CompareTextFileVersions,
@@ -340,6 +340,10 @@ enum Command {
         path: String,
         reply: oneshot::Sender<Result<Option<BinaryHeadMeta>, RuntimeError>>,
     },
+    ReadBinaryBlob {
+        sha256: String,
+        reply: oneshot::Sender<Result<Option<Vec<u8>>, RuntimeError>>,
+    },
     ReadTextInband {
         workspace_id: String,
         version_id: String,
@@ -390,6 +394,30 @@ enum Command {
     ActiveVersionId {
         workspace_id: String,
         reply: oneshot::Sender<Result<String, RuntimeError>>,
+    },
+    ActiveVersion {
+        workspace_id: String,
+        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
+    },
+    EnsureMainVersion {
+        workspace_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
+    },
+    SetActiveVersion {
+        workspace_id: String,
+        version_id: String,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
+    },
+    CreateNamedVersion {
+        input: CreateNamedVersion,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
     },
     CaptureManifestSeed {
         workspace_id: String,
@@ -1245,7 +1273,7 @@ impl ActorHandle {
         self_writes: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<bool, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::VersionedTextRollback {
@@ -1478,6 +1506,15 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    pub async fn read_binary_blob(&self, sha256: String) -> Result<Option<Vec<u8>>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReadBinaryBlob { sha256, reply })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Text head with the body hydrated only under `cap` — one actor turn.
     pub async fn read_text_inband(
         &self,
@@ -1638,6 +1675,82 @@ impl ActorHandle {
         self.tx
             .send(Command::ActiveVersionId {
                 workspace_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn active_version(
+        &self,
+        workspace_id: String,
+    ) -> Result<VersionRecord, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ActiveVersion {
+                workspace_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn ensure_main_version(
+        &self,
+        workspace_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<VersionRecord, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::EnsureMainVersion {
+                workspace_id,
+                now_ms,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn set_active_version(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<VersionRecord, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::SetActiveVersion {
+                workspace_id,
+                version_id,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn create_named_version(
+        &self,
+        input: CreateNamedVersion,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<VersionRecord, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CreateNamedVersion {
+                input,
+                faults,
+                token,
                 reply,
             })
             .await
@@ -3060,6 +3173,12 @@ fn worker_main(
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
+            Command::ReadBinaryBlob { sha256, reply } => {
+                let outcome = store
+                    .read_with(|conn| dohc_engine_storage::get_binary_blob(conn, &sha256))
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
             Command::ReadTextInband {
                 workspace_id,
                 version_id,
@@ -3161,6 +3280,62 @@ fn worker_main(
                     .get_active_version(&workspace_id)
                     .map(|version| version.version_id)
                     .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ActiveVersion {
+                workspace_id,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .get_active_version(&workspace_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::EnsureMainVersion {
+                workspace_id,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    VersionedTextStore::new(&mut store)
+                        .ensure_main_version(&workspace_id, "main", now_ms, faults.as_ref())
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::SetActiveVersion {
+                workspace_id,
+                version_id,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    VersionedTextStore::new(&mut store)
+                        .set_active_version(&workspace_id, &version_id, faults.as_ref())
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::CreateNamedVersion {
+                input,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    VersionedTextStore::new(&mut store)
+                        .create_named_version(&input, faults.as_ref())
+                        .map_err(RuntimeError::from)
+                };
                 let _ = reply.send(outcome);
             }
             Command::CaptureManifestSeed {
@@ -4899,13 +5074,15 @@ fn versioned_text_delete_on_store(
     let outcome = store.write_with(faults, |tx| {
         let result =
             dohc_engine_domain::delete_text_in_tx(tx, input).map_err(RuntimeError::from)?;
-        delete_file_search_index(
-            tx,
-            &input.workspace_id,
-            &input.version_id,
-            &result.object.object_id,
-        )
-        .map_err(RuntimeError::from)?;
+        if !result.deduped {
+            delete_file_search_index(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.object.object_id,
+            )
+            .map_err(RuntimeError::from)?;
+        }
         Ok::<_, RuntimeError>(result)
     })?;
     match outcome {
@@ -4921,11 +5098,11 @@ fn versioned_text_rollback_on_store(
     self_writes: &dyn SelfWriteRecorder,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
-) -> Result<(), RuntimeError> {
+) -> Result<bool, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store).rollback_text_file_mutation_with(
+    let deduped = VersionedTextStore::new(store).rollback_text_file_mutation_with(
         input,
         faults,
         |tx, object_id, restored_text| {
@@ -4946,10 +5123,13 @@ fn versioned_text_rollback_on_store(
             Ok(())
         },
     )?;
+    if deduped {
+        return Ok(true);
+    }
 
     let job_id = format!("rollback-restore_{}", input.mutation_moment_id);
     let Some(job) = store.load_materialization_job(&job_id)? else {
-        return Ok(());
+        return Ok(false);
     };
     self_writes.record(&input.workspace_id, &job.target_path, &job.content_sha256);
     let outcome = materialize_one(
@@ -4970,7 +5150,7 @@ fn versioned_text_rollback_on_store(
         }
     };
     match outcome {
-        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => Ok(()),
+        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => Ok(false),
         JobOutcome::Conflict | JobOutcome::Superseded => {
             self_writes.retract(&input.workspace_id, &job.target_path, &job.content_sha256);
             Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into())

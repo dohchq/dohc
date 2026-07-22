@@ -270,7 +270,25 @@ impl<'a> VersionedTextStore<'a> {
             });
         }
 
+        let payload_hash = hash_fields(&[
+            input.workspace_id.as_bytes(),
+            input.version_id.as_bytes(),
+            input.from_path.as_bytes(),
+            input.to_path.as_bytes(),
+            input.moment_id.as_bytes(),
+        ]);
+
         let ws = &input.workspace_id;
+        if let Some(request_id) = &input.request_id
+            && let Some(recorded) = self
+                .store
+                .read_with(|conn| lookup_request(conn, request_id))?
+        {
+            if recorded.payload_hash != payload_hash {
+                return Err(DomainError::IdempotencyKeyReuseMismatch);
+            }
+            return self.store.read_with(|conn| reconstruct_rename(conn, input));
+        }
         let (object, before) = self.store.read_with(|conn| {
             if !version_exists(conn, ws, &input.version_id)? {
                 return Err(DomainError::VersionNotFound);
@@ -364,8 +382,16 @@ impl<'a> VersionedTextStore<'a> {
                 moment: get_moment(tx, ws, &input.moment_id)?.ok_or(DomainError::StateCorrupt {
                     reason: "moment vanished within its own write transaction",
                 })?,
+                deduped: false,
             };
             after(tx, &result)?;
+            record_request(
+                tx,
+                input.request_id.as_deref(),
+                &payload_hash,
+                moment_order,
+                input.now_ms,
+            )?;
             Ok::<_, DomainError>(result)
         })?;
         committed(outcome)
@@ -378,7 +404,7 @@ impl<'a> VersionedTextStore<'a> {
         &mut self,
         input: &RollbackTextFileMutation,
         faults: &dyn FaultInjector,
-    ) -> Result<(), DomainError> {
+    ) -> Result<bool, DomainError> {
         self.rollback_text_file_mutation_with(input, faults, |_, _, _| Ok(()))
     }
 
@@ -390,7 +416,7 @@ impl<'a> VersionedTextStore<'a> {
         input: &RollbackTextFileMutation,
         faults: &dyn FaultInjector,
         after: F,
-    ) -> Result<(), DomainError>
+    ) -> Result<bool, DomainError>
     where
         F: FnOnce(&Transaction<'_>, &str, Option<(&str, &str)>) -> Result<(), DomainError>,
     {
@@ -401,7 +427,24 @@ impl<'a> VersionedTextStore<'a> {
         normalized_input.path = validate_addressable_plaintext_path(&input.path)?;
         let input = &normalized_input;
 
+        let payload_hash = hash_fields(&[
+            input.workspace_id.as_bytes(),
+            input.version_id.as_bytes(),
+            input.path.as_bytes(),
+            input.mutation_moment_id.as_bytes(),
+        ]);
+
         let ws = &input.workspace_id;
+        if let Some(request_id) = &input.request_id
+            && let Some(recorded) = self
+                .store
+                .read_with(|conn| lookup_request(conn, request_id))?
+        {
+            if recorded.payload_hash != payload_hash {
+                return Err(DomainError::IdempotencyKeyReuseMismatch);
+            }
+            return Ok(true);
+        }
         let prep = self.store.read_with(|conn| {
             if !version_exists(conn, ws, &input.version_id)? {
                 return Err(DomainError::VersionNotFound);
@@ -580,7 +623,14 @@ impl<'a> VersionedTextStore<'a> {
                 (before.content_kind == "text").then_some((before.path.as_str(), before.text.as_str()))
             });
             after(tx, &prep.moment.object_id, restored_text)?;
-            Ok::<_, DomainError>(())
+            record_request(
+                tx,
+                input.request_id.as_deref(),
+                &payload_hash,
+                0,
+                prep.moment.recorded_at_ms,
+            )?;
+            Ok::<_, DomainError>(false)
         })?;
         committed(outcome)
     }
@@ -764,8 +814,46 @@ impl<'a> VersionedTextStore<'a> {
             else {
                 return Ok(None);
             };
+            if snapshot.content_kind == "binary" {
+                let sha = snapshot.binary_sha256.ok_or(DomainError::StateCorrupt {
+                    reason: "binary head without a binary sha",
+                })?;
+                let lengths: Option<(i64, i64)> = conn
+                    .query_row(
+                        "SELECT byte_length, LENGTH(bytes) FROM binary_blobs WHERE sha256 = ?1",
+                        [&sha],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(DomainError::sql_corrupt)?;
+                let Some((byte_length, actual_length)) = lengths else {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "binary head references a missing blob",
+                    });
+                };
+                if byte_length != actual_length {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "binary blob length does not match its bytes",
+                    });
+                }
+                return Ok(Some(InbandText {
+                    workspace_id: workspace_id.to_owned(),
+                    version_id: version_id.to_owned(),
+                    object_id,
+                    path,
+                    content_kind: "binary".to_owned(),
+                    text: Some(String::new()),
+                    byte_length,
+                    blob_sha256: sha,
+                    updated_at_ms: snapshot.updated_at_ms,
+                    latest_moment_id: snapshot.latest_moment_id,
+                    metadata_origin: snapshot.metadata_origin,
+                }));
+            }
             if snapshot.content_kind != "text" {
-                return Err(DomainError::BinaryHeadNotText);
+                return Err(DomainError::StateCorrupt {
+                    reason: "snapshot has an unknown content kind",
+                });
             }
             let sha = snapshot.blob_sha256.ok_or(DomainError::StateCorrupt {
                 reason: "text head without a text blob",
@@ -795,6 +883,7 @@ impl<'a> VersionedTextStore<'a> {
                 version_id: version_id.to_owned(),
                 object_id,
                 path,
+                content_kind: "text".to_owned(),
                 text,
                 byte_length,
                 blob_sha256: sha,
@@ -1197,10 +1286,8 @@ impl<'a> VersionedTextStore<'a> {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.new_version_id, "version_id")?;
         non_empty(&input.from_version_id, "version_id")?;
-        if input.name.is_empty() {
-            return Err(DomainError::InvalidInput {
-                reason: "version name must not be empty",
-            });
+        if input.name.is_empty() || input.name.trim() != input.name {
+            return Err(DomainError::InvalidVersionName);
         }
 
         let payload_hash = hash_fields(&[
@@ -1226,9 +1313,7 @@ impl<'a> VersionedTextStore<'a> {
                 return Err(DomainError::VersionNameConflict);
             }
             if version_exists(conn, ws, &input.new_version_id)? {
-                return Err(DomainError::InvalidInput {
-                    reason: "new version id already exists",
-                });
+                return Err(DomainError::DuplicateId);
             }
             let fork_moment_id = latest_materialized_moment_id(conn, ws, &input.from_version_id)?;
             Ok(ForkPrep::Apply { fork_moment_id })
@@ -1301,6 +1386,13 @@ impl<'a> VersionedTextStore<'a> {
                 params![input.new_version_id, input.now_ms],
             )
             .map_err(DomainError::sql_persist)?;
+            crate::secrets::fork_version_in_tx(
+                tx,
+                ws,
+                &input.from_version_id,
+                &input.new_version_id,
+                input.now_ms,
+            )?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, 0, input.now_ms)?;
             Ok::<_, DomainError>(record.clone())
         })?;
@@ -1702,6 +1794,7 @@ fn capture_retire_in_tx(
         version_id: input.version_id.clone(),
         path: input.path,
         moment_id,
+        request_id: None,
         metadata_origin: "capture".to_owned(),
         author_json: None,
         now_ms: input.now_ms,
@@ -2488,7 +2581,7 @@ fn write_result_for_existing_head(
     write_result_from_moment(conn, &snapshot.workspace_id, moment, true)
 }
 
-fn write_result_from_moment(
+pub(crate) fn write_result_from_moment(
     conn: &Connection,
     workspace_id: &str,
     moment: MomentRecord,
@@ -2531,6 +2624,131 @@ fn write_result_from_moment(
     })
 }
 
+fn reconstruct_rename(
+    conn: &Connection,
+    input: &RenameTextFile,
+) -> Result<RenameResult, DomainError> {
+    let moment = get_moment(conn, &input.workspace_id, &input.moment_id)?.ok_or(
+        DomainError::StateCorrupt {
+            reason: "deduped rename has no moment",
+        },
+    )?;
+    if moment.operation != MomentOp::Rename
+        || moment.version_id != input.version_id
+        || moment.path != input.to_path
+        || !moment.before_present
+    {
+        return Err(DomainError::StateCorrupt {
+            reason: "deduped rename moment does not match its request",
+        });
+    }
+    let object = get_file_object(conn, &input.workspace_id, &moment.object_id)?.ok_or(
+        DomainError::StateCorrupt {
+            reason: "deduped rename points at a missing object",
+        },
+    )?;
+    let before = snapshot_from_moment_before(conn, &input.workspace_id, &moment, &input.from_path)?;
+    let after = snapshot_from_moment_after(conn, &input.workspace_id, &moment, &input.to_path)?;
+    Ok(RenameResult {
+        object,
+        before,
+        after,
+        moment,
+        deduped: true,
+    })
+}
+
+fn snapshot_from_moment_before(
+    conn: &Connection,
+    workspace_id: &str,
+    moment: &MomentRecord,
+    path: &str,
+) -> Result<TextSnapshot, DomainError> {
+    let producer_id =
+        moment
+            .before_latest_moment_id
+            .as_deref()
+            .ok_or(DomainError::StateCorrupt {
+                reason: "deduped mutation has no preimage producer",
+            })?;
+    let producer =
+        get_moment(conn, workspace_id, producer_id)?.ok_or(DomainError::StateCorrupt {
+            reason: "deduped mutation preimage producer is missing",
+        })?;
+    let (text, sha) = snapshot_content_from_moment_side(
+        conn,
+        &moment.before_content_kind,
+        moment.before_blob_sha256.as_deref(),
+        moment.before_binary_sha256.as_deref(),
+    )?;
+    Ok(TextSnapshot {
+        workspace_id: workspace_id.to_owned(),
+        version_id: moment.version_id.clone(),
+        object_id: moment.object_id.clone(),
+        path: path.to_owned(),
+        text,
+        blob_sha256: sha,
+        updated_at_ms: producer.recorded_at_ms,
+        latest_moment_id: producer.moment_id,
+        metadata_origin: producer.metadata_origin,
+    })
+}
+
+fn snapshot_from_moment_after(
+    conn: &Connection,
+    workspace_id: &str,
+    moment: &MomentRecord,
+    path: &str,
+) -> Result<TextSnapshot, DomainError> {
+    let (text, sha) = snapshot_content_from_moment_side(
+        conn,
+        &moment.after_content_kind,
+        moment.after_blob_sha256.as_deref(),
+        moment.after_binary_sha256.as_deref(),
+    )?;
+    Ok(TextSnapshot {
+        workspace_id: workspace_id.to_owned(),
+        version_id: moment.version_id.clone(),
+        object_id: moment.object_id.clone(),
+        path: path.to_owned(),
+        text,
+        blob_sha256: sha,
+        updated_at_ms: moment.recorded_at_ms,
+        latest_moment_id: moment.moment_id.clone(),
+        metadata_origin: moment.metadata_origin.clone(),
+    })
+}
+
+fn snapshot_content_from_moment_side(
+    conn: &Connection,
+    content_kind: &str,
+    text_sha: Option<&str>,
+    binary_sha: Option<&str>,
+) -> Result<(String, String), DomainError> {
+    match content_kind {
+        "text" => {
+            let sha = text_sha.ok_or(DomainError::StateCorrupt {
+                reason: "deduped mutation text side has no blob",
+            })?;
+            let text = blob_text(conn, sha)?.ok_or(DomainError::StateCorrupt {
+                reason: "deduped mutation text blob is missing",
+            })?;
+            Ok((text, sha.to_owned()))
+        }
+        "binary" => Ok((
+            String::new(),
+            binary_sha
+                .ok_or(DomainError::StateCorrupt {
+                    reason: "deduped mutation binary side has no blob",
+                })?
+                .to_owned(),
+        )),
+        _ => Err(DomainError::StateCorrupt {
+            reason: "deduped mutation has an unknown content kind",
+        }),
+    }
+}
+
 /// Apply an R05 text delete inside a caller-owned compound transaction.
 #[doc(hidden)]
 pub fn delete_text_in_tx(
@@ -2540,6 +2758,20 @@ pub fn delete_text_in_tx(
     let normalized_input = normalized_delete_input(input)?;
     let input = &normalized_input;
     let ws = &input.workspace_id;
+    let payload_hash = hash_fields(&[
+        input.workspace_id.as_bytes(),
+        input.version_id.as_bytes(),
+        input.path.as_bytes(),
+        input.moment_id.as_bytes(),
+    ]);
+    if let Some(request_id) = &input.request_id
+        && let Some(recorded) = lookup_request(tx, request_id)?
+    {
+        if recorded.payload_hash != payload_hash {
+            return Err(DomainError::IdempotencyKeyReuseMismatch);
+        }
+        return reconstruct_delete(tx, input);
+    }
     if !version_exists(tx, ws, &input.version_id)? {
         return Err(DomainError::VersionNotFound);
     }
@@ -2597,13 +2829,22 @@ pub fn delete_text_in_tx(
     )
     .map_err(DomainError::sql_persist)?;
 
-    Ok(DeleteResult {
+    let result = DeleteResult {
         object,
         before: snapshot_text_view(&before),
         moment: get_moment(tx, ws, &input.moment_id)?.ok_or(DomainError::StateCorrupt {
             reason: "moment vanished within its own write transaction",
         })?,
-    })
+        deduped: false,
+    };
+    record_request(
+        tx,
+        input.request_id.as_deref(),
+        &payload_hash,
+        moment_order,
+        input.now_ms,
+    )?;
+    Ok(result)
 }
 
 fn reconstruct_capture_delete(
@@ -2615,9 +2856,35 @@ fn reconstruct_capture_delete(
         moment_by_order(conn, workspace_id, moment_order)?.ok_or(DomainError::StateCorrupt {
             reason: "deduped capture retire has no moment",
         })?;
+    delete_result_from_moment(conn, workspace_id, moment, true)
+}
+
+fn reconstruct_delete(
+    conn: &Connection,
+    input: &DeleteTextFile,
+) -> Result<DeleteResult, DomainError> {
+    let moment = get_moment(conn, &input.workspace_id, &input.moment_id)?.ok_or(
+        DomainError::StateCorrupt {
+            reason: "deduped delete has no moment",
+        },
+    )?;
+    if moment.version_id != input.version_id || moment.path != input.path {
+        return Err(DomainError::StateCorrupt {
+            reason: "deduped delete moment does not match its request",
+        });
+    }
+    delete_result_from_moment(conn, &input.workspace_id, moment, true)
+}
+
+pub(crate) fn delete_result_from_moment(
+    conn: &Connection,
+    workspace_id: &str,
+    moment: MomentRecord,
+    deduped: bool,
+) -> Result<DeleteResult, DomainError> {
     if moment.operation != MomentOp::Delete || !moment.before_present {
         return Err(DomainError::StateCorrupt {
-            reason: "deduped capture retire points at a non-delete moment",
+            reason: "deduped delete points at a non-delete moment",
         });
     }
     let object = get_file_object(conn, workspace_id, &moment.object_id)?.ok_or(
@@ -2678,6 +2945,7 @@ fn reconstruct_capture_delete(
             metadata_origin: producer.metadata_origin,
         },
         moment,
+        deduped,
     })
 }
 
@@ -3719,7 +3987,7 @@ fn get_version(
     row.transpose()
 }
 
-fn get_moment(
+pub(crate) fn get_moment(
     conn: &Connection,
     workspace_id: &str,
     moment_id: &str,

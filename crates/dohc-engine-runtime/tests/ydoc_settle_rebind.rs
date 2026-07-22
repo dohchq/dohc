@@ -92,6 +92,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
                     from_path: PATH.to_owned(),
                     to_path: "notes/moved.md".to_owned(),
                     moment_id: "moment-rebind-rename".to_owned(),
+                    request_id: None,
                     metadata_origin: "agent".to_owned(),
                     author_json: None,
                     now_ms: 110,

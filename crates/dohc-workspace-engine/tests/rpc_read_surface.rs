@@ -125,7 +125,8 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
 
     // versions.active resolves to main on a fresh workspace.
     let active = call(&transport, &handle, 2, "versions.active", json!({})).await;
-    assert_eq!(active["versionId"], json!("main"));
+    assert_eq!(active["id"], json!("main"));
+    assert_eq!(active["kind"], json!("main"));
 
     // versions.list contains it.
     let versions = call(&transport, &handle, 3, "versions.list", json!({})).await;
@@ -458,9 +459,8 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         .expect("close");
 
     // A BRAND-NEW workspace: nothing captured, nothing versioned, no key.
-    // versions.active answers null (TS getActiveVersion parity — not an
-    // error) and keyless materialize answers null (no state, fail open is
-    // correct here).
+    // versions.active fails closed when neither active nor main resolves;
+    // keyless materialize still answers null when no secret state exists.
     let fresh = ScratchDir::new().expect("fresh scratch");
     write_shadow_marker_for_harness(fresh.path(), TOKEN).expect("marker");
     let opened = transport
@@ -480,18 +480,19 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         .expect("fresh open");
     let fresh_handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("fresh handle");
-    let active = call(
-        &transport,
-        &fresh_handle,
-        id + 2,
-        "versions.active",
-        json!({}),
-    )
-    .await;
-    assert!(
-        active["versionId"].is_null(),
-        "an empty workspace has no active version yet"
-    );
+    let active = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id + 2,
+                "versions.active",
+                Some(fresh_handle.clone()),
+                json!({}),
+            ),
+        )
+        .await
+        .expect_err("an uninitialized workspace has no resolvable version");
+    assert_eq!(active.message, "state-corrupt");
     // With NO versions at all, materialize refuses like every sibling
     // read — the error surface must not depend on whether a key exists.
     let no_version = transport

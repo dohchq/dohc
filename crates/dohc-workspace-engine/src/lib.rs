@@ -16,11 +16,11 @@ use dohc_engine_domain::{
     ChatChannelSummary, ChatFeedReadState, ChatFollow, ChatMessage, ChatThread,
     ChatThreadReadState, CompareTextFileVersions, ComparisonStatus, ConflictChoice,
     ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus,
-    DeleteTextFile, DispatchClaim, DomainError, FeedCursorValue, FollowState, FollowTargetKind,
-    MarkdownMergeResult, MergeTextFileFromVersion, MergeTextFileResult, RenameTextFile,
-    ResolveConflictKind, ResolveTextConflict, RollbackTextFileMutation, SaveBookmark, SendMessage,
-    SetFollow, SnapshotContent, StartChannelThread, TextConflict, TextSnapshot,
-    VersionFileChangeStatus, WriteBinary, WriteText, merge_markdown,
+    CreateNamedVersion, DeleteTextFile, DispatchClaim, DomainError, FeedCursorValue, FollowState,
+    FollowTargetKind, MarkdownMergeResult, MergeTextFileFromVersion, MergeTextFileResult,
+    RenameTextFile, ResolveConflictKind, ResolveTextConflict, RollbackTextFileMutation,
+    SaveBookmark, SendMessage, SetFollow, SnapshotContent, StartChannelThread, TextConflict,
+    TextSnapshot, VersionFileChangeStatus, VersionRecord, WriteBinary, WriteText, merge_markdown,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -281,6 +281,10 @@ impl EngineService {
                 self.versions_compare_files(&ctx, request.workspace, request.params)
                     .await?
             }
+            "versions.createNamed" => {
+                self.versions_create_named(&ctx, &request, request.params.clone())
+                    .await?
+            }
             "versionedText.read" => {
                 self.versioned_text_read(&ctx, request.workspace, request.params)
                     .await?
@@ -341,7 +345,18 @@ impl EngineService {
             }
             "watcher.status" => self.watcher_status(request.workspace)?,
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
-            "versions.active" => self.versions_active(&ctx, request.workspace).await?,
+            "versions.active" => {
+                self.versions_active(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "versions.ensureMain" => {
+                self.versions_ensure_main(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "versions.setActive" => {
+                self.versions_set_active(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "versions.list" => {
                 self.versions_list(&ctx, request.workspace, request.params)
                     .await?
@@ -352,6 +367,10 @@ impl EngineService {
             }
             "versionedBinary.read" => {
                 self.versioned_binary_read(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "versionedBinary.readBlob" => {
+                self.versioned_binary_read_blob(&ctx, request.workspace, request.params)
                     .await?
             }
             "moments.list" => {
@@ -826,10 +845,10 @@ impl EngineService {
                     path,
                     text,
                     moment_id,
+                    request_id,
                     metadata_origin: origin,
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
-                    request_id,
                 },
                 open.root.clone(),
                 Arc::new(NoFaults),
@@ -946,6 +965,7 @@ impl EngineService {
                     from_path,
                     to_path,
                     moment_id,
+                    request_id,
                     metadata_origin: origin,
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
@@ -971,7 +991,7 @@ impl EngineService {
                 result.moment.after_byte_length,
             ),
             "moment": moment_json(&result.moment),
-            "deduped": false,
+            "deduped": result.deduped,
         }))
     }
 
@@ -1002,6 +1022,7 @@ impl EngineService {
                     version_id: params.version_id,
                     path,
                     moment_id,
+                    request_id,
                     metadata_origin: origin,
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
@@ -1021,7 +1042,7 @@ impl EngineService {
                 result.moment.before_byte_length,
             ),
             "moment": moment_json(&result.moment),
-            "deduped": false,
+            "deduped": result.deduped,
         }))
     }
 
@@ -1040,14 +1061,19 @@ impl EngineService {
         let _author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
+        let request_id = params
+            .request_id
+            .or_else(|| request.idempotency_key.clone());
         let cancellation = OperationCancellation::new(ctx);
-        open.actor
+        let deduped = open
+            .actor
             .versioned_text_rollback(
                 RollbackTextFileMutation {
                     workspace_id: open.workspace_id,
                     version_id: params.version_id,
                     path,
                     mutation_moment_id: params.mutation_moment_id,
+                    request_id,
                     legacy_before_text: params
                         .legacy_before_text
                         .map(|text| normalize_rpc_text(&text)),
@@ -1059,7 +1085,7 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
-        Ok(json!({ "rolledBack": true, "deduped": false }))
+        Ok(json!({ "rolledBack": true, "deduped": deduped }))
     }
 
     async fn versioned_text_compare(
@@ -1118,6 +1144,7 @@ impl EngineService {
                     path,
                     object_id,
                     moment_id,
+                    request_id,
                     conflict_id,
                     metadata_origin: origin,
                     author_json,
@@ -1130,9 +1157,9 @@ impl EngineService {
             .await
             .map_err(map_runtime)?;
         Ok(match result {
-            MergeTextFileResult::Unchanged { .. } => json!({
+            MergeTextFileResult::Unchanged { deduped, .. } => json!({
                 "status": "unchanged",
-                "deduped": false,
+                "deduped": deduped,
             }),
             MergeTextFileResult::Write { write, .. } => json!({
                 "status": "merged",
@@ -1140,20 +1167,55 @@ impl EngineService {
                 "object": file_object_json(&write.object),
                 "snapshot": snapshot_metadata_json(&write.snapshot, "text", None, None),
                 "moment": moment_json(&write.moment),
-                "deduped": false,
+                "deduped": write.deduped,
             }),
             MergeTextFileResult::Delete { delete, .. } => json!({
                 "status": "merged",
                 "writeKind": "delete",
                 "object": file_object_json(&delete.object),
                 "moment": moment_json(&delete.moment),
-                "deduped": false,
+                "deduped": delete.deduped,
             }),
-            MergeTextFileResult::Conflict { .. } => json!({
+            MergeTextFileResult::Conflict { deduped, .. } => json!({
                 "status": "conflict",
-                "deduped": false,
+                "deduped": deduped,
             }),
         })
+    }
+
+    async fn versions_create_named(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionsCreateNamedParams = parse(params)?;
+        let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let new_version_id = self.generated_rpc_id(
+            "version",
+            request.id,
+            request.idempotency_key.as_deref(),
+            &params.name,
+        );
+        let cancellation = OperationCancellation::new(ctx);
+        let version = open
+            .actor
+            .create_named_version(
+                CreateNamedVersion {
+                    workspace_id: open.workspace_id,
+                    new_version_id,
+                    name: params.name,
+                    from_version_id: params.from_version_id,
+                    now_ms: now_ms()?,
+                    request_id: request.idempotency_key.clone(),
+                },
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(version_record_json(&version))
     }
 
     async fn versions_compare_files(
@@ -1244,15 +1306,17 @@ impl EngineService {
         Ok(match snapshot {
             None => Value::Null,
             Some(snapshot) => {
-                let over_cap = snapshot.text.is_none();
+                let over_cap = snapshot.content_kind == "text" && snapshot.text.is_none();
                 let mut body = json!({
                     "workspaceId": snapshot.workspace_id,
                     "versionId": snapshot.version_id,
                     "objectId": snapshot.object_id,
                     "path": snapshot.path,
+                    "contentKind": snapshot.content_kind,
                     "text": snapshot.text,
                     "byteLength": snapshot.byte_length,
                     "blobSha256": snapshot.blob_sha256,
+                    "sha256": snapshot.blob_sha256,
                     "updatedAtMs": snapshot.updated_at_ms,
                     "latestMomentId": snapshot.latest_moment_id,
                     "metadataOrigin": snapshot.metadata_origin
@@ -1370,27 +1434,75 @@ impl EngineService {
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
+        params: Value,
     ) -> Result<Value, WireError> {
+        let params: WorkspaceOnlyParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let cancellation = OperationCancellation::new(ctx);
-        let version_id = tokio::select! {
+        let version = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("versions.active"));
             }
-            result = open.actor.active_version_id(open.workspace_id) => result,
+            result = open.actor.active_version(open.workspace_id) => match result {
+                Ok(version) => version,
+                Err(RuntimeError::Domain(DomainError::WorkspaceNotFound)) => {
+                    return Err(wire(ErrorCode::Internal, "state-corrupt"));
+                }
+                Err(error) => return Err(map_runtime(error)),
+            },
         };
-        Ok(match version_id {
-            Ok(version_id) => json!({ "versionId": version_id }),
-            // A workspace with no versioned rows yet has no active version:
-            // the TS getActiveVersion answers null there, not an error. The
-            // workspace_id came from the daemon's own handle table, so
-            // WorkspaceNotFound here can only mean "nothing versioned yet".
-            Err(RuntimeError::Domain(DomainError::WorkspaceNotFound)) => {
-                json!({ "versionId": Value::Null })
-            }
-            Err(error) => return Err(map_runtime(error)),
-        })
+        Ok(version_record_json(&version))
+    }
+
+    async fn versions_ensure_main(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: WorkspaceOnlyParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let version = open
+            .actor
+            .ensure_main_version(
+                open.workspace_id,
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(version_record_json(&version))
+    }
+
+    async fn versions_set_active(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionsSetActiveParams = parse(params)?;
+        if params.version_id.is_empty() || params.version_id.trim() != params.version_id {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-version"));
+        }
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let version = open
+            .actor
+            .set_active_version(
+                open.workspace_id,
+                params.version_id,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(version_record_json(&version))
     }
 
     async fn versions_list(
@@ -1574,6 +1686,39 @@ impl EngineService {
                     "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
                 }),
             },
+        })
+    }
+
+    async fn versioned_binary_read_blob(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedBinaryReadBlobParams = parse(params)?;
+        if params.sha256.len() != 64 || !params.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
+        }
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let bytes = Self::read_under_ctx(
+            &cancellation,
+            "versionedBinary.readBlob",
+            open.actor.read_binary_blob(params.sha256),
+        )
+        .await?
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "file-not-found"))?;
+        let byte_length = bytes.len();
+        Ok(if byte_length <= MAX_INBAND_CONTENT_BYTES {
+            json!({ "bytes": bytes })
+        } else {
+            json!({
+                "bytes": Value::Null,
+                "byteLength": byte_length,
+                "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+            })
         })
     }
 
@@ -3646,9 +3791,8 @@ struct VersionedTextRollbackParams {
     author: Option<Value>,
     #[serde(default)]
     author_json: Option<String>,
-    // requestId lands with the cross-mutation idempotency ledger follow-up
-    // (design P1-8); accepting-and-ignoring it here would falsely promise
-    // exactly-once to callers.
+    #[serde(default)]
+    request_id: Option<String>,
     #[serde(default)]
     legacy_before_text: Option<String>,
 }
@@ -3714,6 +3858,29 @@ struct VersionsListParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionsCreateNamedParams {
+    workspace_id: String,
+    name: String,
+    from_version_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceOnlyParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionsSetActiveParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    version_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SecretsListParams {
     version_id: String,
     #[serde(default)]
@@ -3737,6 +3904,13 @@ struct VersionedTextListParams {
 struct VersionPathParams {
     version_id: String,
     path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedBinaryReadBlobParams {
+    workspace_id: String,
+    sha256: String,
 }
 
 #[derive(Deserialize)]
@@ -4699,6 +4873,24 @@ fn file_object_json(object: &dohc_engine_domain::FileObjectRecord) -> Value {
     })
 }
 
+fn version_record_json(version: &VersionRecord) -> Value {
+    let mut value = json!({
+        "id": version.version_id,
+        "workspaceId": version.workspace_id,
+        "kind": version.kind.as_str(),
+        "name": version.name,
+        "createdAtMs": version.created_at_ms,
+    });
+    if let Some(fork_version_id) = &version.fork_version_id {
+        let mut fork_point = json!({ "versionId": fork_version_id });
+        if let Some(moment_id) = &version.fork_moment_id {
+            fork_point["momentId"] = json!(moment_id);
+        }
+        value["forkPoint"] = fork_point;
+    }
+    value
+}
+
 fn snapshot_metadata_json(
     snapshot: &TextSnapshot,
     content_kind: &str,
@@ -4962,6 +5154,9 @@ fn map_runtime(error: RuntimeError) -> WireError {
             DomainError::FileNotFound => Some("file-not-found"),
             DomainError::TargetPathExists => Some("target-path-exists"),
             DomainError::VersionNotFound => Some("version-not-found"),
+            DomainError::VersionNameConflict => Some("version-name-conflict"),
+            DomainError::InvalidVersionName => Some("invalid-version-name"),
+            DomainError::DuplicateId => Some("duplicate-id"),
             DomainError::ForkBaseNotFound => Some("invalid-version"),
             DomainError::ConflictStaleTarget => Some("conflict-stale-target"),
             DomainError::InvalidPath { .. } => Some("invalid-path"),
@@ -5022,6 +5217,8 @@ fn map_domain_code(error: DomainError) -> ErrorCode {
         | DomainError::VersionNotFound
         | DomainError::WorkspaceMismatch
         | DomainError::VersionNameConflict
+        | DomainError::InvalidVersionName
+        | DomainError::DuplicateId
         | DomainError::DuplicateMomentId
         | DomainError::FileNotFound
         | DomainError::BinaryHeadNotText

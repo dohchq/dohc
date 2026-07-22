@@ -35,6 +35,14 @@ pub enum DomainError {
     #[error("a version with that name already exists")]
     VersionNameConflict,
 
+    /// A named version must be non-empty and have no surrounding whitespace.
+    #[error("version name is invalid")]
+    InvalidVersionName,
+
+    /// A generated/caller-supplied durable id already exists.
+    #[error("generated id already exists")]
+    DuplicateId,
+
     /// A caller-supplied `moment_id` is already present in this workspace
     /// (moment ids are unique per workspace; a duplicate would collide history).
     #[error("moment id already exists in this workspace")]
@@ -140,6 +148,8 @@ impl DomainError {
             DomainError::VersionNotFound => "version-not-found",
             DomainError::WorkspaceMismatch => "workspace-mismatch",
             DomainError::VersionNameConflict => "version-name-conflict",
+            DomainError::InvalidVersionName => "invalid-version-name",
+            DomainError::DuplicateId => "duplicate-id",
             DomainError::DuplicateMomentId => "duplicate-moment-id",
             DomainError::FileNotFound => "file-not-found",
             DomainError::BinaryHeadNotText => "binary-head-not-text",

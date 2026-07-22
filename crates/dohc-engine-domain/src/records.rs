@@ -164,6 +164,7 @@ pub struct InbandText {
     pub version_id: String,
     pub object_id: String,
     pub path: String,
+    pub content_kind: String,
     pub text: Option<String>,
     pub byte_length: i64,
     pub blob_sha256: String,
@@ -387,6 +388,7 @@ pub struct DeleteTextFile {
     pub version_id: String,
     pub path: String,
     pub moment_id: String,
+    pub request_id: Option<String>,
     pub metadata_origin: String,
     pub author_json: Option<String>,
     pub now_ms: i64,
@@ -400,6 +402,7 @@ pub struct RenameTextFile {
     pub from_path: String,
     pub to_path: String,
     pub moment_id: String,
+    pub request_id: Option<String>,
     pub metadata_origin: String,
     pub author_json: Option<String>,
     pub now_ms: i64,
@@ -412,6 +415,7 @@ pub struct RollbackTextFileMutation {
     pub version_id: String,
     pub path: String,
     pub mutation_moment_id: String,
+    pub request_id: Option<String>,
     pub legacy_before_text: Option<String>,
 }
 
@@ -463,6 +467,7 @@ pub struct DeleteResult {
     pub object: FileObjectRecord,
     pub before: TextSnapshot,
     pub moment: MomentRecord,
+    pub deduped: bool,
 }
 
 /// The result of [`crate::VersionedTextStore::capture_retire`].
@@ -481,4 +486,5 @@ pub struct RenameResult {
     pub before: TextSnapshot,
     pub after: TextSnapshot,
     pub moment: MomentRecord,
+    pub deduped: bool,
 }

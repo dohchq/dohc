@@ -1066,6 +1066,7 @@ fn delete_input(input: &ResolveTextConflict, version_id: &str, path: &str) -> De
         version_id: version_id.to_owned(),
         path: path.to_owned(),
         moment_id: input.delete_moment_id.clone(),
+        request_id: None,
         metadata_origin: input.metadata_origin.clone(),
         author_json: input.author_json.clone(),
         now_ms: input.now_ms,

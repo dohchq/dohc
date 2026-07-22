@@ -78,6 +78,7 @@ fn rollback_input() -> RollbackTextFileMutation {
         version_id: "main".to_owned(),
         path: "a.md".to_owned(),
         mutation_moment_id: "m2".to_owned(),
+        request_id: None,
         legacy_before_text: None,
     }
 }
@@ -88,6 +89,7 @@ fn delete_input() -> DeleteTextFile {
         version_id: "main".to_owned(),
         path: "a.md".to_owned(),
         moment_id: "m2".to_owned(),
+        request_id: None,
         metadata_origin: "user".to_owned(),
         author_json: None,
         now_ms: 20,
@@ -101,6 +103,7 @@ fn rename_input() -> RenameTextFile {
         from_path: "a.md".to_owned(),
         to_path: "b.md".to_owned(),
         moment_id: "m2".to_owned(),
+        request_id: None,
         metadata_origin: "user".to_owned(),
         author_json: None,
         now_ms: 20,
