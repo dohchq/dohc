@@ -30,7 +30,7 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_runtime::{
     ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, LifecycleState, NoFaults,
-    RuntimeError, SearchError, SearchSurface, WorkspaceSupervisor,
+    PostCommitMaterializeOutcome, RuntimeError, SearchError, SearchSurface, WorkspaceSupervisor,
 };
 use dohc_engine_sync::{ReplicationEnvelope, SyncError};
 use serde::{Deserialize, Serialize};
@@ -854,7 +854,7 @@ impl EngineService {
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = normalize_rpc_path(&params.path);
-        let text = normalize_rpc_text(&params.text);
+        let text = params.text;
         if text.len() > MAX_INBAND_CONTENT_BYTES {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
@@ -932,7 +932,7 @@ impl EngineService {
             .moment_id
             .unwrap_or_else(|| self.generated_rpc_id("moment", request.id, None, &path));
         let cancellation = OperationCancellation::new(ctx);
-        let result = open
+        let execution = open
             .actor
             .versioned_binary_write(
                 WriteBinary {
@@ -953,6 +953,7 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
+        let result = execution.write;
         Ok(json!({
             "object": file_object_json(&result.object),
             "snapshot": {
@@ -967,6 +968,9 @@ impl EngineService {
             },
             "moment": moment_json(&result.moment),
             "deduped": result.deduped,
+            "materializeEnqueued": result.materialize_enqueued,
+            "materialized": execution.materialized,
+            "materializeOutcome": materialize_outcome_name(execution.materialize_outcome),
         }))
     }
 
@@ -1093,16 +1097,15 @@ impl EngineService {
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = normalize_rpc_path(&params.path);
-        let _origin =
-            validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
-        let _author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
         let request_id = params
             .request_id
             .or_else(|| request.idempotency_key.clone());
         let cancellation = OperationCancellation::new(ctx);
-        let deduped = open
+        let result = open
             .actor
             .versioned_text_rollback(
                 RollbackTextFileMutation {
@@ -1111,9 +1114,9 @@ impl EngineService {
                     path,
                     mutation_moment_id: params.mutation_moment_id,
                     request_id,
-                    legacy_before_text: params
-                        .legacy_before_text
-                        .map(|text| normalize_rpc_text(&text)),
+                    legacy_before_text: params.legacy_before_text,
+                    metadata_origin: origin,
+                    author_json,
                 },
                 open.root,
                 Arc::new(self.self_writes.clone()),
@@ -1122,7 +1125,13 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
-        Ok(json!({ "rolledBack": true, "deduped": deduped }))
+        Ok(json!({
+            "rolledBack": true,
+            "deduped": result.deduped,
+            "materializeEnqueued": result.materialize_enqueued,
+            "materialized": result.materialized,
+            "materializeOutcome": materialize_outcome_name(result.materialize_outcome),
+        }))
     }
 
     async fn versioned_text_compare(
@@ -1480,9 +1489,7 @@ impl EngineService {
             }
             result = open.actor.active_version(open.workspace_id) => match result {
                 Ok(version) => version,
-                Err(RuntimeError::Domain(DomainError::WorkspaceNotFound)) => {
-                    return Err(wire(ErrorCode::Internal, "state-corrupt"));
-                }
+                Err(RuntimeError::Domain(DomainError::WorkspaceNotFound)) => return Ok(Value::Null),
                 Err(error) => return Err(map_runtime(error)),
             },
         };
@@ -1691,17 +1698,22 @@ impl EngineService {
         // ONE actor turn: the cap is decided in the query, so a replaced
         // head can never smuggle an over-cap blob into memory, and the
         // recorded length is integrity-checked against the stored bytes.
-        let head = Self::read_under_ctx(
-            &cancellation,
-            "versionedBinary.read",
-            open.actor.read_binary_inband(
+        let head = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("versionedBinary.read"));
+            }
+            result = open.actor.read_binary_inband(
                 open.workspace_id,
                 params.version_id,
                 params.path,
                 MAX_INBAND_CONTENT_BYTES,
-            ),
-        )
-        .await?;
+            ) => match result {
+                Ok(head) => head,
+                Err(RuntimeError::Domain(DomainError::TextHeadNotBinary)) => return Ok(Value::Null),
+                Err(error) => return Err(map_runtime(error)),
+            },
+        };
         Ok(match head {
             None => Value::Null,
             Some(head) => match head.bytes {
@@ -1970,7 +1982,7 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let path = normalize_rpc_path(&params.path);
-        let text = normalize_rpc_text(&params.text);
+        let text = params.text;
         if text.len() > MAX_INBAND_CONTENT_BYTES {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
@@ -2085,16 +2097,36 @@ impl EngineService {
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let path = normalize_rpc_path(&params.path);
         let cancellation = OperationCancellation::new(ctx);
-        let moments = Self::read_under_ctx(
+        let limit = params.limit.unwrap_or(200).clamp(1, 500);
+        let mut page = Self::read_under_ctx(
             &cancellation,
             "secrets.moments.list",
-            open.actor
-                .list_secret_moments(open.workspace_id, params.version_id, path),
+            open.actor.list_secret_moments(
+                open.workspace_id,
+                params.version_id,
+                path,
+                params.before_moment_order,
+                limit,
+            ),
         )
         .await?;
-        let rows: Vec<Value> = moments.iter().map(secret_moment_json).collect();
+        let rows: Vec<Value> = page.moments.iter().map(secret_moment_json).collect();
         let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
-        Ok(Value::Array(rows[..included].to_vec()))
+        if included == 0 && !rows.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
+        if included < rows.len() {
+            page.next_before_moment_order = page.moments[..included]
+                .last()
+                .map(|moment| moment.moment_order);
+        }
+        Ok(json!({
+            "moments": rows[..included].to_vec(),
+            "nextBeforeMomentOrder": page.next_before_moment_order,
+        }))
     }
 
     async fn secrets_moments_get(
@@ -2247,6 +2279,41 @@ impl EngineService {
                 Err(error) => return Err(map_runtime(error)),
             },
         };
+        Self::read_under_ctx(
+            &cancellation,
+            "secrets.apply (source version)",
+            open.actor.list_secret_files_page(
+                open.workspace_id.clone(),
+                params.from_version_id.clone(),
+                None,
+                1,
+            ),
+        )
+        .await?;
+        let key_root = open.root.clone();
+        let key_task =
+            tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_root));
+        let key = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("secrets.apply (key load)"));
+            }
+            loaded = key_task => loaded
+                .map_err(|_| wire(ErrorCode::Internal, "key-corrupt"))?
+                .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error))))?,
+        };
+        let Some(key) = key else {
+            let has_state = Self::read_under_ctx(
+                &cancellation,
+                "secrets.apply (key state)",
+                open.actor.secret_state_exists(open.workspace_id.clone()),
+            )
+            .await?;
+            if has_state {
+                return Err(wire(ErrorCode::Internal, "key-corrupt"));
+            }
+            return Ok(json!({ "changed": false, "moment": Value::Null }));
+        };
         let result = open
             .actor
             .apply_secret_file(
@@ -2256,6 +2323,7 @@ impl EngineService {
                 active.version_id,
                 params.moment_id,
                 now_ms()?,
+                key,
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
@@ -4365,6 +4433,10 @@ struct SecretsMomentsListParams {
     workspace_id: String,
     version_id: String,
     path: String,
+    #[serde(default)]
+    before_moment_order: Option<i64>,
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -5569,10 +5641,14 @@ fn normalize_rpc_path(path: &str) -> String {
     path.nfc().collect()
 }
 
-fn normalize_rpc_text(text: &str) -> String {
-    text.replace("\r\n", "\n")
-        .trim_matches(|character: char| character.is_whitespace() || character == '\u{feff}')
-        .to_owned()
+fn materialize_outcome_name(outcome: PostCommitMaterializeOutcome) -> &'static str {
+    match outcome {
+        PostCommitMaterializeOutcome::Applied => "applied",
+        PostCommitMaterializeOutcome::Skipped => "skipped",
+        PostCommitMaterializeOutcome::Conflict => "conflict",
+        PostCommitMaterializeOutcome::Superseded => "superseded",
+        PostCommitMaterializeOutcome::Error => "error",
+    }
 }
 
 fn validate_workspace_param(candidate: Option<&str>, resolved: &str) -> Result<(), WireError> {
@@ -5702,9 +5778,8 @@ fn map_runtime(error: RuntimeError) -> WireError {
     }
     if let RuntimeError::Domain(domain) = &error {
         let message = match domain {
-            DomainError::IdempotencyKeyReuseMismatch | DomainError::DuplicateMomentId => {
-                Some("idempotency-key-reuse-mismatch")
-            }
+            DomainError::IdempotencyKeyReuseMismatch => Some("idempotency-key-reuse-mismatch"),
+            DomainError::DuplicateMomentId => Some("duplicate-id"),
             DomainError::FileNotFound => Some("file-not-found"),
             DomainError::TargetPathExists => Some("target-path-exists"),
             DomainError::VersionNotFound => Some("version-not-found"),
@@ -5712,7 +5787,7 @@ fn map_runtime(error: RuntimeError) -> WireError {
             DomainError::VersionNameConflict => Some("version-name-conflict"),
             DomainError::InvalidVersionName => Some("invalid-version-name"),
             DomainError::DuplicateId => Some("duplicate-id"),
-            DomainError::ForkBaseNotFound => Some("invalid-version"),
+            DomainError::ForkBaseNotFound => Some("fork-base-not-found"),
             DomainError::ConflictStaleTarget => Some("conflict-stale-target"),
             DomainError::InvalidPath { .. } => Some("invalid-path"),
             DomainError::InvalidText { .. } => Some("invalid-text"),

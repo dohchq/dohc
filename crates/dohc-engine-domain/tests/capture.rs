@@ -610,6 +610,8 @@ fn rollback_of_a_capture_binary_moment_still_restores_disk() {
                 mutation_moment_id: flipped.moment_id.clone(),
                 request_id: None,
                 legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
             },
             &NO_FAULTS,
         )
@@ -726,6 +728,8 @@ fn recapture_after_rollback_reclaims_the_marker_row() {
                 mutation_moment_id: first.moment_id.clone(),
                 request_id: None,
                 legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
             },
             &NO_FAULTS,
         )

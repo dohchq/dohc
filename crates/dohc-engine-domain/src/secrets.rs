@@ -44,12 +44,12 @@
 
 use crate::error::DomainError;
 use crate::merge::VersionFileChangeStatus;
-use crate::records::{ApplySecretFileVerbatim, InbandSecret};
+use crate::records::{ApplySecretFileFromVersion, InbandSecret};
 use crate::store::validate_path;
 use dohc_engine_crypto::{SealedSecret, SecretDataKey, SecretPlaintext, aead, seal};
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
-    enqueue_job, put_binary_blob,
+    enqueue_delete_job, enqueue_job, put_binary_blob,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -226,6 +226,12 @@ pub struct SecretCompareEntry {
 pub struct SecretComparePage {
     pub entries: Vec<SecretCompareEntry>,
     pub next_after_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretMomentPage {
+    pub moments: Vec<SecretMomentRecord>,
+    pub next_before_moment_order: Option<i64>,
 }
 
 /// The outcome of a secret write: `changed=false` is a content-equality no-op
@@ -826,6 +832,79 @@ pub fn list_secret_moments_keyless(
     })
 }
 
+/// Keyset-paged secret-moment listing, newest first. The cursor is an
+/// exclusive upper bound on workspace-global `moment_order`.
+pub fn list_secret_moments_page_keyless(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: Option<&str>,
+    path: Option<&str>,
+    before_moment_order: Option<i64>,
+    limit: usize,
+) -> Result<SecretMomentPage, DomainError> {
+    if let Some(path) = path {
+        validate_secret_path(path)?;
+    }
+    if limit == 0 {
+        return Err(DomainError::InvalidInput {
+            reason: "secret moment page limit must be positive",
+        });
+    }
+    store.read_with(|conn| {
+        let mut sql = String::from(
+            "SELECT moment_order, moment_id, workspace_id, version_id, path, recorded_at_ms, \
+             operation, metadata_origin, metadata_summary, metadata_correlation_id \
+             FROM secret_moments WHERE workspace_id = ?1",
+        );
+        let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(workspace_id.to_owned())];
+        if let Some(version_id) = version_id {
+            require_version(conn, workspace_id, version_id)?;
+            sql.push_str(&format!(" AND version_id = ?{}", binds.len() + 1));
+            binds.push(Box::new(version_id.to_owned()));
+        }
+        if let Some(path) = path {
+            sql.push_str(&format!(" AND path = ?{}", binds.len() + 1));
+            binds.push(Box::new(path.to_owned()));
+        }
+        if let Some(before) = before_moment_order {
+            if before < 0 {
+                return Err(DomainError::InvalidInput {
+                    reason: "before_moment_order must be nonnegative",
+                });
+            }
+            sql.push_str(&format!(" AND moment_order < ?{}", binds.len() + 1));
+            binds.push(Box::new(before));
+        }
+        sql.push_str(&format!(
+            " ORDER BY moment_order DESC LIMIT ?{}",
+            binds.len() + 1
+        ));
+        let probe =
+            i64::try_from(limit.saturating_add(1)).map_err(|_| DomainError::InvalidInput {
+                reason: "secret moment page limit is too large",
+            })?;
+        binds.push(Box::new(probe));
+        let mut stmt = conn.prepare(&sql).map_err(DomainError::sql_corrupt)?;
+        let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|bind| bind.as_ref()).collect();
+        let rows = stmt
+            .query_map(refs.as_slice(), map_moment_row)
+            .map_err(DomainError::sql_corrupt)?;
+        let mut moments = Vec::new();
+        for row in rows {
+            moments.push(row.map_err(DomainError::sql_corrupt)??);
+        }
+        let has_more = moments.len() > limit;
+        moments.truncate(limit);
+        let next_before_moment_order = has_more
+            .then(|| moments.last().map(|moment| moment.moment_order))
+            .flatten();
+        Ok(SecretMomentPage {
+            moments,
+            next_before_moment_order,
+        })
+    })
+}
+
 /// Fetch a secret moment without requiring the data key.
 pub fn get_secret_moment_keyless(
     store: &EngineStore,
@@ -969,14 +1048,15 @@ pub fn compare_secret_files_page_keyless(
     })
 }
 
-/// Apply one source-version secret tip to the resolved destination version by
-/// copying the sealed fields verbatim. No plaintext or data key is involved.
-pub fn apply_secret_file_verbatim(
+/// Three-way-apply one source-version secret state to the destination. The key
+/// is used only for equality/base comparisons; writes copy sealed fields.
+pub fn apply_secret_file_from_version(
     store: &mut EngineStore,
-    input: &ApplySecretFileVerbatim,
+    key: &SecretDataKey,
+    input: &ApplySecretFileFromVersion,
     faults: &dyn FaultInjector,
 ) -> Result<SecretWriteResult, DomainError> {
-    let ApplySecretFileVerbatim {
+    let ApplySecretFileFromVersion {
         workspace_id,
         path,
         from_version_id,
@@ -993,13 +1073,36 @@ pub fn apply_secret_file_verbatim(
     let outcome = store.write_with(faults, |tx| {
         require_version(tx, workspace_id, from_version_id)?;
         require_version(tx, workspace_id, to_version_id)?;
-        let Some(source) = select_tip(tx, workspace_id, from_version_id, path)? else {
+        let source = select_tip(tx, workspace_id, from_version_id, path)?;
+        let target = select_tip(tx, workspace_id, to_version_id, path)?;
+        let base = select_fork_base(tx, workspace_id, from_version_id, path)?;
+        if source.is_none() && target.is_none() {
             return Ok(SecretWriteResult {
                 changed: false,
                 moment: None,
             });
-        };
-        if select_tip(tx, workspace_id, to_version_id, path)?.as_ref() == Some(&source) {
+        }
+        if source.as_ref() == target.as_ref() {
+            return Ok(SecretWriteResult {
+                changed: false,
+                moment: None,
+            });
+        }
+        let source_text = source
+            .as_ref()
+            .map(|sealed| aead::open(key, workspace_id, path, sealed))
+            .transpose()?;
+        let target_text = target
+            .as_ref()
+            .map(|sealed| aead::open(key, workspace_id, path, sealed))
+            .transpose()?;
+        let base_text = base
+            .as_ref()
+            .map(|sealed| aead::open(key, workspace_id, path, sealed))
+            .transpose()?;
+        if secret_plaintexts_equal(source_text.as_ref(), target_text.as_ref())
+            || secret_plaintexts_equal(source_text.as_ref(), base_text.as_ref())
+        {
             return Ok(SecretWriteResult {
                 changed: false,
                 moment: None,
@@ -1016,32 +1119,76 @@ pub fn apply_secret_file_verbatim(
             version_id: to_version_id.to_owned(),
             path: path.to_owned(),
             recorded_at_ms: now_ms,
-            operation: SecretOp::Write,
+            operation: if source.is_some() {
+                SecretOp::Write
+            } else {
+                SecretOp::Delete
+            },
             metadata_origin: "sync".to_owned(),
             metadata_summary: None,
             metadata_correlation_id: None,
         };
-        insert_moment(tx, &moment, moment_order, Some(&source))?;
-        upsert_tip(tx, &moment, moment_order, &source)?;
-        let ciphertext_sha = put_binary_blob(tx, source.ciphertext())?;
-        enqueue_job(
-            tx,
-            &MaterializationJobSpec {
-                job_id: format!("secret-mat_{moment_id}"),
-                target_path: path.to_owned(),
-                content_sha256: ciphertext_sha,
-                preimage: Preimage::Absent,
-                target_generation: moment_order,
-                now_ms,
-            },
-        )?;
-        journal(tx, path, "secret.file.put", now_ms)?;
+        insert_moment(tx, &moment, moment_order, source.as_ref())?;
+        if let Some(source) = source.as_ref() {
+            upsert_tip(tx, &moment, moment_order, source)?;
+            let ciphertext_sha = put_binary_blob(tx, source.ciphertext())?;
+            enqueue_job(
+                tx,
+                &MaterializationJobSpec {
+                    job_id: format!("secret-mat_{moment_id}"),
+                    target_path: path.to_owned(),
+                    content_sha256: ciphertext_sha,
+                    preimage: Preimage::Absent,
+                    target_generation: moment_order,
+                    now_ms,
+                },
+            )?;
+            journal(tx, path, "secret.file.put", now_ms)?;
+        } else {
+            let target = target.ok_or(DomainError::StateCorrupt {
+                reason: "secret delete apply has no target preimage",
+            })?;
+            let target_text = target_text.ok_or(DomainError::StateCorrupt {
+                reason: "secret delete apply has no target plaintext",
+            })?;
+            let ciphertext_sha = put_binary_blob(tx, target.ciphertext())?;
+            enqueue_delete_job(
+                tx,
+                &MaterializationJobSpec {
+                    job_id: format!("secret-mat_{moment_id}"),
+                    target_path: path.to_owned(),
+                    content_sha256: ciphertext_sha,
+                    preimage: Preimage::Present(dohc_engine_storage::hex_sha256(
+                        target_text.as_bytes(),
+                    )),
+                    target_generation: moment_order,
+                    now_ms,
+                },
+            )?;
+            tx.execute(
+                "DELETE FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+                params![workspace_id, to_version_id, path],
+            )
+            .map_err(DomainError::sql_persist)?;
+            journal(tx, path, "secret.file.delete", now_ms)?;
+        }
         Ok(SecretWriteResult {
             changed: true,
             moment: Some(moment),
         })
     })?;
     committed(outcome)
+}
+
+fn secret_plaintexts_equal(
+    left: Option<&SecretPlaintext>,
+    right: Option<&SecretPlaintext>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => left.as_bytes() == right.as_bytes(),
+        _ => false,
+    }
 }
 
 /// Restore the sealed state that existed immediately before a secret moment.
@@ -1436,6 +1583,37 @@ fn select_tip(
             Ok(Some(sealed))
         }
     }
+}
+
+fn select_fork_base(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<Option<SealedSecret>, DomainError> {
+    let row = conn
+        .query_row(
+            "SELECT iv_base64, auth_tag_base64, ciphertext_base64, byte_length \
+             FROM secret_fork_bases WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+            params![workspace_id, version_id, path],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    row.map(|(iv, tag, ciphertext, byte_length)| {
+        let byte_length = usize::try_from(byte_length).map_err(|_| DomainError::StateCorrupt {
+            reason: "secret fork base has a negative byte length",
+        })?;
+        SealedSecret::from_base64(&iv, &tag, &ciphertext, byte_length).map_err(DomainError::from)
+    })
+    .transpose()
 }
 
 fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {

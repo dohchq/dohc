@@ -301,6 +301,7 @@ dependencies = [
  "dohc-engine-storage",
  "dohc-engine-testkit",
  "rusqlite",
+ "serde",
  "serde_json",
  "sha2",
  "thiserror",

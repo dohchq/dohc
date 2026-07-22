@@ -122,8 +122,12 @@ MAX_INBAND_CONTENT_BYTES = INBAND_CONTENT_CAP_BYTES = 48 KiB — NOT the
 64 KiB wire-string bound, which is the DOP1 envelope limit above it).
 Real binaries and text past the 48 KiB cap need the protocol's blob-chunk
 streaming (BlobStart exists in the wire contract; NO daemon producer
-yet) — cutover-relevant for readBinaryFile and large text reads; owned by
-RPC-D.
+yet) — cutover-relevant for readBinaryFile and large text reads.
+RE-SCOPED (RPC-D pre-PR adversarial review, 2026-07-22): the EGRESS
+producer moves to shard RPC-D2 (sole caller is desktop binary restore;
+needed pre-cutover, NOT pre-PR — a GATE6 dependency). RPC-D ships
+readBlob's metadata-only over-cap answer and refuses inbound BlobStart
+with "blob-ingest-unsupported".
 
 
 CROSS-ENGINE DELTA (RPC-A r18): secret path SPELLING — TS normalize-stores

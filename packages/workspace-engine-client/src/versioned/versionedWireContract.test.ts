@@ -23,6 +23,7 @@ import {
   decodeVersionedTextRenameResult,
   decodeVersionedTextRollbackResult,
   decodeVersionedTextWriteResult,
+  decodeVersionsActiveResult,
   decodeVersionsCompareFilesResult,
   type MomentsGetParams,
   type MomentsListParams,
@@ -131,7 +132,13 @@ describe("versioned typed loopback", () => {
       decodeVersionedTextRollbackResult(
         await call(engine, 5, VERSIONED_METHOD.textRollback, rollbackParams),
       ),
-    ).toEqual({ rolledBack: true, deduped: false });
+    ).toEqual({
+      rolledBack: true,
+      deduped: false,
+      materializeEnqueued: true,
+      materialized: true,
+      materializeOutcome: "applied",
+    });
 
     const binaryParams: VersionedBinaryWriteParams = {
       versionId: "main",
@@ -159,7 +166,7 @@ describe("versioned typed loopback", () => {
       decodeVersionedBinaryReadBlobResult(
         await call(engine, 8, VERSIONED_METHOD.binaryReadBlob, blobParams),
       ),
-    ).toEqual({ bytes: [0, 1, 254, 255] });
+    ).toEqual({ bytesBase64: "AAH+/w==" });
   });
 
   it("round-trips version creation, activation, compare, merge, and compareFiles", async () => {
@@ -328,7 +335,7 @@ describe("versioned typed loopback", () => {
     const secretMoments = decodeSecretsMomentsListResult(
       await call(engine, 8, VERSIONED_METHOD.secretsMomentsList, listParams),
     );
-    expect(secretMoments.every((moment) => moment.protected)).toBe(true);
+    expect(secretMoments.moments.every((moment) => moment.protected)).toBe(true);
     const getParams: SecretsMomentsGetParams = {
       workspaceId: WORKSPACE,
       momentId: "secret-main",
@@ -392,6 +399,146 @@ describe("versioned typed loopback", () => {
 });
 
 describe("loopback contract enforcement", () => {
+  it("keeps target changes when the secret source is unchanged from its fork base", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: ".env",
+      text: "base",
+      origin: "api",
+      momentId: "base-secret",
+    });
+    const feature = decodeVersionRecord(
+      await call(engine, 2, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        fromVersionId: "main",
+        name: "feature",
+      }),
+    );
+    await call(engine, 3, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: ".env",
+      text: "target-newer",
+      origin: "api",
+      momentId: "target-newer-secret",
+    });
+    // MUTATION: remove the source-vs-fork-base comparison -> target is overwritten.
+    expect(
+      decodeSecretApplyResult(
+        await call(engine, 4, VERSIONED_METHOD.secretsApply, {
+          workspaceId: WORKSPACE,
+          fromVersionId: feature.id,
+          path: ".env",
+          momentId: "unchanged-source-apply",
+        }),
+      ).changed,
+    ).toBe(false);
+    expect(engine.secretValue(WORKSPACE, "main", ".env")).toBe("target-newer");
+  });
+
+  it("propagates a source secret deletion with sync provenance", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: ".env",
+      text: "base",
+      origin: "api",
+      momentId: "delete-base",
+    });
+    const feature = decodeVersionRecord(
+      await call(engine, 2, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        fromVersionId: "main",
+        name: "feature",
+      }),
+    );
+    await call(engine, 3, VERSIONED_METHOD.secretsDelete, {
+      workspaceId: WORKSPACE,
+      versionId: feature.id,
+      path: ".env",
+      origin: "api",
+      momentId: "feature-delete",
+    });
+    // MUTATION: restore the absent-source no-op or restore provenance -> assertions fail.
+    const applied = decodeSecretApplyResult(
+      await call(engine, 4, VERSIONED_METHOD.secretsApply, {
+        workspaceId: WORKSPACE,
+        fromVersionId: feature.id,
+        path: ".env",
+        momentId: "delete-apply",
+      }),
+    );
+    expect(applied.moment).toMatchObject({ operation: "delete", metadata: { origin: "sync" } });
+    expect(engine.secretValue(WORKSPACE, "main", ".env")).toBeUndefined();
+  });
+
+  it("secret restore equality is a no-op with the original moment id", async () => {
+    const engine = new VersionedLoopbackEngine();
+    for (const [id, text] of [["restore-a", "A"], ["restore-b", "B"]] as const) {
+      await call(engine, engine.requests.length + 1, VERSIONED_METHOD.secretsWrite, {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: ".env",
+        text,
+        origin: "api",
+        momentId: id,
+      });
+    }
+    await call(engine, 3, VERSIONED_METHOD.secretsRestore, {
+      workspaceId: WORKSPACE,
+      path: ".env",
+      beforeMomentId: "restore-b",
+      momentId: "restore-first",
+    });
+    // MUTATION: always append a restore moment even when the protected state is already equal.
+    const replay = decodeSecretRestoreResult(
+      await call(engine, 4, VERSIONED_METHOD.secretsRestore, {
+        workspaceId: WORKSPACE,
+        path: ".env",
+        beforeMomentId: "restore-b",
+        momentId: "restore-equal",
+      }),
+    );
+    expect(replay.restoredMomentId).toBe("restore-b");
+    expect(
+      decodeSecretsMomentsGetResult(
+        await call(engine, 5, VERSIONED_METHOD.secretsMomentsGet, {
+          workspaceId: WORKSPACE,
+          momentId: "restore-equal",
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null active version for a fresh workspace", async () => {
+    const engine = new VersionedLoopbackEngine();
+    // MUTATION: versions.active must not synthesize main before versioning is initialized.
+    expect(
+      decodeVersionsActiveResult(
+        await call(engine, 1, VERSIONED_METHOD.versionsActive, {
+          workspaceId: WORKSPACE,
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null when a binary read points at a text head", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({ workspace: WORKSPACE, path: "text.md", text: "text" });
+    // MUTATION: text heads are an ordinary absent-binary result, not a shape error.
+    expect(
+      decodeVersionedBinaryReadResult(
+        await call(engine, 1, VERSIONED_METHOD.binaryRead, {
+          versionId: "main",
+          path: "text.md",
+        }),
+      ),
+    ).toBeNull();
+  });
+
   it("rejects duplicate moment ids", async () => {
     const engine = new VersionedLoopbackEngine();
     const first: VersionedTextWriteParams = {
@@ -492,10 +639,47 @@ describe("loopback contract enforcement", () => {
         await call(engine, 2, VERSIONED_METHOD.binaryReadBlob, blobParams),
       ),
     ).toEqual({
-      bytes: null,
+      bytesBase64: null,
       byteLength: bytes.length,
       inbandLimitBytes: 48 * 1024,
     });
+  });
+
+  it("paginates protected secret moments without overlap", async () => {
+    const engine = new VersionedLoopbackEngine();
+    for (const [index, text] of ["one", "two", "three"].entries()) {
+      await call(engine, index + 1, VERSIONED_METHOD.secretsWrite, {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: ".env",
+        text,
+        origin: "api",
+        momentId: `secret-page-${index}`,
+      });
+    }
+    const first = decodeSecretsMomentsListResult(
+      await call(engine, 4, VERSIONED_METHOD.secretsMomentsList, {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: ".env",
+        limit: 2,
+      }),
+    );
+    // MUTATION: the keyset cursor is the last returned order and pages cannot overlap.
+    expect(first.moments).toHaveLength(2);
+    expect(first.nextBeforeMomentOrder).toBe(first.moments[1]?.momentOrder);
+    const second = decodeSecretsMomentsListResult(
+      await call(engine, 5, VERSIONED_METHOD.secretsMomentsList, {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: ".env",
+        beforeMomentOrder: first.nextBeforeMomentOrder ?? undefined,
+        limit: 2,
+      }),
+    );
+    expect(second.moments).toHaveLength(1);
+    expect(second.moments[0]?.id).not.toBe(first.moments[1]?.id);
+    expect(second.nextBeforeMomentOrder).toBeNull();
   });
 
   it("paginates compareFiles by afterPath/nextCursor without overlap", async () => {

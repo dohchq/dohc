@@ -231,6 +231,8 @@ fn rollback_text_over_binary_restores_the_binary_head() {
                 mutation_moment_id: "text-moment".to_owned(),
                 request_id: None,
                 legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
             },
             &NoFaults,
         )
@@ -288,6 +290,8 @@ fn rollback_first_binary_write_removes_file_and_object() {
                 mutation_moment_id: "bin-job".to_owned(),
                 request_id: None,
                 legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
             },
             &NoFaults,
         )
@@ -402,6 +406,8 @@ fn rollback_of_completed_binary_write_deletes_the_materialized_file() {
                 mutation_moment_id: "bin-job".to_owned(),
                 request_id: None,
                 legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
             },
             &NoFaults,
         )
@@ -508,6 +514,8 @@ fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
                 mutation_moment_id: "bin-job-2".to_owned(),
                 request_id: None,
                 legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
             },
             &NoFaults,
         )
@@ -603,6 +611,8 @@ fn text_rollback_does_not_touch_a_materialization_job_with_the_same_id() {
                 mutation_moment_id: "text-moment".to_owned(),
                 request_id: None,
                 legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
             },
             &NoFaults,
         )
@@ -691,6 +701,8 @@ fn rollback_of_pending_binary_write_with_bytes_on_disk_cleans_disk() {
                 mutation_moment_id: "bin-job".to_owned(),
                 request_id: None,
                 legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
             },
             &NoFaults,
         )

@@ -46,14 +46,14 @@ use dohc_engine_domain::{
     LinkedChatStore, ListMomentsQuery, MergeTextFileFromVersion, MergeTextFileResult, MomentPage,
     MomentRecord, RenameResult, RenameTextFile, ResolveTextConflict, ResolveTextConflictResult,
     RollbackTextFileMutation, SaveBookmark, SecretComparePage, SecretDelete, SecretFileStat,
-    SecretFileStore, SecretMomentRecord, SecretRestoreResult, SecretWrite, SecretWriteResult,
-    SendMessage, SetFollow, SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict,
-    TextSnapshot, VersionFileChange, VersionFileChangePage, VersionRecord, VersionedTextComparison,
-    VersionedTextStore, WriteBinary, WriteResult, WriteText, apply_secret_file_verbatim,
+    SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretRestoreResult, SecretWrite,
+    SecretWriteResult, SendMessage, SetFollow, SnapshotMetadata, SnapshotView, StartChannelThread,
+    TextConflict, TextSnapshot, VersionFileChangePage, VersionRecord, VersionedTextComparison,
+    VersionedTextStore, WriteBinary, WriteResult, WriteText, apply_secret_file_from_version,
     capture_manifest_seed, capture_secret_retire, compare_secret_files_page_keyless,
     delete_secret_file_keyless, derive_capture_object_id, enqueue_write, fork_version_keyless,
     get_secret_moment_keyless, has_secret_state, insert_text_conflict_if_absent,
-    list_secret_files_keyless, list_secret_files_keyless_page, list_secret_moments_keyless,
+    list_secret_files_keyless, list_secret_files_keyless_page, list_secret_moments_page_keyless,
     restore_secret_file_verbatim, secret_file_len_keyless, select_snapshot_by_path_in_tx,
     write_binary_in_tx, write_projected_text_in_tx, write_text_in_tx,
 };
@@ -79,6 +79,30 @@ use tokio_util::sync::CancellationToken;
 /// Bound on the actor's command queue. Backpressure blocks the sender rather
 /// than growing an unbounded queue (`plan §Rust policy`: bounded everything).
 const COMMAND_QUEUE_CAPACITY: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostCommitMaterializeOutcome {
+    Applied,
+    Skipped,
+    Conflict,
+    Superseded,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryWriteExecutionResult {
+    pub write: BinaryWriteResult,
+    pub materialized: bool,
+    pub materialize_outcome: PostCommitMaterializeOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RollbackExecutionResult {
+    pub deduped: bool,
+    pub materialize_enqueued: bool,
+    pub materialized: bool,
+    pub materialize_outcome: PostCommitMaterializeOutcome,
+}
 
 /// Physical channel capacity: the data bound plus ONE slot reserved at spawn
 /// for the `Close` command (see [`WorkspaceActor::close`]). Reserving keeps the
@@ -217,7 +241,7 @@ enum Command {
         self_writes: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-        reply: oneshot::Sender<Result<BinaryWriteResult, RuntimeError>>,
+        reply: oneshot::Sender<Result<BinaryWriteExecutionResult, RuntimeError>>,
     },
     VersionedTextRename {
         input: RenameTextFile,
@@ -239,7 +263,7 @@ enum Command {
         self_writes: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
+        reply: oneshot::Sender<Result<RollbackExecutionResult, RuntimeError>>,
     },
     VersionedTextCompare {
         input: CompareTextFileVersions,
@@ -251,12 +275,6 @@ enum Command {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<MergeTextFileResult, RuntimeError>>,
-    },
-    CompareVersionFiles {
-        workspace_id: String,
-        source_version_id: String,
-        target_version_id: String,
-        reply: oneshot::Sender<Result<Vec<VersionFileChange>, RuntimeError>>,
     },
     CompareVersionFilesPage {
         workspace_id: String,
@@ -404,7 +422,9 @@ enum Command {
         workspace_id: String,
         version_id: String,
         path: String,
-        reply: oneshot::Sender<Result<Vec<SecretMomentRecord>, RuntimeError>>,
+        before_moment_order: Option<i64>,
+        limit: usize,
+        reply: oneshot::Sender<Result<SecretMomentPage, RuntimeError>>,
     },
     GetSecretMoment {
         workspace_id: String,
@@ -427,6 +447,7 @@ enum Command {
         to_version_id: String,
         moment_id: String,
         now_ms: i64,
+        key: Box<SecretDataKey>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<SecretWriteResult, RuntimeError>>,
@@ -1292,7 +1313,7 @@ impl ActorHandle {
         self_writes: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-    ) -> Result<BinaryWriteResult, RuntimeError> {
+    ) -> Result<BinaryWriteExecutionResult, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::VersionedBinaryWrite {
@@ -1357,7 +1378,7 @@ impl ActorHandle {
         self_writes: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-    ) -> Result<bool, RuntimeError> {
+    ) -> Result<RollbackExecutionResult, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::VersionedTextRollback {
@@ -1399,25 +1420,6 @@ impl ActorHandle {
                 root_dir,
                 faults,
                 token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
-    }
-
-    pub async fn compare_version_files(
-        &self,
-        workspace_id: String,
-        source_version_id: String,
-        target_version_id: String,
-    ) -> Result<Vec<VersionFileChange>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CompareVersionFiles {
-                workspace_id,
-                source_version_id,
-                target_version_id,
                 reply,
             })
             .await
@@ -1761,13 +1763,17 @@ impl ActorHandle {
         workspace_id: String,
         version_id: String,
         path: String,
-    ) -> Result<Vec<SecretMomentRecord>, RuntimeError> {
+        before_moment_order: Option<i64>,
+        limit: usize,
+    ) -> Result<SecretMomentPage, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ListSecretMoments {
                 workspace_id,
                 version_id,
                 path,
+                before_moment_order,
+                limit,
                 reply,
             })
             .await
@@ -1826,6 +1832,7 @@ impl ActorHandle {
         to_version_id: String,
         moment_id: String,
         now_ms: i64,
+        key: SecretDataKey,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<SecretWriteResult, RuntimeError> {
@@ -1838,6 +1845,7 @@ impl ActorHandle {
                 to_version_id,
                 moment_id,
                 now_ms,
+                key: Box::new(key),
                 faults,
                 token,
                 reply,
@@ -3356,17 +3364,6 @@ fn worker_main(
                 );
                 let _ = reply.send(outcome);
             }
-            Command::CompareVersionFiles {
-                workspace_id,
-                source_version_id,
-                target_version_id,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .compare_version_files(&workspace_id, &source_version_id, &target_version_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
             Command::CompareVersionFilesPage {
                 workspace_id,
                 source_version_id,
@@ -3609,13 +3606,17 @@ fn worker_main(
                 workspace_id,
                 version_id,
                 path,
+                before_moment_order,
+                limit,
                 reply,
             } => {
-                let outcome = list_secret_moments_keyless(
+                let outcome = list_secret_moments_page_keyless(
                     &store,
                     &workspace_id,
                     Some(&version_id),
                     Some(&path),
+                    before_moment_order,
+                    limit,
                 )
                 .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
@@ -3657,6 +3658,7 @@ fn worker_main(
                 to_version_id,
                 moment_id,
                 now_ms,
+                key,
                 faults,
                 token,
                 reply,
@@ -3664,9 +3666,10 @@ fn worker_main(
                 let outcome = if token.is_cancelled() {
                     Err(RuntimeError::Cancelled)
                 } else {
-                    apply_secret_file_verbatim(
+                    apply_secret_file_from_version(
                         &mut store,
-                        &dohc_engine_domain::ApplySecretFileVerbatim {
+                        &key,
+                        &dohc_engine_domain::ApplySecretFileFromVersion {
                             workspace_id,
                             path,
                             from_version_id,
@@ -5439,16 +5442,18 @@ fn versioned_text_write_on_store(
     };
     let outcome = store.write_with(faults, |tx| {
         let result = write_text_in_tx(tx, input).map_err(RuntimeError::from)?;
-        upsert_file_search_index(
-            tx,
-            root_dir,
-            &input.workspace_id,
-            &input.version_id,
-            &result.snapshot.object_id,
-            &result.snapshot.path,
-            &result.snapshot.text,
-        )
-        .map_err(RuntimeError::from)?;
+        if !result.deduped {
+            upsert_file_search_index(
+                tx,
+                root_dir,
+                &input.workspace_id,
+                &input.version_id,
+                &result.snapshot.object_id,
+                &result.snapshot.path,
+                &result.snapshot.text,
+            )
+            .map_err(RuntimeError::from)?;
+        }
         Ok::<_, RuntimeError>(result)
     })?;
     match outcome {
@@ -5464,7 +5469,7 @@ fn versioned_binary_write_on_store(
     self_writes: &dyn SelfWriteRecorder,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
-) -> Result<BinaryWriteResult, RuntimeError> {
+) -> Result<BinaryWriteExecutionResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -5493,18 +5498,27 @@ fn versioned_binary_write_on_store(
         // Deduped, or a NON-ACTIVE version write: DB-only. Disk mirrors the
         // active version, so there is no job to run and no self-write to
         // suppress.
-        return Ok(result);
+        return Ok(BinaryWriteExecutionResult {
+            write: result,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
     }
 
     // Register before replacement: the watcher may observe the write as soon
     // as the atomic rename lands. A failed/conflicted materialization retracts
     // the identity because no self-write is then available to consume it.
     self_writes.record(&input.workspace_id, &result.path, &result.sha256);
-    let job = store.load_materialization_job(&input.moment_id)?.ok_or(
-        dohc_engine_domain::DomainError::StateCorrupt {
-            reason: "binary write materialization job is missing",
-        },
-    )?;
+    let job = match store.load_materialization_job(&input.moment_id) {
+        Ok(Some(job)) => job,
+        Ok(None) | Err(_) => {
+            return Ok(BinaryWriteExecutionResult {
+                write: result,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
+        }
+    };
     let materialized = materialize_one(
         store,
         root_dir,
@@ -5519,16 +5533,44 @@ fn versioned_binary_write_on_store(
         Ok(outcome) => outcome,
         Err(error) => {
             self_writes.retract(&input.workspace_id, &result.path, &result.sha256);
-            return Err(error.into());
+            let _ = error;
+            return Ok(BinaryWriteExecutionResult {
+                write: result,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
         }
     };
     match materialized {
-        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => Ok(result),
-        JobOutcome::Conflict | JobOutcome::Superseded => {
+        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => Ok(BinaryWriteExecutionResult {
+            write: result,
+            materialized: true,
+            materialize_outcome: PostCommitMaterializeOutcome::Applied,
+        }),
+        JobOutcome::Conflict => {
             self_writes.retract(&input.workspace_id, &result.path, &result.sha256);
-            Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into())
+            Ok(BinaryWriteExecutionResult {
+                write: result,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Conflict,
+            })
         }
-        JobOutcome::Crashed(_) => Err(RuntimeError::OperationCrashed),
+        JobOutcome::Superseded => {
+            self_writes.retract(&input.workspace_id, &result.path, &result.sha256);
+            Ok(BinaryWriteExecutionResult {
+                write: result,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Superseded,
+            })
+        }
+        JobOutcome::Crashed(_) => {
+            self_writes.retract(&input.workspace_id, &result.path, &result.sha256);
+            Ok(BinaryWriteExecutionResult {
+                write: result,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            })
+        }
     }
 }
 
@@ -5564,16 +5606,19 @@ fn versioned_text_rename_on_store(
                 &result.object.object_id,
             )
             .map_err(search_domain)?;
-            upsert_file_search_index(
-                tx,
-                root_dir,
-                &input.workspace_id,
-                &input.version_id,
-                &result.object.object_id,
-                &result.after.path,
-                &result.after.text,
-            )
-            .map_err(search_domain)
+            if result.moment.after_content_kind == "text" {
+                upsert_file_search_index(
+                    tx,
+                    root_dir,
+                    &input.workspace_id,
+                    &input.version_id,
+                    &result.object.object_id,
+                    &result.after.path,
+                    &result.after.text,
+                )
+                .map_err(search_domain)?;
+            }
+            Ok(())
         })
         .map_err(RuntimeError::from)
 }
@@ -5615,7 +5660,7 @@ fn versioned_text_rollback_on_store(
     self_writes: &dyn SelfWriteRecorder,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
-) -> Result<bool, RuntimeError> {
+) -> Result<RollbackExecutionResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -5641,12 +5686,22 @@ fn versioned_text_rollback_on_store(
         },
     )?;
     if deduped {
-        return Ok(true);
+        return Ok(RollbackExecutionResult {
+            deduped: true,
+            materialize_enqueued: false,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
     }
 
     let job_id = format!("rollback-restore_{}", input.mutation_moment_id);
     let Some(job) = store.load_materialization_job(&job_id)? else {
-        return Ok(false);
+        return Ok(RollbackExecutionResult {
+            deduped: false,
+            materialize_enqueued: false,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
     };
     self_writes.record(&input.workspace_id, &job.target_path, &job.content_sha256);
     let outcome = materialize_one(
@@ -5663,16 +5718,49 @@ fn versioned_text_rollback_on_store(
         Ok(outcome) => outcome,
         Err(error) => {
             self_writes.retract(&input.workspace_id, &job.target_path, &job.content_sha256);
-            return Err(error.into());
+            let _ = error;
+            return Ok(RollbackExecutionResult {
+                deduped: false,
+                materialize_enqueued: true,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
         }
     };
     match outcome {
-        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => Ok(false),
-        JobOutcome::Conflict | JobOutcome::Superseded => {
+        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => Ok(RollbackExecutionResult {
+            deduped: false,
+            materialize_enqueued: true,
+            materialized: true,
+            materialize_outcome: PostCommitMaterializeOutcome::Applied,
+        }),
+        JobOutcome::Conflict => {
             self_writes.retract(&input.workspace_id, &job.target_path, &job.content_sha256);
-            Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into())
+            Ok(RollbackExecutionResult {
+                deduped: false,
+                materialize_enqueued: true,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Conflict,
+            })
         }
-        JobOutcome::Crashed(_) => Err(RuntimeError::OperationCrashed),
+        JobOutcome::Superseded => {
+            self_writes.retract(&input.workspace_id, &job.target_path, &job.content_sha256);
+            Ok(RollbackExecutionResult {
+                deduped: false,
+                materialize_enqueued: true,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Superseded,
+            })
+        }
+        JobOutcome::Crashed(_) => {
+            self_writes.retract(&input.workspace_id, &job.target_path, &job.content_sha256);
+            Ok(RollbackExecutionResult {
+                deduped: false,
+                materialize_enqueued: true,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            })
+        }
     }
 }
 

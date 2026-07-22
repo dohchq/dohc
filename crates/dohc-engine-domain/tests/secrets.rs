@@ -5,9 +5,10 @@
 
 use dohc_engine_crypto::{SecretDataKey, aead};
 use dohc_engine_domain::{
-    ApplySecretFileVerbatim, NoFaults, SecretDiskIntent, SecretFileStore, SecretOp, SecretWrite,
-    VersionFileChangeStatus, VersionedTextStore, apply_secret_file_verbatim,
-    compare_secret_files_page_keyless, fork_version_keyless, restore_secret_file_verbatim,
+    ApplySecretFileFromVersion, NoFaults, SecretDelete, SecretDiskIntent, SecretFileStore,
+    SecretOp, SecretWrite, VersionFileChangeStatus, VersionedTextStore,
+    apply_secret_file_from_version, compare_secret_files_page_keyless, delete_secret_file_keyless,
+    fork_version_keyless, restore_secret_file_verbatim,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint};
 use dohc_engine_testkit::harness::wal_sidecar;
@@ -608,8 +609,8 @@ fn ts_written_ciphertext_decrypts_in_the_rust_store() {
     );
 }
 
-fn apply_input(moment_id: &str, now_ms: i64) -> ApplySecretFileVerbatim {
-    ApplySecretFileVerbatim {
+fn apply_input(moment_id: &str, now_ms: i64) -> ApplySecretFileFromVersion {
+    ApplySecretFileFromVersion {
         workspace_id: WS.to_owned(),
         path: ".env".to_owned(),
         from_version_id: "main".to_owned(),
@@ -631,11 +632,13 @@ fn secret_apply_verbatim_copy_is_content_equality_no_op() {
     write_version(&mut store, &key, "main", ".env", "TOKEN=one", "main-1", 10);
 
     let first =
-        apply_secret_file_verbatim(&mut store, &apply_input("apply-1", 20), &NO_FAULTS).unwrap();
+        apply_secret_file_from_version(&mut store, &key, &apply_input("apply-1", 20), &NO_FAULTS)
+            .unwrap();
     assert!(first.changed);
     let moments_after_first = store.table_row_count("secret_moments").unwrap();
     let second =
-        apply_secret_file_verbatim(&mut store, &apply_input("apply-2", 21), &NO_FAULTS).unwrap();
+        apply_secret_file_from_version(&mut store, &key, &apply_input("apply-2", 21), &NO_FAULTS)
+            .unwrap();
     assert!(!second.changed);
     assert_eq!(
         store.table_row_count("secret_moments").unwrap(),
@@ -650,6 +653,126 @@ fn secret_apply_verbatim_copy_is_content_equality_no_op() {
         })
         .unwrap();
     assert_eq!(source_iv, target_iv, "apply copies the sealed IV verbatim");
+}
+
+#[test]
+fn secret_apply_target_newer_than_unchanged_source_is_no_op() {
+    // MUTATION: remove the source-vs-fork-base comparison -> target is overwritten.
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    write_version(&mut store, &key, "main", ".env", "base", "base-main", 10);
+    create_feature(&mut store);
+    write_version(
+        &mut store,
+        &key,
+        "main",
+        ".env",
+        "target-newer",
+        "target-newer",
+        11,
+    );
+
+    let result = apply_secret_file_from_version(
+        &mut store,
+        &key,
+        &ApplySecretFileFromVersion {
+            workspace_id: WS.to_owned(),
+            path: ".env".to_owned(),
+            from_version_id: "feat".to_owned(),
+            to_version_id: "main".to_owned(),
+            moment_id: "unchanged-source-apply".to_owned(),
+            now_ms: 20,
+        },
+        &NO_FAULTS,
+    )
+    .unwrap();
+    assert!(!result.changed);
+    let text = SecretFileStore::new(&mut store, &key)
+        .materialize_secret_file(WS, "main", ".env")
+        .unwrap()
+        .unwrap()
+        .into_utf8()
+        .unwrap();
+    assert_eq!(text, "target-newer");
+}
+
+#[test]
+fn secret_apply_propagates_source_delete() {
+    // MUTATION: restore the absent-source no-op arm -> target survives and no delete moment exists.
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    write_version(&mut store, &key, "main", ".env", "base", "delete-base", 10);
+    create_feature(&mut store);
+    delete_secret_file_keyless(
+        &mut store,
+        &SecretDelete {
+            workspace_id: WS.to_owned(),
+            version_id: "feat".to_owned(),
+            path: ".env".to_owned(),
+            moment_id: "delete-source".to_owned(),
+            metadata_origin: "api".to_owned(),
+            metadata_summary: None,
+            now_ms: 11,
+        },
+        &NO_FAULTS,
+    )
+    .unwrap();
+    let input = ApplySecretFileFromVersion {
+        workspace_id: WS.to_owned(),
+        path: ".env".to_owned(),
+        from_version_id: "feat".to_owned(),
+        to_version_id: "main".to_owned(),
+        moment_id: "apply-delete".to_owned(),
+        now_ms: 20,
+    };
+    let result = apply_secret_file_from_version(&mut store, &key, &input, &NO_FAULTS).unwrap();
+    assert!(result.changed);
+    assert_eq!(result.moment.unwrap().operation, SecretOp::Delete);
+    assert!(
+        SecretFileStore::new(&mut store, &key)
+            .materialize_secret_file(WS, "main", ".env")
+            .unwrap()
+            .is_none()
+    );
+    let operation: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT operation FROM materialization_jobs WHERE job_id='secret-mat_apply-delete'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap();
+    assert_eq!(operation, "delete");
+}
+
+#[test]
+fn secret_apply_reencrypted_plaintext_equal_is_no_op() {
+    // MUTATION: compare only ciphertext triples -> equal plaintext appends a false change.
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    create_feature(&mut store);
+    write_version(&mut store, &key, "main", ".env", "same", "same-main", 10);
+    write_version(&mut store, &key, "feat", ".env", "same", "same-feat", 11);
+    let before = store.table_row_count("secret_moments").unwrap();
+    let result = apply_secret_file_from_version(
+        &mut store,
+        &key,
+        &apply_input("equal-plaintext", 20),
+        &NO_FAULTS,
+    )
+    .unwrap();
+    assert!(!result.changed);
+    assert_eq!(store.table_row_count("secret_moments").unwrap(), before);
 }
 
 #[test]

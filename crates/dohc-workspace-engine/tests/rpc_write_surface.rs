@@ -150,6 +150,35 @@ async fn text_write_enqueues_no_materialization_and_binary_write_enqueues_one() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn conflicted_binary_materialize_returns_the_committed_moment() {
+    // MUTATION: restore post-commit conflict refusal -> this call errors and hides the durable moment.
+    let (scratch, transport, handle) = fixture("binary-conflict-result").await;
+    std::fs::write(scratch.path().join("occupied.bin"), b"external").expect("external file");
+    let result = call(
+        &transport,
+        &handle,
+        2,
+        "versionedBinary.write",
+        json!({
+            "versionId": "main",
+            "path": "occupied.bin",
+            "bytes": [1, 2, 3],
+            "origin": "api",
+        }),
+    )
+    .await;
+    assert_eq!(result["materializeEnqueued"], true);
+    assert_eq!(result["materialized"], false);
+    assert_eq!(result["materializeOutcome"], "conflict");
+    assert!(result["moment"]["momentId"].is_string());
+    assert_eq!(
+        std::fs::read(scratch.path().join("occupied.bin")).unwrap(),
+        b"external"
+    );
+    assert_eq!(moments(&transport, &handle, 3).await.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn binary_self_write_suppression_prevents_a_spurious_capture_moment() {
     // MUTATION: move/remove the pre-materialize suppression record -> watcher capture adds a moment.
     let (_scratch, transport, handle) = fixture("binary-suppression").await;
@@ -257,7 +286,77 @@ async fn secrets_write_rejects_over_cap_text_before_commit() {
         }),
     )
     .await;
-    assert!(moments.as_array().expect("secret moments").is_empty());
+    assert!(
+        moments["moments"]
+            .as_array()
+            .expect("secret moments")
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_moments_keyset_pages_round_trip_without_overlap() {
+    // MUTATION: return the old bare/truncated array or use an inclusive cursor -> shape/overlap fails.
+    let (_scratch, transport, handle) = fixture("secret-moment-pages").await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": "ws-rpcd-secret-moment-pages" }),
+    )
+    .await;
+    for (index, text) in ["one", "two", "three"].into_iter().enumerate() {
+        call(
+            &transport,
+            &handle,
+            3 + index as u64,
+            "secrets.write",
+            json!({
+                "workspaceId": "ws-rpcd-secret-moment-pages",
+                "versionId": "main",
+                "path": ".env",
+                "text": text,
+                "origin": "api",
+                "momentId": format!("secret-page-{index}"),
+            }),
+        )
+        .await;
+    }
+    let first = call(
+        &transport,
+        &handle,
+        6,
+        "secrets.moments.list",
+        json!({
+            "workspaceId": "ws-rpcd-secret-moment-pages",
+            "versionId": "main",
+            "path": ".env",
+            "limit": 2,
+        }),
+    )
+    .await;
+    let first_rows = first["moments"].as_array().expect("first page");
+    assert_eq!(first_rows.len(), 2);
+    assert_eq!(first["nextBeforeMomentOrder"], first_rows[1]["momentOrder"]);
+    let second = call(
+        &transport,
+        &handle,
+        7,
+        "secrets.moments.list",
+        json!({
+            "workspaceId": "ws-rpcd-secret-moment-pages",
+            "versionId": "main",
+            "path": ".env",
+            "beforeMomentOrder": first["nextBeforeMomentOrder"],
+            "limit": 2,
+        }),
+    )
+    .await;
+    let second_rows = second["moments"].as_array().expect("second page");
+    assert_eq!(second_rows.len(), 1);
+    assert_ne!(second_rows[0]["id"], first_rows[1]["id"]);
+    assert!(second["nextBeforeMomentOrder"].is_null());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -292,6 +391,20 @@ async fn request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
     assert_eq!(replay["deduped"], true);
     assert_eq!(replay["moment"]["momentId"], first["moment"]["momentId"]);
     assert_eq!(moments(&transport, &handle, 4).await.len(), 1);
+    // MUTATION: omit origin/author from the write ledger hash -> this silently replays.
+    let origin_flip = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                40,
+                "versionedText.write",
+                Some(handle.clone()),
+                json!({ "versionId": "main", "path": "id.md", "text": "same", "origin": "sync", "requestId": "stable-id" }),
+            ),
+        )
+        .await
+        .expect_err("write provenance mismatch");
+    assert_eq!(origin_flip.message, "idempotency-key-reuse-mismatch");
     let mismatch = transport
         .call(
             RequestContext::unbounded(),
@@ -329,7 +442,7 @@ async fn moment_id_collision_rejects_different_payload_and_replays_exact_payload
         )
         .await
         .expect_err("collision");
-    assert_eq!(mismatch.message, "idempotency-key-reuse-mismatch");
+    assert_eq!(mismatch.message, "duplicate-id");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -368,24 +481,48 @@ async fn origin_closed_set_rejects_capture_and_ydoc() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn normalization_makes_crlf_and_non_nfc_replays_hash_equal() {
-    // MUTATION: hash/store raw path or raw CRLF bytes -> replay mismatches or duplicates.
-    let (_scratch, transport, handle) = fixture("normalization").await;
-    let decomposed = "cafe\u{301}.md";
-    let composed = "caf\u{e9}.md";
-    write(
+async fn raw_text_and_secret_bodies_round_trip_byte_identical() {
+    // MUTATION: re-add trimming, CRLF rewriting, or body NFC normalization -> either equality fails.
+    let (_scratch, transport, handle) = fixture("raw-bodies").await;
+    let body = "  leading\r\ntrailing  ";
+    let written = write(&transport, &handle, 2, "raw.md", body, "raw-body").await;
+    assert_eq!(written["snapshot"]["text"], body);
+    let read = call(
         &transport,
         &handle,
-        2,
-        decomposed,
-        "  a\r\nb  ",
-        "normalized",
+        3,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": "raw.md" }),
     )
     .await;
-    let replay = write(&transport, &handle, 3, composed, "a\nb", "normalized").await;
-    assert_eq!(replay["deduped"], true);
-    assert_eq!(replay["snapshot"]["path"], composed);
-    assert_eq!(replay["snapshot"]["text"], "a\nb");
+    assert_eq!(read["text"], body);
+    call(
+        &transport,
+        &handle,
+        4,
+        "secrets.write",
+        json!({
+            "workspaceId": "ws-rpcd-raw-bodies",
+            "versionId": "main",
+            "path": ".env",
+            "text": body,
+            "origin": "api",
+            "momentId": "raw-secret",
+        }),
+    )
+    .await;
+    let materialized = call(
+        &transport,
+        &handle,
+        5,
+        "secrets.materialize",
+        json!({
+            "versionId": "main",
+            "path": ".env",
+        }),
+    )
+    .await;
+    assert_eq!(materialized["text"], body);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -446,11 +583,29 @@ async fn rename_request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
         params.clone(),
     )
     .await;
-    let replay = call(&transport, &handle, 4, "versionedText.rename", params).await;
+    let replay = call(
+        &transport,
+        &handle,
+        4,
+        "versionedText.rename",
+        params.clone(),
+    )
+    .await;
     assert_eq!(replay["deduped"], true);
     assert_eq!(replay["moment"]["momentId"], first["moment"]["momentId"]);
     let after_replay = moments(&transport, &handle, 5).await.len();
     assert_eq!(after_replay, 2);
+    // MUTATION: omit origin/author from the rename ledger hash -> this silently replays.
+    let mut flipped = params.clone();
+    flipped["origin"] = json!("sync");
+    let origin_flip = transport
+        .call(
+            RequestContext::unbounded(),
+            request(40, "versionedText.rename", Some(handle.clone()), flipped),
+        )
+        .await
+        .expect_err("rename provenance mismatch");
+    assert_eq!(origin_flip.message, "idempotency-key-reuse-mismatch");
 
     let mismatch = transport
         .call(
@@ -517,11 +672,29 @@ async fn delete_request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
         params.clone(),
     )
     .await;
-    let replay = call(&transport, &handle, 5, "versionedText.delete", params).await;
+    let replay = call(
+        &transport,
+        &handle,
+        5,
+        "versionedText.delete",
+        params.clone(),
+    )
+    .await;
     assert_eq!(replay["deduped"], true);
     assert_eq!(replay["moment"]["momentId"], first["moment"]["momentId"]);
     let after_replay = moments(&transport, &handle, 6).await.len();
     assert_eq!(after_replay, 3);
+    // MUTATION: omit origin/author from the delete ledger hash -> this silently replays.
+    let mut flipped = params.clone();
+    flipped["origin"] = json!("sync");
+    let origin_flip = transport
+        .call(
+            RequestContext::unbounded(),
+            request(40, "versionedText.delete", Some(handle.clone()), flipped),
+        )
+        .await
+        .expect_err("delete provenance mismatch");
+    assert_eq!(origin_flip.message, "idempotency-key-reuse-mismatch");
 
     let mismatch = transport
         .call(
@@ -569,10 +742,28 @@ async fn rollback_request_id_replay_is_a_no_op_and_reuse_mismatch_is_refused() {
     )
     .await;
     assert_eq!(first["deduped"], false);
-    let replay = call(&transport, &handle, 5, "versionedText.rollback", params).await;
+    let replay = call(
+        &transport,
+        &handle,
+        5,
+        "versionedText.rollback",
+        params.clone(),
+    )
+    .await;
     assert_eq!(replay["deduped"], true);
     let after_replay = moments(&transport, &handle, 6).await.len();
     assert_eq!(after_replay, 1);
+    // MUTATION: omit origin/author from the rollback ledger hash -> this silently replays.
+    let mut flipped = params.clone();
+    flipped["origin"] = json!("api");
+    let origin_flip = transport
+        .call(
+            RequestContext::unbounded(),
+            request(40, "versionedText.rollback", Some(handle.clone()), flipped),
+        )
+        .await
+        .expect_err("rollback provenance mismatch");
+    assert_eq!(origin_flip.message, "idempotency-key-reuse-mismatch");
 
     let mismatch = transport
         .call(
@@ -826,6 +1017,100 @@ async fn fts_is_maintained_in_each_mutation_transaction() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn binary_rename_does_not_create_an_empty_fts_row() {
+    // MUTATION: unconditionally upsert the renamed head into FTS -> the raw row count becomes one.
+    let (scratch, transport, handle) = fixture("binary-rename-fts").await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versionedBinary.write",
+        json!({ "versionId": "main", "path": "old.bin", "bytes": [1], "origin": "api" }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "versionedText.rename",
+        json!({
+            "versionId": "main",
+            "fromPath": "old.bin",
+            "toPath": "new.bin",
+            "origin": "api",
+            "requestId": "binary-rename-fts",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 4, "workspace.close", json!({})).await;
+    let store =
+        dohc_engine_storage::EngineStore::open(&scratch.path().join(".dohc/engine/engine.db"), 1)
+            .expect("store");
+    let rows: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM engine_search_files_fts WHERE workspace_id=?1 AND version_id='main' AND path='new.bin'",
+                ["ws-rpcd-binary-rename-fts"],
+                |row| row.get(0),
+            )
+        })
+        .expect("fts count");
+    assert_eq!(rows, 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deduped_text_write_does_not_resurrect_a_moved_fts_row() {
+    // MUTATION: run the FTS upsert for a requestId replay -> stale.md reappears in search.
+    let (_scratch, transport, handle) = fixture("deduped-write-fts").await;
+    let params = json!({
+        "versionId": "main",
+        "path": "stale.md",
+        "text": "unique-replay-term",
+        "origin": "api",
+        "requestId": "fts-write-replay",
+    });
+    call(
+        &transport,
+        &handle,
+        2,
+        "versionedText.write",
+        params.clone(),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "versionedText.rename",
+        json!({
+            "versionId": "main",
+            "fromPath": "stale.md",
+            "toPath": "current.md",
+            "origin": "api",
+            "requestId": "fts-move",
+        }),
+    )
+    .await;
+    let replay = call(&transport, &handle, 4, "versionedText.write", params).await;
+    assert_eq!(replay["deduped"], true);
+    let results = call(
+        &transport,
+        &handle,
+        5,
+        "search.query",
+        json!({ "versionId": "main", "query": "unique-replay-term" }),
+    )
+    .await;
+    let paths: Vec<&str> = results
+        .as_array()
+        .expect("results")
+        .iter()
+        .filter_map(|row| row["path"].as_str())
+        .collect();
+    assert_eq!(paths, ["current.md"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_ensure_index_is_idempotent() {
     // MUTATION: make ensure append duplicate state or fail on an existing generation -> second call fails.
     let (_scratch, transport, handle) = fixture("search-ensure").await;
@@ -985,8 +1270,8 @@ async fn merge_classifies_and_never_inlines_the_merged_body() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn merge_request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
-    // MUTATION: skip the ledger check -> replay re-runs merge classification and mutation side effects.
+async fn merge_request_id_replay_after_target_moves_returns_recorded_outcome() {
+    // MUTATION: re-derive replay from current target state -> the original merged variant/id is lost.
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     seed_versions(scratch.path(), "ws-rpcd-merge-request-id");
@@ -1003,22 +1288,31 @@ async fn merge_request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
         params.clone(),
     )
     .await;
-    let replay = call(&transport, &handle, 4, "versionedText.merge", params).await;
+    write(
+        &transport,
+        &handle,
+        4,
+        "merge.md",
+        "target moved on",
+        "move-after-merge",
+    )
+    .await;
+    let replay = call(&transport, &handle, 5, "versionedText.merge", params).await;
     assert_eq!(replay["deduped"], true);
     assert_eq!(replay["status"], first["status"]);
     assert_eq!(replay["moment"]["momentId"], first["moment"]["momentId"]);
-    let after_replay = moments(&transport, &handle, 5).await.len();
-    assert_eq!(after_replay, before + 1);
+    let after_replay = moments(&transport, &handle, 6).await.len();
+    assert_eq!(after_replay, before + 2);
 
     let mismatch = transport
         .call(
             RequestContext::unbounded(),
-            request(6, "versionedText.merge", Some(handle.clone()), json!({ "path": "other.md", "sourceVersionId": "feature", "targetVersionId": "main", "origin": "api", "requestId": "merge-stable" })),
+            request(7, "versionedText.merge", Some(handle.clone()), json!({ "path": "other.md", "sourceVersionId": "feature", "targetVersionId": "main", "origin": "api", "requestId": "merge-stable" })),
         )
         .await
         .expect_err("merge reuse mismatch");
     assert_eq!(mismatch.message, "idempotency-key-reuse-mismatch");
-    assert_eq!(moments(&transport, &handle, 7).await.len(), after_replay);
+    assert_eq!(moments(&transport, &handle, 8).await.len(), after_replay);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

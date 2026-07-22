@@ -31,7 +31,8 @@ pub mod search;
 pub mod supervisor;
 
 pub use actor::{
-    ActorHandle, LifecycleState, SelfWriteRecorder, StoreSnapshot, UnitsOutcome, WorkspaceActor,
+    ActorHandle, BinaryWriteExecutionResult, LifecycleState, PostCommitMaterializeOutcome,
+    RollbackExecutionResult, SelfWriteRecorder, StoreSnapshot, UnitsOutcome, WorkspaceActor,
     YdocOpenState, YdocSettlement,
 };
 pub use error::RuntimeError;

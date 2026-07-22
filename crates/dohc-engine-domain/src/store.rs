@@ -270,12 +270,16 @@ impl<'a> VersionedTextStore<'a> {
             });
         }
 
+        let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
         let payload_hash = hash_fields(&[
             input.workspace_id.as_bytes(),
             input.version_id.as_bytes(),
             input.from_path.as_bytes(),
             input.to_path.as_bytes(),
             input.moment_id.as_bytes(),
+            input.metadata_origin.as_bytes(),
+            author_kind,
+            author_json,
         ]);
 
         let ws = &input.workspace_id;
@@ -427,11 +431,15 @@ impl<'a> VersionedTextStore<'a> {
         normalized_input.path = validate_addressable_plaintext_path(&input.path)?;
         let input = &normalized_input;
 
+        let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
         let payload_hash = hash_fields(&[
             input.workspace_id.as_bytes(),
             input.version_id.as_bytes(),
             input.path.as_bytes(),
             input.mutation_moment_id.as_bytes(),
+            input.metadata_origin.as_bytes(),
+            author_kind,
+            author_json,
         ]);
 
         let ws = &input.workspace_id;
@@ -2214,12 +2222,16 @@ fn write_text_in_tx_with_journal(
     }
 
     let blob = text_blob_sha256(&input.text);
+    let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
     let payload_hash = hash_fields(&[
         input.version_id.as_bytes(),
         input.path.as_bytes(),
         input.text.as_bytes(),
         input.moment_id.as_bytes(),
         input.object_id.as_bytes(),
+        input.metadata_origin.as_bytes(),
+        author_kind,
+        author_json,
     ]);
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
@@ -2758,11 +2770,15 @@ pub fn delete_text_in_tx(
     let normalized_input = normalized_delete_input(input)?;
     let input = &normalized_input;
     let ws = &input.workspace_id;
+    let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
     let payload_hash = hash_fields(&[
         input.workspace_id.as_bytes(),
         input.version_id.as_bytes(),
         input.path.as_bytes(),
         input.moment_id.as_bytes(),
+        input.metadata_origin.as_bytes(),
+        author_kind,
+        author_json,
     ]);
     if let Some(request_id) = &input.request_id
         && let Some(recorded) = lookup_request(tx, request_id)?
@@ -4340,6 +4356,13 @@ pub(crate) fn hash_fields(fields: &[&[u8]]) -> String {
         hasher.update([0u8]);
     }
     hex(&hasher.finalize())
+}
+
+fn hash_author_fields(author_json: Option<&str>) -> (&'static [u8], &[u8]) {
+    match author_json {
+        Some(author_json) => (b"some", author_json.as_bytes()),
+        None => (b"none", b""),
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {

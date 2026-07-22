@@ -144,6 +144,8 @@ fn run_trace(db: &std::path::Path) -> String {
             mutation_moment_id: "m5".to_owned(),
             request_id: None,
             legacy_before_text: None,
+            metadata_origin: "restore".to_owned(),
+            author_json: None,
         },
         &NO_FAULTS,
     )

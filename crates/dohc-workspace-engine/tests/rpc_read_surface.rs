@@ -239,8 +239,8 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         "pages must not overlap"
     );
 
-    // versionedBinary.read returns the exact bytes; on a TEXT head it errors
-    // (asked the wrong question) rather than returning empty bytes.
+    // versionedBinary.read returns the exact bytes; a TEXT head is not a
+    // binary value and therefore answers null.
     id += 1;
     let binary = call(
         &transport,
@@ -256,23 +256,15 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         json!(base64_encode(&[0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF, 0x01]))
     );
     id += 1;
-    let text_as_binary = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                id,
-                "versionedBinary.read",
-                Some(handle.clone()),
-                json!({ "versionId": "main", "path": "notes/a.md" }),
-            ),
-        )
-        .await;
-    let refusal = text_as_binary.expect_err("a text head must refuse binary read");
-    assert_eq!(
-        refusal.code,
-        dohc_engine_protocol::error::ErrorCode::InvalidParams,
-        "asked-the-wrong-surface is a CALLER error, symmetric with BinaryHeadNotText"
-    );
+    let text_as_binary = call(
+        &transport,
+        &handle,
+        id,
+        "versionedBinary.read",
+        json!({ "versionId": "main", "path": "notes/a.md" }),
+    )
+    .await;
+    assert!(text_as_binary.is_null());
 
     // A blob over the in-band cap answers METADATA with a null body — the
     // DOP1 string limit makes full bytes unencodable, and a silent failure
@@ -479,7 +471,7 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         .expect("close");
 
     // A BRAND-NEW workspace: nothing captured, nothing versioned, no key.
-    // versions.active fails closed when neither active nor main resolves;
+    // versions.active answers null when neither active nor main resolves;
     // keyless materialize still answers null when no secret state exists.
     let fresh = ScratchDir::new().expect("fresh scratch");
     write_shadow_marker_for_harness(fresh.path(), TOKEN).expect("marker");
@@ -500,19 +492,16 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         .expect("fresh open");
     let fresh_handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("fresh handle");
-    let active = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                id + 2,
-                "versions.active",
-                Some(fresh_handle.clone()),
-                json!({}),
-            ),
-        )
-        .await
-        .expect_err("an uninitialized workspace has no resolvable version");
-    assert_eq!(active.message, "state-corrupt");
+    // MUTATION: synthesize main or map WorkspaceNotFound to state-corrupt -> this is not null.
+    let active = call(
+        &transport,
+        &fresh_handle,
+        id + 2,
+        "versions.active",
+        json!({}),
+    )
+    .await;
+    assert!(active.is_null());
     // With NO versions at all, materialize refuses like every sibling
     // read — the error surface must not depend on whether a key exists.
     let no_version = transport

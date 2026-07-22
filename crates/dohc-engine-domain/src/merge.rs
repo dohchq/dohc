@@ -16,6 +16,7 @@ use crate::store::{
 };
 use dohc_engine_storage::{FaultInjector, Preimage, StorageError, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_MERGE_LINES: usize = 2_000;
@@ -95,6 +96,28 @@ pub enum MergeTextFileResult {
         conflict: Box<TextConflict>,
         deduped: bool,
     },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MergeLedgerRecord {
+    payload_hash: String,
+    outcome: MergeLedgerOutcome,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum MergeLedgerOutcome {
+    Write { moment_id: String },
+    Delete { moment_id: String },
+    Conflict { conflict_id: String },
+    Unchanged { reason: MergeLedgerUnchangedReason },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum MergeLedgerUnchangedReason {
+    AlreadySame,
+    SourceUnchanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -239,21 +262,31 @@ impl VersionedTextStore<'_> {
         F: Fn(&Connection, &MergeTextFileResult) -> Result<(), DomainError>,
     {
         validate_path(&input.path)?;
+        let (author_kind, author_json) = match input.author_json.as_deref() {
+            Some(author_json) => (b"some".as_slice(), author_json.as_bytes()),
+            None => (b"none".as_slice(), b"".as_slice()),
+        };
         let payload_hash = hash_fields(&[
             input.workspace_id.as_bytes(),
             input.target_version_id.as_bytes(),
             input.source_version_id.as_bytes(),
             input.path.as_bytes(),
             input.moment_id.as_bytes(),
+            input.object_id.as_bytes(),
+            input.conflict_id.as_bytes(),
+            input.metadata_origin.as_bytes(),
+            author_kind,
+            author_json,
         ]);
         let outcome = self.store.write_with(faults, |tx| {
             if let Some(request_id) = &input.request_id
                 && let Some(recorded) = lookup_request(tx, request_id)?
             {
+                let recorded = decode_merge_ledger(&recorded.payload_hash)?;
                 if recorded.payload_hash != payload_hash {
                     return Err(DomainError::IdempotencyKeyReuseMismatch);
                 }
-                return reconstruct_merge(tx, input);
+                return reconstruct_merge(tx, input, &recorded.outcome);
             }
             let compare_input = CompareTextFileVersions {
                 workspace_id: input.workspace_id.clone(),
@@ -552,10 +585,17 @@ where
         MergeTextFileResult::Delete { delete, .. } => delete.moment.moment_order,
         MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => 0,
     };
+    let ledger = MergeLedgerRecord {
+        payload_hash: payload_hash.to_owned(),
+        outcome: merge_ledger_outcome(&result),
+    };
+    let ledger_json = serde_json::to_string(&ledger).map_err(|_| DomainError::StateCorrupt {
+        reason: "merge ledger outcome could not be encoded",
+    })?;
     record_request(
         tx,
         input.request_id.as_deref(),
-        payload_hash,
+        &ledger_json,
         result_seq,
         input.now_ms,
     )?;
@@ -565,6 +605,7 @@ where
 fn reconstruct_merge(
     conn: &Connection,
     input: &MergeTextFileFromVersion,
+    recorded: &MergeLedgerOutcome,
 ) -> Result<MergeTextFileResult, DomainError> {
     let compare_input = CompareTextFileVersions {
         workspace_id: input.workspace_id.clone(),
@@ -573,50 +614,87 @@ fn reconstruct_merge(
         path: input.path.clone(),
     };
     let comparison = compare_text_file_versions_in_db(conn, &compare_input)?;
-    if let Some(moment) = get_moment(conn, &input.workspace_id, &input.moment_id)? {
+    if let MergeLedgerOutcome::Write { moment_id } | MergeLedgerOutcome::Delete { moment_id } =
+        recorded
+    {
+        let moment =
+            get_moment(conn, &input.workspace_id, moment_id)?.ok_or(DomainError::StateCorrupt {
+                reason: "deduped merge moment is missing",
+            })?;
         if moment.version_id != input.target_version_id || moment.path != input.path {
             return Err(DomainError::StateCorrupt {
                 reason: "deduped merge moment does not match its request",
             });
         }
-        return match moment.operation {
-            crate::records::MomentOp::Write => Ok(MergeTextFileResult::Write {
-                comparison,
-                write: write_result_from_moment(conn, &input.workspace_id, moment, true)?,
-            }),
-            crate::records::MomentOp::Delete => Ok(MergeTextFileResult::Delete {
-                comparison,
-                delete: delete_result_from_moment(conn, &input.workspace_id, moment, true)?,
-            }),
-            crate::records::MomentOp::Rename => Err(DomainError::StateCorrupt {
-                reason: "deduped merge points at a rename moment",
+        return match (recorded, moment.operation) {
+            (MergeLedgerOutcome::Write { .. }, crate::records::MomentOp::Write) => {
+                Ok(MergeTextFileResult::Write {
+                    comparison,
+                    write: write_result_from_moment(conn, &input.workspace_id, moment, true)?,
+                })
+            }
+            (MergeLedgerOutcome::Delete { .. }, crate::records::MomentOp::Delete) => {
+                Ok(MergeTextFileResult::Delete {
+                    comparison,
+                    delete: delete_result_from_moment(conn, &input.workspace_id, moment, true)?,
+                })
+            }
+            _ => Err(DomainError::StateCorrupt {
+                reason: "deduped merge moment kind does not match its recorded outcome",
             }),
         };
     }
+    match recorded {
+        MergeLedgerOutcome::Unchanged { reason } => Ok(MergeTextFileResult::Unchanged {
+            reason: match reason {
+                MergeLedgerUnchangedReason::AlreadySame => MergeUnchangedReason::AlreadySame,
+                MergeLedgerUnchangedReason::SourceUnchanged => {
+                    MergeUnchangedReason::SourceUnchanged
+                }
+            },
+            comparison,
+            deduped: true,
+        }),
+        MergeLedgerOutcome::Conflict { conflict_id } => {
+            let conflict = load_text_conflict_in_tx(conn, &input.workspace_id, conflict_id)?
+                .ok_or(DomainError::StateCorrupt {
+                    reason: "deduped merge conflict is missing",
+                })?;
+            Ok(MergeTextFileResult::Conflict {
+                comparison,
+                conflict: Box::new(conflict),
+                deduped: true,
+            })
+        }
+        MergeLedgerOutcome::Write { .. } | MergeLedgerOutcome::Delete { .. } => unreachable!(),
+    }
+}
 
-    if file_states_equal(&comparison.current, &comparison.incoming) {
-        return Ok(MergeTextFileResult::Unchanged {
-            reason: MergeUnchangedReason::AlreadySame,
-            comparison,
-            deduped: true,
-        });
-    }
-    if file_states_equal(&comparison.incoming, &comparison.base) {
-        return Ok(MergeTextFileResult::Unchanged {
-            reason: MergeUnchangedReason::SourceUnchanged,
-            comparison,
-            deduped: true,
-        });
-    }
-    let conflict = load_text_conflict_in_tx(conn, &input.workspace_id, &input.conflict_id)?.ok_or(
-        DomainError::StateCorrupt {
-            reason: "deduped merge has neither a moment nor a conflict",
+fn merge_ledger_outcome(result: &MergeTextFileResult) -> MergeLedgerOutcome {
+    match result {
+        MergeTextFileResult::Write { write, .. } => MergeLedgerOutcome::Write {
+            moment_id: write.moment.moment_id.clone(),
         },
-    )?;
-    Ok(MergeTextFileResult::Conflict {
-        comparison,
-        conflict: Box::new(conflict),
-        deduped: true,
+        MergeTextFileResult::Delete { delete, .. } => MergeLedgerOutcome::Delete {
+            moment_id: delete.moment.moment_id.clone(),
+        },
+        MergeTextFileResult::Conflict { conflict, .. } => MergeLedgerOutcome::Conflict {
+            conflict_id: conflict.conflict_id.clone(),
+        },
+        MergeTextFileResult::Unchanged { reason, .. } => MergeLedgerOutcome::Unchanged {
+            reason: match reason {
+                MergeUnchangedReason::AlreadySame => MergeLedgerUnchangedReason::AlreadySame,
+                MergeUnchangedReason::SourceUnchanged => {
+                    MergeLedgerUnchangedReason::SourceUnchanged
+                }
+            },
+        },
+    }
+}
+
+fn decode_merge_ledger(raw: &str) -> Result<MergeLedgerRecord, DomainError> {
+    serde_json::from_str(raw).map_err(|_| DomainError::StateCorrupt {
+        reason: "merge request ledger outcome is invalid",
     })
 }
 

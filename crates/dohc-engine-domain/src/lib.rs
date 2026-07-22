@@ -64,7 +64,7 @@ pub use merge::{
 };
 pub use normalize::NormalizedState;
 pub use records::{
-    ApplySecretFileVerbatim, BinaryHead, BinaryHeadMeta, BinaryWriteResult, CaptureIngest,
+    ApplySecretFileFromVersion, BinaryHead, BinaryHeadMeta, BinaryWriteResult, CaptureIngest,
     CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire, CaptureRetireResult,
     CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord, InbandBinary, InbandSecret,
     InbandText, ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
@@ -73,13 +73,13 @@ pub use records::{
 };
 pub use secrets::{
     CaptureSecret, CaptureSecretRetire, SecretCompareEntry, SecretComparePage, SecretDelete,
-    SecretDiskIntent, SecretFileStat, SecretFileStore, SecretMomentRecord, SecretOp,
-    SecretRestoreResult, SecretWrite, SecretWriteResult, apply_secret_file_verbatim,
+    SecretDiskIntent, SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord,
+    SecretOp, SecretRestoreResult, SecretWrite, SecretWriteResult, apply_secret_file_from_version,
     capture_secret_retire, compare_secret_files_page_keyless, delete_secret_file_keyless,
     derive_capture_secret_moment_id, derive_capture_secret_retire_moment_id, fork_version_keyless,
     get_secret_moment_keyless, has_secret_state, list_secret_files_keyless,
-    list_secret_files_keyless_page, list_secret_moments_keyless, restore_secret_file_verbatim,
-    secret_file_len_keyless,
+    list_secret_files_keyless_page, list_secret_moments_keyless, list_secret_moments_page_keyless,
+    restore_secret_file_verbatim, secret_file_len_keyless,
 };
 pub use store::{
     CaptureManifestSeedEntry, INBAND_CONTENT_CAP_BYTES, MAX_CAPTURE_BINARY_FILE_BYTES,

@@ -417,6 +417,8 @@ pub struct RollbackTextFileMutation {
     pub mutation_moment_id: String,
     pub request_id: Option<String>,
     pub legacy_before_text: Option<String>,
+    pub metadata_origin: String,
+    pub author_json: Option<String>,
 }
 
 /// Inputs to [`crate::VersionedTextStore::create_named_version`].
@@ -489,9 +491,9 @@ pub struct RenameResult {
     pub deduped: bool,
 }
 
-/// Inputs to [`crate::apply_secret_file_verbatim`].
+/// Inputs to [`crate::apply_secret_file_from_version`].
 #[derive(Debug, Clone)]
-pub struct ApplySecretFileVerbatim {
+pub struct ApplySecretFileFromVersion {
     pub workspace_id: String,
     pub path: String,
     pub from_version_id: String,

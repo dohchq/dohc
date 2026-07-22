@@ -192,6 +192,8 @@ export type SecretsMomentsListParams = JsonObject & {
   workspaceId: string;
   versionId: string;
   path: string;
+  beforeMomentOrder?: number;
+  limit?: number;
 };
 
 export type SecretsMomentsGetParams = JsonObject & {
@@ -290,7 +292,12 @@ export type VersionedBinaryWriteResult = JsonObject & {
   snapshot: BinaryWriteSnapshot;
   moment: MomentRecord;
   deduped: boolean;
+  materializeEnqueued: boolean;
+  materialized: boolean;
+  materializeOutcome: MaterializeOutcome;
 };
+
+export type MaterializeOutcome = "applied" | "skipped" | "conflict" | "superseded" | "error";
 
 export type VersionedTextRenameResult = JsonObject & {
   object: FileObject;
@@ -310,6 +317,9 @@ export type VersionedTextDeleteResult = JsonObject & {
 export type VersionedTextRollbackResult = JsonObject & {
   rolledBack: true;
   deduped: boolean;
+  materializeEnqueued: boolean;
+  materialized: boolean;
+  materializeOutcome: MaterializeOutcome;
 };
 
 export type VersionedTextListEntry = JsonObject & {
@@ -339,9 +349,9 @@ export type VersionedBinaryReadValue = JsonObject & {
 export type VersionedBinaryReadResult = VersionedBinaryReadValue | null;
 
 export type VersionedBinaryReadBlobResult =
-  | (JsonObject & { bytes: number[] })
+  | (JsonObject & { bytesBase64: string })
   | (JsonObject & {
-      bytes: null;
+      bytesBase64: null;
       byteLength: number;
       inbandLimitBytes: number;
     });
@@ -363,7 +373,7 @@ export type VersionRecord = JsonObject & {
 export type VersionsCreateNamedResult = VersionRecord;
 export type VersionsSetActiveResult = VersionRecord;
 export type VersionsEnsureMainResult = VersionRecord;
-export type VersionsActiveResult = VersionRecord;
+export type VersionsActiveResult = VersionRecord | null;
 
 export type VersionsMergeResult =
   | (JsonObject & { status: "unchanged" | "conflict"; deduped: boolean })
@@ -436,7 +446,10 @@ export type SecretRestoreResult = JsonObject & {
   restoredMomentId: string;
   path: string;
 };
-export type SecretsMomentsListResult = SecretMomentRecord[];
+export type SecretsMomentsListResult = JsonObject & {
+  moments: SecretMomentRecord[];
+  nextBeforeMomentOrder: number | null;
+};
 export type SecretsMomentsGetResult = SecretMomentRecord | null;
 
 export type MomentsListResult = JsonObject & {
@@ -692,6 +705,9 @@ export function decodeVersionedBinaryWriteResult(value: JsonValue): VersionedBin
     },
     moment: momentValue(object.moment ?? null, `${label}.moment`),
     deduped: booleanValue(object, "deduped", label),
+    materializeEnqueued: booleanValue(object, "materializeEnqueued", label),
+    materialized: booleanValue(object, "materialized", label),
+    materializeOutcome: materializeOutcomeValue(object, label),
   };
 }
 
@@ -724,7 +740,27 @@ export function decodeVersionedTextRollbackResult(value: JsonValue): VersionedTe
   if (object.rolledBack !== true) {
     throw new VersionedProtocolShapeError(`${label}.rolledBack must be true.`);
   }
-  return { rolledBack: true, deduped: booleanValue(object, "deduped", label) };
+  return {
+    rolledBack: true,
+    deduped: booleanValue(object, "deduped", label),
+    materializeEnqueued: booleanValue(object, "materializeEnqueued", label),
+    materialized: booleanValue(object, "materialized", label),
+    materializeOutcome: materializeOutcomeValue(object, label),
+  };
+}
+
+function materializeOutcomeValue(object: JsonObject, label: string): MaterializeOutcome {
+  const outcome = object.materializeOutcome;
+  if (
+    outcome !== "applied" &&
+    outcome !== "skipped" &&
+    outcome !== "conflict" &&
+    outcome !== "superseded" &&
+    outcome !== "error"
+  ) {
+    throw new VersionedProtocolShapeError(`${label}.materializeOutcome is invalid.`);
+  }
+  return outcome;
 }
 
 export function decodeVersionRecord(value: JsonValue): VersionRecord {
@@ -749,6 +785,10 @@ export function decodeVersionRecord(value: JsonValue): VersionRecord {
     }
   }
   return record;
+}
+
+export function decodeVersionsActiveResult(value: JsonValue): VersionsActiveResult {
+  return value === null ? null : decodeVersionRecord(value);
 }
 
 export function decodeVersionsCompareFilesResult(value: JsonValue): VersionsCompareFilesResult {
@@ -800,20 +840,14 @@ export function decodeVersionedBinaryReadResult(value: JsonValue): VersionedBina
 export function decodeVersionedBinaryReadBlobResult(value: JsonValue): VersionedBinaryReadBlobResult {
   const label = "versionedBinary.readBlob result";
   const object = objectValue(value, label);
-  if (object.bytes === null) {
+  if (object.bytesBase64 === null) {
     return {
-      bytes: null,
+      bytesBase64: null,
       byteLength: numberValue(object, "byteLength", label),
       inbandLimitBytes: numberValue(object, "inbandLimitBytes", label),
     };
   }
-  const bytes = arrayValue(object, "bytes", label).map((byte, index) => {
-    if (typeof byte !== "number" || !Number.isInteger(byte) || byte < 0 || byte > 255) {
-      throw new VersionedProtocolShapeError(`${label}.bytes[${index}] must be a byte.`);
-    }
-    return byte;
-  });
-  return { bytes };
+  return { bytesBase64: stringValue(object, "bytesBase64", label) };
 }
 
 export function decodeSecretWriteResult(value: JsonValue): SecretWriteResult {
@@ -873,12 +907,14 @@ export function decodeSecretRestoreResult(value: JsonValue): SecretRestoreResult
 }
 
 export function decodeSecretsMomentsListResult(value: JsonValue): SecretsMomentsListResult {
-  if (!Array.isArray(value)) {
-    throw new VersionedProtocolShapeError("secrets.moments.list result must be an array.");
-  }
-  return value.map((moment, index) =>
-    secretMomentValue(moment, `secrets.moments.list result[${index}]`),
-  );
+  const label = "secrets.moments.list result";
+  const object = objectValue(value, label);
+  return {
+    moments: arrayValue(object, "moments", label).map((moment, index) =>
+      secretMomentValue(moment, `${label}.moments[${index}]`),
+    ),
+    nextBeforeMomentOrder: nullableNumberValue(object, "nextBeforeMomentOrder", label),
+  };
 }
 
 export function decodeSecretsMomentsGetResult(value: JsonValue): SecretsMomentsGetResult {
