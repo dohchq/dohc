@@ -42,7 +42,6 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
-use unicode_normalization::UnicodeNormalization;
 
 const MAX_OPEN_HANDLES: usize = 64;
 const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
@@ -853,7 +852,7 @@ impl EngineService {
         let params: VersionedTextWriteParams = parse(params)?;
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
-        let path = normalize_rpc_path(&params.path);
+        let path = params.path.clone();
         let text = params.text;
         if text.len() > MAX_INBAND_CONTENT_BYTES {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
@@ -910,7 +909,7 @@ impl EngineService {
         let params: VersionedBinaryWriteParams = parse(params)?;
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
-        let path = normalize_rpc_path(&params.path);
+        let path = params.path.clone();
         let bytes = match (params.bytes, params.bytes_base64) {
             (Some(bytes), None) => bytes,
             (None, Some(encoded)) => base64::engine::general_purpose::STANDARD
@@ -987,8 +986,8 @@ impl EngineService {
         let params: VersionedTextRenameParams = parse(params)?;
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
-        let from_path = normalize_rpc_path(&params.from_path);
-        let to_path = normalize_rpc_path(&params.to_path);
+        let from_path = params.from_path.clone();
+        let to_path = params.to_path.clone();
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         self.ensure_path_not_leased(&open, &params.version_id, &from_path)
@@ -1049,7 +1048,7 @@ impl EngineService {
         let params: VersionedTextDeleteParams = parse(params)?;
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
-        let path = normalize_rpc_path(&params.path);
+        let path = params.path.clone();
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
@@ -1100,7 +1099,7 @@ impl EngineService {
         let params: VersionedTextRollbackParams = parse(params)?;
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
-        let path = normalize_rpc_path(&params.path);
+        let path = params.path.clone();
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
@@ -1155,7 +1154,7 @@ impl EngineService {
                 workspace_id: open.workspace_id,
                 target_version_id: params.target_version_id,
                 source_version_id: params.source_version_id,
-                path: normalize_rpc_path(&params.path),
+                path: params.path.clone(),
             }),
         )
         .await?;
@@ -1171,7 +1170,7 @@ impl EngineService {
         let params: VersionedTextMergeParams = parse(params)?;
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
-        let path = normalize_rpc_path(&params.path);
+        let path = params.path.clone();
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         self.ensure_path_not_leased(&open, &params.target_version_id, &path)
@@ -1749,28 +1748,28 @@ impl EngineService {
         {
             return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
         }
+        // Stored digests are canonical lowercase hex; an uppercase spelling of
+        // a referenced digest must find it, not miss the exact-match lookup.
+        let sha256 = params.sha256.to_ascii_lowercase();
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let cancellation = OperationCancellation::new(ctx);
-        let bytes = Self::read_under_ctx(
+        let read = Self::read_under_ctx(
             &cancellation,
             "versionedBinary.readBlob",
-            open.actor
-                .read_binary_blob(open.workspace_id, params.sha256),
+            open.actor.read_binary_blob(open.workspace_id, sha256),
         )
         .await?
         .ok_or_else(|| wire(ErrorCode::InvalidParams, "file-not-found"))?;
-        let byte_length = bytes.len();
-        Ok(if byte_length <= MAX_INBAND_CONTENT_BYTES {
-            json!({
+        Ok(match read.bytes {
+            Some(bytes) => json!({
                 "bytesBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
-            })
-        } else {
-            json!({
+            }),
+            None => json!({
                 "bytesBase64": Value::Null,
-                "byteLength": byte_length,
+                "byteLength": read.byte_length,
                 "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
-            })
+            }),
         })
     }
 
@@ -1988,7 +1987,7 @@ impl EngineService {
         let params: SecretsWriteParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
-        let path = normalize_rpc_path(&params.path);
+        let path = params.path.clone();
         let text = params.text;
         if text.len() > MAX_INBAND_CONTENT_BYTES {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
@@ -2046,7 +2045,7 @@ impl EngineService {
         let params: SecretsDeleteParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
-        let path = normalize_rpc_path(&params.path);
+        let path = params.path.clone();
         let origin = validated_origin(Some(&params.origin), None)?;
         let cancellation = OperationCancellation::new(ctx);
         let moment = open
@@ -2102,7 +2101,7 @@ impl EngineService {
         let params: SecretsMomentsListParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
-        let path = params.path.as_deref().map(normalize_rpc_path);
+        let path = params.path.clone();
         let cancellation = OperationCancellation::new(ctx);
         let limit = params.limit.unwrap_or(200).clamp(1, 500);
         let mut page = Self::read_under_ctx(
@@ -2279,7 +2278,7 @@ impl EngineService {
         }
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
-        let path = normalize_rpc_path(&params.path);
+        let path = params.path.clone();
         let cancellation = OperationCancellation::new(ctx);
         for (operation, version_id) in [
             ("secrets.apply (source version)", &params.source_version_id),
@@ -2358,7 +2357,7 @@ impl EngineService {
         let params: SecretsRestoreParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
-        let path = normalize_rpc_path(&params.path);
+        let path = params.path.clone();
         let cancellation = OperationCancellation::new(ctx);
         let result = open
             .actor
@@ -5654,10 +5653,6 @@ where
     D: serde::Deserializer<'de>,
 {
     String::deserialize(deserializer).map(Some)
-}
-
-fn normalize_rpc_path(path: &str) -> String {
-    path.nfc().collect()
 }
 
 fn materialize_outcome_name(outcome: PostCommitMaterializeOutcome) -> &'static str {

@@ -373,7 +373,7 @@ enum Command {
     ReadBinaryBlob {
         workspace_id: String,
         sha256: String,
-        reply: oneshot::Sender<Result<Option<Vec<u8>>, RuntimeError>>,
+        reply: oneshot::Sender<Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError>>,
     },
     ReadTextInband {
         workspace_id: String,
@@ -1620,7 +1620,7 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         sha256: String,
-    ) -> Result<Option<Vec<u8>>, RuntimeError> {
+    ) -> Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ReadBinaryBlob {

@@ -313,6 +313,87 @@ async fn over_cap_write_refuses_before_commit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rpc_paths_flow_verbatim_without_unicode_normalization() {
+    // MUTATION: NFC-normalize RPC paths -> the stored spelling changes and a
+    // caller feeding back a listed path misses its own row (the recorded
+    // cross-engine posture: Rust stores the spelling the write carried;
+    // classification stays disguise-proof).
+    let (_scratch, transport, handle) = fixture("verbatim-path").await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": "ws-rpcd-verbatim-path" }),
+    )
+    .await;
+    // "café" with U+0301 COMBINING ACUTE (NFD): NFC would rewrite it.
+    let nfd_secret = "cafe\u{301}.env";
+    call(
+        &transport,
+        &handle,
+        3,
+        "secrets.write",
+        json!({
+            "workspaceId": "ws-rpcd-verbatim-path",
+            "versionId": "main",
+            "path": nfd_secret,
+            "text": "TOKEN=verbatim",
+            "origin": "api",
+            "momentId": "verbatim-secret-1",
+        }),
+    )
+    .await;
+    let listed = call(
+        &transport,
+        &handle,
+        4,
+        "secrets.list",
+        json!({ "versionId": "main" }),
+    )
+    .await;
+    let listed_path = listed["secrets"][0]["path"].as_str().expect("secret path");
+    assert_eq!(listed_path, nfd_secret, "stored spelling is the caller's");
+    let materialized = call(
+        &transport,
+        &handle,
+        5,
+        "secrets.materialize",
+        json!({ "versionId": "main", "path": listed_path }),
+    )
+    .await;
+    assert_eq!(materialized["text"], "TOKEN=verbatim");
+
+    let nfd_text = "notes/tha\u{300}nh.md";
+    let written = call(
+        &transport,
+        &handle,
+        6,
+        "versionedText.write",
+        json!({
+            "versionId": "main",
+            "path": nfd_text,
+            "text": "verbatim path",
+            "origin": "api",
+        }),
+    )
+    .await;
+    assert_eq!(
+        written["snapshot"]["path"].as_str().expect("path"),
+        nfd_text
+    );
+    let read = call(
+        &transport,
+        &handle,
+        7,
+        "versionedText.read",
+        json!({ "versionId": "main", "path": nfd_text }),
+    )
+    .await;
+    assert_eq!(read["text"], "verbatim path");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secrets_write_rejects_over_cap_text_before_commit() {
     // MUTATION: commit the secret and truncate only the response -> the moment leaks and fails.
     let (_scratch, transport, handle) = fixture("secret-cap").await;
@@ -1163,6 +1244,24 @@ async fn rollback_request_id_replay_is_a_no_op_and_reuse_mismatch_is_refused() {
     assert_eq!(replay["deduped"], true);
     let after_replay = moments(&transport, &handle, 6).await.len();
     assert_eq!(after_replay, 1);
+    // MUTATION: omit legacyBeforeText from the rollback ledger hash -> a
+    // different legacy preimage silently replays as deduped.
+    let mut legacy_flip = params.clone();
+    legacy_flip["legacyBeforeText"] = json!("a different legacy preimage");
+    let legacy_mismatch = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                39,
+                "versionedText.rollback",
+                Some(handle.clone()),
+                legacy_flip,
+            ),
+        )
+        .await
+        .expect_err("rollback legacy-preimage mismatch");
+    assert_eq!(legacy_mismatch.message, "idempotency-key-reuse-mismatch");
+
     // MUTATION: omit origin/author from the rollback ledger hash -> this silently replays.
     let mut flipped = params.clone();
     flipped["origin"] = json!("api");
@@ -2310,4 +2409,121 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
         .await
         .expect_err("workspace B must not read workspace A's conflict-only blob");
     assert_eq!(conflict_refused.message, "file-not-found");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_blob_canonicalizes_digests_and_fails_closed_on_broken_references() {
+    let (scratch, transport, handle) = fixture("blob-integrity").await;
+    let workspace = "ws-rpcd-blob-integrity";
+    let written = call(
+        &transport,
+        &handle,
+        2,
+        "versionedBinary.write",
+        json!({
+            "versionId": "main",
+            "path": "asset.bin",
+            "bytes": [1, 2, 3],
+            "origin": "api",
+        }),
+    )
+    .await;
+    let sha = written["snapshot"]["sha256"]
+        .as_str()
+        .expect("sha")
+        .to_owned();
+    // MUTATION: skip lowercase canonicalization -> the uppercase spelling of a
+    // referenced digest misses the exact-match lookup.
+    let upper = call(
+        &transport,
+        &handle,
+        3,
+        "versionedBinary.readBlob",
+        json!({ "workspaceId": workspace, "sha256": sha.to_ascii_uppercase() }),
+    )
+    .await;
+    assert_eq!(upper["bytesBase64"], "AQID");
+
+    call(&transport, &handle, 4, "workspace.close", json!({})).await;
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    // The FK to binary_blobs normally forbids this state — a broken reference
+    // only arises from real corruption (partial restore, FK-off import), which
+    // is exactly what the seed simulates.
+    connection
+        .pragma_update(None, "foreign_keys", "OFF")
+        .expect("fk off");
+    // A conflict row referencing a digest with NO blob row: a broken durable
+    // reference, not an absent digest.
+    let phantom_sha = "a".repeat(64);
+    // An over-cap blob referenced only by a conflict: the metadata answer must
+    // not hydrate it.
+    let big_bytes = vec![7_u8; 49_153];
+    let big_sha = dohc_engine_storage::put_binary_blob(&connection, &big_bytes).expect("big blob");
+    for (conflict_id, referenced_sha) in [
+        ("conflict-phantom", phantom_sha.as_str()),
+        ("conflict-big", big_sha.as_str()),
+    ] {
+        connection
+            .execute(
+                "INSERT INTO conflicts (\
+                    workspace_id, conflict_id, path, target_version_id, source_version_id, \
+                    created_at_ms, updated_at_ms, status, chosen_from, resolution, metadata_origin, \
+                    base_exists, base_path, current_exists, current_path, \
+                    incoming_exists, incoming_path, incoming_content_kind, incoming_binary_sha256\
+                 ) VALUES (?1, ?2, 'conflict.bin', 'main', 'main', \
+                    10, 10, 'open', 'current', NULL, 'sync', \
+                    0, 'conflict.bin', 0, 'conflict.bin', 1, 'conflict.bin', 'binary', ?3)",
+                rusqlite::params![workspace, conflict_id, referenced_sha],
+            )
+            .expect("seed conflict reference");
+    }
+    drop(connection);
+
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                5,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("reopen");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    // MUTATION: answer Ok(None) for a referenced-but-missing blob -> the broken
+    // reference masquerades as a caller mistake instead of failing closed.
+    let corrupt = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                6,
+                "versionedBinary.readBlob",
+                Some(handle.clone()),
+                json!({ "workspaceId": workspace, "sha256": phantom_sha }),
+            ),
+        )
+        .await
+        .expect_err("a referenced digest with no blob row is corruption");
+    assert_eq!(corrupt.message, "state-corrupt");
+    // MUTATION: hydrate over-cap blobs for the metadata answer -> this still
+    // passes, but the arm loads 49k bytes to discard them; the shape contract
+    // (null bytes + recorded length) is what this pins.
+    let over_cap = call(
+        &transport,
+        &handle,
+        7,
+        "versionedBinary.readBlob",
+        json!({ "workspaceId": workspace, "sha256": big_sha }),
+    )
+    .await;
+    assert_eq!(over_cap["bytesBase64"], Value::Null);
+    assert_eq!(over_cap["byteLength"], 49_153);
+    assert_eq!(over_cap["inbandLimitBytes"], 49_152);
 }

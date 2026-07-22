@@ -503,3 +503,11 @@ pub struct ApplySecretFileFromVersion {
     pub moment_id: String,
     pub now_ms: i64,
 }
+
+/// A workspace-referenced binary blob read under the in-band cap: over-cap
+/// answers carry the recorded length only, bytes stay unhydrated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryBlobRead {
+    pub byte_length: i64,
+    pub bytes: Option<Vec<u8>>,
+}

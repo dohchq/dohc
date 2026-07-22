@@ -17,12 +17,12 @@
 use crate::conflicts::{WriteBinaryFile, write_binary_file_in_tx};
 use crate::error::DomainError;
 use crate::records::{
-    BinaryHead, BinaryHeadMeta, BinaryWriteResult, CaptureIngest, CaptureIngestBinary,
-    CaptureIngestBinaryResult, CaptureRetire, CaptureRetireResult, CreateNamedVersion,
-    DeleteResult, DeleteTextFile, FileObjectRecord, InbandBinary, InbandText, ListMomentsQuery,
-    MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation,
-    SnapshotContent, SnapshotMetadata, SnapshotRecord, SnapshotView, TextSnapshot, VersionKind,
-    VersionRecord, WriteBinary, WriteResult, WriteText,
+    BinaryBlobRead, BinaryHead, BinaryHeadMeta, BinaryWriteResult, CaptureIngest,
+    CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire, CaptureRetireResult,
+    CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord, InbandBinary, InbandText,
+    ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
+    RollbackTextFileMutation, SnapshotContent, SnapshotMetadata, SnapshotRecord, SnapshotView,
+    TextSnapshot, VersionKind, VersionRecord, WriteBinary, WriteResult, WriteText,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome,
@@ -432,11 +432,20 @@ impl<'a> VersionedTextStore<'a> {
         let input = &normalized_input;
 
         let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
+        // legacy_before_text determines the restored snapshot when the moment
+        // carries no stored preimage — a different legacy text is a different
+        // rollback, never a replay.
+        let (legacy_kind, legacy_text): (&[u8], &[u8]) = match &input.legacy_before_text {
+            Some(text) => (b"some", text.as_bytes()),
+            None => (b"none", b""),
+        };
         let payload_hash = hash_fields(&[
             input.workspace_id.as_bytes(),
             input.version_id.as_bytes(),
             input.path.as_bytes(),
             input.mutation_moment_id.as_bytes(),
+            legacy_kind,
+            legacy_text,
             input.metadata_origin.as_bytes(),
             author_kind,
             author_json,
@@ -743,7 +752,7 @@ impl<'a> VersionedTextStore<'a> {
         &self,
         workspace_id: &str,
         sha256: &str,
-    ) -> Result<Option<Vec<u8>>, DomainError> {
+    ) -> Result<Option<BinaryBlobRead>, DomainError> {
         non_empty(workspace_id, "workspace_id")?;
         self.store.read_with(|conn| {
             let referenced: bool = conn
@@ -769,7 +778,38 @@ impl<'a> VersionedTextStore<'a> {
             if !referenced {
                 return Ok(None);
             }
-            dohc_engine_storage::get_binary_blob(conn, sha256).map_err(DomainError::from)
+            // Metadata first: an over-cap answer must not hydrate (and
+            // re-verify) up to a 64 MiB blob just to discard the bytes.
+            let byte_length: Option<i64> = conn
+                .query_row(
+                    "SELECT byte_length FROM binary_blobs WHERE sha256 = ?1",
+                    params![sha256],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            // The workspace holds a durable reference to this digest: a
+            // missing blob row is store corruption, not an absent digest.
+            let Some(byte_length) = byte_length else {
+                return Err(DomainError::StateCorrupt {
+                    reason: "referenced binary blob is missing",
+                });
+            };
+            if byte_length as usize > INBAND_CONTENT_CAP_BYTES {
+                return Ok(Some(BinaryBlobRead {
+                    byte_length,
+                    bytes: None,
+                }));
+            }
+            let bytes = dohc_engine_storage::get_binary_blob(conn, sha256)
+                .map_err(DomainError::from)?
+                .ok_or(DomainError::StateCorrupt {
+                    reason: "referenced binary blob is missing",
+                })?;
+            Ok(Some(BinaryBlobRead {
+                byte_length,
+                bytes: Some(bytes),
+            }))
         })
     }
 
