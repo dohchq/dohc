@@ -1392,8 +1392,15 @@ pub(crate) const YDOC_DEFERRED_MIGRATION_ID: &str = "v1-ydoc-deferred-updates";
 
 /// Classifies rows in the shared request ledger so mutation-specific cleanup
 /// cannot evict an unrelated subsystem's idempotency record. Nullable by
-/// design: rows written by older builds remain valid legacy records.
-const V1_ENGINE_REQUEST_KIND_DDL: &str = "ALTER TABLE engine_requests ADD COLUMN kind TEXT;";
+/// design: legacy `result_seq = -1` is ambiguous between chats and the first
+/// Y.Doc update, while zero is shared by chats and versioned no-op results, so
+/// raw-hash rows at either sentinel remain fail-safe unclassified.
+const V1_ENGINE_REQUEST_KIND_DDL: &str = "\
+ALTER TABLE engine_requests ADD COLUMN kind TEXT;
+UPDATE engine_requests SET kind = 'ydoc' WHERE result_seq < -1;
+UPDATE engine_requests SET kind = 'merge' WHERE payload_hash LIKE '{%';
+UPDATE engine_requests SET kind = 'versioned' WHERE result_seq > 0 AND kind IS NULL;
+";
 
 /// The `id` of the request-ledger kind migration.
 pub(crate) const ENGINE_REQUEST_KIND_MIGRATION_ID: &str = "v1-engine-request-kind";
@@ -1850,7 +1857,7 @@ mod tests {
     }
 
     #[test]
-    fn request_kind_migration_preserves_legacy_rows_as_null() {
+    fn request_kind_migration_backfills_provable_legacy_rows() {
         let dir = tempdir();
         let path = dir.join("engine.db");
         let ctx = MigrationContext::current(1_250);
@@ -1858,25 +1865,40 @@ mod tests {
 
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..13], &ctx, &NoFaults)
             .expect("pre-kind migrations");
-        conn.execute(
-            "INSERT INTO engine_requests \
-             (request_id, payload_hash, result_seq, committed_at) \
-             VALUES ('legacy', 'hash', 7, 1)",
-            [],
+        conn.execute_batch(
+            "INSERT INTO engine_requests
+             (request_id, payload_hash, result_seq, committed_at) VALUES
+             ('ydoc', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', -2, 1),
+             ('merge', '{\"payload_hash\":\"hash\",\"outcome\":{\"kind\":\"unchanged\",\"reason\":\"already-same\"}}', 9, 2),
+             ('chat-or-versioned-noop', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 0, 3),
+             ('chat-or-first-ydoc', 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', -1, 4),
+             ('versioned', 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', 7, 5);",
         )
-        .expect("legacy request row");
+        .expect("legacy request rows");
 
         let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("kind migration");
         assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-        let kind: Option<String> = conn
-            .query_row(
-                "SELECT kind FROM engine_requests WHERE request_id = 'legacy'",
-                [],
-                |row| row.get(0),
+        let kind = |request_id: &str| {
+            conn.query_row(
+                "SELECT kind FROM engine_requests WHERE request_id = ?1",
+                [request_id],
+                |row| row.get::<_, Option<String>>(0),
             )
-            .expect("legacy kind");
-        assert_eq!(kind, None);
+            .expect("legacy kind")
+        };
+        // MUTATION: remove the negative-sequence classification -> fails.
+        assert_eq!(kind("ydoc").as_deref(), Some("ydoc"));
+        // MUTATION: classify by positive result_seq before JSON shape -> fails.
+        assert_eq!(kind("merge").as_deref(), Some("merge"));
+        // MUTATION: guess that zero belongs to chats or versioning -> fails.
+        // Both writers used this exact sequence and raw SHA-256 payload shape.
+        assert_eq!(kind("chat-or-versioned-noop"), None);
+        // MUTATION: guess that -1 belongs to chats or Y.Doc -> fails. Both
+        // writers used this exact sequence and raw SHA-256 payload shape.
+        assert_eq!(kind("chat-or-first-ydoc"), None);
+        // MUTATION: leave positive production rows unclassified -> fails.
+        assert_eq!(kind("versioned").as_deref(), Some("versioned"));
     }
 
     #[test]
