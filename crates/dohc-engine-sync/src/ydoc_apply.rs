@@ -169,9 +169,21 @@ pub fn drain_deferred_ydoc_for_key(
                 payload_recorded_at,
                 payload_recorded_at,
             )
-        })?;
-        if matches!(projected, TxnOutcome::Crashed { .. }) {
-            return Err(SyncError::FaultCrash);
+        });
+        match projected {
+            Ok(TxnOutcome::Committed(())) => {}
+            Ok(TxnOutcome::Crashed { .. }) => return Err(SyncError::FaultCrash),
+            // PERMANENT refusals (the identity pins: path rebound to another
+            // object, object moved, binary head) can never succeed for these
+            // rows — returning early would leave the markers in place and
+            // wedge EVERY subsequent open/resync/close on this doc. The CRDT
+            // content is durably applied above; the path's visible head
+            // legitimately belongs to its current owner, whose own flows
+            // govern it. Clear the markers below and move on.
+            Err(SyncError::InvalidInput { .. }) => {}
+            // Anything else (storage) is retryable: keep the markers so the
+            // next drain retries the projection.
+            Err(other) => return Err(other),
         }
     }
     // The durable markers clear LAST — after the projection committed. A
