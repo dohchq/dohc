@@ -213,11 +213,18 @@ impl EngineService {
             },
             next_session: std::sync::atomic::AtomicU64::new(1),
             session_epoch: {
+                // pid + boot-ms + a PROCESS-GLOBAL instance counter: two
+                // services constructed in the same millisecond must still
+                // mint disjoint session ids (they seed persisted
+                // idempotency keys).
+                static INSTANCE: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0);
+                let instance = INSTANCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let boot_ms = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|elapsed| elapsed.as_millis())
                     .unwrap_or(0);
-                format!("{:x}-{boot_ms:x}", std::process::id())
+                format!("{:x}-{boot_ms:x}-{instance:x}", std::process::id())
             },
             self_writes: {
                 // Process-wide for the same reason as the lease registry: a

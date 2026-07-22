@@ -707,6 +707,12 @@ impl CaptureSink for StoreCaptureSink {
             // oracle), so the driver must rebuild the controller with an
             // empty manifest on a policy-snapshot change to re-offer every
             // path through here.
+            //
+            // A pending self-write identity must not outlive the exclusion:
+            // if the path is tracked again later with the OLD settled bytes
+            // on disk, a stale entry would suppress a genuine external
+            // revert.
+            self.self_writes.clear_path(&self.workspace_id, path);
             self.retire_head(path, false)?;
             return Ok(IngestOutcome::NotOwned);
         }

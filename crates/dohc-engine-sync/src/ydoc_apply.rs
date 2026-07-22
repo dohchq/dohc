@@ -112,6 +112,7 @@ pub fn drain_deferred_ydoc_for_key(
     let mut last_payload: Option<YdocUpdatePayload> = None;
     let mut payload_recorded_at = 0_i64;
     let mut drained_coordinates: Vec<(String, i64)> = Vec::new();
+    let mut last_coordinate: Option<(String, i64)> = None;
     for (origin_id, origin_seq, recorded_at_ms, payload) in pending {
         let bytes = store
             .get_binary_blob(&payload.update_blob_sha256)?
@@ -143,6 +144,7 @@ pub fn drain_deferred_ydoc_for_key(
         // head stays behind the already-applied CRDT forever.
         payload_recorded_at = recorded_at_ms;
         last_payload = Some(payload);
+        last_coordinate = Some((origin_id.clone(), origin_seq));
         drained_coordinates.push((origin_id, origin_seq));
     }
     // Drained content must reach the VISIBLE head here, not only the CRDT
@@ -151,6 +153,10 @@ pub fn drain_deferred_ydoc_for_key(
     // did not project, the snapshot/materialization would stay stale until
     // some unrelated open/settle. Same idempotent-by-sha write as the pull
     // path; skipped while cross-origin dependencies are still pending.
+    let (drain_origin, drain_seq) = match &last_coordinate {
+        Some((origin, seq)) => (origin.as_str(), *seq),
+        None => ("deferred-drain", payload_recorded_at),
+    };
     if let Some(payload) = last_payload
         && let Some(persisted) =
             dohc_engine_collab::load_persisted(store, key).map_err(|_| SyncError::InvalidInput {
@@ -165,8 +171,12 @@ pub fn drain_deferred_ydoc_for_key(
                 &payload.path,
                 &persisted.doc,
                 persisted.marker.content_kind,
-                "deferred-drain",
-                payload_recorded_at,
+                // The REAL last drained coordinate keys the moment id: a
+                // synthetic (origin, recorded_at_ms) pair collides when two
+                // drain batches land updates in the same millisecond, and
+                // the duplicate id wedges the projection write.
+                drain_origin,
+                drain_seq,
                 payload_recorded_at,
             )
         });
@@ -204,7 +214,12 @@ pub fn drain_deferred_ydoc_for_key(
     if matches!(cleared, TxnOutcome::Crashed { .. }) {
         return Err(SyncError::FaultCrash);
     }
-    Ok(applied)
+    // The count is DRAINED COORDINATES, not newly-applied rows: a marker
+    // surviving an earlier failed drain redelivers its row as a dedupe, and
+    // callers (the settle's remote-updates-pending refusal) must still see
+    // that remote content landed which the live client has not resynced.
+    let _ = applied;
+    Ok(drained_coordinates.len())
 }
 
 /// Oracle parity for applied `ydoc.update` ops (`projectYDocUpdate` →

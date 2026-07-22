@@ -3798,7 +3798,14 @@ fn ydoc_open_state_on_store(
         None => {
             let doc = Ydoc::wire();
             (
-                requested_content_kind.unwrap_or(ContentKind::Richdoc),
+                // PLAINTEXT default: the desktop's markdown live path opens
+                // without a contentKind, and a richdoc default would wedge
+                // it — richdoc settle is a C1 refusal and the client skips
+                // its close-time settle, so first-time markdown edits would
+                // persist only as closed CRDT cache while the .md file and
+                // history stay stale. Richdoc callers pass the kind
+                // explicitly.
+                requested_content_kind.unwrap_or(ContentKind::Plaintext),
                 Regime::LocalOnly,
                 doc.encode_full_state(),
             )
