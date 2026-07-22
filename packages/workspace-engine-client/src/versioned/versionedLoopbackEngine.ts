@@ -159,7 +159,9 @@ function encodeBase64(bytes: number[]): string {
 }
 
 function decodeBase64(value: string): number[] {
-  return [...Buffer.from(value, "base64")];
+  const bytes = [...Buffer.from(value, "base64")];
+  if (encodeBase64(bytes) !== value) throw new Error("invalid-input");
+  return bytes;
 }
 
 export class VersionedLoopbackEngine implements EngineTransport {
@@ -515,6 +517,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     version.files.set(path, file);
     state.moments.set(momentId, internal);
     state.blobs.set(binarySha, [...bytes]);
+    const materializeEnqueued = version.id === state.activeVersionId;
     const result: JsonObject = {
       object: this.fileObject(workspace, effectiveObjectId, now),
       snapshot: {
@@ -529,9 +532,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
       },
       moment: this.capMoment(moment),
       deduped: false,
-      materializeEnqueued: true,
-      materialized: true,
-      materializeOutcome: "applied",
+      materializeEnqueued,
+      materialized: materializeEnqueued,
+      materializeOutcome: materializeEnqueued ? "applied" : "skipped",
     };
     this.recordReplay(state, requestId, params, result, replayFingerprint);
     return result;
@@ -640,12 +643,36 @@ export class VersionedLoopbackEngine implements EngineTransport {
     requiredOrigin(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const replay = this.replay(state, requestId, params);
-    if (replay) return replay;
+    if (replay) {
+      return {
+        ...replay,
+        materializeEnqueued: false,
+        materialized: false,
+        materializeOutcome: "skipped",
+      };
+    }
     const version = this.version(state, requiredString(params, "versionId", "rollback"));
     const path = requiredString(params, "path", "rollback");
     const mutationId = requiredString(params, "mutationMomentId", "rollback");
     const mutation = state.moments.get(mutationId);
-    if (!mutation) throw new Error("moment not found");
+    if (
+      !mutation ||
+      mutation.wire.versionId !== version.id ||
+      mutation.wire.path !== path
+    ) {
+      throw new Error("file-not-found");
+    }
+    const superseded = [...state.moments.values()].some(
+      (candidate) =>
+        candidate.wire.versionId === version.id &&
+        candidate.wire.objectId === mutation.wire.objectId &&
+        candidate.wire.momentOrder > mutation.wire.momentOrder,
+    );
+    if (superseded) throw new Error("invalid-input");
+    const materializeEnqueued =
+      mutation.wire.operation === "write" &&
+      mutation.wire.afterContentKind === "binary" &&
+      version.id === state.activeVersionId;
     version.files.delete(path);
     const restorePath = mutation.wire.operation === "rename"
       ? mutation.beforePath ?? path
@@ -668,9 +695,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const result: JsonObject = {
       rolledBack: true,
       deduped: false,
-      materializeEnqueued: true,
-      materialized: true,
-      materializeOutcome: "applied",
+      materializeEnqueued,
+      materialized: materializeEnqueued,
+      materializeOutcome: materializeEnqueued ? "applied" : "skipped",
     };
     this.recordReplay(state, requestId, params, result);
     return result;
@@ -791,7 +818,15 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const source = this.version(state, requiredString(params, "sourceVersionId", "compare"));
     const target = this.version(state, requiredString(params, "targetVersionId", "compare"));
     const path = requiredString(params, "path", "compare");
-    return { status: this.filesEqual(source.files.get(path), target.files.get(path)) ? "unchanged" : "merged" };
+    const incoming = source.files.get(path);
+    const current = target.files.get(path);
+    const base = source.textForkBase.get(path);
+    return {
+      status:
+        this.filesEqual(incoming, current) || this.filesEqual(incoming, base)
+          ? "unchanged"
+          : "merged",
+    };
   }
 
   private merge(
@@ -839,6 +874,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const incoming = source.files.get(path);
     const current = target.files.get(path);
     const base = source.textForkBase.get(path);
+    if (
+      incoming?.contentKind === "binary" ||
+      current?.contentKind === "binary" ||
+      base?.contentKind === "binary"
+    ) {
+      throw new Error("binary-head-not-text");
+    }
     if (this.filesEqual(incoming, current)) {
       const result: JsonObject = {
         status: "unchanged",

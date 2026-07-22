@@ -225,9 +225,9 @@ describe("versioned typed loopback", () => {
     ).toEqual({
       rolledBack: true,
       deduped: false,
-      materializeEnqueued: true,
-      materialized: true,
-      materializeOutcome: "applied",
+      materializeEnqueued: false,
+      materialized: false,
+      materializeOutcome: "skipped",
     });
 
     const binaryParams: VersionedBinaryWriteParams = {
@@ -567,6 +567,282 @@ describe("versioned typed loopback", () => {
 });
 
 describe("loopback contract enforcement", () => {
+  it("skips materialization for binary writes to a non-active version", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
+    const named = decodeVersionRecord(
+      await call(engine, 2, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        name: "inactive-binary",
+        fromVersionId: "main",
+      }),
+    );
+
+    expect(
+      decodeVersionedBinaryWriteResult(
+        await call(engine, 3, VERSIONED_METHOD.binaryWrite, {
+          versionId: named.id,
+          path: "inactive.bin",
+          bytes: [1, 2, 3],
+          origin: "api",
+          momentId: "inactive-binary-write",
+        }),
+      ),
+    ).toMatchObject({
+      materializeEnqueued: false,
+      materialized: false,
+      materializeOutcome: "skipped",
+    });
+  });
+
+  it("classifies a source unchanged since its fork as unchanged when the target advances", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({ workspace: WORKSPACE, path: "compare.md", text: "fork base" });
+    const named = decodeVersionRecord(
+      await call(engine, 1, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        name: "compare-fork-base",
+        fromVersionId: "main",
+      }),
+    );
+    await call(engine, 2, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "compare.md",
+      text: "target advanced",
+      origin: "api",
+      momentId: "compare-target-advanced",
+    });
+
+    expect(
+      await call(engine, 3, VERSIONED_METHOD.versionsCompare, {
+        sourceVersionId: named.id,
+        targetVersionId: "main",
+        path: "compare.md",
+      }),
+    ).toEqual({ status: "unchanged" });
+  });
+
+  it("refuses rollback when the mutation moment belongs to another path", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "first.md",
+      text: "first",
+      origin: "api",
+      momentId: "first-path-moment",
+    });
+    await call(engine, 2, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "second.md",
+      text: "second",
+      origin: "api",
+      momentId: "second-path-moment",
+    });
+
+    await expect(
+      call(engine, 3, VERSIONED_METHOD.textRollback, {
+        versionId: "main",
+        path: "first.md",
+        mutationMomentId: "second-path-moment",
+        origin: "restore",
+      }),
+    ).rejects.toThrow("file-not-found");
+    expect(
+      decodeVersionedTextReadResult(
+        await call(engine, 4, VERSIONED_METHOD.textRead, {
+          versionId: "main",
+          path: "first.md",
+        }),
+      )?.text,
+    ).toBe("first");
+  });
+
+  it("refuses rollback when later history exists on the mutation object", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "superseded.md",
+      text: "first",
+      origin: "api",
+      momentId: "superseded-first",
+    });
+    await call(engine, 2, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "superseded.md",
+      text: "later",
+      origin: "api",
+      momentId: "superseded-later",
+    });
+
+    await expect(
+      call(engine, 3, VERSIONED_METHOD.textRollback, {
+        versionId: "main",
+        path: "superseded.md",
+        mutationMomentId: "superseded-first",
+        origin: "restore",
+      }),
+    ).rejects.toThrow("invalid-input");
+    expect(
+      decodeVersionedTextReadResult(
+        await call(engine, 4, VERSIONED_METHOD.textRead, {
+          versionId: "main",
+          path: "superseded.md",
+        }),
+      )?.text,
+    ).toBe("later");
+  });
+
+  it("reports rollback materialization only for active binary writes", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.binaryWrite, {
+      versionId: "main",
+      path: "active.bin",
+      bytes: [1],
+      origin: "api",
+      momentId: "active-binary-moment",
+    });
+    expect(
+      decodeVersionedTextRollbackResult(
+        await call(engine, 2, VERSIONED_METHOD.textRollback, {
+          versionId: "main",
+          path: "active.bin",
+          mutationMomentId: "active-binary-moment",
+          origin: "restore",
+        }),
+      ),
+    ).toMatchObject({
+      materializeEnqueued: true,
+      materialized: true,
+      materializeOutcome: "applied",
+    });
+
+    await call(engine, 3, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "active-text.md",
+      text: "text",
+      origin: "api",
+      momentId: "active-text-moment",
+    });
+    expect(
+      decodeVersionedTextRollbackResult(
+        await call(engine, 4, VERSIONED_METHOD.textRollback, {
+          versionId: "main",
+          path: "active-text.md",
+          mutationMomentId: "active-text-moment",
+          origin: "restore",
+        }),
+      ),
+    ).toMatchObject({
+      materializeEnqueued: false,
+      materialized: false,
+      materializeOutcome: "skipped",
+    });
+
+    const named = decodeVersionRecord(
+      await call(engine, 5, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        name: "inactive-rollback",
+        fromVersionId: "main",
+      }),
+    );
+    await call(engine, 6, VERSIONED_METHOD.binaryWrite, {
+      versionId: named.id,
+      path: "inactive.bin",
+      bytes: [2],
+      origin: "api",
+      momentId: "inactive-binary-moment",
+    });
+    expect(
+      decodeVersionedTextRollbackResult(
+        await call(engine, 7, VERSIONED_METHOD.textRollback, {
+          versionId: named.id,
+          path: "inactive.bin",
+          mutationMomentId: "inactive-binary-moment",
+          origin: "restore",
+        }),
+      ),
+    ).toMatchObject({
+      materializeEnqueued: false,
+      materialized: false,
+      materializeOutcome: "skipped",
+    });
+  });
+
+  it("refuses text merges when any comparison head is binary", async () => {
+    for (const binarySide of ["source", "target", "fork-base"] as const) {
+      const engine = new VersionedLoopbackEngine();
+      if (binarySide === "fork-base") {
+        engine.seedBinaryFile({ workspace: WORKSPACE, path: "merge.bin", bytes: [1] });
+      } else {
+        engine.seedTextFile({ workspace: WORKSPACE, path: "merge.bin", text: "base" });
+      }
+      const named = decodeVersionRecord(
+        await call(engine, 1, VERSIONED_METHOD.versionsCreateNamed, {
+          workspaceId: WORKSPACE,
+          name: `binary-${binarySide}`,
+          fromVersionId: "main",
+        }),
+      );
+
+      if (binarySide === "source") {
+        engine.seedBinaryFile({
+          workspace: WORKSPACE,
+          versionId: named.id,
+          path: "merge.bin",
+          bytes: [2],
+        });
+      } else if (binarySide === "target") {
+        engine.seedBinaryFile({ workspace: WORKSPACE, path: "merge.bin", bytes: [2] });
+      } else {
+        await call(engine, 2, VERSIONED_METHOD.textWrite, {
+          versionId: "main",
+          path: "merge.bin",
+          text: "target text",
+          origin: "api",
+        });
+        await call(engine, 3, VERSIONED_METHOD.textWrite, {
+          versionId: named.id,
+          path: "merge.bin",
+          text: "source text",
+          origin: "api",
+        });
+      }
+
+      await expect(
+        call(engine, 4, VERSIONED_METHOD.versionsMerge, {
+          sourceVersionId: named.id,
+          targetVersionId: "main",
+          path: "merge.bin",
+          origin: "api",
+          requestId: `binary-${binarySide}-merge`,
+        }),
+      ).rejects.toThrow("binary-head-not-text");
+    }
+  });
+
+  it("rejects malformed base64 binary writes", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await expect(
+      call(engine, 1, VERSIONED_METHOD.binaryWrite, {
+        versionId: "main",
+        path: "malformed.bin",
+        bytesBase64: "AA=A",
+        origin: "api",
+        momentId: "malformed-base64-moment",
+      }),
+    ).rejects.toThrow("invalid-input");
+    expect(
+      decodeVersionedBinaryReadResult(
+        await call(engine, 2, VERSIONED_METHOD.binaryRead, {
+          versionId: "main",
+          path: "malformed.bin",
+        }),
+      ),
+    ).toBeNull();
+  });
+
   it("returns the existing head moment for binary content-equality dedup", async () => {
     const engine = new VersionedLoopbackEngine();
     const first = decodeVersionedBinaryWriteResult(
