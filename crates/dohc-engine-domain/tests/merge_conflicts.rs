@@ -1439,6 +1439,80 @@ fn merge_refuses_to_clobber_a_binary_head_at_the_target() {
     assert_eq!(bin.as_deref(), Some(bin_sha.as_str()));
 }
 
+#[test]
+fn exact_merge_retry_reconstructs_recorded_outcome_before_binary_head_comparison() {
+    let (_scratch, mut store) = open();
+    let mut versions = VersionedTextStore::new(&mut store);
+    versions
+        .write_text(
+            &write("main", "retry.md", "base", "retry-base", "retry-object"),
+            &NO_FAULTS,
+        )
+        .expect("base");
+    fork(&mut versions);
+    versions
+        .write_text(
+            &write("feat", "retry.md", "incoming", "retry-incoming", "ignored"),
+            &NO_FAULTS,
+        )
+        .expect("incoming");
+
+    let mut input = merge_input(
+        "retry.md",
+        "retry-merge",
+        "retry-conflict",
+        "retry-merge-object",
+    );
+    input.request_id = Some("exact-merge-retry".to_owned());
+    let first = versions
+        .merge_text_file_from_version(&input, &NO_FAULTS)
+        .expect("first merge");
+    let (first_comparison, first_moment_id) = match first {
+        MergeTextFileResult::Write { comparison, write } => {
+            assert!(!write.deduped);
+            (comparison, write.moment.moment_id)
+        }
+        other => panic!("expected merged write, got {other:?}"),
+    };
+    drop(versions);
+
+    let binary_sha = write_binary(
+        &mut store,
+        "main",
+        "retry.md",
+        b"\0later binary head\xff",
+        "ignored-existing-object",
+        "retry-binary",
+        Preimage::Present(text_blob_sha256("incoming")),
+    );
+
+    // MUTATION: reconstruct by re-running the live comparison before consulting
+    // the recorded comparison -> this exact retry fails binary-head-not-text.
+    let replay = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version(&input, &NO_FAULTS)
+        .expect("exact retry returns the recorded merge");
+    match replay {
+        MergeTextFileResult::Write { comparison, write } => {
+            assert_eq!(comparison, first_comparison);
+            assert_eq!(write.moment.moment_id, first_moment_id);
+            assert!(write.deduped);
+        }
+        other => panic!("expected replayed merged write, got {other:?}"),
+    }
+
+    let live_binary_sha: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT binary_sha256 FROM snapshots WHERE workspace_id = ?1 \
+                 AND version_id = 'main' AND path = 'retry.md'",
+                [WS],
+                |row| row.get(0),
+            )
+        })
+        .expect("binary head survives replay");
+    assert_eq!(live_binary_sha, binary_sha);
+}
+
 /// S2 (BINHEAD): the exact-head gate must not defer FOREVER on a legacy binary
 /// side that carries no head identity. A recorded side built via
 /// `ConflictFileState::binary()` (or a v9-era row) has NULL object/latest-moment,

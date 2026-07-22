@@ -27,7 +27,7 @@ pub enum MarkdownMergeResult {
     Conflict,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ComparisonStatus {
     Same,
     IncomingChanged,
@@ -35,7 +35,7 @@ pub enum ComparisonStatus {
     Diverged,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionedTextComparison {
     pub workspace_id: String,
     pub path: String,
@@ -102,6 +102,8 @@ pub enum MergeTextFileResult {
 struct MergeLedgerRecord {
     payload_hash: String,
     outcome: MergeLedgerOutcome,
+    #[serde(default)]
+    comparison: Option<VersionedTextComparison>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -291,7 +293,7 @@ impl VersionedTextStore<'_> {
                 if recorded.payload_hash != payload_hash {
                     return Err(DomainError::IdempotencyKeyReuseMismatch);
                 }
-                return reconstruct_merge(tx, input, &recorded.outcome);
+                return reconstruct_merge(tx, input, &recorded);
             }
             let compare_input = CompareTextFileVersions {
                 workspace_id: input.workspace_id.clone(),
@@ -595,9 +597,16 @@ where
         MergeTextFileResult::Delete { delete, .. } => delete.moment.moment_order,
         MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => 0,
     };
+    let comparison = match &result {
+        MergeTextFileResult::Write { comparison, .. }
+        | MergeTextFileResult::Delete { comparison, .. }
+        | MergeTextFileResult::Unchanged { comparison, .. }
+        | MergeTextFileResult::Conflict { comparison, .. } => comparison.clone(),
+    };
     let ledger = MergeLedgerRecord {
         payload_hash: payload_hash.to_owned(),
         outcome: merge_ledger_outcome(&result),
+        comparison: Some(comparison),
     };
     let ledger_json = serde_json::to_string(&ledger).map_err(|_| DomainError::StateCorrupt {
         reason: "merge ledger outcome could not be encoded",
@@ -615,17 +624,26 @@ where
 fn reconstruct_merge(
     conn: &Connection,
     input: &MergeTextFileFromVersion,
-    recorded: &MergeLedgerOutcome,
+    recorded: &MergeLedgerRecord,
 ) -> Result<MergeTextFileResult, DomainError> {
-    let compare_input = CompareTextFileVersions {
-        workspace_id: input.workspace_id.clone(),
-        target_version_id: input.target_version_id.clone(),
-        source_version_id: input.source_version_id.clone(),
-        path: input.path.clone(),
+    // Exact retries reconstruct the comparison that was part of the committed
+    // result. Re-reading live heads here would let a later binary replacement
+    // turn an acknowledged merge into `binary-head-not-text`. The fallback is
+    // only for ledgers written before comparison snapshots were recorded.
+    let comparison = match &recorded.comparison {
+        Some(comparison) => comparison.clone(),
+        None => compare_text_file_versions_in_db(
+            conn,
+            &CompareTextFileVersions {
+                workspace_id: input.workspace_id.clone(),
+                target_version_id: input.target_version_id.clone(),
+                source_version_id: input.source_version_id.clone(),
+                path: input.path.clone(),
+            },
+        )?,
     };
-    let comparison = compare_text_file_versions_in_db(conn, &compare_input)?;
     if let MergeLedgerOutcome::Write { moment_id } | MergeLedgerOutcome::Delete { moment_id } =
-        recorded
+        &recorded.outcome
     {
         let moment =
             get_moment(conn, &input.workspace_id, moment_id)?.ok_or(DomainError::StateCorrupt {
@@ -636,7 +654,7 @@ fn reconstruct_merge(
                 reason: "deduped merge moment does not match its request",
             });
         }
-        return match (recorded, moment.operation) {
+        return match (&recorded.outcome, moment.operation) {
             (MergeLedgerOutcome::Write { .. }, crate::records::MomentOp::Write) => {
                 Ok(MergeTextFileResult::Write {
                     comparison,
@@ -654,7 +672,7 @@ fn reconstruct_merge(
             }),
         };
     }
-    match recorded {
+    match &recorded.outcome {
         MergeLedgerOutcome::Unchanged { reason } => Ok(MergeTextFileResult::Unchanged {
             reason: match reason {
                 MergeLedgerUnchangedReason::AlreadySame => MergeUnchangedReason::AlreadySame,

@@ -93,6 +93,15 @@ export interface SeedVersionedBinaryInput {
   origin?: VersionedOrigin;
 }
 
+export interface SeedSecretInput {
+  workspace: string;
+  versionId?: string;
+  path: string;
+  text: string;
+  momentId?: string;
+  origin?: VersionedOrigin;
+}
+
 function asObject(value: JsonValue, label: string): JsonObject {
   if (value === null || Array.isArray(value) || typeof value !== "object") {
     throw new Error(`${label} must be an object.`);
@@ -146,6 +155,25 @@ function copyFile(file: LoopbackFile): LoopbackFile {
 
 function utf8Length(value: string): number {
   return Buffer.byteLength(value, "utf8");
+}
+
+/**
+ * Loopback subset of dohc-engine-files' path floor. It mirrors the common
+ * case-insensitive `.env` segment, `name.env`, and `.env.*` basename rules;
+ * percent decoding, reserved aliases, and the full disk-sink policy stay in
+ * the daemon.
+ */
+function isSecretClassifiedPath(path: string): boolean {
+  const segments = path
+    .split(/[\\/]/)
+    .filter(Boolean)
+    .map((segment) => segment.toLowerCase());
+  const basename = segments.at(-1) ?? "";
+  return (
+    segments.includes(".env") ||
+    basename.endsWith(".env") ||
+    basename.startsWith(".env.")
+  );
 }
 
 function sha256(value: string | number[]): string {
@@ -247,6 +275,28 @@ export class VersionedLoopbackEngine implements EngineTransport {
     state.blobs.set(binarySha, [...input.bytes]);
   }
 
+  seedSecretFile(input: SeedSecretInput): void {
+    if (!isSecretClassifiedPath(input.path)) throw new Error("not-secret-path");
+    const state = this.workspace(input.workspace);
+    const versionId = input.versionId ?? "main";
+    const version = versionId === "main"
+      ? this.ensureMain(state, input.workspace)
+      : this.version(state, versionId);
+    const momentId = input.momentId ?? `secret-moment-${this.nextMomentId++}`;
+    this.assertFreshSecretMoment(state, momentId);
+    const before = version.secrets.get(input.path);
+    version.secrets.set(input.path, input.text);
+    const wire = this.makeSecretMoment(
+      input.workspace,
+      version.id,
+      input.path,
+      momentId,
+      "write",
+      input.origin ?? "local-file",
+    );
+    state.secretMoments.set(momentId, { wire, before, after: input.text });
+  }
+
   secretValue(workspace: string, versionId: string, path: string): string | undefined {
     return this.version(this.workspace(workspace), versionId).secrets.get(path);
   }
@@ -285,6 +335,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.binaryReadBlob(state, params);
       case VERSIONED_METHOD.versionsCreateNamed:
         return this.createNamed(state, workspace, params, request);
+      case VERSIONED_METHOD.versionsList:
+        return this.versionsList(state, params);
       case VERSIONED_METHOD.versionsSetActive:
         return this.setActive(state, params);
       case VERSIONED_METHOD.versionsEnsureMain:
@@ -301,6 +353,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
         return this.compareFiles(state, params);
       case VERSIONED_METHOD.secretsWrite:
         return this.secretWrite(state, workspace, params);
+      case VERSIONED_METHOD.secretsList:
+        return this.secretList(state, params);
+      case VERSIONED_METHOD.secretsMaterialize:
+        return this.secretMaterialize(state, params);
       case VERSIONED_METHOD.secretsDelete:
         return this.secretDelete(state, workspace, params);
       case VERSIONED_METHOD.secretsFork:
@@ -333,12 +389,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
     params: JsonObject,
     request: Request,
   ): JsonValue {
+    const path = requiredString(params, "path", "write");
+    if (isSecretClassifiedPath(path)) throw new Error("invalid-path");
     const version = this.mutationVersion(
       state,
       workspace,
       requiredString(params, "versionId", "write"),
     );
-    const path = requiredString(params, "path", "write");
     const text = requiredString(params, "text", "write");
     if (utf8Length(text) > INBAND_LIMIT_BYTES) throw new Error("content-exceeds-inband-cap");
     const origin = requiredOrigin(params);
@@ -417,12 +474,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
     params: JsonObject,
     request: Request,
   ): JsonValue {
+    const path = requiredString(params, "path", "binary write");
+    if (isSecretClassifiedPath(path)) throw new Error("invalid-path");
     const version = this.mutationVersion(
       state,
       workspace,
       requiredString(params, "versionId", "binary write"),
     );
-    const path = requiredString(params, "path", "binary write");
     const origin = requiredOrigin(params);
     const rawBytes = params.bytes;
     const rawBase64 = params.bytesBase64;
@@ -563,6 +621,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const replay = this.replay(state, requestId, params, fingerprint);
     if (replay) return replay;
     const before = this.file(version, fromPath);
+    const occupied = version.files.get(toPath);
+    if (occupied && occupied.objectId !== before.objectId) {
+      throw new Error("target-path-exists");
+    }
     this.assertFreshMoment(state, momentId);
     const now = optionalNumber(params, "nowMs") ?? this.clock++;
     const after: LoopbackFile = {
@@ -669,6 +731,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
         candidate.wire.momentOrder > mutation.wire.momentOrder,
     );
     if (superseded) throw new Error("invalid-input");
+    const forkPointDependent = [...state.versions.values()].some(
+      (candidate) =>
+        candidate.kind === "named" &&
+        candidate.forkVersionId === version.id &&
+        candidate.forkMomentId === mutationId,
+    );
+    if (forkPointDependent) throw new Error("invalid-input");
     const materializeEnqueued =
       mutation.wire.operation === "write" &&
       mutation.wire.afterContentKind === "binary" &&
@@ -780,19 +849,23 @@ export class VersionedLoopbackEngine implements EngineTransport {
     request: Request,
   ): JsonValue {
     const from = this.version(state, requiredString(params, "fromVersionId", "createNamed"));
+    const name = requiredString(params, "name", "createNamed");
     const requestId = request.idempotencyKey ?? undefined;
     const fingerprint = JSON.stringify({
-      name: requiredString(params, "name", "createNamed"),
+      name,
       fromVersionId: from.id,
     });
     const replay = this.replay(state, requestId, params, fingerprint, false);
     if (replay) return replay;
+    if ([...state.versions.values()].some((version) => version.name === name)) {
+      throw new Error("version-name-conflict");
+    }
     const id = `version-${this.nextVersionId++}`;
     const version: LoopbackVersion = {
       id,
       workspaceId: workspace,
       kind: "named",
-      name: requiredString(params, "name", "createNamed"),
+      name,
       createdAtMs: this.clock++,
       forkVersionId: from.id,
       forkMomentId: this.latestMomentId(from),
@@ -805,6 +878,31 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const result = this.versionJson(version);
     this.recordReplay(state, requestId, params, result, fingerprint);
     return result;
+  }
+
+  private versionsList(state: WorkspaceState, params: JsonObject): JsonValue {
+    const afterVersionId = optionalString(params, "afterVersionId");
+    const versions = [...state.versions.values()].sort(
+      (left, right) =>
+        left.createdAtMs - right.createdAtMs ||
+        left.name.localeCompare(right.name) ||
+        left.id.localeCompare(right.id),
+    );
+    const afterIndex = afterVersionId === undefined
+      ? -1
+      : versions.findIndex((version) => version.id === afterVersionId);
+    const page = afterIndex >= 0 ? versions.slice(afterIndex + 1) : versions;
+    return {
+      versions: page.map((version) => ({
+        versionId: version.id,
+        kind: version.kind,
+        name: version.name,
+        createdAtMs: version.createdAtMs,
+        forkVersionId: version.forkVersionId ?? null,
+        forkMomentId: version.forkMomentId ?? null,
+      })),
+      nextAfterVersionId: null,
+    };
   }
 
   private setActive(state: WorkspaceState, params: JsonObject): JsonValue {
@@ -1003,12 +1101,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private secretWrite(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
+    const path = requiredString(params, "path", "secret write");
+    if (!isSecretClassifiedPath(path)) throw new Error("not-secret-path");
     const version = this.mutationVersion(
       state,
       workspace,
       requiredString(params, "versionId", "secret write"),
     );
-    const path = requiredString(params, "path", "secret write");
     const text = requiredString(params, "text", "secret write");
     if (utf8Length(text) > INBAND_LIMIT_BYTES) throw new Error("content-exceeds-inband-cap");
     const origin = requiredOrigin(params);
@@ -1020,6 +1119,44 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const wire = this.makeSecretMoment(workspace, version.id, path, momentId, "write", origin);
     state.secretMoments.set(momentId, { wire, before, after: text });
     return { changed: true, moment: wire };
+  }
+
+  private secretList(state: WorkspaceState, params: JsonObject): JsonValue {
+    const versionId = requiredString(params, "versionId", "secret list");
+    const version = state.versions.get(versionId);
+    if (!version) throw new Error("invalid-version");
+    const afterPath = optionalString(params, "afterPath");
+    const limit = Math.min(500, Math.max(1, optionalNumber(params, "limit") ?? 200));
+    const entries = [...version.secrets.entries()]
+      .filter(([path]) => afterPath === undefined || path > afterPath)
+      .sort(([left], [right]) => left.localeCompare(right));
+    const page = entries.slice(0, limit);
+    return {
+      secrets: page.map(([path, text]) => {
+        const moment = this.latestSecretMoment(state, version.id, path, text);
+        return {
+          path,
+          byteLength: utf8Length(text),
+          updatedAtMs: moment.recordedAtMs,
+          latestMomentId: moment.id,
+        };
+      }),
+      nextAfterPath: entries.length > page.length ? page.at(-1)?.[0] ?? null : null,
+    };
+  }
+
+  private secretMaterialize(state: WorkspaceState, params: JsonObject): JsonValue {
+    const path = requiredString(params, "path", "secret materialize");
+    if (!isSecretClassifiedPath(path)) throw new Error("not-secret-path");
+    const versionId = requiredString(params, "versionId", "secret materialize");
+    const version = state.versions.get(versionId);
+    if (!version) throw new Error("invalid-version");
+    const text = version.secrets.get(path);
+    if (text === undefined) return null;
+    const byteLength = utf8Length(text);
+    return byteLength <= INBAND_LIMIT_BYTES
+      ? { text }
+      : { text: null, byteLength, inbandLimitBytes: INBAND_LIMIT_BYTES };
   }
 
   private secretDelete(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
@@ -1553,6 +1690,21 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   private latestMomentId(version: LoopbackVersion): string | undefined {
     return [...version.files.values()].sort((left, right) => right.updatedAtMs - left.updatedAtMs)[0]?.latestMomentId;
+  }
+
+  private latestSecretMoment(
+    state: WorkspaceState,
+    versionId: string,
+    path: string,
+    text: string,
+  ): SecretMomentRecord {
+    const moments = [...state.secretMoments.values()]
+      .filter((moment) => moment.wire.path === path && moment.after === text)
+      .sort((left, right) => right.wire.momentOrder - left.wire.momentOrder);
+    const exact = moments.find((moment) => moment.wire.versionId === versionId);
+    const latest = exact ?? moments[0];
+    if (!latest) throw new Error("state-corrupt");
+    return latest.wire;
   }
 
   private filesEqual(left: LoopbackFile | undefined, right: LoopbackFile | undefined): boolean {

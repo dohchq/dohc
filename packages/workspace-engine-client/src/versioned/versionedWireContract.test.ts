@@ -11,6 +11,8 @@ import {
   decodeSecretApplyResult,
   decodeSecretCompareResult,
   decodeSecretDeleteResult,
+  decodeSecretsListResult,
+  decodeSecretsMaterializeResult,
   decodeSecretRestoreResult,
   decodeSecretWriteResult,
   decodeSecretsMomentsGetResult,
@@ -27,6 +29,7 @@ import {
   decodeVersionsActiveResult,
   decodeVersionsCompareFilesResult,
   decodeVersionsMergeResult,
+  decodeVersionsListResult,
   type MomentsGetParams,
   type MomentsListParams,
   type SearchEnsureIndexParams,
@@ -36,6 +39,8 @@ import {
   type SecretsForkParams,
   type SecretsMomentsGetParams,
   type SecretsMomentsListParams,
+  type SecretsListParams,
+  type SecretsMaterializeParams,
   type SecretsRestoreParams,
   type SecretsWriteParams,
   type VersionedBinaryReadBlobParams,
@@ -51,6 +56,7 @@ import {
   type VersionsCompareParams,
   type VersionsCreateNamedParams,
   type VersionsMergeParams,
+  type VersionsListParams,
   type VersionsSetActiveParams,
   type WorkspaceOnlyParams,
 } from "./versionedWireContract";
@@ -387,6 +393,139 @@ describe("versioned typed loopback", () => {
       materialized: false,
       materializeOutcome: "skipped",
     });
+  });
+
+  it("round-trips versions.list, secrets.list, and secrets.materialize including over-cap metadata", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({
+      workspace: WORKSPACE,
+      path: "seed.md",
+      text: "seed",
+      momentId: "list-seed",
+    });
+    const named = decodeVersionRecord(
+      await call(
+        engine,
+        1,
+        VERSIONED_METHOD.versionsCreateNamed,
+        {
+          workspaceId: WORKSPACE,
+          name: "listed feature",
+          fromVersionId: "main",
+        },
+      ),
+    );
+
+    const versionsParams: VersionsListParams = {};
+    const versions = decodeVersionsListResult(
+      await call(engine, 2, VERSIONED_METHOD.versionsList, versionsParams),
+    );
+    expect(versions).toEqual({
+      versions: [
+        {
+          versionId: "main",
+          kind: "main",
+          name: "main",
+          createdAtMs: expect.any(Number),
+          forkVersionId: null,
+          forkMomentId: null,
+        },
+        {
+          versionId: named.id,
+          kind: "named",
+          name: "listed feature",
+          createdAtMs: expect.any(Number),
+          forkVersionId: "main",
+          forkMomentId: "list-seed",
+        },
+      ],
+      nextAfterVersionId: null,
+    });
+    expect(
+      decodeVersionsListResult(
+        await call(engine, 3, VERSIONED_METHOD.versionsList, {
+          afterVersionId: "main",
+        }),
+      ).versions.map((version) => version.versionId),
+    ).toEqual([named.id]);
+
+    await call(engine, 4, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: ".env",
+      text: "TOKEN=small",
+      origin: "api",
+      momentId: "small-secret",
+    });
+    const overCapText = "x".repeat(48 * 1024 + 1);
+    engine.seedSecretFile({
+      workspace: WORKSPACE,
+      path: ".env.large",
+      text: overCapText,
+      momentId: "large-secret",
+    });
+
+    const firstListParams: SecretsListParams = { versionId: "main", limit: 1 };
+    const firstSecrets = decodeSecretsListResult(
+      await call(engine, 5, VERSIONED_METHOD.secretsList, firstListParams),
+    );
+    expect(firstSecrets.secrets).toMatchObject([
+      { path: ".env", byteLength: 11, latestMomentId: "small-secret" },
+    ]);
+    expect(firstSecrets.nextAfterPath).toBe(".env");
+    const secondSecrets = decodeSecretsListResult(
+      await call(engine, 6, VERSIONED_METHOD.secretsList, {
+        versionId: "main",
+        afterPath: firstSecrets.nextAfterPath ?? undefined,
+      }),
+    );
+    expect(secondSecrets).toMatchObject({
+      secrets: [
+        {
+          path: ".env.large",
+          byteLength: 48 * 1024 + 1,
+          latestMomentId: "large-secret",
+        },
+      ],
+      nextAfterPath: null,
+    });
+
+    const smallMaterializeParams: SecretsMaterializeParams = {
+      versionId: "main",
+      path: ".env",
+    };
+    expect(
+      decodeSecretsMaterializeResult(
+        await call(
+          engine,
+          7,
+          VERSIONED_METHOD.secretsMaterialize,
+          smallMaterializeParams,
+        ),
+      ),
+    ).toEqual({ text: "TOKEN=small" });
+    expect(
+      decodeSecretsMaterializeResult(
+        await call(engine, 8, VERSIONED_METHOD.secretsMaterialize, {
+          versionId: "main",
+          path: ".env.large",
+        }),
+      ),
+    ).toEqual({
+      text: null,
+      byteLength: 48 * 1024 + 1,
+      inbandLimitBytes: 48 * 1024,
+    });
+    expect(
+      decodeSecretsMaterializeResult(
+        await call(engine, 9, VERSIONED_METHOD.secretsMaterialize, {
+          versionId: "main",
+          path: ".env.absent",
+        }),
+      ),
+    ).toBeNull();
+    // MUTATION: omit any of the three shipped method registrations, decoders,
+    // loopback handlers, or the over-cap discriminator -> this round trip fails.
   });
 
   it("round-trips opaque secret write/fork/compare/apply/restore/delete and protected moments", async () => {
@@ -1800,6 +1939,136 @@ describe("loopback contract enforcement", () => {
     expect(first.entries.map((entry) => entry.path)).not.toContain(
       second.entries[0]?.path,
     );
+  });
+
+  it("refuses secret-classified plaintext writes and ordinary secret writes", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({ workspace: WORKSPACE, path: "seed.md", text: "seed" });
+
+    await expect(
+      call(engine, 1, VERSIONED_METHOD.textWrite, {
+        versionId: "main",
+        path: ".env",
+        text: "plaintext leak",
+        origin: "api",
+      }),
+    ).rejects.toThrow("invalid-path");
+    await expect(
+      call(engine, 2, VERSIONED_METHOD.binaryWrite, {
+        versionId: "main",
+        path: "config/.env",
+        bytes: [0, 1],
+        origin: "api",
+      }),
+    ).rejects.toThrow("invalid-path");
+    await expect(
+      call(engine, 3, VERSIONED_METHOD.secretsWrite, {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: "notes.md",
+        text: "ordinary content",
+        origin: "api",
+        momentId: "misrouted-secret",
+      }),
+    ).rejects.toThrow("not-secret-path");
+    // MUTATION: remove either direction of the loopback classification floor ->
+    // a secret leaks into plaintext state or ordinary content disappears into secrets.
+  });
+
+  it("refuses rename onto an occupied destination", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({
+      workspace: WORKSPACE,
+      path: "source.md",
+      text: "source",
+      objectId: "source-object",
+    });
+    engine.seedTextFile({
+      workspace: WORKSPACE,
+      path: "occupied.md",
+      text: "occupied",
+      objectId: "occupied-object",
+    });
+
+    await expect(
+      call(engine, 1, VERSIONED_METHOD.textRename, {
+        versionId: "main",
+        fromPath: "source.md",
+        toPath: "occupied.md",
+        origin: "api",
+      }),
+    ).rejects.toThrow("target-path-exists");
+    expect(
+      decodeVersionedTextReadResult(
+        await call(engine, 2, VERSIONED_METHOD.textRead, {
+          versionId: "main",
+          path: "source.md",
+        }),
+      )?.text,
+    ).toBe("source");
+    expect(
+      decodeVersionedTextReadResult(
+        await call(engine, 3, VERSIONED_METHOD.textRead, {
+          versionId: "main",
+          path: "occupied.md",
+        }),
+      )?.text,
+    ).toBe("occupied");
+    // MUTATION: restore Map.set overwrite semantics -> the refusal and source preservation fail.
+  });
+
+  it("refuses rollback of a named version fork point", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({
+      workspace: WORKSPACE,
+      path: "forked.md",
+      text: "fork base",
+      momentId: "fork-point-moment",
+    });
+    decodeVersionRecord(
+      await call(engine, 1, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        name: "fork dependency",
+        fromVersionId: "main",
+      }),
+    );
+
+    await expect(
+      call(engine, 2, VERSIONED_METHOD.textRollback, {
+        versionId: "main",
+        path: "forked.md",
+        mutationMomentId: "fork-point-moment",
+        origin: "api",
+      }),
+    ).rejects.toThrow("invalid-input");
+    expect(
+      decodeVersionedTextReadResult(
+        await call(engine, 3, VERSIONED_METHOD.textRead, {
+          versionId: "main",
+          path: "forked.md",
+        }),
+      )?.text,
+    ).toBe("fork base");
+    // MUTATION: skip the forkPoint dependency check -> rollback deletes history
+    // still referenced by the named version.
+  });
+
+  it("refuses duplicate named-version names", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({ workspace: WORKSPACE, path: "seed.md", text: "seed" });
+    await call(engine, 1, VERSIONED_METHOD.versionsCreateNamed, {
+      workspaceId: WORKSPACE,
+      name: "duplicate name",
+      fromVersionId: "main",
+    });
+    await expect(
+      call(engine, 2, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        name: "duplicate name",
+        fromVersionId: "main",
+      }),
+    ).rejects.toThrow("version-name-conflict");
+    // MUTATION: remove the name lookup before minting the id -> duplicate succeeds.
   });
 });
 

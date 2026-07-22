@@ -78,7 +78,7 @@ pub struct VersionRecord {
 }
 
 /// The materialized current state of a text object within a version.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TextSnapshot {
     pub workspace_id: String,
     pub version_id: String,

@@ -11,6 +11,7 @@ export const VERSIONED_METHOD = {
   binaryRead: "versionedBinary.read",
   binaryReadBlob: "versionedBinary.readBlob",
   versionsCreateNamed: "versions.createNamed",
+  versionsList: "versions.list",
   versionsSetActive: "versions.setActive",
   versionsEnsureMain: "versions.ensureMain",
   versionsActive: "versions.active",
@@ -18,6 +19,8 @@ export const VERSIONED_METHOD = {
   versionsCompare: "versionedText.compare",
   versionsCompareFiles: "versions.compareFiles",
   secretsWrite: "secrets.write",
+  secretsList: "secrets.list",
+  secretsMaterialize: "secrets.materialize",
   secretsDelete: "secrets.delete",
   secretsFork: "secrets.fork",
   secretsCompare: "secrets.compare",
@@ -121,6 +124,10 @@ export type VersionsCreateNamedParams = JsonObject & {
   fromVersionId: string;
 };
 
+export type VersionsListParams = JsonObject & {
+  afterVersionId?: string;
+};
+
 export type VersionsSetActiveParams = JsonObject & {
   workspaceId?: string;
   versionId: string;
@@ -156,6 +163,17 @@ export type SecretsWriteParams = JsonObject & {
   text: string;
   origin: VersionedOrigin;
   momentId: string;
+};
+
+export type SecretsListParams = JsonObject & {
+  versionId: string;
+  afterPath?: string;
+  limit?: number;
+};
+
+export type SecretsMaterializeParams = JsonObject & {
+  versionId: string;
+  path: string;
 };
 
 export type SecretsDeleteParams = JsonObject & {
@@ -404,6 +422,18 @@ export type VersionRecord = JsonObject & {
 };
 
 export type VersionsCreateNamedResult = VersionRecord;
+export type VersionsListEntry = JsonObject & {
+  versionId: string;
+  kind: VersionKind;
+  name: string;
+  createdAtMs: number;
+  forkVersionId: string | null;
+  forkMomentId: string | null;
+};
+export type VersionsListResult = JsonObject & {
+  versions: VersionsListEntry[];
+  nextAfterVersionId: string | null;
+};
 export type VersionsSetActiveResult = VersionRecord;
 export type VersionsEnsureMainResult = VersionRecord;
 export type VersionsActiveResult = VersionRecord | null;
@@ -471,6 +501,24 @@ export type SecretWriteResult = JsonObject & {
   changed: boolean;
   moment: SecretMomentRecord | null;
 };
+export type SecretListEntry = JsonObject & {
+  path: string;
+  byteLength: number;
+  updatedAtMs: number;
+  latestMomentId: string;
+};
+export type SecretsListResult = JsonObject & {
+  secrets: SecretListEntry[];
+  nextAfterPath: string | null;
+};
+export type SecretsMaterializeResult =
+  | null
+  | (JsonObject & { text: string })
+  | (JsonObject & {
+      text: null;
+      byteLength: number;
+      inbandLimitBytes: number;
+    });
 export type SecretDeleteResult = JsonObject & {
   moment: SecretMomentRecord | null;
 };
@@ -871,6 +919,35 @@ export function decodeVersionsActiveResult(value: JsonValue): VersionsActiveResu
   return value === null ? null : decodeVersionRecord(value);
 }
 
+export function decodeVersionsListResult(value: JsonValue): VersionsListResult {
+  const label = "versions.list result";
+  const object = objectValue(value, label);
+  const versions = arrayValue(object, "versions", label).map(
+    (entry, index): VersionsListEntry => {
+      const entryLabel = `${label}.versions[${index}]`;
+      const row = objectValue(entry, entryLabel);
+      const kind = row.kind;
+      if (kind !== "main" && kind !== "named") {
+        throw new VersionedProtocolShapeError(
+          `${entryLabel}.kind must be main or named.`,
+        );
+      }
+      return {
+        versionId: stringValue(row, "versionId", entryLabel),
+        kind,
+        name: stringValue(row, "name", entryLabel),
+        createdAtMs: numberValue(row, "createdAtMs", entryLabel),
+        forkVersionId: nullableStringValue(row, "forkVersionId", entryLabel),
+        forkMomentId: nullableStringValue(row, "forkMomentId", entryLabel),
+      };
+    },
+  );
+  return {
+    versions,
+    nextAfterVersionId: nullableStringValue(object, "nextAfterVersionId", label),
+  };
+}
+
 export function decodeVersionsMergeResult(value: JsonValue): VersionsMergeResult {
   const label = "versionedText.merge result";
   const object = objectValue(value, label);
@@ -983,6 +1060,46 @@ export function decodeSecretWriteResult(value: JsonValue): SecretWriteResult {
       ? null
       : secretMomentValue(object.moment ?? null, `${label}.moment`),
   };
+}
+
+export function decodeSecretsListResult(value: JsonValue): SecretsListResult {
+  const label = "secrets.list result";
+  const object = objectValue(value, label);
+  return {
+    secrets: arrayValue(object, "secrets", label).map((entry, index) => {
+      const entryLabel = `${label}.secrets[${index}]`;
+      const row = objectValue(entry, entryLabel);
+      return {
+        path: stringValue(row, "path", entryLabel),
+        byteLength: numberValue(row, "byteLength", entryLabel),
+        updatedAtMs: numberValue(row, "updatedAtMs", entryLabel),
+        latestMomentId: stringValue(row, "latestMomentId", entryLabel),
+      };
+    }),
+    nextAfterPath: nullableStringValue(object, "nextAfterPath", label),
+  };
+}
+
+export function decodeSecretsMaterializeResult(
+  value: JsonValue,
+): SecretsMaterializeResult {
+  if (value === null) return null;
+  const label = "secrets.materialize result";
+  const object = objectValue(value, label);
+  const text = nullableStringValue(object, "text", label);
+  if (text === null) {
+    return {
+      text: null,
+      byteLength: numberValue(object, "byteLength", label),
+      inbandLimitBytes: numberValue(object, "inbandLimitBytes", label),
+    };
+  }
+  if (object.byteLength !== undefined || object.inbandLimitBytes !== undefined) {
+    throw new VersionedProtocolShapeError(
+      `${label} in-band text must not carry over-cap metadata.`,
+    );
+  }
+  return { text };
 }
 
 export function decodeSecretDeleteResult(value: JsonValue): SecretDeleteResult {
