@@ -466,8 +466,8 @@ describe("YdocLiveAdapter", () => {
     const resyncErrors: YdocResyncNeededError[] = [];
     session.onResyncNeeded((error) => resyncErrors.push(error));
 
-    engine.emitRemoteUpdate(session.sessionId, first);
-    engine.emitRemoteUpdate(session.sessionId, second, { seq: 3 });
+    engine.applyRemoteUpdate(session.sessionId, first);
+    engine.applyRemoteUpdate(session.sessionId, second, { seq: 3 });
 
     expect(resyncErrors).toHaveLength(1);
     expect(resyncErrors[0]?.reason).toBe("event-sequence-gap");
@@ -475,6 +475,56 @@ describe("YdocLiveAdapter", () => {
     expect(() =>
       session.applyLocalTextEdit({ root: "plainText", index: 1, insert: "C" }),
     ).toThrow(YdocResyncNeededError);
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(engine.requests.map((request) => request.method)).toContain(
+      YDOC_METHOD.resync,
+    );
+    expect(session.doc.getText("plainText").toString()).toBe("AB");
+    await expect(
+      session.applyLocalTextEdit({ root: "plainText", index: 2, insert: "C" }),
+    ).resolves.toBeDefined();
+
+    await session.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("resyncs again when a remote event arrives during the resync window", async () => {
+    const engine = seedPlaintextEngine();
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: PATH,
+      contentKind: "plaintext",
+    });
+    const source = new Y.Doc();
+    Y.applyUpdate(source, session.initialUpdate);
+    const text = source.getText("plainText");
+    const beforeFirst = Y.encodeStateVector(source);
+    text.insert(0, "A");
+    const first = Y.encodeStateAsUpdate(source, beforeFirst);
+    const beforeSecond = Y.encodeStateVector(source);
+    text.insert(1, "B");
+    const second = Y.encodeStateAsUpdate(source, beforeSecond);
+    const beforeThird = Y.encodeStateVector(source);
+    text.insert(2, "C");
+    const third = Y.encodeStateAsUpdate(source, beforeThird);
+
+    engine.applyRemoteUpdate(session.sessionId, first);
+    // seq gap -> stale; the resync request is in flight after this call.
+    engine.applyRemoteUpdate(session.sessionId, second, { seq: 3 });
+    // An event landing INSIDE the resync window: its update cannot be ordered
+    // against the in-flight state, so the session must resync once more
+    // instead of silently resetting the baseline past it.
+    engine.applyRemoteUpdate(session.sessionId, third, { seq: 4 });
+
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const resyncCalls = engine.requests.filter(
+      (request) => request.method === YDOC_METHOD.resync,
+    );
+    expect(resyncCalls).toHaveLength(2);
+    expect(session.doc.getText("plainText").toString()).toBe("ABC");
 
     await session.close({ settle: false });
     adapter.dispose();
@@ -712,6 +762,52 @@ describe("YdocLiveAdapter", () => {
 
     await sessionA.close({ settle: false });
     await sessionB.close({ settle: false });
+    adapter.dispose();
+  });
+
+  it("escalates seed-failure cleanup to a settling close when the plain close refuses", async () => {
+    // A seed apply can fail AFTER the daemon committed it (request timeout on
+    // an applied update): close settle:false then refuses UnsettledClose. The
+    // cleanup must fall back to a settling close so the daemon entry releases
+    // instead of wedging until workspace close.
+    const engine = seedPlaintextEngine("seeded body");
+    const seedFailure = new Error("injected seed timeout");
+    const refusal = new Error("unsettled-close");
+    const closes: Array<boolean | undefined> = [];
+    const transport: EngineTransport = {
+      onEvent: (handler) => engine.onEvent(handler),
+      async sendRequest(request) {
+        if (request.method === YDOC_METHOD.open) {
+          const response = await engine.sendRequest(request);
+          return {
+            id: response.id,
+            result: {
+              ...(response.result as Record<string, unknown>),
+              lineage: "absent",
+              seedMarkdown: "seeded body",
+            },
+          };
+        }
+        if (request.method === YDOC_METHOD.recordUpdate) throw seedFailure;
+        if (request.method === YDOC_METHOD.close) {
+          const params = request.params as { settle?: boolean };
+          closes.push(params.settle);
+          if (params.settle === false) throw refusal;
+          return { id: request.id, result: null };
+        }
+        return engine.sendRequest(request);
+      },
+    };
+    const adapter = new YdocLiveAdapter(transport);
+    await expect(
+      adapter.openSession({
+        workspace: WORKSPACE,
+        versionId: VERSION,
+        path: PATH,
+        contentKind: "plaintext",
+      }),
+    ).rejects.toBe(seedFailure);
+    expect(closes).toEqual([false, true]);
     adapter.dispose();
   });
 });

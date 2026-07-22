@@ -282,25 +282,42 @@ fn base_is_claimed_exactly_once() {
         "exactly one base"
     );
 
-    // A second claim — even with DIFFERENT base bytes — must resume, not fork a
-    // second base.
-    let other = Ydoc::wire();
-    other.plaintext_insert(0, "different seed");
-    let other_base = other.encode_full_state();
+    // A second claim with the SAME bytes (crash-retry / redelivery) resumes.
     let second = committed(
         claim_base(
             &mut ts.store,
             &key,
             ContentKind::Plaintext,
-            &other_base,
+            &base,
             &NoFaults,
-            1_500,
+            1_400,
         )
         .expect("second"),
     );
     assert!(
         matches!(second, ClaimOutcome::Resumed),
-        "second base rejected → resume"
+        "identical base retry → resume"
+    );
+    // A claim with DIFFERENT base bytes must REFUSE — silently resuming (and
+    // acking) a divergent base would drop that lineage while the relay
+    // cursor advances past it. Mutation check: drop the stored-sha
+    // comparison in `claim_base_in_tx`'s resumed branch — this claim then
+    // resumes and the error assertion fails.
+    let other = Ydoc::wire();
+    other.plaintext_insert(0, "different seed");
+    let other_base = other.encode_full_state();
+    let diverged = claim_base(
+        &mut ts.store,
+        &key,
+        ContentKind::Plaintext,
+        &other_base,
+        &NoFaults,
+        1_500,
+    )
+    .expect_err("divergent base must refuse");
+    assert!(
+        matches!(diverged, CollabError::BaseStateDiverged),
+        "expected BaseStateDiverged, got {diverged:?}"
     );
     assert_eq!(
         count(&ts.store, "ydoc_snapshots", &key),

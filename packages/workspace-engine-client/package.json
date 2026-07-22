@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@dohc/ydoc-projection": "workspace:*",
     "yjs": "^13.6.30"
   },
   "devDependencies": {

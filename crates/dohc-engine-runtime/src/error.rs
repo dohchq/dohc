@@ -36,6 +36,10 @@ pub enum RuntimeError {
     #[error("search error: {0}")]
     Search(#[from] crate::search::SearchError),
 
+    /// Projected content could not be synchronously materialized.
+    #[error("materialization error: {0}")]
+    Materialize(#[from] dohc_engine_files::MaterializeError),
+
     /// The actor's worker thread could not be spawned.
     #[error("could not spawn actor worker thread")]
     ThreadSpawn(#[source] std::io::Error),
@@ -81,6 +85,7 @@ impl RuntimeError {
             RuntimeError::Collab(err) => err.code(),
             RuntimeError::Sync(err) => err.code(),
             RuntimeError::Search(err) => err.code(),
+            RuntimeError::Materialize(_) => "materialize-failed",
             RuntimeError::ThreadSpawn(_) => "thread-spawn-failed",
             RuntimeError::ActorUnavailable => "actor-unavailable",
             RuntimeError::Overloaded => "overloaded",

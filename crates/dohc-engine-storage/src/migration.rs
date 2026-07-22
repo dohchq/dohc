@@ -1366,6 +1366,30 @@ CREATE INDEX idx_path_aliases_workspace_object ON path_aliases(workspace_id, obj
 /// The `id` of the reverse path-alias lookup migration.
 pub(crate) const PATH_ALIASES_OBJECT_INDEX_MIGRATION_ID: &str = "v1-path-aliases-object-index";
 
+/// Deferred replicated Y.Doc coordinates: rows acked while a live lease held
+/// the doc, pending replay into `ydoc_updates`. The imported replication log
+/// keeps the payload; this table records WHICH coordinates are actually
+/// pending, so drains replay only genuinely-deferred rows (never the whole
+/// history, which after compaction would re-append non-dedupable updates).
+const V1_YDOC_DEFERRED_DDL: &str = "CREATE TABLE ydoc_deferred_updates (
+    workspace_id   TEXT    NOT NULL,
+    version_id     TEXT    NOT NULL,
+    object_id      TEXT    NOT NULL,
+    origin_id      TEXT    NOT NULL,
+    origin_seq     INTEGER NOT NULL,
+    recorded_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, origin_id, origin_seq),
+    FOREIGN KEY (workspace_id, version_id, object_id)
+      REFERENCES ydoc_docs(workspace_id, version_id, object_id)
+      ON DELETE CASCADE
+) STRICT;
+CREATE INDEX ydoc_deferred_updates_by_doc
+    ON ydoc_deferred_updates (workspace_id, version_id, object_id);
+";
+
+/// The `id` of the deferred Y.Doc coordinates migration.
+pub(crate) const YDOC_DEFERRED_MIGRATION_ID: &str = "v1-ydoc-deferred-updates";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1451,6 +1475,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: PATH_ALIASES_OBJECT_INDEX_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_PATH_ALIASES_OBJECT_INDEX_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 12,
+        id: YDOC_DEFERRED_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_YDOC_DEFERRED_DDL,
         sets_user_version: None,
     },
 ];
@@ -1760,11 +1791,11 @@ mod tests {
     // waiting for a real future schema change.
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     fn two_migrations() -> Vec<Migration> {
-        // The frozen list now ends at ordinal 11 (reverse alias lookup), so a
-        // synthetic probe appends at ordinal 12.
+        // The frozen list now ends at ordinal 12 (deferred Y.Doc
+        // coordinates), so a synthetic probe appends at ordinal 13.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 12,
+            ordinal: 13,
             id: "r04-probe",
             kind: MigrationKind::Transactional,
             sql: M2_SQL,
@@ -2280,14 +2311,14 @@ mod tests {
         let mut conn = open_bare(&path);
 
         let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("apply baseline through reverse alias index");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 12 });
+            .expect("apply baseline through the deferred Y.Doc coordinates table");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 13 });
         let max_ordinal: i64 = conn
             .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
                 row.get(0)
             })
             .expect("latest migration ordinal");
-        assert_eq!(max_ordinal, 11);
+        assert_eq!(max_ordinal, 12);
         let index_present: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' \
@@ -2320,7 +2351,7 @@ mod tests {
 
         let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("apply reverse alias index migration");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 2 });
         let columns: Vec<String> = conn
             .prepare("SELECT name FROM pragma_index_info('idx_path_aliases_workspace_object') ORDER BY seqno")
             .expect("prepare reverse alias index columns")
@@ -2334,7 +2365,7 @@ mod tests {
                 row.get(0)
             })
             .expect("latest migration ordinal");
-        assert_eq!(max_ordinal, 11);
+        assert_eq!(max_ordinal, 12);
     }
 
     #[test]
@@ -2943,10 +2974,11 @@ mod tests {
         // (3), the search migration (4), the moment-link migration (5), the
         // sync migration (6), conflicts migration (7), shadow-clone migration
         // (8), binary-conflict-sides migration (9), binary-head migration (10),
-        // reverse alias index migration (11), AND the probe (12).
+        // reverse alias index migration (11), deferred Y.Doc coordinates
+        // migration (12), AND the probe (13).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 12 });
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 13 });
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -3043,7 +3075,7 @@ mod tests {
         }
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 12,
+            ordinal: 13,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
@@ -3061,7 +3093,7 @@ mod tests {
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();
         changed.push(Migration {
-            ordinal: 12,
+            ordinal: 13,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
@@ -3081,7 +3113,7 @@ mod tests {
         // baseline first (transactional), then a non-transactional idempotent step.
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 12,
+            ordinal: 13,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",

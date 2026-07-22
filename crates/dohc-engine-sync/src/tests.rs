@@ -35,6 +35,107 @@ fn insert_probe(tx: &rusqlite::Transaction<'_>, op: &ReplicationEnvelope) -> Res
     Ok(())
 }
 
+struct AlwaysLive;
+
+impl LeaseProbe for AlwaysLive {
+    fn is_live(&self, _key: &dohc_engine_collab::DocKey) -> bool {
+        true
+    }
+}
+
+#[test]
+fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
+    let (_scratch, _path, mut engine) = store();
+    // The defer path refuses non-replicated lineages (they can never drain),
+    // so the test needs the replicated marker scaffolding first.
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO versioned_workspaces (workspace_id, main_version_id)                  VALUES ('ws','main')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES ('ws','object-1',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("workspace scaffolding");
+    let marker_key = dohc_engine_collab::DocKey::new("ws", "main", "object-1").expect("key");
+    dohc_engine_collab::ensure_marker(
+        &mut engine,
+        &marker_key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        dohc_engine_collab::Regime::Replicated,
+        &NoFaults,
+        1_500,
+    )
+    .expect("replicated marker");
+    // A MISSING blob must refuse BEFORE any ack — a deferred coordinate is
+    // already acknowledged, and a blob that can never load would strand the
+    // drain forever while the peer cursor is past the row.
+    let missing = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-1",
+            "path": "notes/live.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+            "isBaseState": false
+        }),
+    );
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &missing, &NoFaults, &AlwaysLive),
+        Err(SyncError::BlobInvalid)
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "peer").expect("ack"),
+        -1,
+        "an unloadable blob must leave the coordinate unacked"
+    );
+    let update_bytes = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "live edit");
+    let blob_sha = engine.put_binary_blob(&update_bytes).expect("store blob");
+    let op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-1",
+            "path": "notes/live.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": blob_sha,
+            "isBaseState": false
+        }),
+    );
+    let outcome =
+        apply_ydoc_envelope(&mut engine, &op, &NoFaults, &AlwaysLive).expect("live lineage defers");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: true,
+            reason: Some("ydoc-session-live"),
+        })
+    );
+    let update_rows: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))
+                .map_err(SyncError::corrupt)
+        })
+        .expect("count Y.Doc updates");
+    assert_eq!(update_rows, 0, "defer must not append remote Y.Doc bytes");
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "peer").expect("ack"),
+        0,
+        "the poison-pill coordinate is acknowledged"
+    );
+}
+
 #[test]
 fn fault_sync_during_journal_txn_rolls_back_domain_and_position() {
     let (_scratch, path, mut engine) = store();
@@ -605,7 +706,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
     let client = RelaySyncClient::new(fake);
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncBetweenApplyAndCursorCommit);
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", faults.as_ref())
+        .pull_chat_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases)
         .expect("pull fault");
     assert!(matches!(
         first,
@@ -619,7 +720,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
             .is_none()
     );
     let retry = client
-        .pull_chat_workspace(&mut reopened, "ws", &NoFaults)
+        .pull_chat_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases)
         .expect("retry pull");
     let pending = match retry {
         SyncPassOutcome::Complete {
@@ -809,7 +910,7 @@ fn pull_rejects_op_for_foreign_workspace() {
     };
     let client = RelaySyncClient::new(fake);
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults),
+        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
         Err(RelayError::InvalidResponse)
     ));
     // Fail closed: the cursor was never persisted, so the pass is retryable.
@@ -996,4 +1097,280 @@ fn reserved_agent_channel_shapes_rejected() {
         apply_chat_envelope(&mut engine, &canonical, &NoFaults),
         Ok(ApplyOutcome::Applied(()))
     ));
+}
+
+#[test]
+fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
+    let (_scratch, _path, mut engine) = store();
+    // The replicated lineage exists before envelopes arrive (base claim);
+    // apply_remote_update refuses NoMarker rather than conjuring one. The
+    // version row exists because the drain now PROJECTS drained content to
+    // the visible head (a real workspace always has its version).
+    dohc_engine_domain::VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO versioned_workspaces (workspace_id, main_version_id)                  VALUES ('ws','main')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES ('ws','object-1',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("workspace scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-1").expect("key");
+    dohc_engine_collab::ensure_marker(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        dohc_engine_collab::Regime::Replicated,
+        &NoFaults,
+        1_500,
+    )
+    .expect("replicated marker");
+    let update_bytes = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "parked edit");
+    let blob_sha = engine.put_binary_blob(&update_bytes).expect("store blob");
+    let op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-1",
+            "path": "notes/live.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": blob_sha,
+            "isBaseState": false
+        }),
+    );
+    let outcome =
+        apply_ydoc_envelope(&mut engine, &op, &NoFaults, &AlwaysLive).expect("live lineage defers");
+    assert_eq!(
+        outcome,
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: true,
+            reason: Some("ydoc-session-live"),
+        })
+    );
+
+    // The lease is gone (close/eviction/crash — any teardown): the drain must
+    // land the acked-but-parked envelope in the durable lineage.
+    let drained = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("drain");
+    assert_eq!(drained, 1, "the parked envelope must apply");
+    // The drain PROJECTS: the drained content is the visible head, not just
+    // CRDT rows (a redelivery of the acked coordinate skips the apply
+    // closure, so nothing else would ever project it).
+    let head_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM path_aliases a                  JOIN snapshots s ON s.workspace_id = a.workspace_id AND s.object_id = a.object_id                  JOIN blobs b ON b.sha256 = s.blob_sha256                  WHERE a.workspace_id = 'ws' AND a.version_id = 'main'                    AND a.path = 'notes/live.md'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("drained head");
+    assert_eq!(head_text, "parked edit");
+    let update_rows: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))
+                .map_err(SyncError::corrupt)
+        })
+        .expect("count Y.Doc updates");
+    assert_eq!(update_rows, 1, "the drained update reaches the Y.Doc log");
+
+    let redrained = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("redrain");
+    assert_eq!(redrained, 0, "replaying the parked row is content-deduped");
+}
+
+#[test]
+fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
+    // Oracle parity (`projectYDocUpdate` → `writeTextFileInDb` → CRDT rows):
+    // an APPLIED (non-deferred) ydoc envelope must advance the VISIBLE head
+    // (moment + snapshot + pending materialization job) in the same
+    // admission transaction as its ack — not just the CRDT log. Mutation
+    // check: drop the `project_and_write_in_tx` calls in
+    // `apply_ydoc_envelope`'s base/update arms — both head assertions below
+    // fail while the ops still report applied.
+    let (_scratch, _path, mut engine) = store();
+    dohc_engine_domain::VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES ('ws','object-mat',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+
+    // Base envelope (fresh replica): the FILE head appears, not just rows.
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    let base_bytes = {
+        base_doc.plaintext_insert(0, "base seed");
+        base_doc.encode_full_state()
+    };
+    let base_sha = engine.put_binary_blob(&base_bytes).expect("base blob");
+    let base_op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-mat",
+            "path": "notes/replicated.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha,
+            "isBaseState": true
+        }),
+    );
+    apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    let (head_text, head_origin): (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text, s.metadata_origin FROM path_aliases a \
+                 JOIN snapshots s ON s.workspace_id = a.workspace_id AND s.object_id = a.object_id \
+                 JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE a.workspace_id = 'ws' AND a.version_id = 'main' \
+                   AND a.path = 'notes/replicated.md'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("base head");
+    assert_eq!(head_text, "base seed", "the base must materialize a head");
+    assert_eq!(head_origin, "ydoc");
+    let pending_jobs: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs WHERE status = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("jobs");
+    assert_eq!(pending_jobs, 1, "the disk write is durably enqueued");
+
+    // Update envelope: the head advances to the merged projection.
+    let delta = base_doc.plaintext_insert(0, "updated ");
+    let delta_sha = engine.put_binary_blob(&delta).expect("delta blob");
+    let update_op = envelope(
+        "peer",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-mat",
+            "path": "notes/replicated.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": delta_sha,
+            "isBaseState": false
+        }),
+    );
+    apply_ydoc_envelope(&mut engine, &update_op, &NoFaults, &NoLiveLeases).expect("update applies");
+    let updated_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM path_aliases a \
+                 JOIN snapshots s ON s.workspace_id = a.workspace_id AND s.object_id = a.object_id \
+                 JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE a.workspace_id = 'ws' AND a.version_id = 'main' \
+                   AND a.path = 'notes/replicated.md'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("updated head");
+    assert_eq!(updated_text, "updated base seed");
+}
+
+#[test]
+fn a_pulled_base_over_leftover_local_rows_projects_the_merged_lineage() {
+    // A crash can leave LOCAL-ONLY update rows before the base envelope
+    // arrives; the claim promotes that lineage, and the projection must be
+    // the RECONSTRUCTED doc plus the base — not the base alone, which would
+    // drop durable local content from the visible head. Mutation check:
+    // rebuild base_doc from `Ydoc::wire()` instead of `load_persisted` in
+    // `apply_ydoc_envelope`'s base arm — the local-content assertion fails.
+    let (_scratch, _path, mut engine) = store();
+    dohc_engine_domain::VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES ('ws','object-promote',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-promote").expect("key");
+    dohc_engine_collab::ensure_marker(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Plaintext,
+        dohc_engine_collab::Regime::LocalOnly,
+        &NoFaults,
+        1_450,
+    )
+    .expect("local-only marker");
+    let local_update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "local-part ");
+    dohc_engine_collab::record_local_update(&mut engine, &key, &local_update, &NoFaults, 1_460)
+        .expect("local row");
+
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    base_doc.plaintext_insert(0, "base-part");
+    let base_bytes = base_doc.encode_full_state();
+    let base_sha = engine.put_binary_blob(&base_bytes).expect("base blob");
+    let base_op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-promote",
+            "path": "notes/promoted.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha,
+            "isBaseState": true
+        }),
+    );
+    apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+
+    let head_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM path_aliases a \
+                 JOIN snapshots s ON s.workspace_id = a.workspace_id AND s.object_id = a.object_id \
+                 JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE a.workspace_id = 'ws' AND a.version_id = 'main' \
+                   AND a.path = 'notes/promoted.md'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("promoted head");
+    assert!(
+        head_text.contains("base-part"),
+        "head must contain the base: {head_text}"
+    );
+    assert!(
+        head_text.contains("local-part"),
+        "head must keep the leftover local rows: {head_text}"
+    );
 }

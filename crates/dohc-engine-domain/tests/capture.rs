@@ -921,3 +921,76 @@ fn a_claimed_dedupe_transfers_ownership_to_capture() {
         "a claimed dedupe must transfer ownership to the claiming writer"
     );
 }
+
+#[test]
+fn disk_driven_retire_owns_materialized_ydoc_heads() {
+    let (_scratch, mut store) = open_store();
+    // Seed a materialized Y.Doc head exactly as a settle does (the generic
+    // write path reserves the 'ydoc' origin).
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            dohc_engine_domain::write_projected_text_in_tx(
+                tx,
+                &dohc_engine_domain::WriteText {
+                    workspace_id: WS.to_owned(),
+                    version_id: VERSION.to_owned(),
+                    object_id: "obj-ydoc-retire".to_owned(),
+                    path: "notes/settled.md".to_owned(),
+                    text: "settled body".to_owned(),
+                    moment_id: "m-ydoc-retire".to_owned(),
+                    metadata_origin: "ydoc".to_owned(),
+                    author_json: None,
+                    now_ms: 10,
+                    request_id: None,
+                },
+            )
+        })
+        .expect("ydoc head");
+    // The manifest seeds 'ydoc' rows into the baseline scanner, so its file
+    // deleted while the daemon was down MUST retire the head — a stale
+    // snapshot must not stay readable forever. Mutation check: drop the
+    // YDOC_ORIGIN arm from `capture_retire_in_tx`'s origin gate — this
+    // retire settles as a no-op and the assertion fails.
+    let result = VersionedTextStore::new(&mut store)
+        .capture_retire(
+            &CaptureRetire {
+                only_if_capture_origin: true,
+                ..retire("notes/settled.md", 20)
+            },
+            &NO_FAULTS,
+        )
+        .expect("disk-driven retire");
+    assert!(
+        result.retired.is_some(),
+        "materialized ydoc heads are disk-owned"
+    );
+
+    // RPC/agent-origin heads stay protected from disk-driven retires.
+    VersionedTextStore::new(&mut store)
+        .write_text(
+            &dohc_engine_domain::WriteText {
+                workspace_id: WS.to_owned(),
+                version_id: VERSION.to_owned(),
+                object_id: "obj-api-retire".to_owned(),
+                path: "notes/api.md".to_owned(),
+                text: "api body".to_owned(),
+                moment_id: "m-api-retire".to_owned(),
+                metadata_origin: "api".to_owned(),
+                author_json: None,
+                now_ms: 30,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("api write");
+    let protected = VersionedTextStore::new(&mut store)
+        .capture_retire(
+            &CaptureRetire {
+                only_if_capture_origin: true,
+                ..retire("notes/api.md", 40)
+            },
+            &NO_FAULTS,
+        )
+        .expect("protected retire is a no-op");
+    assert!(protected.retired.is_none(), "RPC heads stay protected");
+}

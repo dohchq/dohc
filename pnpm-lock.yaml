@@ -489,6 +489,9 @@ importers:
 
   packages/workspace-engine-client:
     dependencies:
+      '@dohc/ydoc-projection':
+        specifier: workspace:*
+        version: link:../ydoc-projection
       yjs:
         specifier: ^13.6.30
         version: 13.6.30

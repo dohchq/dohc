@@ -242,13 +242,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })
     }
 
-    /// Pull and apply chat operations, returning a cursor token the caller must
-    /// commit only after filesystem/materialization work succeeds.
+    /// Pull and apply replicated operations (chat.* AND ydoc.update),
+    /// returning a cursor token the caller must commit only after
+    /// filesystem/materialization work succeeds. `leases` defers ydoc
+    /// envelopes targeting live-leased docs.
     pub fn pull_chat_workspace(
         &self,
         store: &mut EngineStore,
         workspace_id: &str,
         faults: &dyn FaultInjector,
+        leases: &dyn crate::LeaseProbe,
     ) -> Result<SyncPassOutcome, RelayError> {
         let identity = read_sync_identity(store, workspace_id)
             .map_err(local)?
@@ -281,6 +284,24 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             // the cursor is not persisted, so the pass is safely retryable.
             if op.workspace_id != workspace_id {
                 return Err(RelayError::InvalidResponse);
+            }
+            // Dispatch by op kind: the stream carries chat.* AND ydoc.update
+            // once live replicated sessions journal deltas. Feeding a ydoc op
+            // to the chat applier errors UnsupportedOperation and wedges the
+            // cursor.
+            if op.op_kind == "ydoc.update" {
+                match crate::apply_ydoc_envelope(store, op, faults, leases).map_err(local)? {
+                    ApplyOutcome::Applied(_) => {
+                        applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?
+                    }
+                    ApplyOutcome::Skipped => {
+                        skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?
+                    }
+                    ApplyOutcome::Crashed { .. } => {
+                        return Err(RelayError::Local("injected-crash".to_owned()));
+                    }
+                }
+                continue;
             }
             match apply_chat_envelope(store, op, faults).map_err(local)? {
                 ApplyOutcome::Applied(()) => {

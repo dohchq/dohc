@@ -1593,8 +1593,15 @@ fn capture_retire_in_tx(
             },
         )?;
         // A head this caller does not own (written by RPC/replication) is
-        // never destroyed by a disk-driven retire.
-        if input.only_if_capture_origin && head.metadata_origin != CAPTURE_ORIGIN {
+        // never destroyed by a disk-driven retire. DISK-OWNED origins pass:
+        // capture heads, and materialized Y.Doc heads — the manifest seeds
+        // 'ydoc' rows precisely so the baseline scanner tracks their files,
+        // and a file deleted while the daemon was down must retire the head
+        // rather than leave a stale snapshot readable forever.
+        if input.only_if_capture_origin
+            && head.metadata_origin != CAPTURE_ORIGIN
+            && head.metadata_origin != YDOC_ORIGIN
+        {
             record_request(
                 tx,
                 input.request_id.as_deref(),
@@ -1663,6 +1670,11 @@ fn capture_retire_in_tx(
 /// content retired by a disk-driven pass. Only the capture primitives in
 /// this module may write it.
 pub const CAPTURE_ORIGIN: &str = "capture";
+
+/// The metadata origin stamped by Y.Doc settles. Materialized Y.Doc heads are
+/// DISK-OWNED like capture heads: the manifest seeds them into the baseline
+/// scanner, and disk-driven retires may destroy them.
+pub const YDOC_ORIGIN: &str = "ydoc";
 
 /// Maximum binary payload a capture ingest may persist. Mirrors
 /// `MAX_VERSIONED_BINARY_FILE_BYTES` (`versionedTextStore.ts`) and the files
@@ -1915,7 +1927,7 @@ pub fn capture_manifest_seed(
                    AND s.version_id = a.version_id AND s.object_id = a.object_id \
                  LEFT JOIN blobs tb ON tb.sha256 = s.blob_sha256 \
                  LEFT JOIN binary_blobs bb ON bb.sha256 = s.binary_sha256 \
-                 WHERE a.workspace_id = ?1 AND a.version_id = ?2                    AND s.metadata_origin = 'capture'",
+                 WHERE a.workspace_id = ?1 AND a.version_id = ?2                    AND (s.metadata_origin = 'capture'                        OR (s.metadata_origin = 'ydoc'                            AND NOT EXISTS (                                SELECT 1 FROM materialization_jobs j                                WHERE j.job_id = 'ydoc-mat_' || s.latest_moment_id                                  AND j.status = 'pending')))",
             )
             .map_err(DomainError::sql_corrupt)?;
         let rows = stmt
@@ -2011,6 +2023,31 @@ pub fn write_text_in_tx(
     tx: &Transaction<'_>,
     input: &WriteText,
 ) -> Result<WriteResult, DomainError> {
+    write_text_in_tx_with_journal(tx, input, true, false)
+}
+
+/// Apply a projected text write without appending `moment.append` to the
+/// replication journal. A Y.Doc settle has already durably recorded the CRDT
+/// edits that produced this projection, so journaling the derived markdown a
+/// second time would create a competing replication mutation.
+#[doc(hidden)]
+pub fn write_projected_text_in_tx(
+    tx: &Transaction<'_>,
+    input: &WriteText,
+) -> Result<WriteResult, DomainError> {
+    // allow_preallocated_object: the live Y.Doc seed pre-creates the
+    // file_objects row (FK parent for the marker) before any snapshot or
+    // alias exists — the settle that follows is binding ITS OWN object,
+    // not colliding with another.
+    write_text_in_tx_with_journal(tx, input, false, true)
+}
+
+fn write_text_in_tx_with_journal(
+    tx: &Transaction<'_>,
+    input: &WriteText,
+    journal: bool,
+    allow_preallocated_object: bool,
+) -> Result<WriteResult, DomainError> {
     let normalized_input = normalized_write_input(input)?;
     let input = &normalized_input;
     let ws = &input.workspace_id;
@@ -2047,9 +2084,13 @@ pub fn write_text_in_tx(
                 });
             }
             if object_exists(tx, ws, &input.object_id)? {
-                return Err(DomainError::InvalidInput {
-                    reason: "object_id is already bound to another object",
-                });
+                let bare_preallocation =
+                    allow_preallocated_object && !object_has_any_binding(tx, ws, &input.object_id)?;
+                if !bare_preallocation {
+                    return Err(DomainError::InvalidInput {
+                        reason: "object_id is already bound to another object",
+                    });
+                }
             }
             None
         }
@@ -2066,8 +2107,10 @@ pub fn write_text_in_tx(
     let moment_order = next_moment_order(tx)?;
 
     if is_new_object {
+        // OR IGNORE: the preallocated-object path (live Y.Doc seed) already
+        // holds this row; every other new-object path inserts fresh.
         tx.execute(
-            "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES (?1, ?2, ?3)",
+            "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)              VALUES (?1, ?2, ?3)",
             params![ws, object_id, input.now_ms],
         )
         .map_err(DomainError::sql_persist)?;
@@ -2132,12 +2175,14 @@ pub fn write_text_in_tx(
         ],
     )
     .map_err(DomainError::sql_persist)?;
-    tx.execute(
-        "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-         VALUES (?1, 'moment.append', ?2)",
-        params![object_id, input.now_ms],
-    )
-    .map_err(DomainError::sql_persist)?;
+    if journal {
+        tx.execute(
+            "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
+             VALUES (?1, 'moment.append', ?2)",
+            params![object_id, input.now_ms],
+        )
+        .map_err(DomainError::sql_persist)?;
+    }
     record_request(
         tx,
         input.request_id.as_deref(),
@@ -2606,6 +2651,24 @@ pub(crate) fn moment_exists(
     Ok(found.is_some())
 }
 
+/// Whether an object owns ANY binding (a path alias in any version or a
+/// snapshot row). A bare row with none is a Y.Doc seed preallocation.
+fn object_has_any_binding(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    object_id: &str,
+) -> Result<bool, DomainError> {
+    let bound: Option<i64> = tx
+        .query_row(
+            "SELECT 1 WHERE EXISTS (SELECT 1 FROM path_aliases WHERE workspace_id = ?1 AND object_id = ?2)              OR EXISTS (SELECT 1 FROM snapshots WHERE workspace_id = ?1 AND object_id = ?2)",
+            params![workspace_id, object_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(bound.is_some())
+}
+
 fn object_exists(
     conn: &Connection,
     workspace_id: &str,
@@ -2622,7 +2685,10 @@ fn object_exists(
     Ok(found.is_some())
 }
 
-fn object_has_live_alias(
+/// True when the object id owns a live `path_aliases` row anywhere in the
+/// workspace. Public so ydoc.open can refuse reusing a derived id that
+/// capture's locked resolution would disambiguate instead (rename edge).
+pub fn object_has_live_alias(
     conn: &Connection,
     workspace_id: &str,
     object_id: &str,

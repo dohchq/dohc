@@ -15,10 +15,11 @@ use dohc_engine_runtime::{
     ActorHandle, CaptureIngest, CaptureIngestBinary, CaptureRetire, CaptureSecret,
     CaptureSecretRetire, NoFaults, RuntimeError,
 };
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const CAPTURE_METADATA_ORIGIN: &str = "capture";
 /// The encrypted store validates origins against the TS `WRITE_ORIGINS` set,
@@ -58,6 +59,126 @@ const SECRET_KEY_UNAVAILABLE: CaptureError = CaptureError {
     reason: "workspace secret key unavailable",
 };
 
+/// Single-shot identities of daemon-materialized Y.Doc projections. Capture
+/// consumes a matching `(workspace, path, sha)` observation instead of
+/// claiming the just-settled head as a new external edit.
+#[derive(Clone, Default)]
+pub struct SelfWriteSuppression {
+    /// Root-path scope prefixed onto every workspace key. The registry is
+    /// process-global (multi-service suppression), but two ROOTS can carry
+    /// the SAME workspaceId — an unscoped key would let root A's settle
+    /// swallow root B's genuine capture of identical bytes. The global
+    /// instance has an empty scope; per-workspace users hold a
+    /// [`Self::scoped`] view sharing the same map.
+    scope: String,
+    /// Per (scoped workspace, path): the ORDERED pending settle identities.
+    /// Two settles can land before capture consumes the first watcher
+    /// event; a single-slot map would let the first `Changed` consume the
+    /// SECOND sha as a mismatch and ingest the daemon's own write as
+    /// external.
+    entries: Arc<Mutex<PendingWriteIdentities>>,
+}
+
+/// (scoped workspace, path) → ordered pending settle shas.
+type PendingWriteIdentities = HashMap<(String, String), Vec<String>>;
+
+impl SelfWriteSuppression {
+    /// A view over the SAME shared registry whose keys are prefixed with
+    /// the workspace root, so identical workspace ids under different roots
+    /// cannot collide.
+    pub fn scoped(&self, root: &std::path::Path) -> SelfWriteSuppression {
+        SelfWriteSuppression {
+            scope: root.to_string_lossy().into_owned(),
+            entries: Arc::clone(&self.entries),
+        }
+    }
+
+    fn scoped_workspace(&self, workspace_id: &str) -> String {
+        // NUL never appears in a path or workspace id — an unambiguous join.
+        format!("{}{}{workspace_id}", self.scope, char::from(0))
+    }
+
+    pub fn record(&self, workspace_id: &str, path: &str, sha256: &str) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries
+                .entry((self.scoped_workspace(workspace_id), path.to_owned()))
+                .or_default()
+                .push(sha256.to_owned());
+        }
+    }
+
+    /// Consume on a `Changed` TEXT observation: when the observed sha
+    /// matches a pending identity, that identity AND every earlier one is
+    /// removed (their events were coalesced/superseded) and the observation
+    /// suppresses. A non-matching observation is an external edit — every
+    /// pending identity clears (none may survive to suppress a later revert)
+    /// and the observation ingests.
+    fn consume(&self, workspace_id: &str, path: &str, sha256: &str) -> bool {
+        let Ok(mut entries) = self.entries.lock() else {
+            return false;
+        };
+        let key = (self.scoped_workspace(workspace_id), path.to_owned());
+        let Some(pending) = entries.get_mut(&key) else {
+            return false;
+        };
+        let suppressed = match pending.iter().position(|recorded| recorded == sha256) {
+            Some(index) => {
+                pending.drain(..=index);
+                true
+            }
+            None => {
+                pending.clear();
+                false
+            }
+        };
+        if pending.is_empty() {
+            entries.remove(&key);
+        }
+        suppressed
+    }
+
+    /// Clear every pending identity for a path — a `Changed` observation
+    /// that resolves to non-text (binary/untracked/over-cap) means the path
+    /// is no longer daemon-settled text; stale identities must not survive
+    /// to suppress a later revert.
+    fn clear_path(&self, workspace_id: &str, path: &str) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.remove(&(self.scoped_workspace(workspace_id), path.to_owned()));
+        }
+    }
+
+    /// Forget every entry for a workspace — called when the workspace closes
+    /// or its handle is evicted; the registry outlives workspaces.
+    pub fn clear_workspace(&self, workspace_id: &str) {
+        if let Ok(mut entries) = self.entries.lock() {
+            let scoped = self.scoped_workspace(workspace_id);
+            entries.retain(|(workspace, _), _| workspace != &scoped);
+        }
+    }
+}
+
+impl dohc_engine_runtime::SelfWriteRecorder for SelfWriteSuppression {
+    fn record(&self, workspace_id: &str, path: &str, sha256: &str) {
+        SelfWriteSuppression::record(self, workspace_id, path, sha256);
+    }
+
+    fn retract(&self, workspace_id: &str, path: &str, sha256: &str) {
+        // Remove ONE matching identity (the failed settle's own) — every
+        // other pending settle's entry must survive a stale retract.
+        if let Ok(mut entries) = self.entries.lock() {
+            let key = (self.scoped_workspace(workspace_id), path.to_owned());
+            if let Some(pending) = entries.get_mut(&key) {
+                if let Some(index) = pending.iter().rposition(|recorded| recorded == sha256) {
+                    pending.remove(index);
+                }
+                if pending.is_empty() {
+                    entries.remove(&key);
+                }
+            }
+        }
+    }
+}
+
 /// Bridges a files-crate reconcile plan to the actor's domain capture writes.
 ///
 /// The adapter is intentionally not wired into workspace open/close yet. Its
@@ -81,6 +202,7 @@ pub struct StoreCaptureSink {
     /// `loadSecretDataKey` create branch) so workspaces without secrets never
     /// mint a key file.
     secret_key: Option<SecretDataKey>,
+    self_writes: SelfWriteSuppression,
 }
 
 /// The sink's view of `.dohc/files.toml`, split by WHY there are no rules.
@@ -109,6 +231,27 @@ impl StoreCaptureSink {
         now_ms: i64,
         author_json: Option<String>,
     ) -> Self {
+        Self::new_with_self_writes(
+            actor,
+            workspace_id,
+            version_id,
+            shadow_root,
+            now_ms,
+            author_json,
+            SelfWriteSuppression::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_self_writes(
+        actor: ActorHandle,
+        workspace_id: impl Into<String>,
+        version_id: impl Into<String>,
+        shadow_root: impl Into<PathBuf>,
+        now_ms: i64,
+        author_json: Option<String>,
+        self_writes: SelfWriteSuppression,
+    ) -> Self {
         let shadow_root = shadow_root.into();
         // `.dohc/files.toml` can only NARROW engine ownership below the hard
         // floor. See [`PolicyState`] for the absent/malformed/unreadable
@@ -134,6 +277,7 @@ impl StoreCaptureSink {
             files_policy,
             policy_held: std::cell::Cell::new(false),
             secret_key: None,
+            self_writes,
         }
     }
 
@@ -563,9 +707,22 @@ impl CaptureSink for StoreCaptureSink {
             // oracle), so the driver must rebuild the controller with an
             // empty manifest on a policy-snapshot change to re-offer every
             // path through here.
+            //
+            // A pending self-write identity must not outlive the exclusion:
+            // if the path is tracked again later with the OLD settled bytes
+            // on disk, a stale entry would suppress a genuine external
+            // revert.
+            self.self_writes.clear_path(&self.workspace_id, path);
             self.retire_head(path, false)?;
             return Ok(IngestOutcome::NotOwned);
         }
+        // A Changed observation resolves suppression against what the
+        // re-read ACTUALLY contains: a matching TEXT observation suppresses
+        // (consuming that identity and its coalesced predecessors), a
+        // non-matching one clears every pending identity, and a
+        // binary/untracked resolution clears too — an entry left armed by
+        // any of those would later suppress a genuine revert.
+        let changed = matches!(reason, IngestReason::Changed);
         match self.read_current(path, media_type)? {
             CurrentContent::Text(text) => {
                 // Report the identity of the bytes ACTUALLY captured — the
@@ -574,6 +731,9 @@ impl CaptureSink for StoreCaptureSink {
                 // scan-time bytes would diff clean and never re-ingest.
                 let size = text.len() as u64;
                 let sha256 = sha256_hex(text.as_bytes());
+                if changed && self.self_writes.consume(&self.workspace_id, path, &sha256) {
+                    return Ok(IngestOutcome::Captured { size, sha256 });
+                }
                 match self.ingest_text(path, text, claim_foreign_head)? {
                     DomainIngest::Persisted => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
@@ -583,6 +743,9 @@ impl CaptureSink for StoreCaptureSink {
                 }
             }
             CurrentContent::Untracked => {
+                if changed {
+                    self.self_writes.clear_path(&self.workspace_id, path);
+                }
                 // The path stopped being engine-ownable text (absent, symlink,
                 // non-file, or over cap): retire so no stale snapshot remains,
                 // and report NotOwned so the manifest forgets the path instead
@@ -591,6 +754,9 @@ impl CaptureSink for StoreCaptureSink {
                 Ok(IngestOutcome::NotOwned)
             }
             CurrentContent::Binary(bytes) => {
+                if changed {
+                    self.self_writes.clear_path(&self.workspace_id, path);
+                }
                 // Engine-ownable binary content persists as a BINHEAD binary
                 // head (a text->binary flip replaces the text head in the
                 // same transaction — no separate retire). The receipt carries
@@ -1630,5 +1796,39 @@ mod tests {
         supervisor.close(&db).expect("close actor");
         assert_eq!(secret_tip_len(&db, ".env"), None);
         assert_eq!(secret_tip_len(&db, "%2eenv"), None);
+    }
+
+    #[test]
+    fn suppression_keeps_multiple_pending_identities_per_path() {
+        // Two settles can land before capture consumes the first watcher
+        // event. Mutation check: restore the single-slot HashMap<_, String>
+        // registry — the in-order case consumes sha2 for the FIRST event
+        // (mismatch → ingest) and this test fails.
+        let writes = SelfWriteSuppression::default();
+        // In-order delivery: each event consumes its own identity.
+        writes.record("ws", "a.md", "sha1");
+        writes.record("ws", "a.md", "sha2");
+        assert!(writes.consume("ws", "a.md", "sha1"));
+        assert!(writes.consume("ws", "a.md", "sha2"));
+        assert!(!writes.consume("ws", "a.md", "sha2"), "single-shot");
+        // Coalesced delivery: matching the LATER identity consumes the
+        // superseded earlier one too.
+        writes.record("ws", "a.md", "sha1");
+        writes.record("ws", "a.md", "sha2");
+        assert!(writes.consume("ws", "a.md", "sha2"));
+        assert!(
+            !writes.consume("ws", "a.md", "sha1"),
+            "predecessor consumed"
+        );
+        // External edit: every pending identity clears (no later-revert
+        // suppression) and the observation ingests.
+        writes.record("ws", "a.md", "sha1");
+        assert!(!writes.consume("ws", "a.md", "external"));
+        assert!(!writes.consume("ws", "a.md", "sha1"), "cleared by mismatch");
+        // A stale retract removes only its own identity.
+        writes.record("ws", "a.md", "sha1");
+        writes.record("ws", "a.md", "sha2");
+        dohc_engine_runtime::SelfWriteRecorder::retract(&writes, "ws", "a.md", "sha1");
+        assert!(writes.consume("ws", "a.md", "sha2"), "newer entry survives");
     }
 }

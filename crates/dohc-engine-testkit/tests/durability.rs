@@ -345,9 +345,9 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // the R05 moment-preimage-link migration (ordinal 5), the R10 sync
     // migration (ordinal 6), the R06 conflicts migration (ordinal 7), the
     // shadow-clone migration (ordinal 8), binary conflict sides (ordinal 9),
-    // binary heads (ordinal 10), and the path-aliases reverse-alias index
-    // (ordinal 11).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 12);
+    // binary heads (ordinal 10), the path-aliases reverse-alias index
+    // (ordinal 11), and the deferred Y.Doc coordinates table (ordinal 12).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 13);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(

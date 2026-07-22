@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import { markdownToYDoc } from "@dohc/ydoc-projection";
 import type { Event } from "./generated/Event";
 import type { Request } from "./generated/Request";
 import type { Response } from "./generated/Response";
@@ -171,6 +172,13 @@ function declareDohcRootSchema(doc: Y.Doc): void {
   doc.getMap("meta");
   doc.getXmlFragment("body");
   doc.getText("plainText");
+}
+
+function createPlaintextSeedDoc(markdown: string): Y.Doc {
+  const doc = new Y.Doc();
+  declareDohcRootSchema(doc);
+  if (markdown.length > 0) doc.getText("plainText").insert(0, markdown);
+  return doc;
 }
 
 function visitJsonStrings(
@@ -416,7 +424,7 @@ interface LocalRecordCapture {
 
 export class YdocAdapterSession {
   readonly doc: Y.Doc;
-  readonly initialUpdate: Uint8Array;
+  initialUpdate: Uint8Array;
   readonly objectId: string;
   readonly path: string;
   readonly contentKind: YdocContentKind;
@@ -432,6 +440,7 @@ export class YdocAdapterSession {
   // Structured text edits reject before a transaction and do not quarantine.
   private quarantinedError: YdocSessionQuarantinedError | null = null;
   private staleError: YdocResyncNeededError | null = null;
+  private droppedWhileStale = false;
   private nextLocalUpdateSeq = 1;
   private readonly remoteUpdateListeners = new Set<(update: Uint8Array) => void>();
   private readonly remoteApplyErrorListeners = new Set<
@@ -555,9 +564,25 @@ export class YdocAdapterSession {
       sessionId: this.sessionId,
       ...(options?.summary ? { summary: options.summary } : {}),
     };
-    const result = decodeYdocSettleResult(
-      await this.adapter.request(this.workspace, YDOC_METHOD.settle, params),
-    );
+    let raw: unknown;
+    try {
+      raw = await this.adapter.request(this.workspace, YDOC_METHOD.settle, params);
+    } catch (error) {
+      // Remote edits were drained under this session's lease: this doc is
+      // BEHIND the durable lineage. Resync (which returns the full drained
+      // state) and settle exactly once more — the daemon refuses rather
+      // than materializing content this editor never saw.
+      if (
+        error instanceof Error &&
+        error.message.includes("ydoc-remote-updates-pending")
+      ) {
+        await this.resync();
+        raw = await this.adapter.request(this.workspace, YDOC_METHOD.settle, params);
+      } else {
+        throw error;
+      }
+    }
+    const result = decodeYdocSettleResult(raw as Parameters<typeof decodeYdocSettleResult>[0]);
     this.lastSettledSha = result.sha256;
     return result;
   }
@@ -617,7 +642,15 @@ export class YdocAdapterSession {
   }
 
   receiveRemoteUpdate(update: Uint8Array): void {
-    if (this.closed || this.staleError !== null) return;
+    if (this.closed) return;
+    if (this.staleError !== null) {
+      // The engine emitted an update we cannot order against the in-flight
+      // resync state. Dropping it silently would leave the doc permanently
+      // behind (the reset baseline hides the gap) — remember it happened so
+      // the current resync pass runs once more when it lands.
+      this.droppedWhileStale = true;
+      return;
+    }
     try {
       Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
     } catch (cause) {
@@ -631,9 +664,63 @@ export class YdocAdapterSession {
   }
 
   markStale(error: YdocResyncNeededError): void {
-    if (this.closed || this.staleError !== null) return;
+    if (this.closed) return;
+    if (this.staleError !== null) {
+      // A gap/generation event observed while already stale is still an
+      // event whose update this doc missed — the in-flight resync must run
+      // one more pass rather than resetting the baseline past it.
+      this.droppedWhileStale = true;
+      return;
+    }
     this.staleError = error;
     this.notifyListeners(this.resyncNeededListeners, error);
+    void this.resync().catch((cause: unknown) => this.surfaceSessionError(cause));
+  }
+
+  async resync(): Promise<Uint8Array> {
+    if (this.closed) {
+      throw new YdocAdapterError(
+        "session-closed",
+        "The Y.Doc adapter session is closed.",
+      );
+    }
+    await this.recordChain;
+    const raw = await this.adapter.request(this.workspace, YDOC_METHOD.resync, {
+      sessionId: this.sessionId,
+    });
+    if (raw === null || Array.isArray(raw) || typeof raw !== "object") {
+      throw new YdocAdapterError(
+        "response-mismatch",
+        "ydoc.resync result must be an object.",
+      );
+    }
+    const encoded = (raw as Record<string, unknown>).initialUpdateBase64;
+    if (typeof encoded !== "string") {
+      throw new YdocAdapterError(
+        "response-mismatch",
+        "ydoc.resync result.initialUpdateBase64 must be a string.",
+      );
+    }
+    const update = base64ToBytes(encoded);
+    Y.applyUpdate(this.doc, update, ENGINE_DELIVERED_ORIGIN);
+    // The event baseline is PRESERVED across resync: transport event seqs
+    // stay monotone within a session generation, and clearing the position
+    // would let the first post-resync gap pass undetected (the next event
+    // would be accepted as a fresh baseline). Positions recorded during the
+    // stale window keep the continuity; a genuine gap after this resync
+    // marks stale again and converges through one more pass.
+    if (this.droppedWhileStale) {
+      // An update arrived after the engine produced this resync state but
+      // before it was applied here; its content is durable engine-side, so
+      // one more pass folds it in. The stale guard stays SET across the
+      // recursive pass: clearing it first would open an await-window where
+      // local edits journal against a baseline the second pass immediately
+      // advances past.
+      this.droppedWhileStale = false;
+      return await this.resync();
+    }
+    this.staleError = null;
+    return update;
   }
 
   async close(options?: { settle?: boolean; summary?: string }): Promise<void> {
@@ -770,9 +857,8 @@ export class YdocLiveAdapter {
       path: input.path,
       ...(input.contentKind ? { contentKind: input.contentKind } : {}),
     };
-    const result = decodeYdocOpenResult(
-      await this.request(input.workspace, YDOC_METHOD.open, params),
-    );
+    const rawResult = await this.request(input.workspace, YDOC_METHOD.open, params);
+    const result = decodeYdocOpenResult(rawResult);
     const session = new YdocAdapterSession(this, input.workspace, result.sessionId, {
       objectId: result.objectId,
       path: result.path,
@@ -780,6 +866,46 @@ export class YdocLiveAdapter {
       initialUpdate: base64ToBytes(result.initialUpdateBase64),
     });
     this.sessions.set(result.sessionId, session);
+    if (
+      rawResult !== null &&
+      !Array.isArray(rawResult) &&
+      typeof rawResult === "object" &&
+      rawResult.lineage === "absent" &&
+      typeof rawResult.seedMarkdown === "string"
+    ) {
+      try {
+        const seedDoc =
+          result.contentKind === "plaintext"
+            ? createPlaintextSeedDoc(rawResult.seedMarkdown)
+            : markdownToYDoc(rawResult.seedMarkdown);
+        await session.applyLocalUpdate(Y.encodeStateAsUpdate(seedDoc));
+        // The exposed initial state must INCLUDE the seed: consumers (the
+        // desktop bridge) forward session.initialUpdate to the renderer,
+        // and the pre-seed encoding would render an empty document and
+        // baseline subsequent edits wrongly.
+        session.initialUpdate = Y.encodeStateAsUpdate(session.doc);
+      } catch (error) {
+        // A failed seed must not leak the registered session (and with it
+        // the daemon lease). settle:false is refused precisely when the
+        // seed COMMITTED before the failure surfaced (dirty lineage — e.g.
+        // a request timeout on an applied update): fall back to a settling
+        // close so the committed seed becomes the artifact and the daemon
+        // entry actually releases instead of wedging until workspace close.
+        this.releaseSession(result.sessionId);
+        try {
+          await this.request(input.workspace, YDOC_METHOD.close, {
+            sessionId: result.sessionId,
+            settle: false,
+          });
+        } catch {
+          await this.request(input.workspace, YDOC_METHOD.close, {
+            sessionId: result.sessionId,
+            settle: true,
+          }).catch(() => undefined);
+        }
+        throw error;
+      }
+    }
     return session;
   }
 
@@ -812,6 +938,7 @@ export class YdocLiveAdapter {
     this.sessions.delete(sessionId);
     this.eventPositions.delete(sessionId);
   }
+
 
   dispose(): void {
     this.unsubscribeEvents();

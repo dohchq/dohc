@@ -189,7 +189,11 @@ export async function openEngineYdocProviderSession(
       unsubscribeSessionError();
       await journalChain;
       await settleChain;
-      if (closeOptions?.settle !== false) {
+      // Richdoc settle is a C1 daemon refusal (richdoc-settle-unsupported):
+      // the provider's pre-close settle would error before the close RPC ran,
+      // stranding the session and its lease. The daemon's default close
+      // persists the closed richdoc CRDT instead — nothing is lost.
+      if (closeOptions?.settle !== false && session.contentKind !== "richdoc") {
         await runSettle(closeOptions?.summary ?? "session close");
       }
       await session.close({ settle: false });

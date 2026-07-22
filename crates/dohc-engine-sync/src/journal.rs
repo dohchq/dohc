@@ -22,6 +22,64 @@ pub(crate) fn crashes(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
     false
 }
 
+/// Transaction-composable local journal append for callers that must commit
+/// an op in the SAME transaction as a domain mutation (the live-session
+/// `ydoc.update` delta: blob-before-log holds because the CRDT append stored
+/// the blob earlier in this transaction). Requires an EXISTING sync identity —
+/// a replicated, base-claimed lineage cannot exist without one.
+pub fn journal_local_op_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    op_kind: &str,
+    payload: &serde_json::Value,
+    now_ms: i64,
+) -> Result<i64, SyncError> {
+    bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
+    if op_kind.is_empty() || op_kind.len() > crate::model::MAX_OP_KIND_BYTES {
+        return Err(SyncError::InvalidInput {
+            reason: "op_kind must be non-empty and bounded",
+        });
+    }
+    let payload_json = serde_json::to_string(payload).map_err(|_| SyncError::InvalidInput {
+        reason: "payload is not valid JSON",
+    })?;
+    if payload_json.len() > crate::model::MAX_PAYLOAD_BYTES {
+        return Err(SyncError::InvalidInput {
+            reason: "payload exceeds the relay limit",
+        });
+    }
+    let origin_id: String = tx
+        .query_row(
+            "SELECT origin_id FROM sync_identity WHERE workspace_id = ?1",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?
+        .ok_or(SyncError::InvalidInput {
+            reason: "no sync identity for a replicated journal append",
+        })?;
+    let previous: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(origin_seq), -1) FROM replication_log              WHERE workspace_id = ?1 AND origin_id = ?2",
+            params![workspace_id, origin_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if !(-1..crate::MAX_WIRE_INTEGER).contains(&previous) {
+        return Err(SyncError::CoordinateDiverged);
+    }
+    let origin_seq = previous
+        .checked_add(1)
+        .ok_or(SyncError::CoordinateDiverged)?;
+    tx.execute(
+        "INSERT INTO replication_log          (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported)          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
+        params![workspace_id, origin_id, origin_seq, op_kind, payload_json, now_ms],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(origin_seq)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn journal_local_replication_op(
     store: &mut EngineStore,

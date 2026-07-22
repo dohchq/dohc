@@ -22,7 +22,7 @@
 //! scanned path through the sink — narrowed-but-unchanged paths retire via
 //! the sink's NotOwned branch, and newly-widened paths re-ingest.
 
-use crate::capture_sink::StoreCaptureSink;
+use crate::capture_sink::{SelfWriteSuppression, StoreCaptureSink};
 use dohc_engine_files::{
     CancellationToken, CaptureApplyResult, FilesActor, FilesError, ManifestEntry, NativeWatcher,
     ReconcilePlan, ReconcileRun, ScanBounds, ScanGeneration, ScanManifest, apply_reconcile_plan,
@@ -1315,7 +1315,12 @@ impl CaptureDriver {
     /// called after `bind_shadow_clone` succeeded — the sink writes through
     /// the shadow-bound store actor, and an unmarked root must never spawn a
     /// watcher (the caller's shadow validation guarantees it).
-    pub(crate) fn spawn(root: PathBuf, actor: ActorHandle, workspace_id: String) -> CaptureDriver {
+    pub(crate) fn spawn(
+        root: PathBuf,
+        actor: ActorHandle,
+        workspace_id: String,
+        self_writes: SelfWriteSuppression,
+    ) -> CaptureDriver {
         let cancel = CancellationToken::new();
         let status = Arc::new(DriverStatus::default());
         let (baseline_tx, baseline) = tokio::sync::watch::channel(false);
@@ -1324,6 +1329,7 @@ impl CaptureDriver {
             root,
             actor,
             workspace_id,
+            self_writes,
             cancel.clone(),
             Arc::clone(&status),
             baseline_tx,
@@ -1996,6 +2002,7 @@ struct RealEnv {
     actor: ActorHandle,
     workspace_id: String,
     status: Arc<DriverStatus>,
+    self_writes: SelfWriteSuppression,
 }
 
 impl RealEnv {}
@@ -2044,6 +2051,7 @@ impl DriverEnv for RealEnv {
             &fresh,
             initial,
             &self.status,
+            &self.self_writes,
         )
         .await;
         // The open barrier must not release on a FAILED baseline: a caller
@@ -2073,6 +2081,7 @@ impl DriverEnv for RealEnv {
                         &fresh,
                         run,
                         &self.status,
+                        &self.self_writes,
                     )
                     .await
                 }
@@ -2121,6 +2130,7 @@ impl DriverEnv for RealEnv {
                     layer,
                     run,
                     &self.status,
+                    &self.self_writes,
                 )
                 .await;
                 // A clean-looking tick with a NON-EMPTY quarantine is not
@@ -2158,10 +2168,12 @@ impl DriverEnv for RealEnv {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn drive(
     root: PathBuf,
     actor: ActorHandle,
     workspace_id: String,
+    self_writes: SelfWriteSuppression,
     cancel: CancellationToken,
     status: Arc<DriverStatus>,
     baseline_tx: tokio::sync::watch::Sender<bool>,
@@ -2172,6 +2184,7 @@ async fn drive(
         actor,
         workspace_id,
         status: Arc::clone(&status),
+        self_writes,
     };
     drive_loop(&mut env, cancel, status, baseline_tx, flush_rx).await;
 }
@@ -2191,6 +2204,7 @@ async fn apply_run(
     layer: &FilesLayer,
     run: ReconcileRun,
     status: &Arc<DriverStatus>,
+    self_writes: &SelfWriteSuppression,
 ) -> bool {
     let plan = match run {
         ReconcileRun::Completed(plan) => plan,
@@ -2215,6 +2229,7 @@ async fn apply_run(
     let apply_actor = actor.clone();
     let apply_root = root.to_path_buf();
     let apply_workspace = workspace_id.to_owned();
+    let apply_self_writes = self_writes.clone();
     let version_for_retire = version_id.clone();
     let now_ms = wall_now_ms();
     // A DEDICATED plain thread, not spawn_blocking: the sink's blocking actor
@@ -2230,13 +2245,14 @@ async fn apply_run(
             // A FRESH sink per run: the policy snapshot and (lazily loaded)
             // secret key are re-read per reconcile task, matching the TS
             // one-policy-snapshot-per-task rule.
-            let mut sink = StoreCaptureSink::new(
+            let mut sink = StoreCaptureSink::new_with_self_writes(
                 apply_actor,
                 apply_workspace,
                 version_id,
                 apply_root,
                 now_ms,
                 None,
+                apply_self_writes,
             );
             let result = apply_reconcile_plan(&apply_plan, &mut sink, &NoFaults);
             let _ = done_tx.send((apply_plan, result, sink.policy_held()));
@@ -2292,14 +2308,16 @@ async fn apply_run(
             let retire_version = version_for_retire.clone();
             let retire_path = path.clone();
             let retire_root = root.to_path_buf();
+            let retire_self_writes = self_writes.clone();
             let retired = tokio::task::spawn_blocking(move || {
-                let mut sink = StoreCaptureSink::new(
+                let mut sink = StoreCaptureSink::new_with_self_writes(
                     retire_actor,
                     retire_workspace,
                     retire_version,
                     retire_root,
                     now_ms,
                     None,
+                    retire_self_writes,
                 );
                 sink.retire_policy_excluded(&retire_path)
             })

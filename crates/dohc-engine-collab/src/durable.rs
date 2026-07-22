@@ -18,7 +18,7 @@ use dohc_engine_storage::{
     enqueue_job, put_binary_blob, EngineStore, FaultInjector, MaterializationJobSpec, Preimage,
     TxnOutcome,
 };
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::error::CollabError;
 use crate::limits::{DEFAULT_COMPACTION_THRESHOLD, MAX_PROJECTION_BYTES, MAX_YDOC_UPDATE_BYTES};
@@ -267,12 +267,59 @@ pub fn record_local_update(
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
+    record_local_update_with_origin(store, key, update, None, faults, now_ms)
+}
+
+/// [`record_local_update`] with the requesting client's actor origin id
+/// persisted onto the appended row (`ydoc_updates.actor_origin_id`) —
+/// provenance/echo-filter parity with the TS driver, which stores the
+/// caller-supplied origin rather than dropping it.
+pub fn record_local_update_with_origin(
+    store: &mut EngineStore,
+    key: &DocKey,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
+    record_local_update_with_origin_and_hook(
+        store,
+        key,
+        update,
+        actor_origin_id,
+        faults,
+        now_ms,
+        |_tx, _outcome| Ok(()),
+    )
+}
+
+/// [`record_local_update_with_origin`] with a post-append hook running in the
+/// SAME transaction as the CRDT append. The live-session path uses it to
+/// journal the outbound `ydoc.update` replication op atomically with the
+/// append (blob-before-log holds — the append stored the blob earlier in this
+/// transaction). The hook runs only for a genuinely-new append.
+pub fn record_local_update_with_origin_and_hook<F>(
+    store: &mut EngineStore,
+    key: &DocKey,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+    post_append: F,
+) -> Result<TxnOutcome<AppendOutcome>, CollabError>
+where
+    F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
+{
     validate_update_bytes(update)?;
     let sha = crate::hex_sha256(update);
 
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
         let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
-        append_local_update(tx, key, &marker, update, &sha, now_ms)
+        let outcome = append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)?;
+        if !outcome.deduped {
+            post_append(tx, &outcome)?;
+        }
+        Ok(outcome)
     })?;
     self_bound_log(store, key, &outcome, faults, now_ms)?;
     Ok(outcome)
@@ -281,16 +328,154 @@ pub fn record_local_update(
 /// Create a marker when needed and append a locally-produced update in one
 /// transaction. Validation, replay parity, blob storage, journal append, and
 /// first-marker creation therefore share one rollback boundary.
+#[allow(clippy::too_many_arguments)]
 pub fn record_local_update_creating_marker(
     store: &mut EngineStore,
     key: &DocKey,
     content_kind: ContentKind,
     regime: Regime,
     update: &[u8],
+    actor_origin_id: Option<&str>,
     faults: &dyn FaultInjector,
     now_ms: i64,
 ) -> Result<TxnOutcome<AppendOutcome>, CollabError> {
+    record_local_update_creating_marker_with_hook(
+        store,
+        key,
+        content_kind,
+        regime,
+        update,
+        actor_origin_id,
+        faults,
+        now_ms,
+        |_tx, _outcome| Ok(()),
+    )
+}
+
+/// [`record_local_update_creating_marker`] with a post-append hook in the same
+/// transaction (see [`record_local_update_with_origin_and_hook`]). The hook
+/// runs only for a genuinely-new append.
+#[allow(clippy::too_many_arguments)]
+pub fn record_local_update_creating_marker_with_hook<F>(
+    store: &mut EngineStore,
+    key: &DocKey,
+    content_kind: ContentKind,
+    regime: Regime,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+    post_append: F,
+) -> Result<TxnOutcome<AppendOutcome>, CollabError>
+where
+    F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
+{
+    record_local_update_creating_marker_guarded(
+        store,
+        key,
+        content_kind,
+        regime,
+        update,
+        actor_origin_id,
+        false,
+        false,
+        None,
+        faults,
+        now_ms,
+        post_append,
+    )
+}
+
+/// The full first-seed form: optionally ensures the `file_objects` parent row
+/// and enforces the empty-lineage seed guard — all in ONE transaction with the
+/// append, so a crash cannot strand a bare parent row and a timed-out-commit
+/// RETRY of the same seed bytes DEDUPES (the blob check precedes the guard)
+/// instead of refusing seed-onto-existing-lineage.
+#[allow(clippy::too_many_arguments)]
+pub fn record_local_update_creating_marker_guarded<F>(
+    store: &mut EngineStore,
+    key: &DocKey,
+    content_kind: ContentKind,
+    regime: Regime,
+    update: &[u8],
+    actor_origin_id: Option<&str>,
+    ensure_parent_row: bool,
+    require_empty_lineage: bool,
+    request_id: Option<&str>,
+    faults: &dyn FaultInjector,
+    now_ms: i64,
+    post_append: F,
+) -> Result<TxnOutcome<AppendOutcome>, CollabError>
+where
+    F: FnOnce(&Transaction<'_>, &AppendOutcome) -> Result<(), CollabError>,
+{
+    // The caller's idempotency key hashes over the DOC COORDINATES and the
+    // update bytes: content-addressed dedupe alone only holds while the
+    // original row survives compaction — a retry after the fold would
+    // re-append the edit (and re-journal an outbound op on a replicated
+    // lineage) instead of replaying the original result.
+    let request_hash = request_id.map(|_| {
+        crate::hex_sha256(
+            format!(
+                "ydoc-record{sep}{}{sep}{}{sep}{}{sep}{}",
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                crate::hex_sha256(update),
+                sep = char::from(0),
+            )
+            .as_bytes(),
+        )
+    });
     let outcome = store.write_with(faults, |tx| -> Result<AppendOutcome, CollabError> {
+        if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
+            let recorded: Option<(String, i64)> = tx
+                .query_row(
+                    "SELECT payload_hash, result_seq FROM engine_requests                      WHERE request_id = ?1",
+                    rusqlite::params![request_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(map_sql)?;
+            if let Some((payload_hash, result_seq)) = recorded {
+                if payload_hash != hash {
+                    return Err(CollabError::Corrupt {
+                        reason: "idempotency key reused with different content".to_owned(),
+                    });
+                }
+                // Negative namespace: -seq (see the insert below).
+                return Ok(AppendOutcome {
+                    seq: -result_seq,
+                    deduped: true,
+                    emit_outbound: false,
+                });
+            }
+        }
+        if ensure_parent_row {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES (?1, ?2, ?3)",
+                rusqlite::params![key.workspace_id, key.object_id, now_ms],
+            )
+            .map_err(map_sql)?;
+        }
+        let guarded_marker = if require_empty_lineage {
+            query_marker(tx, key)?
+        } else {
+            None
+        };
+        if guarded_marker.is_some_and(|marker| marker.head_update_seq > 0) {
+            // A retry of the SAME first update after a timed-out commit must
+            // dedupe, not refuse: check the blob before the guard.
+            let sha = crate::hex_sha256(update);
+            if let Some(existing) = blob_seq_in_log(tx, key, &sha)? {
+                return Ok(AppendOutcome {
+                    seq: existing,
+                    deduped: true,
+                    emit_outbound: false,
+                });
+            }
+            return Err(CollabError::SeedOntoExistingLineage);
+        }
         validate_update_bytes(update)?;
         let marker = match query_marker(tx, key)? {
             Some(marker) => {
@@ -325,7 +510,26 @@ pub fn record_local_update_creating_marker(
             }
         };
         let sha = crate::hex_sha256(update);
-        append_local_update(tx, key, &marker, update, &sha, now_ms)
+        {
+            let outcome =
+                append_local_update(tx, key, &marker, update, &sha, actor_origin_id, now_ms)?;
+            if !outcome.deduped {
+                post_append(tx, &outcome)?;
+            }
+            if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
+                // NEGATIVE namespace (-seq): rollback cleanup deletes ledger
+                // rows by POSITIVE moment_order, so a stored -seq can never
+                // be swept out from under a retry.
+                tx.execute(
+                    "INSERT INTO engine_requests \
+                     (request_id, payload_hash, result_seq, committed_at) \
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![request_id, hash, -outcome.seq, now_ms],
+                )
+                .map_err(map_sql)?;
+            }
+            Ok(outcome)
+        }
     })?;
     self_bound_log(store, key, &outcome, faults, now_ms)?;
     Ok(outcome)
@@ -337,6 +541,7 @@ fn append_local_update(
     marker: &Marker,
     update: &[u8],
     sha: &str,
+    actor_origin_id: Option<&str>,
     now_ms: i64,
 ) -> Result<AppendOutcome, CollabError> {
     let base = load_for_replay_gate(conn, key)?;
@@ -349,7 +554,7 @@ fn append_local_update(
         });
     }
     put_binary_blob(conn, update)?;
-    let seq = append_row(conn, key, sha, None, now_ms)?;
+    let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
     Ok(AppendOutcome {
         seq,
         deduped: false,
@@ -492,6 +697,24 @@ pub fn claim_base(
     };
 
     store.write_with(faults, |tx| {
+        claim_base_in_tx(tx, key, content_kind, base_bytes, &sv_bytes, now_ms)
+    })
+}
+
+/// Transaction-composable form of [`claim_base`] for callers that must claim
+/// a REMOTE base atomically with the imported coordinate's admission and ack
+/// (a standalone claim before admission would persist a marker for an
+/// envelope the sequence/divergence checks then reject).
+pub fn claim_base_in_tx(
+    tx: &Transaction<'_>,
+    key: &DocKey,
+    content_kind: ContentKind,
+    base_bytes: &[u8],
+    sv_bytes: &[u8],
+    now_ms: i64,
+) -> Result<ClaimOutcome, CollabError> {
+    validate_update_bytes(base_bytes)?;
+    (|| {
         // Upsert the marker first (FK parent for the snapshot), stamping the
         // replicated regime + content kind. In the INDIVIDUAL-FIRST flow the
         // marker already exists as `local-only` (created by `ensure_marker`), so
@@ -519,14 +742,33 @@ pub fn claim_base(
         .map_err(map_sql)?;
 
         // Atomic re-check: a base already claimed ⇒ resume the winner, emit no
-        // second base.
+        // second base — but ONLY when the incoming base IS the stored base.
+        // Silently resuming (and acking) a DIFFERENT base would drop a
+        // divergent lineage while the relay cursor advances past it, leaving
+        // that peer's later updates missing an unrecoverable dependency.
         let (_, _, base_claimed) = head_of(tx, key)?;
         if base_claimed {
-            return Ok(ClaimOutcome::Resumed);
+            let stored_sha: Option<String> = tx
+                .query_row(
+                    "SELECT snapshot_blob_sha256 FROM ydoc_snapshots                      WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3                        AND up_to_seq = 0",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(map_sql)?;
+            return match stored_sha {
+                Some(sha) if sha == crate::hex_sha256(base_bytes) => Ok(ClaimOutcome::Resumed),
+                Some(_) => Err(CollabError::BaseStateDiverged),
+                // Compaction legitimately folds the seq-0 base away once
+                // updates supersede it: divergence is no longer verifiable,
+                // base-once still holds, and refusing would wedge the relay
+                // cursor on a VALID replica. Resume.
+                None => Ok(ClaimOutcome::Resumed),
+            };
         }
 
         let base_sha = put_binary_blob(tx, base_bytes)?;
-        let sv_sha = put_binary_blob(tx, &sv_bytes)?;
+        let sv_sha = put_binary_blob(tx, sv_bytes)?;
         // The base IS the seq-0 snapshot. INSERT (not REPLACE): a genuine second
         // base at up_to_seq = 0 would conflict, a hard backstop under the flag.
         tx.execute(
@@ -553,7 +795,7 @@ pub fn claim_base(
         Ok(ClaimOutcome::Claimed {
             base_snapshot_sha: base_sha,
         })
-    })
+    })()
 }
 
 /// Settle: project the reconstructed Y.Doc to markdown (with provenance),
@@ -721,6 +963,23 @@ pub fn close_session(
         if last_settled.as_deref() != Some(content_sha.as_str()) {
             return Err(CollabError::UnsettledClose);
         }
+        // The settle may have COMMITTED while its materialization failed
+        // transiently: last_settled_sha matches the projection but the
+        // `ydoc-mat_` job is still pending and the DISK holds the old bytes.
+        // Pruning now would discard the CRDT with the artifact never
+        // replaced — refuse until the replay (retry-settle or open-time)
+        // lands the job.
+        let job_pending: bool = store.read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM materialization_jobs j                    JOIN moments m ON j.job_id = 'ydoc-mat_' || m.moment_id                   WHERE m.workspace_id = ?1 AND m.version_id = ?2                     AND m.object_id = ?3 AND j.status = 'pending')",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )
+            .map_err(map_sql)
+        })?;
+        if job_pending {
+            return Err(CollabError::UnsettledClose);
+        }
     }
     // Prune the CRDT cache to nothing, keep the marker.
     store.write_with(faults, |tx| {
@@ -738,8 +997,14 @@ pub fn close_session(
                 rusqlite::params![key.workspace_id, key.version_id, key.object_id],
             )
             .map_err(map_sql)?;
+        // `last_settled_sha` clears WITH the cache: it described the pruned
+        // lineage. The next open reseeds from the file, and its settle
+        // expectation must be the OPEN-TIME head — a retained sha from the
+        // pruned lineage would turn the first settle after an intervening
+        // capture/edit into a permanent ConflictStaleTarget.
         tx.execute(
-            "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0, updated_at_ms = ?4 \
+            "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0, \
+             last_settled_sha = NULL, updated_at_ms = ?4 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id, now_ms],
         )
@@ -844,6 +1109,46 @@ pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Mar
 
 /// The sha of the content the last settle materialized (or `None` if never
 /// settled) — the durable settle-handoff marker the local-only close guard reads.
+/// Full durable admission check for a remote update WITHOUT applying it:
+/// byte validation (empty/5 MiB cap/abort-safe prevalidation) plus the
+/// replay-parity gate against the lineage's current base. The sync defer
+/// path runs this BEFORE acking a coordinate it can only replay later —
+/// an update the drain would refuse must never be acked.
+pub fn validate_remote_update_for(
+    store: &EngineStore,
+    key: &DocKey,
+    bytes: &[u8],
+) -> Result<(), CollabError> {
+    validate_remote_update_with_pending(store, key, &[], bytes)
+}
+
+/// [`validate_remote_update_for`] with already-acked-but-deferred
+/// predecessor updates replayed onto the gate doc first — a later deferred
+/// update may only become invalid AFTER its queued predecessors apply, and
+/// acking it against the bare durable head would strand the drain.
+pub fn validate_remote_update_with_pending(
+    store: &EngineStore,
+    key: &DocKey,
+    pending: &[Vec<u8>],
+    bytes: &[u8],
+) -> Result<(), CollabError> {
+    validate_update_bytes(bytes)?;
+    let base = store.read_with(|conn| load_for_replay_gate(conn, key))?;
+    for queued in pending {
+        base.apply(queued)?;
+    }
+    crate::validate_replay_parity(&base, bytes)
+}
+
+/// The content sha the lineage last durably settled (public read for the
+/// daemon settle path's idempotent no-op check).
+pub fn read_last_settled_sha(
+    store: &EngineStore,
+    key: &DocKey,
+) -> Result<Option<String>, CollabError> {
+    store.read_with(|conn| last_settled_sha(conn, key))
+}
+
 fn last_settled_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, CollabError> {
     conn.query_row(
         "SELECT last_settled_sha FROM ydoc_docs \

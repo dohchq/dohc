@@ -1,129 +1,368 @@
-# RPC-B summary
+# RPC-C C1 implementation summary
 
-## Methods added
+## Implemented surface
 
-- Channels: `chats.channels.create`, `ensureGeneral`, `ensureAgent`, `list`, `findBySlug`, `getWireId`
-- Threads: `chats.threads.start`, `list`
-- Messages: `chats.messages.send`, `list`
-- Read state: `chats.readState.markThreadRead`, `get`
-- Follows: `chats.follows.set`, `list`
-- Personal feed: `chats.feed.markSeen`, `listPersonal`
-- Bookmarks: `chats.bookmarks.save`, `list`, `markReady`
-- Dispatch: `chats.dispatch.enqueue`, `claimNextPending`, `complete`, `fail`
+- Added daemon-side `ydoc.open`, `ydoc.recordUpdate`, `ydoc.settle`,
+  `ydoc.applyExternalMarkdownEdit`, `ydoc.close`, and `ydoc.resync` dispatch
+  paths with strict camelCase/`deny_unknown_fields` serde parameter shapes.
+- Added per-`EngineService` sessions with daemon-minted
+  `ydoc-{monotone:016x}` identifiers, workspace-handle scoping, exclusive
+  `LeaseRegistry` guards, lineage/regime state, first-seed state, event
+  baseline, and last-settled SHA. Leases drop on `ydoc.close`,
+  `workspace.close`, stale-handle eviction, and service teardown.
+- `ydoc.open` resolves the current text head server-side, refuses binary
+  heads, derives absent object IDs with `derive_capture_object_id`, preserves
+  an existing marker's content kind/regime, defaults new lineages to
+  local-only, returns an empty/full Y.Doc state, and exposes explicit
+  `lineage` plus `seedMarkdown` for absent lineages over existing text.
+- `ydoc.recordUpdate` decodes base64, routes bytes through the existing
+  abort-safe replay validator and content-addressed durable append, returns the
+  durable lineage sequence plus `deduped`, and refuses a raced first seed with
+  `seed-onto-existing-lineage`.
+- Plaintext settlement reconstructs and projects the durable Y.Doc, mints a
+  non-journaled domain moment/snapshot, uses the current text SHA (or absent)
+  as materialization preimage, uses `moment_order` as target generation,
+  synchronously materializes only its own job, updates durable/session settle
+  state, and returns projection provenance. Richdoc settlement refuses with
+  `richdoc-settle-unsupported`.
+- `ydoc.applyExternalMarkdownEdit` validates session/workspace scope and
+  refuses with `external-edit-unsupported-live` in C1.
+- `ydoc.close` optionally uses the same settle path, performs regime-aware
+  collab close/prune, drains deferred replicated Y.Doc envelopes for replicated
+  lineages, and releases the lease. `ydoc.resync` returns full state and resets
+  the session event baseline.
+- Added a daemon-owned single-shot self-write suppression registry. Settlement
+  records `(workspace, path, sha)` before replying; capture consumes an exact
+  matching `Changed` observation without minting a capture moment or flipping
+  ownership.
+- Added the `LeaseProbe` sync seam, a no-live-leases implementation, direct
+  `LeaseRegistry` support, `ydoc-session-live` ack/defer results, and a close
+  drain that uses the imported replication log as the durable pending queue.
+- Replaced the hardcoded handshake generation with a process-lifetime
+  `AtomicU64` allocation starting at 1.
+- Added the client stale-to-`ydoc.resync` recovery path and event-baseline
+  reset. The client now consumes daemon `lineage`/`seedMarkdown` fields without
+  changing `ydocWireContract.ts`, builds the first seed with the projection
+  package, and records it before returning the opened session.
 
-Every method has a deny-unknown-fields camelCase parameter DTO, a dispatch arm, an `ActorHandle` passthrough, and a dedicated actor command/reply variant. All actor waits use `read_under_ctx`, including writes. Workspace ids come only from the open daemon handle. Message pages clamp to 500 and expose `nextAfterMessageOrder`; personal-feed pages clamp to the domain's 100-row maximum and expose `nextCursor`, `headCursor`, and `readState`.
+## Files and tests
 
-Dispatch completion/failure now resolve the run under the handle-derived workspace id in `LinkedChatStore`, preventing a run id from another workspace from being completed or failed.
+- Core daemon/session composition:
+  `crates/dohc-workspace-engine/src/lib.rs`
+- Actor-owned durable operations and synchronous materialization:
+  `crates/dohc-engine-runtime/src/actor.rs`
+- Non-journaling projected-write seam:
+  `crates/dohc-engine-domain/src/store.rs`
+- Capture suppression plumbing:
+  `crates/dohc-workspace-engine/src/capture_sink.rs` and
+  `capture_driver.rs`
+- Sync lease/defer/drain seam:
+  `crates/dohc-engine-sync/src/ydoc_apply.rs`
+- Per-authentication generation:
+  `crates/dohc-workspace-engine/src/bin/dohc-workspace-engine.rs`
+- Client seed/resync path:
+  `packages/workspace-engine-client/src/ydoc/ydocLiveAdapter.ts` and
+  `ydocLoopbackEngine.ts`
+- New RPC acceptance coverage:
+  `crates/dohc-workspace-engine/tests/rpc_ydoc.rs`
+- Sync mutation test:
+  `crates/dohc-engine-sync/src/tests.rs`
+- Client recovery test:
+  `packages/workspace-engine-client/src/ydoc/ydocLiveAdapter.test.ts`
 
-## Files touched
+The RPC acceptance test covers settlement over an existing file with no
+spurious conflict, moment retrieval, one-and-only-one new moment after capture
+flush (with a mutation comment identifying how to restore the suppression
+bug), open/record/settle/close/reopen/resync round-trip, double-open busy,
+binary-head refusal, richdoc-settle refusal, raced-seed refusal, live external
+edit refusal, workspace-close lease release, and cross-workspace isolation.
+The sync test proves a live-key envelope advances the peer ack without
+mutating `ydoc_updates`.
 
-- `crates/dohc-workspace-engine/src/lib.rs` — RPC dispatch, DTO parsing, domain input construction, cancellation-aware actor waits, and camelCase response projections.
-- `crates/dohc-engine-runtime/src/actor.rs` — 23 chat command variants, `ActorHandle` methods, and single-actor-turn `LinkedChatStore` execution.
-- `crates/dohc-engine-domain/src/chats.rs` — follow validation, feed metadata, guarded bookmark readiness, run-id validation, channel aggregates, and workspace-scoped dispatch transitions.
-- `crates/dohc-engine-domain/tests/chats.rs` — channel-summary expectations plus dispatch run-id coverage.
-- `crates/dohc-workspace-engine/tests/rpc_chats.rs` — new end-to-end RPC-B acceptance coverage.
-- `SUMMARY.md` — this handoff.
-- `RPC_B_BRIEF.md` — removed as requested by the brief.
+## Verification
 
-## Test coverage written
+- Did **not** run `cargo build` or `cargo test`, as required.
+- Direct `rustfmt --edition 2024` parsing/formatting completed successfully for
+  every changed Rust source.
+- `git diff --check` passes.
+- Changed Cargo TOML and package JSON parse successfully.
+- The workspace-engine-client typecheck/test commands were attempted but could
+  not start because this worktree has no installed `node_modules` (`tsc` and
+  `vitest` were unavailable). No dependency installation was performed.
 
-`rpc_chats.rs` uses `InProcessTransport`, real shadow markers, and only real RPC/domain writes. It covers channel creation/provisioning/list/slug lookup and derived counts; channel-thread creation; message sends and the observable 500-row keyset clamp; thread listing; read-state get/mark; validated follows; personal-feed visibility, 100-row clamp, cursors, page read state, and mark-seen; bookmark save/list and guarded generation-ready ownership; bounded dispatch run ids plus claim/complete/fail and close/reopen reclaim/exhaustion; clean `InvalidParams` errors for invalid coordinates; cross-workspace empty-state probes; and cross-workspace dispatch completion refusal.
+## Deviations
 
-## Not run or included
+None known. `packages/workspace-engine-client/src/ydoc/ydocWireContract.ts` was
+left unchanged as required; the C1 lineage/seed additions are consumed from
+the raw result alongside the existing decoder.
 
-Per the task constraint, no `cargo build`, `cargo check`, or `cargo test` command was run. The changed Rust files were parsed/formatted with `rustfmt`, and `git diff --check` passes. Compilation and execution remain for the orchestrator gate.
+## Adversarial review round (opus, pre-PR)
 
-Replication apply arms, file-linked reads, and reactions/decisions/attachment/mention indexing were intentionally left out: `crates/dohc-engine-domain/src/chats.rs:32-35` explicitly defers those surfaces to RPC-B2 (the gated follow-up shard; formerly labeled R10-scope). No additional chat query or presentation surface was invented beyond the R09 methods at `chats.rs:744-2019`.
+- **P0 fixed**: `ydoc.settle` on an un-seeded/absent lineage previously
+  projected a fresh empty doc and clobbered the existing file; it now
+  refuses with the collab `NoMarker` error, mirroring collab `settle()`.
+  Mutation-verified: restoring `None => Ydoc::wire()` makes the new
+  refusal test fail with a successful empty-markdown settle.
+- **P1 fixed (drain completeness)**: acked-but-parked replicated envelopes
+  were only drained on `ydoc.close` of a replicated session — workspace
+  close, stale-handle eviction, and crashes orphaned them. `ydoc.open` now
+  drains parked envelopes for its key before loading state, so any parked
+  update lands on the next use of the doc regardless of how the previous
+  session ended. New sync test proves defer -> drain applies (and re-drain
+  dedupes).
+- **P1 fixed (settle atomicity)**: the `settle_seq`/`last_settled_sha`
+  marker update now commits in the SAME transaction as the settlement
+  moment; a crash can no longer leave a minted moment on an
+  unsettled-looking lineage (which forced a non-idempotent re-settle).
+- **Flow bug found by strengthening the resync assertion**: a local-only
+  close PRUNES the CRDT cache to a bare marker, but reopen still reported
+  `lineage: "existing"` with an EMPTY doc and no `seedMarkdown` — the
+  client's next settle would clobber the settled file. `lineage` now
+  reports durable DOC STATE (marker with `head_update_seq > 0`), so a
+  pruned reopen is `absent` + `seedMarkdown` and the artifact re-seeds the
+  cache (the recordUpdate seed guard already admits a pruned marker).
+- **P2 fixed (stale suppression entry)**: `consume_match` is now
+  single-shot on ANY Changed observation of the path (a non-matching sha
+  clears the stale entry), and workspace close/eviction clears the
+  workspace's entries (the registry outlives workspaces).
+- **P2 fixed (wire-size guard)**: `ydoc.open`/`ydoc.resync` refuse with
+  `ydoc-state-exceeds-wire-limit` when the full state cannot fit one DOP1
+  string post-base64 (48 KiB raw), instead of relying on the framer.
+- **P2 fixed (client leak)**: a throw during the client's first-seed apply
+  now releases the registered session and closes the daemon lease before
+  surfacing.
+- **Documented**: daemon settle path owns `settle_seq` as moment_order
+  generation (collab `settle()` never runs on daemon lineages in C1);
+  lease-on-actor-panic recovers via workspace reopen eviction (noted, not
+  changed).
 
-## Review round 1
+## Codex review round 1 (PR #220)
 
-- Removed the unsafe anytime `chats.dispatch.reclaimRunning` RPC. A workspace open that CREATES the store actor performs one dispatch reclaim after the capture driver starts (attaching a second service to a live actor does not — see round 7); the actor/domain reclaim APIs remain internal.
-- Added actor-entry cancellation checks to every specified chat write and passed each RPC operation token through to its actor command.
-- Made follows refuse missing/DM channels, missing or DM-linked threads, and person/agent targets without a matching authored message in a non-DM thread.
-- Extended personal-feed pages with the feed-wide read state and newest-message head cursor, emitted as camelCase values or `null`.
-- Ported bookmark projection ownership claiming: projection identity/path are both-or-neither, path and generation/state are fenced in the claim update, and successful readiness records projection identity, projected generation, and projection time.
-- Enforced the verbatim dispatch run-id storage bounds (non-empty, at most 512 UTF-8 bytes, no NUL) for claim, complete, and fail.
-- Added per-channel `threadCount` and `unreadCount` aggregates and acceptance coverage showing the counts change with messages and read-cursor advances.
+- **P1 cancel-after-commit**: no cancellation checks after the settle
+  transaction commits — a Cancelled return there reported failure for a
+  settle the lineage already records, and close(settle:false) could then
+  prune the CRDT with the artifact never materialized/suppressed. Once
+  committed, the settle runs to completion.
+- **P1 owner change**: the settle transaction now refuses
+  (ConflictStaleTarget) when the path's current head belongs to a
+  different object than the session key — a rival write claiming the path
+  can no longer be overwritten by a stale session projection.
+  Mutation-verified via versionedText.write claiming the path mid-session.
+- **P1 defer-ack blob validation**: the live-lease defer now loads and
+  hash-checks the update blob BEFORE acking; a missing/tampered blob
+  leaves the coordinate unacked instead of stranding the drain. The sync
+  test proves a missing blob refuses with the ack still at -1.
+- **P2 suppression vs teardown**: workspace close/eviction clears the
+  suppression registry only AFTER the capture drain completes, so an
+  in-flight reconcile apply cannot re-ingest the daemon's own settled
+  file during teardown.
+- **P2 resync window**: an event arriving while a resync is in flight
+  marks the session dropped-while-stale; the resync then runs one more
+  pass instead of resetting the baseline past the missed update.
+  Mutation-verified (22nd client test fails with the re-resync disabled).
 
-The RPC acceptance flow now covers unfollowable targets, feed page cursors/read state, guarded bookmark projection ownership, invalid run ids, channel aggregates, the removed reclaim method, and close/reopen reclaim through exhaustion. The domain dispatch case also covers the run-id bounds.
+## Codex review round 2 (PR #220)
 
-## Review round 2
+- P1 settle marker compensation: a materialization Conflict/Superseded now
+  reverts settle_seq/last_settled_sha to their pre-settle values before
+  the error returns — an errored settle can no longer leave a marker that
+  lets close(settle:false) prune the CRDT artifactless. (Crash before the
+  compensation = the durable pending-job case; it drains on reopen.)
+- P1 close default: missing `settle` now means SETTLE (TS driver
+  semantics). Richdoc sessions skip the markdown settle on default close
+  (the C1 refusal belongs to the explicit ydoc.settle RPC) and close with
+  persist-closed-state so the CRDT survives; the local-only prune's
+  markdown-is-the-artifact premise never applied to richdoc.
+- P2 empty-workspace bootstrap: ydoc.open ensures the main version before
+  resolving the head — the first live doc in a fresh workspace works.
+- P2 drain precision: new `ydoc_deferred_updates` table (migration 12)
+  records deferred coordinates in the same transaction as their ack;
+  drains replay exactly those rows (never the whole imported history,
+  which after compaction re-appended non-dedupable updates at O(history)
+  per open) and delete each drained coordinate.
+- P2 defer admission: a live lease over an absent/local-only lineage now
+  REFUSES the envelope (unacked) — mirrors the non-live NoMarker/regime
+  refusal; a deferred coordinate is always drainable.
+- P2 eviction ordering: workspace.close evicts sessions/leases only after
+  the close owns teardown (handle removed under open_lock) — a dropped
+  close future can no longer strand live editors while the workspace
+  stays open.
+- P2 actor origin: recordUpdate's actorOriginId now persists onto the
+  appended row (ydoc_updates.actor_origin_id) via
+  record_local_update_with_origin — provenance parity with the TS driver.
+- Client: markStale while already stale marks dropped-while-stale, so a
+  gap/generation event landing inside the resync window forces the extra
+  resync pass (previously only directly-delivered updates did).
 
-- Chat message sends now update their FTS row inside the same domain transaction as the message insert. Channel-thread starts atomically index both the derived thread header and first message. Runtime repair/rebuild calls the same domain-owned delete-then-insert SQL and shared title/message text derivations.
-- Dispatch enqueue now returns `true` only for a fresh ledger row. A duplicate for the same thread returns `false`; a missing or different-thread conflict fails as chat `state-corrupt`, which the RPC maps to `Internal`.
-- `chats.channels.create`, `ensureGeneral`, and `ensureAgent` now carry the request cancellation token and refuse mutation when it is already cancelled at actor entry.
-- Dispatch run ids are trimmed before validation, storage, and lookup. The existing empty, 512-byte, and NUL checks apply to the trimmed value, so padded claims can be completed with the normalized id.
-- Channel listing now fails closed on negative or non-integer persisted read-state sequence/revision values before calculating unread aggregates, while retaining the aggregate's zero clamp for valid over-count cursors.
+## Codex review round 3 (PR #220)
 
-Round-2 regression coverage proves stable-policy write-time chat search (with a mutation-guard comment), duplicate/conflicting enqueue behavior, normalized run-id completion, and corrupt negative read-state rejection. Per the task constraint, no Cargo build, check, or test command was run; all changed Rust files passed direct `rustfmt --edition 2024 --check`, and `git diff --check` passed.
+- P1 pruned-marker settles: settle refuses any marker without durable doc
+  state (updates OR snapshots) — a pruned bare marker no longer projects
+  "" over the artifact; same predicate now drives ydoc.open's lineage
+  report, so a replicated base-snapshot-only lineage (seq 0, snapshot
+  present) is EXISTING and never double-seeds.
+- P1 drain-before-project: settle drains acked-deferred envelopes for
+  replicated markers BEFORE reconstructing/projecting — a close can no
+  longer materialize a pre-drain artifact and then advance the doc.
+- P1 outbound replication: a replicated base-claimed session's
+  recordUpdate journals the ydoc.update delta op IN THE SAME transaction
+  as the CRDT append (new journal_local_op_in_tx +
+  record_local_update_creating_marker_with_hook); local live edits reach
+  list_replication_ops. Local-only lineages journal nothing.
+- P2 legacy append lease: ydoc.apply refuses ydoc-session-busy while a
+  live lease holds the key (single-writer preserved); the raced-seed RPC
+  scenario is structurally gone and the test now asserts the refusal.
+- P2 suppression timing: the identity records BEFORE materialize_one
+  replaces the file (watcher can observe the bytes instantly); the
+  conflict compensation retracts it (new SelfWriteRecorder::retract).
+- P2 empty-session close: an untouched absent-lineage session closes
+  without the default settle (no NoMarker error, lease released).
+- P2 shared leases: ONE process-wide LeaseRegistry (static) — two
+  EngineServices on the same root can no longer hold concurrent live
+  sessions on one DocKey.
+- P2 deferred-row lifecycle: ydoc_deferred_updates now FKs to ydoc_docs
+  ON DELETE CASCADE — a deleted doc cannot leak parked updates into a
+  later same-path incarnation.
+- P2 close cancellation: after the default settle materialized, the close
+  command runs on a fresh token — a caller cancel can no longer strand
+  the session/lease and force a duplicate re-settle.
 
-## Review round 3
+## Codex review round 4 (PR #220)
 
-- Bookmark re-saves now clear projection ownership when the destination changes or an archived row is reactivated, while same-destination active saves retain ownership. New bookmark ids are derived from `(ownerUserId, targetKind, targetId)` with the oracle's SHA-256/first-16-bytes/lowercase-unpadded-base32 algorithm; the save RPC no longer accepts `bookmarkId`.
-- Local follow writes without `atMs` read the prior register in the same transaction and use `max(nowMs, prior.updatedAtMs + 1)`, preserving follow-after-unfollow ordering within one millisecond.
-- Personal-feed RPC pages now use the measured chat byte budget. A byte-truncated page remints `nextCursor` from its last included feed coordinate.
-- Untitled start/list thread responses derive their display title from the first message's collapsed first line, apply the 80-character ellipsis bound, and fall back to `New chat` when no message exists.
-- Caller-supplied message id `__thread__` and the two well-known wire ids as channel ids are rejected as invalid input. Channel wire mappings now use first-writer-wins `INSERT OR IGNORE` behavior.
-- Dispatch failures reject non-string RPC values, whitespace-only reasons, and reasons above 16,384 UTF-16 code units; accepted reasons remain verbatim. No pause-reason RPC is wired on this Rust surface.
-- Dispatch claims now return the complete `{ dispatch, run }` projection with camelCase fields and nullable optional values. The existing schema already stores `command`, `log_path`, terminal metadata, and `failure_note_posted`, so no schema change or compatibility gap was needed.
+- P1 claimed base lineage: the durable-state predicate includes
+  base_claimed (claim_base inserts the base snapshot at up_to_seq 0
+  without advancing head_snapshot_seq) — a base-only replicated lineage
+  reads EXISTING and settles.
+- P1 defer prevalidation: apply_ydoc_envelope runs Ydoc::validate_update
+  before ANY ack path — a hydrated-but-malformed update can no longer be
+  acked into the deferred queue where every drain would refuse it.
+- P1 pull dispatch: pull_chat_workspace dispatches ydoc.update envelopes
+  to apply_ydoc_envelope (with a LeaseProbe param) — peers pulling a live
+  replicated edit no longer wedge on UnsupportedOperation.
+- P1 richdoc provider close (client): the pre-close settle is skipped for
+  richdoc sessions (the C1 refusal belongs to explicit settles; the
+  daemon close persists the closed CRDT).
+- P1 resync drains: ydoc.resync drains the replicated doc's deferred
+  queue before encoding full state — recovery can't miss the very edit
+  that made the client stale.
+- P1 missing-dependency settles refuse: a reconstructed doc holding
+  unintegrated remote updates refuses ydoc-missing-remote-dependencies
+  instead of recording an incomplete projection as settled.
+- P2 idempotent settle: when the projection sha equals last_settled_sha
+  the settle answers with the current head, minting nothing — a default
+  close after an explicit settle no longer duplicates moments/jobs.
+- P2 lease-before-state: ydoc.open derives the key, acquires the lease,
+  then RE-READS state under it (key-change → busy refusal) — a legacy
+  apply between read and lease can't hand the opener stale state.
 
-Round-3 domain and RPC regressions cover projection ownership transfer, exact bookmark-id/base32 vectors, same-millisecond follow toggles, feed byte-cut cursor continuity, untitled title derivation/fallback, reserved ids and FTS-header preservation, first-writer channel-wire mapping, failure-reason validation/verbatim storage, and the full persisted dispatch/run claim. Per the task constraint, no Cargo command was run; all changed Rust files passed direct `rustfmt --edition 2024 --check`, and `git diff --check` passed.
+## Codex review round 5 (PR #220)
 
-## Review round 4
+- P1 create-new-file flow: write_projected accepts the Y.Doc seed's
+  preallocated bare object (exists in file_objects, zero bindings) —
+  open-absent -> edit -> settle on a brand-new path works and is covered
+  by a new acceptance test (created.md lands on disk, head object ==
+  session object, origin ydoc).
+- P1 no-op settle finishes pending jobs: the idempotent branch loads the
+  current head's materialization job and runs it before answering — a
+  marker-committed/materialize-crashed prior settle can't report success
+  over stale disk bytes.
+- P1 base bootstrap on pulls: an is_base_state ydoc.update with no local
+  marker claims the base (file_objects + claim_base, idempotent) before
+  acking — a fresh replica's first replicated doc no longer wedges the
+  stream.
+- P1 full durable validation before defer: the live-lease path runs
+  validate_remote_update_for (byte caps + abort-safe prevalidation +
+  replay-parity gate) pre-ack — nothing the drain would refuse gets
+  acked.
+- P2 probe drains removed: only the post-lease authoritative read drains
+  (drain_deferred flag through the open-state chain); a busy second open
+  can no longer mutate the lineage behind the active editor.
+- P2 wire caps on markdown: settle responses self-describe over-cap
+  bodies (markdown null + byteLength + inbandLimitBytes, mirroring the
+  read surface); ydoc.open refuses ydoc-seed-exceeds-inband-cap for
+  seeds past 48 KiB (blob streaming is RPC-D). Note: the frozen client
+  decoder requires string markdown, so a >48 KiB settle now fails at the
+  client decode instead of dying at the DOP1 framer post-write — C1
+  cannot round-trip such docs either way (the seed refusal blocks
+  opening them); recorded as RPC-D streaming scope.
 
-- `chats.feed.markSeen` now accepts the opaque `headCursor` returned by `listPersonal`, decodes and visibility-checks it server-side, advances the local LWW read register, and returns the complete `ChatFeedReadState`. Raw read coordinates and replication bookkeeping are no longer accepted.
-- `chats.follows.set` no longer accepts caller-supplied LWW timestamps or origins. The domain derives the monotonic timestamp, persisted local origin, and next replication-log sequence inside the write transaction; follow responses expose only the TypeScript `ChatFollow` shape. The peer-origin replication-apply path remains separate.
-- Dispatch claims now reject whitespace-only, NUL-containing, or oversized commands and reject present-but-empty, NUL-containing, or oversized log paths before opening a persistence transaction. Accepted metadata is stored verbatim.
-- Thread-start and message-send ids now share the feed cursor decoder's 256-character cap (plus the empty/NUL floor), preventing an emitted feed cursor from becoming undecodable.
+## Codex review round 6 (PR #220)
 
-Round-4 RPC and domain regressions cover list-to-mark-seen cursor flow and garbage refusal, forged follow-origin rejection plus server-derived journal coordinates, invalid dispatch metadata and verbatim persistence, 257-character message-id refusal on both write paths, and a 256-character id paging through `nextCursor`. Per the task constraint, no Cargo command was run; all changed Rust files passed direct `rustfmt --edition 2024 --check`, and `git diff --check` passed.
+- P1 same-object divergence: the settle transaction refuses
+  ConflictStaleTarget when the object's CURRENT head sha differs from the
+  session's expectation (open-time head sha, replaced by its own last
+  settle) — capture ingests or another writer advancing the same object
+  can no longer be silently overwritten by a stale projection.
+- P1 legacy append serialization: ydoc.apply now holds session_ops across
+  its lease check + append — it can no longer interleave between
+  ydoc.open's lease acquisition and post-lease read.
+- P2 crashed base claims: a TxnOutcome::Crashed from claim_base returns
+  Crashed WITHOUT acking — redelivery replays the claim instead of
+  permanently skipping the base coordinate.
+- P2 event baseline preserved across resync: transport event seqs stay
+  monotone within a generation, so the position survives resync and the
+  first post-resync gap is DETECTED (the reset had made the next event a
+  fresh baseline); the dead resetEventBaseline method is removed.
+- P2 no-op-path suppression ordering: the pending-job replay records the
+  suppression identity BEFORE materialize_one and retracts it on a
+  conflicted job — same discipline as the fresh settle path.
 
-## Review round 5
+## Codex review round 7 (PR #220)
 
-- Message-id validation now retains the 256-scalar outer cap and also enforces the exact 359-byte UTF-8 budget implied by a worst-case i64 feed cursor. The final encoded form is checked as well, so JSON-escaped ids cannot mint a cursor above 512 bytes. Domain and RPC regressions reject a 200-emoji id on thread start and send, while an exact-budget id round-trips through `listPersonal`'s `nextCursor` and `markSeen`.
-- Bookmark save, list, and mark-ready responses now include the handle-derived `workspaceId`, matching the TypeScript `ChatBookmark` contract without trusting a caller-supplied workspace identity.
-- `claimNextPending` now rehydrates and returns an existing RUNNING `{ dispatch, run }` for a lost-response retry with the same normalized `runId` before applying the workspace single-flight guard. A different run id remains blocked with a null claim.
-- Local `chat.follow.set` and `chat.feed.read.set` writes now insert their exact TypeScript apply payloads into `replication_log` with `imported = 0` in the same transaction as the LWW register and compatibility journal write. Repeated writes therefore consume distinct local origin sequences and are relay-visible; tests inspect both rows and payload shapes.
+- Stale-head guard precedes the idempotent no-op (an unchanged projection
+  over an externally-advanced head refuses ConflictStaleTarget).
+- Settles past the in-band cap refuse ydoc-settle-exceeds-inband-cap
+  BEFORE committing (a successful settle is always client-decodable; the
+  Option-markdown response experiment is reverted).
+- MaterializeError gets the same marker compensation + suppression
+  retract as conflicts; the no-op replay's conflict arm NULLs
+  last_settled_sha so close(settle:false) refuses UnsettledClose.
+- Suppression entries are TAKEN on every Changed observation (binary/
+  untracked/over-cap read-backs clear them; only a matching text sha
+  suppresses); retract removes only its own identity.
+- capture_manifest_seed rehydrates 'ydoc' heads alongside 'capture' —
+  offline edits/deletes of materialized ydoc markdown reconcile.
+- ydoc.apply honors cancellation while queued on session_ops; seed
+  updates validate before the file_objects parent row commits.
 
-Per the task constraint, no Cargo command was run. The changed Rust files were parsed and formatted directly with `rustfmt --edition 2024`; final checks also include `rustfmt --check` and `git diff --check`.
+## Codex review round 8 (PR #220)
 
-## Review round 6
+- P1 no-op replay materialize ERRORS get the full compensation (retract +
+  last_settled_sha NULL) — not just conflicts.
+- P1 settles refuse ydoc-remote-updates-pending when the pre-settle drain
+  APPLIED anything: materializing content the client's doc never saw
+  would let the user keep editing stale state; resync (which drains and
+  returns full state) then settle again.
+- P2 remote base claims run INSIDE the admission transaction
+  (claim_base_in_tx) — an out-of-order or divergent base redelivery can
+  no longer persist a marker for an unacked coordinate.
+- P2 the capture manifest seeds only MATERIALIZED ydoc heads (rows whose
+  ydoc-mat_ job is gone) — an unmaterialized settle can't be diffed as a
+  user change on reopen.
+- P2 defer validation replays the QUEUED deferred predecessors onto the
+  gate doc first — a later update that only breaks after they apply
+  stays unacked.
 
-- Follow and personal-feed read LWW writes now accept an optional `replicationOwnerUserId`, normalize it with the oracle's feed-identity rules, reject a value that differs from `ownerUserId`, and write relay-visible ops only when the verified owner is present. Signed-out writes remain durable locally without a `replication_log` entry.
-- Local channel creation/provisioning, channel-thread starts, and message appends now insert exact `chat.channel.create`, `chat.thread.create`, and `chat.message.append` payloads into `replication_log` with `imported = 0` in the same transaction as their rows. Optional author, parent, origin, and channel-wire fields are omitted rather than serialized as null.
-- Personal-feed items are fully hydrated as contract-shaped message/thread records with optional channel, parent, and opening-message records, follow-match kinds, and the required empty reactions array. Byte-budget truncation and keyset cursors continue to use the hydrated message coordinate.
-- Added the remaining bookmark RPC transitions: idempotent active-to-archived generation queueing, required-reason pending-to-failed generation CAS, and optional-reason pending-to-stale generation CAS. Invalid generations fail closed and stale generations return `applied: false` without mutation.
-- Added `chats.channels.getWireId`, returning only `{ wireId }`; channel responses remain unchanged. The well-known general mapping resolves through the point lookup. (Superseded by round 7: unknown channel ids REFUSE as invalid input; only an existing-but-unmapped channel returns `{ wireId: null }` — round 7 is the authoritative contract.)
-- Domain and in-process RPC regressions cover both replication-owner gates, exact core payloads, hydrated feed joins/matches, bookmark archive/failure/stale transitions, stale-generation no-ops, and well-known/unknown wire-id lookups.
+## Codex review round 9 (PR #220)
 
-Per the task constraint, no Cargo build, check, or test command was run. All changed Rust files passed direct `rustfmt --edition 2024` parsing/formatting and `rustfmt --check`; `git diff --check` also passes.
-
-## Review round 7
-
-- `chats.channels.getWireId` now requires a real workspace channel before looking up its wire mapping. Unknown channel ids fail as chat invalid input, while an existing channel with no mapping still returns `{ wireId: null }`.
-- `chats.dispatch.enqueue` now applies the TypeScript `normalizeRequiredId` contract to trigger-message and thread ids before persistence: JavaScript trim semantics, a 512 UTF-16-code-unit cap, and empty/NUL rejection. Dispatch run ids share that exact helper.
-- `chats.bookmarks.save` now normalizes and validates bookmark owner/target identities before lookup, uniqueness checks, and deterministic SHA-256 bookmark-id derivation, so padded and unpadded identities converge on one row.
-- Caller-supplied thread ids and `chats.channels.create` channel ids are trimmed and validated against the replicated-id contract before database or replication-journal writes: non-empty, no ASCII control characters, and at most 256 UTF-16 code units.
-- Added focused in-process RPC coverage for unknown versus real-unmapped channels, trimmed persisted/journaled ids, control/length refusal, normalized bookmark deduplication, and normalized dispatch ledger values.
-
-Per the task constraint, no Cargo command was run. The changed Rust files were parsed and formatted directly with `rustfmt --edition 2024`; final verification also used direct `rustfmt --check` and `git diff --check`.
-
-## Review round 8
-
-- Bookmark owner identities are now normalized on list, archive, ready, failed, and stale paths before any bookmark lookup, matching `saveBookmark`; padded-owner lifecycle calls therefore resolve the trimmed row.
-- Thread-start and send-message IDs now reject every ASCII control character, matching the sync identifier validator instead of allowing non-NUL controls into the local journal.
-- Personal-feed listing now normalizes its owner before the visibility query, hydrated `matchedBy` follow checks, head/read-state lookup, and cursor construction. `markSeen` continues through the same normalizer, so padded feed reads match follows stored under the trimmed identity.
-- The TypeScript oracle has no order/opening field in `ChatMessageAppendPayload` (`packages/workspace-contracts/src/engine.ts:394`). Its importer branch (`packages/workspace-engine/src/linkedChatStore.ts:4442`) computes every imported append through `nextMessageOrder` (`linkedChatStore.ts:4491`), whose SQL is `COALESCE(MAX(message_order), -1) + 1` (`linkedChatStore.ts:2050`). The Rust importer now matches that actual zero-based order semantic by defaulting an empty thread's maximum to `-1`, so a journaled opening append imports at order 0.
-- Replicated channel/thread IDs now enforce both the existing 256 UTF-16-unit cap and the sync layer's 512 UTF-8-byte cap; a 200-character three-byte ID is refused locally before it can be journaled.
-- `WorkspaceSupervisor::open` now returns whether it created the actor or attached to an existing live one. Workspace open runs dispatch recovery only for the fresh actor, and an RPC regression opens one root through two services and proves the first service's running claim survives the second attach.
-
-Round-8 regressions cover padded bookmark lifecycle/list lookups, padded feed visibility/`matchedBy`/mark-seen behavior, control-bearing message IDs on both write paths, the 512-byte replicated-ID ceiling, zero-based imported opening-message order, and the two-service reclaim boundary. Per the task constraint, no Cargo build, check, or test command was run; changed Rust files were parsed/formatted directly with `rustfmt --edition 2024`, followed by `rustfmt --check` and `git diff --check`.
-
-## Review round 9
-
-- ensureGeneral/ensureAgent channel ids run the same replicated-id
-  normalization create_channel applies before persisting/journaling
-  (well-known channels journal chat.channel.create too).
-- list_follows normalizes the owner identity like the write path — a
-  padded owner lookup resolves the trimmed rows instead of answering an
-  empty list.
+Dropped-future hardening (deadline fires after the actor committed):
+- Seed retries DEDUPE: parent row, empty-lineage guard, marker, append,
+  and outbound journal commit in ONE transaction
+  (record_local_update_creating_marker_guarded); the blob dedup check
+  precedes the guard, so a timed-out-commit retry of the same first
+  update answers Deduped instead of seed-onto-existing-lineage — and a
+  crash can no longer strand a bare parent row.
+- Settle expectations derive from DURABLE state (last_settled_sha ||
+  the immutable open-time head sha) inside the actor — RPC-side session
+  fields mutated after awaits no longer participate.
+- ydoc.close TAKES the session entry before the await: a dropped future
+  releases the lease via the local guard drop; a close refusal reinserts
+  the entry under the still-held session_ops serial.
+- Leases reserve per (workspace, OBJECT) across versions — a fork can't
+  host a second canonical editor for the same object.
+- The manifest seed excludes only rows with PENDING ydoc-mat_ jobs
+  (completed jobs persist with status='complete' — the earlier NOT
+  EXISTS would have stopped seeding every settled head after restart).
+- "ydoc-remote-updates-pending" is a DISTINCT wire message and the
+  client auto-recovers: resync (returns the drained full state) then
+  exactly one settle retry.

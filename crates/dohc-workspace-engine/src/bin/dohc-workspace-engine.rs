@@ -14,6 +14,7 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_runtime::{RuntimeError, WorkspaceSupervisor};
 use dohc_workspace_engine::EngineService;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::HashSet,
     error::Error,
@@ -26,6 +27,7 @@ use tokio::task::JoinSet;
 const AUTH_TOKEN_ENV: &str = "DOHC_ENGINE_AUTH_TOKEN";
 const OUTPUT_QUEUE_CAPACITY: usize = 64;
 const READ_CHUNK_BYTES: usize = 64 * 1024;
+static NEXT_SESSION_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -285,7 +287,7 @@ fn authenticate(envelope: Envelope, auth_token: &str) -> Result<HelloAck, WireEr
         .collect();
     Ok(HelloAck {
         protocol_version: PROTOCOL_VERSION,
-        session_generation: 1,
+        session_generation: NEXT_SESSION_GENERATION.fetch_add(1, Ordering::Relaxed),
         capabilities: negotiated,
         limits: WireLimits::default(),
     })

@@ -44,6 +44,12 @@ pub enum CollabError {
     #[error("replicated lineage already has a base (base-once)")]
     BaseAlreadyClaimed,
 
+    /// An incoming base-state envelope carries DIFFERENT bytes than the
+    /// already-claimed base: acking it would silently drop a divergent
+    /// lineage while the relay cursor advances past it.
+    #[error("incoming base state diverges from the claimed base")]
+    BaseStateDiverged,
+
     /// A lease for this doc key is already held by another open session
     /// (single-writer per document).
     #[error("a lease for this document is already held")]
@@ -52,6 +58,25 @@ pub enum CollabError {
     /// No marker row exists for this doc key (the object is not Y.Doc-driven).
     #[error("no Y.Doc marker for this document key")]
     NoMarker,
+    /// The reconstructed doc still holds unintegrated remote updates (a
+    /// missing cross-origin dependency): settling would record an
+    /// incomplete projection as the settled artifact.
+    #[error("the Y.Doc has unintegrated remote updates (missing dependency)")]
+    MissingDependencies,
+
+    /// An absent path's deterministic derived object id is still live at
+    /// another alias (the file was renamed away): reusing it would graft a
+    /// new document onto the renamed file's lineage, and open-time cannot
+    /// reserve capture's order-disambiguated id pre-commit. The path becomes
+    /// creatable again once a capture/local write mints the disambiguated
+    /// object (write caps over the wire are RPC-D scope).
+    #[error("the derived object id is live at another alias; write the file first")]
+    ObjectAliasCollision,
+
+    /// A session opened an absent lineage, but another writer established a
+    /// durable update head before that session could record its seed.
+    #[error("cannot seed onto an existing Y.Doc lineage")]
+    SeedOntoExistingLineage,
 
     /// A local-only close would prune CRDT state whose edits no durable settle
     /// covers (the current head is not reflected in the materialized markdown).
@@ -81,8 +106,12 @@ impl CollabError {
             CollabError::InvalidIdentifier { .. } => "invalid-identifier",
             CollabError::ContentKindMismatch => "content-kind-mismatch",
             CollabError::BaseAlreadyClaimed => "base-already-claimed",
+            CollabError::BaseStateDiverged => "base-state-diverged",
             CollabError::LeaseHeld => "lease-held",
             CollabError::NoMarker => "no-marker",
+            CollabError::MissingDependencies => "ydoc-missing-remote-dependencies",
+            CollabError::ObjectAliasCollision => "object-alias-collision",
+            CollabError::SeedOntoExistingLineage => "seed-onto-existing-lineage",
             CollabError::UnsettledClose => "unsettled-close",
             CollabError::Corrupt { .. } => "corrupt-lineage",
             CollabError::Storage(_) => "storage",

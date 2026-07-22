@@ -29,7 +29,9 @@
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
 use crate::search::{SearchResult, search_workspace};
-use dohc_engine_collab::{AppendOutcome, ContentKind, DocKey, Regime};
+use dohc_engine_collab::{
+    AppendOutcome, CloseOutcome, ContentKind, DocKey, Projection, Regime, Ydoc,
+};
 use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
     BinaryHead, BinaryHeadMeta, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
@@ -41,17 +43,20 @@ use dohc_engine_domain::{
     ResolveTextConflictResult, SaveBookmark, SecretFileStat, SecretFileStore, SecretMomentRecord,
     SecretWriteResult, SendMessage, SetFollow, SnapshotMetadata, SnapshotView, StartChannelThread,
     TextConflict, TextSnapshot, VersionRecord, VersionedTextStore, WriteResult, WriteText,
-    capture_manifest_seed, capture_secret_retire, has_secret_state, insert_text_conflict_if_absent,
-    list_secret_files_keyless, list_secret_files_keyless_page, secret_file_len_keyless,
+    capture_manifest_seed, capture_secret_retire, derive_capture_object_id, enqueue_write,
+    has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
+    list_secret_files_keyless_page, secret_file_len_keyless, select_snapshot_by_path_in_tx,
+    write_projected_text_in_tx,
 };
+use dohc_engine_files::{DurabilityPolicy, JobOutcome, StdBackoff, StdReplacer, materialize_one};
 use dohc_engine_storage::{
-    CompoundWrite, Document, EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome,
-    WriteOutcome,
+    CompoundWrite, Document, EngineStore, FaultInjector, NoFaults, Preimage, StorageError,
+    TxnOutcome, WriteOutcome,
 };
 use dohc_engine_sync::{
     ApplyOutcome, ConflictApplyResult, ReplicationEnvelope, apply_conflict_envelope,
 };
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -126,6 +131,42 @@ pub struct StoreSnapshot {
 pub struct UnitsOutcome {
     pub committed: usize,
     pub cancelled: bool,
+}
+
+/// Actor-owned snapshot used to establish one daemon Y.Doc session without
+/// exposing the store connection to the protocol layer.
+#[derive(Debug)]
+pub struct YdocOpenState {
+    pub key: DocKey,
+    pub content_kind: ContentKind,
+    pub regime: Regime,
+    pub initial_update: Vec<u8>,
+    /// The text head's blob sha at open time (None for an absent head) —
+    /// the session's settle preimage expectation until its first settle.
+    pub head_blob_sha256: Option<String>,
+    pub lineage_existing: bool,
+    pub seed_markdown: Option<String>,
+}
+
+/// Result of the single moment+snapshot+materialization settlement path.
+#[derive(Debug)]
+pub struct YdocSettlement {
+    pub moment_id: String,
+    pub path: String,
+    pub markdown: String,
+    pub sha256: String,
+    pub projection: Projection,
+}
+
+/// Daemon-owned sink for identities written by settlement. Recording before
+/// the actor replies closes the watcher race between atomic replace and the
+/// protocol layer regaining control.
+pub trait SelfWriteRecorder: Send + Sync {
+    fn record(&self, workspace_id: &str, path: &str, sha256: &str);
+    /// Remove a previously recorded identity — the compensation for a settle
+    /// whose materialization conflicted (the file was never replaced, so the
+    /// entry must not survive to suppress a genuine capture).
+    fn retract(&self, workspace_id: &str, path: &str, sha256: &str);
 }
 
 enum Command {
@@ -304,6 +345,61 @@ enum Command {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<AppendOutcome, RuntimeError>>,
+    },
+    YdocOpenState {
+        workspace_id: String,
+        now_ms: i64,
+        drain_deferred: bool,
+        expected_key: Option<DocKey>,
+        version_id: String,
+        path: String,
+        content_kind: Option<ContentKind>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<YdocOpenState, RuntimeError>>,
+    },
+    YdocRecordUpdate {
+        key: DocKey,
+        path: String,
+        content_kind: ContentKind,
+        regime: Regime,
+        update: Vec<u8>,
+        request_id: Option<String>,
+        actor_origin_id: Option<String>,
+        require_empty_lineage: bool,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<AppendOutcome, RuntimeError>>,
+    },
+    YdocSettle {
+        root_dir: PathBuf,
+        key: DocKey,
+        path: String,
+        content_kind: ContentKind,
+        expected_head_sha: Option<String>,
+        session_id: String,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<YdocSettlement, RuntimeError>>,
+    },
+    YdocResync {
+        key: DocKey,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Vec<u8>, RuntimeError>>,
+    },
+    YdocCloseSession {
+        key: DocKey,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Option<CloseOutcome>, RuntimeError>>,
+    },
+    MaterializeReplayPending {
+        root_dir: PathBuf,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<usize, RuntimeError>>,
     },
     ConflictList {
         workspace_id: String,
@@ -1448,6 +1544,159 @@ impl ActorHandle {
                 now_ms,
                 faults,
                 token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ydoc_open_state(
+        &self,
+        workspace_id: String,
+        now_ms: i64,
+        drain_deferred: bool,
+        expected_key: Option<DocKey>,
+        version_id: String,
+        path: String,
+        content_kind: Option<ContentKind>,
+        token: CancellationToken,
+    ) -> Result<YdocOpenState, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocOpenState {
+                workspace_id,
+                now_ms,
+                drain_deferred,
+                expected_key,
+                version_id,
+                path,
+                content_kind,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ydoc_record_update(
+        &self,
+        key: DocKey,
+        path: String,
+        content_kind: ContentKind,
+        regime: Regime,
+        update: Vec<u8>,
+        actor_origin_id: Option<String>,
+        require_empty_lineage: bool,
+        request_id: Option<String>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<AppendOutcome, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocRecordUpdate {
+                key,
+                path,
+                content_kind,
+                regime,
+                update,
+                request_id,
+                actor_origin_id,
+                require_empty_lineage,
+                now_ms,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ydoc_settle(
+        &self,
+        root_dir: PathBuf,
+        key: DocKey,
+        path: String,
+        content_kind: ContentKind,
+        expected_head_sha: Option<String>,
+        session_id: String,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<YdocSettlement, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocSettle {
+                root_dir,
+                key,
+                path,
+                content_kind,
+                expected_head_sha,
+                session_id,
+                self_writes,
+                now_ms,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn ydoc_resync(
+        &self,
+        key: DocKey,
+        token: CancellationToken,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocResync { key, token, reply })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn ydoc_close_session(
+        &self,
+        key: DocKey,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Option<CloseOutcome>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::YdocCloseSession {
+                key,
+                now_ms,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Replay every pending materialization job (best-effort, per-job
+    /// failures tolerated). Returns the number of jobs that reached disk.
+    pub async fn materialize_replay_pending(
+        &self,
+        root_dir: PathBuf,
+        now_ms: i64,
+    ) -> Result<usize, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::MaterializeReplayPending {
+                root_dir,
+                now_ms,
                 reply,
             })
             .await
@@ -2618,6 +2867,181 @@ fn worker_main(
                 );
                 let _ = reply.send(outcome);
             }
+            Command::YdocOpenState {
+                workspace_id,
+                now_ms,
+                drain_deferred,
+                expected_key,
+                version_id,
+                path,
+                content_kind,
+                token,
+                reply,
+            } => {
+                let outcome = ydoc_open_state_on_store(
+                    &mut store,
+                    &workspace_id,
+                    now_ms,
+                    drain_deferred,
+                    expected_key.as_ref(),
+                    &version_id,
+                    &path,
+                    content_kind,
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::YdocRecordUpdate {
+                key,
+                path,
+                content_kind,
+                regime,
+                update,
+                request_id,
+                actor_origin_id,
+                require_empty_lineage,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = ydoc_record_update_on_store(
+                    &mut store,
+                    &key,
+                    &path,
+                    content_kind,
+                    regime,
+                    &update,
+                    actor_origin_id,
+                    require_empty_lineage,
+                    request_id,
+                    now_ms,
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::YdocSettle {
+                root_dir,
+                key,
+                path,
+                content_kind,
+                expected_head_sha,
+                session_id,
+                self_writes,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = ydoc_settle_on_store(
+                    &mut store,
+                    &root_dir,
+                    &key,
+                    &path,
+                    content_kind,
+                    expected_head_sha,
+                    &session_id,
+                    self_writes.as_ref(),
+                    now_ms,
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::YdocResync { key, token, reply } => {
+                let outcome = ydoc_resync_on_store(&mut store, &key, &token);
+                let _ = reply.send(outcome);
+            }
+            Command::YdocCloseSession {
+                key,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome =
+                    ydoc_close_session_on_store(&mut store, &key, now_ms, faults.as_ref(), &token);
+                let _ = reply.send(outcome);
+            }
+            Command::MaterializeReplayPending {
+                root_dir,
+                now_ms,
+                reply,
+            } => {
+                // Open-time replay of jobs left pending by a crash, a
+                // transient settle failure, or a pulled replication apply.
+                // Runs BEFORE the files layer spawns, so no watcher observes
+                // the writes (no suppression needed) and the baseline scan
+                // sees the post-replay disk. Per-job failures are tolerated:
+                // the job stays pending for the next open or the settle
+                // no-op replay.
+                let outcome = (|| {
+                    let jobs = store.list_pending_materialization_jobs()?;
+                    let mut completed = 0_usize;
+                    for job in jobs {
+                        // Secret jobs carry CIPHERTEXT as their content blob;
+                        // only the secret-aware materializer may produce the
+                        // plaintext. Feeding one to the generic replayer
+                        // would write ciphertext bytes to the user path and
+                        // mark the job complete. Leave them for the secret
+                        // pipeline.
+                        if job.job_id.starts_with("secret-mat_") {
+                            continue;
+                        }
+                        match materialize_one(
+                            &store,
+                            &root_dir,
+                            &job,
+                            DurabilityPolicy::per_os(),
+                            &StdReplacer,
+                            &StdBackoff,
+                            now_ms,
+                            &NoFaults,
+                        ) {
+                            Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
+                                completed += 1;
+                            }
+                            Ok(JobOutcome::Conflict | JobOutcome::Superseded) => {
+                                // The disk moved while the daemon was down:
+                                // a settle job's marker still claims bytes
+                                // that never replaced the file. Leave the
+                                // stale sha and every later settle inherits
+                                // a poisoned preimage expectation (and a
+                                // prune-close could discard the CRDT over an
+                                // unmaterialized artifact) — NULL it, the
+                                // same compensation the settle-time replay
+                                // arms apply.
+                                if let Some(moment_id) = job.job_id.strip_prefix("ydoc-mat_") {
+                                    let coords: Option<(String, String, String)> = store
+                                        .read_with(|conn| {
+                                            conn.query_row(
+                                                "SELECT workspace_id, version_id, object_id                                                  FROM moments WHERE moment_id = ?1",
+                                                [moment_id],
+                                                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                                            )
+                                            .optional()
+                                            .map_err(StorageError::corrupt_public)
+                                        })?;
+                                    if let Some((ws, version, object)) = coords {
+                                        store.write_with(&NoFaults, |tx| {
+                                            tx.execute(
+                                                "UPDATE ydoc_docs SET last_settled_sha = NULL,                                                  updated_at_ms = ?4                                                  WHERE workspace_id = ?1 AND version_id = ?2                                                    AND object_id = ?3",
+                                                params![ws, version, object, now_ms],
+                                            )
+                                            .map_err(StorageError::persist_public)?;
+                                            Ok::<_, StorageError>(())
+                                        })?;
+                                    }
+                                }
+                            }
+                            Ok(_) | Err(_) => {}
+                        }
+                    }
+                    Ok::<_, RuntimeError>(completed)
+                })();
+                let _ = reply.send(outcome);
+            }
             Command::ConflictList {
                 workspace_id,
                 status,
@@ -3213,12 +3637,727 @@ fn ydoc_apply_on_store(
         content_kind,
         Regime::Replicated,
         update,
+        None,
         faults,
         now_ms,
     )? {
         TxnOutcome::Committed(outcome) => Ok(outcome),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
     }
+}
+
+/// Durable Y.Doc state exists when the lineage holds updates OR snapshots.
+/// A pruned local-only marker (both zero) has NO durable state: opens report
+/// it absent and settles refuse it (an empty projection must never clobber
+/// the artifact).
+fn ydoc_marker_has_durable_state(marker: &dohc_engine_collab::Marker) -> bool {
+    // base_claimed covers the replicated base-only lineage: claim_base inserts
+    // the base snapshot at up_to_seq 0 WITHOUT advancing head_snapshot_seq, so
+    // the seq pair alone would misread a claimed base as absent (double-seed +
+    // NoMarker settle refusals on a valid lineage).
+    marker.head_update_seq > 0 || marker.head_snapshot_seq > 0 || marker.base_claimed
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ydoc_open_state_on_store(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    now_ms: i64,
+    drain_deferred: bool,
+    expected_key: Option<&DocKey>,
+    version_id: &str,
+    path: &str,
+    requested_content_kind: Option<ContentKind>,
+    token: &CancellationToken,
+) -> Result<YdocOpenState, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    // Bootstrap: the first live doc in an EMPTY workspace must be creatable —
+    // without this, read_text errors VersionNotFound before the absent-path
+    // flow can run (capture normally creates main, but nothing has captured).
+    VersionedTextStore::new(store).ensure_main_version(
+        workspace_id,
+        version_id,
+        now_ms,
+        &NoFaults,
+    )?;
+    let head = VersionedTextStore::new(store).read_text(workspace_id, version_id, path)?;
+    let head_sha = head.as_ref().map(|snapshot| snapshot.blob_sha256.clone());
+    let object_id = match head.as_ref() {
+        Some(snapshot) => snapshot.object_id.clone(),
+        None => {
+            let derived = derive_capture_object_id(workspace_id, version_id, path);
+            // A derived id still LIVE at another alias means this path's
+            // former file was renamed away: capture's locked resolution mints
+            // an order-disambiguated id for that case, which open-time cannot
+            // reserve pre-commit. Reusing the derived id would graft the new
+            // document onto the renamed file's lineage, so refuse; a capture
+            // or local write creates the path and reopening resumes normally.
+            let collides = store.read_with(|conn| {
+                dohc_engine_domain::object_has_live_alias(conn, workspace_id, &derived)
+            })?;
+            if collides {
+                return Err(RuntimeError::Collab(
+                    dohc_engine_collab::CollabError::ObjectAliasCollision,
+                ));
+            }
+            derived
+        }
+    };
+    let key = DocKey::new(workspace_id, version_id, object_id)?;
+    let expected_key_matches = expected_key.is_none_or(|expected| *expected == key);
+    // RETIRED artifact: the path has NO head (deleted on disk, capture
+    // retired the snapshot/alias) but a LOCAL-ONLY lineage that claims a
+    // settled artifact survived (workspace teardown skips the prune).
+    // Markdown-is-the-artifact: the user deleted the document, so reopening
+    // must not resurrect the stale cache — and its retained last_settled_sha
+    // would wedge the next settle in ConflictStaleTarget (head None vs a
+    // settled expectation). Clear the lineage; the open proceeds as absent.
+    // A crashed never-settled draft (last_settled NULL) still resurrects —
+    // its CRDT rows are the only copy of the user's edits. Replicated
+    // lineages are durable canonical and never clear here.
+    // POST-LEASE only (same gating as the drain): the pre-lease probe must
+    // stay side-effect-free — a second opener's probe running this clear
+    // while the first session still holds the lease would delete the live
+    // session's unmaterialized CRDT state out from under it.
+    if drain_deferred
+        && expected_key_matches
+        && head.is_none()
+        && dohc_engine_collab::read_marker(store, &key)?
+            .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::LocalOnly)
+        && dohc_engine_collab::read_last_settled_sha(store, &key)?.is_some()
+    {
+        let cleared = store.write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM ydoc_updates                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "DELETE FROM ydoc_snapshots                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0,                  last_settled_sha = NULL, updated_at_ms = ?4                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![key.workspace_id, key.version_id, key.object_id, now_ms],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })?;
+        if matches!(cleared, TxnOutcome::Crashed { .. }) {
+            return Err(RuntimeError::OperationCrashed);
+        }
+    }
+    // Re-converge BEFORE loading state: an envelope acked-but-deferred while
+    // a previous session held the lease is only guaranteed to drain on that
+    // session's ydoc.close — workspace.close, stale-handle eviction, and a
+    // crash all skip it. The imported replication log is the durable pending
+    // queue, and replaying an already-applied row is content-deduped, so
+    // draining on every open makes the parked update land on the next use
+    // of the doc no matter how the previous session ended.
+    // The drain only runs for the key the CALLER'S LEASE covers: if the
+    // path's owner changed between the RPC's probe and this post-lease read,
+    // the derived key belongs to a different object — possibly one a live
+    // session already holds — and draining it here would mutate that doc
+    // behind its active editor with no event or resync signal. The RPC layer
+    // rejects the mismatched open right after; skipping the drain keeps this
+    // read side-effect-free for the foreign key.
+    if drain_deferred
+        && expected_key_matches
+        && dohc_engine_collab::read_marker(store, &key)?
+            .is_some_and(|marker| marker.regime == Regime::Replicated)
+    {
+        // Only the POST-LEASE read drains: a pre-lease probe mutating the
+        // lineage while another session holds the lease would advance state
+        // behind the active editor with no event or resync signal.
+        dohc_engine_sync::drain_deferred_ydoc_for_key(store, &key, &NoFaults)?;
+    }
+    let persisted = dohc_engine_collab::load_persisted(store, &key)?;
+    // "Existing" means durable DOC STATE, not a bare marker: a local-only
+    // close prunes every CRDT row and leaves head_update_seq == 0
+    // (markdown-is-the-artifact). Reporting such a lineage as existing would
+    // hand the client an EMPTY doc with no seedMarkdown — its next settle
+    // would clobber the settled file. A pruned marker is seed-eligible
+    // (the recordUpdate guard checks head_update_seq > 0), so the artifact
+    // re-seeds the cache exactly like a first open. "Durable doc state"
+    // means updates OR snapshots: a replicated lineage holding only its
+    // base snapshot (head_update_seq == 0, head_snapshot_seq > 0) is
+    // EXISTING — reporting it absent would hand the client the base state
+    // AND a markdown seed, duplicating content on the first seed apply.
+    let lineage_existing = persisted
+        .as_ref()
+        .is_some_and(|persisted| ydoc_marker_has_durable_state(&persisted.marker));
+    let (content_kind, regime, initial_update) = match persisted {
+        Some(persisted) => (
+            persisted.marker.content_kind,
+            persisted.marker.regime,
+            persisted.doc.encode_full_state(),
+        ),
+        None => {
+            let doc = Ydoc::wire();
+            (
+                // PLAINTEXT default: the desktop's markdown live path opens
+                // without a contentKind, and a richdoc default would wedge
+                // it — richdoc settle is a C1 refusal and the client skips
+                // its close-time settle, so first-time markdown edits would
+                // persist only as closed CRDT cache while the .md file and
+                // history stay stale. Richdoc callers pass the kind
+                // explicitly.
+                requested_content_kind.unwrap_or(ContentKind::Plaintext),
+                Regime::LocalOnly,
+                doc.encode_full_state(),
+            )
+        }
+    };
+    Ok(YdocOpenState {
+        head_blob_sha256: head_sha,
+        key,
+        content_kind,
+        regime,
+        initial_update,
+        lineage_existing,
+        seed_markdown: (!lineage_existing)
+            .then(|| head.map(|snapshot| snapshot.text))
+            .flatten(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ydoc_record_update_on_store(
+    store: &mut EngineStore,
+    key: &DocKey,
+    path: &str,
+    content_kind: ContentKind,
+    regime: Regime,
+    update: &[u8],
+    actor_origin_id: Option<String>,
+    require_empty_lineage: bool,
+    request_id: Option<String>,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<AppendOutcome, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    // Validate BEFORE anything touches the store: a malformed first seed
+    // must not strand a bare file_objects row for the deterministic object
+    // id (which regular writes then treat as already existing).
+    Ydoc::validate_update(update)?;
+    // A replicated, base-claimed lineage journals the ydoc.update DELTA in
+    // the SAME transaction as the append (blob-before-log holds; TS parity:
+    // ydocEngineDriver journals inside the recordUpdate write). Local-only
+    // lineages journal nothing — their markdown is the artifact.
+    let update_sha = dohc_engine_storage::hex_sha256(update);
+    let journal_key = key.clone();
+    let journal_path = path.to_owned();
+    let journal_kind = content_kind;
+    match dohc_engine_collab::record_local_update_creating_marker_guarded(
+        store,
+        key,
+        content_kind,
+        regime,
+        update,
+        actor_origin_id.as_deref(),
+        // Parent row, seed guard, marker, append, and outbound journal all
+        // commit in ONE transaction — no bare-parent crash window, and a
+        // timed-out-commit seed retry DEDUPES inside the guard instead of
+        // refusing seed-onto-existing-lineage.
+        true,
+        require_empty_lineage,
+        request_id.as_deref(),
+        faults,
+        now_ms,
+        move |tx, outcome| {
+            if outcome.emit_outbound {
+                dohc_engine_sync::journal_local_op_in_tx(
+                    tx,
+                    &journal_key.workspace_id,
+                    "ydoc.update",
+                    &serde_json::json!({
+                        "versionId": journal_key.version_id,
+                        "objectId": journal_key.object_id,
+                        "path": journal_path,
+                        "contentKind": journal_kind.as_str(),
+                        "updateBlobSha256": update_sha,
+                        "isBaseState": false,
+                    }),
+                    now_ms,
+                )
+                .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+                    // Named explicitly: a base-claimed replicated lineage
+                    // with NO sync identity is a half-initialized state
+                    // (every real replicated flow runs sync init first —
+                    // pulls require the identity and the TS driver creates
+                    // it when journaling the base). Fail closed with a
+                    // diagnosable reason rather than a generic failure; an
+                    // identity cannot be seeded down here (origin identity
+                    // is minted by sync init, not the collab layer).
+                    reason: format!("outbound ydoc.update journal append failed: {error}"),
+                })?;
+            }
+            Ok(())
+        },
+    )? {
+        TxnOutcome::Committed(outcome) => Ok(outcome),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ydoc_settle_on_store(
+    store: &mut EngineStore,
+    root_dir: &std::path::Path,
+    key: &DocKey,
+    path: &str,
+    content_kind: ContentKind,
+    expected_head_sha: Option<String>,
+    session_id: &str,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<YdocSettlement, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    // Refuse to settle a lineage that has no durable state: projecting a
+    // fresh doc would be the empty string, and the projected write below
+    // would clobber the existing file with it. Mirrors collab settle()'s
+    // NoMarker refusal — and a PRUNED bare marker (local-only close) is the
+    // same hazard: load_persisted returns Some with an EMPTY doc, so the
+    // durable-state predicate (updates OR snapshots) gates it, matching
+    // ydoc.open's lineage-absent treatment.
+    match dohc_engine_collab::read_marker(store, key)? {
+        None => return Err(dohc_engine_collab::CollabError::NoMarker.into()),
+        Some(marker) => {
+            if !ydoc_marker_has_durable_state(&marker) {
+                return Err(dohc_engine_collab::CollabError::NoMarker.into());
+            }
+            // Acked-but-deferred remote envelopes must land BEFORE the
+            // projection — but if any actually apply, the CLIENT's doc has
+            // not seen them: settling would materialize content the user
+            // never saw while they keep editing stale state. Refuse; the
+            // client resyncs (which also drains) and settles again.
+            if marker.regime == Regime::Replicated
+                && dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)? > 0
+            {
+                return Err(dohc_engine_domain::DomainError::InvalidInput {
+                    reason: "ydoc-remote-updates-pending",
+                }
+                .into());
+            }
+        }
+    }
+    let doc = match dohc_engine_collab::load_persisted(store, key)? {
+        Some(persisted) => persisted.doc,
+        None => return Err(dohc_engine_collab::CollabError::NoMarker.into()),
+    };
+    // A doc holding unintegrated remote updates (missing cross-origin
+    // dependency) must not settle: the projection would omit pending remote
+    // content and last_settled_sha would record that incomplete artifact as
+    // settled — the CRDT then advances past a stale file.
+    if doc.has_pending_dependencies() {
+        return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
+    }
+    let projection = doc.project(content_kind);
+    // A successful settle must be REPORTABLE: the response carries the
+    // markdown as one wire string, so a projection past the in-band cap
+    // refuses BEFORE anything commits (a committed-but-undecodable settle
+    // would strand the client). Blob streaming lifts this at RPC-D.
+    if projection.markdown.len() > dohc_engine_domain::INBAND_CONTENT_CAP_BYTES {
+        return Err(dohc_engine_domain::DomainError::InvalidText {
+            reason: "ydoc-settle-exceeds-inband-cap",
+        }
+        .into());
+    }
+    // The stale-head guard runs BEFORE the idempotent no-op: an external
+    // capture ingest (or any same-object writer) must surface as
+    // ConflictStaleTarget even when the projection itself is unchanged —
+    // otherwise settle reports success and a close can prune without the
+    // client ever resyncing over the divergence.
+    //
+    // The expectation derives from DURABLE state (the lineage's last settle
+    // sha) falling back to the caller-supplied OPEN-TIME head sha — never
+    // from RPC-side session fields mutated after awaits, which a dropped
+    // future (deadline firing after the actor committed a settle) leaves
+    // stale and would turn every retry into a false conflict.
+    let expected_head_sha =
+        dohc_engine_collab::read_last_settled_sha(store, key)?.or(expected_head_sha);
+    let head_probe =
+        VersionedTextStore::new(store).read_text(&key.workspace_id, &key.version_id, path)?;
+    let probe_sha = head_probe
+        .as_ref()
+        .map(|snapshot| snapshot.blob_sha256.clone());
+    if probe_sha != expected_head_sha {
+        return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
+    }
+    if let Some(current) = head_probe.as_ref() {
+        // Ownership must hold even when the CONTENT matches the expectation:
+        // a path rebound to another object whose blob happens to equal this
+        // session's expected sha would otherwise pass the stale guard and be
+        // answered (or replayed) as if this session still owned it — and a
+        // later close could prune this object's CRDT while the artifact
+        // belongs to the other owner. Mirror the fresh path's in-tx check.
+        if current.object_id != key.object_id {
+            return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
+        }
+        // The marker may have committed while the PRIOR settle's
+        // materialization failed transiently before the file replace: the
+        // head and last_settled_sha are advanced, the job is still pending,
+        // and the DISK holds the old preimage. That job must replay BEFORE
+        // any settle answer — the idempotent no-op (or close could prune
+        // over stale disk bytes) AND a changed-projection settle (whose new
+        // job's preimage is the unmaterialized head; skipping the replay
+        // would strand it in a permanent materialization conflict).
+        let pending_job_id = format!("ydoc-mat_{}", current.latest_moment_id);
+        // PENDING only: a completed/conflicted job must not replay here — a
+        // completed one would re-read the target on every settle (and fail
+        // the whole settle pre-commit on a transient read error), and a
+        // conflicted one already ran its compensation.
+        if let Some(job) = store
+            .load_materialization_job(&pending_job_id)?
+            .filter(|job| job.status == dohc_engine_storage::JobStatus::Pending)
+        {
+            // Suppression BEFORE the replace, exactly like the fresh path —
+            // the watcher can observe the replayed bytes the instant they
+            // land; retract on a conflicted job.
+            self_writes.record(&key.workspace_id, &current.path, &current.blob_sha256);
+            let replay_outcome = materialize_one(
+                store,
+                root_dir,
+                &job,
+                DurabilityPolicy::per_os(),
+                &StdReplacer,
+                &StdBackoff,
+                now_ms,
+                faults,
+            );
+            let replay_outcome = match replay_outcome {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    // Same crash posture as the fresh settle's transient-Err
+                    // arm: the job stays pending for startup replay and the
+                    // committed marker keeps a retry on this idempotent
+                    // branch; only the in-memory suppression is retracted
+                    // (re-recorded before the next replay attempt).
+                    self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);
+                    return Err(error.into());
+                }
+            };
+            match replay_outcome {
+                JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
+                JobOutcome::Conflict | JobOutcome::Superseded => {
+                    self_writes.retract(&key.workspace_id, &current.path, &current.blob_sha256);
+                    // The disk moved past the prior settle before its job
+                    // replayed: last_settled_sha no longer describes a
+                    // materialized artifact. NULL it so close(settle:false)
+                    // refuses UnsettledClose instead of pruning.
+                    let cleared = store.write_with(faults, |tx| {
+                        tx.execute(
+                            "UPDATE ydoc_docs SET last_settled_sha = NULL, updated_at_ms = ?4                              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                            params![key.workspace_id, key.version_id, key.object_id, now_ms],
+                        )
+                        .map_err(StorageError::persist_public)?;
+                        Ok::<_, StorageError>(())
+                    })?;
+                    if matches!(cleared, TxnOutcome::Crashed { .. }) {
+                        return Err(RuntimeError::OperationCrashed);
+                    }
+                    return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
+                }
+                JobOutcome::Crashed(_) => return Err(RuntimeError::OperationCrashed),
+            }
+        }
+    }
+    // Idempotent no-op: when the lineage's last settled content is exactly
+    // this projection, re-settling would mint a duplicate moment (the
+    // fingerprint's previous-moment input changed) and a redundant
+    // materialization job — the TS driver only settles when the projection
+    // differs. Answer with the current head instead (its pending job, if
+    // any, was replayed above).
+    let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
+    if dohc_engine_collab::read_last_settled_sha(store, key)?.as_deref()
+        == Some(projected_sha.as_str())
+    {
+        let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
+        return Ok(YdocSettlement {
+            moment_id: current.latest_moment_id,
+            path: current.path,
+            markdown: current.text,
+            sha256: current.blob_sha256,
+            projection,
+        });
+    }
+    let projection_for_write = projection.clone();
+    let outcome = store.write_with(faults, |tx| {
+        let current = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)?;
+        if current.binary_sha256.is_some() {
+            return Err(dohc_engine_domain::DomainError::BinaryHeadNotText);
+        }
+        // The path may have changed owners since ydoc.open (another write
+        // claimed it with a different object). Settling anyway would overwrite
+        // the OTHER object's head with this session's stale projection while
+        // marking this lineage settled — refuse as a stale target instead.
+        if let Some(snapshot) = current.snapshot.as_ref()
+            && snapshot.object_id != key.object_id
+        {
+            return Err(dohc_engine_domain::DomainError::ConflictStaleTarget);
+        }
+        // SAME-object divergence: capture (an external disk edit) or another
+        // writer may have advanced this object's head since the session's
+        // expectation (the open-time head, or its own last settle). Settling
+        // anyway would overwrite those newer bytes with a projection the
+        // user never saw — refuse; the client resyncs/merges.
+        let current_sha = current
+            .snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.blob_sha256.clone());
+        if current_sha != expected_head_sha {
+            return Err(dohc_engine_domain::DomainError::ConflictStaleTarget);
+        }
+        let preimage = current
+            .snapshot
+            .as_ref()
+            .map_or(Preimage::Absent, |snapshot| {
+                Preimage::Present(snapshot.blob_sha256.clone())
+            });
+        let previous_moment = current
+            .snapshot
+            .as_ref()
+            .map_or("absent", |snapshot| snapshot.latest_moment_id.as_str());
+        let fingerprint = format!(
+            "{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            path,
+            session_id,
+            previous_moment,
+            projection_for_write.source_state_vector_sha256,
+        );
+        let moment_id = format!(
+            "moment-ydoc-{}",
+            dohc_engine_storage::hex_sha256(fingerprint.as_bytes())
+        );
+        let result = write_projected_text_in_tx(
+            tx,
+            &WriteText {
+                workspace_id: key.workspace_id.clone(),
+                version_id: key.version_id.clone(),
+                object_id: key.object_id.clone(),
+                path: path.to_owned(),
+                text: projection_for_write.markdown.clone(),
+                moment_id,
+                metadata_origin: "ydoc".to_owned(),
+                author_json: None,
+                now_ms,
+                request_id: None,
+            },
+        )?;
+        enqueue_write(tx, &result, preimage, "ydoc")?;
+        // The settle marker commits ATOMICALLY with the moment: a crash can
+        // never leave a minted settlement moment whose lineage still reads
+        // as unsettled (which would force a non-idempotent re-settle — the
+        // moment fingerprint includes the per-open session_id). The PRIOR
+        // marker values ride along so a materialization conflict below can
+        // compensate — an errored settle must not leave a marker that lets
+        // close(settle:false) prune the CRDT with no artifact on disk.
+        //
+        // settle_seq namespace: the daemon settle path owns this column and
+        // writes moment_order into it; collab settle()'s +1 generation
+        // counter is never invoked on daemon-settled lineages (C1 has no
+        // collab-settle caller). The close guard reads last_settled_sha only.
+        let prior_marker: (i64, Option<String>) = tx
+            .query_row(
+                "SELECT settle_seq, last_settled_sha FROM ydoc_docs \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| {
+                dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
+            })?;
+        tx.execute(
+            "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6 \
+             WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+            params![
+                key.workspace_id,
+                key.version_id,
+                key.object_id,
+                result.moment.moment_order,
+                result.snapshot.blob_sha256,
+                now_ms,
+            ],
+        )
+        .map_err(|error| {
+            dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
+        })?;
+        Ok((result, prior_marker))
+    })?;
+    let (write, prior_marker) = match outcome {
+        TxnOutcome::Committed(write) => write,
+        TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+    };
+    // NO cancellation checks past this point: the settle marker committed
+    // with the moment above, so a Cancelled return here would report failure
+    // for a settle the lineage already records — and close(settle:false)
+    // could then prune the CRDT with the artifact never materialized or
+    // suppressed. Once committed, the settle runs to completion.
+    //
+    // The suppression identity registers BEFORE the file replace: the watcher
+    // can observe the materialized bytes the instant they land, and a
+    // record-after-replace left a window where capture queued an ingest that
+    // would claim the settle as an external edit.
+    self_writes.record(
+        &key.workspace_id,
+        &write.snapshot.path,
+        &write.snapshot.blob_sha256,
+    );
+    let job_id = format!("ydoc-mat_{}", write.moment.moment_id);
+    let job = store.load_materialization_job(&job_id)?.ok_or_else(|| {
+        RuntimeError::Domain(dohc_engine_domain::DomainError::StateCorrupt {
+            reason: "Y.Doc settle materialization job is missing",
+        })
+    })?;
+    let job_outcome = materialize_one(
+        store,
+        root_dir,
+        &job,
+        DurabilityPolicy::per_os(),
+        &StdReplacer,
+        &StdBackoff,
+        now_ms,
+        faults,
+    );
+    let job_outcome = match job_outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            // A transient materialization ERROR (sharing violation, IO)
+            // leaves the crash-consistent state on purpose: the settle
+            // committed durably (marker, moment, snapshot) and the job stays
+            // pending for startup replay, exactly as if the process had died
+            // between the commit and the replace. Rolling the marker back to
+            // the PRIOR head would make every retry compare the advanced
+            // head against a stale expectation — permanent
+            // ConflictStaleTarget — while the committed marker routes a
+            // retry through the idempotent no-op branch, which replays the
+            // pending job. Only the in-memory suppression identity is
+            // retracted; the no-op replay re-records it before the replace.
+            let _ = prior_marker;
+            self_writes.retract(
+                &key.workspace_id,
+                &write.snapshot.path,
+                &write.snapshot.blob_sha256,
+            );
+            return Err(error.into());
+        }
+    };
+    match job_outcome {
+        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {}
+        JobOutcome::Conflict | JobOutcome::Superseded => {
+            // The target changed on disk and the job left it untouched: this
+            // settle FAILED, so the marker committed above must not stand —
+            // it would let close(settle:false) pass the settled check and
+            // prune the CRDT while the artifact was never materialized.
+            // (A crash before this compensation is the pending-job case: the
+            // job itself is durable and drains on reopen.)
+            let compensated = store.write_with(faults, |tx| {
+                tx.execute(
+                    "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, \
+                     updated_at_ms = ?6 \
+                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                    params![
+                        key.workspace_id,
+                        key.version_id,
+                        key.object_id,
+                        prior_marker.0,
+                        prior_marker.1,
+                        now_ms,
+                    ],
+                )
+                .map_err(StorageError::persist_public)?;
+                Ok::<_, StorageError>(())
+            })?;
+            if matches!(compensated, TxnOutcome::Crashed { .. }) {
+                return Err(RuntimeError::OperationCrashed);
+            }
+            self_writes.retract(
+                &key.workspace_id,
+                &write.snapshot.path,
+                &write.snapshot.blob_sha256,
+            );
+            return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
+        }
+        JobOutcome::Crashed(_) => return Err(RuntimeError::OperationCrashed),
+    }
+    Ok(YdocSettlement {
+        moment_id: write.moment.moment_id,
+        path: write.snapshot.path,
+        markdown: write.snapshot.text,
+        sha256: write.snapshot.blob_sha256,
+        projection,
+    })
+}
+
+fn ydoc_resync_on_store(
+    store: &mut EngineStore,
+    key: &DocKey,
+    token: &CancellationToken,
+) -> Result<Vec<u8>, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    // Resync is the staleness RECOVERY path: an envelope acked-but-deferred
+    // because THIS session held the lease may be the very edit that made the
+    // client stale — drain it first or the recovery response still misses it.
+    if dohc_engine_collab::read_marker(store, key)?
+        .is_some_and(|marker| marker.regime == Regime::Replicated)
+    {
+        dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, &NoFaults)?;
+    }
+    Ok(match dohc_engine_collab::load_persisted(store, key)? {
+        Some(persisted) => persisted.doc.encode_full_state(),
+        None => Ydoc::wire().encode_full_state(),
+    })
+}
+
+fn ydoc_close_session_on_store(
+    store: &mut EngineStore,
+    key: &DocKey,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<Option<CloseOutcome>, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
+        return Ok(None);
+    };
+    // Richdoc lineages persist their closed CRDT state: C1 has no richdoc
+    // markdown settle, so the local-only prune's markdown-is-the-artifact
+    // premise doesn't hold — pruning would discard the only copy.
+    let persist_closed_state = marker.content_kind == ContentKind::Richdoc;
+    let outcome = match dohc_engine_collab::close_session(
+        store,
+        key,
+        persist_closed_state,
+        faults,
+        now_ms,
+    )? {
+        TxnOutcome::Committed(outcome) => outcome,
+        TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+    };
+    if marker.regime == Regime::Replicated {
+        // The drain PROJECTS internally now (idempotent-by-sha, dependency-
+        // gated): drained remote content reaches the visible head with no
+        // session left to settle it.
+        dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?;
+    }
+    Ok(Some(outcome))
 }
 
 fn versioned_text_write_on_store(
