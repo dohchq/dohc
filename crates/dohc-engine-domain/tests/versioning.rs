@@ -1500,10 +1500,25 @@ fn binary_write_rejects_the_reserved_capture_origin_at_the_domain_door() {
             &NO_FAULTS,
         )
         .expect_err("reserved origin must refuse");
-    assert!(
-        error
-            .to_string()
-            .contains("reserved for autonomous capture"),
-        "unexpected error: {error}"
+    assert_eq!(error.code(), "invalid-input", "unexpected error: {error}");
+    let (moments, blobs, requests) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row("SELECT COUNT(*) FROM moments", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                conn.query_row("SELECT COUNT(*) FROM binary_blobs", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                conn.query_row("SELECT COUNT(*) FROM engine_requests", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(
+        (moments, blobs, requests),
+        (0, 0, 0),
+        "a refused reserved-origin write must leave no rows behind"
     );
 }
