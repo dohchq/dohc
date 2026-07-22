@@ -5511,7 +5511,19 @@ fn versioned_binary_write_on_store(
     self_writes.record(&input.workspace_id, &result.path, &result.sha256);
     let job = match store.load_materialization_job(&input.moment_id) {
         Ok(Some(job)) => job,
-        Ok(None) | Err(_) => {
+        Ok(None) => {
+            // No job will ever consume the identity — it must not survive to
+            // suppress a genuine external write of the same path+sha.
+            self_writes.retract(&input.workspace_id, &result.path, &result.sha256);
+            return Ok(BinaryWriteExecutionResult {
+                write: result,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
+        }
+        Err(error) => {
+            self_writes.retract(&input.workspace_id, &result.path, &result.sha256);
+            let _ = error;
             return Ok(BinaryWriteExecutionResult {
                 write: result,
                 materialized: false,
@@ -5695,13 +5707,28 @@ fn versioned_text_rollback_on_store(
     }
 
     let job_id = format!("rollback-restore_{}", input.mutation_moment_id);
-    let Some(job) = store.load_materialization_job(&job_id)? else {
-        return Ok(RollbackExecutionResult {
-            deduped: false,
-            materialize_enqueued: false,
-            materialized: false,
-            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
-        });
+    // The rollback tx is already committed: a failed job load must not turn
+    // into an RPC refusal — the caller would believe a durable rollback
+    // failed. Mirror the binary-write seam and self-describe the outcome.
+    let job = match store.load_materialization_job(&job_id) {
+        Ok(Some(job)) => job,
+        Ok(None) => {
+            return Ok(RollbackExecutionResult {
+                deduped: false,
+                materialize_enqueued: false,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+            });
+        }
+        Err(error) => {
+            let _ = error;
+            return Ok(RollbackExecutionResult {
+                deduped: false,
+                materialize_enqueued: true,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
+        }
     };
     self_writes.record(&input.workspace_id, &job.target_path, &job.content_sha256);
     let outcome = materialize_one(

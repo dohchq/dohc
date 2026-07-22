@@ -2264,6 +2264,14 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: SecretsApplyParams = parse(params)?;
+        // Secret-path gate UP FRONT so the error surface is identical across
+        // key states (a non-secret path refuses the same way with or without
+        // a key on disk).
+        if dohc_engine_files::policy::classify_engine_file_path(&params.path)
+            != dohc_engine_files::policy::PathClassification::Secret
+        {
+            return Err(wire(ErrorCode::InvalidParams, "not-secret-path"));
+        }
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let path = normalize_rpc_path(&params.path);
@@ -2275,8 +2283,11 @@ impl EngineService {
             }
             result = open.actor.active_version(open.workspace_id.clone()) => match result {
                 Ok(version) => version,
+                // A workspace with no versioned rows yet has no active
+                // version: the caller named a target that does not exist —
+                // a caller condition, not engine corruption.
                 Err(RuntimeError::Domain(DomainError::WorkspaceNotFound)) => {
-                    return Err(wire(ErrorCode::Internal, "state-corrupt"));
+                    return Err(wire(ErrorCode::InvalidParams, "version-not-found"));
                 }
                 Err(error) => return Err(map_runtime(error)),
             },

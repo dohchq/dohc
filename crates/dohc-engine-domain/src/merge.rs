@@ -282,7 +282,12 @@ impl VersionedTextStore<'_> {
             if let Some(request_id) = &input.request_id
                 && let Some(recorded) = lookup_request(tx, request_id)?
             {
-                let recorded = decode_merge_ledger(&recorded.payload_hash)?;
+                // A request id recorded by a DIFFERENT operation kind stores a
+                // raw hash, not merge-ledger JSON: that is key reuse, not
+                // engine corruption.
+                let Ok(recorded) = decode_merge_ledger(&recorded.payload_hash) else {
+                    return Err(DomainError::IdempotencyKeyReuseMismatch);
+                };
                 if recorded.payload_hash != payload_hash {
                     return Err(DomainError::IdempotencyKeyReuseMismatch);
                 }

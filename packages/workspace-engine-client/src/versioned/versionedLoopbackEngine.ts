@@ -606,6 +606,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
   private setActive(state: WorkspaceState, params: JsonObject): JsonValue {
     const version = this.version(state, requiredString(params, "versionId", "setActive"));
     state.activeVersionId = version.id;
+    state.versioned = true;
     return this.versionJson(version);
   }
 
@@ -887,7 +888,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   private assertFreshMoment(state: WorkspaceState, momentId: string): void {
     if (state.moments.has(momentId) || state.secretMoments.has(momentId)) {
-      throw new Error("duplicate-moment-id");
+      throw new Error("duplicate-id");
     }
   }
 

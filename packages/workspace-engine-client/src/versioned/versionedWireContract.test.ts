@@ -555,7 +555,7 @@ describe("loopback contract enforcement", () => {
     };
     await call(engine, 1, VERSIONED_METHOD.textWrite, first);
     await expect(call(engine, 2, VERSIONED_METHOD.textWrite, second)).rejects.toThrow(
-      "duplicate-moment-id",
+      "duplicate-id",
     );
   });
 
