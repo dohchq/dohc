@@ -906,6 +906,23 @@ pub fn close_session(
         if last_settled.as_deref() != Some(content_sha.as_str()) {
             return Err(CollabError::UnsettledClose);
         }
+        // The settle may have COMMITTED while its materialization failed
+        // transiently: last_settled_sha matches the projection but the
+        // `ydoc-mat_` job is still pending and the DISK holds the old bytes.
+        // Pruning now would discard the CRDT with the artifact never
+        // replaced — refuse until the replay (retry-settle or open-time)
+        // lands the job.
+        let job_pending: bool = store.read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS (SELECT 1 FROM materialization_jobs j                    JOIN moments m ON j.job_id = 'ydoc-mat_' || m.moment_id                   WHERE m.workspace_id = ?1 AND m.version_id = ?2                     AND m.object_id = ?3 AND j.status = 'pending')",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| row.get(0),
+            )
+            .map_err(map_sql)
+        })?;
+        if job_pending {
+            return Err(CollabError::UnsettledClose);
+        }
     }
     // Prune the CRDT cache to nothing, keep the marker.
     store.write_with(faults, |tx| {

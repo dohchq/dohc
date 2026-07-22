@@ -300,3 +300,135 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
     );
     supervisor.close(&db).expect("close actor");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retired_local_only_doc_reopens_as_absent() {
+    const WS: &str = "ws-retired-reopen";
+    const PATH: &str = "notes/retired.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor");
+    let state = handle
+        .ydoc_open_state(
+            WS.to_owned(),
+            10,
+            true,
+            None,
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open");
+    let key = state.key.clone();
+    let update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "settled once");
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            update,
+            None,
+            true,
+            20,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("record");
+    handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            state.head_blob_sha256.clone(),
+            "session-retire".to_owned(),
+            Arc::new(NoRecorder),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("settle");
+    // Workspace teardown WITHOUT ydoc.close: the lineage (rows +
+    // last_settled_sha) survives. The user then deletes the file and the
+    // disk-driven retire destroys the head.
+    std::fs::remove_file(scratch.path().join(PATH)).expect("delete artifact");
+    handle
+        .capture_retire(
+            dohc_engine_runtime::CaptureRetire {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: PATH.to_owned(),
+                now_ms: 40,
+                request_id: Some("retire-artifact".to_owned()),
+                only_if_text_head: false,
+                only_if_capture_origin: true,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("retire");
+
+    // Reopen: the deleted document must NOT resurrect, and the fresh
+    // create-flow must settle cleanly. Mutation check: drop the
+    // retired-lineage clearing in ydoc_open_state_on_store — the open
+    // reports lineage EXISTING and the settle below wedges
+    // ConflictStaleTarget on the retained last_settled_sha.
+    let reopened = handle
+        .ydoc_open_state(
+            WS.to_owned(),
+            50,
+            true,
+            None,
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("reopen");
+    assert!(
+        !reopened.lineage_existing,
+        "a retired local-only doc reopens as absent"
+    );
+    let update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "fresh body");
+    handle
+        .ydoc_record_update(
+            reopened.key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            update,
+            None,
+            true,
+            60,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("fresh record");
+    let settled = handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            reopened.key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            reopened.head_blob_sha256.clone(),
+            "session-retire-2".to_owned(),
+            Arc::new(NoRecorder),
+            70,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("fresh settle succeeds");
+    assert_eq!(settled.markdown, "fresh body");
+    supervisor.close(&db).expect("close actor");
+}

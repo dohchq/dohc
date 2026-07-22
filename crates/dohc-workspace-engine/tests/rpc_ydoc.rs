@@ -877,6 +877,25 @@ async fn settle_recovers_after_a_transient_replace_failure() {
         .await
         .expect_err("a locked target must fail the settle");
     assert_eq!(failed.code, ErrorCode::Internal);
+    // The settle COMMITTED (marker matches the projection) but the job is
+    // still pending and the disk holds the old bytes: a prune-close now
+    // would discard the CRDT with the artifact never replaced. Mutation
+    // check: drop the pending-job probe from `close_session`'s prune guard
+    // — this close succeeds and the retry below fails on a dead session.
+    let prune_refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                60,
+                "ydoc.close",
+                Some(handle.clone()),
+                json!({ "sessionId": session_id, "settle": false }),
+            ),
+        )
+        .await
+        .expect_err("prune-close must refuse while the settle job is pending");
+    assert_eq!(prune_refused.code, ErrorCode::InvalidParams);
+    assert_eq!(prune_refused.message, "ydoc-unsettled-close");
     drop(lock);
     assert_eq!(
         std::fs::read_to_string(scratch.path().join("notes/locked.md")).expect("still v1"),

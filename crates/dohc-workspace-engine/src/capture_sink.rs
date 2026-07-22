@@ -64,28 +64,64 @@ const SECRET_KEY_UNAVAILABLE: CaptureError = CaptureError {
 /// claiming the just-settled head as a new external edit.
 #[derive(Clone, Default)]
 pub struct SelfWriteSuppression {
-    entries: Arc<Mutex<HashMap<(String, String), String>>>,
+    /// Per (workspace, path): the ORDERED pending settle identities. Two
+    /// settles can land before capture consumes the first watcher event;
+    /// a single-slot map would let the first `Changed` consume the SECOND
+    /// sha as a mismatch and ingest the daemon's own write as external.
+    entries: Arc<Mutex<PendingWriteIdentities>>,
 }
+
+/// (workspace, path) → ordered pending settle shas.
+type PendingWriteIdentities = HashMap<(String, String), Vec<String>>;
 
 impl SelfWriteSuppression {
     pub fn record(&self, workspace_id: &str, path: &str, sha256: &str) {
         if let Ok(mut entries) = self.entries.lock() {
-            entries.insert(
-                (workspace_id.to_owned(), path.to_owned()),
-                sha256.to_owned(),
-            );
+            entries
+                .entry((workspace_id.to_owned(), path.to_owned()))
+                .or_default()
+                .push(sha256.to_owned());
         }
     }
 
-    /// Single-shot removal on ANY `Changed` observation of the path — the
-    /// caller compares the returned recorded sha against what it actually
-    /// read (a non-matching or unreadable observation still clears the
-    /// entry, which must not survive to suppress a later revert).
-    fn take(&self, workspace_id: &str, path: &str) -> Option<String> {
+    /// Consume on a `Changed` TEXT observation: when the observed sha
+    /// matches a pending identity, that identity AND every earlier one is
+    /// removed (their events were coalesced/superseded) and the observation
+    /// suppresses. A non-matching observation is an external edit — every
+    /// pending identity clears (none may survive to suppress a later revert)
+    /// and the observation ingests.
+    fn consume(&self, workspace_id: &str, path: &str, sha256: &str) -> bool {
         let Ok(mut entries) = self.entries.lock() else {
-            return None;
+            return false;
         };
-        entries.remove(&(workspace_id.to_owned(), path.to_owned()))
+        let key = (workspace_id.to_owned(), path.to_owned());
+        let Some(pending) = entries.get_mut(&key) else {
+            return false;
+        };
+        let suppressed = match pending.iter().position(|recorded| recorded == sha256) {
+            Some(index) => {
+                pending.drain(..=index);
+                true
+            }
+            None => {
+                pending.clear();
+                false
+            }
+        };
+        if pending.is_empty() {
+            entries.remove(&key);
+        }
+        suppressed
+    }
+
+    /// Clear every pending identity for a path — a `Changed` observation
+    /// that resolves to non-text (binary/untracked/over-cap) means the path
+    /// is no longer daemon-settled text; stale identities must not survive
+    /// to suppress a later revert.
+    fn clear_path(&self, workspace_id: &str, path: &str) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.remove(&(workspace_id.to_owned(), path.to_owned()));
+        }
     }
 
     /// Forget every entry for a workspace — called when the workspace closes
@@ -103,12 +139,17 @@ impl dohc_engine_runtime::SelfWriteRecorder for SelfWriteSuppression {
     }
 
     fn retract(&self, workspace_id: &str, path: &str, sha256: &str) {
-        // Remove only when the stored identity matches what the failed settle
-        // recorded — a newer settle's entry must survive a stale retract.
+        // Remove ONE matching identity (the failed settle's own) — every
+        // other pending settle's entry must survive a stale retract.
         if let Ok(mut entries) = self.entries.lock() {
             let key = (workspace_id.to_owned(), path.to_owned());
-            if entries.get(&key).is_some_and(|recorded| recorded == sha256) {
-                entries.remove(&key);
+            if let Some(pending) = entries.get_mut(&key) {
+                if let Some(index) = pending.iter().rposition(|recorded| recorded == sha256) {
+                    pending.remove(index);
+                }
+                if pending.is_empty() {
+                    entries.remove(&key);
+                }
             }
         }
     }
@@ -645,16 +686,13 @@ impl CaptureSink for StoreCaptureSink {
             self.retire_head(path, false)?;
             return Ok(IngestOutcome::NotOwned);
         }
-        // A Changed observation consumes the suppression entry REGARDLESS of
-        // what the re-read resolves to: an entry left armed by a
-        // binary/untracked/over-cap read-back would later suppress a genuine
-        // revert to the settled content. The recorded sha decides whether the
-        // TEXT branch below suppresses; every other branch just clears.
-        let consumed_suppression = if matches!(reason, IngestReason::Changed) {
-            self.self_writes.take(&self.workspace_id, path)
-        } else {
-            None
-        };
+        // A Changed observation resolves suppression against what the
+        // re-read ACTUALLY contains: a matching TEXT observation suppresses
+        // (consuming that identity and its coalesced predecessors), a
+        // non-matching one clears every pending identity, and a
+        // binary/untracked resolution clears too — an entry left armed by
+        // any of those would later suppress a genuine revert.
+        let changed = matches!(reason, IngestReason::Changed);
         match self.read_current(path, media_type)? {
             CurrentContent::Text(text) => {
                 // Report the identity of the bytes ACTUALLY captured — the
@@ -663,7 +701,7 @@ impl CaptureSink for StoreCaptureSink {
                 // scan-time bytes would diff clean and never re-ingest.
                 let size = text.len() as u64;
                 let sha256 = sha256_hex(text.as_bytes());
-                if consumed_suppression.as_deref() == Some(sha256.as_str()) {
+                if changed && self.self_writes.consume(&self.workspace_id, path, &sha256) {
                     return Ok(IngestOutcome::Captured { size, sha256 });
                 }
                 match self.ingest_text(path, text, claim_foreign_head)? {
@@ -675,6 +713,9 @@ impl CaptureSink for StoreCaptureSink {
                 }
             }
             CurrentContent::Untracked => {
+                if changed {
+                    self.self_writes.clear_path(&self.workspace_id, path);
+                }
                 // The path stopped being engine-ownable text (absent, symlink,
                 // non-file, or over cap): retire so no stale snapshot remains,
                 // and report NotOwned so the manifest forgets the path instead
@@ -683,6 +724,9 @@ impl CaptureSink for StoreCaptureSink {
                 Ok(IngestOutcome::NotOwned)
             }
             CurrentContent::Binary(bytes) => {
+                if changed {
+                    self.self_writes.clear_path(&self.workspace_id, path);
+                }
                 // Engine-ownable binary content persists as a BINHEAD binary
                 // head (a text->binary flip replaces the text head in the
                 // same transaction — no separate retire). The receipt carries
@@ -1722,5 +1766,39 @@ mod tests {
         supervisor.close(&db).expect("close actor");
         assert_eq!(secret_tip_len(&db, ".env"), None);
         assert_eq!(secret_tip_len(&db, "%2eenv"), None);
+    }
+
+    #[test]
+    fn suppression_keeps_multiple_pending_identities_per_path() {
+        // Two settles can land before capture consumes the first watcher
+        // event. Mutation check: restore the single-slot HashMap<_, String>
+        // registry — the in-order case consumes sha2 for the FIRST event
+        // (mismatch → ingest) and this test fails.
+        let writes = SelfWriteSuppression::default();
+        // In-order delivery: each event consumes its own identity.
+        writes.record("ws", "a.md", "sha1");
+        writes.record("ws", "a.md", "sha2");
+        assert!(writes.consume("ws", "a.md", "sha1"));
+        assert!(writes.consume("ws", "a.md", "sha2"));
+        assert!(!writes.consume("ws", "a.md", "sha2"), "single-shot");
+        // Coalesced delivery: matching the LATER identity consumes the
+        // superseded earlier one too.
+        writes.record("ws", "a.md", "sha1");
+        writes.record("ws", "a.md", "sha2");
+        assert!(writes.consume("ws", "a.md", "sha2"));
+        assert!(
+            !writes.consume("ws", "a.md", "sha1"),
+            "predecessor consumed"
+        );
+        // External edit: every pending identity clears (no later-revert
+        // suppression) and the observation ingests.
+        writes.record("ws", "a.md", "sha1");
+        assert!(!writes.consume("ws", "a.md", "external"));
+        assert!(!writes.consume("ws", "a.md", "sha1"), "cleared by mismatch");
+        // A stale retract removes only its own identity.
+        writes.record("ws", "a.md", "sha1");
+        writes.record("ws", "a.md", "sha2");
+        dohc_engine_runtime::SelfWriteRecorder::retract(&writes, "ws", "a.md", "sha1");
+        assert!(writes.consume("ws", "a.md", "sha2"), "newer entry survives");
     }
 }

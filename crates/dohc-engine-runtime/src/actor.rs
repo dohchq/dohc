@@ -2398,6 +2398,43 @@ fn ydoc_open_state_on_store(
         }
     };
     let key = DocKey::new(workspace_id, version_id, object_id)?;
+    // RETIRED artifact: the path has NO head (deleted on disk, capture
+    // retired the snapshot/alias) but a LOCAL-ONLY lineage that claims a
+    // settled artifact survived (workspace teardown skips the prune).
+    // Markdown-is-the-artifact: the user deleted the document, so reopening
+    // must not resurrect the stale cache — and its retained last_settled_sha
+    // would wedge the next settle in ConflictStaleTarget (head None vs a
+    // settled expectation). Clear the lineage; the open proceeds as absent.
+    // A crashed never-settled draft (last_settled NULL) still resurrects —
+    // its CRDT rows are the only copy of the user's edits. Replicated
+    // lineages are durable canonical and never clear here.
+    if head.is_none()
+        && dohc_engine_collab::read_marker(store, &key)?
+            .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::LocalOnly)
+        && dohc_engine_collab::read_last_settled_sha(store, &key)?.is_some()
+    {
+        let cleared = store.write_with(&NoFaults, |tx| {
+            tx.execute(
+                "DELETE FROM ydoc_updates                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "DELETE FROM ydoc_snapshots                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![key.workspace_id, key.version_id, key.object_id],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0,                  last_settled_sha = NULL, updated_at_ms = ?4                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                params![key.workspace_id, key.version_id, key.object_id, now_ms],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })?;
+        if matches!(cleared, TxnOutcome::Crashed { .. }) {
+            return Err(RuntimeError::OperationCrashed);
+        }
+    }
     // Re-converge BEFORE loading state: an envelope acked-but-deferred while
     // a previous session held the lease is only guaranteed to drain on that
     // session's ydoc.close — workspace.close, stale-handle eviction, and a
@@ -2653,7 +2690,14 @@ fn ydoc_settle_on_store(
         // job's preimage is the unmaterialized head; skipping the replay
         // would strand it in a permanent materialization conflict).
         let pending_job_id = format!("ydoc-mat_{}", current.latest_moment_id);
-        if let Some(job) = store.load_materialization_job(&pending_job_id)? {
+        // PENDING only: a completed/conflicted job must not replay here — a
+        // completed one would re-read the target on every settle (and fail
+        // the whole settle pre-commit on a transient read error), and a
+        // conflicted one already ran its compensation.
+        if let Some(job) = store
+            .load_materialization_job(&pending_job_id)?
+            .filter(|job| job.status == dohc_engine_storage::JobStatus::Pending)
+        {
             // Suppression BEFORE the replace, exactly like the fresh path —
             // the watcher can observe the replayed bytes the instant they
             // land; retract on a conflicted job.

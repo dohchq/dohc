@@ -1569,13 +1569,35 @@ impl EngineService {
                 && !(session.lineage_absent && session.first_update_pending)
         };
         if params.settle.unwrap_or(default_settle) {
-            self.ydoc_settle_inner(
-                &cancellation,
-                handle.as_ref(),
-                &params.session_id,
-                params.summary.as_deref(),
-            )
-            .await?;
+            let settled = self
+                .ydoc_settle_inner(
+                    &cancellation,
+                    handle.as_ref(),
+                    &params.session_id,
+                    params.summary.as_deref(),
+                )
+                .await;
+            match settled {
+                Ok(_) => {}
+                // The refusal fires AFTER the deferred rows drained: for the
+                // EXPLICIT settle RPC the client must resync (it keeps
+                // editing), but a CLOSE is final — the session ends, so the
+                // converged doc (local + drained remote) IS the artifact.
+                // Retry once; the drain has emptied the queue, so the second
+                // settle projects the merged state. Without this, a routine
+                // close refuses and strands the session/lease until the
+                // caller manually resyncs or closes the workspace.
+                Err(error) if error.message == "ydoc-remote-updates-pending" => {
+                    self.ydoc_settle_inner(
+                        &cancellation,
+                        handle.as_ref(),
+                        &params.session_id,
+                        params.summary.as_deref(),
+                    )
+                    .await?;
+                }
+                Err(error) => return Err(error),
+            }
         }
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         // The close command carries a FRESH token: once the settle above has
@@ -1616,8 +1638,16 @@ impl EngineService {
                     CancellationToken::new(),
                 )
                 .await;
-            if close_result.is_err()
-                && let Some(entry) = taken
+            // Reinsert ONLY on a genuine close refusal (UnsettledClose and
+            // friends) — an ActorUnavailable/WorkerPanicked error means the
+            // workspace was torn down while this task ran, and resurrecting
+            // the entry would keep its embedded lease alive past the
+            // eviction, leaving the doc ydoc-session-busy for the NEXT
+            // workspace open.
+            if matches!(
+                close_result,
+                Err(RuntimeError::Collab(_)) | Err(RuntimeError::Domain(_))
+            ) && let Some(entry) = taken
             {
                 lock(&sessions).insert(session_id, entry);
             }
@@ -2575,6 +2605,9 @@ fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Collab(CollabError::ObjectAliasCollision)
     ) {
         return wire(ErrorCode::InvalidParams, "ydoc-object-alias-collision");
+    }
+    if matches!(&error, RuntimeError::Collab(CollabError::UnsettledClose)) {
+        return wire(ErrorCode::InvalidParams, "ydoc-unsettled-close");
     }
     let code = match error {
         RuntimeError::Overloaded => ErrorCode::Overloaded,
