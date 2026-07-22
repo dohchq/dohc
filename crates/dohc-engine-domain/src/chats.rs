@@ -2874,6 +2874,27 @@ impl<'a> LinkedChatStore<'a> {
             if let Some(existing) = running_dispatch_claim(tx, &ws, &run)? {
                 return Ok::<_, DomainError>(Some(existing));
             }
+            // Run ids are globally unique by schema
+            // (idx_agent_run_records_run_id); the oracle never collides
+            // because it MINTS ids (freshRunId), while this wire contract
+            // accepts caller ids for retry rehydration. Any remaining match
+            // (another workspace, or an ENDED run in this one) must refuse
+            // cleanly here rather than hit the UNIQUE violation mid-claim
+            // and surface an internal error for a valid pending dispatch.
+            let run_id_taken: Option<i64> = tx
+                .query_row(
+                    "SELECT 1 FROM agent_run_records WHERE run_id = ?1",
+                    params![run],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            if run_id_taken.is_some() {
+                return Err(DomainError::chat(
+                    "invalid-input",
+                    "Agent run id is already in use.",
+                ));
+            }
             // Single-writer guard: a run already RUNNING means no new claim.
             let open_running: i64 = tx
                 .query_row(
@@ -3998,9 +4019,14 @@ fn record_request(
     now_ms: i64,
 ) -> Result<(), DomainError> {
     if let Some(request_id) = request_id {
+        // -1 keeps chat rows outside the moment-order domain entirely:
+        // versioned rows carry result_seq = moment_order (orders start at 1,
+        // `next_moment_order` is MAX+1) and rollback deletes by that value,
+        // so a sentinel that can never equal an order is immune by
+        // construction, not by the current numbering convention.
         tx.execute(
             "INSERT INTO engine_requests (request_id, payload_hash, result_seq, committed_at) \
-             VALUES (?1, ?2, 0, ?3)",
+             VALUES (?1, ?2, -1, ?3)",
             params![request_id, payload_hash, now_ms],
         )
         .map_err(DomainError::sql_persist)?;

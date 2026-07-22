@@ -2339,3 +2339,72 @@ fn feed_cursor_encode_matches_ts_and_ts_cursor_decodes() {
         "invalid-follow-target"
     );
 }
+
+#[test]
+fn claim_refuses_a_run_id_already_used_anywhere() {
+    // Run ids are globally unique by schema (idx_agent_run_records_run_id).
+    // A caller-supplied id that already exists — an ENDED run in this
+    // workspace, or any run in another — must refuse cleanly. Mutation
+    // check: drop the run_id_taken probe in `claim_next_pending` — both
+    // claims below then hit the UNIQUE violation mid-transaction and
+    // surface a storage error instead of "invalid-input".
+    const OTHER_WS: &str = "ws-2";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = open(&db, 1);
+    let mut chats = LinkedChatStore::new(&mut store);
+    for ws in [WS, OTHER_WS] {
+        chats
+            .ensure_agent_channel(ws, "agent-x", 10, &NO_FAULTS)
+            .expect("agent");
+        let mut start = start_thread("agent-x", "t-x", "m-x", "@agent", ChatActorKind::Human, 20);
+        start.workspace_id = ws.to_owned();
+        chats
+            .start_channel_thread(&start, &NO_FAULTS)
+            .expect("start");
+        chats
+            .enqueue_dispatch(ws, "m-x", "t-x", 21, &NO_FAULTS)
+            .expect("enqueue");
+    }
+
+    // ws-1 claims and finishes run-taken; reusing it in ws-1 refuses.
+    chats
+        .claim_next_pending(WS, "run-taken", "agent", None, 22, &NO_FAULTS)
+        .expect("claim")
+        .expect("some");
+    chats
+        .complete_dispatch(WS, "run-taken", 0, 23, &NO_FAULTS)
+        .expect("complete");
+    let start_y = {
+        let mut start = start_thread("agent-x", "t-y", "m-y", "@agent", ChatActorKind::Human, 24);
+        start.workspace_id = WS.to_owned();
+        start
+    };
+    chats
+        .start_channel_thread(&start_y, &NO_FAULTS)
+        .expect("start y");
+    chats
+        .enqueue_dispatch(WS, "m-y", "t-y", 24, &NO_FAULTS)
+        .expect("enqueue y");
+    assert_eq!(
+        chats
+            .claim_next_pending(WS, "run-taken", "agent", None, 25, &NO_FAULTS)
+            .expect_err("ended-run id reuse must refuse")
+            .code(),
+        "invalid-input"
+    );
+
+    // ws-2 reusing ws-1's live id also refuses (instead of colliding with
+    // the global unique index inside the claim transaction).
+    chats
+        .claim_next_pending(WS, "run-fresh", "agent", None, 26, &NO_FAULTS)
+        .expect("fresh claim")
+        .expect("some");
+    assert_eq!(
+        chats
+            .claim_next_pending(OTHER_WS, "run-fresh", "agent", None, 27, &NO_FAULTS)
+            .expect_err("cross-workspace id reuse must refuse")
+            .code(),
+        "invalid-input"
+    );
+}
