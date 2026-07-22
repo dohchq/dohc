@@ -19,8 +19,9 @@ use dohc_engine_domain::{
     CreateNamedVersion, DeleteTextFile, DispatchClaim, DomainError, FeedCursorValue, FollowState,
     FollowTargetKind, MarkdownMergeResult, MergeTextFileFromVersion, MergeTextFileResult,
     RenameTextFile, ResolveConflictKind, ResolveTextConflict, RollbackTextFileMutation,
-    SaveBookmark, SendMessage, SetFollow, SnapshotContent, StartChannelThread, TextConflict,
-    TextSnapshot, VersionFileChangeStatus, VersionRecord, WriteBinary, WriteText, merge_markdown,
+    SaveBookmark, SecretDelete, SecretDiskIntent, SecretMomentRecord, SecretWrite, SendMessage,
+    SetFollow, StartChannelThread, TextConflict, TextSnapshot, VersionFileChangeStatus,
+    VersionRecord, WriteBinary, WriteText, merge_markdown,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -343,6 +344,10 @@ impl EngineService {
                 self.search_query(&ctx, request.workspace, request.params)
                     .await?
             }
+            "search.ensureIndex" => {
+                self.search_ensure_index(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "watcher.status" => self.watcher_status(request.workspace)?,
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
             "versions.active" => {
@@ -383,6 +388,38 @@ impl EngineService {
             }
             "secrets.list" => {
                 self.secrets_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.write" => {
+                self.secrets_write(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.delete" => {
+                self.secrets_delete(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.fork" => {
+                self.secrets_fork(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.moments.list" => {
+                self.secrets_moments_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.moments.get" => {
+                self.secrets_moments_get(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.compare" => {
+                self.secrets_compare(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.apply" => {
+                self.secrets_apply(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.restore" => {
+                self.secrets_restore(&ctx, request.workspace, request.params)
                     .await?
             }
             "secrets.materialize" => {
@@ -1228,41 +1265,34 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let cancellation = OperationCancellation::new(ctx);
-        let mut changes = Self::read_under_ctx(
+        let page = Self::read_under_ctx(
             &cancellation,
             "versions.compareFiles",
-            open.actor.compare_version_files(
+            open.actor.compare_version_files_page(
                 open.workspace_id,
                 params.source_version_id,
                 params.target_version_id,
+                params.after_path,
+                200,
             ),
         )
         .await?;
-        if let Some(after_path) = params.after_path.as_deref() {
-            changes.retain(|change| change.path.as_str() > after_path);
-        }
-        let entries: Vec<Value> =
-            changes
-                .iter()
-                .map(|change| {
-                    let status = match change.status {
-                        VersionFileChangeStatus::Added => "added",
-                        VersionFileChangeStatus::Modified => "modified",
-                        VersionFileChangeStatus::Deleted => "deleted",
-                    };
-                    let binary =
-                        change.current.as_ref().is_some_and(|content| {
-                            matches!(content, SnapshotContent::Binary { .. })
-                        }) || change.incoming.as_ref().is_some_and(|content| {
-                            matches!(content, SnapshotContent::Binary { .. })
-                        });
-                    if binary {
-                        json!({ "path": change.path, "status": status, "binary": true })
-                    } else {
-                        json!({ "path": change.path, "status": status })
-                    }
-                })
-                .collect();
+        let entries: Vec<Value> = page
+            .entries
+            .iter()
+            .map(|change| {
+                let status = match change.status {
+                    VersionFileChangeStatus::Added => "added",
+                    VersionFileChangeStatus::Modified => "modified",
+                    VersionFileChangeStatus::Deleted => "deleted",
+                };
+                if change.binary {
+                    json!({ "path": change.path, "status": status, "binary": true })
+                } else {
+                    json!({ "path": change.path, "status": status })
+                }
+            })
+            .collect();
         let budget = params
             .byte_budget
             .unwrap_or(MOMENTS_PAGE_BYTE_BUDGET)
@@ -1271,9 +1301,12 @@ impl EngineService {
         if included == 0 && !entries.is_empty() {
             return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
         }
-        let next_cursor = (included < entries.len())
-            .then(|| entries[included - 1]["path"].as_str().map(str::to_owned))
-            .flatten();
+        let byte_truncated = included < entries.len();
+        let next_cursor = if byte_truncated {
+            entries[included - 1]["path"].as_str().map(str::to_owned)
+        } else {
+            page.next_after_path
+        };
         Ok(json!({
             "entries": entries[..included].to_vec(),
             "nextCursor": next_cursor,
@@ -1770,6 +1803,8 @@ impl EngineService {
             if serde_json::to_string(first).map_or(0, |s| s.len()) > MOMENTS_PAGE_BYTE_BUDGET {
                 first["afterText"] = Value::Null;
                 first["beforeText"] = Value::Null;
+                first["afterInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
+                first["beforeInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
             }
         }
         let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
@@ -1878,6 +1913,388 @@ impl EngineService {
         Ok(json!({
             "secrets": row_values[..included].to_vec(),
             "nextAfterPath": next_after_path,
+        }))
+    }
+
+    async fn load_or_create_secret_key(
+        &self,
+        cancellation: &OperationCancellation,
+        open: &OpenWorkspace,
+        operation: &'static str,
+    ) -> Result<dohc_engine_crypto::SecretDataKey, WireError> {
+        let key_root = open.root.clone();
+        let key_task =
+            tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_root));
+        let loaded = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption(operation));
+            }
+            loaded = key_task => loaded
+                .map_err(|_| wire(ErrorCode::Internal, "key-corrupt"))?
+                .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error))))?,
+        };
+        if let Some(key) = loaded {
+            return Ok(key);
+        }
+
+        let has_state = Self::read_under_ctx(
+            cancellation,
+            operation,
+            open.actor.secret_state_exists(open.workspace_id.clone()),
+        )
+        .await?;
+        if has_state {
+            return Err(wire(ErrorCode::Internal, "key-corrupt"));
+        }
+
+        let key_root = open.root.clone();
+        let key_task =
+            tokio::task::spawn_blocking(move || dohc_engine_crypto::create_key_file(&key_root));
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => Err(cancellation.interruption(operation)),
+            created = key_task => created
+                .map_err(|_| wire(ErrorCode::Internal, "key-corrupt"))?
+                .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error)))),
+        }
+    }
+
+    async fn secrets_write(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsWriteParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let path = normalize_rpc_path(&params.path);
+        let text = normalize_rpc_text(&params.text);
+        if text.len() > MAX_INBAND_CONTENT_BYTES {
+            return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
+        }
+        let origin = validated_origin(Some(&params.origin), None)?;
+        let cancellation = OperationCancellation::new(ctx);
+        // Prove the version reference and secret-floor routing keylessly before
+        // any key-file load/mint. Invalid calls must remain side-effect-free.
+        Self::read_under_ctx(
+            &cancellation,
+            "secrets.write (validate)",
+            open.actor.secret_file_len(
+                open.workspace_id.clone(),
+                params.version_id.clone(),
+                path.clone(),
+            ),
+        )
+        .await?;
+        let key = self
+            .load_or_create_secret_key(&cancellation, &open, "secrets.write (key load)")
+            .await?;
+        let result = open
+            .actor
+            .write_secret_file(
+                SecretWrite {
+                    workspace_id: open.workspace_id,
+                    version_id: params.version_id,
+                    path,
+                    text,
+                    moment_id: params.moment_id,
+                    metadata_origin: origin,
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: now_ms()?,
+                    disk_intent: SecretDiskIntent::Materialize,
+                },
+                key,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({
+            "changed": result.changed,
+            "moment": result.moment.as_ref().map(secret_moment_json),
+        }))
+    }
+
+    async fn secrets_delete(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsDeleteParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let path = normalize_rpc_path(&params.path);
+        let origin = validated_origin(Some(&params.origin), None)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let moment = open
+            .actor
+            .delete_secret_file(
+                SecretDelete {
+                    workspace_id: open.workspace_id,
+                    version_id: params.version_id,
+                    path,
+                    moment_id: params.moment_id,
+                    metadata_origin: origin,
+                    metadata_summary: None,
+                    now_ms: now_ms()?,
+                },
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({ "moment": moment.as_ref().map(secret_moment_json) }))
+    }
+
+    async fn secrets_fork(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsForkParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        open.actor
+            .fork_secret_version(
+                open.workspace_id,
+                params.from_version_id,
+                params.to_version_id,
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({}))
+    }
+
+    async fn secrets_moments_list(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsMomentsListParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let path = normalize_rpc_path(&params.path);
+        let cancellation = OperationCancellation::new(ctx);
+        let moments = Self::read_under_ctx(
+            &cancellation,
+            "secrets.moments.list",
+            open.actor
+                .list_secret_moments(open.workspace_id, params.version_id, path),
+        )
+        .await?;
+        let rows: Vec<Value> = moments.iter().map(secret_moment_json).collect();
+        let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
+        Ok(Value::Array(rows[..included].to_vec()))
+    }
+
+    async fn secrets_moments_get(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsMomentsGetParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let moment = Self::read_under_ctx(
+            &cancellation,
+            "secrets.moments.get",
+            open.actor
+                .get_secret_moment(open.workspace_id, params.moment_id),
+        )
+        .await?;
+        Ok(moment.as_ref().map_or(Value::Null, secret_moment_json))
+    }
+
+    async fn secrets_compare(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsCompareParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        // Validate both version references before key state can affect error
+        // precedence. These one-row keyless probes never hydrate ciphertext.
+        Self::read_under_ctx(
+            &cancellation,
+            "secrets.compare (source version)",
+            open.actor.list_secret_files_page(
+                open.workspace_id.clone(),
+                params.source_version_id.clone(),
+                None,
+                1,
+            ),
+        )
+        .await?;
+        Self::read_under_ctx(
+            &cancellation,
+            "secrets.compare (target version)",
+            open.actor.list_secret_files_page(
+                open.workspace_id.clone(),
+                params.target_version_id.clone(),
+                None,
+                1,
+            ),
+        )
+        .await?;
+        let has_state = Self::read_under_ctx(
+            &cancellation,
+            "secrets.compare",
+            open.actor.secret_state_exists(open.workspace_id.clone()),
+        )
+        .await?;
+        let key = if has_state {
+            let key_root = open.root.clone();
+            let key_task =
+                tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_root));
+            let loaded = tokio::select! {
+                biased;
+                () = cancellation.token.cancelled() => {
+                    return Err(cancellation.interruption("secrets.compare (key load)"));
+                }
+                loaded = key_task => loaded
+                    .map_err(|_| wire(ErrorCode::Internal, "key-corrupt"))?
+                    .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error))))?,
+            };
+            Some(loaded.ok_or_else(|| wire(ErrorCode::Internal, "key-corrupt"))?)
+        } else {
+            None
+        };
+        let limit = params.limit.unwrap_or(200).clamp(1, 500);
+        let page = Self::read_under_ctx(
+            &cancellation,
+            "secrets.compare",
+            open.actor.compare_secret_files(
+                open.workspace_id,
+                params.source_version_id,
+                params.target_version_id,
+                params.after_path,
+                limit,
+                key,
+            ),
+        )
+        .await?;
+        let rows: Vec<Value> = page
+            .entries
+            .iter()
+            .map(|entry| {
+                json!({
+                    "path": entry.path,
+                    "status": match entry.status {
+                        VersionFileChangeStatus::Added => "added",
+                        VersionFileChangeStatus::Modified => "modified",
+                        VersionFileChangeStatus::Deleted => "deleted",
+                    },
+                })
+            })
+            .collect();
+        let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
+        if included == 0 && !rows.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
+        let byte_truncated = included < rows.len();
+        let next_after_path = if byte_truncated {
+            page.entries[..included]
+                .last()
+                .map(|entry| entry.path.clone())
+        } else {
+            page.next_after_path
+        };
+        Ok(json!({
+            "entries": rows[..included].to_vec(),
+            "nextAfterPath": next_after_path,
+        }))
+    }
+
+    async fn secrets_apply(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsApplyParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let path = normalize_rpc_path(&params.path);
+        let cancellation = OperationCancellation::new(ctx);
+        let active = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("secrets.apply (active version)"));
+            }
+            result = open.actor.active_version(open.workspace_id.clone()) => match result {
+                Ok(version) => version,
+                Err(RuntimeError::Domain(DomainError::WorkspaceNotFound)) => {
+                    return Err(wire(ErrorCode::Internal, "state-corrupt"));
+                }
+                Err(error) => return Err(map_runtime(error)),
+            },
+        };
+        let result = open
+            .actor
+            .apply_secret_file(
+                open.workspace_id,
+                path,
+                params.from_version_id,
+                active.version_id,
+                params.moment_id,
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({
+            "changed": result.changed,
+            "moment": result.moment.as_ref().map(secret_moment_json),
+        }))
+    }
+
+    async fn secrets_restore(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsRestoreParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let path = normalize_rpc_path(&params.path);
+        let cancellation = OperationCancellation::new(ctx);
+        let result = open
+            .actor
+            .restore_secret_file(
+                open.workspace_id,
+                path,
+                params.before_moment_id,
+                params.moment_id,
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({
+            "restored": result.restored,
+            "restoredMomentId": result.restored_moment_id,
+            "path": result.path,
         }))
     }
 
@@ -3560,6 +3977,30 @@ impl EngineService {
         ))
     }
 
+    async fn search_ensure_index(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SearchEnsureIndexParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        open.actor
+            .ensure_search_index(
+                open.root,
+                open.workspace_id,
+                params.version_id,
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({}))
+    }
+
     fn open(&self, handle: Option<&WorkspaceHandle>) -> Result<OpenWorkspace, WireError> {
         let handle = handle.ok_or_else(workspace_unavailable)?;
         lock(&self.handles)
@@ -3891,6 +4332,80 @@ struct SecretsListParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsWriteParams {
+    workspace_id: String,
+    version_id: String,
+    path: String,
+    text: String,
+    origin: String,
+    moment_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsDeleteParams {
+    workspace_id: String,
+    version_id: String,
+    path: String,
+    origin: String,
+    moment_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsForkParams {
+    workspace_id: String,
+    from_version_id: String,
+    to_version_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsMomentsListParams {
+    workspace_id: String,
+    version_id: String,
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsMomentsGetParams {
+    workspace_id: String,
+    moment_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsCompareParams {
+    workspace_id: String,
+    source_version_id: String,
+    target_version_id: String,
+    #[serde(default)]
+    after_path: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsApplyParams {
+    workspace_id: String,
+    path: String,
+    from_version_id: String,
+    moment_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsRestoreParams {
+    workspace_id: String,
+    path: String,
+    before_moment_id: String,
+    moment_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VersionedTextListParams {
     version_id: String,
     #[serde(default)]
@@ -4095,6 +4610,13 @@ struct SearchParams {
     query: String,
     limit: Option<i64>,
     now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SearchEnsureIndexParams {
+    workspace_id: String,
+    version_id: String,
 }
 
 #[derive(Deserialize)]
@@ -4767,6 +5289,18 @@ fn dispatch_claim_json(claim: &DispatchClaim) -> Value {
 }
 
 fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
+    let after_inband_limit = (moment.after_content_kind == "text"
+        && moment.after_text.is_none()
+        && moment
+            .after_byte_length
+            .is_some_and(|length| length as usize > MAX_INBAND_CONTENT_BYTES))
+    .then_some(MAX_INBAND_CONTENT_BYTES);
+    let before_inband_limit = (moment.before_content_kind == "text"
+        && moment.before_text.is_none()
+        && moment
+            .before_byte_length
+            .is_some_and(|length| length as usize > MAX_INBAND_CONTENT_BYTES))
+    .then_some(MAX_INBAND_CONTENT_BYTES);
     json!({
         "momentOrder": moment.moment_order,
         "momentId": moment.moment_id,
@@ -4793,8 +5327,28 @@ fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
         // the same self-describing in-band cap as every content read.
         "afterText": inband_text(moment.after_text.as_deref()),
         "afterByteLength": moment.after_byte_length,
+        "afterInbandLimitBytes": after_inband_limit,
         "beforeText": inband_text(moment.before_text.as_deref()),
         "beforeByteLength": moment.before_byte_length,
+        "beforeInbandLimitBytes": before_inband_limit,
+    })
+}
+
+fn secret_moment_json(moment: &SecretMomentRecord) -> Value {
+    json!({
+        "id": moment.moment_id,
+        "workspaceId": moment.workspace_id,
+        "versionId": moment.version_id,
+        "path": moment.path,
+        "recordedAtMs": moment.recorded_at_ms,
+        "operation": moment.operation.as_str(),
+        "metadata": {
+            "origin": moment.metadata_origin,
+            "summary": moment.metadata_summary,
+            "correlationId": moment.metadata_correlation_id,
+        },
+        "momentOrder": moment.moment_order,
+        "protected": true,
     })
 }
 
@@ -5154,6 +5708,7 @@ fn map_runtime(error: RuntimeError) -> WireError {
             DomainError::FileNotFound => Some("file-not-found"),
             DomainError::TargetPathExists => Some("target-path-exists"),
             DomainError::VersionNotFound => Some("version-not-found"),
+            DomainError::InvalidVersion => Some("invalid-version"),
             DomainError::VersionNameConflict => Some("version-name-conflict"),
             DomainError::InvalidVersionName => Some("invalid-version-name"),
             DomainError::DuplicateId => Some("duplicate-id"),
@@ -5161,6 +5716,9 @@ fn map_runtime(error: RuntimeError) -> WireError {
             DomainError::ConflictStaleTarget => Some("conflict-stale-target"),
             DomainError::InvalidPath { .. } => Some("invalid-path"),
             DomainError::InvalidText { .. } => Some("invalid-text"),
+            DomainError::NotSecretPath => Some("not-secret-path"),
+            DomainError::SecretMomentNotFound => Some("moment-not-found"),
+            DomainError::Crypto(error) => Some(error.code()),
             DomainError::InvalidInput { .. } => Some("invalid-input"),
             DomainError::StateCorrupt { .. } => Some("state-corrupt"),
             DomainError::Storage(_) => Some("persist-failed"),
@@ -5215,6 +5773,7 @@ fn map_domain_code(error: DomainError) -> ErrorCode {
         },
         DomainError::WorkspaceNotFound
         | DomainError::VersionNotFound
+        | DomainError::InvalidVersion
         | DomainError::WorkspaceMismatch
         | DomainError::VersionNameConflict
         | DomainError::InvalidVersionName

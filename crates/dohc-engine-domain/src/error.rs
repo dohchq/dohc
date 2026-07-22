@@ -26,6 +26,11 @@ pub enum DomainError {
     #[error("version not found")]
     VersionNotFound,
 
+    /// A secret-surface version reference is invalid. This is distinct from
+    /// the text domain's `VersionNotFound` compatibility code.
+    #[error("secret version reference is invalid")]
+    InvalidVersion,
+
     /// An object id resolved to a different workspace than the caller named.
     #[error("object belongs to a different workspace")]
     WorkspaceMismatch,
@@ -146,6 +151,7 @@ impl DomainError {
             DomainError::Storage(err) => err.code(),
             DomainError::WorkspaceNotFound => "workspace-not-found",
             DomainError::VersionNotFound => "version-not-found",
+            DomainError::InvalidVersion => "invalid-version",
             DomainError::WorkspaceMismatch => "workspace-mismatch",
             DomainError::VersionNameConflict => "version-name-conflict",
             DomainError::InvalidVersionName => "invalid-version-name",

@@ -43,6 +43,7 @@
 //! possible enhancement for the sync/retention shard; see BEHAVIOR_DELTA.md.
 
 use crate::error::DomainError;
+use crate::merge::VersionFileChangeStatus;
 use crate::records::InbandSecret;
 use crate::store::validate_path;
 use dohc_engine_crypto::{SealedSecret, SecretDataKey, SecretPlaintext, aead, seal};
@@ -65,7 +66,7 @@ pub enum SecretOp {
 }
 
 impl SecretOp {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             SecretOp::Write => "write",
             SecretOp::Delete => "delete",
@@ -214,12 +215,33 @@ pub struct SecretFileStat {
     pub latest_moment_id: String,
 }
 
+/// Metadata-only whole-version secret comparison entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretCompareEntry {
+    pub path: String,
+    pub status: VersionFileChangeStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretComparePage {
+    pub entries: Vec<SecretCompareEntry>,
+    pub next_after_path: Option<String>,
+}
+
 /// The outcome of a secret write: `changed=false` is a content-equality no-op
 /// (no new moment); otherwise the recorded moment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SecretWriteResult {
     pub changed: bool,
     pub moment: Option<SecretMomentRecord>,
+}
+
+/// Outcome of restoring a secret to the state before a protected moment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretRestoreResult {
+    pub restored: &'static str,
+    pub restored_moment_id: String,
+    pub path: String,
 }
 
 /// Inputs to a secret delete.
@@ -603,31 +625,9 @@ impl<'a> SecretFileStore<'a> {
         &self,
         workspace_id: &str,
         version_id: Option<&str>,
+        path: Option<&str>,
     ) -> Result<Vec<SecretMomentRecord>, DomainError> {
-        self.store.read_with(|conn| {
-            let mut sql = String::from(
-                "SELECT moment_order, moment_id, workspace_id, version_id, path, recorded_at_ms, \
-                 operation, metadata_origin, metadata_summary, metadata_correlation_id \
-                 FROM secret_moments WHERE workspace_id = ?1",
-            );
-            let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(workspace_id.to_owned())];
-            if let Some(version_id) = version_id {
-                require_version(conn, workspace_id, version_id)?;
-                sql.push_str(" AND version_id = ?2");
-                binds.push(Box::new(version_id.to_owned()));
-            }
-            sql.push_str(" ORDER BY moment_order DESC");
-            let mut stmt = conn.prepare(&sql).map_err(DomainError::sql_corrupt)?;
-            let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
-            let rows = stmt
-                .query_map(refs.as_slice(), map_moment_row)
-                .map_err(DomainError::sql_corrupt)?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row.map_err(DomainError::sql_corrupt)??);
-            }
-            Ok(out)
-        })
+        list_secret_moments_keyless(self.store, workspace_id, version_id, path)
     }
 
     /// Fetch a single secret moment by id (metadata only), or `None`.
@@ -636,23 +636,30 @@ impl<'a> SecretFileStore<'a> {
         workspace_id: &str,
         moment_id: &str,
     ) -> Result<Option<SecretMomentRecord>, DomainError> {
-        if moment_id.is_empty() {
-            return Err(DomainError::InvalidInput {
-                reason: "moment_id must not be empty",
-            });
-        }
-        self.store.read_with(|conn| {
-            conn.query_row(
-                "SELECT moment_order, moment_id, workspace_id, version_id, path, recorded_at_ms, \
-                 operation, metadata_origin, metadata_summary, metadata_correlation_id \
-                 FROM secret_moments WHERE workspace_id = ?1 AND moment_id = ?2",
-                params![workspace_id, moment_id],
-                map_moment_row,
-            )
-            .optional()
-            .map_err(DomainError::sql_corrupt)?
-            .transpose()
-        })
+        get_secret_moment_keyless(self.store, workspace_id, moment_id)
+    }
+
+    /// Compare secret tips across two versions. Ciphertext-equal rows skip the
+    /// key entirely; ciphertext-different rows decrypt only inside the domain
+    /// to distinguish re-encryption from a real plaintext modification.
+    pub fn compare_secret_files_page(
+        &self,
+        workspace_id: &str,
+        source_version_id: &str,
+        target_version_id: &str,
+        after_path: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<SecretCompareEntry>, DomainError> {
+        Ok(compare_secret_files_page_keyless(
+            self.store,
+            Some(self.key),
+            workspace_id,
+            source_version_id,
+            target_version_id,
+            after_path,
+            limit,
+        )?
+        .entries)
     }
 
     // ----------------------------------------------------------------- fork
@@ -736,6 +743,32 @@ pub(crate) fn fork_version_in_tx(
     Ok(())
 }
 
+/// Keyless standalone secret fork. Ciphertext is copied verbatim and both
+/// version references are validated before entering the write transaction.
+pub fn fork_version_keyless(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    from_version_id: &str,
+    to_version_id: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<(), DomainError> {
+    non_empty(workspace_id, "workspace_id")?;
+    if from_version_id == to_version_id {
+        return Err(DomainError::InvalidInput {
+            reason: "fork source and destination versions must differ",
+        });
+    }
+    store.read_with(|conn| {
+        require_version(conn, workspace_id, from_version_id)?;
+        require_version(conn, workspace_id, to_version_id)
+    })?;
+    let outcome = store.write_with(faults, |tx| {
+        fork_version_in_tx(tx, workspace_id, from_version_id, to_version_id, now_ms)
+    })?;
+    committed(outcome)
+}
+
 // ============================================================================
 // Free helpers.
 // ============================================================================
@@ -750,6 +783,380 @@ pub fn delete_secret_file_keyless(
     faults: &dyn FaultInjector,
 ) -> Result<Option<SecretMomentRecord>, DomainError> {
     delete_secret_file_inner(store, input, faults, false)
+}
+
+/// Keyless secret-moment listing, newest first, optionally scoped to a
+/// version and path. A path filter always passes the secret-floor gate.
+pub fn list_secret_moments_keyless(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: Option<&str>,
+    path: Option<&str>,
+) -> Result<Vec<SecretMomentRecord>, DomainError> {
+    if let Some(path) = path {
+        validate_secret_path(path)?;
+    }
+    store.read_with(|conn| {
+        let mut sql = String::from(
+            "SELECT moment_order, moment_id, workspace_id, version_id, path, recorded_at_ms, \
+             operation, metadata_origin, metadata_summary, metadata_correlation_id \
+             FROM secret_moments WHERE workspace_id = ?1",
+        );
+        let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(workspace_id.to_owned())];
+        if let Some(version_id) = version_id {
+            require_version(conn, workspace_id, version_id)?;
+            sql.push_str(&format!(" AND version_id = ?{}", binds.len() + 1));
+            binds.push(Box::new(version_id.to_owned()));
+        }
+        if let Some(path) = path {
+            sql.push_str(&format!(" AND path = ?{}", binds.len() + 1));
+            binds.push(Box::new(path.to_owned()));
+        }
+        sql.push_str(" ORDER BY moment_order DESC");
+        let mut stmt = conn.prepare(&sql).map_err(DomainError::sql_corrupt)?;
+        let refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(|bind| bind.as_ref()).collect();
+        let rows = stmt
+            .query_map(refs.as_slice(), map_moment_row)
+            .map_err(DomainError::sql_corrupt)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(DomainError::sql_corrupt)??);
+        }
+        Ok(out)
+    })
+}
+
+/// Fetch a secret moment without requiring the data key.
+pub fn get_secret_moment_keyless(
+    store: &EngineStore,
+    workspace_id: &str,
+    moment_id: &str,
+) -> Result<Option<SecretMomentRecord>, DomainError> {
+    if moment_id.is_empty() {
+        return Err(DomainError::InvalidInput {
+            reason: "moment_id must not be empty",
+        });
+    }
+    store.read_with(|conn| {
+        conn.query_row(
+            "SELECT moment_order, moment_id, workspace_id, version_id, path, recorded_at_ms, \
+             operation, metadata_origin, metadata_summary, metadata_correlation_id \
+             FROM secret_moments WHERE workspace_id = ?1 AND moment_id = ?2",
+            params![workspace_id, moment_id],
+            map_moment_row,
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?
+        .transpose()
+    })
+}
+
+/// Whole-version secret comparison that can run keyless when no encrypted
+/// state exists. A key is only consulted for ciphertext-different rows.
+pub fn compare_secret_files_page_keyless(
+    store: &EngineStore,
+    key: Option<&SecretDataKey>,
+    workspace_id: &str,
+    source_version_id: &str,
+    target_version_id: &str,
+    after_path: Option<&str>,
+    limit: usize,
+) -> Result<SecretComparePage, DomainError> {
+    if limit == 0 {
+        return Err(DomainError::InvalidInput {
+            reason: "limit must be positive",
+        });
+    }
+    store.read_with(|conn| {
+        require_version(conn, workspace_id, source_version_id)?;
+        require_version(conn, workspace_id, target_version_id)?;
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT t.path, t.iv_base64, t.auth_tag_base64, t.ciphertext_base64, t.byte_length, \
+                        s.path, s.iv_base64, s.auth_tag_base64, s.ciphertext_base64, s.byte_length \
+                 FROM (SELECT path, iv_base64, auth_tag_base64, ciphertext_base64, byte_length \
+                       FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2) AS t \
+                 FULL OUTER JOIN \
+                      (SELECT path, iv_base64, auth_tag_base64, ciphertext_base64, byte_length \
+                       FROM secret_files WHERE workspace_id = ?1 AND version_id = ?3) AS s \
+                   ON t.path = s.path \
+                 WHERE COALESCE(t.path, s.path) > ?4 \
+                 ORDER BY COALESCE(t.path, s.path) LIMIT ?5",
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    workspace_id,
+                    target_version_id,
+                    source_version_id,
+                    after_path.unwrap_or(""),
+                    limit as i64
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                        row.get::<_, Option<i64>>(9)?,
+                    ))
+                },
+            )
+            .map_err(DomainError::sql_corrupt)?;
+        let mut entries = Vec::new();
+        let mut rows_fetched = 0usize;
+        let mut last_scanned_path = None;
+        for row in rows {
+            let (t_path, t_iv, t_tag, t_ct, t_len, s_path, s_iv, s_tag, s_ct, s_len) =
+                row.map_err(DomainError::sql_corrupt)?;
+            let path = t_path.as_ref().or(s_path.as_ref()).ok_or(DomainError::StateCorrupt {
+                reason: "secret comparison row has no path",
+            })?;
+            rows_fetched += 1;
+            last_scanned_path = Some(path.clone());
+            match (&t_path, &s_path) {
+                (None, Some(_)) => entries.push(SecretCompareEntry {
+                    path: path.clone(),
+                    status: VersionFileChangeStatus::Added,
+                }),
+                (Some(_), None) => entries.push(SecretCompareEntry {
+                    path: path.clone(),
+                    status: VersionFileChangeStatus::Deleted,
+                }),
+                (Some(_), Some(_)) => {
+                    if t_iv == s_iv && t_tag == s_tag && t_ct == s_ct {
+                        continue;
+                    }
+                    let key = key.ok_or(DomainError::StateCorrupt {
+                        reason: "secret comparison needs a missing data key",
+                    })?;
+                    let target = SealedSecret::from_base64(
+                        t_iv.as_deref().ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?,
+                        t_tag.as_deref().ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?,
+                        t_ct.as_deref().ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?,
+                        usize::try_from(t_len.ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?)
+                            .map_err(|_| DomainError::StateCorrupt { reason: "secret tip has a negative byte length" })?,
+                    )?;
+                    let source = SealedSecret::from_base64(
+                        s_iv.as_deref().ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?,
+                        s_tag.as_deref().ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?,
+                        s_ct.as_deref().ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?,
+                        usize::try_from(s_len.ok_or(DomainError::StateCorrupt { reason: "secret tip is incomplete" })?)
+                            .map_err(|_| DomainError::StateCorrupt { reason: "secret tip has a negative byte length" })?,
+                    )?;
+                    if aead::open(key, workspace_id, path, &target)?.as_bytes()
+                        != aead::open(key, workspace_id, path, &source)?.as_bytes()
+                    {
+                        entries.push(SecretCompareEntry {
+                            path: path.clone(),
+                            status: VersionFileChangeStatus::Modified,
+                        });
+                    }
+                }
+                (None, None) => unreachable!(),
+            }
+        }
+        Ok(SecretComparePage {
+            entries,
+            next_after_path: (rows_fetched == limit).then_some(last_scanned_path).flatten(),
+        })
+    })
+}
+
+/// Apply one source-version secret tip to the resolved destination version by
+/// copying the sealed fields verbatim. No plaintext or data key is involved.
+pub fn apply_secret_file_verbatim(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    path: &str,
+    from_version_id: &str,
+    to_version_id: &str,
+    moment_id: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<SecretWriteResult, DomainError> {
+    non_empty(workspace_id, "workspace_id")?;
+    non_empty(from_version_id, "version_id")?;
+    non_empty(to_version_id, "version_id")?;
+    non_empty(moment_id, "moment_id")?;
+    validate_secret_path(path)?;
+    let outcome = store.write_with(faults, |tx| {
+        require_version(tx, workspace_id, from_version_id)?;
+        require_version(tx, workspace_id, to_version_id)?;
+        let Some(source) = select_tip(tx, workspace_id, from_version_id, path)? else {
+            return Ok(SecretWriteResult {
+                changed: false,
+                moment: None,
+            });
+        };
+        if select_tip(tx, workspace_id, to_version_id, path)?.as_ref() == Some(&source) {
+            return Ok(SecretWriteResult {
+                changed: false,
+                moment: None,
+            });
+        }
+        if secret_moment_exists(tx, workspace_id, moment_id)? {
+            return Err(DomainError::DuplicateMomentId);
+        }
+        let moment_order = next_secret_moment_order(tx, workspace_id)?;
+        let moment = SecretMomentRecord {
+            moment_order,
+            moment_id: moment_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            version_id: to_version_id.to_owned(),
+            path: path.to_owned(),
+            recorded_at_ms: now_ms,
+            operation: SecretOp::Write,
+            metadata_origin: "sync".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+        };
+        insert_moment(tx, &moment, moment_order, Some(&source))?;
+        upsert_tip(tx, &moment, moment_order, &source)?;
+        let ciphertext_sha = put_binary_blob(tx, source.ciphertext())?;
+        enqueue_job(
+            tx,
+            &MaterializationJobSpec {
+                job_id: format!("secret-mat_{moment_id}"),
+                target_path: path.to_owned(),
+                content_sha256: ciphertext_sha,
+                preimage: Preimage::Absent,
+                target_generation: moment_order,
+                now_ms,
+            },
+        )?;
+        journal(tx, path, "secret.file.put", now_ms)?;
+        Ok(SecretWriteResult {
+            changed: true,
+            moment: Some(moment),
+        })
+    })?;
+    committed(outcome)
+}
+
+/// Restore the sealed state that existed immediately before a secret moment.
+/// The prior ciphertext is copied forward verbatim; history is append-only.
+pub fn restore_secret_file_verbatim(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    path: &str,
+    before_moment_id: &str,
+    moment_id: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<SecretRestoreResult, DomainError> {
+    non_empty(workspace_id, "workspace_id")?;
+    non_empty(before_moment_id, "moment_id")?;
+    non_empty(moment_id, "moment_id")?;
+    validate_secret_path(path)?;
+    let outcome = store.write_with(faults, |tx| {
+        let before = tx
+            .query_row(
+                "SELECT moment_order, moment_id, workspace_id, version_id, path, recorded_at_ms, \
+                 operation, metadata_origin, metadata_summary, metadata_correlation_id \
+                 FROM secret_moments WHERE workspace_id = ?1 AND moment_id = ?2",
+                params![workspace_id, before_moment_id],
+                map_moment_row,
+            )
+            .optional()
+            .map_err(DomainError::sql_corrupt)?
+            .ok_or(DomainError::SecretMomentNotFound)??;
+        if before.path != path {
+            return Err(DomainError::InvalidInput {
+                reason: "path does not match the protected history moment",
+            });
+        }
+        let previous = tx
+            .query_row(
+                "SELECT after_present, after_iv_base64, after_auth_tag_base64, \
+                 after_ciphertext_base64, after_byte_length FROM secret_moments \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3 \
+                   AND moment_order < ?4 ORDER BY moment_order DESC LIMIT 1",
+                params![workspace_id, before.version_id, before.path, before.moment_order],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(DomainError::sql_corrupt)?;
+        let target = match previous {
+            None | Some((0, _, _, _, _)) => None,
+            Some((1, iv, tag, ciphertext, byte_length)) => Some(SealedSecret::from_base64(
+                iv.as_deref().ok_or(DomainError::StateCorrupt { reason: "secret moment is incomplete" })?,
+                tag.as_deref().ok_or(DomainError::StateCorrupt { reason: "secret moment is incomplete" })?,
+                ciphertext.as_deref().ok_or(DomainError::StateCorrupt { reason: "secret moment is incomplete" })?,
+                usize::try_from(byte_length.ok_or(DomainError::StateCorrupt { reason: "secret moment is incomplete" })?)
+                    .map_err(|_| DomainError::StateCorrupt { reason: "secret moment has a negative byte length" })?,
+            )?),
+            Some(_) => return Err(DomainError::StateCorrupt { reason: "secret moment has invalid presence" }),
+        };
+        let current = select_tip(tx, workspace_id, &before.version_id, &before.path)?;
+        if target.as_ref() == current.as_ref() {
+            return Ok(SecretRestoreResult {
+                restored: if target.is_some() { "text" } else { "deleted" },
+                restored_moment_id: before.moment_id,
+                path: before.path,
+            });
+        }
+        if secret_moment_exists(tx, workspace_id, moment_id)? {
+            return Err(DomainError::DuplicateMomentId);
+        }
+        let moment_order = next_secret_moment_order(tx, workspace_id)?;
+        let record = SecretMomentRecord {
+            moment_order,
+            moment_id: moment_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            version_id: before.version_id,
+            path: before.path,
+            recorded_at_ms: now_ms,
+            operation: if target.is_some() { SecretOp::Write } else { SecretOp::Delete },
+            metadata_origin: "restore".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+        };
+        insert_moment(tx, &record, moment_order, target.as_ref())?;
+        if let Some(sealed) = target.as_ref() {
+            upsert_tip(tx, &record, moment_order, sealed)?;
+            let ciphertext_sha = put_binary_blob(tx, sealed.ciphertext())?;
+            enqueue_job(
+                tx,
+                &MaterializationJobSpec {
+                    job_id: format!("secret-mat_{moment_id}"),
+                    target_path: record.path.clone(),
+                    content_sha256: ciphertext_sha,
+                    preimage: Preimage::Absent,
+                    target_generation: moment_order,
+                    now_ms,
+                },
+            )?;
+            journal(tx, &record.path, "secret.file.put", now_ms)?;
+        } else {
+            tx.execute(
+                "DELETE FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+                params![workspace_id, record.version_id, record.path],
+            )
+            .map_err(DomainError::sql_persist)?;
+            journal(tx, &record.path, "secret.file.delete", now_ms)?;
+        }
+        Ok(SecretRestoreResult {
+            restored: if target.is_some() { "text" } else { "deleted" },
+            restored_moment_id: record.moment_id,
+            path: record.path,
+        })
+    })?;
+    committed(outcome)
 }
 
 fn delete_secret_file_inner(
@@ -1104,7 +1511,7 @@ fn require_version(
     if found.is_some() {
         Ok(())
     } else {
-        Err(DomainError::VersionNotFound)
+        Err(DomainError::InvalidVersion)
     }
 }
 

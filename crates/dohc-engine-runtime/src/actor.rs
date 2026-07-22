@@ -29,7 +29,8 @@
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
 use crate::search::{
-    SearchResult, delete_file_search_index, search_workspace, upsert_file_search_index,
+    SearchResult, delete_file_search_index, ensure_search_index_for_version, search_workspace,
+    upsert_file_search_index,
 };
 use dohc_engine_collab::{
     AppendOutcome, CloseOutcome, ContentKind, DocKey, Projection, Regime, Ydoc,
@@ -44,14 +45,17 @@ use dohc_engine_domain::{
     DeleteResult, DeleteTextFile, DispatchClaim, InbandBinary, InbandSecret, InbandText,
     LinkedChatStore, ListMomentsQuery, MergeTextFileFromVersion, MergeTextFileResult, MomentPage,
     MomentRecord, RenameResult, RenameTextFile, ResolveTextConflict, ResolveTextConflictResult,
-    RollbackTextFileMutation, SaveBookmark, SecretFileStat, SecretFileStore, SecretMomentRecord,
-    SecretWriteResult, SendMessage, SetFollow, SnapshotMetadata, SnapshotView, StartChannelThread,
-    TextConflict, TextSnapshot, VersionFileChange, VersionRecord, VersionedTextComparison,
-    VersionedTextStore, WriteBinary, WriteResult, WriteText, capture_manifest_seed,
-    capture_secret_retire, derive_capture_object_id, enqueue_write, has_secret_state,
-    insert_text_conflict_if_absent, list_secret_files_keyless, list_secret_files_keyless_page,
-    secret_file_len_keyless, select_snapshot_by_path_in_tx, write_binary_in_tx,
-    write_projected_text_in_tx, write_text_in_tx,
+    RollbackTextFileMutation, SaveBookmark, SecretComparePage, SecretDelete, SecretFileStat,
+    SecretFileStore, SecretMomentRecord, SecretRestoreResult, SecretWrite, SecretWriteResult,
+    SendMessage, SetFollow, SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict,
+    TextSnapshot, VersionFileChange, VersionFileChangePage, VersionRecord, VersionedTextComparison,
+    VersionedTextStore, WriteBinary, WriteResult, WriteText, apply_secret_file_verbatim,
+    capture_manifest_seed, capture_secret_retire, compare_secret_files_page_keyless,
+    delete_secret_file_keyless, derive_capture_object_id, enqueue_write, fork_version_keyless,
+    get_secret_moment_keyless, has_secret_state, insert_text_conflict_if_absent,
+    list_secret_files_keyless, list_secret_files_keyless_page, list_secret_moments_keyless,
+    restore_secret_file_verbatim, secret_file_len_keyless, select_snapshot_by_path_in_tx,
+    write_binary_in_tx, write_projected_text_in_tx, write_text_in_tx,
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, StdBackoff, StdReplacer, materialize_one};
 use dohc_engine_storage::{
@@ -254,6 +258,14 @@ enum Command {
         target_version_id: String,
         reply: oneshot::Sender<Result<Vec<VersionFileChange>, RuntimeError>>,
     },
+    CompareVersionFilesPage {
+        workspace_id: String,
+        source_version_id: String,
+        target_version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+        reply: oneshot::Sender<Result<VersionFileChangePage, RuntimeError>>,
+    },
     CaptureIngest {
         input: CaptureIngest,
         faults: Arc<dyn FaultInjector>,
@@ -365,6 +377,69 @@ enum Command {
         key: Box<SecretDataKey>,
         cap: usize,
         reply: oneshot::Sender<Result<Option<InbandSecret>, RuntimeError>>,
+    },
+    WriteSecretFile {
+        input: Box<SecretWrite>,
+        key: Box<SecretDataKey>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<SecretWriteResult, RuntimeError>>,
+    },
+    DeleteSecretFile {
+        input: SecretDelete,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Option<SecretMomentRecord>, RuntimeError>>,
+    },
+    ForkSecretVersion {
+        workspace_id: String,
+        from_version_id: String,
+        to_version_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<(), RuntimeError>>,
+    },
+    ListSecretMoments {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        reply: oneshot::Sender<Result<Vec<SecretMomentRecord>, RuntimeError>>,
+    },
+    GetSecretMoment {
+        workspace_id: String,
+        moment_id: String,
+        reply: oneshot::Sender<Result<Option<SecretMomentRecord>, RuntimeError>>,
+    },
+    CompareSecretFiles {
+        workspace_id: String,
+        source_version_id: String,
+        target_version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+        key: Option<Box<SecretDataKey>>,
+        reply: oneshot::Sender<Result<SecretComparePage, RuntimeError>>,
+    },
+    ApplySecretFile {
+        workspace_id: String,
+        path: String,
+        from_version_id: String,
+        to_version_id: String,
+        moment_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<SecretWriteResult, RuntimeError>>,
+    },
+    RestoreSecretFile {
+        workspace_id: String,
+        path: String,
+        before_moment_id: String,
+        moment_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<SecretRestoreResult, RuntimeError>>,
     },
     ListSecretFiles {
         workspace_id: String,
@@ -521,6 +596,15 @@ enum Command {
         now_ms: i64,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Vec<SearchResult>, RuntimeError>>,
+    },
+    EnsureSearchIndex {
+        root_dir: PathBuf,
+        workspace_id: String,
+        version_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<(), RuntimeError>>,
     },
     ChatChannelCreate {
         workspace_id: String,
@@ -1341,6 +1425,29 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    pub async fn compare_version_files_page(
+        &self,
+        workspace_id: String,
+        source_version_id: String,
+        target_version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+    ) -> Result<VersionFileChangePage, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CompareVersionFilesPage {
+                workspace_id,
+                source_version_id,
+                target_version_id,
+                after_path,
+                limit,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Capture a text file on the actor's single writer thread.
     pub async fn capture_ingest(
         &self,
@@ -1577,6 +1684,190 @@ impl ActorHandle {
                 path,
                 key: Box::new(key),
                 cap,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn write_secret_file(
+        &self,
+        input: SecretWrite,
+        key: SecretDataKey,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<SecretWriteResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::WriteSecretFile {
+                input: Box::new(input),
+                key: Box::new(key),
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn delete_secret_file(
+        &self,
+        input: SecretDelete,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::DeleteSecretFile {
+                input,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn fork_secret_version(
+        &self,
+        workspace_id: String,
+        from_version_id: String,
+        to_version_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ForkSecretVersion {
+                workspace_id,
+                from_version_id,
+                to_version_id,
+                now_ms,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn list_secret_moments(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+    ) -> Result<Vec<SecretMomentRecord>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ListSecretMoments {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn get_secret_moment(
+        &self,
+        workspace_id: String,
+        moment_id: String,
+    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::GetSecretMoment {
+                workspace_id,
+                moment_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn compare_secret_files(
+        &self,
+        workspace_id: String,
+        source_version_id: String,
+        target_version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+        key: Option<SecretDataKey>,
+    ) -> Result<SecretComparePage, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CompareSecretFiles {
+                workspace_id,
+                source_version_id,
+                target_version_id,
+                after_path,
+                limit,
+                key: key.map(Box::new),
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn apply_secret_file(
+        &self,
+        workspace_id: String,
+        path: String,
+        from_version_id: String,
+        to_version_id: String,
+        moment_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<SecretWriteResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ApplySecretFile {
+                workspace_id,
+                path,
+                from_version_id,
+                to_version_id,
+                moment_id,
+                now_ms,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn restore_secret_file(
+        &self,
+        workspace_id: String,
+        path: String,
+        before_moment_id: String,
+        moment_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<SecretRestoreResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::RestoreSecretFile {
+                workspace_id,
+                path,
+                before_moment_id,
+                moment_id,
+                now_ms,
+                faults,
+                token,
                 reply,
             })
             .await
@@ -2158,6 +2449,31 @@ impl ActorHandle {
                 query,
                 limit,
                 now_ms,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn ensure_search_index(
+        &self,
+        root_dir: PathBuf,
+        workspace_id: String,
+        version_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::EnsureSearchIndex {
+                root_dir,
+                workspace_id,
+                version_id,
+                now_ms,
+                faults,
                 token,
                 reply,
             })
@@ -3051,6 +3367,25 @@ fn worker_main(
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
+            Command::CompareVersionFilesPage {
+                workspace_id,
+                source_version_id,
+                target_version_id,
+                after_path,
+                limit,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .compare_version_files_page(
+                        &workspace_id,
+                        &source_version_id,
+                        &target_version_id,
+                        after_path.as_deref(),
+                        limit,
+                    )
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
             Command::CaptureIngest {
                 input,
                 faults,
@@ -3214,6 +3549,159 @@ fn worker_main(
                 let outcome = SecretFileStore::new(&mut store, &key)
                     .materialize_secret_file_inband(&workspace_id, &version_id, &path, cap)
                     .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::WriteSecretFile {
+                input,
+                key,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    SecretFileStore::new(&mut store, &key)
+                        .write_secret_file(&input, faults.as_ref())
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::DeleteSecretFile {
+                input,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    delete_secret_file_keyless(&mut store, &input, faults.as_ref())
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::ForkSecretVersion {
+                workspace_id,
+                from_version_id,
+                to_version_id,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    fork_version_keyless(
+                        &mut store,
+                        &workspace_id,
+                        &from_version_id,
+                        &to_version_id,
+                        now_ms,
+                        faults.as_ref(),
+                    )
+                    .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::ListSecretMoments {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            } => {
+                let outcome = list_secret_moments_keyless(
+                    &store,
+                    &workspace_id,
+                    Some(&version_id),
+                    Some(&path),
+                )
+                .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::GetSecretMoment {
+                workspace_id,
+                moment_id,
+                reply,
+            } => {
+                let outcome = get_secret_moment_keyless(&store, &workspace_id, &moment_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::CompareSecretFiles {
+                workspace_id,
+                source_version_id,
+                target_version_id,
+                after_path,
+                limit,
+                key,
+                reply,
+            } => {
+                let outcome = compare_secret_files_page_keyless(
+                    &store,
+                    key.as_deref(),
+                    &workspace_id,
+                    &source_version_id,
+                    &target_version_id,
+                    after_path.as_deref(),
+                    limit,
+                )
+                .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ApplySecretFile {
+                workspace_id,
+                path,
+                from_version_id,
+                to_version_id,
+                moment_id,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    apply_secret_file_verbatim(
+                        &mut store,
+                        &workspace_id,
+                        &path,
+                        &from_version_id,
+                        &to_version_id,
+                        &moment_id,
+                        now_ms,
+                        faults.as_ref(),
+                    )
+                    .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::RestoreSecretFile {
+                workspace_id,
+                path,
+                before_moment_id,
+                moment_id,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    restore_secret_file_verbatim(
+                        &mut store,
+                        &workspace_id,
+                        &path,
+                        &before_moment_id,
+                        &moment_id,
+                        now_ms,
+                        faults.as_ref(),
+                    )
+                    .map_err(RuntimeError::from)
+                };
                 let _ = reply.send(outcome);
             }
             Command::ListSecretFiles {
@@ -4134,6 +4622,33 @@ fn worker_main(
                                 &query,
                                 limit,
                                 now_ms,
+                            )
+                        })
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::EnsureSearchIndex {
+                root_dir,
+                workspace_id,
+                version_id,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    store
+                        .read_with(|conn| {
+                            ensure_search_index_for_version(
+                                conn,
+                                &root_dir,
+                                &workspace_id,
+                                &version_id,
+                                now_ms,
+                                faults.as_ref(),
                             )
                         })
                         .map_err(RuntimeError::from)

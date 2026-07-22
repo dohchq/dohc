@@ -8,7 +8,7 @@ use dohc_engine_protocol::{
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
 use serde_json::{Value, json};
-use std::{path::Path, sync::Arc};
+use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -211,6 +211,76 @@ async fn over_cap_write_refuses_before_commit() {
         .expect_err("over-cap binary");
     assert_eq!(refused.message, "content-exceeds-inband-cap");
     assert_eq!(moments(&transport, &handle, 7).await.len(), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secrets_write_rejects_over_cap_text_before_commit() {
+    // MUTATION: commit the secret and truncate only the response -> the moment leaks and fails.
+    let (_scratch, transport, handle) = fixture("secret-cap").await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": "ws-rpcd-secret-cap" }),
+    )
+    .await;
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                3,
+                "secrets.write",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": "ws-rpcd-secret-cap",
+                    "versionId": "main",
+                    "path": ".env",
+                    "text": "x".repeat(dohc_engine_domain::INBAND_CONTENT_CAP_BYTES + 1),
+                    "origin": "api",
+                    "momentId": "secret-too-big",
+                }),
+            ),
+        )
+        .await
+        .expect_err("over-cap secret write");
+    assert_eq!(refused.message, "content-exceeds-inband-cap");
+    let moments = call(
+        &transport,
+        &handle,
+        4,
+        "secrets.moments.list",
+        json!({
+            "workspaceId": "ws-rpcd-secret-cap",
+            "versionId": "main",
+            "path": ".env",
+        }),
+    )
+    .await;
+    assert!(moments.as_array().expect("secret moments").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_require_version_wire_code_is_invalid_version() {
+    // MUTATION: restore the text-domain VersionNotFound code in secrets::require_version -> fails.
+    let (_scratch, transport, handle) = fixture("secret-invalid-version").await;
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                2,
+                "secrets.fork",
+                Some(handle),
+                json!({
+                    "workspaceId": "ws-rpcd-secret-invalid-version",
+                    "fromVersionId": "missing",
+                    "toVersionId": "main",
+                }),
+            ),
+        )
+        .await
+        .expect_err("unknown secret version");
+    assert_eq!(error.message, "invalid-version");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -755,6 +825,50 @@ async fn fts_is_maintained_in_each_mutation_transaction() {
     assert!(binary_gone.as_array().expect("results").is_empty());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_ensure_index_is_idempotent() {
+    // MUTATION: make ensure append duplicate state or fail on an existing generation -> second call fails.
+    let (_scratch, transport, handle) = fixture("search-ensure").await;
+    write(
+        &transport,
+        &handle,
+        2,
+        "searchable.md",
+        "needle-for-explicit-rebuild",
+        "search-ensure-write",
+    )
+    .await;
+    for id in [3, 4] {
+        let ensured = call(
+            &transport,
+            &handle,
+            id,
+            "search.ensureIndex",
+            json!({
+                "workspaceId": "ws-rpcd-search-ensure",
+                "versionId": "main",
+            }),
+        )
+        .await;
+        assert_eq!(ensured, json!({}));
+    }
+    let results = call(
+        &transport,
+        &handle,
+        5,
+        "search.query",
+        json!({ "versionId": "main", "query": "explicit-rebuild" }),
+    )
+    .await;
+    assert!(
+        results
+            .as_array()
+            .expect("search results")
+            .iter()
+            .any(|row| row["path"] == "searchable.md")
+    );
+}
+
 fn seed_versions(root: &Path, workspace_id: &str) {
     use dohc_engine_domain::{
         CreateNamedVersion, NoFaults, VersionedTextStore, WriteBinary, WriteText,
@@ -1005,6 +1119,172 @@ async fn compare_files_is_paged_and_binary_entry_shape_is_exact() {
         .expect("binary entry");
     assert_eq!(binary.as_object().expect("object").len(), 3);
     assert_eq!(binary["binary"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compare_files_pages_via_db_keyset_not_full_vector() {
+    // MUTATION: swap target/source in the SQL -> only-source/only-target statuses flip and fail.
+    use dohc_engine_domain::{
+        CreateNamedVersion, NoFaults, VersionFileChangeStatus, VersionedTextStore, WriteText,
+    };
+    use dohc_engine_storage::EngineStore;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    std::fs::create_dir_all(scratch.path().join(".dohc/engine")).expect("engine dir");
+    let db = scratch.path().join(".dohc/engine/engine.db");
+    let expected = {
+        let mut store = EngineStore::open(&db, 1).expect("store");
+        store.bind_shadow_clone_token(TOKEN).expect("bind token");
+        let faults = NoFaults;
+        let mut versioned = VersionedTextStore::new(&mut store);
+        versioned
+            .ensure_main_version("ws-rpcd-keyset-compare", "main", 1, &faults)
+            .expect("main");
+        for index in 0..230 {
+            let path = format!("bulk/{index:03}.md");
+            versioned
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws-rpcd-keyset-compare".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: format!("object-{index:03}"),
+                        path,
+                        text: "target".to_owned(),
+                        moment_id: format!("target-{index:03}"),
+                        metadata_origin: "api".to_owned(),
+                        author_json: None,
+                        now_ms: 10 + index,
+                        request_id: None,
+                    },
+                    &faults,
+                )
+                .expect("target write");
+        }
+        versioned
+            .create_named_version(
+                &CreateNamedVersion {
+                    workspace_id: "ws-rpcd-keyset-compare".to_owned(),
+                    new_version_id: "feature".to_owned(),
+                    name: "Feature".to_owned(),
+                    from_version_id: "main".to_owned(),
+                    now_ms: 500,
+                    request_id: None,
+                },
+                &faults,
+            )
+            .expect("feature");
+        for index in 0..230 {
+            let path = format!("bulk/{index:03}.md");
+            versioned
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws-rpcd-keyset-compare".to_owned(),
+                        version_id: "feature".to_owned(),
+                        object_id: "ignored".to_owned(),
+                        path,
+                        text: "source".to_owned(),
+                        moment_id: format!("source-{index:03}"),
+                        metadata_origin: "api".to_owned(),
+                        author_json: None,
+                        now_ms: 600 + index,
+                        request_id: None,
+                    },
+                    &faults,
+                )
+                .expect("source write");
+        }
+        for (version_id, path, object_id, moment_id) in [
+            (
+                "main",
+                "only-target.md",
+                "only-target-object",
+                "only-target-moment",
+            ),
+            (
+                "feature",
+                "only-source.md",
+                "only-source-object",
+                "only-source-moment",
+            ),
+        ] {
+            versioned
+                .write_text(
+                    &WriteText {
+                        workspace_id: "ws-rpcd-keyset-compare".to_owned(),
+                        version_id: version_id.to_owned(),
+                        object_id: object_id.to_owned(),
+                        path: path.to_owned(),
+                        text: path.to_owned(),
+                        moment_id: moment_id.to_owned(),
+                        metadata_origin: "api".to_owned(),
+                        author_json: None,
+                        now_ms: 900,
+                        request_id: None,
+                    },
+                    &faults,
+                )
+                .expect("one-sided write");
+        }
+        versioned
+            .compare_version_files("ws-rpcd-keyset-compare", "feature", "main")
+            .expect("full oracle")
+            .into_iter()
+            .map(|change| {
+                let status = match change.status {
+                    VersionFileChangeStatus::Added => "added",
+                    VersionFileChangeStatus::Modified => "modified",
+                    VersionFileChangeStatus::Deleted => "deleted",
+                };
+                (change.path, status.to_owned())
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "ws-rpcd-keyset-compare",
+                }),
+            ),
+        )
+        .await
+        .expect("open");
+    let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    let mut actual = BTreeMap::new();
+    let mut cursor: Option<String> = None;
+    let mut id = 2;
+    loop {
+        let mut params = json!({
+            "sourceVersionId": "feature",
+            "targetVersionId": "main",
+        });
+        if let Some(after_path) = cursor.as_ref() {
+            params["afterPath"] = json!(after_path);
+        }
+        let page = call(&transport, &handle, id, "versions.compareFiles", params).await;
+        id += 1;
+        for entry in page["entries"].as_array().expect("entries") {
+            actual.insert(
+                entry["path"].as_str().expect("path").to_owned(),
+                entry["status"].as_str().expect("status").to_owned(),
+            );
+        }
+        cursor = page["nextCursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(actual, expected);
+    assert_eq!(actual["only-source.md"], "added");
+    assert_eq!(actual["only-target.md"], "deleted");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

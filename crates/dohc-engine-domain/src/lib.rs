@@ -59,8 +59,8 @@ pub use error::DomainError;
 pub use merge::{
     CompareTextFileVersions, ComparisonStatus, MAX_MERGE_LINES, MarkdownMergeResult,
     MergeTextFileFromVersion, MergeTextFileResult, MergeUnchangedReason, VersionFileChange,
-    VersionFileChangeStatus, VersionedTextComparison, comparison_status, file_states_equal,
-    merge_markdown,
+    VersionFileChangeEntry, VersionFileChangePage, VersionFileChangeStatus,
+    VersionedTextComparison, comparison_status, file_states_equal, merge_markdown,
 };
 pub use normalize::NormalizedState;
 pub use records::{
@@ -72,11 +72,14 @@ pub use records::{
     VersionKind, VersionRecord, WriteBinary, WriteResult, WriteText,
 };
 pub use secrets::{
-    CaptureSecret, CaptureSecretRetire, SecretDelete, SecretDiskIntent, SecretFileStat,
-    SecretFileStore, SecretMomentRecord, SecretOp, SecretWrite, SecretWriteResult,
-    capture_secret_retire, delete_secret_file_keyless, derive_capture_secret_moment_id,
-    derive_capture_secret_retire_moment_id, has_secret_state, list_secret_files_keyless,
-    list_secret_files_keyless_page, secret_file_len_keyless,
+    CaptureSecret, CaptureSecretRetire, SecretCompareEntry, SecretComparePage, SecretDelete,
+    SecretDiskIntent, SecretFileStat, SecretFileStore, SecretMomentRecord, SecretOp,
+    SecretRestoreResult, SecretWrite, SecretWriteResult, apply_secret_file_verbatim,
+    capture_secret_retire, compare_secret_files_page_keyless, delete_secret_file_keyless,
+    derive_capture_secret_moment_id, derive_capture_secret_retire_moment_id, fork_version_keyless,
+    get_secret_moment_keyless, has_secret_state, list_secret_files_keyless,
+    list_secret_files_keyless_page, list_secret_moments_keyless, restore_secret_file_verbatim,
+    secret_file_len_keyless,
 };
 pub use store::{
     CaptureManifestSeedEntry, INBAND_CONTENT_CAP_BYTES, MAX_CAPTURE_BINARY_FILE_BYTES,

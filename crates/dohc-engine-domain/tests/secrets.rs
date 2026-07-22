@@ -5,7 +5,9 @@
 
 use dohc_engine_crypto::{SecretDataKey, aead};
 use dohc_engine_domain::{
-    NoFaults, SecretDiskIntent, SecretFileStore, SecretOp, SecretWrite, VersionedTextStore,
+    NoFaults, SecretDiskIntent, SecretFileStore, SecretOp, SecretWrite, VersionFileChangeStatus,
+    VersionedTextStore, apply_secret_file_verbatim, compare_secret_files_page_keyless,
+    fork_version_keyless, restore_secret_file_verbatim,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint};
 use dohc_engine_testkit::harness::wal_sidecar;
@@ -53,6 +55,50 @@ fn write(
             &NO_FAULTS,
         )
         .expect("write secret")
+}
+
+fn write_version(
+    store: &mut EngineStore,
+    key: &SecretDataKey,
+    version_id: &str,
+    path: &str,
+    text: &str,
+    moment_id: &str,
+    now_ms: i64,
+) -> dohc_engine_domain::SecretWriteResult {
+    SecretFileStore::new(store, key)
+        .write_secret_file(
+            &SecretWrite {
+                workspace_id: WS.to_owned(),
+                version_id: version_id.to_owned(),
+                path: path.to_owned(),
+                text: text.to_owned(),
+                moment_id: moment_id.to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                now_ms,
+                disk_intent: SecretDiskIntent::Materialize,
+            },
+            &NO_FAULTS,
+        )
+        .expect("write secret version")
+}
+
+fn create_feature(store: &mut EngineStore) {
+    VersionedTextStore::new(store)
+        .create_named_version(
+            &dohc_engine_domain::CreateNamedVersion {
+                workspace_id: WS.to_owned(),
+                new_version_id: "feat".to_owned(),
+                name: "feature".to_owned(),
+                from_version_id: "main".to_owned(),
+                now_ms: 2,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("feature");
 }
 
 #[test]
@@ -225,7 +271,7 @@ fn plaintext_never_leaks_into_engine_db_or_wal() {
         let stats = secrets.list_secret_files(WS, "main").unwrap();
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].byte_length, text.len() as i64);
-        let moments = secrets.list_secret_moments(WS, Some("main")).unwrap();
+        let moments = secrets.list_secret_moments(WS, Some("main"), None).unwrap();
         assert_eq!(moments.len(), 1);
         // Store dropped → WAL flushed on close.
     }
@@ -560,6 +606,162 @@ fn ts_written_ciphertext_decrypts_in_the_rust_store() {
         plaintext,
         "a TS-written secret must decrypt byte-exact in the Rust store"
     );
+}
+
+#[test]
+fn secret_apply_verbatim_copy_is_content_equality_no_op() {
+    // MUTATION: re-encrypt on apply or mint on equal ciphertext -> IV/moment assertions fail.
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    create_feature(&mut store);
+    write_version(&mut store, &key, "main", ".env", "TOKEN=one", "main-1", 10);
+
+    let first = apply_secret_file_verbatim(
+        &mut store, WS, ".env", "main", "feat", "apply-1", 20, &NO_FAULTS,
+    )
+    .unwrap();
+    assert!(first.changed);
+    let moments_after_first = store.table_row_count("secret_moments").unwrap();
+    let second = apply_secret_file_verbatim(
+        &mut store, WS, ".env", "main", "feat", "apply-2", 21, &NO_FAULTS,
+    )
+    .unwrap();
+    assert!(!second.changed);
+    assert_eq!(
+        store.table_row_count("secret_moments").unwrap(),
+        moments_after_first
+    );
+    let (source_iv, target_iv): (String, String) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row("SELECT iv_base64 FROM secret_files WHERE workspace_id=?1 AND version_id='main' AND path='.env'", [WS], |row| row.get(0))?,
+                conn.query_row("SELECT iv_base64 FROM secret_files WHERE workspace_id=?1 AND version_id='feat' AND path='.env'", [WS], |row| row.get(0))?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(source_iv, target_iv, "apply copies the sealed IV verbatim");
+}
+
+#[test]
+fn secret_restore_verbatim_copy_is_content_equality_no_op() {
+    // MUTATION: re-seal the historical state or append on equality -> IV/moment assertions fail.
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    write(&mut store, &key, ".env", "TOKEN=one", "sm-one", 10);
+    let original_iv: String = store
+        .read_with(|conn| conn.query_row("SELECT iv_base64 FROM secret_files WHERE workspace_id=?1 AND version_id='main' AND path='.env'", [WS], |row| row.get(0)))
+        .unwrap();
+    write(&mut store, &key, ".env", "TOKEN=two", "sm-two", 11);
+
+    let restored = restore_secret_file_verbatim(
+        &mut store,
+        WS,
+        ".env",
+        "sm-two",
+        "restore-1",
+        20,
+        &NO_FAULTS,
+    )
+    .unwrap();
+    assert_eq!(restored.restored, "text");
+    let count = store.table_row_count("secret_moments").unwrap();
+    let again = restore_secret_file_verbatim(
+        &mut store,
+        WS,
+        ".env",
+        "sm-two",
+        "restore-2",
+        21,
+        &NO_FAULTS,
+    )
+    .unwrap();
+    assert_eq!(again.restored_moment_id, "sm-two");
+    assert_eq!(store.table_row_count("secret_moments").unwrap(), count);
+    let restored_iv: String = store
+        .read_with(|conn| conn.query_row("SELECT iv_base64 FROM secret_files WHERE workspace_id=?1 AND version_id='main' AND path='.env'", [WS], |row| row.get(0)))
+        .unwrap();
+    assert_eq!(
+        restored_iv, original_iv,
+        "restore copies the historical IV verbatim"
+    );
+}
+
+#[test]
+fn secret_compare_is_whole_version_no_path_param() {
+    // MUTATION: add a single-path filter -> one of the two classifications disappears.
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    create_feature(&mut store);
+    write_version(&mut store, &key, "main", ".env", "main", "main-env", 10);
+    write_version(
+        &mut store,
+        &key,
+        "feat",
+        ".env.local",
+        "feature",
+        "feat-env",
+        11,
+    );
+    let entries =
+        compare_secret_files_page_keyless(&store, Some(&key), WS, "feat", "main", None, 100)
+            .unwrap()
+            .entries;
+    assert_eq!(entries.len(), 2);
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.path == ".env" && entry.status == VersionFileChangeStatus::Deleted)
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.path == ".env.local"
+                && entry.status == VersionFileChangeStatus::Added)
+    );
+}
+
+#[test]
+fn secret_compare_ciphertext_identical_is_not_modified() {
+    // MUTATION: classify distinct version rows as modified without checking the sealed triple -> fails.
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    write(&mut store, &key, ".env", "same", "main-same", 10);
+    create_feature(&mut store);
+    fork_version_keyless(&mut store, WS, "main", "feat", 11, &NO_FAULTS).unwrap();
+    let entries = compare_secret_files_page_keyless(&store, None, WS, "feat", "main", None, 100)
+        .unwrap()
+        .entries;
+    assert!(entries.is_empty());
+}
+
+#[test]
+fn secret_compare_reencrypted_same_content_is_unmodified() {
+    // MUTATION: skip decrypt fallback when ciphertext differs -> this becomes a false modified.
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    create_feature(&mut store);
+    write_version(&mut store, &key, "main", ".env", "same", "main-same", 10);
+    write_version(&mut store, &key, "feat", ".env", "same", "feat-same", 11);
+    let entries =
+        compare_secret_files_page_keyless(&store, Some(&key), WS, "feat", "main", None, 100)
+            .unwrap()
+            .entries;
+    assert!(entries.is_empty());
 }
 
 // --- helpers ----------------------------------------------------------------

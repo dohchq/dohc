@@ -85,6 +85,7 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     // Pre-open disk content: the startup baseline captures text, binary and
     // a secret before the first read RPC ever runs.
     write_file(scratch.path(), "notes/a.md", b"captured text");
+    write_file(scratch.path(), "notes/big.md", &vec![b'x'; 64 * 1024]);
     write_file(
         scratch.path(),
         "img.png",
@@ -345,6 +346,25 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     .await;
     assert_eq!(fetched["momentId"], newest["momentId"]);
     assert_eq!(fetched["path"], newest["path"]);
+
+    // MUTATION: omit the in-band marker when an over-cap body is nulled -> fails.
+    let big_text_moment = moment_list
+        .iter()
+        .find(|moment| moment["path"] == "notes/big.md")
+        .expect("large captured text moment");
+    assert!(big_text_moment["afterText"].is_null());
+    assert_eq!(big_text_moment["afterInbandLimitBytes"], json!(48 * 1024));
+    id += 1;
+    let big_text_fetched = call(
+        &transport,
+        &handle,
+        id,
+        "moments.get",
+        json!({ "momentId": big_text_moment["momentId"] }),
+    )
+    .await;
+    assert!(big_text_fetched["afterText"].is_null());
+    assert_eq!(big_text_fetched["afterInbandLimitBytes"], json!(48 * 1024));
 
     // secrets.list exposes metadata only; secrets.materialize is the single
     // plaintext accessor and roundtrips the captured secret.

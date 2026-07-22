@@ -8,9 +8,9 @@ use dohc_engine_domain::{
     ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus, CreateNamedVersion,
     DeleteTextFile, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
     MergeUnchangedReason, NoFaults, ResolveConflictKind, ResolveTextConflict, SnapshotContent,
-    TextConflict, TextSnapshot, VersionFileChangeStatus, VersionedTextStore, WriteBinaryFile,
-    WriteText, insert_text_conflict_if_absent, live_state_matches_conflict_current,
-    store::text_blob_sha256, write_binary_file_in_tx,
+    TextConflict, TextSnapshot, VersionFileChangeEntry, VersionFileChangeStatus,
+    VersionedTextStore, WriteBinaryFile, WriteText, insert_text_conflict_if_absent,
+    live_state_matches_conflict_current, store::text_blob_sha256, write_binary_file_in_tx,
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs};
 use dohc_engine_storage::{
@@ -21,6 +21,24 @@ use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 
 const WS: &str = "ws-r06";
 const NO_FAULTS: NoFaults = NoFaults;
+
+#[test]
+fn compare_files_never_hydrates_full_text_body() {
+    // MUTATION: add a text or sha payload field to the paged entry -> this exhaustive destructure fails to compile.
+    let entry = VersionFileChangeEntry {
+        path: "large.md".to_owned(),
+        status: VersionFileChangeStatus::Modified,
+        binary: false,
+    };
+    let VersionFileChangeEntry {
+        path,
+        status,
+        binary,
+    } = entry;
+    assert_eq!(path, "large.md");
+    assert_eq!(status, VersionFileChangeStatus::Modified);
+    assert!(!binary);
+}
 
 fn write(version: &str, path: &str, text: &str, moment: &str, object: &str) -> WriteText {
     WriteText {

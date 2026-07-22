@@ -112,6 +112,19 @@ pub struct VersionFileChange {
     pub incoming: Option<SnapshotContent>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionFileChangeEntry {
+    pub path: String,
+    pub status: VersionFileChangeStatus,
+    pub binary: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionFileChangePage {
+    pub entries: Vec<VersionFileChangeEntry>,
+    pub next_after_path: Option<String>,
+}
+
 /// Port of `mergeMarkdown.ts`: LCS-aligned line hunks with conservative
 /// overlap detection and the exact 2,000-line quadratic-work guard.
 pub fn merge_markdown(base: &str, local: &str, remote: &str) -> MarkdownMergeResult {
@@ -341,20 +354,7 @@ impl VersionedTextStore<'_> {
         target_version_id: &str,
     ) -> Result<Vec<VersionFileChange>, DomainError> {
         self.store.read_with(|conn| {
-            for version_id in [source_version_id, target_version_id] {
-                let exists: Option<i64> = conn
-                    .query_row(
-                        "SELECT 1 FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
-                        params![workspace_id, version_id],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(DomainError::sql_corrupt)?;
-                if exists.is_none() {
-                    return Err(DomainError::VersionNotFound);
-                }
-            }
-            Ok(())
+            validate_compare_versions(conn, workspace_id, source_version_id, target_version_id)
         })?;
         let target = self.list_snapshots(workspace_id, target_version_id)?;
         let source = self.list_snapshots(workspace_id, source_version_id)?;
@@ -399,6 +399,141 @@ impl VersionedTextStore<'_> {
         }
         Ok(changes)
     }
+
+    /// Metadata-only keyset page for the compareFiles RPC. Content equality is
+    /// decided from the kind-specific stored digest, never hydrated bodies.
+    pub fn compare_version_files_page(
+        &self,
+        workspace_id: &str,
+        source_version_id: &str,
+        target_version_id: &str,
+        after_path: Option<&str>,
+        limit: usize,
+    ) -> Result<VersionFileChangePage, DomainError> {
+        if limit == 0 {
+            return Err(DomainError::InvalidInput {
+                reason: "limit must be positive",
+            });
+        }
+        self.store.read_with(|conn| {
+            validate_compare_versions(conn, workspace_id, source_version_id, target_version_id)?;
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT t.path, t.content_kind, t.blob_sha256, t.binary_sha256, \
+                            s.path, s.content_kind, s.blob_sha256, s.binary_sha256 \
+                     FROM (SELECT path, content_kind, blob_sha256, binary_sha256 FROM snapshots \
+                           WHERE workspace_id = ?1 AND version_id = ?2) AS t \
+                     FULL OUTER JOIN \
+                          (SELECT path, content_kind, blob_sha256, binary_sha256 FROM snapshots \
+                           WHERE workspace_id = ?1 AND version_id = ?3) AS s \
+                       ON t.path = s.path \
+                     WHERE COALESCE(t.path, s.path) > ?4 \
+                     ORDER BY COALESCE(t.path, s.path) LIMIT ?5",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        target_version_id,
+                        source_version_id,
+                        after_path.unwrap_or(""),
+                        limit as i64
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, Option<String>>(7)?,
+                        ))
+                    },
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let mut entries = Vec::new();
+            let mut rows_fetched = 0usize;
+            let mut last_scanned_path = None;
+            for row in rows {
+                let (t_path, t_kind, t_blob, t_bin, s_path, s_kind, s_blob, s_bin) =
+                    row.map_err(DomainError::sql_corrupt)?;
+                rows_fetched += 1;
+                let path =
+                    t_path
+                        .as_ref()
+                        .or(s_path.as_ref())
+                        .ok_or(DomainError::StateCorrupt {
+                            reason: "version comparison row has no path",
+                        })?;
+                last_scanned_path = Some(path.clone());
+                let entry = match (&t_path, &s_path) {
+                    (None, Some(_)) => Some(VersionFileChangeEntry {
+                        path: path.clone(),
+                        status: VersionFileChangeStatus::Added,
+                        binary: s_kind.as_deref() == Some("binary"),
+                    }),
+                    (Some(_), None) => Some(VersionFileChangeEntry {
+                        path: path.clone(),
+                        status: VersionFileChangeStatus::Deleted,
+                        binary: t_kind.as_deref() == Some("binary"),
+                    }),
+                    (Some(_), Some(_)) => {
+                        let same = t_kind == s_kind
+                            && match t_kind.as_deref() {
+                                Some("text") => t_blob == s_blob,
+                                Some("binary") => t_bin == s_bin,
+                                _ => {
+                                    return Err(DomainError::StateCorrupt {
+                                        reason: "snapshot has an invalid content kind",
+                                    });
+                                }
+                            };
+                        (!same).then(|| VersionFileChangeEntry {
+                            path: path.clone(),
+                            status: VersionFileChangeStatus::Modified,
+                            binary: t_kind.as_deref() == Some("binary")
+                                || s_kind.as_deref() == Some("binary"),
+                        })
+                    }
+                    (None, None) => unreachable!(),
+                };
+                if let Some(entry) = entry {
+                    entries.push(entry);
+                }
+            }
+            Ok(VersionFileChangePage {
+                entries,
+                next_after_path: (rows_fetched == limit)
+                    .then_some(last_scanned_path)
+                    .flatten(),
+            })
+        })
+    }
+}
+
+fn validate_compare_versions(
+    conn: &Connection,
+    workspace_id: &str,
+    source_version_id: &str,
+    target_version_id: &str,
+) -> Result<(), DomainError> {
+    for version_id in [source_version_id, target_version_id] {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+                params![workspace_id, version_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DomainError::sql_corrupt)?;
+        if exists.is_none() {
+            return Err(DomainError::VersionNotFound);
+        }
+    }
+    Ok(())
 }
 
 fn finish_merge<F>(
