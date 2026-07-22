@@ -2,7 +2,7 @@
 
 ## Methods added
 
-- Channels: `chats.channels.create`, `ensureGeneral`, `ensureAgent`, `list`, `findBySlug`
+- Channels: `chats.channels.create`, `ensureGeneral`, `ensureAgent`, `list`, `findBySlug`, `getWireId`
 - Threads: `chats.threads.start`, `list`
 - Messages: `chats.messages.send`, `list`
 - Read state: `chats.readState.markThreadRead`, `get`
@@ -37,7 +37,7 @@ Replication apply arms, file-linked reads, and reactions/decisions/attachment/me
 
 ## Review round 1
 
-- Removed the unsafe anytime `chats.dispatch.reclaimRunning` RPC. Each actual workspace open now performs one dispatch reclaim after the capture driver starts; the actor/domain reclaim APIs remain internal.
+- Removed the unsafe anytime `chats.dispatch.reclaimRunning` RPC. A workspace open that CREATES the store actor performs one dispatch reclaim after the capture driver starts (attaching a second service to a live actor does not — see round 7); the actor/domain reclaim APIs remain internal.
 - Added actor-entry cancellation checks to every specified chat write and passed each RPC operation token through to its actor command.
 - Made follows refuse missing/DM channels, missing or DM-linked threads, and person/agent targets without a matching authored message in a non-DM thread.
 - Extended personal-feed pages with the feed-wide read state and newest-message head cursor, emitted as camelCase values or `null`.
@@ -93,7 +93,7 @@ Per the task constraint, no Cargo command was run. The changed Rust files were p
 - Local channel creation/provisioning, channel-thread starts, and message appends now insert exact `chat.channel.create`, `chat.thread.create`, and `chat.message.append` payloads into `replication_log` with `imported = 0` in the same transaction as their rows. Optional author, parent, origin, and channel-wire fields are omitted rather than serialized as null.
 - Personal-feed items are fully hydrated as contract-shaped message/thread records with optional channel, parent, and opening-message records, follow-match kinds, and the required empty reactions array. Byte-budget truncation and keyset cursors continue to use the hydrated message coordinate.
 - Added the remaining bookmark RPC transitions: idempotent active-to-archived generation queueing, required-reason pending-to-failed generation CAS, and optional-reason pending-to-stale generation CAS. Invalid generations fail closed and stale generations return `applied: false` without mutation.
-- Added `chats.channels.getWireId`, returning only `{ wireId }`; channel responses remain unchanged. The well-known general mapping resolves through the point lookup and an unknown local channel id returns null.
+- Added `chats.channels.getWireId`, returning only `{ wireId }`; channel responses remain unchanged. The well-known general mapping resolves through the point lookup. (Superseded by round 7: unknown channel ids REFUSE as invalid input; only an existing-but-unmapped channel returns `{ wireId: null }` — round 7 is the authoritative contract.)
 - Domain and in-process RPC regressions cover both replication-owner gates, exact core payloads, hydrated feed joins/matches, bookmark archive/failure/stale transitions, stale-generation no-ops, and well-known/unknown wire-id lookups.
 
 Per the task constraint, no Cargo build, check, or test command was run. All changed Rust files passed direct `rustfmt --edition 2024` parsing/formatting and `rustfmt --check`; `git diff --check` also passes.

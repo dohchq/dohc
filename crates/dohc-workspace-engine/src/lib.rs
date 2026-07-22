@@ -449,14 +449,20 @@ impl EngineService {
             db_path: Some(db_path.clone()),
         };
         if actor_open.created_actor {
-            actor
-                .chat_dispatch_reclaim_running(
+            // Cancellation-aware like every other actor wait in this flow:
+            // a caller abort stops WAITING promptly (the actor still finishes
+            // the reclaim it already accepted — it is idempotent on the next
+            // open) and the OpenGuard above closes the actor on early drop.
+            Self::read_under_ctx(
+                &cancellation,
+                "workspace.open (dispatch reclaim)",
+                actor.chat_dispatch_reclaim_running(
                     params.workspace_id.clone(),
                     CHAT_DISPATCH_MAX_ATTEMPTS,
                     now_ms,
-                )
-                .await
-                .map_err(map_runtime)?;
+                ),
+            )
+            .await?;
         }
         capture.wait_for_baseline().await;
         open_guard.disarm();
