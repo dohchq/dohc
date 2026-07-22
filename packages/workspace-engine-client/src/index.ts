@@ -13,3 +13,5 @@ export * from "./ydoc/ydocLiveAdapter";
 export * from "./ydoc/ydocLoopbackEngine";
 export * from "./ydoc/ydocProviderSession";
 export * from "./ydoc/ydocWireContract";
+export * from "./versioned/versionedLoopbackEngine";
+export * from "./versioned/versionedWireContract";
