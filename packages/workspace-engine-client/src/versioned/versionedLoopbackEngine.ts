@@ -879,6 +879,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (!source || !target) throw new Error("invalid-version");
     const path = requiredString(params, "path", "secret apply");
     const momentId = requiredString(params, "momentId", "secret apply");
+    const origin = requiredOrigin(params);
+    const summary = optionalString(params, "summary") ?? null;
+    const correlationId = optionalString(params, "correlationId") ?? null;
     this.assertFreshSecretMoment(state, momentId);
     const before = target.secrets.get(path);
     const after = source.secrets.get(path);
@@ -889,7 +892,16 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (after === undefined) target.secrets.delete(path);
     else target.secrets.set(path, after);
     const operation = after === undefined ? "delete" : "write";
-    const wire = this.makeSecretMoment(workspace, target.id, path, momentId, operation, "sync");
+    const wire = this.makeSecretMoment(
+      workspace,
+      target.id,
+      path,
+      momentId,
+      operation,
+      origin,
+      summary,
+      correlationId,
+    );
     state.secretMoments.set(momentId, { wire, before, after });
     return { changed: true, moment: wire };
   }
@@ -1227,6 +1239,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     momentId: string,
     operation: "write" | "delete",
     origin: VersionedOrigin,
+    summary: string | null = null,
+    correlationId: string | null = null,
   ): SecretMomentRecord {
     return {
       id: momentId,
@@ -1235,7 +1249,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       path,
       recordedAtMs: this.clock++,
       operation,
-      metadata: { origin, summary: null, correlationId: null },
+      metadata: { origin, summary, correlationId },
       momentOrder: this.clock++,
       protected: true,
     };

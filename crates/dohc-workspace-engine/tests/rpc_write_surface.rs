@@ -653,8 +653,8 @@ async fn secret_moments_without_version_list_workspace_history_newest_first() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn secrets_apply_arm_uses_the_explicit_target_version() {
-    // MUTATION: derive the apply target from versions.active -> the moment lands in feature.
+async fn secrets_apply_uses_explicit_target_and_preserves_caller_provenance() {
+    // MUTATION: hardcode apply provenance to sync or drop summary/correlation -> assertions fail.
     let (_scratch, transport, handle) = fixture("secret-apply-target").await;
     let workspace_id = "ws-rpcd-secret-apply-target";
     call(
@@ -727,12 +727,44 @@ async fn secrets_apply_arm_uses_the_explicit_target_version() {
             "sourceVersionId": feature_id,
             "targetVersionId": "main",
             "momentId": "secret-explicit-target-apply",
+            "origin": "api",
+            "summary": "Updated .env from feature",
+            "correlationId": "merge-correlation-1",
         }),
     )
     .await;
     assert_eq!(applied["changed"], true);
     assert_eq!(applied["moment"]["id"], "secret-explicit-target-apply");
     assert_eq!(applied["moment"]["versionId"], "main");
+    assert_eq!(applied["moment"]["metadata"]["origin"], "api");
+    assert_eq!(
+        applied["moment"]["metadata"]["summary"],
+        "Updated .env from feature"
+    );
+    assert_eq!(
+        applied["moment"]["metadata"]["correlationId"],
+        "merge-correlation-1"
+    );
+    let invalid_origin = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                8,
+                "secrets.apply",
+                Some(handle),
+                json!({
+                    "workspaceId": workspace_id,
+                    "path": ".env",
+                    "sourceVersionId": feature_id,
+                    "targetVersionId": "main",
+                    "momentId": "secret-invalid-origin-apply",
+                    "origin": "capture",
+                }),
+            ),
+        )
+        .await
+        .expect_err("apply origin uses the closed five-value set");
+    assert_eq!(invalid_origin.message, "invalid-metadata");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -752,6 +784,7 @@ async fn secrets_apply_fresh_workspace_returns_invalid_version() {
                     "sourceVersionId": "feature",
                     "targetVersionId": "main",
                     "momentId": "secret-fresh-apply",
+                    "origin": "sync",
                 }),
             ),
         )
@@ -834,6 +867,7 @@ async fn secrets_apply_rejects_non_secret_path_before_key_handling() {
         "sourceVersionId": "feature",
         "targetVersionId": "main",
         "momentId": "secret-non-secret-apply",
+        "origin": "sync",
     });
     for (id, key_present) in [(2, false), (3, true)] {
         if key_present {
@@ -1526,6 +1560,67 @@ async fn fts_is_maintained_in_each_mutation_transaction() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn degraded_policy_write_invalidates_healthy_state_and_rebuilds_after_restore() {
+    // MUTATION: skip degraded-write search-state invalidation -> restored ensure
+    // trusts the old healthy generation and this new file stays unsearchable.
+    let (scratch, transport, handle) = fixture("degraded-write-rebuild").await;
+    let workspace_id = "ws-rpcd-degraded-write-rebuild";
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "search.ensureIndex",
+        json!({ "workspaceId": workspace_id, "versionId": "main" }),
+    )
+    .await;
+
+    let policy_path = scratch.path().join(".dohc/files.toml");
+    std::fs::write(&policy_path, "not = valid [[[ ").expect("break files policy");
+    write(
+        &transport,
+        &handle,
+        4,
+        "written-while-degraded.md",
+        "degraded-window-needle",
+        "degraded-window-write",
+    )
+    .await;
+    std::fs::remove_file(policy_path).expect("restore default policy");
+
+    call(
+        &transport,
+        &handle,
+        5,
+        "search.ensureIndex",
+        json!({ "workspaceId": workspace_id, "versionId": "main" }),
+    )
+    .await;
+    let results = call(
+        &transport,
+        &handle,
+        6,
+        "search.query",
+        json!({ "versionId": "main", "query": "degraded-window-needle" }),
+    )
+    .await;
+    assert!(
+        results
+            .as_array()
+            .expect("results")
+            .iter()
+            .any(|row| row["path"] == "written-while-degraded.md")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn binary_rename_does_not_create_an_empty_fts_row() {
     // MUTATION: unconditionally upsert the renamed head into FTS -> the raw row count becomes one.
     let (scratch, transport, handle) = fixture("binary-rename-fts").await;
@@ -1617,6 +1712,72 @@ async fn deduped_text_write_does_not_resurrect_a_moved_fts_row() {
         .filter_map(|row| row["path"].as_str())
         .collect();
     assert_eq!(paths, ["current.md"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replayed_binary_write_does_not_delete_live_text_fts_row() {
+    // MUTATION: delete the binary object's FTS row before the dedup short-circuit
+    // -> replay removes the newer text head from search.
+    let (_scratch, transport, handle) = fixture("binary-replay-live-text-fts").await;
+    let binary_params = json!({
+        "versionId": "main",
+        "objectId": "replayed-object",
+        "path": "replayed.md",
+        "bytes": [1, 2, 3],
+        "origin": "api",
+        "requestId": "earlier-binary-request",
+    });
+    call(
+        &transport,
+        &handle,
+        2,
+        "versionedBinary.write",
+        binary_params.clone(),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "versionedText.write",
+        json!({
+            "versionId": "main",
+            "objectId": "replayed-object",
+            "path": "replayed.md",
+            "text": "live-text-search-needle",
+            "origin": "api",
+            "requestId": "newer-text-request",
+        }),
+    )
+    .await;
+    let before = call(
+        &transport,
+        &handle,
+        4,
+        "search.query",
+        json!({ "versionId": "main", "query": "live-text-search-needle" }),
+    )
+    .await;
+    assert_eq!(before[0]["path"], "replayed.md");
+
+    let replay = call(
+        &transport,
+        &handle,
+        5,
+        "versionedBinary.write",
+        binary_params,
+    )
+    .await;
+    assert_eq!(replay["deduped"], true);
+    let after = call(
+        &transport,
+        &handle,
+        6,
+        "search.query",
+        json!({ "versionId": "main", "query": "live-text-search-needle" }),
+    )
+    .await;
+    assert_eq!(after[0]["path"], "replayed.md");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2412,7 +2573,7 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn read_blob_canonicalizes_digests_and_fails_closed_on_broken_references() {
+async fn read_blob_canonicalizes_digests_and_rejects_broken_or_length_mismatched_blobs() {
     let (scratch, transport, handle) = fixture("blob-integrity").await;
     let workspace = "ws-rpcd-blob-integrity";
     let written = call(
@@ -2460,9 +2621,19 @@ async fn read_blob_canonicalizes_digests_and_fails_closed_on_broken_references()
     // not hydrate it.
     let big_bytes = vec![7_u8; 49_153];
     let big_sha = dohc_engine_storage::put_binary_blob(&connection, &big_bytes).expect("big blob");
+    let corrupt_big_bytes = vec![8_u8; 49_153];
+    let corrupt_big_sha = dohc_engine_storage::put_binary_blob(&connection, &corrupt_big_bytes)
+        .expect("corrupt big blob");
+    connection
+        .execute(
+            "UPDATE binary_blobs SET byte_length = byte_length + 1 WHERE sha256 = ?1",
+            [&corrupt_big_sha],
+        )
+        .expect("corrupt recorded byte length");
     for (conflict_id, referenced_sha) in [
         ("conflict-phantom", phantom_sha.as_str()),
         ("conflict-big", big_sha.as_str()),
+        ("conflict-big-length-mismatch", corrupt_big_sha.as_str()),
     ] {
         connection
             .execute(
@@ -2526,4 +2697,19 @@ async fn read_blob_canonicalizes_digests_and_fails_closed_on_broken_references()
     assert_eq!(over_cap["bytesBase64"], Value::Null);
     assert_eq!(over_cap["byteLength"], 49_153);
     assert_eq!(over_cap["inbandLimitBytes"], 49_152);
+    // MUTATION: trust recorded byte_length for an over-cap metadata answer ->
+    // this succeeds with false metadata instead of reporting store corruption.
+    let mismatched = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                8,
+                "versionedBinary.readBlob",
+                Some(handle),
+                json!({ "workspaceId": workspace, "sha256": corrupt_big_sha }),
+            ),
+        )
+        .await
+        .expect_err("over-cap recorded/actual length mismatch is corruption");
+    assert_eq!(mismatched.message, "state-corrupt");
 }

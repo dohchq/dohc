@@ -408,6 +408,9 @@ describe("versioned typed loopback", () => {
       sourceVersionId: named.id,
       targetVersionId: "main",
       momentId: "secret-apply",
+      origin: "api",
+      summary: "Updated .env from feature",
+      correlationId: "merge-correlation-1",
     };
     const applied = decodeSecretApplyResult(
       await call(engine, 5, VERSIONED_METHOD.secretsApply, applyParams),
@@ -415,6 +418,12 @@ describe("versioned typed loopback", () => {
     expect(applied.changed).toBe(true);
     // MUTATION: derive the target from the active version -> this moment is not in main.
     expect(applied.moment?.versionId).toBe("main");
+    // MUTATION: loopback hardcodes sync or drops apply metadata -> this fails.
+    expect(applied.moment?.metadata).toEqual({
+      origin: "api",
+      summary: "Updated .env from feature",
+      correlationId: "merge-correlation-1",
+    });
     expect(engine.secretValue(WORKSPACE, "main", ".env")).toBe(
       "opaque-ciphertext-B",
     );
@@ -691,6 +700,7 @@ describe("loopback contract enforcement", () => {
           targetVersionId: "main",
           path: ".env",
           momentId: "unchanged-source-apply",
+          origin: "sync",
         }),
       ).changed,
     ).toBe(false);
@@ -729,6 +739,7 @@ describe("loopback contract enforcement", () => {
         targetVersionId: "main",
         path: ".env",
         momentId: "delete-apply",
+        origin: "sync",
       }),
     );
     expect(applied.moment).toMatchObject({ operation: "delete", metadata: { origin: "sync" } });
@@ -927,6 +938,7 @@ describe("loopback contract enforcement", () => {
         targetVersionId: "main",
         path: ".env",
         momentId: "missing-apply",
+        origin: "sync",
       }),
     ).rejects.toThrow("invalid-version");
   });

@@ -616,6 +616,9 @@ fn apply_input(moment_id: &str, now_ms: i64) -> ApplySecretFileFromVersion {
         from_version_id: "main".to_owned(),
         to_version_id: "feat".to_owned(),
         moment_id: moment_id.to_owned(),
+        metadata_origin: "sync".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         now_ms,
     }
 }
@@ -684,6 +687,9 @@ fn secret_apply_target_newer_than_unchanged_source_is_no_op() {
             from_version_id: "feat".to_owned(),
             to_version_id: "main".to_owned(),
             moment_id: "unchanged-source-apply".to_owned(),
+            metadata_origin: "sync".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
             now_ms: 20,
         },
         &NO_FAULTS,
@@ -729,6 +735,9 @@ fn secret_apply_propagates_source_delete() {
         from_version_id: "feat".to_owned(),
         to_version_id: "main".to_owned(),
         moment_id: "apply-delete".to_owned(),
+        metadata_origin: "sync".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
         now_ms: 20,
     };
     let result = apply_secret_file_from_version(&mut store, &key, &input, &NO_FAULTS).unwrap();

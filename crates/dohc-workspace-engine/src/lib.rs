@@ -2278,6 +2278,7 @@ impl EngineService {
         }
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let origin = validated_origin(Some(&params.origin), None)?;
         let path = params.path.clone();
         let cancellation = OperationCancellation::new(ctx);
         for (operation, version_id) in [
@@ -2335,6 +2336,9 @@ impl EngineService {
                 params.source_version_id,
                 params.target_version_id,
                 params.moment_id,
+                origin,
+                params.summary,
+                params.correlation_id,
                 now_ms()?,
                 key,
                 Arc::new(NoFaults),
@@ -4483,6 +4487,11 @@ struct SecretsApplyParams {
     source_version_id: String,
     target_version_id: String,
     moment_id: String,
+    origin: String,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    correlation_id: Option<String>,
 }
 
 #[derive(Deserialize)]

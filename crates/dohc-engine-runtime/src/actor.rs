@@ -447,6 +447,9 @@ enum Command {
         from_version_id: String,
         to_version_id: String,
         moment_id: String,
+        metadata_origin: String,
+        metadata_summary: Option<String>,
+        metadata_correlation_id: Option<String>,
         now_ms: i64,
         key: Box<SecretDataKey>,
         faults: Arc<dyn FaultInjector>,
@@ -1840,6 +1843,9 @@ impl ActorHandle {
         from_version_id: String,
         to_version_id: String,
         moment_id: String,
+        metadata_origin: String,
+        metadata_summary: Option<String>,
+        metadata_correlation_id: Option<String>,
         now_ms: i64,
         key: SecretDataKey,
         faults: Arc<dyn FaultInjector>,
@@ -1853,6 +1859,9 @@ impl ActorHandle {
                 from_version_id,
                 to_version_id,
                 moment_id,
+                metadata_origin,
+                metadata_summary,
+                metadata_correlation_id,
                 now_ms,
                 key: Box::new(key),
                 faults,
@@ -3670,6 +3679,9 @@ fn worker_main(
                 from_version_id,
                 to_version_id,
                 moment_id,
+                metadata_origin,
+                metadata_summary,
+                metadata_correlation_id,
                 now_ms,
                 key,
                 faults,
@@ -3688,6 +3700,9 @@ fn worker_main(
                             from_version_id,
                             to_version_id,
                             moment_id,
+                            metadata_origin,
+                            metadata_summary,
+                            metadata_correlation_id,
                             now_ms,
                         },
                         faults.as_ref(),
@@ -5494,13 +5509,15 @@ fn versioned_binary_write_on_store(
     )?;
     let outcome = store.write_with(faults, |tx| {
         let result = write_binary_in_tx(tx, input).map_err(RuntimeError::from)?;
-        delete_file_search_index(
-            tx,
-            &input.workspace_id,
-            &input.version_id,
-            &result.object_id,
-        )
-        .map_err(RuntimeError::from)?;
+        if !result.deduped {
+            delete_file_search_index(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.object_id,
+            )
+            .map_err(RuntimeError::from)?;
+        }
         Ok::<_, RuntimeError>(result)
     })?;
     let result = match outcome {

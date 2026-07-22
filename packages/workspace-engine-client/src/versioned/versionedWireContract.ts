@@ -186,6 +186,9 @@ export type SecretsApplyParams = JsonObject & {
   sourceVersionId: string;
   targetVersionId: string;
   momentId: string;
+  origin: VersionedOrigin;
+  summary?: string;
+  correlationId?: string;
 };
 
 export type SecretsRestoreParams = JsonObject & {

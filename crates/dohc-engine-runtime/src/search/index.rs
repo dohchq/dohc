@@ -93,11 +93,10 @@ fn insert_file_index_row(
 /// Upsert a single text file's FTS row, respecting the fail-closed FILE policy
 /// freeze. Ports `upsertFileSearchIndex` (`searchIndex.ts`). Reads the policy
 /// off `root_dir`; a broken policy FREEZES the file index — the FTS rows AND the
-/// `engine_search_index_state` row are left untouched, so nothing is dropped
-/// while degraded. The degraded generation is marked `file_policy_degraded = 1`
-/// by [`ensure_search_index_for_version`], and the later degraded→healthy
-/// TRANSITION (not the mere presence/absence of a state row) is what rebuilds
-/// the file index and picks up everything written during the degraded window.
+/// existing FTS rows are left untouched, so nothing is dropped while degraded.
+/// Any existing healthy `engine_search_index_state` row is marked degraded in
+/// the same transaction, so the later degraded→healthy transition rebuilds the
+/// file index and picks up everything written during the degraded window.
 /// Query-time `path_is_search_indexed` fails file search closed meanwhile.
 ///
 /// Under a healthy policy the row is delete-then-conditionally-re-inserted (a
@@ -113,8 +112,13 @@ pub fn upsert_file_search_index(
 ) -> Result<(), SearchError> {
     let policy = read_engine_search_policy(root_dir);
     if policy.is_degraded() {
-        // Freeze, don't drop: leave every FTS row and the state row exactly as
-        // they are. The healthy-transition rebuild reconciles later.
+        // Freeze, don't drop. Invalidate an existing healthy certification in
+        // this mutation transaction; no row already means ensure must rebuild.
+        conn.execute(
+            "UPDATE engine_search_index_state SET file_policy_degraded = 1 \
+             WHERE workspace_id = ?1 AND version_id = ?2",
+            params![workspace_id, version_id],
+        )?;
         return Ok(());
     }
     delete_file_index_row(conn, workspace_id, version_id, object_id)?;

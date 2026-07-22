@@ -1062,6 +1062,9 @@ pub fn apply_secret_file_from_version(
         from_version_id,
         to_version_id,
         moment_id,
+        metadata_origin,
+        metadata_summary,
+        metadata_correlation_id,
         now_ms,
     } = input;
     let now_ms = *now_ms;
@@ -1069,6 +1072,7 @@ pub fn apply_secret_file_from_version(
     non_empty(from_version_id, "version_id")?;
     non_empty(to_version_id, "version_id")?;
     non_empty(moment_id, "moment_id")?;
+    validate_origin(metadata_origin)?;
     validate_secret_path(path)?;
     let outcome = store.write_with(faults, |tx| {
         require_version(tx, workspace_id, from_version_id)?;
@@ -1124,9 +1128,9 @@ pub fn apply_secret_file_from_version(
             } else {
                 SecretOp::Delete
             },
-            metadata_origin: "sync".to_owned(),
-            metadata_summary: None,
-            metadata_correlation_id: None,
+            metadata_origin: metadata_origin.to_owned(),
+            metadata_summary: metadata_summary.clone(),
+            metadata_correlation_id: metadata_correlation_id.clone(),
         };
         insert_moment(tx, &moment, moment_order, source.as_ref())?;
         if let Some(source) = source.as_ref() {

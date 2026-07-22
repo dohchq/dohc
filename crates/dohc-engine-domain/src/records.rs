@@ -501,6 +501,9 @@ pub struct ApplySecretFileFromVersion {
     pub from_version_id: String,
     pub to_version_id: String,
     pub moment_id: String,
+    pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
     pub now_ms: i64,
 }
 

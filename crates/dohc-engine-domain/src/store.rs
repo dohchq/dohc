@@ -780,17 +780,17 @@ impl<'a> VersionedTextStore<'a> {
             }
             // Metadata first: an over-cap answer must not hydrate (and
             // re-verify) up to a 64 MiB blob just to discard the bytes.
-            let byte_length: Option<i64> = conn
+            let lengths: Option<(i64, i64)> = conn
                 .query_row(
-                    "SELECT byte_length FROM binary_blobs WHERE sha256 = ?1",
+                    "SELECT byte_length, LENGTH(bytes) FROM binary_blobs WHERE sha256 = ?1",
                     params![sha256],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
                 .map_err(DomainError::sql_corrupt)?;
             // The workspace holds a durable reference to this digest: a
             // missing blob row is store corruption, not an absent digest.
-            let Some(byte_length) = byte_length else {
+            let Some((byte_length, actual_length)) = lengths else {
                 return Err(DomainError::StateCorrupt {
                     reason: "referenced binary blob is missing",
                 });
@@ -798,6 +798,11 @@ impl<'a> VersionedTextStore<'a> {
             if byte_length < 0 {
                 return Err(DomainError::StateCorrupt {
                     reason: "binary blob has a negative recorded length",
+                });
+            }
+            if byte_length != actual_length {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary blob length does not match its bytes",
                 });
             }
             if byte_length as usize > INBAND_CONTENT_CAP_BYTES {
