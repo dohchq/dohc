@@ -198,7 +198,16 @@ impl EngineService {
                 GLOBAL_LEASES.clone()
             },
             next_session: std::sync::atomic::AtomicU64::new(1),
-            self_writes: SelfWriteSuppression::default(),
+            self_writes: {
+                // Process-wide for the same reason as the lease registry: a
+                // settle through service A must suppress the capture ingest
+                // observed by service B's driver on the same root, or B
+                // claims the ydoc head as an external capture edit. Keys are
+                // (workspace, path), so a global map is collision-safe.
+                static GLOBAL_SELF_WRITES: std::sync::LazyLock<SelfWriteSuppression> =
+                    std::sync::LazyLock::new(SelfWriteSuppression::default);
+                GLOBAL_SELF_WRITES.clone()
+            },
         }
     }
 
@@ -392,6 +401,14 @@ impl EngineService {
             .next_handle
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let handle = WorkspaceHandle(format!("ws-{sequence:016x}"));
+        // Startup replay BEFORE the files layer exists: jobs left pending by
+        // a crash, a transient settle failure, or a pulled replication apply
+        // land on disk while nothing is watching (no suppression window),
+        // and the baseline reconcile below then scans the POST-replay disk.
+        actor
+            .materialize_replay_pending(root.clone(), now_ms)
+            .await
+            .map_err(map_runtime)?;
         // The files layer spawns ONLY here — after the shadow binding
         // succeeded — so an unmarked or mismatched root can never grow a
         // watcher or files actor (the shadow-scope dormancy invariant).
@@ -1564,8 +1581,12 @@ impl EngineService {
         let actor = open.actor.clone();
         let session_id = params.session_id.clone();
         let session_key = session.key.clone();
+        // The TAKE happens synchronously BEFORE the spawn: if this future is
+        // dropped right after spawning, `session_ops` releases while the task
+        // has not yet run — a concurrent recordUpdate/settle must NOT be able
+        // to find the session and race edits against the in-flight close.
+        let taken = lock(&self.sessions).remove(&params.session_id);
         let close_task = tokio::spawn(async move {
-            let taken = lock(&sessions).remove(&session_id);
             let close_result = actor
                 .ydoc_close_session(
                     session_key,
@@ -2597,6 +2618,7 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::InvalidIdentifier { .. }
         | CollabError::ContentKindMismatch
         | CollabError::BaseAlreadyClaimed
+        | CollabError::BaseStateDiverged
         | CollabError::LeaseHeld
         | CollabError::NoMarker
         | CollabError::MissingDependencies

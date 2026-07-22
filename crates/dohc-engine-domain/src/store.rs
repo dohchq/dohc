@@ -1593,8 +1593,15 @@ fn capture_retire_in_tx(
             },
         )?;
         // A head this caller does not own (written by RPC/replication) is
-        // never destroyed by a disk-driven retire.
-        if input.only_if_capture_origin && head.metadata_origin != CAPTURE_ORIGIN {
+        // never destroyed by a disk-driven retire. DISK-OWNED origins pass:
+        // capture heads, and materialized Y.Doc heads — the manifest seeds
+        // 'ydoc' rows precisely so the baseline scanner tracks their files,
+        // and a file deleted while the daemon was down must retire the head
+        // rather than leave a stale snapshot readable forever.
+        if input.only_if_capture_origin
+            && head.metadata_origin != CAPTURE_ORIGIN
+            && head.metadata_origin != YDOC_ORIGIN
+        {
             record_request(
                 tx,
                 input.request_id.as_deref(),
@@ -1663,6 +1670,11 @@ fn capture_retire_in_tx(
 /// content retired by a disk-driven pass. Only the capture primitives in
 /// this module may write it.
 pub const CAPTURE_ORIGIN: &str = "capture";
+
+/// The metadata origin stamped by Y.Doc settles. Materialized Y.Doc heads are
+/// DISK-OWNED like capture heads: the manifest seeds them into the baseline
+/// scanner, and disk-driven retires may destroy them.
+pub const YDOC_ORIGIN: &str = "ydoc";
 
 /// Maximum binary payload a capture ingest may persist. Mirrors
 /// `MAX_VERSIONED_BINARY_FILE_BYTES` (`versionedTextStore.ts`) and the files

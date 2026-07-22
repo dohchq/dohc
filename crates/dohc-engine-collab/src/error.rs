@@ -44,6 +44,12 @@ pub enum CollabError {
     #[error("replicated lineage already has a base (base-once)")]
     BaseAlreadyClaimed,
 
+    /// An incoming base-state envelope carries DIFFERENT bytes than the
+    /// already-claimed base: acking it would silently drop a divergent
+    /// lineage while the relay cursor advances past it.
+    #[error("incoming base state diverges from the claimed base")]
+    BaseStateDiverged,
+
     /// A lease for this doc key is already held by another open session
     /// (single-writer per document).
     #[error("a lease for this document is already held")]
@@ -100,6 +106,7 @@ impl CollabError {
             CollabError::InvalidIdentifier { .. } => "invalid-identifier",
             CollabError::ContentKindMismatch => "content-kind-mismatch",
             CollabError::BaseAlreadyClaimed => "base-already-claimed",
+            CollabError::BaseStateDiverged => "base-state-diverged",
             CollabError::LeaseHeld => "lease-held",
             CollabError::NoMarker => "no-marker",
             CollabError::MissingDependencies => "ydoc-missing-remote-dependencies",

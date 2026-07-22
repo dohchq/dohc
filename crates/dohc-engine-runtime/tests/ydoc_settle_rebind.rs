@@ -156,3 +156,147 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
     );
     supervisor.close(&db).expect("close actor");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
+    const WS: &str = "ws-prune-reseed";
+    const PATH: &str = "notes/prune.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor");
+    let state = handle
+        .ydoc_open_state(
+            WS.to_owned(),
+            10,
+            true,
+            None,
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open");
+    let key = state.key.clone();
+    let update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "v1");
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            update,
+            None,
+            true,
+            20,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("record");
+    handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            state.head_blob_sha256.clone(),
+            "session-prune".to_owned(),
+            Arc::new(NoRecorder),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("first settle");
+    // Prune-close: settled lineage, local-only → CRDT rows drop, marker stays.
+    handle
+        .ydoc_close_session(
+            key.clone(),
+            40,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("prune close");
+
+    // The head advances WITHOUT a session: an external disk edit ingested by
+    // capture (disk + DB stay consistent).
+    std::fs::write(scratch.path().join(PATH), "external edit").expect("disk edit");
+    handle
+        .capture_ingest(
+            CaptureIngest {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: PATH.to_owned(),
+                text: "external edit".to_owned(),
+                metadata_origin: "capture".to_owned(),
+                author_json: None,
+                now_ms: 50,
+                request_id: Some("prune-external".to_owned()),
+                claim_foreign_head: true,
+            },
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("external capture");
+
+    // Reopen: the pruned lineage reseeds from the NEW head, and its first
+    // settle must succeed. Mutation check: drop `last_settled_sha = NULL`
+    // from the prune UPDATE in `close_session` — the settle expectation then
+    // trails at the v1 sha and this settle refuses ConflictStaleTarget.
+    let reopened = handle
+        .ydoc_open_state(
+            WS.to_owned(),
+            60,
+            true,
+            None,
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("reopen");
+    assert!(!reopened.lineage_existing, "pruned lineage reseeds");
+    let update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "reseeded body");
+    handle
+        .ydoc_record_update(
+            reopened.key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            update,
+            None,
+            true,
+            70,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("reseed record");
+    let settled = handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            reopened.key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            reopened.head_blob_sha256.clone(),
+            "session-prune-2".to_owned(),
+            Arc::new(NoRecorder),
+            80,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("post-prune settle must succeed");
+    assert_eq!(settled.markdown, "reseeded body");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("disk"),
+        "reseeded body"
+    );
+    supervisor.close(&db).expect("close actor");
+}

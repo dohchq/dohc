@@ -1110,3 +1110,110 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
     let redrained = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("redrain");
     assert_eq!(redrained, 0, "replaying the parked row is content-deduped");
 }
+
+#[test]
+fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
+    // Oracle parity (`projectYDocUpdate` → `writeTextFileInDb` → CRDT rows):
+    // an APPLIED (non-deferred) ydoc envelope must advance the VISIBLE head
+    // (moment + snapshot + pending materialization job) in the same
+    // admission transaction as its ack — not just the CRDT log. Mutation
+    // check: drop the `project_and_write_in_tx` calls in
+    // `apply_ydoc_envelope`'s base/update arms — both head assertions below
+    // fail while the ops still report applied.
+    let (_scratch, _path, mut engine) = store();
+    dohc_engine_domain::VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES ('ws','object-mat',1_400)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("scaffolding");
+
+    // Base envelope (fresh replica): the FILE head appears, not just rows.
+    let base_doc = dohc_engine_collab::Ydoc::wire();
+    let base_bytes = {
+        base_doc.plaintext_insert(0, "base seed");
+        base_doc.encode_full_state()
+    };
+    let base_sha = engine.put_binary_blob(&base_bytes).expect("base blob");
+    let base_op = envelope(
+        "peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-mat",
+            "path": "notes/replicated.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": base_sha,
+            "isBaseState": true
+        }),
+    );
+    apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    let (head_text, head_origin): (String, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text, s.metadata_origin FROM path_aliases a \
+                 JOIN snapshots s ON s.workspace_id = a.workspace_id AND s.object_id = a.object_id \
+                 JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE a.workspace_id = 'ws' AND a.version_id = 'main' \
+                   AND a.path = 'notes/replicated.md'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("base head");
+    assert_eq!(head_text, "base seed", "the base must materialize a head");
+    assert_eq!(head_origin, "ydoc");
+    let pending_jobs: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM materialization_jobs WHERE status = 'pending'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("jobs");
+    assert_eq!(pending_jobs, 1, "the disk write is durably enqueued");
+
+    // Update envelope: the head advances to the merged projection.
+    let delta = base_doc.plaintext_insert(0, "updated ");
+    let delta_sha = engine.put_binary_blob(&delta).expect("delta blob");
+    let update_op = envelope(
+        "peer",
+        1,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": "object-mat",
+            "path": "notes/replicated.md",
+            "contentKind": "plaintext",
+            "updateBlobSha256": delta_sha,
+            "isBaseState": false
+        }),
+    );
+    apply_ydoc_envelope(&mut engine, &update_op, &NoFaults, &NoLiveLeases).expect("update applies");
+    let updated_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT b.text FROM path_aliases a \
+                 JOIN snapshots s ON s.workspace_id = a.workspace_id AND s.object_id = a.object_id \
+                 JOIN blobs b ON b.sha256 = s.blob_sha256 \
+                 WHERE a.workspace_id = 'ws' AND a.version_id = 'main' \
+                   AND a.path = 'notes/replicated.md'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("updated head");
+    assert_eq!(updated_text, "updated base seed");
+}

@@ -391,6 +391,11 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<CloseOutcome>, RuntimeError>>,
     },
+    MaterializeReplayPending {
+        root_dir: PathBuf,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<usize, RuntimeError>>,
+    },
     ConflictList {
         workspace_id: String,
         status: Option<String>,
@@ -1472,6 +1477,25 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// Replay every pending materialization job (best-effort, per-job
+    /// failures tolerated). Returns the number of jobs that reached disk.
+    pub async fn materialize_replay_pending(
+        &self,
+        root_dir: PathBuf,
+        now_ms: i64,
+    ) -> Result<usize, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::MaterializeReplayPending {
+                root_dir,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     pub async fn conflict_list(
         &self,
         workspace_id: String,
@@ -2118,6 +2142,41 @@ fn worker_main(
             } => {
                 let outcome =
                     ydoc_close_session_on_store(&mut store, &key, now_ms, faults.as_ref(), &token);
+                let _ = reply.send(outcome);
+            }
+            Command::MaterializeReplayPending {
+                root_dir,
+                now_ms,
+                reply,
+            } => {
+                // Open-time replay of jobs left pending by a crash, a
+                // transient settle failure, or a pulled replication apply.
+                // Runs BEFORE the files layer spawns, so no watcher observes
+                // the writes (no suppression needed) and the baseline scan
+                // sees the post-replay disk. Per-job failures are tolerated:
+                // the job stays pending for the next open or the settle
+                // no-op replay.
+                let outcome = (|| {
+                    let jobs = store.list_pending_materialization_jobs()?;
+                    let mut completed = 0_usize;
+                    for job in jobs {
+                        if let Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) =
+                            materialize_one(
+                                &store,
+                                &root_dir,
+                                &job,
+                                DurabilityPolicy::per_os(),
+                                &StdReplacer,
+                                &StdBackoff,
+                                now_ms,
+                                &NoFaults,
+                            )
+                        {
+                            completed += 1;
+                        }
+                    }
+                    Ok::<_, RuntimeError>(completed)
+                })();
                 let _ = reply.send(outcome);
             }
             Command::ConflictList {

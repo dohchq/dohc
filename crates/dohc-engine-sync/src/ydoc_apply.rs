@@ -3,7 +3,10 @@ use dohc_engine_collab::{
     DocKey, RemoteUpdate, ReplicationApplyOutcome, apply_remote_update,
     apply_remote_update_in_transaction, maybe_compact,
 };
-use dohc_engine_storage::{EngineStore, FaultInjector, TxnOutcome};
+use dohc_engine_domain::{
+    WriteText, enqueue_write, select_snapshot_by_path_in_tx, write_projected_text_in_tx,
+};
+use dohc_engine_storage::{EngineStore, FaultInjector, Preimage, TxnOutcome};
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 
@@ -139,6 +142,108 @@ pub fn drain_deferred_ydoc_for_key(
         })?;
     }
     Ok(applied)
+}
+
+/// Oracle parity for applied `ydoc.update` ops (`projectYDocUpdate` →
+/// `writeTextFileInDb` → CRDT rows): every NON-DEFERRED apply materializes
+/// its projection — moment, snapshot, and durable materialization job — in
+/// the SAME admission transaction, so `versionedText.read`, search, and the
+/// disk pipeline advance with the relay cursor instead of trailing it until
+/// someone manually opens and settles the doc.
+#[allow(clippy::too_many_arguments)]
+fn project_and_write_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    key: &DocKey,
+    path: &str,
+    doc: &dohc_engine_collab::Ydoc,
+    content_kind: dohc_engine_collab::ContentKind,
+    origin_id: &str,
+    origin_seq: i64,
+    now_ms: i64,
+) -> Result<(), SyncError> {
+    let projection = doc.project(content_kind);
+    let current = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "ydoc.update head read failed",
+        })?;
+    // Identity pins (the oracle's fix-2): NEVER write through a path
+    // occupied by a different object, and never project an object into a
+    // path it does not own — a hostile op would otherwise mutate the wrong
+    // plaintext file.
+    if current.binary_sha256.is_some() {
+        return Err(SyncError::InvalidInput {
+            reason: "ydoc.update targets a binary head",
+        });
+    }
+    if let Some(snapshot) = current.snapshot.as_ref()
+        && snapshot.object_id != key.object_id
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "ydoc.update path is occupied by another object",
+        });
+    }
+    let other_alias: Option<String> = tx
+        .query_row(
+            "SELECT path FROM path_aliases              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3 AND path != ?4",
+            params![key.workspace_id, key.version_id, key.object_id, path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    if other_alias.is_some() {
+        return Err(SyncError::InvalidInput {
+            reason: "ydoc.update object already occupies another path",
+        });
+    }
+    // Idempotent skip: a redelivered (or content-converged) envelope whose
+    // projection already IS the head mints no duplicate moment/job.
+    let projected_sha = dohc_engine_storage::hex_sha256(projection.markdown.as_bytes());
+    if current
+        .snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.blob_sha256 == projected_sha)
+    {
+        return Ok(());
+    }
+    let preimage = current
+        .snapshot
+        .as_ref()
+        .map_or(Preimage::Absent, |snapshot| {
+            Preimage::Present(snapshot.blob_sha256.clone())
+        });
+    // Deterministic per-envelope moment id: a crash between commit and
+    // cursor advance redelivers the envelope, whose re-apply lands in the
+    // idempotent skip above (same projection) — the id can never collide.
+    let fingerprint = format!(
+        "{} {} {} {} {} {}",
+        key.workspace_id, key.version_id, key.object_id, path, origin_id, origin_seq
+    );
+    let moment_id = format!(
+        "moment-ydoc-apply-{}",
+        dohc_engine_storage::hex_sha256(fingerprint.as_bytes())
+    );
+    let result = write_projected_text_in_tx(
+        tx,
+        &WriteText {
+            workspace_id: key.workspace_id.clone(),
+            version_id: key.version_id.clone(),
+            object_id: key.object_id.clone(),
+            path: path.to_owned(),
+            text: projection.markdown.clone(),
+            moment_id,
+            metadata_origin: "ydoc".to_owned(),
+            author_json: None,
+            now_ms,
+            request_id: None,
+        },
+    )
+    .map_err(|_| SyncError::InvalidInput {
+        reason: "ydoc.update projection write failed",
+    })?;
+    enqueue_write(tx, &result, preimage, "ydoc").map_err(|_| SyncError::InvalidInput {
+        reason: "ydoc.update materialization enqueue failed",
+    })?;
+    Ok(())
 }
 
 pub fn apply_ydoc_envelope(
@@ -286,6 +391,15 @@ pub fn apply_ydoc_envelope(
         };
         let claim_key = key.clone();
         let claim_bytes = bytes.clone();
+        let base_doc = {
+            let doc = dohc_engine_collab::Ydoc::wire();
+            doc.apply(&claim_bytes)
+                .map_err(|_| SyncError::InvalidInput {
+                    reason: "ydoc.update base bytes fail validation",
+                })?;
+            doc
+        };
+        let base_path = payload.path.clone();
         let outcome = crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
             tx.execute(
                 "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms)                  VALUES (?1, ?2, ?3)",
@@ -303,6 +417,17 @@ pub fn apply_ydoc_envelope(
             .map_err(|_| SyncError::InvalidInput {
                 reason: "ydoc.update base could not be claimed",
             })?;
+            // A fresh base-only replica gets its FILE, not just CRDT rows.
+            project_and_write_in_tx(
+                tx,
+                &claim_key,
+                &base_path,
+                &base_doc,
+                kind,
+                &op.origin_id,
+                op.origin_seq,
+                op.recorded_at_ms,
+            )?;
             Ok(YdocApplyResult {
                 deferred: false,
                 reason: None,
@@ -310,17 +435,60 @@ pub fn apply_ydoc_envelope(
         })?;
         return Ok(outcome);
     }
+    // The lease is NOT live: any coordinates parked by an earlier live
+    // phase drain FIRST, so the projection below reconstructs the COMPLETE
+    // applied lineage (a partial projection would materialize a file missing
+    // parked content).
+    if dohc_engine_collab::read_marker(store, &key)
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "ydoc marker read failed",
+        })?
+        .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
+    {
+        drain_deferred_ydoc_for_key(store, &key, faults)?;
+    }
+    // Reconstruct the post-apply doc OUTSIDE the admission tx (commutative:
+    // the in-tx apply of the same bytes yields the same converged state, and
+    // a dedup changes nothing).
+    let projected_doc = {
+        let persisted = dohc_engine_collab::load_persisted(store, &key)
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "ydoc lineage load failed",
+            })?
+            .ok_or(SyncError::InvalidInput {
+                reason: "ydoc.update targets an absent lineage",
+            })?;
+        persisted
+            .doc
+            .apply(&bytes)
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "ydoc.update bytes fail durable validation",
+            })?;
+        persisted
+    };
+    let update_path = payload.path.clone();
+    let update_kind = projected_doc.marker.content_kind;
     let remote = RemoteUpdate {
         origin_id: envelope.origin_id.clone(),
         origin_seq: envelope.origin_seq,
         bytes,
     };
     let outcome = crate::apply_envelope_with(store, envelope, faults, |tx, op| {
-        apply_remote_update_in_transaction(tx, &key, &remote, op.recorded_at_ms).map_err(|_| {
-            SyncError::InvalidInput {
+        let applied = apply_remote_update_in_transaction(tx, &key, &remote, op.recorded_at_ms)
+            .map_err(|_| SyncError::InvalidInput {
                 reason: "ydoc.update could not be applied",
-            }
-        })
+            })?;
+        project_and_write_in_tx(
+            tx,
+            &key,
+            &update_path,
+            &projected_doc.doc,
+            update_kind,
+            &op.origin_id,
+            op.origin_seq,
+            op.recorded_at_ms,
+        )?;
+        Ok(applied)
     })?;
     if matches!(
         outcome,

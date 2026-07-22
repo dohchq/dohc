@@ -687,10 +687,27 @@ pub fn claim_base_in_tx(
         .map_err(map_sql)?;
 
         // Atomic re-check: a base already claimed ⇒ resume the winner, emit no
-        // second base.
+        // second base — but ONLY when the incoming base IS the stored base.
+        // Silently resuming (and acking) a DIFFERENT base would drop a
+        // divergent lineage while the relay cursor advances past it, leaving
+        // that peer's later updates missing an unrecoverable dependency.
         let (_, _, base_claimed) = head_of(tx, key)?;
         if base_claimed {
-            return Ok(ClaimOutcome::Resumed);
+            let stored_sha: Option<String> = tx
+                .query_row(
+                    "SELECT snapshot_blob_sha256 FROM ydoc_snapshots                      WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3                        AND up_to_seq = 0",
+                    rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(map_sql)?;
+            return match stored_sha {
+                Some(sha) if sha == crate::hex_sha256(base_bytes) => Ok(ClaimOutcome::Resumed),
+                Some(_) => Err(CollabError::BaseStateDiverged),
+                None => Err(CollabError::Corrupt {
+                    reason: "base claimed but the seq-0 base snapshot is missing".to_owned(),
+                }),
+            };
         }
 
         let base_sha = put_binary_blob(tx, base_bytes)?;
@@ -906,8 +923,14 @@ pub fn close_session(
                 rusqlite::params![key.workspace_id, key.version_id, key.object_id],
             )
             .map_err(map_sql)?;
+        // `last_settled_sha` clears WITH the cache: it described the pruned
+        // lineage. The next open reseeds from the file, and its settle
+        // expectation must be the OPEN-TIME head — a retained sha from the
+        // pruned lineage would turn the first settle after an intervening
+        // capture/edit into a permanent ConflictStaleTarget.
         tx.execute(
-            "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0, updated_at_ms = ?4 \
+            "UPDATE ydoc_docs SET head_update_seq = 0, head_snapshot_seq = 0, \
+             last_settled_sha = NULL, updated_at_ms = ?4 \
              WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
             rusqlite::params![key.workspace_id, key.version_id, key.object_id, now_ms],
         )
