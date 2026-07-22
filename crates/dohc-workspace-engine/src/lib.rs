@@ -1757,10 +1757,12 @@ impl EngineService {
         .ok_or_else(|| wire(ErrorCode::InvalidParams, "file-not-found"))?;
         let byte_length = bytes.len();
         Ok(if byte_length <= MAX_INBAND_CONTENT_BYTES {
-            json!({ "bytes": bytes })
+            json!({
+                "bytesBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            })
         } else {
             json!({
-                "bytes": Value::Null,
+                "bytesBase64": Value::Null,
                 "byteLength": byte_length,
                 "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
             })
@@ -5800,13 +5802,22 @@ fn map_runtime(error: RuntimeError) -> WireError {
             _ => None,
         };
         if let Some(message) = message {
-            let code = if matches!(
-                domain,
-                DomainError::Storage(_) | DomainError::StateCorrupt { .. }
-            ) {
-                ErrorCode::Internal
-            } else {
-                ErrorCode::InvalidParams
+            let code = match domain {
+                DomainError::Storage(_) | DomainError::StateCorrupt { .. } => ErrorCode::Internal,
+                // Same severity split as map_domain_code: decode/key failures
+                // are internal state problems, not caller mistakes.
+                DomainError::Crypto(error) => match error {
+                    dohc_engine_crypto::CryptoError::InvalidIvLength
+                    | dohc_engine_crypto::CryptoError::InvalidTagLength
+                    | dohc_engine_crypto::CryptoError::PlaintextTooLarge
+                    | dohc_engine_crypto::CryptoError::PlaintextNotUtf8
+                    | dohc_engine_crypto::CryptoError::InvalidBase64 => ErrorCode::InvalidParams,
+                    dohc_engine_crypto::CryptoError::DecryptFailed
+                    | dohc_engine_crypto::CryptoError::InvalidKeyLength
+                    | dohc_engine_crypto::CryptoError::KeyFileMalformed
+                    | dohc_engine_crypto::CryptoError::EnvelopeUnwrapFailed => ErrorCode::Internal,
+                },
+                _ => ErrorCode::InvalidParams,
             };
             return wire(code, message);
         }

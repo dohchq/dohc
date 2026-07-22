@@ -786,7 +786,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const versionId = requiredString(params, "versionId", "secret moments list");
     const path = requiredString(params, "path", "secret moments list");
     const before = optionalNumber(params, "beforeMomentOrder");
-    const limit = Math.min(500, Math.max(0, optionalNumber(params, "limit") ?? 200));
+    const requestedLimit = optionalNumber(params, "limit");
+    if (requestedLimit !== undefined && requestedLimit <= 0) {
+      throw new Error("invalid-input");
+    }
+    const limit = Math.min(500, requestedLimit ?? 200);
     const filtered = [...state.secretMoments.values()]
       .map((moment) => moment.wire)
       .filter((moment) => moment.versionId === versionId && moment.path === path)
@@ -808,7 +812,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const versionId = optionalString(params, "versionId");
     const objectId = optionalString(params, "objectId");
     const before = optionalNumber(params, "beforeMomentOrder");
-    const limit = Math.min(500, Math.max(0, optionalNumber(params, "limit") ?? 200));
+    const requestedLimit = optionalNumber(params, "limit");
+    if (requestedLimit !== undefined && requestedLimit <= 0) {
+      throw new Error("invalid-input");
+    }
+    const limit = Math.min(500, requestedLimit ?? 200);
     const all = [...state.moments.values()]
       .map((moment) => moment.wire)
       .filter((moment) => versionId === undefined || moment.versionId === versionId)

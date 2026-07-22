@@ -1675,5 +1675,7 @@ async fn text_read_returns_binary_head_and_read_blob_reads_by_sha() {
         }),
     )
     .await;
-    assert_eq!(blob["bytes"], json!([1, 2, 3, 4]));
+    // Base64 in-band, matching versionedBinary.read's encoding (one payload
+    // convention for binary bytes across adjacent RPCs).
+    assert_eq!(blob["bytesBase64"], json!("AQIDBA=="));
 }
