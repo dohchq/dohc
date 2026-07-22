@@ -3223,7 +3223,7 @@ fn validate_plaintext_storable_path(path: &str) -> Result<String, DomainError> {
 /// Normalize a path used only to address an existing plaintext alias. Secret
 /// paths are allowed so an absent/secret lookup reports absence honestly;
 /// structurally invalid, reserved, and ignored paths remain rejected.
-fn validate_addressable_plaintext_path(path: &str) -> Result<String, DomainError> {
+pub fn validate_addressable_plaintext_path(path: &str) -> Result<String, DomainError> {
     use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
 
     let (classification, normalized) = classify_engine_file_path_normalized(path);

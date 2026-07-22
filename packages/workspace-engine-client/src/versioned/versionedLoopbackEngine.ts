@@ -837,9 +837,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const path = requiredString(params, "path", "secret delete");
     const origin = requiredOrigin(params);
     const momentId = requiredString(params, "momentId", "secret delete");
-    this.assertFreshSecretMoment(state, momentId);
     const before = version.secrets.get(path);
     if (before === undefined) return { moment: null };
+    this.assertFreshSecretMoment(state, momentId);
     version.secrets.delete(path);
     const wire = this.makeSecretMoment(workspace, version.id, path, momentId, "delete", origin);
     state.secretMoments.set(momentId, { wire, before });
@@ -882,13 +882,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const origin = requiredOrigin(params);
     const summary = optionalString(params, "summary") ?? null;
     const correlationId = optionalString(params, "correlationId") ?? null;
-    this.assertFreshSecretMoment(state, momentId);
     const before = target.secrets.get(path);
     const after = source.secrets.get(path);
     const base = source.secretForkBase.get(path);
     if ((before === undefined && after === undefined) || before === after || after === base) {
       return { changed: false, moment: null };
     }
+    this.assertFreshSecretMoment(state, momentId);
     if (after === undefined) target.secrets.delete(path);
     else target.secrets.set(path, after);
     const operation = after === undefined ? "delete" : "write";
@@ -910,9 +910,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const path = requiredString(params, "path", "secret restore");
     const beforeMomentId = requiredString(params, "beforeMomentId", "secret restore");
     const momentId = requiredString(params, "momentId", "secret restore");
-    this.assertFreshSecretMoment(state, momentId);
     const sourceMoment = state.secretMoments.get(beforeMomentId);
     if (!sourceMoment) throw new Error("moment not found");
+    if (sourceMoment.wire.path !== path) throw new Error("invalid-input");
     const version = this.version(state, sourceMoment.wire.versionId);
     const prior = version.secrets.get(path);
     if (prior === sourceMoment.before) {
@@ -922,6 +922,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
         path,
       };
     }
+    this.assertFreshSecretMoment(state, momentId);
     if (sourceMoment.before === undefined) version.secrets.delete(path);
     else version.secrets.set(path, sourceMoment.before);
     const operation = sourceMoment.before === undefined ? "delete" : "write";

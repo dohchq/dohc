@@ -55,7 +55,8 @@ use dohc_engine_domain::{
     get_secret_moment_keyless, has_secret_state, insert_text_conflict_if_absent,
     list_secret_files_keyless, list_secret_files_keyless_page, list_secret_moments_page_keyless,
     restore_secret_file_verbatim, secret_file_len_keyless, select_snapshot_by_path_in_tx,
-    write_binary_in_tx, write_projected_text_in_tx, write_text_in_tx,
+    validate_addressable_plaintext_path, write_binary_in_tx, write_projected_text_in_tx,
+    write_text_in_tx,
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, StdBackoff, StdReplacer, materialize_one};
 use dohc_engine_storage::{
@@ -4757,6 +4758,7 @@ fn ydoc_open_state_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    let canonical_path = validate_addressable_plaintext_path(path)?;
     // Bootstrap: the first live doc in an EMPTY workspace must be creatable —
     // without this, read_text errors VersionNotFound before the absent-path
     // flow can run (capture normally creates main, but nothing has captured).
@@ -4766,12 +4768,13 @@ fn ydoc_open_state_on_store(
         now_ms,
         &NoFaults,
     )?;
-    let head = VersionedTextStore::new(store).read_text(workspace_id, version_id, path)?;
+    let head =
+        VersionedTextStore::new(store).read_text(workspace_id, version_id, &canonical_path)?;
     let head_sha = head.as_ref().map(|snapshot| snapshot.blob_sha256.clone());
     let object_id = match head.as_ref() {
         Some(snapshot) => snapshot.object_id.clone(),
         None => {
-            let derived = derive_capture_object_id(workspace_id, version_id, path);
+            let derived = derive_capture_object_id(workspace_id, version_id, &canonical_path);
             // A derived id still LIVE at another alias means this path's
             // former file was renamed away: capture's locked resolution mints
             // an order-disambiguated id for that case, which open-time cannot

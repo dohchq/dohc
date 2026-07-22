@@ -17,11 +17,11 @@ use dohc_engine_domain::{
     ChatThreadReadState, CompareTextFileVersions, ComparisonStatus, ConflictChoice,
     ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus,
     CreateNamedVersion, DeleteTextFile, DispatchClaim, DomainError, FeedCursorValue, FollowState,
-    FollowTargetKind, MarkdownMergeResult, MergeTextFileFromVersion, MergeTextFileResult,
+    FollowTargetKind, MarkdownMergeResult, MergeTextFileFromVersion, MergeTextFileResult, MomentOp,
     RenameTextFile, ResolveConflictKind, ResolveTextConflict, RollbackTextFileMutation,
     SaveBookmark, SecretDelete, SecretDiskIntent, SecretMomentRecord, SecretWrite, SendMessage,
     SetFollow, StartChannelThread, TextConflict, TextSnapshot, VersionFileChangeStatus,
-    VersionRecord, WriteBinary, WriteText, merge_markdown,
+    VersionRecord, WriteBinary, WriteText, merge_markdown, validate_addressable_plaintext_path,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -817,12 +817,14 @@ impl EngineService {
         version_id: &str,
         path: &str,
     ) -> Result<(), WireError> {
+        let canonical_path = validate_addressable_plaintext_path(path)
+            .map_err(|error| map_runtime(RuntimeError::Domain(error)))?;
         let existing = match open
             .actor
             .resolve_path_object(
                 open.workspace_id.clone(),
                 version_id.to_owned(),
-                path.to_owned(),
+                canonical_path.clone(),
             )
             .await
         {
@@ -833,7 +835,11 @@ impl EngineService {
             Err(error) => return Err(map_runtime(error)),
         };
         let object_id = existing.unwrap_or_else(|| {
-            dohc_engine_domain::derive_capture_object_id(&open.workspace_id, version_id, path)
+            dohc_engine_domain::derive_capture_object_id(
+                &open.workspace_id,
+                version_id,
+                &canonical_path,
+            )
         });
         let key = DocKey::new(open.workspace_id.clone(), version_id.to_owned(), object_id)
             .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-input"))?;
@@ -1099,11 +1105,34 @@ impl EngineService {
         let params: VersionedTextRollbackParams = parse(params)?;
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
-        let path = params.path.clone();
+        let path = validate_addressable_plaintext_path(&params.path)
+            .map_err(|error| map_runtime(RuntimeError::Domain(error)))?;
         let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
         let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         self.ensure_path_not_leased(&open, &params.version_id, &path)
             .await?;
+        let restore_path = open
+            .actor
+            .get_moment(open.workspace_id.clone(), params.mutation_moment_id.clone())
+            .await
+            .map_err(map_runtime)?
+            .filter(|moment| {
+                moment.version_id == params.version_id
+                    && moment.path == path
+                    && moment.operation == MomentOp::Rename
+            });
+        if let Some(before_moment_id) =
+            restore_path.and_then(|moment| moment.before_latest_moment_id)
+            && let Some(before) = open
+                .actor
+                .get_moment(open.workspace_id.clone(), before_moment_id)
+                .await
+                .map_err(map_runtime)?
+            && before.path != path
+        {
+            self.ensure_path_not_leased(&open, &params.version_id, &before.path)
+                .await?;
+        }
         let request_id = params
             .request_id
             .or_else(|| request.idempotency_key.clone());
@@ -4072,6 +4101,18 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let cancellation = OperationCancellation::new(ctx);
+        let versions = Self::read_under_ctx(
+            &cancellation,
+            "search.ensureIndex (version)",
+            open.actor.list_versions(open.workspace_id.clone()),
+        )
+        .await?;
+        if !versions
+            .iter()
+            .any(|version| version.version_id == params.version_id)
+        {
+            return Err(wire(ErrorCode::InvalidParams, "version-not-found"));
+        }
         open.actor
             .ensure_search_index(
                 open.root,

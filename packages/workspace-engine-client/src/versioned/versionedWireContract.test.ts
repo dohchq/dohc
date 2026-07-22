@@ -784,6 +784,129 @@ describe("loopback contract enforcement", () => {
     ).toBeNull();
   });
 
+  it("retries a committed secret delete as a no-op before duplicate-id validation", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: ".env",
+      text: "A",
+      origin: "api",
+      momentId: "delete-retry-seed",
+    });
+    const params: SecretsDeleteParams = {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: ".env",
+      origin: "api",
+      momentId: "delete-retry",
+    };
+    decodeSecretDeleteResult(await call(engine, 2, VERSIONED_METHOD.secretsDelete, params));
+
+    // MUTATION: check duplicate secret moment ids before desired-state equality -> this throws.
+    expect(
+      decodeSecretDeleteResult(
+        await call(engine, 3, VERSIONED_METHOD.secretsDelete, params),
+      ).moment,
+    ).toBeNull();
+  });
+
+  it("retries a committed secret apply as a no-op before duplicate-id validation", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: "main",
+      path: ".env",
+      text: "A",
+      origin: "api",
+      momentId: "apply-retry-main",
+    });
+    const feature = decodeVersionRecord(
+      await call(engine, 2, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        fromVersionId: "main",
+        name: "apply-retry-feature",
+      }),
+    );
+    await call(engine, 3, VERSIONED_METHOD.secretsWrite, {
+      workspaceId: WORKSPACE,
+      versionId: feature.id,
+      path: ".env",
+      text: "B",
+      origin: "api",
+      momentId: "apply-retry-feature-write",
+    });
+    const params: SecretsApplyParams = {
+      workspaceId: WORKSPACE,
+      sourceVersionId: feature.id,
+      targetVersionId: "main",
+      path: ".env",
+      origin: "api",
+      momentId: "apply-retry",
+    };
+    decodeSecretApplyResult(await call(engine, 4, VERSIONED_METHOD.secretsApply, params));
+
+    // MUTATION: check duplicate secret moment ids before desired-state equality -> this throws.
+    expect(
+      decodeSecretApplyResult(
+        await call(engine, 5, VERSIONED_METHOD.secretsApply, params),
+      ),
+    ).toEqual({ changed: false, moment: null });
+  });
+
+  it("retries a committed secret restore as a no-op before duplicate-id validation", async () => {
+    const engine = new VersionedLoopbackEngine();
+    for (const [id, text] of [["restore-retry-a", "A"], ["restore-retry-b", "B"]] as const) {
+      await call(engine, engine.requests.length + 1, VERSIONED_METHOD.secretsWrite, {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: ".env",
+        text,
+        origin: "api",
+        momentId: id,
+      });
+    }
+    const params: SecretsRestoreParams = {
+      workspaceId: WORKSPACE,
+      path: ".env",
+      beforeMomentId: "restore-retry-b",
+      momentId: "restore-retry",
+    };
+    decodeSecretRestoreResult(await call(engine, 3, VERSIONED_METHOD.secretsRestore, params));
+
+    // MUTATION: check duplicate secret moment ids before desired-state equality -> this throws.
+    expect(
+      decodeSecretRestoreResult(
+        await call(engine, 4, VERSIONED_METHOD.secretsRestore, params),
+      ).restoredMomentId,
+    ).toBe("restore-retry-b");
+  });
+
+  it("rejects a secret restore whose requested path differs from the protected moment", async () => {
+    const engine = new VersionedLoopbackEngine();
+    for (const [id, text] of [["restore-path-a", "A"], ["restore-path-b", "B"]] as const) {
+      await call(engine, engine.requests.length + 1, VERSIONED_METHOD.secretsWrite, {
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: ".env",
+        text,
+        origin: "api",
+        momentId: id,
+      });
+    }
+
+    // MUTATION: omit the source moment path check -> the before-state is written to .other.
+    await expect(
+      call(engine, 3, VERSIONED_METHOD.secretsRestore, {
+        workspaceId: WORKSPACE,
+        path: ".other",
+        beforeMomentId: "restore-path-b",
+        momentId: "restore-wrong-path",
+      }),
+    ).rejects.toThrow("invalid-input");
+    expect(engine.secretValue(WORKSPACE, "main", ".other")).toBeUndefined();
+  });
+
   it("restores a secret into the source moment version while another version is active", async () => {
     const engine = new VersionedLoopbackEngine();
     for (const [id, text] of [["main-a", "A"], ["main-b", "B"]] as const) {

@@ -1488,6 +1488,125 @@ async fn leased_doc_rejects_write_rename_delete_and_rollback() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn absent_path_lease_uses_the_domain_canonical_path() {
+    // MUTATION: key the absent-path fallback on the raw caller spelling -> the write succeeds.
+    let (_scratch, transport, handle) = fixture("absent-path-canonical-lease").await;
+    let opened = call(
+        &transport,
+        &handle,
+        2,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "notes/draft.md" }),
+    )
+    .await;
+
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                3,
+                "versionedText.write",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "path": "notes//draft.md",
+                    "text": "must remain in the live editor",
+                    "origin": "api",
+                    "requestId": "canonical-lease-write",
+                }),
+            ),
+        )
+        .await
+        .expect_err("canonical spelling must share the absent-path lease");
+    assert_eq!(error.message, "ydoc-session-busy");
+
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.close",
+        json!({ "sessionId": opened["sessionId"], "settle": false }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rollback_rename_rejects_a_lease_on_the_restore_path() {
+    // MUTATION: skip the rename restore-path lease check -> rollback recreates a.md.
+    let (_scratch, transport, handle) = fixture("rollback-rename-restore-lease").await;
+    write(
+        &transport,
+        &handle,
+        2,
+        "a.md",
+        "rename preimage",
+        "rollback-rename-seed",
+    )
+    .await;
+    let renamed = call(
+        &transport,
+        &handle,
+        3,
+        "versionedText.rename",
+        json!({
+            "versionId": "main",
+            "fromPath": "a.md",
+            "toPath": "b.md",
+            "origin": "api",
+            "requestId": "rollback-rename-move",
+        }),
+    )
+    .await;
+    let opened = call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "a.md" }),
+    )
+    .await;
+
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                5,
+                "versionedText.rollback",
+                Some(handle.clone()),
+                json!({
+                    "versionId": "main",
+                    "path": "b.md",
+                    "mutationMomentId": renamed["moment"]["momentId"],
+                    "origin": "restore",
+                }),
+            ),
+        )
+        .await
+        .expect_err("leased restore path must block rename rollback");
+    assert_eq!(error.message, "ydoc-session-busy");
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            6,
+            "versionedText.read",
+            json!({ "versionId": "main", "path": "b.md" }),
+        )
+        .await["text"],
+        "rename preimage"
+    );
+
+    call(
+        &transport,
+        &handle,
+        7,
+        "ydoc.close",
+        json!({ "sessionId": opened["sessionId"], "settle": false }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fts_is_maintained_in_each_mutation_transaction() {
     // MUTATION: defer FTS update outside the mutation transaction -> an immediate query is stale.
     let (scratch, transport, handle) = fixture("fts").await;
@@ -1822,6 +1941,37 @@ async fn search_ensure_index_is_idempotent() {
             .iter()
             .any(|row| row["path"] == "searchable.md")
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn search_ensure_index_rejects_an_unknown_version() {
+    // MUTATION: dispatch an unknown version directly to the index builder -> this succeeds.
+    let (_scratch, transport, handle) = fixture("search-ensure-unknown-version").await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": "ws-rpcd-search-ensure-unknown-version" }),
+    )
+    .await;
+
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                3,
+                "search.ensureIndex",
+                Some(handle),
+                json!({
+                    "workspaceId": "ws-rpcd-search-ensure-unknown-version",
+                    "versionId": "typo-version",
+                }),
+            ),
+        )
+        .await
+        .expect_err("unknown version must fail closed");
+    assert_eq!(error.message, "version-not-found");
 }
 
 fn seed_versions(root: &Path, workspace_id: &str) {
