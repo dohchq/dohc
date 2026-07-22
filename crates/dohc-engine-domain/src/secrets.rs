@@ -1498,7 +1498,7 @@ pub fn derive_capture_secret_moment_id(
     let order = next_secret_moment_order.to_string();
     format!(
         "moment-{}",
-        crate::store::hash_framed_fields(&[
+        crate::store::hash_fields(&[
             b"capture-secret-write",
             workspace_id.as_bytes(),
             version_id.as_bytes(),
@@ -1519,7 +1519,7 @@ pub fn derive_capture_secret_retire_moment_id(
     let order = next_secret_moment_order.to_string();
     format!(
         "moment-{}",
-        crate::store::hash_framed_fields(&[
+        crate::store::hash_fields(&[
             b"capture-secret-retire",
             workspace_id.as_bytes(),
             version_id.as_bytes(),

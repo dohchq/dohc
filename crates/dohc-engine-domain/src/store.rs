@@ -795,6 +795,11 @@ impl<'a> VersionedTextStore<'a> {
                     reason: "referenced binary blob is missing",
                 });
             };
+            if byte_length < 0 {
+                return Err(DomainError::StateCorrupt {
+                    reason: "binary blob has a negative recorded length",
+                });
+            }
             if byte_length as usize > INBAND_CONTENT_CAP_BYTES {
                 return Ok(Some(BinaryBlobRead {
                     byte_length,
@@ -1655,7 +1660,7 @@ fn capture_ingest_in_tx(
         Some(author_json) => (b"some".as_slice(), author_json.as_bytes()),
         None => (b"none".as_slice(), b"".as_slice()),
     };
-    let payload_hash = hash_framed_fields(&[
+    let payload_hash = hash_fields(&[
         b"capture-ingest",
         input.workspace_id.as_bytes(),
         input.version_id.as_bytes(),
@@ -1775,7 +1780,7 @@ fn capture_retire_in_tx(
     // DORMANT: no store outside tests has recorded capture-retire requests
     // (the sink passes request_id: None), and R15 resets shadow data, so no
     // legacy-hash compatibility shim is owed.
-    let payload_hash = hash_framed_fields(&[
+    let payload_hash = hash_fields(&[
         b"capture-retire",
         input.workspace_id.as_bytes(),
         input.version_id.as_bytes(),
@@ -1948,7 +1953,7 @@ fn capture_ingest_binary_in_tx(
         Some(author_json) => (b"some".as_slice(), author_json.as_bytes()),
         None => (b"none".as_slice(), b"".as_slice()),
     };
-    let payload_hash = hash_framed_fields(&[
+    let payload_hash = hash_fields(&[
         b"capture-ingest-binary",
         input.workspace_id.as_bytes(),
         input.version_id.as_bytes(),
@@ -4449,7 +4454,7 @@ pub fn text_blob_sha256(text: &str) -> String {
 pub fn derive_capture_object_id(workspace_id: &str, version_id: &str, path: &str) -> String {
     format!(
         "object-{}",
-        hash_framed_fields(&[
+        hash_fields(&[
             workspace_id.as_bytes(),
             version_id.as_bytes(),
             path.as_bytes(),
@@ -4466,7 +4471,7 @@ fn derive_disambiguated_capture_object_id(
     let next_moment_order = next_moment_order.to_string();
     format!(
         "object-{}",
-        hash_framed_fields(&[
+        hash_fields(&[
             workspace_id.as_bytes(),
             version_id.as_bytes(),
             path.as_bytes(),
@@ -4487,7 +4492,7 @@ pub fn derive_capture_moment_id(
     let next_moment_order = next_moment_order.to_string();
     format!(
         "moment-{}",
-        hash_framed_fields(&[
+        hash_fields(&[
             workspace_id.as_bytes(),
             object_id.as_bytes(),
             next_moment_order.as_bytes(),
@@ -4505,21 +4510,13 @@ pub fn derive_capture_retire_moment_id(
     derive_capture_moment_id(workspace_id, object_id, next_moment_order)
 }
 
-pub(crate) fn hash_framed_fields(fields: &[&[u8]]) -> String {
-    let mut hasher = Sha256::new();
-    for field in fields {
-        hasher.update((field.len() as u64).to_le_bytes());
-        hasher.update(field);
-    }
-    hex(&hasher.finalize())
-}
-
-/// Deterministic fingerprint over NUL-separated fields (idempotency payloads).
+/// Deterministic fingerprint over length-framed fields (idempotency
+/// payloads). Length framing means a NUL or any other byte inside a
+/// caller-supplied field can never shift field boundaries and collide two
+/// different payloads.
 pub(crate) fn hash_fields(fields: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
     for field in fields {
-        // Length-framed: a NUL inside a caller-supplied field must not shift
-        // field boundaries and collide two different payloads.
         hasher.update((field.len() as u64).to_le_bytes());
         hasher.update(field);
     }
