@@ -28,25 +28,30 @@
 
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
-use crate::search::{SearchResult, search_workspace};
+use crate::search::{
+    SearchResult, delete_file_search_index, search_workspace, upsert_file_search_index,
+};
 use dohc_engine_collab::{
     AppendOutcome, CloseOutcome, ContentKind, DocKey, Projection, Regime, Ydoc,
 };
 use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
-    BinaryHead, BinaryHeadMeta, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
-    CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult, CaptureSecret,
-    CaptureSecretRetire, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
-    ChatChannelSummary, ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMessage, ChatMessagePage,
-    ChatThread, ChatThreadReadState, DispatchClaim, InbandBinary, InbandSecret, InbandText,
-    LinkedChatStore, ListMomentsQuery, MomentPage, MomentRecord, ResolveTextConflict,
-    ResolveTextConflictResult, SaveBookmark, SecretFileStat, SecretFileStore, SecretMomentRecord,
+    BinaryHead, BinaryHeadMeta, BinaryWriteResult, CaptureIngest, CaptureIngestBinary,
+    CaptureIngestBinaryResult, CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult,
+    CaptureSecret, CaptureSecretRetire, ChatBookmark, ChatBookmarkTransition, ChatChannel,
+    ChatChannelKind, ChatChannelSummary, ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMessage,
+    ChatMessagePage, ChatThread, ChatThreadReadState, CompareTextFileVersions, DeleteResult,
+    DeleteTextFile, DispatchClaim, InbandBinary, InbandSecret, InbandText, LinkedChatStore,
+    ListMomentsQuery, MergeTextFileFromVersion, MergeTextFileResult, MomentPage, MomentRecord,
+    RenameResult, RenameTextFile, ResolveTextConflict, ResolveTextConflictResult,
+    RollbackTextFileMutation, SaveBookmark, SecretFileStat, SecretFileStore, SecretMomentRecord,
     SecretWriteResult, SendMessage, SetFollow, SnapshotMetadata, SnapshotView, StartChannelThread,
-    TextConflict, TextSnapshot, VersionRecord, VersionedTextStore, WriteResult, WriteText,
-    capture_manifest_seed, capture_secret_retire, derive_capture_object_id, enqueue_write,
-    has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
-    list_secret_files_keyless_page, secret_file_len_keyless, select_snapshot_by_path_in_tx,
-    write_projected_text_in_tx,
+    TextConflict, TextSnapshot, VersionFileChange, VersionRecord, VersionedTextComparison,
+    VersionedTextStore, WriteBinary, WriteResult, WriteText, capture_manifest_seed,
+    capture_secret_retire, derive_capture_object_id, enqueue_write, has_secret_state,
+    insert_text_conflict_if_absent, list_secret_files_keyless, list_secret_files_keyless_page,
+    secret_file_len_keyless, select_snapshot_by_path_in_tx, write_binary_in_tx,
+    write_projected_text_in_tx, write_text_in_tx,
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, StdBackoff, StdReplacer, materialize_one};
 use dohc_engine_storage::{
@@ -197,9 +202,57 @@ enum Command {
     },
     VersionedTextWrite {
         input: WriteText,
+        root_dir: Option<PathBuf>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<WriteResult, RuntimeError>>,
+    },
+    VersionedBinaryWrite {
+        input: WriteBinary,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<BinaryWriteResult, RuntimeError>>,
+    },
+    VersionedTextRename {
+        input: RenameTextFile,
+        root_dir: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<RenameResult, RuntimeError>>,
+    },
+    VersionedTextDelete {
+        input: DeleteTextFile,
+        root_dir: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<DeleteResult, RuntimeError>>,
+    },
+    VersionedTextRollback {
+        input: RollbackTextFileMutation,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<(), RuntimeError>>,
+    },
+    VersionedTextCompare {
+        input: CompareTextFileVersions,
+        reply: oneshot::Sender<Result<VersionedTextComparison, RuntimeError>>,
+    },
+    VersionedTextMerge {
+        input: MergeTextFileFromVersion,
+        root_dir: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<MergeTextFileResult, RuntimeError>>,
+    },
+    CompareVersionFiles {
+        workspace_id: String,
+        source_version_id: String,
+        target_version_id: String,
+        reply: oneshot::Sender<Result<Vec<VersionFileChange>, RuntimeError>>,
     },
     CaptureIngest {
         input: CaptureIngest,
@@ -243,6 +296,12 @@ enum Command {
         path: String,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<TextSnapshot>, RuntimeError>>,
+    },
+    ResolvePathObject {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        reply: oneshot::Sender<Result<Option<String>, RuntimeError>>,
     },
     ListVersions {
         workspace_id: String,
@@ -1080,8 +1139,173 @@ impl ActorHandle {
         self.tx
             .send(Command::VersionedTextWrite {
                 input,
+                root_dir: None,
                 faults,
                 token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Execute an RPC text write with its FTS row in the same transaction.
+    pub async fn versioned_text_write_indexed(
+        &self,
+        input: WriteText,
+        root_dir: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<WriteResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedTextWrite {
+                input,
+                root_dir: Some(root_dir),
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Execute, index, and materialize a caller-originated binary write on the
+    /// actor's sole writer thread.
+    pub async fn versioned_binary_write(
+        &self,
+        input: WriteBinary,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<BinaryWriteResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedBinaryWrite {
+                input,
+                root_dir,
+                self_writes,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn versioned_text_rename(
+        &self,
+        input: RenameTextFile,
+        root_dir: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<RenameResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedTextRename {
+                input,
+                root_dir,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn versioned_text_delete(
+        &self,
+        input: DeleteTextFile,
+        root_dir: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<DeleteResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedTextDelete {
+                input,
+                root_dir,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn versioned_text_rollback(
+        &self,
+        input: RollbackTextFileMutation,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedTextRollback {
+                input,
+                root_dir,
+                self_writes,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn versioned_text_compare(
+        &self,
+        input: CompareTextFileVersions,
+    ) -> Result<VersionedTextComparison, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedTextCompare { input, reply })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn versioned_text_merge(
+        &self,
+        input: MergeTextFileFromVersion,
+        root_dir: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<MergeTextFileResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedTextMerge {
+                input,
+                root_dir,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn compare_version_files(
+        &self,
+        workspace_id: String,
+        source_version_id: String,
+        target_version_id: String,
+    ) -> Result<Vec<VersionFileChange>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CompareVersionFiles {
+                workspace_id,
+                source_version_id,
+                target_version_id,
                 reply,
             })
             .await
@@ -1517,6 +1741,25 @@ impl ActorHandle {
                 version_id,
                 path,
                 token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn resolve_path_object(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+    ) -> Result<Option<String>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ResolvePathObject {
+                workspace_id,
+                version_id,
+                path,
                 reply,
             })
             .await
@@ -2580,12 +2823,119 @@ fn worker_main(
             }
             Command::VersionedTextWrite {
                 input,
+                root_dir,
                 faults,
                 token,
                 reply,
             } => {
-                let outcome =
-                    versioned_text_write_on_store(&mut store, &input, faults.as_ref(), &token);
+                let outcome = versioned_text_write_on_store(
+                    &mut store,
+                    &input,
+                    root_dir.as_deref(),
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::VersionedBinaryWrite {
+                input,
+                root_dir,
+                self_writes,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = versioned_binary_write_on_store(
+                    &mut store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::VersionedTextRename {
+                input,
+                root_dir,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = versioned_text_rename_on_store(
+                    &mut store,
+                    &input,
+                    &root_dir,
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::VersionedTextDelete {
+                input,
+                root_dir,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = versioned_text_delete_on_store(
+                    &mut store,
+                    &input,
+                    &root_dir,
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::VersionedTextRollback {
+                input,
+                root_dir,
+                self_writes,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = versioned_text_rollback_on_store(
+                    &mut store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::VersionedTextCompare { input, reply } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .compare_text_file_versions(&input)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::VersionedTextMerge {
+                input,
+                root_dir,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = versioned_text_merge_on_store(
+                    &mut store,
+                    &input,
+                    &root_dir,
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::CompareVersionFiles {
+                workspace_id,
+                source_version_id,
+                target_version_id,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .compare_version_files(&workspace_id, &source_version_id, &target_version_id)
+                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::CaptureIngest {
@@ -2845,6 +3195,17 @@ fn worker_main(
                         .read_text(&workspace_id, &version_id, &path)
                         .map_err(RuntimeError::from)
                 };
+                let _ = reply.send(outcome);
+            }
+            Command::ResolvePathObject {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .object_id_for_path(&workspace_id, &version_id, &path)
+                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::YdocApply {
@@ -4363,6 +4724,7 @@ fn ydoc_close_session_on_store(
 fn versioned_text_write_on_store(
     store: &mut EngineStore,
     input: &WriteText,
+    root_dir: Option<&std::path::Path>,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
@@ -4378,8 +4740,279 @@ fn versioned_text_write_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    let Some(root_dir) = root_dir else {
+        return VersionedTextStore::new(store)
+            .write_text(input, faults)
+            .map_err(RuntimeError::from);
+    };
+    let outcome = store.write_with(faults, |tx| {
+        let result = write_text_in_tx(tx, input).map_err(RuntimeError::from)?;
+        upsert_file_search_index(
+            tx,
+            root_dir,
+            &input.workspace_id,
+            &input.version_id,
+            &result.snapshot.object_id,
+            &result.snapshot.path,
+            &result.snapshot.text,
+        )
+        .map_err(RuntimeError::from)?;
+        Ok::<_, RuntimeError>(result)
+    })?;
+    match outcome {
+        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn versioned_binary_write_on_store(
+    store: &mut EngineStore,
+    input: &WriteBinary,
+    root_dir: &std::path::Path,
+    self_writes: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<BinaryWriteResult, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    VersionedTextStore::new(store).ensure_main_version(
+        &input.workspace_id,
+        &input.version_id,
+        input.now_ms,
+        faults,
+    )?;
+    let outcome = store.write_with(faults, |tx| {
+        let result = write_binary_in_tx(tx, input).map_err(RuntimeError::from)?;
+        delete_file_search_index(
+            tx,
+            &input.workspace_id,
+            &input.version_id,
+            &result.object_id,
+        )
+        .map_err(RuntimeError::from)?;
+        Ok::<_, RuntimeError>(result)
+    })?;
+    let result = match outcome {
+        TxnOutcome::Committed(result) => result,
+        TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+    };
+    if result.deduped || !result.materialize_enqueued {
+        // Deduped, or a NON-ACTIVE version write: DB-only. Disk mirrors the
+        // active version, so there is no job to run and no self-write to
+        // suppress.
+        return Ok(result);
+    }
+
+    // Register before replacement: the watcher may observe the write as soon
+    // as the atomic rename lands. A failed/conflicted materialization retracts
+    // the identity because no self-write is then available to consume it.
+    self_writes.record(&input.workspace_id, &result.path, &result.sha256);
+    let job = store.load_materialization_job(&input.moment_id)?.ok_or(
+        dohc_engine_domain::DomainError::StateCorrupt {
+            reason: "binary write materialization job is missing",
+        },
+    )?;
+    let materialized = materialize_one(
+        store,
+        root_dir,
+        &job,
+        DurabilityPolicy::per_os(),
+        &StdReplacer,
+        &StdBackoff,
+        input.now_ms,
+        faults,
+    );
+    let materialized = match materialized {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            self_writes.retract(&input.workspace_id, &result.path, &result.sha256);
+            return Err(error.into());
+        }
+    };
+    match materialized {
+        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => Ok(result),
+        JobOutcome::Conflict | JobOutcome::Superseded => {
+            self_writes.retract(&input.workspace_id, &result.path, &result.sha256);
+            Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into())
+        }
+        JobOutcome::Crashed(_) => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn search_domain(error: crate::search::SearchError) -> dohc_engine_domain::DomainError {
+    match error {
+        crate::search::SearchError::Storage(error) => {
+            dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
+        }
+        crate::search::SearchError::Store(error) => dohc_engine_domain::DomainError::Storage(error),
+        crate::search::SearchError::Corrupt(reason)
+        | crate::search::SearchError::Bounds(reason) => {
+            dohc_engine_domain::DomainError::StateCorrupt { reason }
+        }
+    }
+}
+
+fn versioned_text_rename_on_store(
+    store: &mut EngineStore,
+    input: &RenameTextFile,
+    root_dir: &std::path::Path,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<RenameResult, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
     VersionedTextStore::new(store)
-        .write_text(input, faults)
+        .rename_text_file_with(input, faults, |tx, result| {
+            delete_file_search_index(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.object.object_id,
+            )
+            .map_err(search_domain)?;
+            upsert_file_search_index(
+                tx,
+                root_dir,
+                &input.workspace_id,
+                &input.version_id,
+                &result.object.object_id,
+                &result.after.path,
+                &result.after.text,
+            )
+            .map_err(search_domain)
+        })
+        .map_err(RuntimeError::from)
+}
+
+fn versioned_text_delete_on_store(
+    store: &mut EngineStore,
+    input: &DeleteTextFile,
+    _root_dir: &std::path::Path,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<DeleteResult, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let outcome = store.write_with(faults, |tx| {
+        let result =
+            dohc_engine_domain::delete_text_in_tx(tx, input).map_err(RuntimeError::from)?;
+        delete_file_search_index(
+            tx,
+            &input.workspace_id,
+            &input.version_id,
+            &result.object.object_id,
+        )
+        .map_err(RuntimeError::from)?;
+        Ok::<_, RuntimeError>(result)
+    })?;
+    match outcome {
+        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn versioned_text_rollback_on_store(
+    store: &mut EngineStore,
+    input: &RollbackTextFileMutation,
+    root_dir: &std::path::Path,
+    self_writes: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<(), RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    VersionedTextStore::new(store).rollback_text_file_mutation_with(
+        input,
+        faults,
+        |tx, object_id, restored_text| {
+            delete_file_search_index(tx, &input.workspace_id, &input.version_id, object_id)
+                .map_err(search_domain)?;
+            if let Some((path, text)) = restored_text {
+                upsert_file_search_index(
+                    tx,
+                    root_dir,
+                    &input.workspace_id,
+                    &input.version_id,
+                    object_id,
+                    path,
+                    text,
+                )
+                .map_err(search_domain)?;
+            }
+            Ok(())
+        },
+    )?;
+
+    let job_id = format!("rollback-restore_{}", input.mutation_moment_id);
+    let Some(job) = store.load_materialization_job(&job_id)? else {
+        return Ok(());
+    };
+    self_writes.record(&input.workspace_id, &job.target_path, &job.content_sha256);
+    let outcome = materialize_one(
+        store,
+        root_dir,
+        &job,
+        DurabilityPolicy::per_os(),
+        &StdReplacer,
+        &StdBackoff,
+        job.created_at_ms,
+        faults,
+    );
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            self_writes.retract(&input.workspace_id, &job.target_path, &job.content_sha256);
+            return Err(error.into());
+        }
+    };
+    match outcome {
+        JobOutcome::Completed | JobOutcome::AlreadyMaterialized => Ok(()),
+        JobOutcome::Conflict | JobOutcome::Superseded => {
+            self_writes.retract(&input.workspace_id, &job.target_path, &job.content_sha256);
+            Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into())
+        }
+        JobOutcome::Crashed(_) => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn versioned_text_merge_on_store(
+    store: &mut EngineStore,
+    input: &MergeTextFileFromVersion,
+    root_dir: &std::path::Path,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<MergeTextFileResult, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    VersionedTextStore::new(store)
+        .merge_text_file_from_version_with(input, faults, |tx, result| {
+            match result {
+                MergeTextFileResult::Write { write, .. } => upsert_file_search_index(
+                    tx,
+                    root_dir,
+                    &input.workspace_id,
+                    &input.target_version_id,
+                    &write.object.object_id,
+                    &write.snapshot.path,
+                    &write.snapshot.text,
+                )
+                .map_err(search_domain)?,
+                MergeTextFileResult::Delete { delete, .. } => delete_file_search_index(
+                    tx,
+                    &input.workspace_id,
+                    &input.target_version_id,
+                    &delete.object.object_id,
+                )
+                .map_err(search_domain)?,
+                MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => {}
+            }
+            Ok(())
+        })
         .map_err(RuntimeError::from)
 }
 

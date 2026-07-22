@@ -14,10 +14,13 @@ use dohc_engine_collab::{CollabError, ContentKind, DocKey, Lease, LeaseRegistry,
 use dohc_engine_domain::{
     BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatBookmark, ChatChannel, ChatChannelKind,
     ChatChannelSummary, ChatFeedReadState, ChatFollow, ChatMessage, ChatThread,
-    ChatThreadReadState, ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata,
-    ConflictResolution, ConflictStatus, DispatchClaim, DomainError, FeedCursorValue, FollowState,
-    FollowTargetKind, ResolveConflictKind, ResolveTextConflict, SaveBookmark, SendMessage,
-    SetFollow, StartChannelThread, TextConflict, TextSnapshot, WriteText,
+    ChatThreadReadState, CompareTextFileVersions, ComparisonStatus, ConflictChoice,
+    ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus,
+    DeleteTextFile, DispatchClaim, DomainError, FeedCursorValue, FollowState, FollowTargetKind,
+    MarkdownMergeResult, MergeTextFileFromVersion, MergeTextFileResult, RenameTextFile,
+    ResolveConflictKind, ResolveTextConflict, RollbackTextFileMutation, SaveBookmark, SendMessage,
+    SetFollow, SnapshotContent, StartChannelThread, TextConflict, TextSnapshot,
+    VersionFileChangeStatus, WriteBinary, WriteText, merge_markdown,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -31,12 +34,14 @@ use dohc_engine_runtime::{
 use dohc_engine_sync::{ReplicationEnvelope, SyncError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
     time::{SystemTime, UNIX_EPOCH},
 };
+use unicode_normalization::UnicodeNormalization;
 
 const MAX_OPEN_HANDLES: usize = 64;
 const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
@@ -246,6 +251,34 @@ impl EngineService {
             "workspace.close" => self.workspace_close(request.workspace).await?,
             "versionedText.write" => {
                 self.versioned_text_write(&ctx, &request, request.params.clone())
+                    .await?
+            }
+            "versionedBinary.write" => {
+                self.versioned_binary_write(&ctx, &request, request.params.clone())
+                    .await?
+            }
+            "versionedText.rename" => {
+                self.versioned_text_rename(&ctx, &request, request.params.clone())
+                    .await?
+            }
+            "versionedText.delete" => {
+                self.versioned_text_delete(&ctx, &request, request.params.clone())
+                    .await?
+            }
+            "versionedText.rollback" => {
+                self.versioned_text_rollback(&ctx, &request, request.params.clone())
+                    .await?
+            }
+            "versionedText.merge" => {
+                self.versioned_text_merge(&ctx, &request, request.params.clone())
+                    .await?
+            }
+            "versionedText.compare" => {
+                self.versioned_text_compare(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "versions.compareFiles" => {
+                self.versions_compare_files(&ctx, request.workspace, request.params)
                     .await?
             }
             "versionedText.read" => {
@@ -699,6 +732,62 @@ impl EngineService {
         Ok(json!({ "closed": closed }))
     }
 
+    fn generated_rpc_id(
+        &self,
+        prefix: &str,
+        wire_request_id: u64,
+        request_id: Option<&str>,
+        path: &str,
+    ) -> String {
+        let mut digest = Sha256::new();
+        let wire_request_id = wire_request_id.to_string();
+        let fields: Vec<&[u8]> = match request_id {
+            Some(request_id) => vec![request_id.as_bytes(), path.as_bytes()],
+            None => vec![
+                self.session_epoch.as_bytes(),
+                wire_request_id.as_bytes(),
+                path.as_bytes(),
+            ],
+        };
+        for field in fields {
+            digest.update((field.len() as u64).to_le_bytes());
+            digest.update(field);
+        }
+        format!("{prefix}-{:x}", digest.finalize())
+    }
+
+    async fn ensure_path_not_leased(
+        &self,
+        open: &OpenWorkspace,
+        version_id: &str,
+        path: &str,
+    ) -> Result<(), WireError> {
+        let existing = match open
+            .actor
+            .resolve_path_object(
+                open.workspace_id.clone(),
+                version_id.to_owned(),
+                path.to_owned(),
+            )
+            .await
+        {
+            Ok(existing) => existing,
+            Err(RuntimeError::Domain(
+                DomainError::WorkspaceNotFound | DomainError::VersionNotFound,
+            )) => None,
+            Err(error) => return Err(map_runtime(error)),
+        };
+        let object_id = existing.unwrap_or_else(|| {
+            dohc_engine_domain::derive_capture_object_id(&open.workspace_id, version_id, path)
+        });
+        let key = DocKey::new(open.workspace_id.clone(), version_id.to_owned(), object_id)
+            .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-input"))?;
+        if self.leases.scoped(&open.root).is_held(&key) {
+            return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
+        }
+        Ok(())
+    }
+
     async fn versioned_text_write(
         &self,
         ctx: &RequestContext,
@@ -707,28 +796,426 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: VersionedTextWriteParams = parse(params)?;
         let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let path = normalize_rpc_path(&params.path);
+        let text = normalize_rpc_text(&params.text);
+        if text.len() > MAX_INBAND_CONTENT_BYTES {
+            return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
+        }
+        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        self.ensure_path_not_leased(&open, &params.version_id, &path)
+            .await?;
+        let request_id = params
+            .request_id
+            .or_else(|| request.idempotency_key.clone());
+        let object_id = params.object_id.unwrap_or_else(|| {
+            self.generated_rpc_id("object", request.id, request_id.as_deref(), &path)
+        });
+        let moment_id = params.moment_id.unwrap_or_else(|| {
+            self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path)
+        });
         let cancellation = OperationCancellation::new(ctx);
         let result = open
             .actor
-            .versioned_text_write(
+            .versioned_text_write_indexed(
                 WriteText {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     version_id: params.version_id,
-                    object_id: params.object_id,
-                    path: params.path,
-                    text: params.text,
-                    moment_id: params.moment_id,
-                    metadata_origin: params.metadata_origin,
-                    author_json: params.author_json,
+                    object_id,
+                    path,
+                    text,
+                    moment_id,
+                    metadata_origin: origin,
+                    author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
-                    request_id: request.idempotency_key.clone(),
+                    request_id,
                 },
+                open.root.clone(),
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
             .await
             .map_err(map_runtime)?;
-        Ok(json!({ "snapshot": snapshot_json(&result.snapshot), "deduped": result.deduped }))
+        Ok(json!({
+            "object": file_object_json(&result.object),
+            "snapshot": snapshot_json(&result.snapshot),
+            "moment": moment_json(&result.moment),
+            "deduped": result.deduped,
+        }))
+    }
+
+    async fn versioned_binary_write(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedBinaryWriteParams = parse(params)?;
+        let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let path = normalize_rpc_path(&params.path);
+        let bytes = match (params.bytes, params.bytes_base64) {
+            (Some(bytes), None) => bytes,
+            (None, Some(encoded)) => base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-input"))?,
+            _ => return Err(wire(ErrorCode::InvalidParams, "invalid-input")),
+        };
+        if bytes.len() > MAX_INBAND_CONTENT_BYTES {
+            return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
+        }
+        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        self.ensure_path_not_leased(&open, &params.version_id, &path)
+            .await?;
+        let object_id = params
+            .object_id
+            .unwrap_or_else(|| self.generated_rpc_id("object", request.id, None, &path));
+        let moment_id = params
+            .moment_id
+            .unwrap_or_else(|| self.generated_rpc_id("moment", request.id, None, &path));
+        let cancellation = OperationCancellation::new(ctx);
+        let result = open
+            .actor
+            .versioned_binary_write(
+                WriteBinary {
+                    workspace_id: open.workspace_id.clone(),
+                    version_id: params.version_id,
+                    object_id,
+                    path,
+                    bytes,
+                    moment_id,
+                    metadata_origin: origin,
+                    author_json,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                },
+                open.root,
+                Arc::new(self.self_writes.clone()),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({
+            "object": file_object_json(&result.object),
+            "snapshot": {
+                "objectId": result.object_id,
+                "path": result.path,
+                "contentKind": "binary",
+                "text": "",
+                "sha256": result.sha256,
+                "byteLength": result.byte_length,
+                "updatedAtMs": result.updated_at_ms,
+                "latestMomentId": result.moment.moment_id,
+            },
+            "moment": moment_json(&result.moment),
+            "deduped": result.deduped,
+        }))
+    }
+
+    async fn versioned_text_rename(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedTextRenameParams = parse(params)?;
+        let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let from_path = normalize_rpc_path(&params.from_path);
+        let to_path = normalize_rpc_path(&params.to_path);
+        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        self.ensure_path_not_leased(&open, &params.version_id, &from_path)
+            .await?;
+        self.ensure_path_not_leased(&open, &params.version_id, &to_path)
+            .await?;
+        let request_id = params
+            .request_id
+            .or_else(|| request.idempotency_key.clone());
+        let moment_id =
+            self.generated_rpc_id("moment", request.id, request_id.as_deref(), &to_path);
+        let cancellation = OperationCancellation::new(ctx);
+        let result = open
+            .actor
+            .versioned_text_rename(
+                RenameTextFile {
+                    workspace_id: open.workspace_id,
+                    version_id: params.version_id,
+                    from_path,
+                    to_path,
+                    moment_id,
+                    metadata_origin: origin,
+                    author_json,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                },
+                open.root,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({
+            "object": file_object_json(&result.object),
+            "before": snapshot_metadata_json(
+                &result.before,
+                &result.moment.before_content_kind,
+                result.moment.before_binary_sha256.as_deref(),
+                result.moment.before_byte_length,
+            ),
+            "after": snapshot_metadata_json(
+                &result.after,
+                &result.moment.after_content_kind,
+                result.moment.after_binary_sha256.as_deref(),
+                result.moment.after_byte_length,
+            ),
+            "moment": moment_json(&result.moment),
+            "deduped": false,
+        }))
+    }
+
+    async fn versioned_text_delete(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedTextDeleteParams = parse(params)?;
+        let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let path = normalize_rpc_path(&params.path);
+        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        self.ensure_path_not_leased(&open, &params.version_id, &path)
+            .await?;
+        let request_id = params
+            .request_id
+            .or_else(|| request.idempotency_key.clone());
+        let moment_id = self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path);
+        let cancellation = OperationCancellation::new(ctx);
+        let result = open
+            .actor
+            .versioned_text_delete(
+                DeleteTextFile {
+                    workspace_id: open.workspace_id,
+                    version_id: params.version_id,
+                    path,
+                    moment_id,
+                    metadata_origin: origin,
+                    author_json,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                },
+                open.root,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({
+            "object": file_object_json(&result.object),
+            "before": snapshot_metadata_json(
+                &result.before,
+                &result.moment.before_content_kind,
+                result.moment.before_binary_sha256.as_deref(),
+                result.moment.before_byte_length,
+            ),
+            "moment": moment_json(&result.moment),
+            "deduped": false,
+        }))
+    }
+
+    async fn versioned_text_rollback(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedTextRollbackParams = parse(params)?;
+        let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let path = normalize_rpc_path(&params.path);
+        let _origin =
+            validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let _author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        self.ensure_path_not_leased(&open, &params.version_id, &path)
+            .await?;
+        let cancellation = OperationCancellation::new(ctx);
+        open.actor
+            .versioned_text_rollback(
+                RollbackTextFileMutation {
+                    workspace_id: open.workspace_id,
+                    version_id: params.version_id,
+                    path,
+                    mutation_moment_id: params.mutation_moment_id,
+                    legacy_before_text: params
+                        .legacy_before_text
+                        .map(|text| normalize_rpc_text(&text)),
+                },
+                open.root,
+                Arc::new(self.self_writes.clone()),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({ "rolledBack": true, "deduped": false }))
+    }
+
+    async fn versioned_text_compare(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedTextCompareParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let comparison = Self::read_under_ctx(
+            &cancellation,
+            "versionedText.compare",
+            open.actor.versioned_text_compare(CompareTextFileVersions {
+                workspace_id: open.workspace_id,
+                target_version_id: params.target_version_id,
+                source_version_id: params.source_version_id,
+                path: normalize_rpc_path(&params.path),
+            }),
+        )
+        .await?;
+        Ok(json!({ "status": comparison_wire_status(&comparison) }))
+    }
+
+    async fn versioned_text_merge(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedTextMergeParams = parse(params)?;
+        let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let path = normalize_rpc_path(&params.path);
+        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        self.ensure_path_not_leased(&open, &params.target_version_id, &path)
+            .await?;
+        let request_id = params
+            .request_id
+            .or_else(|| request.idempotency_key.clone());
+        let object_id = self.generated_rpc_id("object", request.id, request_id.as_deref(), &path);
+        let moment_id = self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path);
+        let conflict_id =
+            self.generated_rpc_id("conflict", request.id, request_id.as_deref(), &path);
+        let cancellation = OperationCancellation::new(ctx);
+        let result = open
+            .actor
+            .versioned_text_merge(
+                MergeTextFileFromVersion {
+                    workspace_id: open.workspace_id,
+                    target_version_id: params.target_version_id,
+                    source_version_id: params.source_version_id,
+                    path,
+                    object_id,
+                    moment_id,
+                    conflict_id,
+                    metadata_origin: origin,
+                    author_json,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                },
+                open.root,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(match result {
+            MergeTextFileResult::Unchanged { .. } => json!({
+                "status": "unchanged",
+                "deduped": false,
+            }),
+            MergeTextFileResult::Write { write, .. } => json!({
+                "status": "merged",
+                "writeKind": "write",
+                "object": file_object_json(&write.object),
+                "snapshot": snapshot_metadata_json(&write.snapshot, "text", None, None),
+                "moment": moment_json(&write.moment),
+                "deduped": false,
+            }),
+            MergeTextFileResult::Delete { delete, .. } => json!({
+                "status": "merged",
+                "writeKind": "delete",
+                "object": file_object_json(&delete.object),
+                "moment": moment_json(&delete.moment),
+                "deduped": false,
+            }),
+            MergeTextFileResult::Conflict { .. } => json!({
+                "status": "conflict",
+                "deduped": false,
+            }),
+        })
+    }
+
+    async fn versions_compare_files(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionsCompareFilesParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let mut changes = Self::read_under_ctx(
+            &cancellation,
+            "versions.compareFiles",
+            open.actor.compare_version_files(
+                open.workspace_id,
+                params.source_version_id,
+                params.target_version_id,
+            ),
+        )
+        .await?;
+        if let Some(after_path) = params.after_path.as_deref() {
+            changes.retain(|change| change.path.as_str() > after_path);
+        }
+        let entries: Vec<Value> =
+            changes
+                .iter()
+                .map(|change| {
+                    let status = match change.status {
+                        VersionFileChangeStatus::Added => "added",
+                        VersionFileChangeStatus::Modified => "modified",
+                        VersionFileChangeStatus::Deleted => "deleted",
+                    };
+                    let binary =
+                        change.current.as_ref().is_some_and(|content| {
+                            matches!(content, SnapshotContent::Binary { .. })
+                        }) || change.incoming.as_ref().is_some_and(|content| {
+                            matches!(content, SnapshotContent::Binary { .. })
+                        });
+                    if binary {
+                        json!({ "path": change.path, "status": status, "binary": true })
+                    } else {
+                        json!({ "path": change.path, "status": status })
+                    }
+                })
+                .collect();
+        let budget = params
+            .byte_budget
+            .unwrap_or(MOMENTS_PAGE_BYTE_BUDGET)
+            .clamp(1, SINGLE_ROW_HARD_CAP_BYTES);
+        let included = byte_budget_cut_serialized(&entries, budget);
+        if included == 0 && !entries.is_empty() {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
+        }
+        let next_cursor = (included < entries.len())
+            .then(|| entries[included - 1]["path"].as_str().map(str::to_owned))
+            .flatten();
+        Ok(json!({
+            "entries": entries[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
     }
 
     async fn versioned_text_read(
@@ -3050,14 +3537,165 @@ struct WorkspaceOpenParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VersionedTextWriteParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
     version_id: String,
-    object_id: String,
+    #[serde(default)]
+    object_id: Option<String>,
     path: String,
     text: String,
-    moment_id: String,
-    metadata_origin: String,
+    #[serde(default)]
+    moment_id: Option<String>,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    metadata_origin: Option<String>,
+    #[serde(default)]
+    author: Option<Value>,
+    #[serde(default)]
     author_json: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
     now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedBinaryWriteParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    version_id: String,
+    #[serde(default)]
+    object_id: Option<String>,
+    path: String,
+    #[serde(default)]
+    bytes: Option<Vec<u8>>,
+    #[serde(default)]
+    bytes_base64: Option<String>,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    metadata_origin: Option<String>,
+    #[serde(default)]
+    author: Option<Value>,
+    #[serde(default)]
+    author_json: Option<String>,
+    #[serde(default)]
+    moment_id: Option<String>,
+    #[serde(default)]
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextRenameParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    version_id: String,
+    from_path: String,
+    to_path: String,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    metadata_origin: Option<String>,
+    #[serde(default)]
+    author: Option<Value>,
+    #[serde(default)]
+    author_json: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextDeleteParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    version_id: String,
+    path: String,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    metadata_origin: Option<String>,
+    #[serde(default)]
+    author: Option<Value>,
+    #[serde(default)]
+    author_json: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextRollbackParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    version_id: String,
+    path: String,
+    mutation_moment_id: String,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    metadata_origin: Option<String>,
+    #[serde(default)]
+    author: Option<Value>,
+    #[serde(default)]
+    author_json: Option<String>,
+    // requestId lands with the cross-mutation idempotency ledger follow-up
+    // (design P1-8); accepting-and-ignoring it here would falsely promise
+    // exactly-once to callers.
+    #[serde(default)]
+    legacy_before_text: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextCompareParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    path: String,
+    source_version_id: String,
+    target_version_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextMergeParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    path: String,
+    source_version_id: String,
+    target_version_id: String,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    metadata_origin: Option<String>,
+    #[serde(default)]
+    author: Option<Value>,
+    #[serde(default)]
+    author_json: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionsCompareFilesParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    source_version_id: String,
+    target_version_id: String,
+    #[serde(default)]
+    after_path: Option<String>,
+    #[serde(default)]
+    byte_budget: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -4043,11 +4681,72 @@ fn snapshot_json(snapshot: &TextSnapshot) -> Value {
         "objectId": snapshot.object_id,
         "path": snapshot.path,
         "text": snapshot.text,
+        "contentKind": "text",
+        "sha256": snapshot.blob_sha256,
+        "byteLength": snapshot.text.len(),
         "blobSha256": snapshot.blob_sha256,
         "updatedAtMs": snapshot.updated_at_ms,
         "latestMomentId": snapshot.latest_moment_id,
         "metadataOrigin": snapshot.metadata_origin
     })
+}
+
+fn file_object_json(object: &dohc_engine_domain::FileObjectRecord) -> Value {
+    json!({
+        "id": object.object_id,
+        "workspaceId": object.workspace_id,
+        "createdAtMs": object.created_at_ms,
+    })
+}
+
+fn snapshot_metadata_json(
+    snapshot: &TextSnapshot,
+    content_kind: &str,
+    binary_sha256: Option<&str>,
+    binary_byte_length: Option<i64>,
+) -> Value {
+    let (sha256, byte_length) = if content_kind == "binary" {
+        (
+            binary_sha256.unwrap_or(&snapshot.blob_sha256),
+            binary_byte_length.unwrap_or_default().max(0) as usize,
+        )
+    } else {
+        (snapshot.blob_sha256.as_str(), snapshot.text.len())
+    };
+    json!({
+        "workspaceId": snapshot.workspace_id,
+        "versionId": snapshot.version_id,
+        "objectId": snapshot.object_id,
+        "path": snapshot.path,
+        "contentKind": content_kind,
+        "sha256": sha256,
+        "byteLength": byte_length,
+        "updatedAtMs": snapshot.updated_at_ms,
+        "latestMomentId": snapshot.latest_moment_id,
+        "metadataOrigin": snapshot.metadata_origin,
+    })
+}
+
+fn comparison_wire_status(
+    comparison: &dohc_engine_domain::VersionedTextComparison,
+) -> &'static str {
+    match comparison.status {
+        ComparisonStatus::Same | ComparisonStatus::CurrentChanged => "unchanged",
+        ComparisonStatus::IncomingChanged => "merged",
+        ComparisonStatus::Diverged => match (
+            comparison.base.as_ref(),
+            comparison.current.as_ref(),
+            comparison.incoming.as_ref(),
+        ) {
+            (Some(base), Some(current), Some(incoming)) => {
+                match merge_markdown(&base.text, &current.text, &incoming.text) {
+                    MarkdownMergeResult::Merged(_) => "merged",
+                    MarkdownMergeResult::Conflict => "conflict",
+                }
+            }
+            _ => "conflict",
+        },
+    }
 }
 
 fn conflict_json(conflict: &TextConflict) -> Value {
@@ -4120,6 +4819,79 @@ where
     String::deserialize(deserializer).map(Some)
 }
 
+fn normalize_rpc_path(path: &str) -> String {
+    path.nfc().collect()
+}
+
+fn normalize_rpc_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .trim_matches(|character: char| character.is_whitespace() || character == '\u{feff}')
+        .to_owned()
+}
+
+fn validate_workspace_param(candidate: Option<&str>, resolved: &str) -> Result<(), WireError> {
+    if candidate.is_some_and(|candidate| candidate != resolved) {
+        return Err(wire(ErrorCode::InvalidParams, "invalid-workspace"));
+    }
+    Ok(())
+}
+
+fn validated_origin(
+    origin: Option<&str>,
+    legacy_origin: Option<&str>,
+) -> Result<String, WireError> {
+    let value = origin
+        .or(legacy_origin)
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "invalid-metadata"))?;
+    match value {
+        "api" | "local-file" | "restore" | "sync" | "unknown" => Ok(value.to_owned()),
+        // Compatibility for pre-RPC-D callers. The new `origin` field remains
+        // the closed five-set; legacy `metadataOrigin: agent` represented an
+        // API write before author attribution became a separate field.
+        "agent" if origin.is_none() => Ok("api".to_owned()),
+        _ => Err(wire(ErrorCode::InvalidParams, "invalid-metadata")),
+    }
+}
+
+fn validated_author(
+    author: Option<&Value>,
+    legacy_author_json: Option<&str>,
+) -> Result<Option<String>, WireError> {
+    if author.is_some() && legacy_author_json.is_some() {
+        return Err(wire(ErrorCode::InvalidParams, "invalid-metadata"));
+    }
+    let value = match author {
+        Some(value) => value.clone(),
+        None => match legacy_author_json {
+            Some(raw) => serde_json::from_str(raw)
+                .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-metadata"))?,
+            None => return Ok(None),
+        },
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "invalid-metadata"))?;
+    let nonempty = |field: &str| {
+        object
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    };
+    let run_valid = object
+        .get("agentRunId")
+        .is_none_or(|value| value.as_str().is_some_and(|value| !value.is_empty()));
+    if object.get("kind").and_then(Value::as_str) != Some("agent")
+        || !nonempty("agentId")
+        || !nonempty("onBehalfOf")
+        || !run_valid
+    {
+        return Err(wire(ErrorCode::InvalidParams, "invalid-metadata"));
+    }
+    serde_json::to_string(&value)
+        .map(Some)
+        .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-metadata"))
+}
+
 fn parse<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, WireError> {
     serde_json::from_value(value).map_err(|_| wire(ErrorCode::InvalidParams, "invalid parameters"))
 }
@@ -4181,6 +4953,35 @@ fn map_runtime(error: RuntimeError) -> WireError {
     }
     if matches!(&error, RuntimeError::Collab(CollabError::UnsettledClose)) {
         return wire(ErrorCode::InvalidParams, "ydoc-unsettled-close");
+    }
+    if let RuntimeError::Domain(domain) = &error {
+        let message = match domain {
+            DomainError::IdempotencyKeyReuseMismatch | DomainError::DuplicateMomentId => {
+                Some("idempotency-key-reuse-mismatch")
+            }
+            DomainError::FileNotFound => Some("file-not-found"),
+            DomainError::TargetPathExists => Some("target-path-exists"),
+            DomainError::VersionNotFound => Some("version-not-found"),
+            DomainError::ForkBaseNotFound => Some("invalid-version"),
+            DomainError::ConflictStaleTarget => Some("conflict-stale-target"),
+            DomainError::InvalidPath { .. } => Some("invalid-path"),
+            DomainError::InvalidText { .. } => Some("invalid-text"),
+            DomainError::InvalidInput { .. } => Some("invalid-input"),
+            DomainError::StateCorrupt { .. } => Some("state-corrupt"),
+            DomainError::Storage(_) => Some("persist-failed"),
+            _ => None,
+        };
+        if let Some(message) = message {
+            let code = if matches!(
+                domain,
+                DomainError::Storage(_) | DomainError::StateCorrupt { .. }
+            ) {
+                ErrorCode::Internal
+            } else {
+                ErrorCode::InvalidParams
+            };
+            return wire(code, message);
+        }
     }
     let code = match error {
         RuntimeError::Overloaded => ErrorCode::Overloaded,

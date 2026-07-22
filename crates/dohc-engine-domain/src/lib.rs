@@ -64,12 +64,12 @@ pub use merge::{
 };
 pub use normalize::NormalizedState;
 pub use records::{
-    BinaryHead, BinaryHeadMeta, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
-    CaptureRetire, CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile,
-    FileObjectRecord, InbandBinary, InbandSecret, InbandText, ListMomentsQuery, MomentOp,
-    MomentPage, MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation,
-    SnapshotContent, SnapshotMetadata, SnapshotView, TextSnapshot, VersionKind, VersionRecord,
-    WriteResult, WriteText,
+    BinaryHead, BinaryHeadMeta, BinaryWriteResult, CaptureIngest, CaptureIngestBinary,
+    CaptureIngestBinaryResult, CaptureRetire, CaptureRetireResult, CreateNamedVersion,
+    DeleteResult, DeleteTextFile, FileObjectRecord, InbandBinary, InbandSecret, InbandText,
+    ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
+    RollbackTextFileMutation, SnapshotContent, SnapshotMetadata, SnapshotView, TextSnapshot,
+    VersionKind, VersionRecord, WriteBinary, WriteResult, WriteText,
 };
 pub use secrets::{
     CaptureSecret, CaptureSecretRetire, SecretDelete, SecretDiskIntent, SecretFileStat,
@@ -83,7 +83,7 @@ pub use store::{
     MAX_TEXT_BYTES, SECRET_SEED_SENTINEL_SHA, VersionedTextStore, capture_manifest_seed,
     delete_text_in_tx, derive_capture_moment_id, derive_capture_object_id,
     derive_capture_retire_moment_id, object_has_live_alias, validate_delete_input,
-    validate_write_input, write_projected_text_in_tx, write_text_in_tx,
+    validate_write_input, write_binary_in_tx, write_projected_text_in_tx, write_text_in_tx,
 };
 
 // Re-export the storage surface a domain caller needs on the common path.

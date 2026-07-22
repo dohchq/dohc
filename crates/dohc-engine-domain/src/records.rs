@@ -292,6 +292,21 @@ pub struct WriteText {
     pub request_id: Option<String>,
 }
 
+/// Inputs to a caller-originated binary write. Bytes are stored in the binary
+/// blob table and the resulting head is materialized by the runtime actor.
+#[derive(Debug, Clone)]
+pub struct WriteBinary {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub object_id: String,
+    pub path: String,
+    pub bytes: Vec<u8>,
+    pub moment_id: String,
+    pub metadata_origin: String,
+    pub author_json: Option<String>,
+    pub now_ms: i64,
+}
+
 /// Inputs to [`crate::VersionedTextStore::capture_ingest`].
 #[derive(Debug, Clone)]
 pub struct CaptureIngest {
@@ -415,10 +430,31 @@ pub struct CreateNamedVersion {
 /// The result of a successful [`crate::VersionedTextStore::write_text`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteResult {
+    pub object: FileObjectRecord,
     pub snapshot: TextSnapshot,
     pub moment: MomentRecord,
     /// True when no new moment was needed (request replay or equal content).
     pub deduped: bool,
+}
+
+/// Result of a caller-originated binary write. Binary bodies never travel in
+/// this record; the content address and byte length are sufficient for the
+/// mutation response and materializer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryWriteResult {
+    pub object: FileObjectRecord,
+    pub object_id: String,
+    pub path: String,
+    pub sha256: String,
+    pub byte_length: i64,
+    pub updated_at_ms: i64,
+    pub moment: MomentRecord,
+    pub deduped: bool,
+    /// True when a materialization job was enqueued — only for writes into
+    /// the workspace's ACTIVE version. Disk mirrors the active version; a
+    /// non-active write is DB-only (materializing it would hand the capture
+    /// baseline another version's bytes to ingest into the active one).
+    pub materialize_enqueued: bool,
 }
 
 /// The result of a successful [`crate::VersionedTextStore::delete_text_file`].

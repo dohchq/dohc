@@ -207,6 +207,20 @@ impl VersionedTextStore<'_> {
         input: &MergeTextFileFromVersion,
         faults: &dyn FaultInjector,
     ) -> Result<MergeTextFileResult, DomainError> {
+        self.merge_text_file_from_version_with(input, faults, |_, _| Ok(()))
+    }
+
+    /// Merge with a caller-supplied same-transaction side effect (used by the
+    /// runtime to keep FTS synchronized with a merged write/delete).
+    pub fn merge_text_file_from_version_with<F>(
+        &mut self,
+        input: &MergeTextFileFromVersion,
+        faults: &dyn FaultInjector,
+        after: F,
+    ) -> Result<MergeTextFileResult, DomainError>
+    where
+        F: Fn(&Connection, &MergeTextFileResult) -> Result<(), DomainError>,
+    {
         // note: request-id replay is deferred until all four result variants can be reconstructed.
         validate_path(&input.path)?;
         let outcome = self.store.write_with(faults, |tx| {
@@ -218,16 +232,20 @@ impl VersionedTextStore<'_> {
             };
             let comparison = compare_text_file_versions_in_db(tx, &compare_input)?;
             if file_states_equal(&comparison.current, &comparison.incoming) {
-                return Ok(MergeTextFileResult::Unchanged {
+                let result = MergeTextFileResult::Unchanged {
                     reason: MergeUnchangedReason::AlreadySame,
                     comparison,
-                });
+                };
+                after(tx, &result)?;
+                return Ok(result);
             }
             if file_states_equal(&comparison.incoming, &comparison.base) {
-                return Ok(MergeTextFileResult::Unchanged {
+                let result = MergeTextFileResult::Unchanged {
                     reason: MergeUnchangedReason::SourceUnchanged,
                     comparison,
-                });
+                };
+                after(tx, &result)?;
+                return Ok(result);
             }
 
             if file_states_equal(&comparison.current, &comparison.base) {
@@ -242,13 +260,17 @@ impl VersionedTextStore<'_> {
                             Preimage::Present(snapshot.blob_sha256.clone())
                         });
                     enqueue_write(tx, &write, preimage, "merge")?;
-                    return Ok(MergeTextFileResult::Write { comparison, write });
+                    let result = MergeTextFileResult::Write { comparison, write };
+                    after(tx, &result)?;
+                    return Ok(result);
                 }
                 let delete_input = merge_delete_input(input);
                 validate_delete_input(&delete_input)?;
                 let delete = delete_text_in_tx(tx, &delete_input)?;
                 enqueue_delete(tx, &delete, "merge")?;
-                return Ok(MergeTextFileResult::Delete { comparison, delete });
+                let result = MergeTextFileResult::Delete { comparison, delete };
+                after(tx, &result)?;
+                return Ok(result);
             }
 
             if let (Some(base), Some(current), Some(incoming)) =
@@ -265,7 +287,9 @@ impl VersionedTextStore<'_> {
                     Preimage::Present(current.blob_sha256.clone()),
                     "merge",
                 )?;
-                return Ok(MergeTextFileResult::Write { comparison, write });
+                let result = MergeTextFileResult::Write { comparison, write };
+                after(tx, &result)?;
+                return Ok(result);
             }
 
             if input.conflict_id.is_empty() {
@@ -285,10 +309,12 @@ impl VersionedTextStore<'_> {
                 params![conflict.conflict_id, conflict.created_at_ms],
             )
             .map_err(DomainError::sql_persist)?;
-            Ok(MergeTextFileResult::Conflict {
+            let result = MergeTextFileResult::Conflict {
                 comparison,
                 conflict: Box::new(conflict),
-            })
+            };
+            after(tx, &result)?;
+            Ok(result)
         })?;
         committed(outcome)
     }

@@ -54,8 +54,11 @@ pub use tokio_util::sync::CancellationToken;
 
 pub use dohc_engine_collab::{AppendOutcome, ContentKind, DocKey};
 pub use dohc_engine_domain::{
-    CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureManifestSeedEntry,
-    CaptureRetire, CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ResolveTextConflict,
-    ResolveTextConflictResult, TextConflict, TextSnapshot, WriteResult, WriteText,
+    BinaryWriteResult, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
+    CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult, CaptureSecret,
+    CaptureSecretRetire, CompareTextFileVersions, DeleteResult, DeleteTextFile,
+    MergeTextFileFromVersion, MergeTextFileResult, RenameResult, RenameTextFile,
+    ResolveTextConflict, ResolveTextConflictResult, RollbackTextFileMutation, TextConflict,
+    TextSnapshot, VersionFileChange, VersionedTextComparison, WriteBinary, WriteResult, WriteText,
 };
 pub use dohc_engine_sync::{ApplyOutcome, ConflictApplyResult, ReplicationEnvelope};
