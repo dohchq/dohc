@@ -52,6 +52,7 @@ interface LoopbackVersion {
   forkVersionId?: string;
   forkMomentId?: string;
   files: Map<string, LoopbackFile>;
+  textForkBase: Map<string, LoopbackFile>;
   secrets: Map<string, string>;
   secretForkBase: Map<string, string>;
 }
@@ -65,7 +66,7 @@ interface InternalSecretMoment {
 interface WorkspaceState {
   versioned: boolean;
   versions: Map<string, LoopbackVersion>;
-  activeVersionId: string;
+  activeVersionId?: string;
   moments: Map<string, InternalMoment>;
   secretMoments: Map<string, InternalSecretMoment>;
   blobs: Map<string, number[]>;
@@ -177,8 +178,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   seedTextFile(input: SeedVersionedTextInput): void {
     const state = this.workspace(input.workspace);
-    state.versioned = true;
-    const version = this.version(state, input.versionId ?? "main");
+    const versionId = input.versionId ?? "main";
+    const version = versionId === "main"
+      ? this.ensureMain(state, input.workspace)
+      : this.version(state, versionId);
     const objectId = input.objectId ?? `object-${this.nextObjectId++}`;
     const momentId = input.momentId ?? `moment-${this.nextMomentId++}`;
     this.assertFreshMoment(state, momentId);
@@ -208,8 +211,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   seedBinaryFile(input: SeedVersionedBinaryInput): void {
     const state = this.workspace(input.workspace);
-    state.versioned = true;
-    const version = this.version(state, input.versionId ?? "main");
+    const versionId = input.versionId ?? "main";
+    const version = versionId === "main"
+      ? this.ensureMain(state, input.workspace)
+      : this.version(state, versionId);
     const objectId = input.objectId ?? `object-${this.nextObjectId++}`;
     const momentId = input.momentId ?? `moment-${this.nextMomentId++}`;
     this.assertFreshMoment(state, momentId);
@@ -277,14 +282,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
       case VERSIONED_METHOD.binaryReadBlob:
         return this.binaryReadBlob(state, params);
       case VERSIONED_METHOD.versionsCreateNamed:
-        return this.createNamed(state, workspace, params);
+        return this.createNamed(state, workspace, params, request);
       case VERSIONED_METHOD.versionsSetActive:
         return this.setActive(state, params);
       case VERSIONED_METHOD.versionsEnsureMain:
-        state.versioned = true;
-        return this.versionJson(this.version(state, "main"));
+        return this.versionJson(this.ensureMain(state, workspace));
       case VERSIONED_METHOD.versionsActive:
-        return state.versioned
+        return state.versioned && state.activeVersionId !== undefined
           ? this.versionJson(this.version(state, state.activeVersionId))
           : null;
       case VERSIONED_METHOD.versionsMerge:
@@ -327,8 +331,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
     params: JsonObject,
     request: Request,
   ): JsonValue {
-    state.versioned = true;
-    const version = this.version(state, requiredString(params, "versionId", "write"));
+    const version = this.mutationVersion(
+      state,
+      workspace,
+      requiredString(params, "versionId", "write"),
+    );
     const path = requiredString(params, "path", "write");
     const text = requiredString(params, "text", "write");
     if (utf8Length(text) > INBAND_LIMIT_BYTES) throw new Error("content-exceeds-inband-cap");
@@ -408,8 +415,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
     params: JsonObject,
     request: Request,
   ): JsonValue {
-    state.versioned = true;
-    const version = this.version(state, requiredString(params, "versionId", "binary write"));
+    const version = this.mutationVersion(
+      state,
+      workspace,
+      requiredString(params, "versionId", "binary write"),
+    );
     const path = requiredString(params, "path", "binary write");
     const origin = requiredOrigin(params);
     const rawBytes = params.bytes;
@@ -459,6 +469,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // Daemon parity: writing the SAME bytes over an equal binary head is a
     // content-equality dedup — no new moment, no materialization work.
     if (before?.contentKind === "binary" && before.binarySha === binarySha) {
+      const headMoment = state.moments.get(before.latestMomentId);
+      if (!headMoment) throw new Error("state-corrupt");
       const result: JsonObject = {
         object: this.fileObject(workspace, before.objectId, before.updatedAtMs),
         snapshot: {
@@ -474,7 +486,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
           latestMomentId: before.latestMomentId,
           metadataOrigin: before.metadataOrigin,
         },
-        moment: null,
+        moment: this.capMoment(headMoment.wire),
         deduped: true,
         materializeEnqueued: false,
         materialized: false,
@@ -536,10 +548,18 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const toPath = requiredString(params, "toPath", "rename");
     const origin = requiredOrigin(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
-    const replay = this.replay(state, requestId, params);
+    const momentId = requestId
+      ? this.generatedRequestId("moment", requestId, toPath)
+      : `moment-${this.nextMomentId++}`;
+    const fingerprint = this.renameFingerprint(
+      workspace,
+      params,
+      origin,
+      momentId,
+    );
+    const replay = this.replay(state, requestId, params, fingerprint);
     if (replay) return replay;
     const before = this.file(version, fromPath);
-    const momentId = `moment-${this.nextMomentId++}`;
     this.assertFreshMoment(state, momentId);
     const now = optionalNumber(params, "nowMs") ?? this.clock++;
     const after: LoopbackFile = {
@@ -566,7 +586,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       moment: this.capMoment(moment),
       deduped: false,
     };
-    this.recordReplay(state, requestId, params, result);
+    this.recordReplay(state, requestId, params, result, fingerprint);
     return result;
   }
 
@@ -580,10 +600,18 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const path = requiredString(params, "path", "delete");
     const origin = requiredOrigin(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
-    const replay = this.replay(state, requestId, params);
+    const momentId = requestId
+      ? this.generatedRequestId("moment", requestId, path)
+      : `moment-${this.nextMomentId++}`;
+    const fingerprint = this.deleteFingerprint(
+      workspace,
+      params,
+      origin,
+      momentId,
+    );
+    const replay = this.replay(state, requestId, params, fingerprint);
     if (replay) return replay;
     const before = this.file(version, path);
-    const momentId = `moment-${this.nextMomentId++}`;
     this.assertFreshMoment(state, momentId);
     const now = optionalNumber(params, "nowMs") ?? this.clock++;
     const tombstone: LoopbackFile = {
@@ -604,12 +632,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
       moment: this.capMoment(moment),
       deduped: false,
     };
-    this.recordReplay(state, requestId, params, result);
+    this.recordReplay(state, requestId, params, result, fingerprint);
     return result;
   }
 
   private textRollback(state: WorkspaceState, params: JsonObject, request: Request): JsonValue {
-    state.versioned = true;
     requiredOrigin(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
     const replay = this.replay(state, requestId, params);
@@ -719,9 +746,20 @@ export class VersionedLoopbackEngine implements EngineTransport {
       : { bytesBase64: null, byteLength: bytes.length, inbandLimitBytes: INBAND_LIMIT_BYTES };
   }
 
-  private createNamed(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
-    state.versioned = true;
+  private createNamed(
+    state: WorkspaceState,
+    workspace: string,
+    params: JsonObject,
+    request: Request,
+  ): JsonValue {
     const from = this.version(state, requiredString(params, "fromVersionId", "createNamed"));
+    const requestId = request.idempotencyKey ?? undefined;
+    const fingerprint = JSON.stringify({
+      name: requiredString(params, "name", "createNamed"),
+      fromVersionId: from.id,
+    });
+    const replay = this.replay(state, requestId, params, fingerprint, false);
+    if (replay) return replay;
     const id = `version-${this.nextVersionId++}`;
     const version: LoopbackVersion = {
       id,
@@ -732,11 +770,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
       forkVersionId: from.id,
       forkMomentId: this.latestMomentId(from),
       files: new Map([...from.files].map(([path, file]) => [path, copyFile(file)])),
+      textForkBase: new Map([...from.files].map(([path, file]) => [path, copyFile(file)])),
       secrets: new Map(from.secrets),
       secretForkBase: new Map(from.secrets),
     };
     state.versions.set(id, version);
-    return this.versionJson(version);
+    const result = this.versionJson(version);
+    this.recordReplay(state, requestId, params, result, fingerprint);
+    return result;
   }
 
   private setActive(state: WorkspaceState, params: JsonObject): JsonValue {
@@ -761,22 +802,80 @@ export class VersionedLoopbackEngine implements EngineTransport {
   ): JsonValue {
     const origin = requiredOrigin(params);
     const requestId = optionalString(params, "requestId") ?? request.idempotencyKey ?? undefined;
-    const replay = this.replay(state, requestId, params);
-    if (replay) return replay;
-    const source = this.version(state, requiredString(params, "sourceVersionId", "merge"));
-    const target = this.version(state, requiredString(params, "targetVersionId", "merge"));
+    const sourceVersionId = requiredString(params, "sourceVersionId", "merge");
+    const targetVersionId = requiredString(params, "targetVersionId", "merge");
     const path = requiredString(params, "path", "merge");
+    const objectId = requestId
+      ? this.generatedRequestId("object", requestId, path)
+      : `object-${this.nextObjectId++}`;
+    const momentId = requestId
+      ? this.generatedRequestId("moment", requestId, path)
+      : `moment-${this.nextMomentId++}`;
+    const conflictId = requestId
+      ? this.generatedRequestId("conflict", requestId, path)
+      : `conflict-${this.nextMomentId++}`;
+    const fingerprint = this.mergeFingerprint(
+      workspace,
+      params,
+      origin,
+      objectId,
+      momentId,
+      conflictId,
+    );
+    const replay = this.replay(state, requestId, params, fingerprint);
+    if (replay) {
+      return {
+        ...replay,
+        materializeEnqueued: false,
+        materialized: false,
+        materializeOutcome: "skipped",
+      };
+    }
+    const source = this.version(state, sourceVersionId);
+    const target = this.version(state, targetVersionId);
+    if (source.kind !== "named" || source.forkVersionId !== target.id) {
+      throw new Error("fork-base-not-found");
+    }
     const incoming = source.files.get(path);
-    if (this.filesEqual(incoming, target.files.get(path))) {
-      const result: JsonObject = { status: "unchanged", deduped: false };
-      this.recordReplay(state, requestId, params, result);
+    const current = target.files.get(path);
+    const base = source.textForkBase.get(path);
+    if (this.filesEqual(incoming, current)) {
+      const result: JsonObject = {
+        status: "unchanged",
+        deduped: false,
+        materializeEnqueued: false,
+        materialized: false,
+        materializeOutcome: "skipped",
+      };
+      this.recordReplay(state, requestId, params, result, fingerprint);
       return result;
     }
-    // The loopback intentionally models only a conflict-free fast-forward.
+    if (this.filesEqual(incoming, base)) {
+      const result: JsonObject = {
+        status: "unchanged",
+        deduped: false,
+        materializeEnqueued: false,
+        materialized: false,
+        materializeOutcome: "skipped",
+      };
+      this.recordReplay(state, requestId, params, result, fingerprint);
+      return result;
+    }
+    if (!this.filesEqual(current, base)) {
+      const result: JsonObject = {
+        status: "conflict",
+        deduped: false,
+        materializeEnqueued: false,
+        materialized: false,
+        materializeOutcome: "skipped",
+      };
+      this.recordReplay(state, requestId, params, result, fingerprint);
+      return result;
+    }
+    const materializeEnqueued = target.id === state.activeVersionId;
     if (!incoming) {
       const before = this.file(target, path);
       const now = optionalNumber(params, "nowMs") ?? this.clock++;
-      const momentId = `moment-${this.nextMomentId++}`;
       const tombstone: LoopbackFile = {
         objectId: before.objectId,
         contentKind: before.contentKind,
@@ -795,18 +894,20 @@ export class VersionedLoopbackEngine implements EngineTransport {
         object: this.fileObject(workspace, before.objectId, now),
         moment: this.capMoment(moment),
         deduped: false,
+        materializeEnqueued,
+        materialized: materializeEnqueued,
+        materializeOutcome: materializeEnqueued ? "applied" : "skipped",
       };
-      this.recordReplay(state, requestId, params, result);
+      this.recordReplay(state, requestId, params, result, fingerprint);
       return result;
     }
     const before = target.files.get(path);
     const now = optionalNumber(params, "nowMs") ?? this.clock++;
-    const momentId = `moment-${this.nextMomentId++}`;
     const copied: LoopbackFile = {
       ...copyFile(incoming),
       // Daemon parity: a path that already exists in the target keeps its
       // object identity; the source id binds only NEW target paths.
-      objectId: before?.objectId ?? incoming.objectId,
+      objectId: before?.objectId ?? objectId,
       updatedAtMs: now,
       latestMomentId: momentId,
       metadataOrigin: origin,
@@ -827,8 +928,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
       snapshot: this.snapshotMetadata(workspace, target.id, path, copied),
       moment: this.capMoment(moment),
       deduped: false,
+      materializeEnqueued,
+      materialized: materializeEnqueued,
+      materializeOutcome: materializeEnqueued ? "applied" : "skipped",
     };
-    this.recordReplay(state, requestId, params, result);
+    this.recordReplay(state, requestId, params, result, fingerprint);
     return result;
   }
 
@@ -857,8 +961,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private secretWrite(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
-    state.versioned = true;
-    const version = this.version(state, requiredString(params, "versionId", "secret write"));
+    const version = this.mutationVersion(
+      state,
+      workspace,
+      requiredString(params, "versionId", "secret write"),
+    );
     const path = requiredString(params, "path", "secret write");
     const text = requiredString(params, "text", "secret write");
     if (utf8Length(text) > INBAND_LIMIT_BYTES) throw new Error("content-exceeds-inband-cap");
@@ -874,8 +981,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private secretDelete(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
-    state.versioned = true;
-    const version = this.version(state, requiredString(params, "versionId", "secret delete"));
+    const version = this.mutationVersion(
+      state,
+      workspace,
+      requiredString(params, "versionId", "secret delete"),
+    );
     const path = requiredString(params, "path", "secret delete");
     const origin = requiredOrigin(params);
     const momentId = requiredString(params, "momentId", "secret delete");
@@ -1039,20 +1149,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
   private workspace(id: string): WorkspaceState {
     let state = this.workspaces.get(id);
     if (!state) {
-      const main: LoopbackVersion = {
-        id: "main",
-        workspaceId: id,
-        kind: "main",
-        name: "main",
-        createdAtMs: this.clock++,
-        files: new Map(),
-        secrets: new Map(),
-        secretForkBase: new Map(),
-      };
       state = {
         versioned: false,
-        versions: new Map([[main.id, main]]),
-        activeVersionId: main.id,
+        versions: new Map(),
         moments: new Map(),
         secretMoments: new Map(),
         blobs: new Map(),
@@ -1061,6 +1160,41 @@ export class VersionedLoopbackEngine implements EngineTransport {
       this.workspaces.set(id, state);
     }
     return state;
+  }
+
+  private ensureMain(state: WorkspaceState, workspace: string): LoopbackVersion {
+    const existing = state.versions.get("main");
+    if (existing) {
+      state.versioned = true;
+      state.activeVersionId ??= existing.id;
+      return existing;
+    }
+    const main: LoopbackVersion = {
+      id: "main",
+      workspaceId: workspace,
+      kind: "main",
+      name: "main",
+      createdAtMs: this.clock++,
+      files: new Map(),
+      textForkBase: new Map(),
+      secrets: new Map(),
+      secretForkBase: new Map(),
+    };
+    state.versions.set(main.id, main);
+    state.versioned = true;
+    state.activeVersionId = main.id;
+    return main;
+  }
+
+  private mutationVersion(
+    state: WorkspaceState,
+    workspace: string,
+    versionId: string,
+  ): LoopbackVersion {
+    if (versionId === "main" && !state.versions.has(versionId)) {
+      return this.ensureMain(state, workspace);
+    }
+    return this.version(state, versionId);
   }
 
   private version(state: WorkspaceState, id: string): LoopbackVersion {
@@ -1100,6 +1234,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     requestId: string | undefined,
     params: JsonObject,
     fingerprint = JSON.stringify(params),
+    markDeduped = true,
   ): JsonObject | undefined {
     if (!requestId) return undefined;
     const recorded = state.replays.get(requestId);
@@ -1107,7 +1242,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (recorded.fingerprint !== fingerprint) {
       throw new Error("idempotency-key-reuse-mismatch");
     }
-    return { ...recorded.result, deduped: true };
+    return markDeduped
+      ? { ...recorded.result, deduped: true }
+      : { ...recorded.result };
   }
 
   private recordReplay(
@@ -1163,6 +1300,60 @@ export class VersionedLoopbackEngine implements EngineTransport {
     });
   }
 
+  private renameFingerprint(
+    workspace: string,
+    params: JsonObject,
+    origin: VersionedOrigin,
+    momentId: string,
+  ): string {
+    return JSON.stringify({
+      workspaceId: workspace,
+      versionId: params.versionId,
+      fromPath: params.fromPath,
+      toPath: params.toPath,
+      momentId,
+      metadataOrigin: origin,
+      authorJson: this.writeAuthorFingerprint(params),
+    });
+  }
+
+  private deleteFingerprint(
+    workspace: string,
+    params: JsonObject,
+    origin: VersionedOrigin,
+    momentId: string,
+  ): string {
+    return JSON.stringify({
+      workspaceId: workspace,
+      versionId: params.versionId,
+      path: params.path,
+      momentId,
+      metadataOrigin: origin,
+      authorJson: this.writeAuthorFingerprint(params),
+    });
+  }
+
+  private mergeFingerprint(
+    workspace: string,
+    params: JsonObject,
+    origin: VersionedOrigin,
+    objectId: string,
+    momentId: string,
+    conflictId: string,
+  ): string {
+    return JSON.stringify({
+      workspaceId: workspace,
+      targetVersionId: params.targetVersionId,
+      sourceVersionId: params.sourceVersionId,
+      path: params.path,
+      momentId,
+      objectId,
+      conflictId,
+      metadataOrigin: origin,
+      authorJson: this.writeAuthorFingerprint(params),
+    });
+  }
+
   private writeAuthorFingerprint(params: JsonObject): string | null {
     if (params.author !== undefined) return JSON.stringify(params.author);
     const legacy = params.authorJson;
@@ -1175,6 +1366,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
   }
 
   private generatedWriteId(prefix: "object" | "moment", requestId: string, path: string): string {
+    return this.generatedRequestId(prefix, requestId, path);
+  }
+
+  private generatedRequestId(prefix: string, requestId: string, path: string): string {
     const digest = createHash("sha256");
     for (const field of [requestId, path]) {
       const bytes = Buffer.from(field, "utf8");

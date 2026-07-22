@@ -1271,17 +1271,24 @@ impl EngineService {
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
-                open.root,
+                open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
             .await;
         drop(session_serial);
-        let result = result.map_err(map_runtime)?;
-        Ok(match result {
+        let execution = result.map_err(map_runtime)?;
+        let materialize_enqueued = execution.materialize_enqueued;
+        let materialized = execution.materialized;
+        let materialize_outcome = materialize_outcome_name(execution.materialize_outcome);
+        Ok(match execution.merge {
             MergeTextFileResult::Unchanged { deduped, .. } => json!({
                 "status": "unchanged",
                 "deduped": deduped,
+                "materializeEnqueued": materialize_enqueued,
+                "materialized": materialized,
+                "materializeOutcome": materialize_outcome,
             }),
             MergeTextFileResult::Write { write, .. } => json!({
                 "status": "merged",
@@ -1290,6 +1297,9 @@ impl EngineService {
                 "snapshot": snapshot_metadata_json(&write.snapshot, "text", None, None),
                 "moment": moment_json(&write.moment),
                 "deduped": write.deduped,
+                "materializeEnqueued": materialize_enqueued,
+                "materialized": materialized,
+                "materializeOutcome": materialize_outcome,
             }),
             MergeTextFileResult::Delete { delete, .. } => json!({
                 "status": "merged",
@@ -1297,10 +1307,16 @@ impl EngineService {
                 "object": file_object_json(&delete.object),
                 "moment": moment_json(&delete.moment),
                 "deduped": delete.deduped,
+                "materializeEnqueued": materialize_enqueued,
+                "materialized": materialized,
+                "materializeOutcome": materialize_outcome,
             }),
             MergeTextFileResult::Conflict { deduped, .. } => json!({
                 "status": "conflict",
                 "deduped": deduped,
+                "materializeEnqueued": materialize_enqueued,
+                "materialized": materialized,
+                "materializeOutcome": materialize_outcome,
             }),
         })
     }

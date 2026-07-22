@@ -99,6 +99,14 @@ pub struct BinaryWriteExecutionResult {
     pub materialize_outcome: PostCommitMaterializeOutcome,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeExecutionResult {
+    pub merge: MergeTextFileResult,
+    pub materialize_enqueued: bool,
+    pub materialized: bool,
+    pub materialize_outcome: PostCommitMaterializeOutcome,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RollbackExecutionResult {
     pub deduped: bool,
@@ -277,9 +285,10 @@ enum Command {
     VersionedTextMerge {
         input: MergeTextFileFromVersion,
         root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-        reply: oneshot::Sender<Result<MergeTextFileResult, RuntimeError>>,
+        reply: oneshot::Sender<Result<MergeExecutionResult, RuntimeError>>,
     },
     CompareVersionFilesPage {
         workspace_id: String,
@@ -1423,14 +1432,16 @@ impl ActorHandle {
         &self,
         input: MergeTextFileFromVersion,
         root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-    ) -> Result<MergeTextFileResult, RuntimeError> {
+    ) -> Result<MergeExecutionResult, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::VersionedTextMerge {
                 input,
                 root_dir,
+                self_writes,
                 faults,
                 token,
                 reply,
@@ -3382,6 +3393,7 @@ fn worker_main(
             Command::VersionedTextMerge {
                 input,
                 root_dir,
+                self_writes,
                 faults,
                 token,
                 reply,
@@ -3390,6 +3402,7 @@ fn worker_main(
                     &mut store,
                     &input,
                     &root_dir,
+                    self_writes.as_ref(),
                     faults.as_ref(),
                     &token,
                 );
@@ -5921,13 +5934,19 @@ fn versioned_text_merge_on_store(
     store: &mut EngineStore,
     input: &MergeTextFileFromVersion,
     root_dir: &std::path::Path,
+    self_writes: &dyn SelfWriteRecorder,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
-) -> Result<MergeTextFileResult, RuntimeError> {
+) -> Result<MergeExecutionResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store)
+    let target_is_active = VersionedTextStore::new(store)
+        .get_active_version(&input.workspace_id)
+        .map_err(RuntimeError::from)?
+        .version_id
+        == input.target_version_id;
+    let result = VersionedTextStore::new(store)
         .merge_text_file_from_version_with(input, faults, |tx, result| {
             match result {
                 MergeTextFileResult::Write { write, .. } => upsert_file_search_index(
@@ -5951,7 +5970,86 @@ fn versioned_text_merge_on_store(
             }
             Ok(())
         })
-        .map_err(RuntimeError::from)
+        .map_err(RuntimeError::from)?;
+    let (moment_id, deduped) = match &result {
+        MergeTextFileResult::Write { write, .. } => {
+            (write.moment.moment_id.as_str(), write.deduped)
+        }
+        MergeTextFileResult::Delete { delete, .. } => {
+            (delete.moment.moment_id.as_str(), delete.deduped)
+        }
+        MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => {
+            return Ok(MergeExecutionResult {
+                merge: result,
+                materialize_enqueued: false,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+            });
+        }
+    };
+    if !target_is_active {
+        return Ok(MergeExecutionResult {
+            merge: result,
+            materialize_enqueued: false,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
+    }
+
+    let job_id = format!("merge-mat_{moment_id}");
+    let job = match store.load_materialization_job(&job_id) {
+        Ok(Some(job)) => job,
+        Ok(None) if deduped => {
+            return Ok(MergeExecutionResult {
+                merge: result,
+                materialize_enqueued: false,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+            });
+        }
+        Ok(None) => {
+            return Ok(MergeExecutionResult {
+                merge: result,
+                materialize_enqueued: true,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
+        }
+        Err(error) => {
+            eprintln!(
+                "engine: merge committed but loading its materialization job failed: {error}"
+            );
+            return Ok(MergeExecutionResult {
+                merge: result,
+                materialize_enqueued: !deduped,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
+        }
+    };
+    if deduped && job.status != JobStatus::Pending {
+        return Ok(MergeExecutionResult {
+            merge: result,
+            materialize_enqueued: false,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
+    }
+    let (materialized, materialize_outcome) = materialize_pending_job(
+        store,
+        root_dir,
+        &input.workspace_id,
+        &job,
+        self_writes,
+        input.now_ms,
+        faults,
+    );
+    Ok(MergeExecutionResult {
+        merge: result,
+        materialize_enqueued: !deduped,
+        materialized,
+        materialize_outcome,
+    })
 }
 
 fn capture_ingest_on_store(

@@ -150,7 +150,69 @@ fn merge_input(path: &str, moment: &str, conflict: &str, object: &str) -> MergeT
 }
 
 #[test]
-fn compare_requires_named_durable_fork_base_and_classifies_all_statuses() {
+fn empty_main_fork_compares_and_merges_its_first_file_with_an_absent_base() {
+    // MUTATION: restore the fork_base_snapshots row-count gate -> both the
+    // comparison and merge fail with fork-base-not-found.
+    let (_scratch, mut store) = open();
+    let mut versions = VersionedTextStore::new(&mut store);
+    fork(&mut versions);
+    versions
+        .write_text(
+            &write(
+                "feat",
+                "first.md",
+                "the branch's first file",
+                "empty-fork-first",
+                "empty-fork-object",
+            ),
+            &NO_FAULTS,
+        )
+        .expect("first branch write");
+
+    let comparison = versions
+        .compare_text_file_versions(&CompareTextFileVersions {
+            workspace_id: WS.to_owned(),
+            target_version_id: "main".to_owned(),
+            source_version_id: "feat".to_owned(),
+            path: "first.md".to_owned(),
+        })
+        .expect("empty fork comparison");
+    assert!(comparison.base.is_none());
+    assert!(comparison.current.is_none());
+    assert_eq!(
+        comparison
+            .incoming
+            .as_ref()
+            .map(|snapshot| snapshot.text.as_str()),
+        Some("the branch's first file")
+    );
+
+    assert!(matches!(
+        versions
+            .merge_text_file_from_version(
+                &merge_input(
+                    "first.md",
+                    "empty-fork-merge",
+                    "empty-fork-conflict",
+                    "empty-fork-target-object",
+                ),
+                &NO_FAULTS,
+            )
+            .expect("empty fork merge"),
+        MergeTextFileResult::Write { .. }
+    ));
+    assert_eq!(
+        versions
+            .read_text(WS, "main", "first.md")
+            .expect("read merged first file")
+            .expect("merged first file exists")
+            .text,
+        "the branch's first file"
+    );
+}
+
+#[test]
+fn compare_requires_named_fork_metadata_and_classifies_all_statuses() {
     let (_scratch, mut store) = open();
     let mut vt = VersionedTextStore::new(&mut store);
     for (index, path) in ["same.md", "incoming.md", "current.md", "diverged.md"]
@@ -230,15 +292,16 @@ fn compare_requires_named_durable_fork_base_and_classifies_all_statuses() {
         })
         .expect("delete durable bases");
     let vt = VersionedTextStore::new(&mut store);
-    let err = vt
+    let comparison = vt
         .compare_text_file_versions(&CompareTextFileVersions {
             workspace_id: WS.to_owned(),
             target_version_id: "main".to_owned(),
             source_version_id: "feat".to_owned(),
             path: "same.md".to_owned(),
         })
-        .expect_err("durable rows required");
-    assert_eq!(err.code(), "fork-base-not-found");
+        .expect("fork metadata still proves an absent per-path base");
+    assert!(comparison.base.is_none());
+    assert_eq!(comparison.status, ComparisonStatus::Same);
 }
 
 #[test]

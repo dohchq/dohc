@@ -740,18 +740,6 @@ fn compare_text_file_versions_in_db(
     {
         return Err(DomainError::ForkBaseNotFound);
     }
-    let base_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM fork_base_snapshots \
-             WHERE workspace_id = ?1 AND version_id = ?2",
-            params![input.workspace_id, input.source_version_id],
-            |row| row.get(0),
-        )
-        .map_err(DomainError::sql_corrupt)?;
-    if base_count == 0 {
-        return Err(DomainError::ForkBaseNotFound);
-    }
-
     // BINHEAD: the three-way text comparison below reads snapshots via an inner
     // `JOIN blobs`, so a binary head (`blob_sha256 = NULL`) reads as ABSENT. If
     // any of the three sides holds a binary head at this path, a text merge

@@ -408,8 +408,18 @@ export type VersionsSetActiveResult = VersionRecord;
 export type VersionsEnsureMainResult = VersionRecord;
 export type VersionsActiveResult = VersionRecord | null;
 
+type MergeMaterializationResult = {
+  materializeEnqueued: boolean;
+  materialized: boolean;
+  materializeOutcome: MaterializeOutcome;
+};
+
 export type VersionsMergeResult =
-  | (JsonObject & { status: "unchanged" | "conflict"; deduped: boolean })
+  | (JsonObject &
+      MergeMaterializationResult & {
+        status: "unchanged" | "conflict";
+        deduped: boolean;
+      })
   | (JsonObject & {
       status: "merged";
       writeKind: "write";
@@ -417,14 +427,14 @@ export type VersionsMergeResult =
       snapshot: SnapshotMetadata;
       moment: MomentRecord;
       deduped: boolean;
-    })
+    } & MergeMaterializationResult)
   | (JsonObject & {
       status: "merged";
       writeKind: "delete";
       object: FileObject;
       moment: MomentRecord;
       deduped: boolean;
-    });
+    } & MergeMaterializationResult);
 
 export type VersionsCompareResult = JsonObject & {
   status: VersionedComparisonStatus;
@@ -859,6 +869,50 @@ export function decodeVersionRecord(value: JsonValue): VersionRecord {
 
 export function decodeVersionsActiveResult(value: JsonValue): VersionsActiveResult {
   return value === null ? null : decodeVersionRecord(value);
+}
+
+export function decodeVersionsMergeResult(value: JsonValue): VersionsMergeResult {
+  const label = "versionedText.merge result";
+  const object = objectValue(value, label);
+  const status = object.status;
+  const materialization: MergeMaterializationResult = {
+    materializeEnqueued: booleanValue(object, "materializeEnqueued", label),
+    materialized: booleanValue(object, "materialized", label),
+    materializeOutcome: materializeOutcomeValue(object, label),
+  };
+  if (status === "unchanged" || status === "conflict") {
+    return {
+      status,
+      deduped: booleanValue(object, "deduped", label),
+      ...materialization,
+    };
+  }
+  if (status !== "merged") {
+    throw new VersionedProtocolShapeError(`${label}.status is invalid.`);
+  }
+  const writeKind = object.writeKind;
+  if (writeKind === "write") {
+    return {
+      status,
+      writeKind,
+      object: fileObjectValue(object.object ?? null, `${label}.object`),
+      snapshot: snapshotMetadataValue(object.snapshot ?? null, `${label}.snapshot`),
+      moment: momentValue(object.moment ?? null, `${label}.moment`),
+      deduped: booleanValue(object, "deduped", label),
+      ...materialization,
+    };
+  }
+  if (writeKind === "delete") {
+    return {
+      status,
+      writeKind,
+      object: fileObjectValue(object.object ?? null, `${label}.object`),
+      moment: momentValue(object.moment ?? null, `${label}.moment`),
+      deduped: booleanValue(object, "deduped", label),
+      ...materialization,
+    };
+  }
+  throw new VersionedProtocolShapeError(`${label}.writeKind is invalid.`);
 }
 
 export function decodeVersionsCompareFilesResult(value: JsonValue): VersionsCompareFilesResult {

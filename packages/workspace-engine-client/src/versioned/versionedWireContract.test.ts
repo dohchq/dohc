@@ -26,6 +26,7 @@ import {
   decodeVersionedTextWriteResult,
   decodeVersionsActiveResult,
   decodeVersionsCompareFilesResult,
+  decodeVersionsMergeResult,
   type MomentsGetParams,
   type MomentsListParams,
   type SearchEnsureIndexParams,
@@ -280,7 +281,7 @@ describe("versioned typed loopback", () => {
     ).toEqual({ bytesBase64: "AAH+/w==" });
   });
 
-  it("round-trips version creation, activation, compare, merge, and compareFiles", async () => {
+  it("round-trips versions and dedupes merge retries when nowMs changes", async () => {
     const engine = new VersionedLoopbackEngine();
     engine.seedTextFile({ workspace: WORKSPACE, path: "seed.md", text: "main" });
     const activeParams: WorkspaceOnlyParams = { workspaceId: WORKSPACE };
@@ -338,6 +339,16 @@ describe("versioned typed loopback", () => {
       ).entries,
     ).toEqual([{ path: "seed.md", status: "modified" }]);
 
+    // The merge targets main, so main must be ACTIVE for the materialize
+    // trio to report applied — daemon parity: inactive targets stay DB-only.
+    expect(
+      decodeVersionRecord(
+        await call(engine, 65, VERSIONED_METHOD.versionsSetActive, {
+          workspaceId: WORKSPACE,
+          versionId: "main",
+        }),
+      ).id,
+    ).toBe("main");
     const mergeParams: VersionsMergeParams = {
       path: "seed.md",
       sourceVersionId: named.id,
@@ -346,11 +357,36 @@ describe("versioned typed loopback", () => {
       requestId: "merge-request",
     };
     expect(
-      await call(engine, 7, VERSIONED_METHOD.versionsMerge, mergeParams),
-    ).toMatchObject({ status: "merged", writeKind: "write", deduped: false });
+      decodeVersionsMergeResult(
+        await call(engine, 7, VERSIONED_METHOD.versionsMerge, {
+          ...mergeParams,
+          nowMs: 40,
+        }),
+      ),
+    ).toMatchObject({
+      status: "merged",
+      writeKind: "write",
+      deduped: false,
+      materializeEnqueued: true,
+      materialized: true,
+      materializeOutcome: "applied",
+    });
     expect(
-      await call(engine, 8, VERSIONED_METHOD.versionsMerge, mergeParams),
-    ).toMatchObject({ status: "merged", writeKind: "write", deduped: true });
+      decodeVersionsMergeResult(
+        await call(engine, 8, VERSIONED_METHOD.versionsMerge, {
+          ...mergeParams,
+          nowMs: 99,
+        }),
+      ),
+    ).toMatchObject({
+      // MUTATION: include nowMs in the merge fingerprint -> replay mismatch.
+      status: "merged",
+      writeKind: "write",
+      deduped: true,
+      materializeEnqueued: false,
+      materialized: false,
+      materializeOutcome: "skipped",
+    });
   });
 
   it("round-trips opaque secret write/fork/compare/apply/restore/delete and protected moments", async () => {
@@ -531,6 +567,53 @@ describe("versioned typed loopback", () => {
 });
 
 describe("loopback contract enforcement", () => {
+  it("returns the existing head moment for binary content-equality dedup", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const first = decodeVersionedBinaryWriteResult(
+      await call(engine, 1, VERSIONED_METHOD.binaryWrite, {
+        versionId: "main",
+        path: "same.bin",
+        bytes: [1, 2, 3],
+        origin: "api",
+        momentId: "binary-original-head",
+        requestId: "binary-original-request",
+      }),
+    );
+    const deduped = decodeVersionedBinaryWriteResult(
+      await call(engine, 2, VERSIONED_METHOD.binaryWrite, {
+        versionId: "main",
+        path: "same.bin",
+        bytes: [1, 2, 3],
+        origin: "api",
+        momentId: "unused-equality-moment",
+        requestId: "binary-content-equality",
+      }),
+    );
+    // MUTATION: return moment:null for content equality -> the strict decoder fails.
+    expect(deduped.deduped).toBe(true);
+    expect(deduped.moment.momentId).toBe(first.moment.momentId);
+  });
+
+  it("replays createNamed by top-level idempotency key with the original version id", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
+    const params: VersionsCreateNamedParams = {
+      workspaceId: WORKSPACE,
+      name: "stable-feature",
+      fromVersionId: "main",
+    };
+    const first = decodeVersionRecord(
+      await call(engine, 2, VERSIONED_METHOD.versionsCreateNamed, params, "create-stable"),
+    );
+    const replay = decodeVersionRecord(
+      await call(engine, 3, VERSIONED_METHOD.versionsCreateNamed, params, "create-stable"),
+    );
+    // MUTATION: bypass createNamed's request ledger -> a second version id is minted.
+    expect(replay).toEqual(first);
+  });
+
   it("persists a fresh target merge moment and stamps the merged file head", async () => {
     const engine = new VersionedLoopbackEngine();
     engine.seedTextFile({
@@ -582,6 +665,100 @@ describe("loopback contract enforcement", () => {
     });
     expect(targetHistory.moments[0]?.momentId).not.toBe("source-before-merge");
     expect(targetHead?.latestMomentId).toBe(targetHistory.moments[0]?.momentId);
+  });
+
+  it("keeps target text edits when the source is unchanged from its fork base", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({ workspace: WORKSPACE, path: "forked.md", text: "base" });
+    const feature = decodeVersionRecord(
+      await call(engine, 1, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        name: "unchanged-source",
+        fromVersionId: "main",
+      }),
+    );
+    await call(engine, 2, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "forked.md",
+      text: "target advanced",
+      origin: "api",
+      requestId: "target-advanced",
+    });
+
+    const merged = decodeVersionsMergeResult(
+      await call(engine, 3, VERSIONED_METHOD.versionsMerge, {
+        sourceVersionId: feature.id,
+        targetVersionId: "main",
+        path: "forked.md",
+        origin: "api",
+        requestId: "unchanged-source-merge",
+      }),
+    );
+    // MUTATION: ignore textForkBase and overwrite differing targets -> fails.
+    expect(merged).toMatchObject({
+      status: "unchanged",
+      materializeEnqueued: false,
+      materialized: false,
+      materializeOutcome: "skipped",
+    });
+    expect(
+      decodeVersionedTextReadResult(
+        await call(engine, 4, VERSIONED_METHOD.textRead, {
+          versionId: "main",
+          path: "forked.md",
+        }),
+      )?.text,
+    ).toBe("target advanced");
+  });
+
+  it("dedupes rename and delete retries when only nowMs changes", async () => {
+    const engine = new VersionedLoopbackEngine();
+    await call(engine, 1, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "clock.md",
+      text: "stable",
+      origin: "api",
+      requestId: "clock-seed",
+    });
+    const renameParams: VersionedTextRenameParams = {
+      versionId: "main",
+      fromPath: "clock.md",
+      toPath: "renamed-clock.md",
+      origin: "api",
+      requestId: "clock-rename",
+      nowMs: 10,
+    };
+    const firstRename = decodeVersionedTextRenameResult(
+      await call(engine, 2, VERSIONED_METHOD.textRename, renameParams),
+    );
+    const replayedRename = decodeVersionedTextRenameResult(
+      await call(engine, 3, VERSIONED_METHOD.textRename, {
+        ...renameParams,
+        nowMs: 20,
+      }),
+    );
+    expect(replayedRename.deduped).toBe(true);
+    expect(replayedRename.moment.momentId).toBe(firstRename.moment.momentId);
+
+    const deleteParams: VersionedTextDeleteParams = {
+      versionId: "main",
+      path: "renamed-clock.md",
+      origin: "api",
+      requestId: "clock-delete",
+      nowMs: 30,
+    };
+    const firstDelete = decodeVersionedTextDeleteResult(
+      await call(engine, 4, VERSIONED_METHOD.textDelete, deleteParams),
+    );
+    const replayedDelete = decodeVersionedTextDeleteResult(
+      await call(engine, 5, VERSIONED_METHOD.textDelete, {
+        ...deleteParams,
+        nowMs: 40,
+      }),
+    );
+    // MUTATION: include nowMs in rename/delete fingerprints -> replay mismatch.
+    expect(replayedDelete.deduped).toBe(true);
+    expect(replayedDelete.moment.momentId).toBe(firstDelete.moment.momentId);
   });
 
   it("treats a same-moment same-value secret write retry as an equality no-op", async () => {
@@ -942,9 +1119,15 @@ describe("loopback contract enforcement", () => {
     expect(engine.secretValue(WORKSPACE, feature.id, ".env")).toBe("B");
   });
 
-  it("returns null active version for a fresh workspace", async () => {
+  it("keeps a fresh workspace versionless until a main write bootstraps it", async () => {
     const engine = new VersionedLoopbackEngine();
-    // MUTATION: versions.active must not synthesize main before versioning is initialized.
+    // MUTATION: pre-install main during workspace access -> this read succeeds.
+    await expect(
+      call(engine, 0, VERSIONED_METHOD.textRead, {
+        versionId: "main",
+        path: "missing.md",
+      }),
+    ).rejects.toThrow("version not found");
     expect(
       decodeVersionsActiveResult(
         await call(engine, 1, VERSIONED_METHOD.versionsActive, {
@@ -952,6 +1135,20 @@ describe("loopback contract enforcement", () => {
         }),
       ),
     ).toBeNull();
+    await call(engine, 2, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "bootstrap.md",
+      text: "main write bootstraps",
+      origin: "api",
+      requestId: "bootstrap-main",
+    });
+    expect(
+      decodeVersionsActiveResult(
+        await call(engine, 3, VERSIONED_METHOD.versionsActive, {
+          workspaceId: WORKSPACE,
+        }),
+      )?.id,
+    ).toBe("main");
   });
 
   it("returns null when a binary read points at a text head", async () => {
@@ -1290,6 +1487,9 @@ describe("loopback contract enforcement", () => {
 
   it("paginates compareFiles by afterPath/nextCursor without overlap", async () => {
     const engine = new VersionedLoopbackEngine();
+    await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
+      workspaceId: WORKSPACE,
+    });
     const named = decodeVersionRecord(
       await call(engine, 1, VERSIONED_METHOD.versionsCreateNamed, {
         workspaceId: WORKSPACE,
