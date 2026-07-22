@@ -862,7 +862,7 @@ describe("loopback contract enforcement", () => {
     });
   });
 
-  it("clamps zero moment limits to one on both loopback histories", async () => {
+  it("refuses a zero moments.list limit and clamps the secret history to one", async () => {
     const engine = new VersionedLoopbackEngine();
     for (const index of [0, 1]) {
       await call(engine, index + 1, VERSIONED_METHOD.textWrite, {
@@ -882,17 +882,20 @@ describe("loopback contract enforcement", () => {
       });
     }
 
-    // MUTATION: refuse limit <= 0 instead of clamping it to the daemon's floor -> fails.
-    const ordinary = decodeMomentsListResult(
-      await call(engine, 5, VERSIONED_METHOD.momentsList, { limit: 0 }),
-    );
+    // Endpoint-specific on purpose: moments.list mirrors the oracle's
+    // normalizeMomentListLimit refusal (limit < 1 = invalid-input), while
+    // secrets.moments.list — a daemon extension with no oracle limit — clamps
+    // to the daemon's floor of 1.
+    // MUTATION: clamp moments.list or refuse secrets.moments.list -> fails.
+    await expect(
+      call(engine, 5, VERSIONED_METHOD.momentsList, { limit: 0 }),
+    ).rejects.toThrow("invalid-input");
     const secret = decodeSecretsMomentsListResult(
       await call(engine, 6, VERSIONED_METHOD.secretsMomentsList, {
         workspaceId: WORKSPACE,
         limit: 0,
       }),
     );
-    expect(ordinary.moments).toHaveLength(1);
     expect(secret.moments).toHaveLength(1);
   });
 

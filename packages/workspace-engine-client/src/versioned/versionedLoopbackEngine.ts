@@ -927,7 +927,14 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const versionId = optionalString(params, "versionId");
     const objectId = optionalString(params, "objectId");
     const before = optionalNumber(params, "beforeMomentOrder");
-    const limit = Math.min(500, Math.max(1, optionalNumber(params, "limit") ?? 200));
+    // The daemon's moments.list caps at 500 and lets the DOMAIN refuse a
+    // non-positive limit (oracle normalizeMomentListLimit contract);
+    // secrets.moments.list clamps instead — endpoint-specific on purpose.
+    const requestedLimit = optionalNumber(params, "limit");
+    if (requestedLimit !== undefined && requestedLimit < 1) {
+      throw new Error("invalid-input");
+    }
+    const limit = Math.min(500, requestedLimit ?? 200);
     const all = [...state.moments.values()]
       .map((moment) => moment.wire)
       .filter((moment) => versionId === undefined || moment.versionId === versionId)
