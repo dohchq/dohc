@@ -432,3 +432,157 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
     assert_eq!(settled.markdown, "fresh body");
     supervisor.close(&db).expect("close actor");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn settle_replay_recovers_cross_platform_via_fault_injection() {
+    // Portable twin of the windows-only exclusive-lock tests: the crash
+    // fault at materialize.after-job-commit leaves the SAME durable state a
+    // transient replace failure does (committed marker + pending ydoc-mat_
+    // job + stale disk), so the replay path gets non-Windows coverage.
+    // Mutation check: drop the pending-job probe from `close_session`'s
+    // prune guard — the prune-close below succeeds and the retry fails on
+    // a dead session.
+    const WS: &str = "ws-portable-replay";
+    const PATH: &str = "notes/portable.md";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor");
+    let state = handle
+        .ydoc_open_state(
+            WS.to_owned(),
+            10,
+            true,
+            None,
+            "main".to_owned(),
+            PATH.to_owned(),
+            Some(ContentKind::Plaintext),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("open");
+    let key = state.key.clone();
+    let doc = dohc_engine_collab::Ydoc::wire();
+    let first = doc.plaintext_insert(0, "v1");
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            first,
+            None,
+            true,
+            20,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("record v1");
+    handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            state.head_blob_sha256.clone(),
+            "session-portable".to_owned(),
+            Arc::new(NoRecorder),
+            30,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("settle v1");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("disk v1"),
+        "v1"
+    );
+
+    let second = doc.plaintext_insert(0, "v2 ");
+    handle
+        .ydoc_record_update(
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            Regime::LocalOnly,
+            second,
+            None,
+            false,
+            40,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("record v2");
+    let faults = dohc_engine_testkit::ScriptedFaults::crash_at(
+        dohc_engine_storage::FaultPoint::MaterializeAfterJobCommit,
+    );
+    let crashed = handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            state.head_blob_sha256.clone(),
+            "session-portable".to_owned(),
+            Arc::new(NoRecorder),
+            50,
+            faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the injected crash must fail the settle");
+    assert!(
+        matches!(crashed, RuntimeError::OperationCrashed),
+        "expected OperationCrashed, got {crashed:?}"
+    );
+    assert!(faults.fired(), "the fault point must have fired");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("disk still v1"),
+        "v1",
+        "the crashed settle must not have replaced the file"
+    );
+
+    // The committed-but-unmaterialized settle blocks a prune-close.
+    let prune_refused = handle
+        .ydoc_close_session(
+            key.clone(),
+            60,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("prune-close must refuse while the settle job is pending");
+    assert!(
+        matches!(
+            prune_refused,
+            RuntimeError::Collab(dohc_engine_collab::CollabError::UnsettledClose)
+        ),
+        "expected UnsettledClose, got {prune_refused:?}"
+    );
+
+    // The retry replays the pending job to disk.
+    let settled = handle
+        .ydoc_settle(
+            scratch.path().to_path_buf(),
+            key.clone(),
+            PATH.to_owned(),
+            ContentKind::Plaintext,
+            state.head_blob_sha256.clone(),
+            "session-portable".to_owned(),
+            Arc::new(NoRecorder),
+            70,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("retry settles");
+    assert_eq!(settled.markdown, "v2 v1");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(PATH)).expect("disk v2"),
+        "v2 v1"
+    );
+    supervisor.close(&db).expect("close actor");
+}

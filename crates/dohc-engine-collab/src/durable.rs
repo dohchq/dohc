@@ -704,9 +704,11 @@ pub fn claim_base_in_tx(
             return match stored_sha {
                 Some(sha) if sha == crate::hex_sha256(base_bytes) => Ok(ClaimOutcome::Resumed),
                 Some(_) => Err(CollabError::BaseStateDiverged),
-                None => Err(CollabError::Corrupt {
-                    reason: "base claimed but the seq-0 base snapshot is missing".to_owned(),
-                }),
+                // Compaction legitimately folds the seq-0 base away once
+                // updates supersede it: divergence is no longer verifiable,
+                // base-once still holds, and refusing would wedge the relay
+                // cursor on a VALID replica. Resume.
+                None => Ok(ClaimOutcome::Resumed),
             };
         }
 

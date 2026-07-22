@@ -151,7 +151,7 @@ pub fn drain_deferred_ydoc_for_key(
 /// disk pipeline advance with the relay cursor instead of trailing it until
 /// someone manually opens and settles the doc.
 #[allow(clippy::too_many_arguments)]
-fn project_and_write_in_tx(
+pub fn project_and_write_in_tx(
     tx: &rusqlite::Transaction<'_>,
     key: &DocKey,
     path: &str,
@@ -243,6 +243,22 @@ fn project_and_write_in_tx(
     enqueue_write(tx, &result, preimage, "ydoc").map_err(|_| SyncError::InvalidInput {
         reason: "ydoc.update materialization enqueue failed",
     })?;
+    // The pulled projection IS the settled artifact (its job materializes
+    // it): advance the marker exactly like a local settle would. Leaving the
+    // OLD locally-settled sha behind would make the next session's settle
+    // expectation trail the remote head — permanent ConflictStaleTarget.
+    tx.execute(
+        "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+        params![
+            key.workspace_id,
+            key.version_id,
+            key.object_id,
+            result.moment.moment_order,
+            projected_sha,
+            now_ms,
+        ],
+    )
+    .map_err(SyncError::persist)?;
     Ok(())
 }
 

@@ -47,6 +47,7 @@ pub use secret_apply::apply_secret_envelope;
 pub use share::{ShareBoundary, ShareSurface, apply_shared_envelope};
 pub use ydoc_apply::{
     LeaseProbe, NoLiveLeases, YdocApplyResult, apply_ydoc_envelope, drain_deferred_ydoc_for_key,
+    project_and_write_in_tx,
 };
 
 pub use dohc_engine_storage::{FaultInjector, FaultPoint, NoFaults};

@@ -162,7 +162,7 @@ pub struct EngineService {
     open_lock: tokio::sync::Mutex<()>,
     next_handle: std::sync::atomic::AtomicU64,
     sessions: Arc<Mutex<HashMap<String, YdocSession>>>,
-    session_ops: tokio::sync::Mutex<()>,
+    session_ops: Arc<tokio::sync::Mutex<()>>,
     leases: LeaseRegistry,
     next_session: std::sync::atomic::AtomicU64,
     self_writes: SelfWriteSuppression,
@@ -186,7 +186,7 @@ impl EngineService {
             open_lock: tokio::sync::Mutex::new(()),
             next_handle: std::sync::atomic::AtomicU64::new(1),
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            session_ops: tokio::sync::Mutex::new(()),
+            session_ops: Arc::new(tokio::sync::Mutex::new(())),
             leases: {
                 // ONE process-wide registry: the supervisor lets multiple
                 // EngineServices open the same workspace root, and per-service
@@ -1362,12 +1362,17 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: YdocRecordUpdateParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
-        let _serial = tokio::select! {
+        // An OWNED guard: it moves INTO the spawned task below, so a dropped
+        // RPC future cannot release the session serial while the record (and
+        // its first_update_pending transition) is still running — a second
+        // recordUpdate would otherwise read the stale flag and refuse
+        // seed-onto-existing-lineage after the first write committed.
+        let serial = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("ydoc.recordUpdate (queued)"));
             }
-            serial = self.session_ops.lock() => serial,
+            serial = Arc::clone(&self.session_ops).lock_owned() => serial,
         };
         let (open, session) = self.ydoc_session(handle.as_ref(), &params.session_id)?;
         let update = base64::engine::general_purpose::STANDARD
@@ -1388,6 +1393,7 @@ impl EngineService {
             let now = now_ms()?;
             let token = cancellation.token();
             let record_task = tokio::spawn(async move {
+                let _serial = serial;
                 let outcome = actor
                     .ydoc_record_update(
                         session.key,

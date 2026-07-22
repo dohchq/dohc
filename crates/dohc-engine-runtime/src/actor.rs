@@ -2160,6 +2160,15 @@ fn worker_main(
                     let jobs = store.list_pending_materialization_jobs()?;
                     let mut completed = 0_usize;
                     for job in jobs {
+                        // Secret jobs carry CIPHERTEXT as their content blob;
+                        // only the secret-aware materializer may produce the
+                        // plaintext. Feeding one to the generic replayer
+                        // would write ciphertext bytes to the user path and
+                        // mark the job complete. Leave them for the secret
+                        // pipeline.
+                        if job.job_id.starts_with("secret-mat_") {
+                            continue;
+                        }
                         match materialize_one(
                             &store,
                             &root_dir,
@@ -2398,6 +2407,7 @@ fn ydoc_open_state_on_store(
         }
     };
     let key = DocKey::new(workspace_id, version_id, object_id)?;
+    let expected_key_matches = expected_key.is_none_or(|expected| *expected == key);
     // RETIRED artifact: the path has NO head (deleted on disk, capture
     // retired the snapshot/alias) but a LOCAL-ONLY lineage that claims a
     // settled artifact survived (workspace teardown skips the prune).
@@ -2408,7 +2418,13 @@ fn ydoc_open_state_on_store(
     // A crashed never-settled draft (last_settled NULL) still resurrects —
     // its CRDT rows are the only copy of the user's edits. Replicated
     // lineages are durable canonical and never clear here.
-    if head.is_none()
+    // POST-LEASE only (same gating as the drain): the pre-lease probe must
+    // stay side-effect-free — a second opener's probe running this clear
+    // while the first session still holds the lease would delete the live
+    // session's unmaterialized CRDT state out from under it.
+    if drain_deferred
+        && expected_key_matches
+        && head.is_none()
         && dohc_engine_collab::read_marker(store, &key)?
             .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::LocalOnly)
         && dohc_engine_collab::read_last_settled_sha(store, &key)?.is_some()
@@ -2449,7 +2465,6 @@ fn ydoc_open_state_on_store(
     // behind its active editor with no event or resync signal. The RPC layer
     // rejects the mismatched open right after; skipping the drain keeps this
     // read side-effect-free for the foreign key.
-    let expected_key_matches = expected_key.is_none_or(|expected| *expected == key);
     if drain_deferred
         && expected_key_matches
         && dohc_engine_collab::read_marker(store, &key)?
@@ -3029,7 +3044,44 @@ fn ydoc_close_session_on_store(
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
     if marker.regime == Regime::Replicated {
-        dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?;
+        let drained = dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?;
+        // Remote content that landed via THIS close-time drain must reach
+        // the visible head too: the session is gone, so nothing else will
+        // settle it — without this projection the CRDT and relay cursor
+        // advance while the markdown head and disk stay at the pre-close
+        // settle until some later reopen. The write rides the same
+        // idempotent-by-sha projection the pull path uses; its job lands
+        // via the open-time replay.
+        if drained > 0 {
+            let path: Option<String> = store.read_with(|conn| {
+                conn.query_row(
+                    "SELECT path FROM path_aliases                      WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                    params![key.workspace_id, key.version_id, key.object_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(StorageError::corrupt_public)
+            })?;
+            if let Some(path) = path
+                && let Some(persisted) = dohc_engine_collab::load_persisted(store, key)?
+            {
+                let projected = store.write_with(faults, |tx| {
+                    dohc_engine_sync::project_and_write_in_tx(
+                        tx,
+                        key,
+                        &path,
+                        &persisted.doc,
+                        marker.content_kind,
+                        "close-drain",
+                        now_ms,
+                        now_ms,
+                    )
+                })?;
+                if matches!(projected, TxnOutcome::Crashed { .. }) {
+                    return Err(RuntimeError::OperationCrashed);
+                }
+            }
+        }
     }
     Ok(Some(outcome))
 }
