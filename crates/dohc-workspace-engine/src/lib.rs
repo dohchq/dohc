@@ -1049,7 +1049,8 @@ impl EngineService {
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
-                open.root,
+                open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
                 Arc::new(NoFaults),
                 cancellation.token(),
             )
@@ -1110,7 +1111,8 @@ impl EngineService {
                     author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                 },
-                open.root,
+                open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
                 Arc::new(NoFaults),
                 cancellation.token(),
             )

@@ -50,13 +50,15 @@ use dohc_engine_domain::{
     SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage, SetFollow, SnapshotMetadata,
     SnapshotView, StartChannelThread, TextConflict, TextSnapshot, VersionFileChangePage,
     VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult,
-    WriteText, apply_secret_file_from_version, capture_manifest_seed, capture_secret_retire,
+    WriteText, apply_secret_file_from_version, binary_delete_job_id, binary_rename_delete_job_id,
+    binary_rename_write_job_id, capture_manifest_seed, capture_secret_retire,
     compare_secret_files_page_keyless, delete_secret_file_keyless, derive_capture_object_id,
-    enqueue_write, fork_version_keyless, get_secret_moment_keyless, has_secret_state,
-    insert_text_conflict_if_absent, list_secret_files_keyless, list_secret_files_keyless_page,
-    list_secret_moments_page_keyless, restore_secret_file_verbatim, secret_file_len_keyless,
-    select_snapshot_by_path_in_tx, validate_addressable_plaintext_path, write_binary_in_tx,
-    write_projected_text_in_tx, write_text_in_tx,
+    enqueue_binary_delete, enqueue_binary_rename, enqueue_write, fork_version_keyless,
+    get_secret_moment_keyless, has_secret_state, insert_text_conflict_if_absent,
+    list_secret_files_keyless, list_secret_files_keyless_page, list_secret_moments_page_keyless,
+    restore_secret_file_verbatim, secret_file_len_keyless, select_snapshot_by_path_in_tx,
+    validate_addressable_plaintext_path, write_binary_in_tx, write_projected_text_in_tx,
+    write_text_in_tx,
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, StdBackoff, StdReplacer, materialize_one};
 use dohc_engine_storage::{
@@ -247,6 +249,7 @@ enum Command {
     VersionedTextRename {
         input: RenameTextFile,
         root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<RenameResult, RuntimeError>>,
@@ -254,6 +257,7 @@ enum Command {
     VersionedTextDelete {
         input: DeleteTextFile,
         root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<DeleteResult, RuntimeError>>,
@@ -1338,6 +1342,7 @@ impl ActorHandle {
         &self,
         input: RenameTextFile,
         root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<RenameResult, RuntimeError> {
@@ -1346,6 +1351,7 @@ impl ActorHandle {
             .send(Command::VersionedTextRename {
                 input,
                 root_dir,
+                self_writes,
                 faults,
                 token,
                 reply,
@@ -1359,6 +1365,7 @@ impl ActorHandle {
         &self,
         input: DeleteTextFile,
         root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<DeleteResult, RuntimeError> {
@@ -1367,6 +1374,7 @@ impl ActorHandle {
             .send(Command::VersionedTextDelete {
                 input,
                 root_dir,
+                self_writes,
                 faults,
                 token,
                 reply,
@@ -3314,6 +3322,7 @@ fn worker_main(
             Command::VersionedTextRename {
                 input,
                 root_dir,
+                self_writes,
                 faults,
                 token,
                 reply,
@@ -3322,6 +3331,7 @@ fn worker_main(
                     &mut store,
                     &input,
                     &root_dir,
+                    self_writes.as_ref(),
                     faults.as_ref(),
                     &token,
                 );
@@ -3330,6 +3340,7 @@ fn worker_main(
             Command::VersionedTextDelete {
                 input,
                 root_dir,
+                self_writes,
                 faults,
                 token,
                 reply,
@@ -3338,6 +3349,7 @@ fn worker_main(
                     &mut store,
                     &input,
                     &root_dir,
+                    self_writes.as_ref(),
                     faults.as_ref(),
                     &token,
                 );
@@ -4046,6 +4058,17 @@ fn worker_main(
                         // pipeline.
                         if job.job_id.starts_with("secret-mat_") {
                             continue;
+                        }
+                        if let Some(moment_id) =
+                            job.job_id.strip_prefix("binary-rename-1-delete-mat_")
+                        {
+                            let write_job_id = binary_rename_write_job_id(moment_id);
+                            let destination_ready = store
+                                .load_materialization_job(&write_job_id)?
+                                .is_some_and(|write_job| write_job.status == JobStatus::Complete);
+                            if !destination_ready {
+                                continue;
+                            }
                         }
                         match materialize_one(
                             &store,
@@ -5668,13 +5691,14 @@ fn versioned_text_rename_on_store(
     store: &mut EngineStore,
     input: &RenameTextFile,
     root_dir: &std::path::Path,
+    self_writes: &dyn SelfWriteRecorder,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<RenameResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store)
+    let result = VersionedTextStore::new(store)
         .rename_text_file_with(input, faults, |tx, result| {
             delete_file_search_index(
                 tx,
@@ -5695,15 +5719,40 @@ fn versioned_text_rename_on_store(
                 )
                 .map_err(search_domain)?;
             }
+            enqueue_binary_rename(tx, result)?;
             Ok(())
         })
-        .map_err(RuntimeError::from)
+        .map_err(RuntimeError::from)?;
+    if result.moment.after_content_kind == "binary" {
+        let write_ready = materialize_expected_job(
+            store,
+            root_dir,
+            &input.workspace_id,
+            &binary_rename_write_job_id(&result.moment.moment_id),
+            self_writes,
+            result.moment.recorded_at_ms,
+            faults,
+        );
+        if write_ready {
+            materialize_expected_job(
+                store,
+                root_dir,
+                &input.workspace_id,
+                &binary_rename_delete_job_id(&result.moment.moment_id),
+                self_writes,
+                result.moment.recorded_at_ms,
+                faults,
+            );
+        }
+    }
+    Ok(result)
 }
 
 fn versioned_text_delete_on_store(
     store: &mut EngineStore,
     input: &DeleteTextFile,
-    _root_dir: &std::path::Path,
+    root_dir: &std::path::Path,
+    self_writes: &dyn SelfWriteRecorder,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<DeleteResult, RuntimeError> {
@@ -5721,12 +5770,61 @@ fn versioned_text_delete_on_store(
                 &result.object.object_id,
             )
             .map_err(RuntimeError::from)?;
+            enqueue_binary_delete(tx, &result).map_err(RuntimeError::from)?;
         }
         Ok::<_, RuntimeError>(result)
     })?;
     match outcome {
-        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Committed(result) => {
+            if result.moment.before_content_kind == "binary" {
+                materialize_expected_job(
+                    store,
+                    root_dir,
+                    &input.workspace_id,
+                    &binary_delete_job_id(&result.moment.moment_id),
+                    self_writes,
+                    result.moment.recorded_at_ms,
+                    faults,
+                );
+            }
+            Ok(result)
+        }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn materialize_expected_job(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    workspace_id: &str,
+    job_id: &str,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> bool {
+    let job = match store.load_materialization_job(job_id) {
+        Ok(Some(job)) => job,
+        Ok(None) => return false,
+        Err(error) => {
+            eprintln!("engine: loading post-commit materialization job failed: {error}");
+            return false;
+        }
+    };
+    match job.status {
+        JobStatus::Complete => true,
+        JobStatus::Pending => {
+            materialize_pending_job(
+                store,
+                root_dir,
+                workspace_id,
+                &job,
+                self_writes,
+                now_ms,
+                faults,
+            )
+            .0
+        }
+        JobStatus::Conflict => false,
     }
 }
 

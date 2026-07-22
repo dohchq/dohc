@@ -1942,6 +1942,137 @@ async fn binary_rename_does_not_create_an_empty_fts_row() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_version_binary_rename_moves_the_materialized_disk_file() {
+    // MUTATION: skip binary rename disk reconciliation -> old.bin survives and
+    // new.bin is absent.
+    let (scratch, transport, handle) = fixture("binary-rename-disk").await;
+    let bytes = [4_u8, 8, 15, 16, 23, 42];
+    call(
+        &transport,
+        &handle,
+        2,
+        "versionedBinary.write",
+        json!({ "versionId": "main", "path": "old.bin", "bytes": bytes, "origin": "api" }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "versionedText.rename",
+        json!({
+            "versionId": "main",
+            "fromPath": "old.bin",
+            "toPath": "new.bin",
+            "origin": "api",
+            "requestId": "binary-rename-disk",
+        }),
+    )
+    .await;
+    assert!(!scratch.path().join("old.bin").exists());
+    assert_eq!(
+        std::fs::read(scratch.path().join("new.bin")).expect("renamed binary"),
+        bytes
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_version_binary_delete_removes_the_materialized_disk_file() {
+    // MUTATION: skip binary delete disk reconciliation -> deleted.bin survives.
+    let (scratch, transport, handle) = fixture("binary-delete-disk").await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versionedBinary.write",
+        json!({ "versionId": "main", "path": "deleted.bin", "bytes": [1, 3, 3, 7], "origin": "api" }),
+    )
+    .await;
+    assert!(scratch.path().join("deleted.bin").exists());
+    call(
+        &transport,
+        &handle,
+        3,
+        "versionedText.delete",
+        json!({
+            "versionId": "main",
+            "path": "deleted.bin",
+            "origin": "api",
+            "requestId": "binary-delete-disk",
+        }),
+    )
+    .await;
+    assert!(!scratch.path().join("deleted.bin").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inactive_version_binary_rename_and_delete_leave_the_working_tree_untouched() {
+    // MUTATION: reconcile inactive binary mutations -> old.bin is removed or
+    // new.bin appears even though main remains active.
+    let (scratch, transport, handle) = fixture("inactive-binary-disk").await;
+    let workspace_id = "ws-rpcd-inactive-binary-disk";
+    let bytes = [9_u8, 8, 7, 6];
+    call(
+        &transport,
+        &handle,
+        2,
+        "versionedBinary.write",
+        json!({ "versionId": "main", "path": "old.bin", "bytes": bytes, "origin": "api" }),
+    )
+    .await;
+    let named = call(
+        &transport,
+        &handle,
+        3,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace_id,
+            "name": "feature",
+            "fromVersionId": "main",
+        }),
+    )
+    .await;
+    let feature = named["id"].as_str().expect("feature id");
+    call(
+        &transport,
+        &handle,
+        4,
+        "versionedText.rename",
+        json!({
+            "versionId": feature,
+            "fromPath": "old.bin",
+            "toPath": "new.bin",
+            "origin": "api",
+            "requestId": "inactive-binary-rename",
+        }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(scratch.path().join("old.bin")).expect("active binary remains"),
+        bytes
+    );
+    assert!(!scratch.path().join("new.bin").exists());
+    call(
+        &transport,
+        &handle,
+        5,
+        "versionedText.delete",
+        json!({
+            "versionId": feature,
+            "path": "new.bin",
+            "origin": "api",
+            "requestId": "inactive-binary-delete",
+        }),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(scratch.path().join("old.bin")).expect("active binary still remains"),
+        bytes
+    );
+    assert!(!scratch.path().join("new.bin").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deduped_text_write_does_not_resurrect_a_moved_fts_row() {
     // MUTATION: run the FTS upsert for a requestId replay -> stale.md reappears in search.
     let (_scratch, transport, handle) = fixture("deduped-write-fts").await;

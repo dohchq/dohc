@@ -514,7 +514,7 @@ impl<'a> VersionedTextStore<'a> {
             )
             .map_err(DomainError::sql_persist)?;
             tx.execute(
-                "DELETE FROM engine_requests WHERE result_seq = ?1 AND kind = 'versioned'",
+                "DELETE FROM engine_requests WHERE result_seq = ?1 AND kind IN ('versioned', 'merge')",
                 params![prep.moment.moment_order],
             )
             .map_err(DomainError::sql_persist)?;
@@ -550,6 +550,7 @@ impl<'a> VersionedTextStore<'a> {
             //     race the compensator and re-materialize the rolled-back bytes.
             if prep.moment.operation == MomentOp::Write
                 && prep.moment.after_content_kind == "binary"
+                && version_is_active(tx, ws, &input.version_id)?
                 && let Some(written_moment_sha) = prep.moment.after_binary_sha256.as_deref()
             {
                 let job: Option<(String, i64, String)> = tx
@@ -2588,15 +2589,7 @@ pub fn write_binary_in_tx(
             Preimage::Present(snapshot.blob_sha256.clone().unwrap_or_default())
         }
     });
-    let active_version: Option<String> = tx
-        .query_row(
-            "SELECT COALESCE(                (SELECT version_id FROM active_versions WHERE workspace_id = ?1),                (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id = ?1))",
-            params![input.workspace_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
-    let version_is_active = active_version.as_deref() == Some(input.version_id.as_str());
+    let version_is_active = version_is_active(tx, &input.workspace_id, &input.version_id)?;
     write_binary_file_in_tx(
         tx,
         &WriteBinaryFile {
@@ -2643,6 +2636,24 @@ pub fn write_binary_in_tx(
         deduped: false,
         materialize_enqueued: version_is_active,
     })
+}
+
+/// Whether `version_id` is the workspace version mirrored by the working tree.
+/// A missing explicit active row falls back to the canonical main version.
+pub(crate) fn version_is_active(
+    conn: &Connection,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<bool, DomainError> {
+    let active_version: Option<String> = conn
+        .query_row(
+            "SELECT COALESCE(                (SELECT version_id FROM active_versions WHERE workspace_id = ?1),                (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id = ?1))",
+            params![workspace_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(active_version.as_deref() == Some(version_id))
 }
 
 fn reconstruct_binary_write(

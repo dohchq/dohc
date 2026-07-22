@@ -394,6 +394,155 @@ fn merge_decision_tree_writes_deletes_merges_and_opens_conflict() {
 }
 
 #[test]
+fn merge_materialization_is_gated_to_the_active_target_version_across_reopen() {
+    // MUTATION: enqueue merge jobs unconditionally -> the inactive assertion
+    // fails and startup replay overwrites the active working-tree bytes.
+    let (scratch, mut store) = open();
+    {
+        let mut versions = VersionedTextStore::new(&mut store);
+        versions
+            .write_text(
+                &write(
+                    "main",
+                    "gated.md",
+                    "active-base",
+                    "gate-base",
+                    "gate-object",
+                ),
+                &NO_FAULTS,
+            )
+            .expect("base");
+        fork(&mut versions);
+        versions
+            .create_named_version(
+                &CreateNamedVersion {
+                    workspace_id: WS.to_owned(),
+                    new_version_id: "source".to_owned(),
+                    name: "source".to_owned(),
+                    from_version_id: "feat".to_owned(),
+                    now_ms: 60,
+                    request_id: None,
+                },
+                &NO_FAULTS,
+            )
+            .expect("source fork");
+        versions
+            .write_text(
+                &write("source", "gated.md", "incoming", "gate-source", "ignored"),
+                &NO_FAULTS,
+            )
+            .expect("source write");
+        let inactive = MergeTextFileFromVersion {
+            workspace_id: WS.to_owned(),
+            target_version_id: "feat".to_owned(),
+            source_version_id: "source".to_owned(),
+            path: "gated.md".to_owned(),
+            object_id: "ignored".to_owned(),
+            moment_id: "gate-inactive-merge".to_owned(),
+            request_id: Some("gate-inactive-request".to_owned()),
+            conflict_id: "gate-inactive-conflict".to_owned(),
+            metadata_origin: "agent".to_owned(),
+            author_json: None,
+            now_ms: 70,
+        };
+        assert!(matches!(
+            versions
+                .merge_text_file_from_version(&inactive, &NO_FAULTS)
+                .expect("inactive merge"),
+            MergeTextFileResult::Write { .. }
+        ));
+    }
+    assert!(
+        store
+            .list_pending_materialization_jobs()
+            .expect("inactive pending jobs")
+            .is_empty(),
+        "inactive-target merge must be DB-only"
+    );
+
+    let target = scratch.join("gated.md");
+    std::fs::write(&target, "active-base").expect("working tree preimage");
+    drop(store);
+    let db = scratch.engine_db_path().expect("db");
+    let store = EngineStore::open(&db, 80).expect("reopen");
+    assert!(
+        run_pending_jobs(
+            &store,
+            scratch.path(),
+            DurabilityPolicy::per_os(),
+            &StdReplacer,
+            &NoBackoff,
+            81,
+            &NO_FAULTS,
+        )
+        .expect("startup replay")
+        .is_empty()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("working tree after reopen"),
+        "active-base"
+    );
+
+    drop(store);
+    let (_active_scratch, mut active_store) = open();
+    {
+        let mut versions = VersionedTextStore::new(&mut active_store);
+        versions
+            .write_text(
+                &write(
+                    "main",
+                    "active-gated.md",
+                    "active-base",
+                    "active-gate-base",
+                    "active-gate-object",
+                ),
+                &NO_FAULTS,
+            )
+            .expect("active base");
+        fork(&mut versions);
+        versions
+            .write_text(
+                &write(
+                    "feat",
+                    "active-gated.md",
+                    "incoming",
+                    "active-gate-source",
+                    "ignored",
+                ),
+                &NO_FAULTS,
+            )
+            .expect("active source");
+    }
+    let active = MergeTextFileFromVersion {
+        workspace_id: WS.to_owned(),
+        target_version_id: "main".to_owned(),
+        source_version_id: "feat".to_owned(),
+        path: "active-gated.md".to_owned(),
+        object_id: "ignored".to_owned(),
+        moment_id: "gate-active-merge".to_owned(),
+        request_id: Some("gate-active-request".to_owned()),
+        conflict_id: "gate-active-conflict".to_owned(),
+        metadata_origin: "agent".to_owned(),
+        author_json: None,
+        now_ms: 90,
+    };
+    assert!(matches!(
+        VersionedTextStore::new(&mut active_store)
+            .merge_text_file_from_version(&active, &NO_FAULTS)
+            .expect("active merge"),
+        MergeTextFileResult::Write { .. }
+    ));
+    assert_eq!(
+        active_store
+            .list_pending_materialization_jobs()
+            .expect("active pending jobs")
+            .len(),
+        1,
+        "active-target merge must enqueue its generic write"
+    );
+}
+
+#[test]
 fn compare_version_files_classifies_omits_identical_and_sorts() {
     let (_scratch, mut store) = open();
     let mut vt = VersionedTextStore::new(&mut store);
