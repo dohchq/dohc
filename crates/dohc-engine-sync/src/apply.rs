@@ -936,6 +936,7 @@ fn apply_attachment(
         || !valid_object
         || !valid_path
         || !valid_heading
+        || !is_persisted_safe_integer(p.created_at_ms)
     {
         return Err(SyncError::InvalidInput {
             reason: "chat attachment payload is invalid",

@@ -1569,6 +1569,13 @@ fn imported_attachment_rejects_invalid_heading_and_bounds() {
             json!({"objectId":"object","headingText":"Heading","headingAnchor":"a".repeat(401),"headingOccurrence":0}),
         ),
         ("object_id_bound", json!({"objectId":"o".repeat(201)})),
+        // MUTATION: drop the created_at_ms bound -> an at_ms beyond the JS-safe
+        // range is accepted here, then map_attachment_row rejects the row and
+        // every attachment read for the thread becomes state-corrupt.
+        (
+            "created_at_ms_bound",
+            json!({"objectId":"object","createdAtMs": i64::MAX}),
+        ),
     ];
     for (case, fields) in cases {
         let (_scratch, _path, mut engine) = store();
