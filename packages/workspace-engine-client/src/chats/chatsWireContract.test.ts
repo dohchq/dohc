@@ -3,7 +3,11 @@ import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 import {
   CHATS_METHOD,
   ChatsProtocolShapeError,
+  decodeChatAttachment,
+  decodeChatDecision,
   decodeChatMessage,
+  decodeChatReaction,
+  decodeChatThread,
   decodeChatsResult,
   type ChatsMethod,
   type ChatsMethodParamsMap,
@@ -617,9 +621,162 @@ describe("B2 chats wire contract and loopback", () => {
     ).rejects.toThrow("invalid-parameters");
     // MUTATION: accept unknown params -> daemon/loopback contract parity breaks.
   });
+
+  it("uses invalid-parameters for an oversized page limit", async () => {
+    const engine = new ChatsLoopbackEngine();
+    // MUTATION: restore the cursor error identity for pageLimit > 500 -> this mismatches the daemon.
+    await expect(
+      call(engine, 1, CHATS_METHOD.dispatchListPending, { pageLimit: 501 }),
+    ).rejects.toThrow("invalid-parameters");
+  });
+
+  it("matches default channel follows by wire id", async () => {
+    const engine = new ChatsLoopbackEngine();
+    engine.seedChannel({
+      workspace: WORKSPACE,
+      channelId: "local-channel-id",
+      wireId: "shared-wire-id",
+      name: "Shared",
+    });
+    await call(
+      engine,
+      1,
+      CHATS_METHOD.threadStart,
+      {
+        channelId: "local-channel-id",
+        threadId: "thread",
+        messageId: "opening",
+        authorKind: "human",
+        authorDisplayName: "Ada",
+        body: "Opening",
+        nowMs: 10,
+      },
+      "start",
+    );
+    await call(engine, 2, CHATS_METHOD.followsEnsureDefaults, {
+      ownerUserId: "viewer",
+    });
+    const feed = await call(engine, 3, CHATS_METHOD.feedListPersonal, {
+      ownerUserId: "viewer",
+    });
+    // MUTATION: compare the follow target with thread.channelId -> the opening disappears.
+    expect(feed.items.map((item) => item.message.id)).toEqual(["opening"]);
+    expect(feed.items[0]?.matchedBy).toEqual(["channel"]);
+  });
+
+  it("coalesces every pending trigger in the claimed thread", async () => {
+    const engine = new ChatsLoopbackEngine();
+    for (const [triggerMessageId, createdAtMs] of [
+      ["first", 10],
+      ["second", 11],
+    ] as const) {
+      engine.seedDispatch({
+        workspaceId: WORKSPACE,
+        triggerMessageId,
+        threadId: "thread",
+        state: "pending",
+        createdAtMs,
+      });
+    }
+    const claim = await call(engine, 1, CHATS_METHOD.dispatchClaimNextPending, {
+      runId: "run-one",
+      nowMs: 20,
+    });
+    const secondClaim = await call(engine, 2, CHATS_METHOD.dispatchClaimNextPending, {
+      runId: "run-two",
+      nowMs: 21,
+    });
+    // MUTATION: leave same-thread siblings pending -> secondClaim claims "second".
+    expect(claim?.dispatch.triggerMessageId).toBe("first");
+    expect(secondClaim).toBeNull();
+  });
+
+  it("rejects missing and cross-thread reply parents", async () => {
+    const engine = new ChatsLoopbackEngine();
+    engine.seedChannel({
+      workspace: WORKSPACE,
+      channelId: "channel",
+      name: "General",
+    });
+    for (const [threadId, messageId] of [
+      ["thread-a", "opening-a"],
+      ["thread-b", "opening-b"],
+    ] as const) {
+      await call(
+        engine,
+        threadId === "thread-a" ? 1 : 2,
+        CHATS_METHOD.threadStart,
+        {
+          channelId: "channel",
+          threadId,
+          messageId,
+          authorKind: "human",
+          authorDisplayName: "Ada",
+          body: "Opening",
+          nowMs: threadId === "thread-a" ? 10 : 11,
+        },
+        `start-${threadId}`,
+      );
+    }
+    const reply = (id: number, messageId: string, parentMessageId: string) =>
+      call(engine, id, CHATS_METHOD.messageSend, {
+        threadId: "thread-a",
+        messageId,
+        authorKind: "human",
+        authorDisplayName: "Ada",
+        parentMessageId,
+        body: "Reply",
+        nowMs: 20 + id,
+      });
+    // MUTATION: store parentMessageId unchecked -> either request resolves.
+    await expect(reply(3, "missing-reply", "missing")).rejects.toThrow("message-not-found");
+    await expect(reply(4, "cross-reply", "opening-b")).rejects.toThrow("message-not-found");
+  });
 });
 
 describe("chats result decoder rejection", () => {
+  it("accepts daemon-emitted negative imported timestamps", () => {
+    // MUTATION: restore any decoder's default nonnegative guard -> its decode throws.
+    expect(
+      decodeChatReaction({
+        reactionId: "reaction",
+        threadId: "thread",
+        messageId: "message",
+        emoji: "👍",
+        author: { authorId: "ada", kind: "human", displayName: "" },
+        state: "added",
+        atMs: -10,
+      }).atMs,
+    ).toBe(-10);
+    expect(
+      decodeChatDecision({
+        threadId: "thread",
+        messageId: "message",
+        state: "open",
+        atMs: -9,
+      }).atMs,
+    ).toBe(-9);
+    expect(
+      decodeChatThread({
+        id: "thread",
+        workspaceId: "workspace",
+        title: "Imported",
+        createdAtMs: -30,
+        updatedAtMs: -30,
+        linkedFile: { objectId: "object", linkedAtMs: -31 },
+      }).linkedFile?.linkedAtMs,
+    ).toBe(-31);
+    expect(
+      decodeChatAttachment({
+        attachmentId: "attachment",
+        threadId: "thread",
+        messageId: "message",
+        targetKind: "file",
+        createdAtMs: -28,
+      }).createdAtMs,
+    ).toBe(-28);
+  });
+
   it("reports a wrong-typed nested field path", () => {
     expect(() =>
       decodeChatMessage({

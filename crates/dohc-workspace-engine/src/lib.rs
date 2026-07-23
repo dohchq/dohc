@@ -169,7 +169,6 @@ fn decode_chat_cursor(
     if cursor.version != 1
         || cursor.binding != expected_binding
         || cursor.consumed < 0
-        || cursor.first < 0
         || cursor.second.is_empty()
     {
         return Err(invalid());
@@ -2960,13 +2959,7 @@ impl EngineService {
         // No cursor on this family yet (composite sort keys) — truncated
         // says so honestly; cursor pagination is RPC_GAP follow-up work.
         let row_values: Vec<Value> = channels.iter().map(channel_summary_json).collect();
-        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
-        if included == 0 && !row_values.is_empty() {
-            return Err(wire(
-                ErrorCode::Internal,
-                "a listing row exceeds the response frame budget",
-            ));
-        }
+        let included = bounded_chat_page_len(&row_values)?;
         let truncated = included < row_values.len();
         Ok(json!({
             "channels": row_values[..included].to_vec(),
@@ -3109,13 +3102,7 @@ impl EngineService {
         // No cursor on this family yet (composite sort keys) — truncated
         // says so honestly; cursor pagination is RPC_GAP follow-up work.
         let row_values: Vec<Value> = threads.iter().map(thread_json).collect();
-        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
-        if included == 0 && !row_values.is_empty() {
-            return Err(wire(
-                ErrorCode::Internal,
-                "a listing row exceeds the response frame budget",
-            ));
-        }
+        let included = bounded_chat_page_len(&row_values)?;
         let truncated = included < row_values.len();
         Ok(json!({
             "threads": row_values[..included].to_vec(),
@@ -3742,13 +3729,7 @@ impl EngineService {
         )
         .await?;
         let row_values: Vec<Value> = page.messages.iter().map(message_json).collect();
-        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
-        if included == 0 && !row_values.is_empty() {
-            return Err(wire(
-                ErrorCode::Internal,
-                "a message row exceeds the response frame budget",
-            ));
-        }
+        let included = bounded_chat_page_len(&row_values)?;
         let truncated = included < row_values.len();
         let next_after = if truncated {
             page.messages[..included]
@@ -3941,13 +3922,7 @@ impl EngineService {
             .iter()
             .map(|follow| follow_json(&workspace_id, follow))
             .collect();
-        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
-        if included == 0 && !row_values.is_empty() {
-            return Err(wire(
-                ErrorCode::Internal,
-                "a listing row exceeds the response frame budget",
-            ));
-        }
+        let included = bounded_chat_page_len(&row_values)?;
         let truncated = included < row_values.len();
         Ok(json!({
             "follows": row_values[..included].to_vec(),
@@ -4051,13 +4026,7 @@ impl EngineService {
                 value
             })
             .collect();
-        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
-        if included == 0 && !row_values.is_empty() {
-            return Err(wire(
-                ErrorCode::Internal,
-                "a feed row exceeds the response frame budget",
-            ));
-        }
+        let included = bounded_chat_page_len(&row_values)?;
         let truncated = included < row_values.len();
         let next_cursor = if truncated {
             page.items[..included].last().map(|item| {
@@ -4240,13 +4209,7 @@ impl EngineService {
             .iter()
             .map(|bookmark| bookmark_json(&workspace_id, bookmark))
             .collect();
-        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
-        if included == 0 && !row_values.is_empty() {
-            return Err(wire(
-                ErrorCode::Internal,
-                "a listing row exceeds the response frame budget",
-            ));
-        }
+        let included = bounded_chat_page_len(&row_values)?;
         let truncated = included < row_values.len();
         Ok(json!({
             "bookmarks": row_values[..included].to_vec(),

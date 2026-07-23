@@ -3019,11 +3019,6 @@ impl<'a> LinkedChatStore<'a> {
                 )
                 .optional()
                 .map_err(DomainError::sql_corrupt)?;
-            if prior_at_ms.is_some_and(|at_ms| at_ms < 0) {
-                return Err(DomainError::StateCorrupt {
-                    reason: "chat reaction has a negative timestamp",
-                });
-            }
             let bumped = prior_at_ms
                 .map(|at_ms| {
                     at_ms.checked_add(1).ok_or(DomainError::StateCorrupt {
@@ -3033,6 +3028,11 @@ impl<'a> LinkedChatStore<'a> {
                 .transpose()?
                 .unwrap_or(i64::MIN);
             let at_ms = input.now_ms.max(bumped);
+            if !persisted_safe_integer(at_ms) {
+                return Err(DomainError::StateCorrupt {
+                    reason: "chat reaction timestamp overflowed",
+                });
+            }
             let reaction_id = reaction_id_for(&input.message_id, &emoji, &author_id);
             let (origin_id, origin_seq) =
                 local_replication_coordinate(tx, &input.workspace_id, at_ms)?;
@@ -3189,11 +3189,6 @@ impl<'a> LinkedChatStore<'a> {
                 record_request(tx, Some(&input.request_id), &payload_hash, current.at_ms)?;
                 return Ok(current);
             }
-            if current.at_ms < 0 {
-                return Err(DomainError::StateCorrupt {
-                    reason: "chat decision has a negative timestamp",
-                });
-            }
             let next = current
                 .at_ms
                 .checked_add(1)
@@ -3201,6 +3196,11 @@ impl<'a> LinkedChatStore<'a> {
                     reason: "chat decision timestamp overflowed",
                 })?;
             let at_ms = input.now_ms.max(next);
+            if !persisted_safe_integer(at_ms) {
+                return Err(DomainError::StateCorrupt {
+                    reason: "chat decision timestamp overflowed",
+                });
+            }
             journal_decision_set(
                 tx,
                 &input.workspace_id,
@@ -7763,25 +7763,36 @@ fn map_channel_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatChann
 fn map_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatThread, DomainError>> {
     let stored_title: String = row.get(2)?;
     let first_body: Option<String> = row.get(9)?;
-    let channel_id: Option<String> = row.get(5)?;
-    let linked_object_id: Option<String> = row.get(6)?;
-    let linked_at_ms: Option<i64> = row.get(8)?;
+    let mut channel_id: Option<String> = row.get(5)?;
+    let mut linked_object_id: Option<String> = row.get(6)?;
+    let mut linked_path_hint: Option<String> = row.get(7)?;
+    let mut linked_at_ms: Option<i64> = row.get(8)?;
     let channel_owner_exists: i64 = row.get(10)?;
     let created_at_ms: i64 = row.get(3)?;
     let updated_at_ms: i64 = row.get(4)?;
-    if linked_object_id.as_deref().is_some_and(str::is_empty)
-        || channel_id.as_deref().is_some_and(str::is_empty)
-        || linked_object_id.is_some() == channel_id.is_some()
-        || channel_id.is_some() && channel_owner_exists != 1
-        || linked_object_id.is_some() != linked_at_ms.is_some()
-        || !persisted_nonnegative_safe(created_at_ms)
-        || !persisted_nonnegative_safe(updated_at_ms)
-        || linked_at_ms.is_some_and(|value| !persisted_nonnegative_safe(value))
+    let has_linked_owner = linked_object_id
+        .as_deref()
+        .is_some_and(|value| !value.is_empty());
+    let has_channel_owner = channel_id.as_deref().is_some_and(|value| !value.is_empty());
+    if has_linked_owner == has_channel_owner
+        || has_channel_owner && channel_owner_exists != 1
+        || has_linked_owner && linked_at_ms.is_none()
+        || !persisted_safe_integer(created_at_ms)
+        || !persisted_safe_integer(updated_at_ms)
+        || has_linked_owner && linked_at_ms.is_some_and(|value| !persisted_safe_integer(value))
     {
         return Ok(Err(DomainError::chat(
             "state-corrupt",
             "Chat thread ownership is corrupt.",
         )));
+    }
+    if !has_linked_owner {
+        linked_object_id = None;
+        linked_path_hint = None;
+        linked_at_ms = None;
+    }
+    if !has_channel_owner {
+        channel_id = None;
     }
     Ok(Ok(ChatThread {
         workspace_id: row.get(0)?,
@@ -7791,7 +7802,7 @@ fn map_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatThread
         updated_at_ms,
         channel_id,
         linked_object_id,
-        linked_path_hint: row.get(7)?,
+        linked_path_hint,
         linked_at_ms,
     }))
 }
@@ -7841,19 +7852,7 @@ fn map_reaction_row(
     Ok((|| {
         let author_kind = ChatActorKind::from_db(&author_kind)?;
         let state = ChatReactionState::from_db(&state)?;
-        let display_name_valid = matches!(
-            normalize_display_name(&author_display_name),
-            Ok(normalized) if normalized == author_display_name
-        );
-        if reaction_id.is_empty()
-            || thread_id.is_empty()
-            || message_id.is_empty()
-            || author_id.is_empty()
-            || author_id.encode_utf16().count() > MAX_REACTION_AUTHOR_ID_UTF16_UNITS
-            || !is_reaction_emoji_verbatim(&emoji)
-            || !display_name_valid
-            || !persisted_nonnegative_safe(at_ms)
-        {
+        if !persisted_safe_integer(at_ms) {
             return Err(DomainError::StateCorrupt {
                 reason: "chat reaction row is corrupt",
             });
@@ -7882,15 +7881,7 @@ fn map_decision_row(
     let at_ms: i64 = row.get(4)?;
     Ok((|| {
         let state = ChatDecisionState::from_db(&state)?;
-        let resolver_is_valid = resolved_by_message_id
-            .as_ref()
-            .is_none_or(|message_id| !message_id.is_empty());
-        if thread_id.is_empty()
-            || message_id.is_empty()
-            || !persisted_nonnegative_safe(at_ms)
-            || !resolver_is_valid
-            || (state == ChatDecisionState::Resolved) != resolved_by_message_id.is_some()
-        {
+        if !persisted_safe_integer(at_ms) {
             return Err(DomainError::StateCorrupt {
                 reason: "chat decision row is corrupt",
             });
@@ -7923,12 +7914,9 @@ fn map_attachment_row(
     let all_heading =
         heading_text.is_some() && heading_anchor.is_some() && heading_occurrence.is_some();
     if target_kind != "file"
-        || attachment_id.is_empty()
-        || thread_id.is_empty()
-        || message_id.is_empty()
         || (any_heading && !all_heading)
         || heading_occurrence.is_some_and(|value| !persisted_nonnegative_safe(value))
-        || !persisted_nonnegative_safe(created_at_ms)
+        || !persisted_safe_integer(created_at_ms)
     {
         return Ok(Err(DomainError::chat(
             "state-corrupt",

@@ -424,6 +424,86 @@ async fn rpc_b2_reactions_and_decisions_accept_max_page_limit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_negative_reaction_cursor_boundary_round_trips() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-negative-cursor").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel",
+            "name": "General",
+            "kind": "channel",
+            "nowMs": 10,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel",
+            "threadId": "thread",
+            "messageId": "message",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Opening",
+            "nowMs": 20,
+        }),
+    )
+    .await;
+
+    let conn = rusqlite::Connection::open(scratch.engine_db_path().expect("engine database path"))
+        .expect("open database");
+    for (reaction_id, emoji, author_id, at_ms, origin_seq) in [
+        ("reaction-negative-a", "👍", "ada", -10_i64, 0_i64),
+        ("reaction-negative-b", "🎉", "bob", -9_i64, 1_i64),
+    ] {
+        conn.execute(
+            "INSERT INTO chat_reactions \
+             (workspace_id,reaction_id,thread_id,message_id,emoji,author_id,author_kind,\
+              author_display_name,state,at_ms,origin_id,origin_seq) \
+             VALUES ('rpc-b2-negative-cursor',?1,'thread','message',?2,?3,'human','',\
+                     'added',?4,'peer',?5)",
+            rusqlite::params![reaction_id, emoji, author_id, at_ms, origin_seq],
+        )
+        .expect("insert imported reaction");
+    }
+    drop(conn);
+
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.list",
+        json!({ "threadId": "thread", "pageLimit": 1 }),
+    )
+    .await;
+    let cursor = first["nextCursor"]
+        .as_str()
+        .expect("negative boundary cursor");
+    let second = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.list",
+        json!({ "threadId": "thread", "pageLimit": 1, "cursor": cursor }),
+    )
+    .await;
+    // MUTATION: restore the cursor.first nonnegative guard -> the second request refuses.
+    assert_eq!(first["reactions"][0]["atMs"], json!(-10));
+    assert_eq!(first["reactions"][0]["author"]["displayName"], json!(""));
+    assert_eq!(second["reactions"][0]["atMs"], json!(-9));
+    assert!(second["nextCursor"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rpc_b2_single_oversize_row_fails_instead_of_truncating() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));

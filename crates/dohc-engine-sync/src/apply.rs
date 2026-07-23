@@ -373,8 +373,8 @@ fn apply_thread(
             reason: "chat thread owner shape is invalid",
         });
     }
-    if payload.linked_object_id.is_none()
-        && (payload.linked_path_hint.is_some() || payload.linked_at_ms.is_some())
+    if payload.linked_object_id.is_some() != payload.linked_at_ms.is_some()
+        || payload.linked_object_id.is_none() && payload.linked_path_hint.is_some()
     {
         return Err(SyncError::InvalidInput {
             reason: "chat thread linked owner shape is invalid",

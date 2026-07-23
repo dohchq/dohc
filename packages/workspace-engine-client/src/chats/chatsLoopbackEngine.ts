@@ -370,7 +370,7 @@ function validateEmoji(value: string): string {
 
 function pageLimit(params: ChatsJsonObject): number {
   const value = optionalSafeInteger(params, "pageLimit", 1) ?? DEFAULT_PAGE_LIMIT;
-  if (value > MAX_PAGE_LIMIT) throw new Error("invalid-cursor");
+  if (value > MAX_PAGE_LIMIT) throw new Error("invalid-parameters");
   return value;
 }
 
@@ -827,6 +827,12 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const authorUserId = optionalString(params, "authorUserId");
     const parentMessageId = optionalString(params, "parentMessageId");
     if (authorUserId !== undefined) message.authorUserId = authorUserId;
+    if (
+      parentMessageId !== undefined &&
+      state.messages.get(parentMessageId)?.threadId !== threadId
+    ) {
+      throw new Error("message-not-found");
+    }
     if (parentMessageId !== undefined) message.parentMessageId = parentMessageId;
     if (origin === "cli") message.origin = "cli";
     const attachmentValues = params.attachments;
@@ -1292,9 +1298,20 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const candidates: ChatFeedItem[] = [...state.messages.values()]
       .filter((message) => {
         const thread = state.threads.get(message.threadId);
+        const channel = thread?.channelId
+          ? state.channels.get(thread.channelId)
+          : undefined;
+        const openingMessageId = thread
+          ? threadMessages(state, thread.id)[0]?.id
+          : undefined;
         return !!thread && (
           follows.has(`thread\0${thread.id}`) ||
-          (thread.channelId !== undefined && follows.has(`channel\0${thread.channelId}`)) ||
+          (
+            message.id === openingMessageId &&
+            channel?.wireId !== null &&
+            channel?.wireId !== undefined &&
+            follows.has(`channel\0${channel.wireId}`)
+          ) ||
           follows.has(`person\0${message.authorUserId ?? ""}`) ||
           (message.author.kind === "agent" && follows.has(`agent\0${message.author.displayName}`))
         );
@@ -1302,14 +1319,22 @@ export class ChatsLoopbackEngine implements EngineTransport {
       .sort((left, right) => right.createdAtMs - left.createdAtMs || compareText(right.id, left.id))
       .map((message) => {
         const thread = state.threads.get(message.threadId)!;
+        const channel = thread.channelId ? state.channels.get(thread.channelId) : undefined;
+        const isOpeningMessage = threadMessages(state, thread.id)[0]?.id === message.id;
         const matchedBy: ChatFeedItem["matchedBy"] = [];
         if (follows.has(`thread\0${thread.id}`)) matchedBy.push("thread");
-        if (thread.channelId && follows.has(`channel\0${thread.channelId}`)) matchedBy.push("channel");
+        if (
+          isOpeningMessage &&
+          channel?.wireId !== null &&
+          channel?.wireId !== undefined &&
+          follows.has(`channel\0${channel.wireId}`)
+        ) {
+          matchedBy.push("channel");
+        }
         if (message.authorUserId && follows.has(`person\0${message.authorUserId}`)) matchedBy.push("person");
         if (message.author.kind === "agent" && follows.has(`agent\0${message.author.displayName}`)) {
           matchedBy.push("agent");
         }
-        const channel = thread.channelId ? state.channels.get(thread.channelId) : undefined;
         return {
           message: { ...message, attachments: [] },
           thread: {
@@ -1487,6 +1512,14 @@ export class ChatsLoopbackEngine implements EngineTransport {
     dispatch.runId = runId;
     dispatch.attemptCount += 1;
     dispatch.updatedAtMs = atMs;
+    for (const other of state.dispatches.values()) {
+      if (other.threadId === dispatch.threadId && other.state === "pending") {
+        other.state = "done";
+        other.runId = runId;
+        other.attemptCount += 1;
+        other.updatedAtMs = atMs;
+      }
+    }
     const run: ChatRun = {
       workspaceId: workspace,
       runId,

@@ -1,8 +1,9 @@
 use std::sync::Mutex;
 
 use dohc_engine_domain::{
-    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, LinkedChatStore,
-    SaveBookmark, attachment_id_for, channel_slug_for_name,
+    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
+    ChatReactionState, FollowState, FollowTargetKind, LinkedChatStore, ResolveDecision,
+    SaveBookmark, SetFollow, SetReaction, attachment_id_for, channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -570,6 +571,25 @@ fn imported_opening_message_uses_zero_based_order() {
     assert_eq!(order, 0);
 }
 
+#[test]
+fn imported_thread_rejects_linked_object_without_linked_timestamp() {
+    let (_scratch, _path, mut engine) = store();
+    let malformed = envelope(
+        "half-linked",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "thread-half-linked",
+            "title": "Half linked",
+            "createdAtMs": 20,
+            "linkedObjectId": "object-1"
+        }),
+    );
+    let result = apply_chat_envelope(&mut engine, &malformed, &NoFaults);
+    // MUTATION: drop the linkedObjectId/linkedAtMs pairing guard -> this half-linked row persists.
+    assert!(matches!(result, Err(SyncError::InvalidInput { .. })));
+}
+
 fn imported_chat_fixture(engine: &mut EngineStore, origin: &str) {
     let operations = [
         envelope(
@@ -613,6 +633,160 @@ fn imported_chat_fixture(engine: &mut EngineStore, origin: &str) {
     for operation in operations {
         apply_chat_envelope(engine, &operation, &NoFaults).expect("fixture operation");
     }
+}
+
+#[test]
+fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "verbatim");
+
+    let mut reaction = reaction_payload("added", "👍", -10, "Ada");
+    reaction["threadId"] = json!("thread-imported");
+    reaction["messageId"] = json!("message-imported");
+    reaction["authorDisplayName"] = json!("");
+    let operations = [
+        envelope("verbatim", 3, "chat.reaction.set", reaction),
+        envelope(
+            "verbatim",
+            4,
+            "chat.decision.set",
+            json!({
+                "threadId": "thread-imported",
+                "messageId": "message-imported",
+                "state": "open",
+                "atMs": -9
+            }),
+        ),
+        envelope(
+            "verbatim",
+            5,
+            "chat.thread.create",
+            json!({
+                "threadId": "file-thread-negative",
+                "title": "Imported file thread",
+                "createdAtMs": -30,
+                "linkedObjectId": "object-negative",
+                "linkedAtMs": -31
+            }),
+        ),
+        envelope(
+            "verbatim",
+            6,
+            "chat.message.append",
+            json!({
+                "messageId": "file-message-negative",
+                "threadId": "file-thread-negative",
+                "authorKind": "human",
+                "authorDisplayName": "",
+                "body": "Imported negative attachment",
+                "createdAtMs": -29
+            }),
+        ),
+        envelope(
+            "verbatim",
+            7,
+            "chat.attachment.add",
+            json!({
+                "attachmentId": attachment_id_for(
+                    "file-message-negative",
+                    "object-negative",
+                    None,
+                    None
+                ),
+                "threadId": "file-thread-negative",
+                "messageId": "file-message-negative",
+                "targetKind": "file",
+                "objectId": "object-negative",
+                "createdAtMs": -28
+            }),
+        ),
+    ];
+    for operation in operations {
+        apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("verbatim import");
+    }
+
+    LinkedChatStore::new(&mut engine)
+        .set_follow(
+            &SetFollow {
+                workspace_id: "ws".to_owned(),
+                owner_user_id: "viewer".to_owned(),
+                replication_owner_user_id: None,
+                target_kind: FollowTargetKind::Thread,
+                target_id: "thread-imported".to_owned(),
+                state: FollowState::Following,
+                now_ms: 1,
+            },
+            &NoFaults,
+        )
+        .expect("follow imported thread");
+
+    let reactions = LinkedChatStore::new(&mut engine)
+        .list_reactions("ws", "thread-imported", None, 10)
+        .expect("list imported reaction");
+    let feed = LinkedChatStore::new(&mut engine)
+        .list_personal_feed("ws", "viewer", Some(10), None)
+        .expect("hydrate imported reaction");
+    let decisions = LinkedChatStore::new(&mut engine)
+        .list_thread_decisions("ws", "thread-imported", None, 10)
+        .expect("list imported decision");
+    let threads = LinkedChatStore::new(&mut engine)
+        .list_threads_for_file("ws", "object-negative", None, 10)
+        .expect("list imported thread");
+    let attachments = LinkedChatStore::new(&mut engine)
+        .list_thread_attachments("ws", "file-thread-negative", None, 10)
+        .expect("list imported attachment");
+
+    // MUTATION: re-tighten any verbatim row mapper -> its corresponding read fails here.
+    assert_eq!(
+        (
+            reactions[0].at_ms,
+            reactions[0].author_display_name.as_str()
+        ),
+        (-10, "")
+    );
+    assert_eq!(feed.items[0].reactions[0].at_ms, -10);
+    assert_eq!(decisions[0].at_ms, -9);
+    assert_eq!(
+        (
+            threads[0].created_at_ms,
+            threads[0].linked_at_ms,
+            attachments[0].created_at_ms
+        ),
+        (-30, Some(-31), -28)
+    );
+
+    let local_reaction = LinkedChatStore::new(&mut engine)
+        .set_reaction(
+            &SetReaction {
+                workspace_id: "ws".to_owned(),
+                thread_id: "thread-imported".to_owned(),
+                message_id: "message-imported".to_owned(),
+                emoji: "👍".to_owned(),
+                author_id: "Ada".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".to_owned(),
+                state: ChatReactionState::Removed,
+                now_ms: 0,
+                request_id: "local-after-import".to_owned(),
+            },
+            &NoFaults,
+        )
+        .expect("local reaction after import");
+    let local_decision = LinkedChatStore::new(&mut engine)
+        .resolve_decision(
+            &ResolveDecision {
+                workspace_id: "ws".to_owned(),
+                thread_id: "thread-imported".to_owned(),
+                message_id: "message-imported".to_owned(),
+                resolved_by_message_id: "message-imported".to_owned(),
+                now_ms: 0,
+                request_id: "local-decision-after-import".to_owned(),
+            },
+            &NoFaults,
+        )
+        .expect("local decision after import");
+    assert_eq!(local_reaction.at_ms, 0);
+    assert_eq!(local_decision.at_ms, 0);
 }
 
 fn live_bookmark(engine: &mut EngineStore) -> String {

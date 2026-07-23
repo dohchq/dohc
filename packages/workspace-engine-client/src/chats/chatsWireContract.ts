@@ -652,8 +652,8 @@ export function decodeChatThread(value: JsonValue, label = "chat thread"): ChatT
     id: stringValue(object, "id", label),
     workspaceId: stringValue(object, "workspaceId", label),
     title: stringValue(object, "title", label),
-    createdAtMs: safeInteger(object, "createdAtMs", label),
-    updatedAtMs: safeInteger(object, "updatedAtMs", label),
+    createdAtMs: safeInteger(object, "createdAtMs", label, false),
+    updatedAtMs: safeInteger(object, "updatedAtMs", label, false),
   };
   if (object.channelId !== undefined) result.channelId = stringValue(object, "channelId", label);
   if (object.linkedFile !== undefined) {
@@ -663,7 +663,7 @@ export function decodeChatThread(value: JsonValue, label = "chat thread"): ChatT
     ]);
     result.linkedFile = {
       objectId: stringValue(linked, "objectId", linkedLabel),
-      linkedAtMs: safeInteger(linked, "linkedAtMs", linkedLabel),
+      linkedAtMs: safeInteger(linked, "linkedAtMs", linkedLabel, false),
     };
     const pathHint = optionalString(linked, "pathHint", linkedLabel);
     if (pathHint !== undefined) result.linkedFile.pathHint = pathHint;
@@ -684,7 +684,7 @@ export function decodeChatAttachment(
     threadId: stringValue(object, "threadId", label),
     messageId: stringValue(object, "messageId", label),
     targetKind: enumValue(object, "targetKind", label, ["file"]),
-    createdAtMs: safeInteger(object, "createdAtMs", label),
+    createdAtMs: safeInteger(object, "createdAtMs", label, false),
   };
   for (const key of ["objectId", "pathHint", "headingText", "headingAnchor"] as const) {
     const field = optionalString(object, key, label);
@@ -728,7 +728,7 @@ export function decodeChatDecision(value: JsonValue, label = "chat decision"): C
     threadId: stringValue(object, "threadId", label),
     messageId: stringValue(object, "messageId", label),
     state: enumValue(object, "state", label, ["open", "resolved"]),
-    atMs: safeInteger(object, "atMs", label),
+    atMs: safeInteger(object, "atMs", label, false),
   };
   const resolved = optionalString(object, "resolvedByMessageId", label);
   if (resolved !== undefined) result.resolvedByMessageId = resolved;
@@ -754,7 +754,7 @@ export function decodeChatReaction(value: JsonValue, label = "chat reaction"): C
       displayName: stringValue(author, "displayName", authorLabel),
     },
     state: enumValue(object, "state", label, ["added", "removed"]),
-    atMs: safeInteger(object, "atMs", label),
+    atMs: safeInteger(object, "atMs", label, false),
   };
 }
 
