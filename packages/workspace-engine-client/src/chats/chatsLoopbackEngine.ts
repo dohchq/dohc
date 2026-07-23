@@ -210,9 +210,20 @@ function normalizeTrimmed(value: string, code: string): string {
   return normalized;
 }
 
+const MAX_MESSAGE_BODY_BYTES = 64 * 1024;
+
+// Mirrors the daemon `normalize_body` (dohc-engine-domain chats.rs): CRLF/CR -> LF,
+// trimEnd only (leading whitespace preserved), non-empty, <= 64 KiB UTF-8. Used for
+// both the stored body and the idempotency fingerprint so the loopback matches the
+// daemon byte-for-byte instead of NFC-trimming both ends.
 function normalizeMessageBody(value: string): string {
   const normalized = value.replace(/\r\n?/gu, "\n").trimEnd();
-  if (normalized.length === 0) throw new Error("invalid-message-body");
+  if (
+    normalized.length === 0 ||
+    new TextEncoder().encode(normalized).length > MAX_MESSAGE_BODY_BYTES
+  ) {
+    throw new Error("invalid-message-body");
+  }
   return normalized;
 }
 
@@ -919,7 +930,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     if (!state.channels.has(channelId)) throw new Error("channel-not-found");
     const threadId = requiredString(params, "threadId");
     if (state.threads.has(threadId)) throw new Error("target-exists");
-    const body = normalizeNonempty(requiredString(params, "body", "invalid-message-body"), "invalid-message-body");
+    const body = normalizeMessageBody(requiredString(params, "body", "invalid-message-body"));
     const atMs = this.tick(optionalSafeInteger(params, "nowMs"));
     const title = optionalString(params, "title")?.trim() || body.split("\n")[0]?.slice(0, 80) || "New chat";
     const thread: ChatThread = {
@@ -993,7 +1004,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     if (authorKind !== "human" && authorKind !== "agent") throw new Error("invalid-sender");
     const origin = optionalString(params, "origin");
     if (origin !== undefined && origin !== "cli") throw new Error("invalid-message-body");
-    const body = normalizeNonempty(requiredString(params, "body", "invalid-message-body"), "invalid-message-body");
+    const body = normalizeMessageBody(requiredString(params, "body", "invalid-message-body"));
     const author: ChatActor = {
       kind: authorKind,
       displayName: normalizeNonempty(

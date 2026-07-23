@@ -250,6 +250,48 @@ op. REGRESSION: `imported_follow_refuses_unsafe_at_ms_without_row_or_ack`
   hostile peers; the reset wipes primed rows). Revisit if a reviewer pushes for
   local-mint symmetry (cf. the linked-timestamp reversal).
 
+CROSS-ENGINE DELTA (PR #225 codex r8) — attachment objectId CONTROL CHARS on
+replicated apply: SHARED with the oracle, NOT rejected. A remote
+`chat.attachment.add` whose `objectId` carries leading/trailing whitespace or a
+control char (with a peer-computed `attachmentId` that matches the recompute over
+that exact string) is accepted verbatim by BOTH engines. The oracle's replicated
+validator checks the objectId ONLY by `objectId.length !== 0 && length <= 200 &&
+attachmentId === attachmentIdFor(...)` (linkedChatStore.ts:4626-4634) — no
+control-char / trim check, unlike its `chat.thread.create` objectId
+(`isBoundedReplicatedId`). Rust's apply (`valid_object`, dohc-engine-sync
+apply.rs) matches exactly (non-empty, `encode_utf16 <= 200`, attachment-id
+recompute). Same shared trust boundary as the r5 attachment-identity decline: the
+value is RENDERABLE on both engines (`map_attachment_row` reads `object_id` as
+`Option<String>` and does not throw), and DD1 already makes the LOCAL attachment
+mint stricter (`normalize_attachment_object_id` rejects control chars), which is
+the SAFE direction (local mints stay replicable). Adding a control-char rejection
+to the replicated apply would DIVERGE from the oracle and stall the origin's ack
+stream on a hostile op. The thread-objectId/attachment-objectId asymmetry (thread
+rejects control chars on apply, attachment tolerates) is driven by the ORACLE's
+own validator asymmetry — correct bug-for-bug parity. Forgery hardening belongs
+at the relay/RPC-E boundary; no Rust code change.
+
+CROSS-ENGINE DELTA (PR #225 codex r8) — live-bookmark requeue timestamp uses the
+trigger `createdAtMs` VERBATIM (safe negatives included), matching the oracle. On
+an imported `chat.message.append` / `chat.attachment.add`, `mark_live_bookmarks_
+pending` sets `chat_bookmark_outbox.updated_at_ms` to the trigger's
+`created_at_ms` (dohc-engine-sync apply.rs:768/971). Since message/attachment
+`createdAtMs` apply is bounded with `is_persisted_safe_integer` (SIGNED, allows
+safe negatives — verbatim-import parity with the oracle's `Number.isFinite`), a
+negative can propagate into the outbox timestamp. This is NOT clamped, matching
+the oracle EXACTLY: `markLiveBookmarksPending(db, ws, threadId,
+payload.createdAtMs)` (linkedChatStore.ts:4533/4671) uses the trigger createdAtMs
+verbatim, and the oracle's replicated createdAtMs is `isFinite`-only, so the
+oracle propagates the same negatives. NO read-corrupt gap: `outbox_updated_at_ms`
+is exposed ONLY as (a) the ORDER BY key for keyset pagination (a total order that
+handles negatives) and (b) the opaque `first` field inside the encoded cursor,
+which `decode_chat_cursor` does not bound non-negative (it validates only
+`version`/`binding`/`consumed >= 0`/`second`). The client-facing
+`ChatBookmark.updatedAtMs` is the bookmark's OWN column (lib.rs:7383), never the
+outbox value. Clamping to `max(0, at_ms)` would DIVERGE from the oracle for no
+representability gain. Adversarial-only (a peer must send a negative createdAtMs,
+which both engines accept), moot post-R15. No Rust code change.
+
 CROSS-ENGINE DELTA (RPC-A r18): secret path SPELLING — TS normalize-stores
 (percent-disguises collapse); Rust stores the spelling the write carried
 and resolves verbatim (the secretness gate still classifies via

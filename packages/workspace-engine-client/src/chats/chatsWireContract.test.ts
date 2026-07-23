@@ -621,6 +621,34 @@ describe("B2 chats wire contract and loopback", () => {
     expect(replay.createdAtMs).toBe(10);
   });
 
+  it("normalizes stored message body like the daemon (trimEnd + CRLF->LF, leading kept)", async () => {
+    const engine = new ChatsLoopbackEngine();
+    engine.seedChannel({
+      workspace: WORKSPACE,
+      channelId: "channel",
+      name: "Work",
+      kind: "agent",
+    });
+    const started = await call(
+      engine,
+      1,
+      CHATS_METHOD.threadStart,
+      {
+        channelId: "channel",
+        threadId: "thread",
+        messageId: "message",
+        authorKind: "human",
+        authorDisplayName: "Ada",
+        body: "  keep-lead\r\nmid\r\n  ",
+        nowMs: 10,
+      },
+      "start",
+    );
+    // MUTATION: restore normalizeNonempty for the stored body -> leading whitespace is
+    // trimmed and the embedded CR survives, diverging from the daemon's normalize_body.
+    expect(started.message.body).toBe("  keep-lead\nmid");
+  });
+
   it("keeps dispatch claims single-flight until the open run ends", async () => {
     const running = new ChatsLoopbackEngine();
     running.seedDispatch({
