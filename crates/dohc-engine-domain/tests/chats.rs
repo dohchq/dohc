@@ -43,6 +43,8 @@ fn start_thread(
         author_user_id: Some("user-ada".to_owned()),
         origin: None,
         body: body.to_owned(),
+        needs_decision: false,
+        attachments: Vec::new(),
         now_ms: now,
         request_id: None,
     }
@@ -65,6 +67,8 @@ fn send_msg(
         parent_message_id: parent.map(str::to_owned),
         origin: None,
         body: body.to_owned(),
+        needs_decision: false,
+        attachments: Vec::new(),
         now_ms: now,
         request_id: None,
     }

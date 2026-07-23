@@ -40,11 +40,11 @@ describe("desktop agent dispatch store", () => {
     return dispatch;
   }
 
-  it("materializes the run id in the log path and persists the resolved command", () => {
+  it("desktop_claim_mints_one_run_id_and_replaces_every_log_token", () => {
     const handle = requireDispatch();
     const command =
       'claude -p --permission-mode acceptEdits --allowedTools "Bash(dohc chat:*)"';
-    const logTemplate = join(root, "run-logs", "{runId}.log");
+    const logTemplate = join(root, "run-logs", "{runId}", "{runId}.log");
     handle.store.recordTrigger({
       workspaceId: WORKSPACE_ID,
       triggerMessageId: "message-command",
@@ -58,8 +58,9 @@ describe("desktop agent dispatch store", () => {
     if (!claim) throw new Error("Expected the pending dispatch to be claimed.");
 
     expect(claim.run.command).toBe(command);
+    // MUTATION: replace only the first token -> the basename retains {runId}.
     expect(claim.run.logPath).toBe(
-      join(root, "run-logs", `${claim.run.runId}.log`),
+      join(root, "run-logs", claim.run.runId, `${claim.run.runId}.log`),
     );
     expect(basename(claim.run.logPath ?? "")).toBe(`${claim.run.runId}.log`);
     expect(claim.run.logPath).not.toContain("{runId}");
@@ -69,11 +70,11 @@ describe("desktop agent dispatch store", () => {
     expect(dispatch.store.getRunRecord(claim.run.runId)).toMatchObject({
       runId: claim.run.runId,
       command,
-      logPath: join(root, "run-logs", `${claim.run.runId}.log`),
+      logPath: join(root, "run-logs", claim.run.runId, `${claim.run.runId}.log`),
     });
   });
 
-  it("mints claimed run ids from an injected createRunId seam", () => {
+  it("desktop_claim_persists_the_templated_run_id_in_ledger_and_run", () => {
     requireDispatch().close();
     dispatch = createDesktopAgentDispatchStore(root, {
       createRunId: () => "run_injected_0001",
@@ -87,7 +88,29 @@ describe("desktop agent dispatch store", () => {
       command: "codex exec",
     });
     if (!claim) throw new Error("Expected the pending dispatch to be claimed.");
+    // MUTATION: mint separately for template/claim -> persisted ids diverge.
     expect(claim.run.runId).toBe("run_injected_0001");
+    expect(claim.dispatch.runId).toBe("run_injected_0001");
+  });
+
+  it("desktop_claim_clears_prepared_id_after_null_and_error", () => {
+    requireDispatch().close();
+    const ids = ["run_null", "run_error", "run_after"];
+    dispatch = createDesktopAgentDispatchStore(root, {
+      createRunId: () => ids.shift() ?? "run_exhausted",
+    });
+    expect(dispatch.store.claimNextPending(WORKSPACE_ID)).toBeNull();
+    expect(() =>
+      dispatch?.store.claimNextPending(WORKSPACE_ID, { command: "bad\0command" }),
+    ).toThrow();
+    dispatch.store.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message-after-clear",
+      threadId: THREAD_ID,
+    });
+    const claim = dispatch.store.claimNextPending(WORKSPACE_ID);
+    // MUTATION: omit either finally clear -> a stale prepared id is persisted.
+    expect(claim?.run.runId).toBe("run_after");
   });
 
   it("records and resolves run-message links through the desktop adapter", () => {

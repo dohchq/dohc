@@ -164,6 +164,134 @@ engine_requests table gained a kind column (migration 13, every writer
 stamped — versioned/merge/ydoc/compound/chat) and the purge is scoped
 to kind='versioned'; legacy NULL-kind rows are never swept.
 
+CROSS-ENGINE DELTA (PR #225 claude r3): mention-handle READ validation
+— the Rust read validator shares the scanner's exact alphabet (dots,
+underscores, the U+017F/U+212A fold chars), so every indexed handle is
+queryable; the TS oracle's normalizeMentionHandle (/^[a-z0-9-]+$/)
+refuses some handles its own scanner indexes (agent.ops_v2 throws on
+JS, succeeds on Rust). Deliberate oracle-bug fix; parity suites must
+expect it; moot for data post-R15.
+
+CROSS-ENGINE DELTA (PR #225 codex r4/r6 + CodeRabbit): linked thread
+timestamp — RUST REJECTS-ON-APPLY, DELIBERATELY STRICTER THAN THE
+ORACLE. An imported `chat.thread.create` with `linkedObjectId` but no
+`linkedAtMs` is a malformed op that the ORACLE accepts and stores with
+`linked_at_ms = NULL` (`linkedAtMs ?? null` at linkedChatStore.ts:4432)
+and then BRICKS on its OWN read — `threadFromRow` passes NULL to
+`numberValue` (:653/:1498) and throws corruptStore, so the row is
+unrenderable on the oracle too. **Policy (named, tested): the Rust
+receiver REJECTS the op at apply** (`chat.thread.create` requires
+`linkedAtMs` whenever `linkedObjectId` is present, dohc-engine-sync
+apply.rs) — fail-closed, consistent with `map_thread_row`, so no
+durable-unreadable linked thread is ever persisted. This is a
+deliberate stricter-than-oracle divergence: the oracle's
+accept-then-brick is a latent bug we do NOT replicate. It costs no
+honest-data parity — well-behaved mint always pairs the fields
+(:2122/:2157), so only a corrupt/hostile op is refused (its origin's
+ack stream fail-closed halts at that op, the correct response to a
+malformed replicated write; the relay/RPC-E layer owns hostile-origin
+quarantine). Differential/parity suites MUST expect the delta: a
+half-linked import → oracle acks-then-bricks, Rust refuses.
+REGRESSION TEST: `imported_thread_rejects_linked_object_without_linked_timestamp`
+(dohc-engine-sync). Moot for data post-R15 (the reset wipes any
+pre-existing NULL-linked rows).
+
+CROSS-ENGINE DELTA (PR #225 codex r5): attachment object identity SHARED
+TRUST BOUNDARY — an imported `chat.attachment.add` without `objectId` is
+accepted by BOTH engines with the peer's `attachmentId` trusted verbatim
+and not recomputed. The oracle gates its object-id checks and attachment-id
+recomputation behind `payload.objectId !== undefined && (...)`
+(`linkedChatStore.ts:4626-4634`), which short-circuits when the field is
+absent; Rust intentionally matches. This is adversarial-only because
+well-behaved minting always carries `objectId`, and it is moot post-R15.
+Rust does not add an import-side object-id requirement: doing so would
+diverge from the oracle and stall the origin's ack stream. Any attachment-id
+forgery hardening belongs at the relay/RPC-E trust boundary and must cover
+both engines; there is no Rust code change for this finding.
+
+CROSS-ENGINE DELTA (PR #225 codex r4/r5/r7 + claude): structural-timestamp
+SAFE-INTEGER apply bounds — RUST BOUNDS, STRICTER THAN THE ORACLE'S
+`isFinite`-ONLY APPLY, but MATCHES the DOP1 WIRE representability. Every
+imported chat cell/structural timestamp — reaction/decision `at_ms`,
+feed-read `at_ms`, attachment `created_at_ms`, message `createdAtMs`,
+channel `createdAtMs`, and (r7) `chat.follow.set` `at_ms` — is bounded on
+apply with `is_persisted_safe_integer` (dohc-engine-sync apply.rs; signed
+`-MAX_WIRE_INTEGER..=MAX_WIRE_INTEGER`, `MAX_WIRE_INTEGER = 2^53-1`). The
+ORACLE's replicated apply validators check only `Number.isFinite`
+(linkedChatStore.ts, e.g. the follow arm ~:4686), so in a strict
+differential test the oracle STORES a finite-but-non-safe value (e.g. `2^53`)
+while Rust REJECTS it with `InvalidInput`. This is NOT a fresh divergence
+class: values beyond `2^53-1` cannot traverse the DOP1 wire (the frame/limits
+decoders are safe-int bounded on BOTH engines), so such a value could never
+legitimately arrive over replication; bounding the apply makes the domain
+consistent with the wire it must round-trip. It costs no honest-data parity
+(real clocks are ~13 orders of magnitude below `2^53` ms ≈ year 285000).
+Differential/parity suites MUST expect the delta on a hand-fed `2^53` cell
+op. REGRESSION: `imported_follow_refuses_unsafe_at_ms_without_row_or_ack`
+(dohc-engine-sync) + the sibling cell tests. Moot for data post-R15.
+
+  SUB-NOTE (claude r-opus, P3, RECORDED NOT FIXED): the LOCAL LWW mints
+  `set_follow` / `set_feed_read` (dohc-engine-domain chats.rs) compute
+  `at_ms = now_ms.max(prior + 1)` and journal the replicated op WITHOUT a
+  safe-integer bound — unlike `create_thread` / message-send, which bound
+  `now_ms`. So if a hostile peer first primed a follow/feed-read row at exactly
+  `MAX_WIRE_INTEGER` (the max the apply now allows), a subsequent LOCAL toggle
+  would mint `at_ms = 2^53`, an op the wire cannot carry and Rust's own apply
+  would reject on a peer. Left as bug-for-bug parity, NOT bounded: (a) the
+  oracle's `setFollow` derives `at_ms` from an internal `nowMs()` clock (no
+  caller field) and has the same latent inability to replicate `2^53`, so
+  bounding would be stricter than the oracle; (b) the value is RENDERABLE on
+  both engines (`map_follow_row` / oracle `numberValue` are `isFinite`-only),
+  so unlike the linked-timestamp delta above it is not accept-then-brick; (c)
+  bounding the mint would REFUSE a legitimate local user action (a follow
+  toggle) to guard an edge unreachable without a hostile peer priming
+  `prior = 2^53-1`. DD3's apply bound is the reachable defense (it stops the
+  hostile IMPORT). Adversarial-only, moot post-R15 (single-user dogfood has no
+  hostile peers; the reset wipes primed rows). Revisit if a reviewer pushes for
+  local-mint symmetry (cf. the linked-timestamp reversal).
+
+CROSS-ENGINE DELTA (PR #225 codex r8) — attachment objectId CONTROL CHARS on
+replicated apply: SHARED with the oracle, NOT rejected. A remote
+`chat.attachment.add` whose `objectId` carries leading/trailing whitespace or a
+control char (with a peer-computed `attachmentId` that matches the recompute over
+that exact string) is accepted verbatim by BOTH engines. The oracle's replicated
+validator checks the objectId ONLY by `objectId.length !== 0 && length <= 200 &&
+attachmentId === attachmentIdFor(...)` (linkedChatStore.ts:4626-4634) — no
+control-char / trim check, unlike its `chat.thread.create` objectId
+(`isBoundedReplicatedId`). Rust's apply (`valid_object`, dohc-engine-sync
+apply.rs) matches exactly (non-empty, `encode_utf16 <= 200`, attachment-id
+recompute). Same shared trust boundary as the r5 attachment-identity decline: the
+value is RENDERABLE on both engines (`map_attachment_row` reads `object_id` as
+`Option<String>` and does not throw), and DD1 already makes the LOCAL attachment
+mint stricter (`normalize_attachment_object_id` rejects control chars), which is
+the SAFE direction (local mints stay replicable). Adding a control-char rejection
+to the replicated apply would DIVERGE from the oracle and stall the origin's ack
+stream on a hostile op. The thread-objectId/attachment-objectId asymmetry (thread
+rejects control chars on apply, attachment tolerates) is driven by the ORACLE's
+own validator asymmetry — correct bug-for-bug parity. Forgery hardening belongs
+at the relay/RPC-E boundary; no Rust code change.
+
+CROSS-ENGINE DELTA (PR #225 codex r8) — live-bookmark requeue timestamp uses the
+trigger `createdAtMs` VERBATIM (safe negatives included), matching the oracle. On
+an imported `chat.message.append` / `chat.attachment.add`, `mark_live_bookmarks_
+pending` sets `chat_bookmark_outbox.updated_at_ms` to the trigger's
+`created_at_ms` (dohc-engine-sync apply.rs:768/971). Since message/attachment
+`createdAtMs` apply is bounded with `is_persisted_safe_integer` (SIGNED, allows
+safe negatives — verbatim-import parity with the oracle's `Number.isFinite`), a
+negative can propagate into the outbox timestamp. This is NOT clamped, matching
+the oracle EXACTLY: `markLiveBookmarksPending(db, ws, threadId,
+payload.createdAtMs)` (linkedChatStore.ts:4533/4671) uses the trigger createdAtMs
+verbatim, and the oracle's replicated createdAtMs is `isFinite`-only, so the
+oracle propagates the same negatives. NO read-corrupt gap: `outbox_updated_at_ms`
+is exposed ONLY as (a) the ORDER BY key for keyset pagination (a total order that
+handles negatives) and (b) the opaque `first` field inside the encoded cursor,
+which `decode_chat_cursor` does not bound non-negative (it validates only
+`version`/`binding`/`consumed >= 0`/`second`). The client-facing
+`ChatBookmark.updatedAtMs` is the bookmark's OWN column (lib.rs:7383), never the
+outbox value. Clamping to `max(0, at_ms)` would DIVERGE from the oracle for no
+representability gain. Adversarial-only (a peer must send a negative createdAtMs,
+which both engines accept), moot post-R15. No Rust code change.
+
 CROSS-ENGINE DELTA (RPC-A r18): secret path SPELLING — TS normalize-stores
 (percent-disguises collapse); Rust stores the spelling the write carried
 and resolves verbatim (the secretness gate still classifies via

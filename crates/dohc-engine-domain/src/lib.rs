@@ -38,15 +38,22 @@ pub mod secrets;
 pub mod store;
 
 pub use chats::{
-    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, AgentRunRecord, BookmarkMode, BookmarkTargetKind,
-    ChatActorKind, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
-    ChatChannelSummary, ChatFeedItem, ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMessage,
-    ChatMessagePage, ChatReaction, ChatThread, ChatThreadReadState, DispatchClaim, DispatchRecord,
-    FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_NAME, GENERAL_CHANNEL_WIRE_ID,
-    LINKED_CHAT_PROJECTION_KIND, LinkedChatStore, MAX_MESSAGE_BODY_BYTES, MAX_MESSAGE_PAGE,
-    SaveBookmark, SendMessage, SetFollow, StartChannelThread, base32_lowercase_no_padding,
-    bookmark_id_for, channel_slug_for_name, decode_feed_cursor, encode_feed_cursor,
-    linked_chat_projection_path,
+    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, AgentRunRecord, AgentUnreadThreadRow, BookmarkMode,
+    BookmarkTargetKind, ChannelOpeningMessage, ChannelThreadSummary, ChatActorKind,
+    ChatAgentReadState, ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel,
+    ChatChannelKind, ChatChannelSummary, ChatDecision, ChatDecisionState, ChatFeedItem,
+    ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention, ChatMessage,
+    ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatReactionState, ChatThread,
+    ChatThreadProjection, ChatThreadReadState, CreateFileThread, DispatchClaim, DispatchRecord,
+    DispatchRecovery, FeedCursorValue, FollowState, FollowTargetKind, GENERAL_CHANNEL_NAME,
+    GENERAL_CHANNEL_WIRE_ID, LINKED_CHAT_PROJECTION_KIND, LinkedChatStore, LocalAttachmentInput,
+    MAX_FILE_MENTION_RESULTS, MAX_MESSAGE_BODY_BYTES, MAX_MESSAGE_PAGE, MentionCursor,
+    PendingBookmarkRow, ResolveDecision, RunRecordLink, SaveBookmark, SendMessage, SetFollow,
+    SetReaction, StartChannelThread, ThreadDispatchPause, attachment_id_for,
+    base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
+    encode_feed_cursor, has_projection_control_char, index_message_mentions_in_tx, is_js_trim_ws,
+    is_reaction_emoji_verbatim, linked_chat_projection_path, parse_mention_handles,
+    reaction_id_for, render_chat_thread_projection,
 };
 pub use conflicts::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,

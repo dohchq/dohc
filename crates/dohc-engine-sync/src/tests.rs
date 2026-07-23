@@ -1,6 +1,10 @@
 use std::sync::Mutex;
 
-use dohc_engine_domain::{AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, channel_slug_for_name};
+use dohc_engine_domain::{
+    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
+    ChatReactionState, FollowState, FollowTargetKind, LinkedChatStore, ResolveDecision,
+    SaveBookmark, SetFollow, SetReaction, attachment_id_for, channel_slug_for_name,
+};
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 use rusqlite::params;
@@ -33,6 +37,326 @@ fn insert_probe(tx: &rusqlite::Transaction<'_>, op: &ReplicationEnvelope) -> Res
     )
     .map_err(SyncError::persist)?;
     Ok(())
+}
+
+fn reaction_payload(state: &str, emoji: &str, at_ms: i64, author_id: &str) -> serde_json::Value {
+    json!({
+        "reactionId": format!("reaction-{author_id}"),
+        "messageId": "message",
+        "threadId": "thread",
+        "emoji": emoji,
+        "authorId": author_id,
+        "authorKind": "human",
+        "authorDisplayName": author_id,
+        "atMs": at_ms,
+        "state": state,
+    })
+}
+
+fn decision_payload(state: &str, at_ms: i64, resolver: Option<&str>) -> serde_json::Value {
+    let mut payload = json!({
+        "threadId": "thread",
+        "messageId": "message",
+        "state": state,
+        "atMs": at_ms,
+    });
+    if let Some(resolver) = resolver {
+        payload["resolvedByMessageId"] = json!(resolver);
+    }
+    payload
+}
+
+fn reaction_winner(engine: &EngineStore) -> (String, i64, String, i64) {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state, at_ms, origin_id, origin_seq FROM chat_reactions \
+                 WHERE workspace_id = 'ws' AND message_id = 'message'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("reaction winner")
+}
+
+fn decision_winner(engine: &EngineStore) -> (String, i64, String, i64) {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state, at_ms, origin_id, origin_seq FROM chat_decisions \
+                 WHERE workspace_id = 'ws' AND message_id = 'message'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("decision winner")
+}
+
+#[test]
+fn imported_decision_refuses_unsafe_at_ms_without_row_or_ack() {
+    let (_scratch, _path, mut engine) = store();
+    let operation = envelope(
+        "unsafe-decision-time",
+        0,
+        "chat.decision.set",
+        decision_payload("open", i64::MAX, None),
+    );
+
+    // MUTATION: dropping the persisted-safe atMs bound journals a decision that
+    // the cross-engine read contract cannot represent.
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    let row_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM chat_decisions", [], |row| row.get(0))
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("decision row count");
+    assert_eq!(row_count, 0);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "unsafe-decision-time").expect("ack"),
+        -1
+    );
+}
+
+#[test]
+fn decision_lww_is_permutation_convergent_and_resolved_wins_ties() {
+    let ops = [
+        envelope(
+            "alpha",
+            0,
+            "chat.decision.set",
+            decision_payload("open", 100, None),
+        ),
+        envelope(
+            "beta",
+            0,
+            "chat.decision.set",
+            decision_payload("resolved", 100, Some("resolver")),
+        ),
+        envelope(
+            "omega",
+            0,
+            "chat.decision.set",
+            decision_payload("open", 100, None),
+        ),
+    ];
+    let permutations = [
+        [0usize, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let mut winners = Vec::new();
+    for order in permutations {
+        let (_scratch, _path, mut engine) = store();
+        for index in order {
+            apply_chat_envelope(&mut engine, &ops[index], &NoFaults).expect("apply");
+        }
+        winners.push(decision_winner(&engine));
+    }
+    // MUTATION: using arrival order or origin before resolvedRank -> equal-time peers disagree or an open cell beats resolved.
+    assert!(winners.iter().all(|winner| winner == &winners[0]));
+    assert_eq!(winners[0].0, "resolved");
+    assert_eq!(winners[0].2, "beta");
+}
+
+#[test]
+fn reaction_lww_remove_wins_equal_time_and_origin_breaks_remaining_ties() {
+    let (_scratch, _path, mut engine) = store();
+    let added = envelope(
+        "omega",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "👍", 100, "Ada"),
+    );
+    let removed = envelope(
+        "alpha",
+        0,
+        "chat.reaction.set",
+        reaction_payload("removed", "👍", 100, "Ada"),
+    );
+    apply_chat_envelope(&mut engine, &added, &NoFaults).expect("added");
+    apply_chat_envelope(&mut engine, &removed, &NoFaults).expect("removed");
+    // MUTATION: ranking origin before state -> lexically larger added beats an equal-time remove.
+    assert_eq!(reaction_winner(&engine).0, "removed");
+
+    let low = envelope(
+        "beta",
+        0,
+        "chat.reaction.set",
+        reaction_payload("removed", "🎉", 200, "Bob"),
+    );
+    let high = envelope(
+        "zeta",
+        0,
+        "chat.reaction.set",
+        reaction_payload("removed", "🎉", 200, "Bob"),
+    );
+    apply_chat_envelope(&mut engine, &high, &NoFaults).expect("high");
+    apply_chat_envelope(&mut engine, &low, &NoFaults).expect("low");
+    let winner: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT origin_id FROM chat_reactions WHERE emoji = '🎉'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("winner");
+    // MUTATION: omitting the origin tie-break -> equal-time/equal-state application becomes arrival-dependent.
+    assert_eq!(winner, "zeta");
+}
+
+#[test]
+fn reaction_lww_is_permutation_convergent() {
+    let ops = [
+        envelope(
+            "alpha",
+            0,
+            "chat.reaction.set",
+            reaction_payload("added", "👍", 100, "Ada"),
+        ),
+        envelope(
+            "beta",
+            0,
+            "chat.reaction.set",
+            reaction_payload("removed", "👍", 100, "Ada"),
+        ),
+        envelope(
+            "omega",
+            0,
+            "chat.reaction.set",
+            reaction_payload("added", "👍", 101, "Ada"),
+        ),
+    ];
+    let permutations = [
+        [0usize, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let mut winners = Vec::new();
+    for order in permutations {
+        let (_scratch, _path, mut engine) = store();
+        for index in order {
+            apply_chat_envelope(&mut engine, &ops[index], &NoFaults).expect("apply");
+        }
+        winners.push(reaction_winner(&engine));
+    }
+    // MUTATION: replacing the total-order max with last-writer arrival -> permutations settle to different rows.
+    assert!(winners.iter().all(|winner| winner == &winners[0]));
+    assert_eq!(winners[0], ("added".to_owned(), 101, "omega".to_owned(), 0));
+}
+
+#[test]
+fn reaction_import_preserves_remote_time_verbatim() {
+    let (_scratch, _path, mut engine) = store();
+    let future = envelope(
+        "peer",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "👍", 9_999_999_999, "Ada"),
+    );
+    apply_chat_envelope(&mut engine, &future, &NoFaults).expect("apply");
+    // MUTATION: receiver-clock clamping remote atMs -> identical envelopes store different total-order keys on different peers.
+    assert_eq!(reaction_winner(&engine).1, 9_999_999_999);
+}
+
+#[test]
+fn imported_reaction_refuses_unsafe_at_ms_without_row_or_ack() {
+    let (_scratch, _path, mut engine) = store();
+    let operation = envelope(
+        "unsafe-reaction-time",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "👍", i64::MAX, "Ada"),
+    );
+
+    // MUTATION: dropping the persisted-safe atMs bound journals a reaction that
+    // subsequently makes reaction reads state-corrupt.
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    let row_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM chat_reactions", [], |row| row.get(0))
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("reaction row count");
+    assert_eq!(row_count, 0);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "unsafe-reaction-time").expect("ack"),
+        -1
+    );
+}
+
+#[test]
+fn reaction_import_accepts_negative_time_and_empty_display_name_and_preserves_lww_order() {
+    let (_scratch, _path, mut engine) = store();
+    let mut winner_payload = reaction_payload("added", "👍", -10, "Ada");
+    winner_payload["authorDisplayName"] = json!("");
+    let winner = envelope("peer", 0, "chat.reaction.set", winner_payload);
+    apply_chat_envelope(&mut engine, &winner, &NoFaults).expect("negative-time reaction");
+
+    let mut older_payload = reaction_payload("removed", "👍", -11, "Ada");
+    older_payload["authorDisplayName"] = json!("Older");
+    let older = envelope("peer", 1, "chat.reaction.set", older_payload);
+    apply_chat_envelope(&mut engine, &older, &NoFaults).expect("older reaction");
+
+    let stored: (String, String, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state, author_display_name, at_ms FROM chat_reactions \
+                 WHERE workspace_id = 'ws' AND message_id = 'message'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("stored reaction");
+    // MUTATION: re-adding either imported-value rejection stalls the envelope;
+    // replacing the LWW comparison lets the later-arriving older row win.
+    assert_eq!(stored, ("added".to_owned(), String::new(), -10));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "peer").expect("ack"),
+        1
+    );
+}
+
+#[test]
+fn reaction_import_rejects_non_emoji_graphemes() {
+    for hostile in ["hello", "http://evil.invalid", "👍 nice", "✁"] {
+        let (_scratch, _path, mut engine) = store();
+        let invalid = envelope(
+            "mallory",
+            0,
+            "chat.reaction.set",
+            reaction_payload("added", hostile, 100, "Mallory"),
+        );
+        let result = apply_chat_envelope(&mut engine, &invalid, &NoFaults);
+        // MUTATION: trusting peer-side IPC validation -> arbitrary text lands in the reaction cell key.
+        assert!(matches!(result, Err(SyncError::InvalidInput { .. })));
+    }
+    let (_scratch, _path, mut engine) = store();
+    let flag = envelope(
+        "peer",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "🇺🇸", 100, "Ada"),
+    );
+    // MUTATION: validating one scalar instead of one emoji grapheme -> a valid regional-indicator flag is rejected.
+    assert!(apply_chat_envelope(&mut engine, &flag, &NoFaults).is_ok());
 }
 
 struct AlwaysLive;
@@ -303,6 +627,1093 @@ fn imported_opening_message_uses_zero_based_order() {
         })
         .expect("opening message order");
     assert_eq!(order, 0);
+}
+
+#[test]
+fn imported_channel_refuses_unsafe_created_at_ms_without_row_or_ack() {
+    let (_scratch, _path, mut engine) = store();
+    let operation = envelope(
+        "unsafe-channel-time",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "unsafe-channel",
+            "name": "Unsafe",
+            "slug": "unsafe",
+            "kind": "channel",
+            "createdAtMs": i64::MAX
+        }),
+    );
+
+    // MUTATION: dropping the persisted-safe createdAtMs bound journals a
+    // channel that the typed client cannot decode.
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    let row_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_channels WHERE workspace_id='ws'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("channel row count");
+    assert_eq!(row_count, 0);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "unsafe-channel-time").expect("ack"),
+        -1
+    );
+}
+
+#[test]
+fn imported_thread_rejects_linked_object_without_linked_timestamp() {
+    // A file-linked thread MUST carry linkedAtMs. The oracle accepts this op
+    // (storing linked_at_ms NULL) but then bricks its OWN read (threadFromRow
+    // numberValue(null) throws corruptStore) — a latent oracle bug. We reject
+    // the malformed op at apply, deliberately STRICTER than the oracle, so no
+    // durable-unreadable linked thread is ever persisted. Honest mint always
+    // pairs the fields; only a corrupt/hostile peer hits this.
+    // MUTATION: drop the linkedObjectId-requires-linkedAtMs guard -> the op is
+    // accepted, stored with linked_at_ms NULL, and every later thread read for
+    // it throws state-corrupt.
+    assert_imported_thread_rejected(json!({
+        "threadId": "thread-half-linked",
+        "title": "Half linked",
+        "createdAtMs": 20,
+        "linkedObjectId": "object-1"
+    }));
+}
+
+fn assert_imported_thread_rejected(payload: serde_json::Value) {
+    let (_scratch, _path, mut engine) = store();
+    let operation = envelope("invalid-thread", 0, "chat.thread.create", payload);
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "invalid-thread").expect("ack"),
+        -1
+    );
+}
+
+#[test]
+fn imported_thread_rejects_negative_or_unsafe_timestamps() {
+    for payload in [
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": -1,
+            "linkedObjectId": "object"
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": MAX_WIRE_INTEGER + 1,
+            "linkedObjectId": "object"
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "linkedObjectId": "object",
+            "linkedAtMs": -1
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "linkedObjectId": "object",
+            "linkedAtMs": MAX_WIRE_INTEGER + 1
+        }),
+    ] {
+        // MUTATION: accept signed i64 timestamps without the oracle's nonnegative safe-integer gate.
+        assert_imported_thread_rejected(payload);
+    }
+}
+
+#[test]
+fn imported_thread_rejects_unbounded_untrimmed_or_control_identifiers() {
+    for payload in [
+        json!({
+            "threadId": " thread",
+            "title": "",
+            "createdAtMs": 1,
+            "linkedObjectId": "object"
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "linkedObjectId": "\u{FEFF}object"
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "channelSlug": "general",
+            "channelWireId": "wire\u{7f}"
+        }),
+        json!({
+            "threadId": "a".repeat(257),
+            "title": "",
+            "createdAtMs": 1,
+            "linkedObjectId": "object"
+        }),
+    ] {
+        // MUTATION: use the generic byte-only bounded check -> trim-unstable/control ids can persist.
+        assert_imported_thread_rejected(payload);
+    }
+}
+
+#[test]
+fn imported_thread_rejects_overlong_or_trim_unstable_titles() {
+    for title in [
+        " padded ".to_owned(),
+        "\u{FEFF}title".to_owned(),
+        "a".repeat(201),
+    ] {
+        // MUTATION: omit the title UTF-16 length/JS-trim stability gate.
+        assert_imported_thread_rejected(json!({
+            "threadId": "thread",
+            "title": title,
+            "createdAtMs": 1,
+            "linkedObjectId": "object"
+        }));
+    }
+}
+
+#[test]
+fn imported_thread_rejects_channel_slugs_outside_oracle_grammar() {
+    for channel_slug in [
+        "General".to_owned(),
+        "two--words".to_owned(),
+        "-leading".to_owned(),
+        "a".repeat(201),
+    ] {
+        // MUTATION: treat channelSlug as a generic non-empty id -> invalid aliases create placeholders.
+        assert_imported_thread_rejected(json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "channelSlug": channel_slug
+        }));
+    }
+}
+
+#[test]
+fn imported_thread_rejects_invalid_owner_shape_and_linked_path() {
+    for payload in [
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "linkedObjectId": "object",
+            "channelSlug": "general"
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "channelSlug": "general",
+            "linkedAtMs": 1
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "channelSlug": "general",
+            "linkedPathHint": "notes/file.md"
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "linkedObjectId": "object",
+            "linkedPathHint": "notes/../escape.md"
+        }),
+    ] {
+        // MUTATION: relax exact-one-owner or normalized-path enforcement.
+        assert_imported_thread_rejected(payload);
+    }
+}
+
+#[test]
+fn imported_slug_only_thread_binds_the_existing_channel() {
+    let (_scratch, _path, mut engine) = store();
+    let channel = envelope(
+        "slug-only",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "existing-channel",
+            "name": "Existing",
+            "slug": "existing",
+            "kind": "channel",
+            "createdAtMs": 10
+        }),
+    );
+    let thread = envelope(
+        "slug-only",
+        1,
+        "chat.thread.create",
+        json!({
+            "threadId": "legacy-thread",
+            "title": "",
+            "createdAtMs": 20,
+            "channelSlug": "existing"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &channel, &NoFaults).expect("channel");
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
+    let (channel_id, channel_count, placeholder_count): (String, i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT channel_id FROM chat_threads \
+                     WHERE workspace_id = 'ws' AND thread_id = 'legacy-thread'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_channels WHERE workspace_id = 'ws'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_channel_placeholders WHERE workspace_id = 'ws'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("binding");
+    // MUTATION: treating channelSlug as a wire id mints a duplicate placeholder.
+    assert_eq!(channel_id, "existing-channel");
+    assert_eq!(channel_count, 1);
+    assert_eq!(placeholder_count, 0);
+}
+
+#[test]
+fn imported_thread_with_forged_agent_slug_is_refused() {
+    let (_scratch, _path, mut engine) = store();
+    let operation = envelope(
+        "forged-agent-slug",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "forged-agent-thread",
+            "title": "",
+            "createdAtMs": 20,
+            "channelSlug": channel_slug_for_name(AGENT_CHANNEL_NAME)
+        }),
+    );
+    // MUTATION: dropping the canonical-agent-slug iff reserved-wire invariant
+    // lets an ordinary channel impersonate the dispatch channel.
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "forged-agent-slug").expect("ack"),
+        -1
+    );
+}
+
+fn imported_chat_fixture(engine: &mut EngineStore, origin: &str) {
+    let operations = [
+        envelope(
+            origin,
+            0,
+            "chat.channel.create",
+            json!({
+                "channelId": "channel-imported",
+                "name": "Imported",
+                "slug": "imported",
+                "kind": "channel",
+                "createdAtMs": 10
+            }),
+        ),
+        envelope(
+            origin,
+            1,
+            "chat.thread.create",
+            json!({
+                "threadId": "thread-imported",
+                "title": "Imported thread",
+                "createdAtMs": 20,
+                "channelSlug": "imported",
+                "channelWireId": "channel-imported"
+            }),
+        ),
+        envelope(
+            origin,
+            2,
+            "chat.message.append",
+            json!({
+                "messageId": "message-imported",
+                "threadId": "thread-imported",
+                "authorKind": "human",
+                "authorDisplayName": "Ada",
+                "body": "Opening",
+                "createdAtMs": 20
+            }),
+        ),
+    ];
+    for operation in operations {
+        apply_chat_envelope(engine, &operation, &NoFaults).expect("fixture operation");
+    }
+}
+
+#[test]
+fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "verbatim");
+
+    let mut reaction = reaction_payload("added", "👍", -10, "Ada");
+    reaction["threadId"] = json!("thread-imported");
+    reaction["messageId"] = json!("message-imported");
+    reaction["authorDisplayName"] = json!("");
+    let operations = [
+        envelope("verbatim", 3, "chat.reaction.set", reaction),
+        envelope(
+            "verbatim",
+            4,
+            "chat.decision.set",
+            json!({
+                "threadId": "thread-imported",
+                "messageId": "message-imported",
+                "state": "open",
+                "atMs": -9
+            }),
+        ),
+        envelope(
+            "verbatim",
+            5,
+            "chat.message.append",
+            json!({
+                "messageId": "file-message-negative",
+                "threadId": "thread-imported",
+                "authorKind": "human",
+                "authorDisplayName": "Ada",
+                "body": "Imported negative attachment",
+                "createdAtMs": -29
+            }),
+        ),
+        envelope(
+            "verbatim",
+            6,
+            "chat.attachment.add",
+            json!({
+                "attachmentId": attachment_id_for(
+                    "file-message-negative",
+                    "object-negative",
+                    None,
+                    None
+                ),
+                "threadId": "thread-imported",
+                "messageId": "file-message-negative",
+                "targetKind": "file",
+                "objectId": "object-negative",
+                "createdAtMs": -28
+            }),
+        ),
+    ];
+    for operation in operations {
+        apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("verbatim import");
+    }
+
+    LinkedChatStore::new(&mut engine)
+        .set_follow(
+            &SetFollow {
+                workspace_id: "ws".to_owned(),
+                owner_user_id: "viewer".to_owned(),
+                replication_owner_user_id: None,
+                target_kind: FollowTargetKind::Thread,
+                target_id: "thread-imported".to_owned(),
+                state: FollowState::Following,
+                now_ms: 1,
+            },
+            &NoFaults,
+        )
+        .expect("follow imported thread");
+
+    let reactions = LinkedChatStore::new(&mut engine)
+        .list_reactions("ws", "thread-imported", None, 10)
+        .expect("list imported reaction");
+    let feed = LinkedChatStore::new(&mut engine)
+        .list_personal_feed("ws", "viewer", Some(10), None)
+        .expect("hydrate imported reaction");
+    let decisions = LinkedChatStore::new(&mut engine)
+        .list_thread_decisions("ws", "thread-imported", None, 10)
+        .expect("list imported decision");
+    let messages = LinkedChatStore::new(&mut engine)
+        .list_messages("ws", "thread-imported", 10, None)
+        .expect("list imported message");
+    let attachments = LinkedChatStore::new(&mut engine)
+        .list_thread_attachments("ws", "thread-imported", None, 10)
+        .expect("list imported attachment");
+
+    // MUTATION: re-tighten any verbatim row mapper -> its corresponding read fails here.
+    assert_eq!(
+        (
+            reactions[0].at_ms,
+            reactions[0].author_display_name.as_str()
+        ),
+        (-10, "")
+    );
+    assert_eq!(feed.items[0].reactions[0].at_ms, -10);
+    assert_eq!(decisions[0].at_ms, -9);
+    assert_eq!(
+        messages
+            .messages
+            .iter()
+            .find(|message| message.message_id == "file-message-negative")
+            .expect("negative message")
+            .created_at_ms,
+        -29
+    );
+    assert_eq!(attachments[0].created_at_ms, -28);
+
+    let local_reaction = LinkedChatStore::new(&mut engine)
+        .set_reaction(
+            &SetReaction {
+                workspace_id: "ws".to_owned(),
+                thread_id: "thread-imported".to_owned(),
+                message_id: "message-imported".to_owned(),
+                emoji: "👍".to_owned(),
+                author_id: "Ada".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".to_owned(),
+                state: ChatReactionState::Removed,
+                now_ms: 0,
+                request_id: "local-after-import".to_owned(),
+            },
+            &NoFaults,
+        )
+        .expect("local reaction after import");
+    let local_decision = LinkedChatStore::new(&mut engine)
+        .resolve_decision(
+            &ResolveDecision {
+                workspace_id: "ws".to_owned(),
+                thread_id: "thread-imported".to_owned(),
+                message_id: "message-imported".to_owned(),
+                resolved_by_message_id: "message-imported".to_owned(),
+                now_ms: 0,
+                request_id: "local-decision-after-import".to_owned(),
+            },
+            &NoFaults,
+        )
+        .expect("local decision after import");
+    assert_eq!(local_reaction.at_ms, 0);
+    assert_eq!(local_decision.at_ms, 0);
+}
+
+#[test]
+fn imported_message_append_refuses_each_oracle_invalid_field() {
+    let invalid_payloads = [
+        json!({
+            "messageId": "",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "other",
+            "authorDisplayName": "Ada",
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "",
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "authorUserId": "",
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "authorUserId": null,
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "parentMessageId": "",
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "parentMessageId": null,
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "origin": "desktop",
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "origin": null,
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "",
+            "createdAtMs": 20
+        }),
+    ];
+    for payload in invalid_payloads {
+        let (_scratch, _path, mut engine) = store();
+        imported_chat_fixture(&mut engine, "invalid-message");
+        let operation = envelope("invalid-message", 3, "chat.message.append", payload);
+        // MUTATION: omitting any message.append oracle predicate journals a
+        // payload that the TypeScript receiver refuses.
+        assert!(matches!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults),
+            Err(SyncError::InvalidInput { .. })
+        ));
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", "invalid-message").expect("ack"),
+            2
+        );
+    }
+}
+
+#[test]
+fn imported_message_refuses_unsafe_created_at_ms_without_row_or_ack() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "unsafe-message-time");
+    let operation = envelope(
+        "unsafe-message-time",
+        3,
+        "chat.message.append",
+        json!({
+            "messageId": "unsafe-message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Unsafe timestamp",
+            "createdAtMs": i64::MAX
+        }),
+    );
+
+    // MUTATION: dropping the persisted-safe createdAtMs bound journals a
+    // message that makes every typed response carrying it undecodable.
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    let row_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_messages WHERE workspace_id='ws' AND message_id='unsafe-message'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("message row count");
+    assert_eq!(row_count, 0);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "unsafe-message-time").expect("ack"),
+        2
+    );
+}
+
+#[test]
+fn imported_message_append_applies_verbatim_without_a_body_cap() {
+    // Oracle parity (linkedChatStore.ts:4442-4464): the replicated
+    // chat.message.append validator checks body only for `length === 0` — it
+    // does NOT cap body size (the 64 KiB cap lives solely in the local-mint
+    // normalizeBody). Adding an import-path cap here would STALL an origin's
+    // ack stream on a body the oracle accepts. Oversized bodies are fronted by
+    // the DOP1 64 KiB per-string wire bound and both engines' mint caps.
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "large-message");
+    let operation = envelope(
+        "large-message",
+        3,
+        "chat.message.append",
+        json!({
+            "messageId": "large",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": format!("@indexed {}", "x".repeat(64 * 1024)),
+            "createdAtMs": 30
+        }),
+    );
+    let result = apply_chat_envelope(&mut engine, &operation, &NoFaults);
+    let (messages, mentions): (i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_messages WHERE message_id = 'large'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_mentions WHERE message_id = 'large' AND handle = 'indexed'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("large persistence counts");
+    // MUTATION: re-add an import-path body cap -> this oracle-legal op refuses
+    // and wedges the origin's ack stream instead of applying+indexing.
+    assert!(matches!(result, Ok(ApplyOutcome::Applied(()))));
+    assert_eq!((messages, mentions), (1, 1));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "large-message").expect("ack"),
+        3
+    );
+}
+
+#[test]
+fn imported_follow_set_refuses_unbounded_or_empty_identities() {
+    for (owner, target) in [
+        ("".to_owned(), "target".to_owned()),
+        ("owner".to_owned(), "".to_owned()),
+        ("😀".repeat(129), "target".to_owned()),
+        ("owner".to_owned(), "😀".repeat(129)),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        let operation = envelope(
+            "invalid-follow",
+            0,
+            "chat.follow.set",
+            json!({
+                "ownerUserId": owner,
+                "targetKind": "person",
+                "targetId": target,
+                "state": "following",
+                "atMs": -1
+            }),
+        );
+        // MUTATION: dropping either 1..=256 UTF-16 bound admits an oracle-invalid cell key.
+        assert!(matches!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults),
+            Err(SyncError::InvalidInput { .. })
+        ));
+    }
+}
+
+#[test]
+fn imported_follow_refuses_unsafe_at_ms_without_row_or_ack() {
+    let (_scratch, _path, mut engine) = store();
+    let operation = envelope(
+        "unsafe-follow-time",
+        0,
+        "chat.follow.set",
+        json!({
+            "ownerUserId": "owner",
+            "targetKind": "person",
+            "targetId": "target",
+            "state": "following",
+            "atMs": i64::MAX
+        }),
+    );
+
+    // MUTATION: dropping the persisted-safe bound persists an LWW value that
+    // follow-bearing JavaScript responses cannot represent.
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    let row_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM chat_follows", [], |row| row.get(0))
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("follow row count");
+    assert_eq!(row_count, 0);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "unsafe-follow-time").expect("ack"),
+        -1
+    );
+}
+
+#[test]
+fn imported_feed_read_set_refuses_unbounded_or_empty_identities() {
+    for (owner, message) in [
+        ("".to_owned(), "message".to_owned()),
+        ("owner".to_owned(), "".to_owned()),
+        ("😀".repeat(129), "message".to_owned()),
+        ("owner".to_owned(), "😀".repeat(129)),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        let operation = envelope(
+            "invalid-feed-read",
+            0,
+            "chat.feed.read.set",
+            json!({
+                "ownerUserId": owner,
+                "lastSeenCreatedAtMs": -2,
+                "lastSeenMessageId": message,
+                "atMs": -1
+            }),
+        );
+        // MUTATION: dropping either 1..=256 UTF-16 bound admits an oracle-invalid read row.
+        assert!(matches!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults),
+            Err(SyncError::InvalidInput { .. })
+        ));
+    }
+}
+
+#[test]
+fn imported_feed_read_refuses_unsafe_timestamps_without_row_or_ack() {
+    for (origin, last_seen_created_at_ms, at_ms) in [
+        ("unsafe-feed-read-time", 1, i64::MAX),
+        ("unsafe-feed-read-cursor", i64::MAX, 1),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        let operation = envelope(
+            origin,
+            0,
+            "chat.feed.read.set",
+            json!({
+                "ownerUserId": "owner",
+                "lastSeenCreatedAtMs": last_seen_created_at_ms,
+                "lastSeenMessageId": "message",
+                "atMs": at_ms
+            }),
+        );
+
+        // MUTATION: dropping either persisted-safe timestamp bound journals a
+        // feed-read row that cannot cross the DOP1/JavaScript read contract.
+        assert!(matches!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults),
+            Err(SyncError::InvalidInput { .. })
+        ));
+        let row_count: i64 = engine
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM chat_feed_read_state", [], |row| {
+                    row.get(0)
+                })
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })
+            .expect("feed read row count");
+        assert_eq!(row_count, 0);
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", origin).expect("ack"),
+            -1
+        );
+    }
+}
+
+fn live_bookmark(engine: &mut EngineStore) -> String {
+    LinkedChatStore::new(engine)
+        .save_bookmark(
+            &SaveBookmark {
+                workspace_id: "ws".to_owned(),
+                owner_user_id: "owner".to_owned(),
+                target_kind: BookmarkTargetKind::Thread,
+                target_id: "thread-imported".to_owned(),
+                mode: BookmarkMode::Live,
+                destination_path: "bookmarks/imported.md".to_owned(),
+                now_ms: 30,
+            },
+            &NoFaults,
+        )
+        .expect("bookmark")
+        .bookmark_id
+}
+
+#[test]
+fn imported_message_requeues_active_live_bookmarks() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "message-bookmark");
+    let bookmark_id = live_bookmark(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE chat_bookmark_outbox SET projection_state='failed',failure_reason='old' \
+                 WHERE workspace_id='ws' AND bookmark_id=?1",
+                [&bookmark_id],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("failed outbox");
+    let message = envelope(
+        "message-bookmark",
+        3,
+        "chat.message.append",
+        json!({
+            "messageId": "message-imported-2",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Reply",
+            "createdAtMs": 40
+        }),
+    );
+    apply_chat_envelope(&mut engine, &message, &NoFaults).expect("message");
+    let state: (i64, String, Option<String>, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT generation,projection_state,failure_reason,updated_at_ms \
+                 FROM chat_bookmark_outbox WHERE workspace_id='ws' AND bookmark_id=?1",
+                [&bookmark_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+        })
+        .expect("outbox");
+    // MUTATION: omit the receiver-local bump from imported message apply -> stale generation/state remains.
+    assert_eq!(state, (2, "pending".to_owned(), None, 40));
+}
+
+#[test]
+fn imported_message_indexes_mentions_only_when_inserted() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "mention-index");
+    let first = envelope(
+        "mention-index",
+        3,
+        "chat.message.append",
+        json!({
+            "messageId": "mention-message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "hello @one",
+            "createdAtMs": 40
+        }),
+    );
+    let duplicate_id = envelope(
+        "mention-index",
+        4,
+        "chat.message.append",
+        json!({
+            "messageId": "mention-message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "hostile duplicate @two",
+            "createdAtMs": 50
+        }),
+    );
+    apply_chat_envelope(&mut engine, &first, &NoFaults).expect("first message");
+    apply_chat_envelope(&mut engine, &duplicate_id, &NoFaults).expect("duplicate id");
+    let handles: Vec<String> = engine
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT handle FROM chat_mentions WHERE message_id='mention-message' ORDER BY handle",
+            )?;
+            stmt.query_map([], |row| row.get(0))?.collect()
+        })
+        .expect("mention handles");
+    // MUTATION: indexing before checking INSERT OR IGNORE admits the duplicate payload's handle.
+    assert_eq!(handles, vec!["one"]);
+}
+
+#[test]
+fn imported_attachment_cross_origin_duplicate_requeues_active_live_bookmarks() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "attachment-bookmark");
+    let bookmark_id = live_bookmark(&mut engine);
+    let attachment = envelope(
+        "attachment-peer",
+        0,
+        "chat.attachment.add",
+        json!({
+            "attachmentId": attachment_id_for("message-imported", "object", None, None),
+            "threadId": "thread-imported",
+            "messageId": "message-imported",
+            "targetKind": "file",
+            "objectId": "object",
+            "pathHint": "notes/file.md",
+            "createdAtMs": 41
+        }),
+    );
+    apply_chat_envelope(&mut engine, &attachment, &NoFaults).expect("attachment");
+    let state: (i64, String, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT generation,projection_state,updated_at_ms FROM chat_bookmark_outbox \
+                 WHERE workspace_id='ws' AND bookmark_id=?1",
+                [&bookmark_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .expect("outbox");
+    // MUTATION: omit the receiver-local bump from imported attachment apply -> bookmark is not reprojected.
+    assert_eq!(state, (2, "pending".to_owned(), 41));
+
+    let cross_origin_duplicate = envelope(
+        "attachment-peer-two",
+        0,
+        "chat.attachment.add",
+        attachment.payload.clone(),
+    );
+    apply_chat_envelope(&mut engine, &cross_origin_duplicate, &NoFaults)
+        .expect("cross-origin duplicate");
+    let duplicated: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT generation FROM chat_bookmark_outbox \
+                 WHERE workspace_id='ws' AND bookmark_id=?1",
+                [&bookmark_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("outbox after cross-origin duplicate");
+    // MUTATION: gate the bump on INSERT OR IGNORE's affected-row count -> this reachable duplicate stays at 2.
+    assert_eq!(duplicated, 3);
+}
+
+#[test]
+fn imported_attachment_recomputes_id_and_rejects_mismatch() {
+    let (_scratch, _path, mut engine) = store();
+    let invalid = envelope(
+        "hostile-attachment",
+        0,
+        "chat.attachment.add",
+        json!({
+            "attachmentId": "forged",
+            "threadId": "thread",
+            "messageId": "message",
+            "targetKind": "file",
+            "objectId": "object",
+            "createdAtMs": 10
+        }),
+    );
+    let result = apply_chat_envelope(&mut engine, &invalid, &NoFaults);
+    // MUTATION: trust the peer's attachment id -> forged content identity is persisted and acked.
+    assert!(matches!(result, Err(SyncError::InvalidInput { .. })));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "hostile-attachment").expect("ack"),
+        -1
+    );
+}
+
+#[test]
+fn imported_attachment_rejects_invalid_heading_and_bounds() {
+    let cases = [
+        ("heading_triplet_partial", json!({"headingText":"Heading"})),
+        (
+            "heading_requires_object",
+            json!({"headingText":"Heading","headingAnchor":"anchor","headingOccurrence":0}),
+        ),
+        (
+            "heading_text_bound",
+            json!({"objectId":"object","headingText":"x".repeat(301),"headingAnchor":"anchor","headingOccurrence":0}),
+        ),
+        (
+            "heading_control_character",
+            json!({"objectId":"object","headingText":"bad\u{0007}","headingAnchor":"anchor","headingOccurrence":0}),
+        ),
+        (
+            "heading_occurrence_nonnegative",
+            json!({"objectId":"object","headingText":"Heading","headingAnchor":"anchor","headingOccurrence":-1}),
+        ),
+        (
+            "path_must_be_normalized",
+            json!({"objectId":"object","pathHint":"notes/./file.md"}),
+        ),
+        (
+            "heading_anchor_bound",
+            json!({"objectId":"object","headingText":"Heading","headingAnchor":"a".repeat(401),"headingOccurrence":0}),
+        ),
+        ("object_id_bound", json!({"objectId":"o".repeat(201)})),
+        // MUTATION: drop the created_at_ms bound -> an at_ms beyond the JS-safe
+        // range is accepted here, then map_attachment_row rejects the row and
+        // every attachment read for the thread becomes state-corrupt.
+        (
+            "created_at_ms_bound",
+            json!({"objectId":"object","createdAtMs": i64::MAX}),
+        ),
+    ];
+    for (case, fields) in cases {
+        let (_scratch, _path, mut engine) = store();
+        let mut payload = json!({
+            "attachmentId": "placeholder",
+            "threadId": "thread",
+            "messageId": "message",
+            "targetKind": "file",
+            "createdAtMs": 10
+        });
+        payload
+            .as_object_mut()
+            .expect("payload")
+            .extend(fields.as_object().expect("fields").clone());
+        if let Some(object_id) = payload.get("objectId").and_then(serde_json::Value::as_str) {
+            let heading_anchor = payload
+                .get("headingAnchor")
+                .and_then(serde_json::Value::as_str);
+            let occurrence = payload
+                .get("headingOccurrence")
+                .and_then(serde_json::Value::as_i64);
+            payload["attachmentId"] = json!(attachment_id_for(
+                "message",
+                object_id,
+                heading_anchor,
+                occurrence
+            ));
+        }
+        let operation = envelope(case, 0, "chat.attachment.add", payload);
+        let result = apply_chat_envelope(&mut engine, &operation, &NoFaults);
+        // MUTATION: remove this hostile-peer heading/path guard -> the named malformed case applies.
+        assert!(
+            matches!(result, Err(SyncError::InvalidInput { .. })),
+            "case {case}"
+        );
+    }
 }
 
 #[test]

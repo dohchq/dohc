@@ -6,6 +6,8 @@ use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Request, WorkspaceHandle},
 };
+use dohc_engine_storage::{EngineStore, NoFaults, StorageError};
+use dohc_engine_sync::{ReplicationEnvelope, apply_chat_envelope};
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
 use serde_json::{Value, json};
@@ -82,6 +84,937 @@ async fn call_error(
         )
         .await
         .unwrap_err()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chats_feed_list_personal_refuses_limit_above_cap() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "feed-limit-cap").await;
+    let mut id = 1;
+
+    // MUTATION: clamp an over-cap feed limit at the RPC boundary -> the caller
+    // gets a successful, semantically different page instead of invalid input.
+    let error = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.feed.listPersonal",
+        json!({ "ownerUserId": "owner", "limit": 101 }),
+    )
+    .await;
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+    assert_eq!(error.message, "invalid-follow-target");
+}
+
+async fn call_with_idempotency(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: &mut u64,
+    method: &str,
+    idempotency_key: &str,
+    params: Value,
+) -> Value {
+    *id += 1;
+    let mut request = request(*id, method, Some(handle.clone()), params);
+    request.idempotency_key = Some(idempotency_key.to_owned());
+    transport
+        .call(RequestContext::unbounded(), request)
+        .await
+        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
+        .result
+}
+
+async fn call_error_with_idempotency(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: &mut u64,
+    method: &str,
+    idempotency_key: &str,
+    params: Value,
+) -> dohc_engine_protocol::error::WireError {
+    *id += 1;
+    let mut request = request(*id, method, Some(handle.clone()), params);
+    request.idempotency_key = Some(idempotency_key.to_owned());
+    transport
+        .call(RequestContext::unbounded(), request)
+        .await
+        .unwrap_err()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_reactions_decisions_and_personal_feed_hydration() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-round3").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel",
+            "name": "General",
+            "kind": "channel",
+            "nowMs": 10,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel",
+            "threadId": "thread",
+            "messageId": "decision",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "authorUserId": "ada",
+            "body": "Choose",
+            "needsDecision": true,
+            "nowMs": 20,
+        }),
+    )
+    .await;
+    let decisions = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.decisions.listForThread",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    // MUTATION: omitting needsDecision from the strict DTO/domain input -> the opening decision is absent over DOP1.
+    assert_eq!(decisions["decisions"][0]["state"], json!("open"));
+
+    let resolved = call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.decisions.resolve",
+        "resolve",
+        json!({
+            "threadId": "thread",
+            "messageId": "decision",
+            "resolvedByMessageId": "not-present-yet",
+            "nowMs": 30,
+        }),
+    )
+    .await;
+    // MUTATION: requiring the resolver row to exist -> a valid head-check-free resolver is rejected.
+    assert_eq!(resolved["resolvedByMessageId"], json!("not-present-yet"));
+    let malformed = call_error_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.decisions.resolve",
+        "malformed",
+        json!({
+            "threadId": "thread",
+            "messageId": "decision",
+            "resolvedByMessageId": "",
+            "nowMs": 31,
+        }),
+    )
+    .await;
+    // MUTATION: mapping malformed resolver input to state-corrupt -> wire code becomes INTERNAL.
+    assert_eq!(malformed.code, ErrorCode::InvalidParams);
+    assert_eq!(malformed.message, "invalid-message-body");
+
+    let reaction = call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.set",
+        "reaction",
+        json!({
+            "threadId": "thread",
+            "messageId": "decision",
+            "emoji": "👍",
+            "author": {
+                "authorId": "ada",
+                "kind": "human",
+                "displayName": "Ada",
+            },
+            "state": "added",
+            "nowMs": 40,
+        }),
+    )
+    .await;
+    assert_eq!(reaction["emoji"], json!("👍"));
+    let invalid_state = call_error_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.set",
+        "bad-state",
+        json!({
+            "threadId": "thread",
+            "messageId": "decision",
+            "emoji": "👍",
+            "author": {
+                "authorId": "ada",
+                "kind": "human",
+                "displayName": "Ada",
+            },
+            "state": "unknown",
+        }),
+    )
+    .await;
+    // MUTATION: routing an unknown wire literal through persisted-row decoding -> caller input is mislabeled INTERNAL.
+    assert_eq!(invalid_state.code, ErrorCode::InvalidParams);
+    assert_eq!(invalid_state.message, "invalid-parameters");
+    let reactions = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.list",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    assert_eq!(
+        reactions["reactions"][0]["reactionId"],
+        reaction["reactionId"]
+    );
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.follows.set",
+        json!({
+            "ownerUserId": "viewer",
+            "targetKind": "thread",
+            "targetId": "thread",
+            "state": "following",
+            "nowMs": 41,
+        }),
+    )
+    .await;
+    let feed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.feed.listPersonal",
+        json!({ "ownerUserId": "viewer", "limit": 10 }),
+    )
+    .await;
+    // MUTATION: serializing the parked `reactions: []` placeholder -> active feed reactions vanish at the wire boundary.
+    assert_eq!(feed["items"][0]["reactions"][0]["emoji"], json!("👍"));
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel",
+            "threadId": "newer-thread",
+            "messageId": "newer-opening",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Newer",
+            "nowMs": 50,
+        }),
+    )
+    .await;
+    let first_page = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({ "channelId": "channel", "pageLimit": 1 }),
+    )
+    .await;
+    assert_eq!(
+        first_page["threads"][0]["thread"]["id"],
+        json!("newer-thread")
+    );
+    let next_cursor = first_page["nextCursor"]
+        .as_str()
+        .expect("channel summary cursor")
+        .to_owned();
+    let second_page = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({
+            "channelId": "channel",
+            "pageLimit": 1,
+            "cursor": next_cursor,
+        }),
+    )
+    .await;
+    let summary = &second_page["threads"][0];
+    // MUTATION: shipping a prefix-only channel list or omitting the full aggregate -> older page/full opening reaction is unavailable.
+    assert_eq!(summary["thread"]["id"], json!("thread"));
+    assert_eq!(summary["messageCount"], json!(1));
+    assert_eq!(summary["openDecisionCount"], json!(0));
+    assert_eq!(
+        summary["openingMessage"]["reactions"][0]["emoji"],
+        json!("👍")
+    );
+    assert!(second_page["nextCursor"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_reactions_and_decisions_accept_max_page_limit() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-max-page").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel",
+            "name": "General",
+            "kind": "channel",
+            "nowMs": 10,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel",
+            "threadId": "thread",
+            "messageId": "message",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Choose",
+            "needsDecision": true,
+            "nowMs": 20,
+        }),
+    )
+    .await;
+    call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.set",
+        "reaction",
+        json!({
+            "threadId": "thread",
+            "messageId": "message",
+            "emoji": "👍",
+            "author": {
+                "authorId": "ada",
+                "kind": "human",
+                "displayName": "Ada",
+            },
+            "state": "added",
+            "nowMs": 30,
+        }),
+    )
+    .await;
+
+    let decisions = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.decisions.listForThread",
+        json!({ "threadId": "thread", "pageLimit": 500 }),
+    )
+    .await;
+    let reactions = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.list",
+        json!({ "threadId": "thread", "pageLimit": 500 }),
+    )
+    .await;
+    // MUTATION: keeping the domain probe cap at 500 rejects the RPC's 501-row probe.
+    assert_eq!(
+        decisions["decisions"].as_array().expect("decisions").len(),
+        1
+    );
+    assert_eq!(
+        reactions["reactions"].as_array().expect("reactions").len(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_negative_reaction_cursor_boundary_round_trips() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-negative-cursor").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel",
+            "name": "General",
+            "kind": "channel",
+            "nowMs": 10,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel",
+            "threadId": "thread",
+            "messageId": "message",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Opening",
+            "nowMs": 20,
+        }),
+    )
+    .await;
+
+    let conn = rusqlite::Connection::open(scratch.engine_db_path().expect("engine database path"))
+        .expect("open database");
+    for (reaction_id, emoji, author_id, at_ms, origin_seq) in [
+        ("reaction-negative-a", "👍", "ada", -10_i64, 0_i64),
+        ("reaction-negative-b", "🎉", "bob", -9_i64, 1_i64),
+    ] {
+        conn.execute(
+            "INSERT INTO chat_reactions \
+             (workspace_id,reaction_id,thread_id,message_id,emoji,author_id,author_kind,\
+              author_display_name,state,at_ms,origin_id,origin_seq) \
+             VALUES ('rpc-b2-negative-cursor',?1,'thread','message',?2,?3,'human','',\
+                     'added',?4,'peer',?5)",
+            rusqlite::params![reaction_id, emoji, author_id, at_ms, origin_seq],
+        )
+        .expect("insert imported reaction");
+    }
+    drop(conn);
+
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.list",
+        json!({ "threadId": "thread", "pageLimit": 1 }),
+    )
+    .await;
+    let cursor = first["nextCursor"]
+        .as_str()
+        .expect("negative boundary cursor");
+    let second = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.list",
+        json!({ "threadId": "thread", "pageLimit": 1, "cursor": cursor }),
+    )
+    .await;
+    // MUTATION: restore the cursor.first nonnegative guard -> the second request refuses.
+    assert_eq!(first["reactions"][0]["atMs"], json!(-10));
+    assert_eq!(first["reactions"][0]["author"]["displayName"], json!(""));
+    assert_eq!(second["reactions"][0]["atMs"], json!(-9));
+    assert!(second["nextCursor"].is_null());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_single_oversize_row_fails_instead_of_truncating() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-oversize-row").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel",
+            "name": "General",
+            "kind": "channel",
+            "nowMs": 10,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel",
+            "threadId": "thread",
+            "messageId": "message",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Opening",
+            "nowMs": 20,
+        }),
+    )
+    .await;
+
+    let conn = rusqlite::Connection::open(scratch.engine_db_path().expect("engine database path"))
+        .expect("open database");
+    let oversize_title = "x".repeat(700 * 1024 + 1);
+    conn.execute(
+        "UPDATE chat_threads SET title = ?1 \
+         WHERE workspace_id = 'rpc-b2-oversize-row' AND thread_id = 'thread'",
+        rusqlite::params![oversize_title],
+    )
+    .expect("compose oversize persisted row");
+    drop(conn);
+
+    let error = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({ "channelId": "channel", "pageLimit": 1 }),
+    )
+    .await;
+    // MUTATION: treating the first oversize row as a normal byte-budget cut
+    // returns an empty/truncated page instead of a stable refusal.
+    assert_eq!(error.code, ErrorCode::LimitExceeded);
+    assert_eq!(error.message, "row-exceeds-wire-limit");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_attachment_and_file_thread_contracts() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-attachments").await;
+    let mut id = 10;
+    let thread = call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.create",
+        "create-file-thread",
+        json!({
+            "threadId": "file-thread",
+            "title": "File thread",
+            "linkedFile": { "objectId": "object-1", "pathHint": "notes/file.md" },
+            "nowMs": 20,
+        }),
+    )
+    .await;
+    // MUTATION: omit linked owner hydration -> canonical Thread loses its stable file identity.
+    assert_eq!(
+        thread,
+        json!({
+            "id": "file-thread",
+            "workspaceId": "rpc-b2-attachments",
+            "title": "File thread",
+            "createdAtMs": 20,
+            "updatedAtMs": 20,
+            "linkedFile": {
+                "objectId": "object-1",
+                "pathHint": "notes/file.md",
+                "linkedAtMs": 20,
+            }
+        })
+    );
+    let sent = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "file-thread",
+            "messageId": "message-1",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "See the source",
+            "attachments": [{
+                "objectId": "object-1",
+                "pathHint": "notes/file.md",
+                "headingText": "Heading",
+                "headingAnchor": "heading",
+                "headingOccurrence": 0
+            }],
+            "nowMs": 30,
+        }),
+    )
+    .await;
+    // MUTATION: omit authoritative attachment hydration from send -> result is incomplete.
+    assert_eq!(
+        sent["attachments"].as_array().expect("attachments").len(),
+        1
+    );
+    assert_eq!(sent["id"], json!("message-1"));
+    let attachments = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.attachments.listForThread",
+        json!({ "threadId": "file-thread", "pageLimit": 10 }),
+    )
+    .await;
+    assert_eq!(
+        attachments["attachments"]
+            .as_array()
+            .expect("attachment page")
+            .len(),
+        1
+    );
+    let mentions = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.attachments.listFileMentions",
+        json!({
+            "objectId": "object-1",
+            "pathHint": "notes/reused.md",
+            "pageLimit": 10
+        }),
+    )
+    .await;
+    // MUTATION: hydrate only the selected attachment -> nested message attachment list is empty.
+    assert_eq!(
+        mentions["mentions"][0]["message"]["attachments"]
+            .as_array()
+            .expect("hydrated attachments")
+            .len(),
+        1
+    );
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.follows.set",
+        json!({
+            "ownerUserId": "feed-viewer",
+            "targetKind": "thread",
+            "targetId": "file-thread",
+            "state": "following",
+            "nowMs": 31,
+        }),
+    )
+    .await;
+    let feed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.feed.listPersonal",
+        json!({ "ownerUserId": "feed-viewer", "limit": 10 }),
+    )
+    .await;
+    // MUTATION: route Feed through the legacy slim serializers -> both of
+    // these authoritative B2 fields disappear.
+    assert_eq!(
+        feed["items"][0]["message"]["attachments"]
+            .as_array()
+            .expect("feed message attachments")
+            .len(),
+        1
+    );
+    assert_eq!(
+        feed["items"][0]["thread"]["linkedFile"],
+        json!({
+            "objectId": "object-1",
+            "pathHint": "notes/file.md",
+            "linkedAtMs": 20,
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    let db_path = scratch.engine_db_path().expect("db path");
+    let mut store = EngineStore::open(&db_path, 1).expect("store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_channels \
+                 (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) \
+                 VALUES ('rpc-b2-cap','channel','Channel','channel','channel',1,1)",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            for index in 0..=2_000_i64 {
+                let thread_id = format!("thread-{index:04}");
+                let message_id = format!("message-{index:04}");
+                let attachment_id = format!("attachment-{index:04}");
+                tx.execute(
+                    "INSERT INTO chat_threads \
+                     (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) \
+                     VALUES ('rpc-b2-cap',?1,'Thread',?2,?2,'channel')",
+                    rusqlite::params![thread_id, index],
+                )
+                .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO chat_messages \
+                     (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) \
+                     VALUES ('rpc-b2-cap',?1,0,?2,'human','Ada','Body',?3)",
+                    rusqlite::params![thread_id, message_id, index],
+                )
+                .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO chat_attachments \
+                     (workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) \
+                     VALUES ('rpc-b2-cap',?1,?2,?3,'file','wanted',?4)",
+                    rusqlite::params![attachment_id, thread_id, message_id, index],
+                )
+                .map_err(StorageError::persist_public)?;
+            }
+            tx.execute(
+                "INSERT INTO chat_attachments \
+                 (workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) \
+                 VALUES ('rpc-b2-cap','other-target','thread-2000','message-2000','file','other',2000)",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed");
+    drop(store);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-cap").await;
+    let mut id = 10;
+    let mut cursor: Option<String> = None;
+    let mut mentions = Vec::new();
+    loop {
+        let mut params = json!({ "objectId": "wanted", "pageLimit": 500 });
+        if let Some(value) = &cursor {
+            params["cursor"] = json!(value);
+        }
+        let page = call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.attachments.listFileMentions",
+            params,
+        )
+        .await;
+        mentions.extend(
+            page["mentions"]
+                .as_array()
+                .expect("mention page")
+                .iter()
+                .cloned(),
+        );
+        cursor = page["nextCursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    // MUTATION: omit the logical 2,000 cap -> the oldest selected row is exposed.
+    assert_eq!(mentions.len(), 2_000);
+    assert_eq!(mentions[0]["message"]["id"], json!("message-2000"));
+    assert!(
+        mentions
+            .iter()
+            .all(|mention| mention["message"]["id"] != json!("message-0000"))
+    );
+    // MUTATION: hydrate only matching attachments -> the newest message loses its other target.
+    assert_eq!(
+        mentions[0]["message"]["attachments"]
+            .as_array()
+            .expect("all attachments")
+            .len(),
+        2
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_mentions_backfill_marker_makes_second_open_a_noop() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    let db_path = scratch.engine_db_path().expect("db path");
+    let mut store = EngineStore::open(&db_path, 1).expect("store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_channels \
+                 (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) \
+                 VALUES ('rpc-b2-mentions','channel','Channel','channel','channel',1,1)",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "INSERT INTO chat_threads \
+                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) \
+                 VALUES ('rpc-b2-mentions','thread','Thread',20,20,'channel')",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "INSERT INTO chat_messages \
+                 (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) \
+                 VALUES ('rpc-b2-mentions','thread',0,'message','human','Ada',\
+                         'hello @agent @agent.ops_v2 @ſK',20)",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed pre-index database");
+    drop(store);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-mentions").await;
+    let mut id = 10;
+    let mentions = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.mentions.listForHandle",
+        json!({ "handle": "AGENT", "unreadByAgentOnly": false, "pageLimit": 10 }),
+    )
+    .await;
+    // MUTATION: handing out the workspace before backfill makes this first read empty.
+    assert_eq!(
+        mentions,
+        json!({
+            "mentions": [{
+                "threadId": "thread",
+                "messageId": "message",
+                "handle": "agent",
+                "authorKind": "human",
+                "createdAtMs": 20
+            }],
+            "nextCursor": null
+        })
+    );
+    for (query, normalized) in [
+        ("AGENT.OPS_V2...", "agent.ops_v2"),
+        ("\u{017F}\u{212A}_", "\u{017F}k"),
+    ] {
+        let mentions = call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.mentions.listForHandle",
+            json!({ "handle": query, "unreadByAgentOnly": false, "pageLimit": 10 }),
+        )
+        .await;
+        // MUTATION: retain the narrow ASCII alphanumeric/hyphen validator -> this indexed row is unqueryable.
+        assert_eq!(mentions["mentions"][0]["handle"], json!(normalized));
+        assert_eq!(mentions["mentions"][0]["messageId"], json!("message"));
+    }
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.recordEligibleTriggers",
+        json!({}),
+    )
+    .await;
+    let retry = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.recordEligibleTriggers",
+        json!({}),
+    )
+    .await;
+    // MUTATION: scan-before-backfill or a non-idempotent ledger changes this pair.
+    assert_eq!((first, retry), (json!(1), json!(0)));
+
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+    let conn = rusqlite::Connection::open(&db_path).expect("open closed engine db");
+    conn.execute(
+        "INSERT INTO chat_messages \
+         (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) \
+         VALUES ('rpc-b2-mentions','thread',1,'raw-after-marker','human','Ada','@raw',30)",
+        [],
+    )
+    .expect("insert raw post-marker message");
+    drop(conn);
+
+    let reopened = open_workspace(&transport, &scratch, id + 1, "rpc-b2-mentions").await;
+    let raw_mentions = call(
+        &transport,
+        &reopened,
+        &mut id,
+        "chats.mentions.listForHandle",
+        json!({ "handle": "raw", "unreadByAgentOnly": false, "pageLimit": 10 }),
+    )
+    .await;
+    // MUTATION: drop or ignore the durable completion marker -> the second
+    // open reparses this raw fixture row and hides the write-time-indexing
+    // invariant by making it visible.
+    assert!(
+        raw_mentions["mentions"]
+            .as_array()
+            .expect("raw mentions")
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn synced_negative_agent_read_cursor_round_trips_over_the_wire() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    let db_path = scratch.engine_db_path().expect("db path");
+    let mut store = EngineStore::open(&db_path, 1).expect("store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_threads \
+                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms,linked_object_id,linked_at_ms) \
+                 VALUES ('rpc-negative-agent-read','negative-thread','Imported',0,0,'negative-object',0)",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed local thread");
+    let operation = ReplicationEnvelope {
+        workspace_id: "rpc-negative-agent-read".to_owned(),
+        origin_id: "peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "chat.message.append".to_owned(),
+        payload: json!({
+            "messageId": "negative-message",
+            "threadId": "negative-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Peer",
+            "body": "Imported",
+            "createdAtMs": -10,
+        }),
+        recorded_at_ms: 1,
+    };
+    apply_chat_envelope(&mut store, &operation, &NoFaults).expect("apply synced chat row");
+    drop(store);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-negative-agent-read").await;
+    let mut id = 10;
+    let state = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.markThreadRead",
+        json!({
+            "threadId": "negative-thread",
+            "upTo": { "createdAtMs": 0, "messageId": "after" },
+        }),
+    )
+    .await;
+    // Oracle parity (linkedChatStore.ts:3101-3109): the clamped target is the
+    // negative latest, which sits below the fresh (0, "") cursor floor, so the
+    // mark is a NO-OP — the thread stays unread-but-unmarkable exactly like the
+    // oracle. The read/serialization chain must still accept the signed
+    // coordinate the daemon reads back (no state-corrupt).
+    // MUTATION: advance onto the negative coordinate -> the no-op assertions fail.
+    assert_eq!(state["lastReadCreatedAtMs"], json!(0));
+    assert_eq!(state["lastReadMessageId"], json!(""));
+    assert_eq!(state["revision"], json!(0));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -174,7 +1107,7 @@ async fn review_round_7_normalizes_persisted_chat_identities() {
         }),
     )
     .await;
-    assert_eq!(started["thread"]["threadId"], json!("thread-round-7"));
+    assert_eq!(started["thread"]["id"], json!("thread-round-7"));
     assert_eq!(started["message"]["threadId"], json!("thread-round-7"));
     for (thread_id, message_id) in [
         (format!("bad{}thread", '\u{0001}'), "bad-control"),
@@ -604,8 +1537,8 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         }),
     )
     .await;
-    assert_eq!(started["thread"]["threadId"], json!("thread-1"));
-    assert_eq!(started["message"]["messageOrder"], json!(0));
+    assert_eq!(started["thread"]["id"], json!("thread-1"));
+    assert_eq!(started["message"]["id"], json!("message-0"));
 
     let overlong_send = call_error(
         &transport,
@@ -867,7 +1800,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
             }),
         )
         .await;
-        assert_eq!(sent["messageOrder"], json!(sequence));
+        assert_eq!(sent["id"], json!(format!("message-{sequence:03}")));
     }
 
     let channels = call(
@@ -1182,14 +2115,12 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     .await;
     assert_eq!(follows["follows"].as_array().expect("follows").len(), 1);
 
-    // The feed domain caps at 100. The RPC clamps a larger request before it
-    // reaches the domain and preserves its cursor for the next keyset page.
     let feed = call(
         &transport,
         &first_handle,
         &mut id,
         "chats.feed.listPersonal",
-        json!({ "ownerUserId": "owner-1", "limit": 500 }),
+        json!({ "ownerUserId": "owner-1", "limit": 100 }),
     )
     .await;
     assert_eq!(feed["items"].as_array().expect("feed items").len(), 100);
@@ -1252,7 +2183,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.feed.listPersonal",
-        json!({ "ownerUserId": "owner-1", "limit": 500 }),
+        json!({ "ownerUserId": "owner-1", "limit": 100 }),
     )
     .await;
     assert_eq!(feed_after_seen["headCursor"], feed["headCursor"]);
@@ -2258,7 +3189,7 @@ async fn review_round_12_rejects_malformed_ready_generation_and_null_claim_metad
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn review_round_16_reserved_ensure_ids_follow_states_and_bookmark_polling() {
+async fn rpc_b2_reshapes_six_existing_arms_without_truncated() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "rpc-chat-r16").await;
@@ -2395,6 +3326,10 @@ async fn review_round_16_reserved_ensure_ids_follow_states_and_bookmark_polling(
         json!({ "ownerUserId": "owner-1" }),
     )
     .await;
+    // MUTATION: restore the RPC-B `{bookmarks,truncated}` response -> the
+    // cursor-page contract exposes the removed field and omits nextCursor.
+    assert!(pending.get("truncated").is_none());
+    assert_eq!(pending["nextCursor"], Value::Null);
     assert_eq!(pending["bookmarks"].as_array().expect("pending").len(), 1);
     assert_eq!(pending["bookmarks"][0]["bookmarkId"], json!(&bookmark_id));
     let bad_limit = call_error(
@@ -2414,7 +3349,9 @@ async fn review_round_16_reserved_ensure_ids_follow_states_and_bookmark_polling(
         json!({ "ownerUserId": "owner-1", "bookmarkId": &bookmark_id }),
     )
     .await;
-    assert_eq!(found["bookmark"]["bookmarkId"], json!(&bookmark_id));
+    // MUTATION: wrap `find` in the old `{bookmark: ...}` object -> consumers
+    // no longer receive the design's direct `Bookmark | null` result.
+    assert_eq!(found["bookmarkId"], json!(&bookmark_id));
     let missing = call(
         &transport,
         &handle,
@@ -2423,7 +3360,7 @@ async fn review_round_16_reserved_ensure_ids_follow_states_and_bookmark_polling(
         json!({ "ownerUserId": "owner-1", "bookmarkId": "bookmark_nope" }),
     )
     .await;
-    assert_eq!(missing["bookmark"], Value::Null);
+    assert_eq!(missing, Value::Null);
     call(
         &transport,
         &handle,
@@ -2448,4 +3385,598 @@ async fn review_round_16_reserved_ensure_ids_follow_states_and_bookmark_polling(
     assert_eq!(drained["bookmarks"].as_array().expect("drained").len(), 0);
 
     call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_page_adapter_drains_without_overlap_or_omission() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-pages").await;
+    let mut id = 10;
+    for (trigger, created_at_ms) in [("b", 20), ("a", 20), ("old", 10)] {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.enqueue",
+            json!({
+                "triggerMessageId": trigger,
+                "threadId": "thread",
+                "nowMs": created_at_ms,
+            }),
+        )
+        .await;
+    }
+    let mut cursor: Option<String> = None;
+    let mut ids = Vec::new();
+    loop {
+        let mut params = json!({ "pageLimit": 1 });
+        if let Some(cursor) = &cursor {
+            params["cursor"] = json!(cursor);
+        }
+        let page = call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.listPending",
+            params,
+        )
+        .await;
+        ids.extend(
+            page["dispatches"]
+                .as_array()
+                .expect("dispatches")
+                .iter()
+                .map(|row| row["triggerMessageId"].as_str().expect("id").to_owned()),
+        );
+        cursor = page["nextCursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    // MUTATION: use inclusive/offset pagination -> rows overlap or disappear.
+    assert_eq!(ids, ["old", "a", "b"]);
+
+    let invalid_cursor = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.openRuns",
+        json!({ "cursor": "eyJ2ZXJzaW9uIjoxfQ" }),
+    )
+    .await;
+    assert_eq!(
+        (invalid_cursor.code, invalid_cursor.message.as_str()),
+        (ErrorCode::InvalidParams, "invalid-cursor")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_rejects_unknown_fields_and_null_optionals() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-strict").await;
+    let mut id = 10;
+    let unknown = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listPending",
+        json!({ "surprise": true }),
+    )
+    .await;
+    let null_optional = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.setThreadPaused",
+        json!({ "threadId": "thread", "paused": true, "reason": null }),
+    )
+    .await;
+    // MUTATION: remove deny_unknown/non-null optional decoders -> malformed calls enter domain.
+    assert_eq!(
+        (unknown.code, null_optional.code),
+        (ErrorCode::InvalidParams, ErrorCode::InvalidParams)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_workspace_handle_overrides_spoofed_workspace_identity() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-scope").await;
+    let mut id = 10;
+    let spoofed = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listPending",
+        json!({ "workspaceId": "foreign" }),
+    )
+    .await;
+    // MUTATION: trust a params workspace id -> caller can select foreign rows.
+    assert_eq!(spoofed.code, ErrorCode::InvalidParams);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_small_ports_round_trip_strict_shapes_and_recovery_mutations() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-roundtrip").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({ "channelId": "channel", "name": "Channel", "kind": "channel", "nowMs": 2 }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel", "threadId": "thread", "messageId": "message",
+            "authorKind": "human", "authorDisplayName": "Ada", "body": "hello", "nowMs": 10,
+        }),
+    )
+    .await;
+    let db_path = scratch.engine_db_path().expect("db");
+    let conn = rusqlite::Connection::open(db_path).expect("open db");
+    conn.execute(
+        "INSERT INTO chat_threads \
+         (workspace_id,thread_id,title,created_at_ms,updated_at_ms,linked_object_id,linked_path_hint,linked_at_ms) \
+         VALUES ('rpc-b2-roundtrip','file-thread','File',12,12,'object','notes/file.md',12)",
+        [],
+    )
+    .expect("file thread");
+    drop(conn);
+    let file_threads = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForFile",
+        json!({ "objectId": "object" }),
+    )
+    .await;
+    assert_eq!(
+        file_threads["threads"][0]["linkedFile"]["pathHint"],
+        json!("notes/file.md")
+    );
+    let channel = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.findChannelId",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    assert_eq!(channel, json!("channel"));
+
+    let unread = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listUnreadThreads",
+        json!({}),
+    )
+    .await;
+    assert_eq!(unread["threads"][0]["id"], json!("thread"));
+    let read = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.markThreadRead",
+        json!({ "threadId": "thread", "upTo": { "createdAtMs": 999, "messageId": "z" } }),
+    )
+    .await;
+    assert_eq!(
+        (
+            read["lastReadCreatedAtMs"].as_i64(),
+            read["lastReadMessageId"].as_str()
+        ),
+        (Some(10), Some("message"))
+    );
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.follows.ensureDefaults",
+        json!({ "ownerUserId": "owner" }),
+    )
+    .await;
+    let bookmark = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.save",
+        json!({
+            "ownerUserId": "owner", "targetKind": "thread", "targetId": "thread",
+            "mode": "live", "destinationPath": "bookmarks/thread.md", "nowMs": 11,
+        }),
+    )
+    .await;
+    let bookmark_id = bookmark["bookmarkId"]
+        .as_str()
+        .expect("bookmark id")
+        .to_owned();
+    let pending_once = call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.markPending",
+        "bookmark-pending-request",
+        json!({ "ownerUserId": "owner", "bookmarkId": bookmark_id }),
+    )
+    .await;
+    let pending_replay = call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.markPending",
+        "bookmark-pending-request",
+        json!({ "ownerUserId": "owner", "bookmarkId": bookmark["bookmarkId"] }),
+    )
+    .await;
+    assert_eq!(pending_once["generation"], pending_replay["generation"]);
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.enqueue",
+        json!({ "triggerMessageId": "trigger", "threadId": "thread", "nowMs": 20 }),
+    )
+    .await;
+    let paused = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.setThreadPaused",
+        json!({ "threadId": "thread", "paused": true, "reason": "manual" }),
+    )
+    .await;
+    assert_eq!(paused["reason"], json!("manual"));
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.isThreadPaused",
+            json!({ "threadId": "thread" })
+        )
+        .await,
+        json!(true)
+    );
+    let pause_state = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.getThreadPauseState",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    assert_eq!(pause_state["reason"], json!("manual"));
+    let no_claim = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "runId": "run", "command": "agent" }),
+    )
+    .await;
+    assert_eq!(no_claim, Value::Null);
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.setThreadPaused",
+        json!({ "threadId": "thread", "paused": false, "reason": "ignored" }),
+    )
+    .await;
+    let claim = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "runId": "run", "command": "agent" }),
+    )
+    .await;
+    assert_eq!(claim["run"]["runId"], json!("run"));
+    assert!(claim["run"].get("endedAtMs").is_none());
+    let open = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.openRuns",
+        json!({}),
+    )
+    .await;
+    assert_eq!(open["claims"][0]["run"]["runId"], json!("run"));
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.recordRunMessage",
+            json!({ "messageId": "agent-message", "runId": "run" })
+        )
+        .await,
+        json!(true)
+    );
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.runIdForMessage",
+            json!({ "messageId": "agent-message" })
+        )
+        .await,
+        json!("run")
+    );
+    let messages = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listRunMessages",
+        json!({ "runId": "run" }),
+    )
+    .await;
+    assert_eq!(messages["messageIds"], json!(["agent-message"]));
+    let run = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.getRunRecord",
+        json!({ "runId": "run" }),
+    )
+    .await;
+    assert_eq!(run["runId"], json!("run"));
+    let runs = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.runRecordsForThread",
+        json!({ "threadId": "thread", "limit": 200 }),
+    )
+    .await;
+    assert_eq!(runs["runs"]["agent-message"]["runId"], json!("run"));
+    let count = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.recentCount",
+        json!({ "threadId": "thread", "sinceMs": -1.5 }),
+    )
+    .await;
+    assert_eq!(count, json!(1));
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.fail",
+        json!({ "runId": "run", "reason": "app-quit", "exitCode": 143, "nowMs": 30 }),
+    )
+    .await;
+    let recoveries = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listAppQuitRecoveries",
+        json!({}),
+    )
+    .await;
+    assert_eq!(recoveries["recoveries"][0]["attemptCount"], json!(1));
+    let noted = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.markFailureNotePosted",
+        json!({ "runId": "run" }),
+    )
+    .await;
+    assert_eq!(noted["failureNotePosted"], json!(true));
+    let requeued = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.requeueFailedTrigger",
+        json!({ "triggerMessageId": "trigger", "runId": "run" }),
+    )
+    .await;
+    let failed_pending = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.failPendingForThread",
+        json!({ "threadId": "thread", "reason": "stop" }),
+    )
+    .await;
+    // MUTATION: omit any Phase 2/3 registration or return legacy nullable fields -> roundtrip differs/fails.
+    assert_eq!((requeued, failed_pending), (json!(true), json!(1)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn thread_projection_matches_exact_markdown_bytes() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-projection-bytes").await;
+    let mut id = 10;
+    call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.create",
+        "projection-thread",
+        json!({
+            "threadId": "thread-projection",
+            "title": "Project thread",
+            "linkedFile": {
+                "objectId": "object-1",
+                "pathHint": "private/stored-hint.md"
+            },
+            "nowMs": 10
+        }),
+    )
+    .await;
+    for (message_id, kind, name, body, now_ms) in [
+        (
+            "human-message",
+            "human",
+            "Ada",
+            "First line\nsecond line",
+            20,
+        ),
+        ("agent-message", "agent", "Helper", "Agent body", 30),
+    ] {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.messages.send",
+            json!({
+                "threadId": "thread-projection",
+                "messageId": message_id,
+                "authorKind": kind,
+                "authorDisplayName": name,
+                "body": body,
+                "nowMs": now_ms
+            }),
+        )
+        .await;
+    }
+    let projection = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.getProjection",
+        json!({
+            "threadId": "thread-projection",
+            "linkedFileAccess": {
+                "kind": "allowed",
+                "path": "docs/current.md"
+            }
+        }),
+    )
+    .await;
+    let expected = "# Project thread\n\nRead-only chat projection.\n\n\
+Linked file: docs/current.md\n\n## Ada\n\nFirst line\nsecond line\n\n\
+## Helper (agent)\n\nAgent body\n";
+    assert_eq!(projection["text"].as_str(), Some(expected));
+    assert_eq!(projection["readOnly"], json!(true));
+    assert_eq!(projection["threadId"], json!("thread-projection"));
+    assert!(
+        projection["path"]
+            .as_str()
+            .expect("projection path")
+            .starts_with(".dohc/chats/v1-")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn thread_projection_over_wire_limit_fails_without_partial_text() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-projection-cap").await;
+    let mut id = 10;
+    call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.create",
+        "projection-cap-thread",
+        json!({
+            "threadId": "thread-cap",
+            "title": "Large thread",
+            "linkedFile": { "objectId": "object-large" },
+            "nowMs": 10
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "thread-cap",
+            "messageId": "large-message",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "x".repeat(50 * 1024),
+            "nowMs": 20
+        }),
+    )
+    .await;
+    let error = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.getProjection",
+        json!({ "threadId": "thread-cap" }),
+    )
+    .await;
+    // MUTATION: truncate instead of refusing -> this call succeeds with partial Markdown.
+    assert_eq!(
+        (error.code, error.message.as_str()),
+        (ErrorCode::LimitExceeded, "projection-exceeds-inband-limit")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn thread_projection_read_only_notice_and_access_line_presence() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-projection-access").await;
+    let mut id = 10;
+    call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.create",
+        "projection-access-thread",
+        json!({
+            "threadId": "thread-access",
+            "title": "Access",
+            "linkedFile": {
+                "objectId": "object-access",
+                "pathHint": "secret/stored-only.md"
+            },
+            "nowMs": 10
+        }),
+    )
+    .await;
+    for kind in ["denied", "unknown"] {
+        let projection = call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.threads.getProjection",
+            json!({
+                "threadId": "thread-access",
+                "linkedFileAccess": { "kind": kind }
+            }),
+        )
+        .await;
+        let text = projection["text"].as_str().expect("projection text");
+        assert!(text.contains("\nRead-only chat projection.\n"));
+        assert!(text.contains("\nLinked file: unavailable\n"));
+        assert!(!text.contains("secret/stored-only.md"));
+    }
+    let null_access = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.getProjection",
+        json!({
+            "threadId": "thread-access",
+            "linkedFileAccess": null
+        }),
+    )
+    .await;
+    assert_eq!(null_access.code, ErrorCode::InvalidParams);
 }
