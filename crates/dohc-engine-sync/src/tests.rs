@@ -243,6 +243,39 @@ fn reaction_import_preserves_remote_time_verbatim() {
 }
 
 #[test]
+fn reaction_import_accepts_negative_time_and_empty_display_name_and_preserves_lww_order() {
+    let (_scratch, _path, mut engine) = store();
+    let mut winner_payload = reaction_payload("added", "👍", -10, "Ada");
+    winner_payload["authorDisplayName"] = json!("");
+    let winner = envelope("peer", 0, "chat.reaction.set", winner_payload);
+    apply_chat_envelope(&mut engine, &winner, &NoFaults).expect("negative-time reaction");
+
+    let mut older_payload = reaction_payload("removed", "👍", -11, "Ada");
+    older_payload["authorDisplayName"] = json!("Older");
+    let older = envelope("peer", 1, "chat.reaction.set", older_payload);
+    apply_chat_envelope(&mut engine, &older, &NoFaults).expect("older reaction");
+
+    let stored: (String, String, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state, author_display_name, at_ms FROM chat_reactions \
+                 WHERE workspace_id = 'ws' AND message_id = 'message'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("stored reaction");
+    // MUTATION: re-adding either imported-value rejection stalls the envelope;
+    // replacing the LWW comparison lets the later-arriving older row win.
+    assert_eq!(stored, ("added".to_owned(), String::new(), -10));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "peer").expect("ack"),
+        1
+    );
+}
+
+#[test]
 fn reaction_import_rejects_non_emoji_graphemes() {
     for hostile in ["hello", "http://evil.invalid", "👍 nice", "✁"] {
         let (_scratch, _path, mut engine) = store();

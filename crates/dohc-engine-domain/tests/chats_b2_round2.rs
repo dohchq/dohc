@@ -536,6 +536,14 @@ fn mention_parser_matches_unicode_boundary_punctuation_and_case_oracle() {
 
 #[test]
 fn mention_parser_ignores_inline_and_fenced_code() {
+    // The oracle keeps the first opener armed and ignores different-length
+    // runs, so neither pair of double/single runs becomes an independent span.
+    // MUTATION: pairing each run with a later equal-length run hides @agent.
+    assert_eq!(parse_mention_handles("` x `` @agent `` y"), vec!["agent"]);
+    assert_eq!(parse_mention_handles("`` x ` @agent ` y"), vec!["agent"]);
+    // MUTATION: ignoring the armed opener makes a matched outer span visible.
+    assert!(parse_mention_handles("` x `` @agent `` y `").is_empty());
+
     let body = [
         "@you outside",
         "`@inline code`",

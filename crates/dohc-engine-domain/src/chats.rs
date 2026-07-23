@@ -1917,6 +1917,7 @@ pub fn parse_mention_handles(body: &str) -> Vec<String> {
 
     let bytes = body.as_bytes();
     let mut index = 0usize;
+    let mut open: Option<(usize, usize)> = None;
     while index < bytes.len() {
         if bytes[index] != b'`' || range_contains(&ignored, index) {
             index += 1;
@@ -1927,25 +1928,13 @@ pub fn parse_mention_handles(body: &str) -> Vec<String> {
             index += 1;
         }
         let run = index - start;
-        let mut search = index;
-        let mut close = None;
-        while search < bytes.len() {
-            if bytes[search] != b'`' || range_contains(&ignored, search) {
-                search += 1;
-                continue;
+        match open {
+            None => open = Some((run, start)),
+            Some((open_run, open_start)) if run == open_run => {
+                ignored.push((open_start, index));
+                open = None;
             }
-            let close_start = search;
-            while search < bytes.len() && bytes[search] == b'`' {
-                search += 1;
-            }
-            if search - close_start == run {
-                close = Some(search);
-                break;
-            }
-        }
-        if let Some(end) = close {
-            ignored.push((start, end));
-            index = end;
+            Some(_) => {}
         }
     }
 
@@ -3102,7 +3091,7 @@ impl<'a> LinkedChatStore<'a> {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatReaction>, DomainError> {
-        if limit <= 0 || limit > MAX_MESSAGE_PAGE {
+        if limit <= 0 || limit > MAX_MESSAGE_PAGE + 1 {
             return Err(DomainError::InvalidInput {
                 reason: "reaction page limit is invalid",
             });
@@ -3235,7 +3224,7 @@ impl<'a> LinkedChatStore<'a> {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatDecision>, DomainError> {
-        if limit <= 0 || limit > MAX_MESSAGE_PAGE {
+        if limit <= 0 || limit > MAX_MESSAGE_PAGE + 1 {
             return Err(DomainError::InvalidInput {
                 reason: "decision page limit is invalid",
             });

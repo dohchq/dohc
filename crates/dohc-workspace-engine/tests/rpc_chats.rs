@@ -340,6 +340,151 @@ async fn rpc_b2_reactions_decisions_and_personal_feed_hydration() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_reactions_and_decisions_accept_max_page_limit() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-max-page").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel",
+            "name": "General",
+            "kind": "channel",
+            "nowMs": 10,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel",
+            "threadId": "thread",
+            "messageId": "message",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Choose",
+            "needsDecision": true,
+            "nowMs": 20,
+        }),
+    )
+    .await;
+    call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.set",
+        "reaction",
+        json!({
+            "threadId": "thread",
+            "messageId": "message",
+            "emoji": "👍",
+            "author": {
+                "authorId": "ada",
+                "kind": "human",
+                "displayName": "Ada",
+            },
+            "state": "added",
+            "nowMs": 30,
+        }),
+    )
+    .await;
+
+    let decisions = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.decisions.listForThread",
+        json!({ "threadId": "thread", "pageLimit": 500 }),
+    )
+    .await;
+    let reactions = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.list",
+        json!({ "threadId": "thread", "pageLimit": 500 }),
+    )
+    .await;
+    // MUTATION: keeping the domain probe cap at 500 rejects the RPC's 501-row probe.
+    assert_eq!(
+        decisions["decisions"].as_array().expect("decisions").len(),
+        1
+    );
+    assert_eq!(
+        reactions["reactions"].as_array().expect("reactions").len(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_single_oversize_row_fails_instead_of_truncating() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-oversize-row").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel",
+            "name": "General",
+            "kind": "channel",
+            "nowMs": 10,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel",
+            "threadId": "thread",
+            "messageId": "message",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Opening",
+            "nowMs": 20,
+        }),
+    )
+    .await;
+
+    let conn = rusqlite::Connection::open(scratch.engine_db_path().expect("engine database path"))
+        .expect("open database");
+    let oversize_title = "x".repeat(700 * 1024 + 1);
+    conn.execute(
+        "UPDATE chat_threads SET title = ?1 \
+         WHERE workspace_id = 'rpc-b2-oversize-row' AND thread_id = 'thread'",
+        rusqlite::params![oversize_title],
+    )
+    .expect("compose oversize persisted row");
+    drop(conn);
+
+    let error = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({ "channelId": "channel", "pageLimit": 1 }),
+    )
+    .await;
+    // MUTATION: treating the first oversize row as a normal byte-budget cut
+    // returns an empty/truncated page instead of a stable refusal.
+    assert_eq!(error.code, ErrorCode::LimitExceeded);
+    assert_eq!(error.message, "row-exceeds-wire-limit");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rpc_b2_attachment_and_file_thread_contracts() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
