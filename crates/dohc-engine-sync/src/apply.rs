@@ -4,7 +4,7 @@ use serde::{Deserialize, Deserializer};
 
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, attachment_id_for, channel_slug_for_name,
-    has_projection_control_char, is_reaction_emoji_verbatim, parse_mention_handles,
+    has_projection_control_char, is_js_trim_ws, is_reaction_emoji_verbatim, parse_mention_handles,
     validate_addressable_plaintext_path,
 };
 
@@ -137,10 +137,6 @@ where
 
 fn non_empty(value: &str) -> Result<(), SyncError> {
     crate::model::bounded(value, "chat identifier must be non-empty and bounded")
-}
-
-fn is_js_trim_ws(c: char) -> bool {
-    c == '\u{FEFF}' || (c.is_whitespace() && c != '\u{0085}')
 }
 
 fn is_bounded_replicated_id(value: &str, max_utf16_units: usize) -> bool {

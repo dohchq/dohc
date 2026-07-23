@@ -1817,7 +1817,7 @@ fn normalize_body(body: &str) -> Result<String, DomainError> {
 /// `normalizeBody`. It differs from Rust's `char::is_whitespace` (Unicode
 /// `White_Space`) at exactly two code points: JS trims U+FEFF (ZWNBSP) which is
 /// NOT `White_Space`, and JS does NOT trim U+0085 (NEL) which IS `White_Space`.
-fn is_js_trim_ws(c: char) -> bool {
+pub fn is_js_trim_ws(c: char) -> bool {
     c == '\u{FEFF}' || (c.is_whitespace() && c != '\u{0085}')
 }
 

@@ -51,7 +51,7 @@ pub use chats::{
     PendingBookmarkRow, ResolveDecision, RunRecordLink, SaveBookmark, SendMessage, SetFollow,
     SetReaction, StartChannelThread, ThreadDispatchPause, attachment_id_for,
     base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
-    encode_feed_cursor, has_projection_control_char, index_message_mentions_in_tx,
+    encode_feed_cursor, has_projection_control_char, index_message_mentions_in_tx, is_js_trim_ws,
     is_reaction_emoji_verbatim, linked_chat_projection_path, parse_mention_handles,
     reaction_id_for, render_chat_thread_projection,
 };
