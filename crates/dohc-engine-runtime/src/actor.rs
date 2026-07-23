@@ -42,12 +42,13 @@ use dohc_engine_domain::{
     CaptureRetire, CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ChannelThreadSummary,
     ChatAgentReadState, ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel,
     ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState,
-    ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage, ChatReaction,
-    ChatThread, ChatThreadReadState, CompareTextFileVersions, CreateFileThread, CreateNamedVersion,
-    DeleteResult, DeleteTextFile, DispatchClaim, DispatchRecovery, DomainError, InbandBinary,
-    InbandSecret, InbandText, LinkedChatStore, ListMomentsQuery, MentionCursor,
-    MergeTextFileFromVersion, MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow,
-    RenameResult, RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
+    ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
+    ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection, ChatThreadReadState,
+    CompareTextFileVersions, CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile,
+    DispatchClaim, DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText,
+    LinkedChatStore, ListMomentsQuery, MentionCursor, MergeTextFileFromVersion,
+    MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow, RenameResult,
+    RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
     RollbackTextFileMutation, RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete,
     SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretRestoreResult,
     SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction, SnapshotMetadata,
@@ -717,6 +718,12 @@ enum Command {
         workspace_id: String,
         thread_id: String,
         reply: oneshot::Sender<Result<Option<String>, RuntimeError>>,
+    },
+    ChatThreadGetProjection {
+        workspace_id: String,
+        thread_id: String,
+        linked_file_access: ChatProjectionFileAccess,
+        reply: oneshot::Sender<Result<ChatThreadProjection, RuntimeError>>,
     },
     ChatAttachmentsListForThread {
         workspace_id: String,
@@ -2967,6 +2974,25 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    pub async fn chat_thread_get_projection(
+        &self,
+        workspace_id: String,
+        thread_id: String,
+        linked_file_access: ChatProjectionFileAccess,
+    ) -> Result<ChatThreadProjection, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChatThreadGetProjection {
+                workspace_id,
+                thread_id,
+                linked_file_access,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     pub async fn chat_attachments_list_for_thread(
         &self,
         workspace_id: String,
@@ -5205,6 +5231,17 @@ fn worker_main(
             } => {
                 let outcome = LinkedChatStore::new(&mut store)
                     .find_thread_channel_id(&workspace_id, &thread_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ChatThreadGetProjection {
+                workspace_id,
+                thread_id,
+                linked_file_access,
+                reply,
+            } => {
+                let outcome = LinkedChatStore::new(&mut store)
+                    .get_thread_projection(&workspace_id, &thread_id, linked_file_access)
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }

@@ -3406,3 +3406,184 @@ async fn rpc_b2_small_ports_round_trip_strict_shapes_and_recovery_mutations() {
     // MUTATION: omit any Phase 2/3 registration or return legacy nullable fields -> roundtrip differs/fails.
     assert_eq!((requeued, failed_pending), (json!(true), json!(1)));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn thread_projection_matches_exact_markdown_bytes() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-projection-bytes").await;
+    let mut id = 10;
+    call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.create",
+        "projection-thread",
+        json!({
+            "threadId": "thread-projection",
+            "title": "Project thread",
+            "linkedFile": {
+                "objectId": "object-1",
+                "pathHint": "private/stored-hint.md"
+            },
+            "nowMs": 10
+        }),
+    )
+    .await;
+    for (message_id, kind, name, body, now_ms) in [
+        (
+            "human-message",
+            "human",
+            "Ada",
+            "First line\nsecond line",
+            20,
+        ),
+        ("agent-message", "agent", "Helper", "Agent body", 30),
+    ] {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.messages.send",
+            json!({
+                "threadId": "thread-projection",
+                "messageId": message_id,
+                "authorKind": kind,
+                "authorDisplayName": name,
+                "body": body,
+                "nowMs": now_ms
+            }),
+        )
+        .await;
+    }
+    let projection = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.getProjection",
+        json!({
+            "threadId": "thread-projection",
+            "linkedFileAccess": {
+                "kind": "allowed",
+                "path": "docs/current.md"
+            }
+        }),
+    )
+    .await;
+    let expected = "# Project thread\n\nRead-only chat projection.\n\n\
+Linked file: docs/current.md\n\n## Ada\n\nFirst line\nsecond line\n\n\
+## Helper (agent)\n\nAgent body\n";
+    assert_eq!(projection["text"].as_str(), Some(expected));
+    assert_eq!(projection["readOnly"], json!(true));
+    assert_eq!(projection["threadId"], json!("thread-projection"));
+    assert!(
+        projection["path"]
+            .as_str()
+            .expect("projection path")
+            .starts_with(".dohc/chats/v1-")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn thread_projection_over_wire_limit_fails_without_partial_text() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-projection-cap").await;
+    let mut id = 10;
+    call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.create",
+        "projection-cap-thread",
+        json!({
+            "threadId": "thread-cap",
+            "title": "Large thread",
+            "linkedFile": { "objectId": "object-large" },
+            "nowMs": 10
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "thread-cap",
+            "messageId": "large-message",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "x".repeat(50 * 1024),
+            "nowMs": 20
+        }),
+    )
+    .await;
+    let error = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.getProjection",
+        json!({ "threadId": "thread-cap" }),
+    )
+    .await;
+    // MUTATION: truncate instead of refusing -> this call succeeds with partial Markdown.
+    assert_eq!(
+        (error.code, error.message.as_str()),
+        (ErrorCode::LimitExceeded, "projection-exceeds-inband-limit")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn thread_projection_read_only_notice_and_access_line_presence() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-projection-access").await;
+    let mut id = 10;
+    call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.create",
+        "projection-access-thread",
+        json!({
+            "threadId": "thread-access",
+            "title": "Access",
+            "linkedFile": {
+                "objectId": "object-access",
+                "pathHint": "secret/stored-only.md"
+            },
+            "nowMs": 10
+        }),
+    )
+    .await;
+    for kind in ["denied", "unknown"] {
+        let projection = call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.threads.getProjection",
+            json!({
+                "threadId": "thread-access",
+                "linkedFileAccess": { "kind": kind }
+            }),
+        )
+        .await;
+        let text = projection["text"].as_str().expect("projection text");
+        assert!(text.contains("\nRead-only chat projection.\n"));
+        assert!(text.contains("\nLinked file: unavailable\n"));
+        assert!(!text.contains("secret/stored-only.md"));
+    }
+    let null_access = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.getProjection",
+        json!({
+            "threadId": "thread-access",
+            "linkedFileAccess": null
+        }),
+    )
+    .await;
+    assert_eq!(null_access.code, ErrorCode::InvalidParams);
+}

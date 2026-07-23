@@ -231,6 +231,24 @@ pub struct ChatMessage {
     pub attachments: Vec<ChatAttachment>,
 }
 
+/// The caller's authorization result for naming a linked file in a read-only
+/// thread projection. Denied and unknown deliberately render identically.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatProjectionFileAccess {
+    Allowed(String),
+    Denied,
+    Unknown,
+}
+
+/// A complete read-only thread projection. Projections are never persisted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatThreadProjection {
+    pub path: String,
+    pub read_only: bool,
+    pub thread_id: String,
+    pub text: String,
+}
+
 /// The state of one reaction LWW cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChatReactionState {
@@ -918,6 +936,46 @@ pub fn linked_chat_projection_path(
     Ok(format!(
         ".dohc/chats/v1-{}.md",
         base32_lowercase_no_padding(&digest)
+    ))
+}
+
+/// Render the TypeScript oracle's exact thread-to-Markdown projection.
+pub fn render_chat_thread_projection(
+    thread: &ChatThread,
+    messages: &[ChatMessage],
+    linked_file_access: &ChatProjectionFileAccess,
+) -> Result<String, DomainError> {
+    let mut lines = vec![
+        format!("# {}", thread.title),
+        String::new(),
+        "Read-only chat projection.".to_owned(),
+        String::new(),
+    ];
+    if thread.linked_object_id.is_some() {
+        let linked_file_line = match linked_file_access {
+            ChatProjectionFileAccess::Allowed(path) => {
+                format!("Linked file: {}", normalize_attachment_path_hint(path)?)
+            }
+            ChatProjectionFileAccess::Denied | ChatProjectionFileAccess::Unknown => {
+                "Linked file: unavailable".to_owned()
+            }
+        };
+        lines.push(linked_file_line);
+        lines.push(String::new());
+    }
+    for message in messages {
+        let author = match message.author_kind {
+            ChatActorKind::Human => message.author_display_name.clone(),
+            ChatActorKind::Agent => format!("{} (agent)", message.author_display_name),
+        };
+        lines.push(format!("## {author}"));
+        lines.push(String::new());
+        lines.push(message.body.clone());
+        lines.push(String::new());
+    }
+    Ok(format!(
+        "{}\n",
+        lines.join("\n").trim_end_matches(is_js_trim_ws)
     ))
 }
 
@@ -3261,6 +3319,39 @@ impl<'a> LinkedChatStore<'a> {
                 .query_map(params![workspace_id, MAX_LIST_ROWS], map_thread_row)
                 .map_err(DomainError::sql_corrupt)?;
             collect(rows)
+        })
+    }
+
+    /// Load and render a complete thread projection in oracle message order.
+    pub fn get_thread_projection(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        linked_file_access: ChatProjectionFileAccess,
+    ) -> Result<ChatThreadProjection, DomainError> {
+        self.store.read_with(|conn| {
+            let thread = require_thread(conn, workspace_id, thread_id)?;
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
+                     author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms \
+                     FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
+                     ORDER BY created_at_ms, message_id",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(params![workspace_id, thread_id], map_message_row)
+                .map_err(DomainError::sql_corrupt)?;
+            let mut messages: Vec<ChatMessage> = collect(rows)?;
+            for message in &mut messages {
+                hydrate_message_attachments(conn, workspace_id, message)?;
+            }
+            Ok(ChatThreadProjection {
+                path: linked_chat_projection_path(workspace_id, &thread.thread_id, None)?,
+                read_only: true,
+                thread_id: thread.thread_id.clone(),
+                text: render_chat_thread_projection(&thread, &messages, &linked_file_access)?,
+            })
         })
     }
 

@@ -16,17 +16,17 @@ use dohc_engine_domain::{
     AgentRunRecord, BookmarkMode, BookmarkTargetKind, ChannelThreadSummary, ChatActorKind,
     ChatAgentReadState, ChatAttachment, ChatBookmark, ChatChannel, ChatChannelKind,
     ChatChannelSummary, ChatDecision, ChatDecisionState, ChatFeedReadState, ChatFileMention,
-    ChatFollow, ChatMention, ChatMessage, ChatReaction, ChatReactionState, ChatThread,
-    ChatThreadReadState, CompareTextFileVersions, ComparisonStatus, ConflictChoice,
-    ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus,
-    CreateFileThread, CreateNamedVersion, DeleteTextFile, DispatchClaim, DispatchRecord,
-    DomainError, FeedCursorValue, FollowState, FollowTargetKind, LocalAttachmentInput,
-    MarkdownMergeResult, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult, MomentOp,
-    RenameTextFile, ResolveConflictKind, ResolveDecision, ResolveTextConflict,
-    RollbackTextFileMutation, SaveBookmark, SecretDelete, SecretDiskIntent, SecretMomentRecord,
-    SecretWrite, SendMessage, SetFollow, SetReaction, StartChannelThread, TextConflict,
-    TextSnapshot, ThreadDispatchPause, VersionFileChangeStatus, VersionRecord, WriteBinary,
-    WriteText, merge_markdown, validate_addressable_plaintext_path,
+    ChatFollow, ChatMention, ChatMessage, ChatProjectionFileAccess, ChatReaction,
+    ChatReactionState, ChatThread, ChatThreadReadState, CompareTextFileVersions, ComparisonStatus,
+    ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
+    ConflictStatus, CreateFileThread, CreateNamedVersion, DeleteTextFile, DispatchClaim,
+    DispatchRecord, DomainError, FeedCursorValue, FollowState, FollowTargetKind,
+    LocalAttachmentInput, MarkdownMergeResult, MentionCursor, MergeTextFileFromVersion,
+    MergeTextFileResult, MomentOp, RenameTextFile, ResolveConflictKind, ResolveDecision,
+    ResolveTextConflict, RollbackTextFileMutation, SaveBookmark, SecretDelete, SecretDiskIntent,
+    SecretMomentRecord, SecretWrite, SendMessage, SetFollow, SetReaction, StartChannelThread,
+    TextConflict, TextSnapshot, ThreadDispatchPause, VersionFileChangeStatus, VersionRecord,
+    WriteBinary, WriteText, merge_markdown, validate_addressable_plaintext_path,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -590,6 +590,10 @@ impl EngineService {
             }
             "chats.threads.findChannelId" => {
                 self.chats_threads_find_channel_id(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.threads.getProjection" => {
+                self.chats_threads_get_projection(&ctx, request.workspace, request.params)
                     .await?
             }
             "chats.messages.send" => {
@@ -3260,6 +3264,48 @@ impl EngineService {
         )
         .await?;
         Ok(channel_id.map_or(Value::Null, Value::String))
+    }
+
+    async fn chats_threads_get_projection(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatThreadProjectionParams = parse(params)?;
+        let linked_file_access = match params.linked_file_access {
+            None | Some(ChatProjectionFileAccessParams::Unknown {}) => {
+                ChatProjectionFileAccess::Unknown
+            }
+            Some(ChatProjectionFileAccessParams::Denied {}) => ChatProjectionFileAccess::Denied,
+            Some(ChatProjectionFileAccessParams::Allowed { path }) => {
+                ChatProjectionFileAccess::Allowed(path)
+            }
+        };
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let projection = Self::read_under_ctx(
+            &cancellation,
+            "chats.threads.getProjection",
+            open.actor.chat_thread_get_projection(
+                open.workspace_id,
+                params.thread_id,
+                linked_file_access,
+            ),
+        )
+        .await?;
+        if projection.text.len() > dohc_engine_domain::INBAND_CONTENT_CAP_BYTES {
+            return Err(wire(
+                ErrorCode::LimitExceeded,
+                "projection-exceeds-inband-limit",
+            ));
+        }
+        Ok(json!({
+            "path": projection.path,
+            "readOnly": projection.read_only,
+            "threadId": projection.thread_id,
+            "text": projection.text,
+        }))
     }
 
     async fn chats_attachments_list_for_thread(
@@ -6502,6 +6548,25 @@ struct ChatThreadParams {
 }
 
 #[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+enum ChatProjectionFileAccessParams {
+    Allowed { path: String },
+    Denied {},
+    Unknown {},
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatThreadProjectionParams {
+    thread_id: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null_projection_access"
+    )]
+    linked_file_access: Option<ChatProjectionFileAccessParams>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatThreadsListForFileParams {
     object_id: String,
@@ -7776,6 +7841,15 @@ where
     D: serde::Deserializer<'de>,
 {
     Vec::<ChatLocalAttachmentParams>::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_optional_non_null_projection_access<'de, D>(
+    deserializer: D,
+) -> Result<Option<ChatProjectionFileAccessParams>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    ChatProjectionFileAccessParams::deserialize(deserializer).map(Some)
 }
 
 fn materialize_outcome_name(outcome: PostCommitMaterializeOutcome) -> &'static str {
