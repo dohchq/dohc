@@ -193,6 +193,8 @@ pub struct ChatThread {
     pub updated_at_ms: i64,
     pub channel_id: Option<String>,
     pub linked_object_id: Option<String>,
+    pub linked_path_hint: Option<String>,
+    pub linked_at_ms: Option<i64>,
 }
 
 /// A durable chat message row.
@@ -219,6 +221,27 @@ pub struct ChatThreadReadState {
     pub last_read_sequence: i64,
     pub revision: i64,
     pub updated_at_ms: i64,
+}
+
+/// The agent's message-coordinate read cursor (separate from the human
+/// sequence cursor above).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatAgentReadState {
+    pub workspace_id: String,
+    pub thread_id: String,
+    pub last_read_created_at_ms: i64,
+    pub last_read_message_id: String,
+    pub revision: i64,
+    pub updated_at_ms: i64,
+}
+
+/// An unread thread paired with the latest human-message coordinate that
+/// determines its descending page order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentUnreadThreadRow {
+    pub thread: ChatThread,
+    pub latest_created_at_ms: i64,
+    pub latest_message_id: String,
 }
 
 /// A follow target kind.
@@ -402,6 +425,15 @@ pub struct ChatBookmarkTransition {
     pub applied: bool,
 }
 
+/// One pending-bookmark keyset row. The outbox timestamp is deliberately kept
+/// beside (rather than inside) the public bookmark DTO because it is only the
+/// first coordinate of the DOP1 continuation cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingBookmarkRow {
+    pub bookmark: ChatBookmark,
+    pub outbox_updated_at_ms: i64,
+}
+
 /// A durable dispatch claim (ledger row + minted run record).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DispatchClaim {
@@ -437,6 +469,30 @@ pub struct AgentRunRecord {
     pub failure_reason: Option<String>,
     pub log_path: Option<String>,
     pub failure_note_posted: bool,
+}
+
+/// A message-to-run link in the oracle's run-first ordering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunRecordLink {
+    pub message_id: String,
+    pub run: AgentRunRecord,
+}
+
+/// Receiver-private dispatch pause state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadDispatchPause {
+    pub workspace_id: String,
+    pub thread_id: String,
+    pub paused: bool,
+    pub reason: Option<String>,
+    pub updated_at_ms: i64,
+}
+
+/// One ended app-quit run eligible for desktop recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchRecovery {
+    pub run: AgentRunRecord,
+    pub attempt_count: i64,
 }
 
 // ---------------------------------------------------------------------- inputs
@@ -819,6 +875,36 @@ fn normalize_failure_reason(reason: &str) -> Result<String, DomainError> {
     } else {
         Ok(reason.to_owned())
     }
+}
+
+fn validate_dispatch_page_limit(limit: i64) -> Result<(), DomainError> {
+    if !(1..=501).contains(&limit) {
+        Err(DomainError::chat(
+            "invalid-cursor",
+            "Page limit is invalid.",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn dispatch_after(after: Option<(i64, String)>) -> (i64, i64, String) {
+    match after {
+        Some((timestamp, id)) => (1, timestamp, id),
+        None => (0, 0, String::new()),
+    }
+}
+
+fn dispatch_corrupt() -> DomainError {
+    DomainError::chat("state-corrupt", "Agent dispatch store is corrupt.")
+}
+
+fn persisted_nonnegative_safe(value: i64) -> bool {
+    (0..=9_007_199_254_740_991).contains(&value)
+}
+
+fn persisted_safe_integer(value: i64) -> bool {
+    (-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&value)
 }
 
 fn normalize_feed_identity(value: &str, label: &str) -> Result<String, DomainError> {
@@ -1559,6 +1645,8 @@ impl<'a> LinkedChatStore<'a> {
                 updated_at_ms: now,
                 channel_id: Some(channel.channel_id.clone()),
                 linked_object_id: None,
+                linked_path_hint: None,
+                linked_at_ms: None,
             };
             let message = ChatMessage {
                 workspace_id: input.workspace_id.clone(),
@@ -1790,16 +1878,181 @@ impl<'a> LinkedChatStore<'a> {
             let mut stmt = conn
                 .prepare_cached(
                     "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, t.updated_at_ms, \
-                     t.channel_id, t.linked_object_id, \
+                     t.channel_id, t.linked_object_id, t.linked_path_hint, t.linked_at_ms, \
                      (SELECT m.body FROM chat_messages m \
                       WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
-                      ORDER BY m.created_at_ms, m.message_id LIMIT 1) \
+                      ORDER BY m.created_at_ms, m.message_id LIMIT 1), \
+                     EXISTS(SELECT 1 FROM chat_channels c \
+                       WHERE c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id) \
                      FROM chat_threads t WHERE t.workspace_id = ?1 \
                      ORDER BY created_at_ms, thread_id LIMIT ?2",
                 )
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
                 .query_map(params![workspace_id, MAX_LIST_ROWS], map_thread_row)
+                .map_err(DomainError::sql_corrupt)?;
+            collect(rows)
+        })
+    }
+
+    /// File-linked threads by stable object identity, ordered by
+    /// `(created_at_ms, thread_id)` with an exclusive keyset coordinate.
+    pub fn list_threads_for_file(
+        &self,
+        workspace_id: &str,
+        object_id: &str,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChatThread>, DomainError> {
+        let object_id = object_id.trim_matches(is_js_trim_ws);
+        if object_id.is_empty() || object_id.encode_utf16().count() > 200 {
+            return Err(DomainError::chat(
+                "invalid-path",
+                "Linked file object id is invalid.",
+            ));
+        }
+        if !(1..=501).contains(&limit) {
+            return Err(DomainError::chat(
+                "invalid-cursor",
+                "Page limit is invalid.",
+            ));
+        }
+        let (has_after, after_created_at_ms, after_thread_id) = match after {
+            Some((created_at_ms, thread_id)) => (1_i64, created_at_ms, thread_id),
+            None => (0_i64, 0_i64, String::new()),
+        };
+        self.store.read_with(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, \
+                            t.updated_at_ms, t.channel_id, t.linked_object_id, \
+                            t.linked_path_hint, t.linked_at_ms, \
+                            (SELECT m.body FROM chat_messages m \
+                             WHERE m.workspace_id = t.workspace_id \
+                               AND m.thread_id = t.thread_id \
+                             ORDER BY m.created_at_ms, m.message_id LIMIT 1), \
+                            EXISTS(SELECT 1 FROM chat_channels c \
+                              WHERE c.workspace_id = t.workspace_id \
+                                AND c.channel_id = t.channel_id) \
+                     FROM chat_threads t \
+                     WHERE t.workspace_id = ?1 AND t.linked_object_id = ?2 \
+                       AND (?3 = 0 OR t.created_at_ms > ?4 \
+                         OR (t.created_at_ms = ?4 AND t.thread_id > ?5)) \
+                     ORDER BY t.created_at_ms, t.thread_id LIMIT ?6",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        object_id,
+                        has_after,
+                        after_created_at_ms,
+                        after_thread_id,
+                        limit
+                    ],
+                    map_thread_row,
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            collect(rows)
+        })
+    }
+
+    /// Point lookup used by the shared-channel write gate. Every well-formed
+    /// miss, foreign-workspace thread, and file-linked thread returns `None`.
+    pub fn find_thread_channel_id(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<String>, DomainError> {
+        self.store.read_with(|conn| {
+            conn.query_row(
+                "SELECT channel_id FROM chat_threads \
+                 WHERE workspace_id = ?1 AND thread_id = ?2",
+                params![workspace_id, thread_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DomainError::sql_corrupt)
+            .map(Option::flatten)
+        })
+    }
+
+    /// Threads whose latest message is human-authored and beyond the agent
+    /// cursor, newest coordinate first.
+    pub fn list_agent_unread_threads(
+        &self,
+        workspace_id: &str,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<AgentUnreadThreadRow>, DomainError> {
+        if !(1..=501).contains(&limit) {
+            return Err(DomainError::chat(
+                "invalid-cursor",
+                "Page limit is invalid.",
+            ));
+        }
+        let (has_after, after_created_at_ms, after_message_id) = match after {
+            Some((created_at_ms, message_id)) => (1_i64, created_at_ms, message_id),
+            None => (0_i64, 0_i64, String::new()),
+        };
+        self.store.read_with(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, \
+                            t.updated_at_ms, t.channel_id, t.linked_object_id, \
+                            t.linked_path_hint, t.linked_at_ms, \
+                            (SELECT m.body FROM chat_messages m \
+                             WHERE m.workspace_id = t.workspace_id \
+                               AND m.thread_id = t.thread_id \
+                             ORDER BY m.created_at_ms, m.message_id LIMIT 1), \
+                            EXISTS(SELECT 1 FROM chat_channels c \
+                              WHERE c.workspace_id = t.workspace_id \
+                                AND c.channel_id = t.channel_id), \
+                            latest.created_at_ms, latest.message_id \
+                     FROM chat_threads t \
+                     JOIN chat_messages latest \
+                       ON latest.workspace_id = t.workspace_id \
+                      AND latest.thread_id = t.thread_id \
+                      AND NOT EXISTS (SELECT 1 FROM chat_messages newer \
+                        WHERE newer.workspace_id = latest.workspace_id \
+                          AND newer.thread_id = latest.thread_id \
+                          AND (newer.created_at_ms > latest.created_at_ms \
+                            OR (newer.created_at_ms = latest.created_at_ms \
+                              AND newer.message_id > latest.message_id))) \
+                     LEFT JOIN chat_agent_read_state ars \
+                       ON ars.workspace_id = t.workspace_id \
+                      AND ars.thread_id = t.thread_id \
+                     WHERE t.workspace_id = ?1 AND latest.author_kind = 'human' \
+                       AND (ars.thread_id IS NULL \
+                         OR latest.created_at_ms > ars.last_read_created_at_ms \
+                         OR (latest.created_at_ms = ars.last_read_created_at_ms \
+                           AND latest.message_id > ars.last_read_message_id)) \
+                       AND (?2 = 0 OR latest.created_at_ms < ?3 \
+                         OR (latest.created_at_ms = ?3 AND latest.message_id < ?4)) \
+                     ORDER BY latest.created_at_ms DESC, latest.message_id DESC LIMIT ?5",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        has_after,
+                        after_created_at_ms,
+                        after_message_id,
+                        limit
+                    ],
+                    |row| {
+                        let thread = map_thread_row(row)?;
+                        let latest_created_at_ms = row.get(11)?;
+                        let latest_message_id = row.get(12)?;
+                        Ok(thread.map(|thread| AgentUnreadThreadRow {
+                            thread,
+                            latest_created_at_ms,
+                            latest_message_id,
+                        }))
+                    },
+                )
                 .map_err(DomainError::sql_corrupt)?;
             collect(rows)
         })
@@ -2094,6 +2347,132 @@ impl<'a> LinkedChatStore<'a> {
                 .map_err(DomainError::sql_corrupt)?;
             collect(rows)
         })
+    }
+
+    /// Seed follows for every concrete non-DM channel wire identity. These
+    /// receiver-private seed cells are insert-ignore and intentionally emit no
+    /// replication journal entry.
+    pub fn ensure_default_channel_follows(
+        &mut self,
+        workspace_id: &str,
+        owner_user_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<(), DomainError> {
+        let workspace_id = workspace_id.to_owned();
+        let owner_user_id = normalize_feed_identity(owner_user_id, "Feed owner")?;
+        let outcome = self.store.write_with(faults, |tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO chat_follows \
+                 (workspace_id, owner_user_id, target_kind, target_id, state, \
+                  updated_at_ms, origin_id, origin_seq) \
+                 SELECT DISTINCT ?1, ?2, 'channel', w.wire_id, 'following', 0, 'seed', 0 \
+                 FROM chat_channels c JOIN chat_channel_wire_ids w \
+                   ON w.workspace_id = c.workspace_id AND w.channel_id = c.channel_id \
+                 WHERE c.workspace_id = ?1 AND c.kind <> 'dm' \
+                   AND NOT EXISTS (SELECT 1 FROM chat_channel_placeholders p \
+                     WHERE p.workspace_id = c.workspace_id AND p.channel_id = c.channel_id)",
+                params![workspace_id, owner_user_id],
+            )
+            .map_err(DomainError::sql_persist)?;
+            Ok::<_, DomainError>(())
+        })?;
+        committed(outcome)
+    }
+
+    /// Monotonic message-coordinate CAS for the agent's read state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mark_thread_read_by_agent(
+        &mut self,
+        workspace_id: &str,
+        thread_id: &str,
+        up_to_created_at_ms: i64,
+        up_to_message_id: &str,
+        expected_revision: Option<i64>,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatAgentReadState, DomainError> {
+        if !persisted_nonnegative_safe(up_to_created_at_ms) || up_to_message_id.is_empty() {
+            return Err(DomainError::chat(
+                "invalid-read-cursor",
+                "Agent read cursor is invalid.",
+            ));
+        }
+        if expected_revision.is_some_and(|revision| !persisted_nonnegative_safe(revision)) {
+            return Err(DomainError::chat(
+                "invalid-read-cursor",
+                "Expected read-state revision is invalid.",
+            ));
+        }
+        let workspace_id = workspace_id.to_owned();
+        let thread_id = thread_id.to_owned();
+        let up_to_message_id = up_to_message_id.to_owned();
+        let outcome = self.store.write_with(faults, |tx| {
+            require_thread(tx, &workspace_id, &thread_id)?;
+            let current = agent_read_state_for_thread(tx, &workspace_id, &thread_id)?;
+            if expected_revision.is_some_and(|revision| revision != current.revision) {
+                return Err(DomainError::chat(
+                    "read-state-revision-mismatch",
+                    "Agent read-state revision is stale.",
+                ));
+            }
+            let latest: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT created_at_ms, message_id FROM chat_messages \
+                     WHERE workspace_id = ?1 AND thread_id = ?2 \
+                     ORDER BY created_at_ms DESC, message_id DESC LIMIT 1",
+                    params![workspace_id, thread_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            let Some(latest) = latest else {
+                return Ok::<_, DomainError>(current);
+            };
+            let requested = (up_to_created_at_ms, up_to_message_id.clone());
+            let target = if requested > latest {
+                latest
+            } else {
+                requested
+            };
+            let current_coordinate = (
+                current.last_read_created_at_ms,
+                current.last_read_message_id.clone(),
+            );
+            if target <= current_coordinate {
+                return Ok(current);
+            }
+            let revision = current
+                .revision
+                .checked_add(1)
+                .ok_or_else(dispatch_corrupt)?;
+            tx.execute(
+                "INSERT INTO chat_agent_read_state \
+                 (workspace_id, thread_id, last_read_created_at_ms, last_read_message_id, \
+                  revision, updated_at_ms) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT(workspace_id, thread_id) DO UPDATE SET \
+                   last_read_created_at_ms = excluded.last_read_created_at_ms, \
+                   last_read_message_id = excluded.last_read_message_id, \
+                   revision = excluded.revision, updated_at_ms = excluded.updated_at_ms",
+                params![
+                    workspace_id,
+                    thread_id,
+                    target.0,
+                    target.1,
+                    revision,
+                    now_ms
+                ],
+            )
+            .map_err(DomainError::sql_persist)?;
+            Ok(ChatAgentReadState {
+                workspace_id: workspace_id.clone(),
+                thread_id: thread_id.clone(),
+                last_read_created_at_ms: target.0,
+                last_read_message_id: target.1,
+                revision,
+                updated_at_ms: now_ms,
+            })
+        })?;
+        committed(outcome)
     }
 
     /// LWW-upsert the feed read state (`markPersonalFeedSeen`). Journals
@@ -2615,22 +2994,62 @@ impl<'a> LinkedChatStore<'a> {
         owner_user_id: &str,
         limit: Option<i64>,
     ) -> Result<Vec<ChatBookmark>, DomainError> {
+        self.list_pending_bookmarks_page(workspace_id, owner_user_id, limit.unwrap_or(50), None)
+            .map(|rows| rows.into_iter().map(|row| row.bookmark).collect())
+    }
+
+    /// Keyset page for the projection worker's poll. The exclusive coordinate
+    /// is the oracle order `(outbox.updated_at_ms, bookmark_id)`.
+    pub fn list_pending_bookmarks_page(
+        &self,
+        workspace_id: &str,
+        owner_user_id: &str,
+        limit: i64,
+        after: Option<(i64, String)>,
+    ) -> Result<Vec<PendingBookmarkRow>, DomainError> {
         let owner_user_id = normalize_feed_identity(owner_user_id, "Bookmark owner")?;
-        let limit = limit.unwrap_or(50);
-        if !(1..=200).contains(&limit) {
+        // One look-ahead row lets the wire layer distinguish a complete page
+        // from a prefix without an offset or an unbounded materialization.
+        if !(1..=201).contains(&limit) {
             return Err(DomainError::chat(
                 "invalid-bookmark-target",
                 "Bookmark limit is invalid.",
             ));
         }
+        let (has_after, after_updated_at_ms, after_bookmark_id) = match after {
+            Some((updated_at_ms, bookmark_id)) => (1_i64, updated_at_ms, bookmark_id),
+            None => (0_i64, 0_i64, String::new()),
+        };
         self.store.read_with(|conn| {
             let mut stmt = conn
                 .prepare_cached(&format!(
-                    "{BOOKMARK_SELECT} WHERE b.workspace_id = ?1 AND b.owner_user_id = ?2                      AND o.projection_state = 'pending'                      ORDER BY o.updated_at_ms, b.bookmark_id LIMIT ?3"
+                    "{PENDING_BOOKMARK_SELECT} \
+                     WHERE b.workspace_id = ?1 AND b.owner_user_id = ?2 \
+                       AND o.projection_state = 'pending' \
+                       AND (?3 = 0 OR o.updated_at_ms > ?4 \
+                         OR (o.updated_at_ms = ?4 AND b.bookmark_id > ?5)) \
+                     ORDER BY o.updated_at_ms, b.bookmark_id LIMIT ?6"
                 ))
                 .map_err(DomainError::sql_corrupt)?;
             let rows = stmt
-                .query_map(params![workspace_id, owner_user_id, limit], map_bookmark_row)
+                .query_map(
+                    params![
+                        workspace_id,
+                        owner_user_id,
+                        has_after,
+                        after_updated_at_ms,
+                        after_bookmark_id,
+                        limit
+                    ],
+                    |row| {
+                        let bookmark = map_bookmark_row(row)?;
+                        let outbox_updated_at_ms = row.get(17)?;
+                        Ok(bookmark.map(|bookmark| PendingBookmarkRow {
+                            bookmark,
+                            outbox_updated_at_ms,
+                        }))
+                    },
+                )
                 .map_err(DomainError::sql_corrupt)?;
             collect(rows)
         })
@@ -2667,6 +3086,48 @@ impl<'a> LinkedChatStore<'a> {
                 queue_bookmark_generation(tx, &ws, &bid, now_ms)?;
             }
             require_bookmark(tx, &ws, &owner, &bid)
+        })?;
+        committed(outcome)
+    }
+
+    /// Queue a fresh projection generation. The request id is mandatory
+    /// because semantic replay without it would increment twice.
+    pub fn mark_bookmark_pending(
+        &mut self,
+        workspace_id: &str,
+        owner_user_id: &str,
+        bookmark_id: &str,
+        request_id: &str,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatBookmark, DomainError> {
+        let workspace_id = workspace_id.to_owned();
+        let owner_user_id = normalize_feed_identity(owner_user_id, "Bookmark owner")?;
+        let bookmark_id = normalize_feed_identity(bookmark_id, "Bookmark id")?;
+        let payload_hash = hash_fields(&[
+            workspace_id.as_bytes(),
+            owner_user_id.as_bytes(),
+            bookmark_id.as_bytes(),
+        ]);
+        if let Some((recorded_hash, generation)) = self
+            .store
+            .read_with(|conn| lookup_request_result(conn, request_id))?
+        {
+            if recorded_hash != payload_hash {
+                return Err(DomainError::IdempotencyKeyReuseMismatch);
+            }
+            let mut bookmark = self.store.read_with(|conn| {
+                require_bookmark(conn, &workspace_id, &owner_user_id, &bookmark_id)
+            })?;
+            bookmark.generation = generation;
+            return Ok(bookmark);
+        }
+        let outcome = self.store.write_with(faults, |tx| {
+            require_bookmark(tx, &workspace_id, &owner_user_id, &bookmark_id)?;
+            queue_bookmark_generation(tx, &workspace_id, &bookmark_id, now_ms)?;
+            let bookmark = require_bookmark(tx, &workspace_id, &owner_user_id, &bookmark_id)?;
+            record_request_result(tx, request_id, &payload_hash, bookmark.generation, now_ms)?;
+            Ok::<_, DomainError>(bookmark)
         })?;
         committed(outcome)
     }
@@ -3068,6 +3529,594 @@ impl<'a> LinkedChatStore<'a> {
         committed(outcome)
     }
 
+    /// Pending dispatches in trigger-message time order. Scanner-created rows
+    /// preserve the message timestamp in `created_at_ms` (F7).
+    pub fn list_pending_dispatches(
+        &self,
+        workspace_id: &str,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<DispatchRecord>, DomainError> {
+        validate_dispatch_page_limit(limit)?;
+        let (has_after, after_created_at_ms, after_trigger) = dispatch_after(after);
+        self.store.read_with(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT workspace_id, trigger_message_id, thread_id, state, run_id, \
+                            failure_reason, attempt_count, created_at_ms, updated_at_ms \
+                     FROM chat_dispatch_ledger \
+                     WHERE workspace_id = ?1 AND state = 'pending' \
+                       AND (?2 = 0 OR created_at_ms > ?3 \
+                         OR (created_at_ms = ?3 AND trigger_message_id > ?4)) \
+                     ORDER BY created_at_ms, trigger_message_id LIMIT ?5",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        has_after,
+                        after_created_at_ms,
+                        after_trigger,
+                        limit
+                    ],
+                    |row| map_dispatch_row(row, 0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            collect(rows)
+        })
+    }
+
+    /// Open claims, after first proving the complete workspace invariant: one
+    /// unended run per running ledger row and no unmatched unended run.
+    pub fn list_open_dispatch_runs(
+        &self,
+        workspace_id: &str,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<DispatchClaim>, DomainError> {
+        validate_dispatch_page_limit(limit)?;
+        let (has_after, after_updated_at_ms, after_trigger) = dispatch_after(after);
+        self.store.read_with(|conn| {
+            let broken_running: i64 = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM chat_dispatch_ledger l \
+                     WHERE l.workspace_id = ?1 AND l.state = 'running' \
+                       AND (l.run_id IS NULL OR (SELECT COUNT(*) \
+                         FROM agent_run_records r WHERE r.workspace_id = l.workspace_id \
+                           AND r.run_id = l.run_id AND r.ended_at_ms IS NULL) <> 1))",
+                    params![workspace_id],
+                    |row| row.get(0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let unmatched: i64 = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM agent_run_records r \
+                     LEFT JOIN chat_dispatch_ledger l \
+                       ON l.workspace_id = r.workspace_id \
+                      AND l.trigger_message_id = r.trigger_message_id \
+                     WHERE r.workspace_id = ?1 AND r.ended_at_ms IS NULL \
+                       AND (l.trigger_message_id IS NULL OR l.state <> 'running' \
+                         OR l.run_id <> r.run_id))",
+                    params![workspace_id],
+                    |row| row.get(0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            if broken_running != 0 || unmatched != 0 {
+                return Err(dispatch_corrupt());
+            }
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT l.workspace_id, l.trigger_message_id, l.thread_id, l.state, \
+                            l.run_id, l.failure_reason, l.attempt_count, l.created_at_ms, \
+                            l.updated_at_ms, r.workspace_id, r.run_id, r.thread_id, \
+                            r.trigger_message_id, r.command, r.started_at_ms, r.ended_at_ms, \
+                            r.exit_code, r.failure_reason, r.log_path, r.failure_note_posted \
+                     FROM chat_dispatch_ledger l JOIN agent_run_records r \
+                       ON r.workspace_id = l.workspace_id AND r.run_id = l.run_id \
+                     WHERE l.workspace_id = ?1 AND l.state = 'running' \
+                       AND r.ended_at_ms IS NULL \
+                       AND (?2 = 0 OR l.updated_at_ms > ?3 \
+                         OR (l.updated_at_ms = ?3 AND l.trigger_message_id > ?4)) \
+                     ORDER BY l.updated_at_ms, l.trigger_message_id LIMIT ?5",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        has_after,
+                        after_updated_at_ms,
+                        after_trigger,
+                        limit
+                    ],
+                    map_dispatch_claim_row,
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            collect(rows)
+        })
+    }
+
+    pub fn list_run_messages(
+        &self,
+        workspace_id: &str,
+        run_id: &str,
+        after_message_id: Option<String>,
+        limit: i64,
+    ) -> Result<Vec<String>, DomainError> {
+        let run_id = normalize_dispatch_run_id(run_id)?;
+        validate_dispatch_page_limit(limit)?;
+        let (has_after, after_message_id) = match after_message_id {
+            Some(message_id) => (1_i64, message_id),
+            None => (0_i64, String::new()),
+        };
+        self.store.read_with(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT message_id FROM run_message_links \
+                     WHERE workspace_id = ?1 AND run_id = ?2 \
+                       AND (?3 = 0 OR message_id > ?4) \
+                     ORDER BY message_id LIMIT ?5",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![workspace_id, run_id, has_after, after_message_id, limit],
+                    |row| row.get(0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            rows.collect::<Result<Vec<String>, _>>()
+                .map_err(DomainError::sql_corrupt)
+        })
+    }
+
+    pub fn dispatch_run_id_for_message(
+        &self,
+        workspace_id: &str,
+        message_id: &str,
+    ) -> Result<Option<String>, DomainError> {
+        let message_id = normalize_dispatch_id(message_id, "Message id is invalid.")?;
+        self.store.read_with(|conn| {
+            conn.query_row(
+                "SELECT run_id FROM run_message_links \
+                 WHERE workspace_id = ?1 AND message_id = ?2",
+                params![workspace_id, message_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DomainError::sql_corrupt)
+        })
+    }
+
+    pub fn run_records_for_thread(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        run_limit: Option<i64>,
+        after: Option<(i64, String, String)>,
+        page_limit: i64,
+    ) -> Result<Vec<RunRecordLink>, DomainError> {
+        let thread_id = normalize_dispatch_id(thread_id, "Thread id is invalid.")?;
+        if run_limit.is_some_and(|limit| limit < 1) {
+            return Err(DomainError::chat(
+                "invalid-input",
+                "Run record limit must be a positive integer.",
+            ));
+        }
+        validate_dispatch_page_limit(page_limit)?;
+        let (has_after, after_started_at_ms, after_run_id, after_message_id) = match after {
+            Some((started_at_ms, run_id, message_id)) => (1_i64, started_at_ms, run_id, message_id),
+            None => (0_i64, 0_i64, String::new(), String::new()),
+        };
+        self.store.read_with(|conn| {
+            let sql = if run_limit.is_some() {
+                "WITH recent_runs AS (SELECT * FROM agent_run_records \
+                   WHERE workspace_id = ?1 AND thread_id = ?2 \
+                   ORDER BY started_at_ms DESC, run_id DESC LIMIT ?3) \
+                 SELECT links.message_id, runs.workspace_id, runs.run_id, runs.thread_id, \
+                        runs.trigger_message_id, runs.command, runs.started_at_ms, \
+                        runs.ended_at_ms, runs.exit_code, runs.failure_reason, runs.log_path, \
+                        runs.failure_note_posted \
+                 FROM run_message_links links JOIN recent_runs runs \
+                   ON runs.workspace_id = links.workspace_id AND runs.run_id = links.run_id \
+                 WHERE runs.workspace_id = ?1 AND runs.thread_id = ?2 \
+                   AND (?4 = 0 OR runs.started_at_ms < ?5 \
+                     OR (runs.started_at_ms = ?5 AND runs.run_id < ?6) \
+                     OR (runs.started_at_ms = ?5 AND runs.run_id = ?6 \
+                       AND links.message_id > ?7)) \
+                 ORDER BY runs.started_at_ms DESC, runs.run_id DESC, links.message_id LIMIT ?8"
+            } else {
+                "SELECT links.message_id, runs.workspace_id, runs.run_id, runs.thread_id, \
+                        runs.trigger_message_id, runs.command, runs.started_at_ms, \
+                        runs.ended_at_ms, runs.exit_code, runs.failure_reason, runs.log_path, \
+                        runs.failure_note_posted \
+                 FROM run_message_links links JOIN agent_run_records runs \
+                   ON runs.workspace_id = links.workspace_id AND runs.run_id = links.run_id \
+                 WHERE runs.workspace_id = ?1 AND runs.thread_id = ?2 \
+                   AND (?3 = 0 OR runs.started_at_ms < ?4 \
+                     OR (runs.started_at_ms = ?4 AND runs.run_id < ?5) \
+                     OR (runs.started_at_ms = ?4 AND runs.run_id = ?5 \
+                       AND links.message_id > ?6)) \
+                 ORDER BY runs.started_at_ms DESC, runs.run_id DESC, links.message_id LIMIT ?7"
+            };
+            let mut stmt = conn.prepare_cached(sql).map_err(DomainError::sql_corrupt)?;
+            let map = |row: &rusqlite::Row<'_>| {
+                let message_id = row.get(0)?;
+                let run = map_run_row(row, 1)?;
+                Ok(run.map(|run| RunRecordLink { message_id, run }))
+            };
+            let rows = match run_limit {
+                Some(run_limit) => stmt.query_map(
+                    params![
+                        workspace_id,
+                        thread_id,
+                        run_limit,
+                        has_after,
+                        after_started_at_ms,
+                        after_run_id,
+                        after_message_id,
+                        page_limit
+                    ],
+                    map,
+                ),
+                None => stmt.query_map(
+                    params![
+                        workspace_id,
+                        thread_id,
+                        has_after,
+                        after_started_at_ms,
+                        after_run_id,
+                        after_message_id,
+                        page_limit
+                    ],
+                    map,
+                ),
+            }
+            .map_err(DomainError::sql_corrupt)?;
+            collect(rows)
+        })
+    }
+
+    pub fn get_run_record(
+        &self,
+        workspace_id: &str,
+        run_id: &str,
+    ) -> Result<Option<AgentRunRecord>, DomainError> {
+        let run_id = normalize_dispatch_run_id(run_id)?;
+        self.store.read_with(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT workspace_id, run_id, thread_id, trigger_message_id, command, \
+                            started_at_ms, ended_at_ms, exit_code, failure_reason, log_path, \
+                            failure_note_posted FROM agent_run_records \
+                     WHERE run_id = ?1 LIMIT 2",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(params![run_id], |row| map_run_row(row, 0))
+                .map_err(DomainError::sql_corrupt)?;
+            let mut runs = collect(rows)?;
+            if runs.len() > 1 {
+                return Err(dispatch_corrupt());
+            }
+            Ok(runs.pop().filter(|run| run.workspace_id == workspace_id))
+        })
+    }
+
+    pub fn thread_dispatch_paused(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<bool, DomainError> {
+        Ok(self
+            .get_thread_dispatch_pause_state(workspace_id, thread_id)?
+            .is_some_and(|pause| pause.paused))
+    }
+
+    pub fn get_thread_dispatch_pause_state(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+    ) -> Result<Option<ThreadDispatchPause>, DomainError> {
+        let thread_id = normalize_dispatch_id(thread_id, "Thread id is invalid.")?;
+        self.store.read_with(|conn| {
+            conn.query_row(
+                "SELECT workspace_id, thread_id, paused, reason, updated_at_ms \
+                 FROM chat_dispatch_pause WHERE workspace_id = ?1 AND thread_id = ?2",
+                params![workspace_id, thread_id],
+                map_pause_row,
+            )
+            .optional()
+            .map_err(DomainError::sql_corrupt)?
+            .transpose()
+        })
+    }
+
+    pub fn recent_dispatch_count(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        since_ms: f64,
+    ) -> Result<i64, DomainError> {
+        let thread_id = normalize_dispatch_id(thread_id, "Thread id is invalid.")?;
+        if !since_ms.is_finite() {
+            return Err(DomainError::chat(
+                "invalid-input",
+                "Dispatch window start must be finite.",
+            ));
+        }
+        self.store.read_with(|conn| {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM agent_run_records \
+                     WHERE workspace_id = ?1 AND thread_id = ?2 AND started_at_ms >= ?3",
+                    params![workspace_id, thread_id, since_ms],
+                    |row| row.get(0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            if count < 0 {
+                return Err(dispatch_corrupt());
+            }
+            Ok(count)
+        })
+    }
+
+    pub fn fail_pending_for_thread(
+        &mut self,
+        workspace_id: &str,
+        thread_id: &str,
+        reason: &str,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<i64, DomainError> {
+        let workspace_id = workspace_id.to_owned();
+        let thread_id = normalize_dispatch_id(thread_id, "Thread id is invalid.")?;
+        let reason = normalize_failure_reason(reason)?;
+        let outcome = self.store.write_with(faults, |tx| {
+            let changed = tx
+                .execute(
+                    "UPDATE chat_dispatch_ledger SET state = 'failed', failure_reason = ?3, \
+                       updated_at_ms = ?4 \
+                     WHERE workspace_id = ?1 AND thread_id = ?2 AND state = 'pending'",
+                    params![workspace_id, thread_id, reason, now_ms],
+                )
+                .map_err(DomainError::sql_persist)?;
+            i64::try_from(changed).map_err(|_| dispatch_corrupt())
+        })?;
+        committed(outcome)
+    }
+
+    pub fn record_run_message(
+        &mut self,
+        workspace_id: &str,
+        message_id: &str,
+        run_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<bool, DomainError> {
+        let workspace_id = workspace_id.to_owned();
+        let message_id = normalize_dispatch_id(message_id, "Message id is invalid.")?;
+        let run_id = normalize_dispatch_run_id(run_id)?;
+        let outcome = self.store.write_with(faults, |tx| {
+            let runs = run_rows_by_global_id(tx, &run_id)?;
+            if runs.len() > 1 {
+                return Err(dispatch_corrupt());
+            }
+            if runs
+                .first()
+                .is_none_or(|run| run.workspace_id != workspace_id)
+            {
+                return Err(DomainError::chat(
+                    "run-not-found",
+                    "Agent run was not found in this workspace.",
+                ));
+            }
+            let inserted = tx
+                .execute(
+                    "INSERT OR IGNORE INTO run_message_links \
+                     (workspace_id, message_id, run_id) VALUES (?1, ?2, ?3)",
+                    params![workspace_id, message_id, run_id],
+                )
+                .map_err(DomainError::sql_persist)?;
+            if inserted == 1 {
+                return Ok::<_, DomainError>(true);
+            }
+            let existing: Option<String> = tx
+                .query_row(
+                    "SELECT run_id FROM run_message_links \
+                     WHERE workspace_id = ?1 AND message_id = ?2",
+                    params![workspace_id, message_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            if existing.as_deref() != Some(run_id.as_str()) {
+                return Err(dispatch_corrupt());
+            }
+            Ok(false)
+        })?;
+        committed(outcome)
+    }
+
+    pub fn set_thread_dispatch_paused(
+        &mut self,
+        workspace_id: &str,
+        thread_id: &str,
+        paused: bool,
+        reason: Option<&str>,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<ThreadDispatchPause, DomainError> {
+        let workspace_id = workspace_id.to_owned();
+        let thread_id = normalize_dispatch_id(thread_id, "Thread id is invalid.")?;
+        let reason = if paused {
+            reason.map(normalize_failure_reason).transpose()?
+        } else {
+            None
+        };
+        let outcome = self.store.write_with(faults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_dispatch_pause \
+                 (workspace_id, thread_id, paused, reason, updated_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(workspace_id, thread_id) DO UPDATE SET \
+                   paused = excluded.paused, reason = excluded.reason, \
+                   updated_at_ms = excluded.updated_at_ms",
+                params![workspace_id, thread_id, i64::from(paused), reason, now_ms],
+            )
+            .map_err(DomainError::sql_persist)?;
+            tx.query_row(
+                "SELECT workspace_id, thread_id, paused, reason, updated_at_ms \
+                 FROM chat_dispatch_pause WHERE workspace_id = ?1 AND thread_id = ?2",
+                params![workspace_id, thread_id],
+                map_pause_row,
+            )
+            .map_err(DomainError::sql_corrupt)?
+        })?;
+        committed(outcome)
+    }
+
+    pub fn mark_failure_note_posted(
+        &mut self,
+        workspace_id: &str,
+        run_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<AgentRunRecord, DomainError> {
+        let workspace_id = workspace_id.to_owned();
+        let run_id = normalize_dispatch_run_id(run_id)?;
+        let outcome = self.store.write_with(faults, |tx| {
+            let mut runs = run_rows_by_global_id(tx, &run_id)?;
+            if runs.len() > 1 {
+                return Err(dispatch_corrupt());
+            }
+            let run = runs
+                .pop()
+                .filter(|run| run.workspace_id == workspace_id)
+                .ok_or_else(|| DomainError::chat("run-not-found", "Agent run was not found."))?;
+            if run.failure_note_posted {
+                return Ok::<_, DomainError>(run);
+            }
+            let changed = tx
+                .execute(
+                    "UPDATE agent_run_records SET failure_note_posted = 1 \
+                     WHERE workspace_id = ?1 AND run_id = ?2 AND failure_note_posted = 0",
+                    params![workspace_id, run_id],
+                )
+                .map_err(DomainError::sql_persist)?;
+            if changed != 1 {
+                return Err(dispatch_corrupt());
+            }
+            require_run_in_workspace(tx, &workspace_id, &run_id)
+        })?;
+        committed(outcome)
+    }
+
+    pub fn requeue_failed_trigger(
+        &mut self,
+        workspace_id: &str,
+        trigger_message_id: &str,
+        run_id: &str,
+        now_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<bool, DomainError> {
+        let workspace_id = workspace_id.to_owned();
+        let trigger_message_id =
+            normalize_dispatch_id(trigger_message_id, "Trigger message id is invalid.")?;
+        let run_id = normalize_dispatch_run_id(run_id)?;
+        let outcome = self.store.write_with(faults, |tx| {
+            let ended_at_ms: Option<Option<i64>> = tx
+                .query_row(
+                    "SELECT ended_at_ms FROM agent_run_records \
+                     WHERE workspace_id = ?1 AND run_id = ?2",
+                    params![workspace_id, run_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            if ended_at_ms.flatten().is_none() {
+                return Ok::<_, DomainError>(false);
+            }
+            let changed = tx
+                .execute(
+                    "UPDATE chat_dispatch_ledger SET state = 'pending', run_id = NULL, \
+                       failure_reason = NULL, updated_at_ms = ?4 \
+                     WHERE workspace_id = ?1 AND trigger_message_id = ?2 \
+                       AND state = 'failed' AND run_id = ?3 AND attempt_count < 2",
+                    params![workspace_id, trigger_message_id, run_id, now_ms],
+                )
+                .map_err(DomainError::sql_persist)?;
+            Ok(changed == 1)
+        })?;
+        committed(outcome)
+    }
+
+    pub fn list_app_quit_recoveries(
+        &self,
+        workspace_id: &str,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<DispatchRecovery>, DomainError> {
+        validate_dispatch_page_limit(limit)?;
+        let (has_after, after_started_at_ms, after_run_id) = dispatch_after(after);
+        self.store.read_with(|conn| {
+            let duplicate: i64 = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM agent_run_records r \
+                     JOIN chat_dispatch_ledger l ON l.workspace_id = r.workspace_id \
+                       AND l.trigger_message_id = r.trigger_message_id AND l.run_id = r.run_id \
+                     WHERE r.workspace_id = ?1 AND r.ended_at_ms IS NOT NULL \
+                       AND r.exit_code = 143 AND r.failure_reason = 'app-quit' \
+                       AND r.failure_note_posted = 0 AND l.state = 'failed' \
+                       AND (SELECT COUNT(*) FROM agent_run_records all_runs \
+                         WHERE all_runs.run_id = r.run_id) <> 1)",
+                    params![workspace_id],
+                    |row| row.get(0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            if duplicate != 0 {
+                return Err(dispatch_corrupt());
+            }
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT r.workspace_id, r.run_id, r.thread_id, r.trigger_message_id, \
+                            r.command, r.started_at_ms, r.ended_at_ms, r.exit_code, \
+                            r.failure_reason, r.log_path, r.failure_note_posted, l.attempt_count \
+                     FROM agent_run_records r JOIN chat_dispatch_ledger l \
+                       ON l.workspace_id = r.workspace_id \
+                      AND l.trigger_message_id = r.trigger_message_id AND l.run_id = r.run_id \
+                     WHERE r.workspace_id = ?1 AND r.ended_at_ms IS NOT NULL \
+                       AND r.exit_code = 143 AND r.failure_reason = 'app-quit' \
+                       AND r.failure_note_posted = 0 AND l.state = 'failed' \
+                       AND (?2 = 0 OR r.started_at_ms > ?3 \
+                         OR (r.started_at_ms = ?3 AND r.run_id > ?4)) \
+                     ORDER BY r.started_at_ms, r.run_id LIMIT ?5",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        has_after,
+                        after_started_at_ms,
+                        after_run_id,
+                        limit
+                    ],
+                    |row| {
+                        let run = map_run_row(row, 0)?;
+                        let attempt_count: i64 = row.get(11)?;
+                        Ok(run.and_then(|run| {
+                            if persisted_nonnegative_safe(attempt_count) {
+                                Ok(DispatchRecovery { run, attempt_count })
+                            } else {
+                                Err(dispatch_corrupt())
+                            }
+                        }))
+                    },
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            collect(rows)
+        })
+    }
+
     /// Complete a running dispatch (`completeRun`): the `running` ledger row →
     /// `done` and its `agent_run_records` row gets `ended_at_ms`/`exit_code`.
     /// This is what unblocks the workspace's single-writer claim guard so the
@@ -3364,6 +4413,15 @@ FROM chat_bookmarks b \
 JOIN chat_bookmark_outbox o \
   ON o.workspace_id = b.workspace_id AND o.bookmark_id = b.bookmark_id";
 
+const PENDING_BOOKMARK_SELECT: &str = "\
+SELECT b.bookmark_id, b.owner_user_id, b.target_kind, b.target_id, b.thread_id, b.message_id, \
+       b.mode, b.destination_path, b.state, b.created_at_ms, b.updated_at_ms, \
+       o.generation, o.projected_generation, o.projection_state, o.last_projected_at_ms, \
+       o.projection_object_id, o.failure_reason, o.updated_at_ms AS outbox_updated_at_ms \
+FROM chat_bookmarks b \
+JOIN chat_bookmark_outbox o \
+  ON o.workspace_id = b.workspace_id AND o.bookmark_id = b.bookmark_id";
+
 fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
     match outcome {
         TxnOutcome::Committed(value) => Ok(value),
@@ -3531,10 +4589,12 @@ fn require_thread(
 ) -> Result<ChatThread, DomainError> {
     conn.query_row(
         "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, t.updated_at_ms, \
-         t.channel_id, t.linked_object_id, \
+         t.channel_id, t.linked_object_id, t.linked_path_hint, t.linked_at_ms, \
          (SELECT m.body FROM chat_messages m \
           WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id \
-          ORDER BY m.created_at_ms, m.message_id LIMIT 1) \
+          ORDER BY m.created_at_ms, m.message_id LIMIT 1), \
+         EXISTS(SELECT 1 FROM chat_channels c \
+           WHERE c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id) \
          FROM chat_threads t WHERE t.workspace_id = ?1 AND t.thread_id = ?2",
         params![workspace_id, thread_id],
         map_thread_row,
@@ -3937,6 +4997,53 @@ fn require_message(
     .ok_or_else(|| DomainError::chat("message-not-found", "Chat message was not found."))
 }
 
+fn agent_read_state_for_thread(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+) -> Result<ChatAgentReadState, DomainError> {
+    let row = conn
+        .query_row(
+            "SELECT last_read_created_at_ms, last_read_message_id, revision, updated_at_ms \
+             FROM chat_agent_read_state WHERE workspace_id = ?1 AND thread_id = ?2",
+            params![workspace_id, thread_id],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let Some((created_at_ms, message_id, revision, updated_at_ms)) = row else {
+        return Ok(ChatAgentReadState {
+            workspace_id: workspace_id.to_owned(),
+            thread_id: thread_id.to_owned(),
+            last_read_created_at_ms: 0,
+            last_read_message_id: String::new(),
+            revision: 0,
+            updated_at_ms: 0,
+        });
+    };
+    if !persisted_nonnegative_safe(created_at_ms)
+        || !persisted_nonnegative_safe(revision)
+        || !persisted_nonnegative_safe(updated_at_ms)
+    {
+        return Err(dispatch_corrupt());
+    }
+    Ok(ChatAgentReadState {
+        workspace_id: workspace_id.to_owned(),
+        thread_id: thread_id.to_owned(),
+        last_read_created_at_ms: created_at_ms,
+        last_read_message_id: message_id,
+        revision,
+        updated_at_ms,
+    })
+}
+
 fn message_by_id(
     conn: &Connection,
     workspace_id: &str,
@@ -4043,6 +5150,42 @@ fn running_dispatch_claim(
     .map_err(DomainError::sql_corrupt)
 }
 
+fn run_rows_by_global_id(
+    conn: &Connection,
+    run_id: &str,
+) -> Result<Vec<AgentRunRecord>, DomainError> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT workspace_id, run_id, thread_id, trigger_message_id, command, \
+                    started_at_ms, ended_at_ms, exit_code, failure_reason, log_path, \
+                    failure_note_posted FROM agent_run_records WHERE run_id = ?1 LIMIT 2",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let rows = stmt
+        .query_map(params![run_id], |row| map_run_row(row, 0))
+        .map_err(DomainError::sql_corrupt)?;
+    collect(rows)
+}
+
+fn require_run_in_workspace(
+    conn: &Connection,
+    workspace_id: &str,
+    run_id: &str,
+) -> Result<AgentRunRecord, DomainError> {
+    conn.query_row(
+        "SELECT workspace_id, run_id, thread_id, trigger_message_id, command, \
+                started_at_ms, ended_at_ms, exit_code, failure_reason, log_path, \
+                failure_note_posted FROM agent_run_records \
+         WHERE workspace_id = ?1 AND run_id = ?2",
+        params![workspace_id, run_id],
+        |row| map_run_row(row, 0),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?
+    .transpose()?
+    .ok_or_else(|| DomainError::chat("run-not-found", "Agent run was not found."))
+}
+
 /// Resolve a workspace-scoped run id to `(trigger_message_id, ended_at_ms,
 /// ledger_state)` by joining `agent_run_records` to its dispatch ledger row.
 /// `None` when the run id is unknown in that workspace.
@@ -4092,6 +5235,36 @@ fn lookup_request(conn: &Connection, request_id: &str) -> Result<Option<String>,
     .map_err(DomainError::sql_corrupt)
 }
 
+fn lookup_request_result(
+    conn: &Connection,
+    request_id: &str,
+) -> Result<Option<(String, i64)>, DomainError> {
+    conn.query_row(
+        "SELECT payload_hash, result_seq FROM engine_requests WHERE request_id = ?1",
+        params![request_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)
+}
+
+fn record_request_result(
+    tx: &Transaction<'_>,
+    request_id: &str,
+    payload_hash: &str,
+    result_seq: i64,
+    now_ms: i64,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "INSERT INTO engine_requests \
+         (request_id, payload_hash, result_seq, committed_at, kind) \
+         VALUES (?1, ?2, ?3, ?4, 'chat')",
+        params![request_id, payload_hash, result_seq, now_ms],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
 /// Record the idempotency-ledger row in the SAME transaction as the mutation, so
 /// a committed retry replays to the recorded result exactly-once. `result_seq`
 /// is unused by chat replays (the result is rebuilt from the durable rows by
@@ -4138,6 +5311,128 @@ fn hash_fields(fields: &[&[u8]]) -> String {
 
 // -------------------------------------------------------------------- mappers
 
+fn map_dispatch_row(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<Result<DispatchRecord, DomainError>> {
+    let state: String = row.get(offset + 3)?;
+    let run_id: Option<String> = row.get(offset + 4)?;
+    let failure_reason: Option<String> = row.get(offset + 5)?;
+    let attempt_count: i64 = row.get(offset + 6)?;
+    let created_at_ms: i64 = row.get(offset + 7)?;
+    let updated_at_ms: i64 = row.get(offset + 8)?;
+    let valid_state = matches!(state.as_str(), "pending" | "running" | "done" | "failed");
+    let valid_run = match state.as_str() {
+        "pending" => run_id.is_none(),
+        "running" | "done" => run_id.is_some() && attempt_count > 0,
+        "failed" => run_id.is_none() || attempt_count > 0,
+        _ => false,
+    };
+    let valid_reason = failure_reason
+        .as_deref()
+        .is_none_or(|reason| state == "failed" && !reason.trim_matches(is_js_trim_ws).is_empty());
+    if !valid_state
+        || !valid_run
+        || !valid_reason
+        || !persisted_nonnegative_safe(attempt_count)
+        || !persisted_nonnegative_safe(created_at_ms)
+        || !persisted_nonnegative_safe(updated_at_ms)
+    {
+        return Ok(Err(dispatch_corrupt()));
+    }
+    Ok(Ok(DispatchRecord {
+        workspace_id: row.get(offset)?,
+        trigger_message_id: row.get(offset + 1)?,
+        thread_id: row.get(offset + 2)?,
+        state,
+        run_id,
+        failure_reason,
+        attempt_count,
+        created_at_ms,
+        updated_at_ms,
+    }))
+}
+
+fn map_run_row(
+    row: &rusqlite::Row<'_>,
+    offset: usize,
+) -> rusqlite::Result<Result<AgentRunRecord, DomainError>> {
+    let started_at_ms: i64 = row.get(offset + 5)?;
+    let ended_at_ms: Option<i64> = row.get(offset + 6)?;
+    let exit_code: Option<i64> = row.get(offset + 7)?;
+    let failure_reason: Option<String> = row.get(offset + 8)?;
+    let failure_note_posted: i64 = row.get(offset + 10)?;
+    if !persisted_nonnegative_safe(started_at_ms)
+        || ended_at_ms.is_some_and(|value| !persisted_nonnegative_safe(value))
+        || exit_code.is_some_and(|value| !persisted_safe_integer(value))
+        || ended_at_ms.is_none() && (exit_code.is_some() || failure_reason.is_some())
+        || failure_reason
+            .as_deref()
+            .is_some_and(|reason| reason.trim_matches(is_js_trim_ws).is_empty())
+        || !matches!(failure_note_posted, 0 | 1)
+    {
+        return Ok(Err(dispatch_corrupt()));
+    }
+    Ok(Ok(AgentRunRecord {
+        workspace_id: row.get(offset)?,
+        run_id: row.get(offset + 1)?,
+        thread_id: row.get(offset + 2)?,
+        trigger_message_id: row.get(offset + 3)?,
+        command: row.get(offset + 4)?,
+        started_at_ms,
+        ended_at_ms,
+        exit_code,
+        failure_reason,
+        log_path: row.get(offset + 9)?,
+        failure_note_posted: failure_note_posted == 1,
+    }))
+}
+
+fn map_dispatch_claim_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<DispatchClaim, DomainError>> {
+    let dispatch = map_dispatch_row(row, 0)?;
+    let run = map_run_row(row, 9)?;
+    Ok(match (dispatch, run) {
+        (Ok(dispatch), Ok(run))
+            if dispatch.workspace_id == run.workspace_id
+                && dispatch.thread_id == run.thread_id
+                && dispatch.trigger_message_id == run.trigger_message_id
+                && dispatch.run_id.as_deref() == Some(run.run_id.as_str())
+                && dispatch.state == "running"
+                && run.ended_at_ms.is_none() =>
+        {
+            Ok(DispatchClaim { dispatch, run })
+        }
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        _ => Err(dispatch_corrupt()),
+    })
+}
+
+fn map_pause_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<ThreadDispatchPause, DomainError>> {
+    let paused: i64 = row.get(2)?;
+    let reason: Option<String> = row.get(3)?;
+    let updated_at_ms: i64 = row.get(4)?;
+    if !matches!(paused, 0 | 1)
+        || reason
+            .as_deref()
+            .is_some_and(|reason| reason.trim_matches(is_js_trim_ws).is_empty())
+        || paused == 0 && reason.is_some()
+        || !persisted_nonnegative_safe(updated_at_ms)
+    {
+        return Ok(Err(dispatch_corrupt()));
+    }
+    Ok(Ok(ThreadDispatchPause {
+        workspace_id: row.get(0)?,
+        thread_id: row.get(1)?,
+        paused: paused == 1,
+        reason,
+        updated_at_ms,
+    }))
+}
+
 fn map_channel_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatChannel, DomainError>> {
     let workspace_id: String = row.get(0)?;
     let channel_id: String = row.get(1)?;
@@ -4159,15 +5454,37 @@ fn map_channel_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatChann
 
 fn map_thread_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatThread, DomainError>> {
     let stored_title: String = row.get(2)?;
-    let first_body: Option<String> = row.get(7)?;
+    let first_body: Option<String> = row.get(9)?;
+    let channel_id: Option<String> = row.get(5)?;
+    let linked_object_id: Option<String> = row.get(6)?;
+    let linked_at_ms: Option<i64> = row.get(8)?;
+    let channel_owner_exists: i64 = row.get(10)?;
+    let created_at_ms: i64 = row.get(3)?;
+    let updated_at_ms: i64 = row.get(4)?;
+    if linked_object_id.as_deref().is_some_and(str::is_empty)
+        || channel_id.as_deref().is_some_and(str::is_empty)
+        || linked_object_id.is_some() == channel_id.is_some()
+        || channel_id.is_some() && channel_owner_exists != 1
+        || linked_object_id.is_some() != linked_at_ms.is_some()
+        || !persisted_nonnegative_safe(created_at_ms)
+        || !persisted_nonnegative_safe(updated_at_ms)
+        || linked_at_ms.is_some_and(|value| !persisted_nonnegative_safe(value))
+    {
+        return Ok(Err(DomainError::chat(
+            "state-corrupt",
+            "Chat thread ownership is corrupt.",
+        )));
+    }
     Ok(Ok(ChatThread {
         workspace_id: row.get(0)?,
         thread_id: row.get(1)?,
         title: chat_thread_display_title(&stored_title, first_body.as_deref()),
-        created_at_ms: row.get(3)?,
-        updated_at_ms: row.get(4)?,
-        channel_id: row.get(5)?,
-        linked_object_id: row.get(6)?,
+        created_at_ms,
+        updated_at_ms,
+        channel_id,
+        linked_object_id,
+        linked_path_hint: row.get(7)?,
+        linked_at_ms,
     }))
 }
 
@@ -4224,22 +5541,51 @@ fn map_follow_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatFollow
 fn map_bookmark_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<Result<ChatBookmark, DomainError>> {
+    let target_kind: String = row.get(2)?;
+    let message_id: Option<String> = row.get(5)?;
+    let mode: String = row.get(6)?;
+    let state: String = row.get(8)?;
+    let created_at_ms: i64 = row.get(9)?;
+    let updated_at_ms: i64 = row.get(10)?;
+    let generation: i64 = row.get(11)?;
+    let projected_generation: i64 = row.get(12)?;
+    let projection_state: String = row.get(13)?;
+    let last_projected_at_ms: Option<i64> = row.get(14)?;
+    if !matches!(target_kind.as_str(), "message" | "thread")
+        || !matches!(mode.as_str(), "live" | "snapshot")
+        || !matches!(state.as_str(), "active" | "archived")
+        || !matches!(
+            projection_state.as_str(),
+            "pending" | "ready" | "failed" | "stale"
+        )
+        || (target_kind == "message") != message_id.is_some()
+        || !(1..=9_007_199_254_740_991).contains(&generation)
+        || !(0..=generation).contains(&projected_generation)
+        || !persisted_nonnegative_safe(created_at_ms)
+        || !persisted_nonnegative_safe(updated_at_ms)
+        || last_projected_at_ms.is_some_and(|value| !persisted_nonnegative_safe(value))
+    {
+        return Ok(Err(DomainError::chat(
+            "state-corrupt",
+            "Chat bookmark is corrupt.",
+        )));
+    }
     Ok(Ok(ChatBookmark {
         bookmark_id: row.get(0)?,
         owner_user_id: row.get(1)?,
-        target_kind: row.get(2)?,
+        target_kind,
         target_id: row.get(3)?,
         thread_id: row.get(4)?,
-        message_id: row.get(5)?,
-        mode: row.get(6)?,
+        message_id,
+        mode,
         destination_path: row.get(7)?,
-        state: row.get(8)?,
-        created_at_ms: row.get(9)?,
-        updated_at_ms: row.get(10)?,
-        generation: row.get(11)?,
-        projected_generation: row.get(12)?,
-        projection_state: row.get(13)?,
-        last_projected_at_ms: row.get(14)?,
+        state,
+        created_at_ms,
+        updated_at_ms,
+        generation,
+        projected_generation,
+        projection_state,
+        last_projected_at_ms,
         projection_object_id: row.get(15)?,
         failure_reason: row.get(16)?,
     }))

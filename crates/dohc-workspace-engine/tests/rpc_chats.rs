@@ -84,6 +84,24 @@ async fn call_error(
         .unwrap_err()
 }
 
+async fn call_with_idempotency(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: &mut u64,
+    method: &str,
+    idempotency_key: &str,
+    params: Value,
+) -> Value {
+    *id += 1;
+    let mut request = request(*id, method, Some(handle.clone()), params);
+    request.idempotency_key = Some(idempotency_key.to_owned());
+    transport
+        .call(RequestContext::unbounded(), request)
+        .await
+        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
+        .result
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn review_round_7_normalizes_persisted_chat_identities() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -2258,7 +2276,7 @@ async fn review_round_12_rejects_malformed_ready_generation_and_null_claim_metad
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn review_round_16_reserved_ensure_ids_follow_states_and_bookmark_polling() {
+async fn rpc_b2_reshapes_six_existing_arms_without_truncated() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "rpc-chat-r16").await;
@@ -2395,6 +2413,10 @@ async fn review_round_16_reserved_ensure_ids_follow_states_and_bookmark_polling(
         json!({ "ownerUserId": "owner-1" }),
     )
     .await;
+    // MUTATION: restore the RPC-B `{bookmarks,truncated}` response -> the
+    // cursor-page contract exposes the removed field and omits nextCursor.
+    assert!(pending.get("truncated").is_none());
+    assert_eq!(pending["nextCursor"], Value::Null);
     assert_eq!(pending["bookmarks"].as_array().expect("pending").len(), 1);
     assert_eq!(pending["bookmarks"][0]["bookmarkId"], json!(&bookmark_id));
     let bad_limit = call_error(
@@ -2414,7 +2436,9 @@ async fn review_round_16_reserved_ensure_ids_follow_states_and_bookmark_polling(
         json!({ "ownerUserId": "owner-1", "bookmarkId": &bookmark_id }),
     )
     .await;
-    assert_eq!(found["bookmark"]["bookmarkId"], json!(&bookmark_id));
+    // MUTATION: wrap `find` in the old `{bookmark: ...}` object -> consumers
+    // no longer receive the design's direct `Bookmark | null` result.
+    assert_eq!(found["bookmarkId"], json!(&bookmark_id));
     let missing = call(
         &transport,
         &handle,
@@ -2423,7 +2447,7 @@ async fn review_round_16_reserved_ensure_ids_follow_states_and_bookmark_polling(
         json!({ "ownerUserId": "owner-1", "bookmarkId": "bookmark_nope" }),
     )
     .await;
-    assert_eq!(missing["bookmark"], Value::Null);
+    assert_eq!(missing, Value::Null);
     call(
         &transport,
         &handle,
@@ -2448,4 +2472,417 @@ async fn review_round_16_reserved_ensure_ids_follow_states_and_bookmark_polling(
     assert_eq!(drained["bookmarks"].as_array().expect("drained").len(), 0);
 
     call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_page_adapter_drains_without_overlap_or_omission() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-pages").await;
+    let mut id = 10;
+    for (trigger, created_at_ms) in [("b", 20), ("a", 20), ("old", 10)] {
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.enqueue",
+            json!({
+                "triggerMessageId": trigger,
+                "threadId": "thread",
+                "nowMs": created_at_ms,
+            }),
+        )
+        .await;
+    }
+    let mut cursor: Option<String> = None;
+    let mut ids = Vec::new();
+    loop {
+        let mut params = json!({ "pageLimit": 1 });
+        if let Some(cursor) = &cursor {
+            params["cursor"] = json!(cursor);
+        }
+        let page = call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.listPending",
+            params,
+        )
+        .await;
+        ids.extend(
+            page["dispatches"]
+                .as_array()
+                .expect("dispatches")
+                .iter()
+                .map(|row| row["triggerMessageId"].as_str().expect("id").to_owned()),
+        );
+        cursor = page["nextCursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    // MUTATION: use inclusive/offset pagination -> rows overlap or disappear.
+    assert_eq!(ids, ["old", "a", "b"]);
+
+    let invalid_cursor = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.openRuns",
+        json!({ "cursor": "eyJ2ZXJzaW9uIjoxfQ" }),
+    )
+    .await;
+    assert_eq!(
+        (invalid_cursor.code, invalid_cursor.message.as_str()),
+        (ErrorCode::InvalidParams, "invalid-cursor")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_rejects_unknown_fields_and_null_optionals() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-strict").await;
+    let mut id = 10;
+    let unknown = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listPending",
+        json!({ "surprise": true }),
+    )
+    .await;
+    let null_optional = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.setThreadPaused",
+        json!({ "threadId": "thread", "paused": true, "reason": null }),
+    )
+    .await;
+    // MUTATION: remove deny_unknown/non-null optional decoders -> malformed calls enter domain.
+    assert_eq!(
+        (unknown.code, null_optional.code),
+        (ErrorCode::InvalidParams, ErrorCode::InvalidParams)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_workspace_handle_overrides_spoofed_workspace_identity() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-scope").await;
+    let mut id = 10;
+    let spoofed = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listPending",
+        json!({ "workspaceId": "foreign" }),
+    )
+    .await;
+    // MUTATION: trust a params workspace id -> caller can select foreign rows.
+    assert_eq!(spoofed.code, ErrorCode::InvalidParams);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_small_ports_round_trip_strict_shapes_and_recovery_mutations() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-roundtrip").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({ "channelId": "channel", "name": "Channel", "kind": "channel", "nowMs": 2 }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel", "threadId": "thread", "messageId": "message",
+            "authorKind": "human", "authorDisplayName": "Ada", "body": "hello", "nowMs": 10,
+        }),
+    )
+    .await;
+    let db_path = scratch.engine_db_path().expect("db");
+    let conn = rusqlite::Connection::open(db_path).expect("open db");
+    conn.execute(
+        "INSERT INTO chat_threads \
+         (workspace_id,thread_id,title,created_at_ms,updated_at_ms,linked_object_id,linked_path_hint,linked_at_ms) \
+         VALUES ('rpc-b2-roundtrip','file-thread','File',12,12,'object','notes/file.md',12)",
+        [],
+    )
+    .expect("file thread");
+    drop(conn);
+    let file_threads = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForFile",
+        json!({ "objectId": "object" }),
+    )
+    .await;
+    assert_eq!(
+        file_threads["threads"][0]["linkedFile"]["pathHint"],
+        json!("notes/file.md")
+    );
+    let channel = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.findChannelId",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    assert_eq!(channel, json!("channel"));
+
+    let unread = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.listUnreadThreads",
+        json!({}),
+    )
+    .await;
+    assert_eq!(unread["threads"][0]["id"], json!("thread"));
+    let read = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.markThreadRead",
+        json!({ "threadId": "thread", "upTo": { "createdAtMs": 999, "messageId": "z" } }),
+    )
+    .await;
+    assert_eq!(
+        (
+            read["lastReadCreatedAtMs"].as_i64(),
+            read["lastReadMessageId"].as_str()
+        ),
+        (Some(10), Some("message"))
+    );
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.follows.ensureDefaults",
+        json!({ "ownerUserId": "owner" }),
+    )
+    .await;
+    let bookmark = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.save",
+        json!({
+            "ownerUserId": "owner", "targetKind": "thread", "targetId": "thread",
+            "mode": "live", "destinationPath": "bookmarks/thread.md", "nowMs": 11,
+        }),
+    )
+    .await;
+    let bookmark_id = bookmark["bookmarkId"]
+        .as_str()
+        .expect("bookmark id")
+        .to_owned();
+    let pending_once = call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.markPending",
+        "bookmark-pending-request",
+        json!({ "ownerUserId": "owner", "bookmarkId": bookmark_id }),
+    )
+    .await;
+    let pending_replay = call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.bookmarks.markPending",
+        "bookmark-pending-request",
+        json!({ "ownerUserId": "owner", "bookmarkId": bookmark["bookmarkId"] }),
+    )
+    .await;
+    assert_eq!(pending_once["generation"], pending_replay["generation"]);
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.enqueue",
+        json!({ "triggerMessageId": "trigger", "threadId": "thread", "nowMs": 20 }),
+    )
+    .await;
+    let paused = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.setThreadPaused",
+        json!({ "threadId": "thread", "paused": true, "reason": "manual" }),
+    )
+    .await;
+    assert_eq!(paused["reason"], json!("manual"));
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.isThreadPaused",
+            json!({ "threadId": "thread" })
+        )
+        .await,
+        json!(true)
+    );
+    let pause_state = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.getThreadPauseState",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    assert_eq!(pause_state["reason"], json!("manual"));
+    let no_claim = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "runId": "run", "command": "agent" }),
+    )
+    .await;
+    assert_eq!(no_claim, Value::Null);
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.setThreadPaused",
+        json!({ "threadId": "thread", "paused": false, "reason": "ignored" }),
+    )
+    .await;
+    let claim = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.claimNextPending",
+        json!({ "runId": "run", "command": "agent" }),
+    )
+    .await;
+    assert_eq!(claim["run"]["runId"], json!("run"));
+    assert!(claim["run"].get("endedAtMs").is_none());
+    let open = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.openRuns",
+        json!({}),
+    )
+    .await;
+    assert_eq!(open["claims"][0]["run"]["runId"], json!("run"));
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.recordRunMessage",
+            json!({ "messageId": "agent-message", "runId": "run" })
+        )
+        .await,
+        json!(true)
+    );
+    assert_eq!(
+        call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.dispatch.runIdForMessage",
+            json!({ "messageId": "agent-message" })
+        )
+        .await,
+        json!("run")
+    );
+    let messages = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listRunMessages",
+        json!({ "runId": "run" }),
+    )
+    .await;
+    assert_eq!(messages["messageIds"], json!(["agent-message"]));
+    let run = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.getRunRecord",
+        json!({ "runId": "run" }),
+    )
+    .await;
+    assert_eq!(run["runId"], json!("run"));
+    let runs = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.runRecordsForThread",
+        json!({ "threadId": "thread", "limit": 200 }),
+    )
+    .await;
+    assert_eq!(runs["runs"]["agent-message"]["runId"], json!("run"));
+    let count = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.recentCount",
+        json!({ "threadId": "thread", "sinceMs": -1.5 }),
+    )
+    .await;
+    assert_eq!(count, json!(1));
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.fail",
+        json!({ "runId": "run", "reason": "app-quit", "exitCode": 143, "nowMs": 30 }),
+    )
+    .await;
+    let recoveries = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.listAppQuitRecoveries",
+        json!({}),
+    )
+    .await;
+    assert_eq!(recoveries["recoveries"][0]["attemptCount"], json!(1));
+    let noted = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.markFailureNotePosted",
+        json!({ "runId": "run" }),
+    )
+    .await;
+    assert_eq!(noted["failureNotePosted"], json!(true));
+    let requeued = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.requeueFailedTrigger",
+        json!({ "triggerMessageId": "trigger", "runId": "run" }),
+    )
+    .await;
+    let failed_pending = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.failPendingForThread",
+        json!({ "threadId": "thread", "reason": "stop" }),
+    )
+    .await;
+    // MUTATION: omit any Phase 2/3 registration or return legacy nullable fields -> roundtrip differs/fails.
+    assert_eq!((requeued, failed_pending), (json!(true), json!(1)));
 }

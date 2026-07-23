@@ -10,18 +10,20 @@ pub mod shadow_fence;
 pub use capture_sink::{SelfWriteSuppression, StoreCaptureSink};
 
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use dohc_engine_collab::{CollabError, ContentKind, DocKey, Lease, LeaseRegistry, Regime};
 use dohc_engine_domain::{
-    BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatBookmark, ChatChannel, ChatChannelKind,
-    ChatChannelSummary, ChatFeedReadState, ChatFollow, ChatMessage, ChatThread,
-    ChatThreadReadState, CompareTextFileVersions, ComparisonStatus, ConflictChoice,
-    ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus,
-    CreateNamedVersion, DeleteTextFile, DispatchClaim, DomainError, FeedCursorValue, FollowState,
-    FollowTargetKind, MarkdownMergeResult, MergeTextFileFromVersion, MergeTextFileResult, MomentOp,
-    RenameTextFile, ResolveConflictKind, ResolveTextConflict, RollbackTextFileMutation,
-    SaveBookmark, SecretDelete, SecretDiskIntent, SecretMomentRecord, SecretWrite, SendMessage,
-    SetFollow, StartChannelThread, TextConflict, TextSnapshot, VersionFileChangeStatus,
-    VersionRecord, WriteBinary, WriteText, merge_markdown, validate_addressable_plaintext_path,
+    AgentRunRecord, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatAgentReadState,
+    ChatBookmark, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatFeedReadState, ChatFollow,
+    ChatMessage, ChatThread, ChatThreadReadState, CompareTextFileVersions, ComparisonStatus,
+    ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
+    ConflictStatus, CreateNamedVersion, DeleteTextFile, DispatchClaim, DispatchRecord, DomainError,
+    FeedCursorValue, FollowState, FollowTargetKind, MarkdownMergeResult, MergeTextFileFromVersion,
+    MergeTextFileResult, MomentOp, RenameTextFile, ResolveConflictKind, ResolveTextConflict,
+    RollbackTextFileMutation, SaveBookmark, SecretDelete, SecretDiskIntent, SecretMomentRecord,
+    SecretWrite, SendMessage, SetFollow, StartChannelThread, TextConflict, TextSnapshot,
+    ThreadDispatchPause, VersionFileChangeStatus, VersionRecord, WriteBinary, WriteText,
+    merge_markdown, validate_addressable_plaintext_path,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -108,6 +110,110 @@ const SINGLE_ROW_HARD_CAP_BYTES: usize = 700 * 1024;
 /// Approximate serialized-bytes budget for one chat list/messages page —
 /// the same measured discipline as every other list family.
 const CHAT_PAGE_BYTE_BUDGET: usize = 256 * 1024;
+
+const CHAT_PAGE_LIMIT_DEFAULT: i64 = 200;
+const CHAT_PAGE_LIMIT_MAX: i64 = 500;
+
+/// Versioned, opaque continuation state for the RPC-B2 chat families. The
+/// binding is a digest over method + authenticated workspace + logical
+/// filters, so a cursor cannot be replayed against another view.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatKeysetCursor {
+    version: u8,
+    binding: String,
+    consumed: i64,
+    first: i64,
+    second: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    third: Option<String>,
+}
+
+fn chat_cursor_binding(method: &str, workspace_id: &str, filters: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    for field in std::iter::once(method)
+        .chain(std::iter::once(workspace_id))
+        .chain(filters.iter().copied())
+    {
+        hasher.update(field.as_bytes());
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    let mut binding = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(binding, "{byte:02x}");
+    }
+    binding
+}
+
+fn encode_chat_cursor(cursor: &ChatKeysetCursor) -> Result<String, WireError> {
+    let bytes =
+        serde_json::to_vec(cursor).map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn decode_chat_cursor(
+    encoded: Option<&str>,
+    expected_binding: &str,
+) -> Result<Option<ChatKeysetCursor>, WireError> {
+    let Some(encoded) = encoded else {
+        return Ok(None);
+    };
+    let invalid = || wire(ErrorCode::InvalidParams, "invalid-cursor");
+    let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| invalid())?;
+    let cursor: ChatKeysetCursor = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+    if cursor.version != 1
+        || cursor.binding != expected_binding
+        || cursor.consumed < 0
+        || cursor.first < 0
+        || cursor.second.is_empty()
+    {
+        return Err(invalid());
+    }
+    Ok(Some(cursor))
+}
+
+fn chat_page_limit(value: Option<i64>) -> Result<i64, WireError> {
+    let value = value.unwrap_or(CHAT_PAGE_LIMIT_DEFAULT);
+    if !(1..=CHAT_PAGE_LIMIT_MAX).contains(&value) {
+        return Err(wire(ErrorCode::InvalidParams, "invalid-parameters"));
+    }
+    Ok(value)
+}
+
+fn bounded_chat_page_len(rows: &[Value]) -> Result<usize, WireError> {
+    let included = byte_budget_cut_serialized(rows, CHAT_PAGE_BYTE_BUDGET);
+    if included == 0 && !rows.is_empty() {
+        return Err(wire(ErrorCode::LimitExceeded, "row-exceeds-wire-limit"));
+    }
+    Ok(included)
+}
+
+fn dispatch_page_cursor<T>(
+    rows: &[T],
+    included: usize,
+    consumed: i64,
+    binding: String,
+    coordinate: impl FnOnce(&T) -> (i64, String),
+) -> Result<Option<String>, WireError> {
+    if rows.len() <= included {
+        return Ok(None);
+    }
+    let last = rows
+        .get(included.saturating_sub(1))
+        .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+    let (first, second) = coordinate(last);
+    encode_chat_cursor(&ChatKeysetCursor {
+        version: 1,
+        binding,
+        consumed: consumed + included as i64,
+        first,
+        second,
+        third: None,
+    })
+    .map(Some)
+}
 
 #[derive(Clone)]
 struct OpenWorkspace {
@@ -462,6 +568,14 @@ impl EngineService {
                 self.chats_threads_list(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.threads.listForFile" => {
+                self.chats_threads_list_for_file(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.threads.findChannelId" => {
+                self.chats_threads_find_channel_id(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.messages.send" => {
                 self.chats_messages_send(
                     &ctx,
@@ -483,12 +597,32 @@ impl EngineService {
                 self.chats_read_state_get(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.agentReadState.listUnreadThreads" => {
+                self.chats_agent_read_state_list_unread_threads(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                )
+                .await?
+            }
+            "chats.agentReadState.markThreadRead" => {
+                self.chats_agent_read_state_mark_thread_read(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                )
+                .await?
+            }
             "chats.follows.set" => {
                 self.chats_follows_set(&ctx, request.workspace, request.params)
                     .await?
             }
             "chats.follows.list" => {
                 self.chats_follows_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.follows.ensureDefaults" => {
+                self.chats_follows_ensure_defaults(&ctx, request.workspace, request.params)
                     .await?
             }
             "chats.feed.markSeen" => {
@@ -523,6 +657,15 @@ impl EngineService {
                 self.chats_bookmarks_archive(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.bookmarks.markPending" => {
+                self.chats_bookmarks_mark_pending(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                    request.idempotency_key,
+                )
+                .await?
+            }
             "chats.bookmarks.markFailed" => {
                 self.chats_bookmarks_mark_failed(&ctx, request.workspace, request.params)
                     .await?
@@ -538,6 +681,74 @@ impl EngineService {
             "chats.dispatch.claimNextPending" => {
                 self.chats_dispatch_claim_next_pending(&ctx, request.workspace, request.params)
                     .await?
+            }
+            "chats.dispatch.listPending" => {
+                self.chats_dispatch_list_pending(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.openRuns" => {
+                self.chats_dispatch_open_runs(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.listRunMessages" => {
+                self.chats_dispatch_list_run_messages(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.runIdForMessage" => {
+                self.chats_dispatch_run_id_for_message(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.runRecordsForThread" => {
+                self.chats_dispatch_run_records_for_thread(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.getRunRecord" => {
+                self.chats_dispatch_get_run_record(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.isThreadPaused" => {
+                self.chats_dispatch_thread_paused(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.getThreadPauseState" => {
+                self.chats_dispatch_get_thread_pause_state(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.recentCount" => {
+                self.chats_dispatch_recent_count(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.failPendingForThread" => {
+                self.chats_dispatch_fail_pending_for_thread(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.recordRunMessage" => {
+                self.chats_dispatch_record_run_message(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.setThreadPaused" => {
+                self.chats_dispatch_set_thread_paused(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.markFailureNotePosted" => {
+                self.chats_dispatch_mark_failure_note_posted(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                )
+                .await?
+            }
+            "chats.dispatch.requeueFailedTrigger" => {
+                self.chats_dispatch_requeue_failed_trigger(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.dispatch.listAppQuitRecoveries" => {
+                self.chats_dispatch_list_app_quit_recoveries(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                )
+                .await?
             }
             "chats.dispatch.complete" => {
                 self.chats_dispatch_complete(&ctx, request.workspace, request.params)
@@ -2797,6 +3008,91 @@ impl EngineService {
         }))
     }
 
+    async fn chats_threads_list_for_file(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatThreadsListForFileParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let binding = chat_cursor_binding(
+            "chats.threads.listForFile",
+            &workspace_id,
+            &[&params.object_id],
+        );
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let after = cursor
+            .as_ref()
+            .map(|cursor| (cursor.first, cursor.second.clone()));
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.threads.listForFile",
+            open.actor.chat_threads_list_for_file(
+                workspace_id.clone(),
+                params.object_id,
+                after,
+                page_limit + 1,
+            ),
+        )
+        .await?;
+        let values: Vec<Value> = rows
+            .iter()
+            .take(page_limit as usize)
+            .map(thread_b2_json)
+            .collect();
+        let included = bounded_chat_page_len(&values)?;
+        let has_more = rows.len() > included;
+        let next_cursor = if has_more {
+            let last = rows
+                .get(included.saturating_sub(1))
+                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            Some(encode_chat_cursor(&ChatKeysetCursor {
+                version: 1,
+                binding,
+                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                first: last.created_at_ms,
+                second: last.thread_id.clone(),
+                third: None,
+            })?)
+        } else {
+            None
+        };
+        Ok(json!({
+            "threads": values[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
+    }
+
+    async fn chats_threads_find_channel_id(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatThreadParams = parse(params)?;
+        if params.thread_id.is_empty()
+            || params.thread_id.encode_utf16().count() > 256
+            || params.thread_id.len() > 512
+            || params.thread_id.chars().any(char::is_control)
+        {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-parameters"));
+        }
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let channel_id = Self::read_under_ctx(
+            &cancellation,
+            "chats.threads.findChannelId",
+            open.actor
+                .chat_thread_find_channel_id(open.workspace_id, params.thread_id),
+        )
+        .await?;
+        Ok(channel_id.map_or(Value::Null, Value::String))
+    }
+
     async fn chats_messages_send(
         &self,
         ctx: &RequestContext,
@@ -2919,6 +3215,83 @@ impl EngineService {
         Ok(read_state_json(&state))
     }
 
+    async fn chats_agent_read_state_list_unread_threads(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatPageParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let binding =
+            chat_cursor_binding("chats.agentReadState.listUnreadThreads", &workspace_id, &[]);
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let after = cursor
+            .as_ref()
+            .map(|cursor| (cursor.first, cursor.second.clone()));
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.agentReadState.listUnreadThreads",
+            open.actor
+                .chat_agent_unread_threads(workspace_id, after, page_limit + 1),
+        )
+        .await?;
+        let values: Vec<Value> = rows
+            .iter()
+            .take(page_limit as usize)
+            .map(|row| thread_b2_json(&row.thread))
+            .collect();
+        let included = bounded_chat_page_len(&values)?;
+        let next_cursor = if rows.len() > included {
+            let last = rows
+                .get(included.saturating_sub(1))
+                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            Some(encode_chat_cursor(&ChatKeysetCursor {
+                version: 1,
+                binding,
+                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                first: last.latest_created_at_ms,
+                second: last.latest_message_id.clone(),
+                third: None,
+            })?)
+        } else {
+            None
+        };
+        Ok(json!({
+            "threads": values[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
+    }
+
+    async fn chats_agent_read_state_mark_thread_read(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatAgentReadMarkParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let state = Self::read_under_ctx(
+            &cancellation,
+            "chats.agentReadState.markThreadRead",
+            open.actor.chat_agent_mark_thread_read(
+                open.workspace_id,
+                params.thread_id,
+                params.up_to.created_at_ms,
+                params.up_to.message_id,
+                params.expected_revision,
+                now_ms()?,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(agent_read_state_json(&state))
+    }
+
     async fn chats_follows_set(
         &self,
         ctx: &RequestContext,
@@ -2988,6 +3361,28 @@ impl EngineService {
             "follows": row_values[..included].to_vec(),
             "truncated": truncated,
         }))
+    }
+
+    async fn chats_follows_ensure_defaults(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatOwnerParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        Self::read_under_ctx(
+            &cancellation,
+            "chats.follows.ensureDefaults",
+            open.actor.chat_follows_ensure_defaults(
+                open.workspace_id,
+                params.owner_user_id,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(Value::Null)
     }
 
     async fn chats_feed_mark_seen(
@@ -3144,12 +3539,10 @@ impl EngineService {
             ),
         )
         .await?;
-        Ok(json!({
-            "bookmark": bookmark
-                .as_ref()
-                .map(|bookmark| bookmark_json(&workspace_id, bookmark))
-                .unwrap_or(Value::Null)
-        }))
+        Ok(bookmark
+            .as_ref()
+            .map(|bookmark| bookmark_json(&workspace_id, bookmark))
+            .unwrap_or(Value::Null))
     }
 
     async fn chats_bookmarks_list_pending(
@@ -3161,34 +3554,71 @@ impl EngineService {
         let params: ChatBookmarkListPendingParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id.clone();
+        let logical_limit = params.limit.unwrap_or(50);
+        if !(1..=200).contains(&logical_limit) {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-bookmark-target"));
+        }
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let logical_limit_binding = logical_limit.to_string();
+        let binding = chat_cursor_binding(
+            "chats.bookmarks.listPending",
+            &workspace_id,
+            &[&params.owner_user_id, &logical_limit_binding],
+        );
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let consumed = cursor.as_ref().map_or(0, |cursor| cursor.consumed);
+        if consumed > logical_limit {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-cursor"));
+        }
+        let remaining = logical_limit - consumed;
+        if remaining == 0 {
+            return Ok(json!({ "bookmarks": [], "nextCursor": Value::Null }));
+        }
+        let take = remaining.min(page_limit);
+        let after = cursor
+            .as_ref()
+            .map(|cursor| (cursor.first, cursor.second.clone()));
         let cancellation = OperationCancellation::new(ctx);
-        let bookmarks = Self::read_under_ctx(
+        let rows = Self::read_under_ctx(
             &cancellation,
             "chats.bookmarks.listPending",
             open.actor.chat_bookmarks_list_pending(
                 workspace_id.clone(),
                 params.owner_user_id,
-                params.limit,
+                take + 1,
+                after,
             ),
         )
         .await?;
-        // Domain-bounded to 200 rows; the byte budget still fences
-        // string-heavy rows like the other list families.
-        let row_values: Vec<Value> = bookmarks
+        let row_values: Vec<Value> = rows
             .iter()
-            .map(|bookmark| bookmark_json(&workspace_id, bookmark))
+            .take(take as usize)
+            .map(|row| bookmark_json(&workspace_id, &row.bookmark))
             .collect();
         let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
         if included == 0 && !row_values.is_empty() {
-            return Err(wire(
-                ErrorCode::Internal,
-                "a listing row exceeds the response frame budget",
-            ));
+            return Err(wire(ErrorCode::LimitExceeded, "row-exceeds-wire-limit"));
         }
-        let truncated = included < row_values.len();
+        let next_consumed = consumed + included as i64;
+        let has_more = next_consumed < logical_limit && rows.len() > included;
+        let next_cursor = if has_more {
+            let last = rows
+                .get(included.saturating_sub(1))
+                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            Some(encode_chat_cursor(&ChatKeysetCursor {
+                version: 1,
+                binding,
+                consumed: next_consumed,
+                first: last.outbox_updated_at_ms,
+                second: last.bookmark.bookmark_id.clone(),
+                third: None,
+            })?)
+        } else {
+            None
+        };
         Ok(json!({
             "bookmarks": row_values[..included].to_vec(),
-            "truncated": truncated,
+            "nextCursor": next_cursor,
         }))
     }
 
@@ -3282,6 +3712,36 @@ impl EngineService {
                 workspace_id.clone(),
                 params.owner_user_id,
                 params.bookmark_id,
+                now_ms()?,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(bookmark_json(&workspace_id, &bookmark))
+    }
+
+    async fn chats_bookmarks_mark_pending(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+        request_id: Option<String>,
+    ) -> Result<Value, WireError> {
+        let params: ChatBookmarkArchiveParams = parse(params)?;
+        let request_id = request_id
+            .filter(|request_id| !request_id.is_empty())
+            .ok_or_else(|| wire(ErrorCode::InvalidParams, "invalid-parameters"))?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let bookmark = Self::read_under_ctx(
+            &cancellation,
+            "chats.bookmarks.markPending",
+            open.actor.chat_bookmark_mark_pending(
+                workspace_id.clone(),
+                params.owner_user_id,
+                params.bookmark_id,
+                request_id,
                 now_ms()?,
                 cancellation.token(),
             ),
@@ -3400,6 +3860,492 @@ impl EngineService {
             .as_ref()
             .map(dispatch_claim_json)
             .unwrap_or(Value::Null))
+    }
+
+    async fn chats_dispatch_list_pending(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatPageParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let binding = chat_cursor_binding("chats.dispatch.listPending", &workspace_id, &[]);
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let after = cursor
+            .as_ref()
+            .map(|cursor| (cursor.first, cursor.second.clone()));
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.listPending",
+            open.actor
+                .chat_dispatch_list_pending(workspace_id, after, page_limit + 1),
+        )
+        .await?;
+        let values: Vec<Value> = rows
+            .iter()
+            .take(page_limit as usize)
+            .map(dispatch_json)
+            .collect();
+        let included = bounded_chat_page_len(&values)?;
+        let next_cursor = dispatch_page_cursor(
+            &rows,
+            included,
+            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
+            binding,
+            |row| (row.created_at_ms, row.trigger_message_id.clone()),
+        )?;
+        Ok(json!({
+            "dispatches": values[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
+    }
+
+    async fn chats_dispatch_open_runs(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatPageParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let binding = chat_cursor_binding("chats.dispatch.openRuns", &workspace_id, &[]);
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let after = cursor
+            .as_ref()
+            .map(|cursor| (cursor.first, cursor.second.clone()));
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.openRuns",
+            open.actor
+                .chat_dispatch_open_runs(workspace_id, after, page_limit + 1),
+        )
+        .await?;
+        let values: Vec<Value> = rows
+            .iter()
+            .take(page_limit as usize)
+            .map(dispatch_claim_json)
+            .collect();
+        let included = bounded_chat_page_len(&values)?;
+        let next_cursor = dispatch_page_cursor(
+            &rows,
+            included,
+            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
+            binding,
+            |claim| {
+                (
+                    claim.dispatch.updated_at_ms,
+                    claim.dispatch.trigger_message_id.clone(),
+                )
+            },
+        )?;
+        Ok(json!({
+            "claims": values[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
+    }
+
+    async fn chats_dispatch_list_run_messages(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchRunPageParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let binding = chat_cursor_binding(
+            "chats.dispatch.listRunMessages",
+            &workspace_id,
+            &[&params.run_id],
+        );
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.listRunMessages",
+            open.actor.chat_dispatch_list_run_messages(
+                workspace_id,
+                params.run_id,
+                cursor.as_ref().map(|cursor| cursor.second.clone()),
+                page_limit + 1,
+            ),
+        )
+        .await?;
+        let values: Vec<Value> = rows
+            .iter()
+            .take(page_limit as usize)
+            .map(|message_id| json!(message_id))
+            .collect();
+        let included = bounded_chat_page_len(&values)?;
+        let next_cursor = if rows.len() > included {
+            let last = rows
+                .get(included.saturating_sub(1))
+                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            Some(encode_chat_cursor(&ChatKeysetCursor {
+                version: 1,
+                binding,
+                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                first: 0,
+                second: last.clone(),
+                third: None,
+            })?)
+        } else {
+            None
+        };
+        Ok(json!({
+            "messageIds": values[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
+    }
+
+    async fn chats_dispatch_run_id_for_message(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchMessageParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let run_id = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.runIdForMessage",
+            open.actor
+                .chat_dispatch_run_id_for_message(open.workspace_id, params.message_id),
+        )
+        .await?;
+        Ok(run_id.map_or(Value::Null, Value::String))
+    }
+
+    async fn chats_dispatch_run_records_for_thread(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchThreadRunsParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let limit_binding = params
+            .limit
+            .map_or_else(String::new, |limit| limit.to_string());
+        let binding = chat_cursor_binding(
+            "chats.dispatch.runRecordsForThread",
+            &workspace_id,
+            &[&params.thread_id, &limit_binding],
+        );
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let after = match &cursor {
+            None => None,
+            Some(cursor) => Some((
+                cursor.first,
+                cursor.second.clone(),
+                cursor
+                    .third
+                    .clone()
+                    .ok_or_else(|| wire(ErrorCode::InvalidParams, "invalid-cursor"))?,
+            )),
+        };
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.runRecordsForThread",
+            open.actor.chat_dispatch_run_records_for_thread(
+                workspace_id,
+                params.thread_id,
+                params.limit,
+                after,
+                page_limit + 1,
+            ),
+        )
+        .await?;
+        let entry_values: Vec<Value> = rows
+            .iter()
+            .take(page_limit as usize)
+            .map(|row| {
+                let mut entry = serde_json::Map::new();
+                entry.insert(row.message_id.clone(), run_json(&row.run));
+                Value::Object(entry)
+            })
+            .collect();
+        let included = bounded_chat_page_len(&entry_values)?;
+        let mut runs = serde_json::Map::new();
+        for row in rows.iter().take(included) {
+            runs.insert(row.message_id.clone(), run_json(&row.run));
+        }
+        let next_cursor = if rows.len() > included {
+            let last = rows
+                .get(included.saturating_sub(1))
+                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            Some(encode_chat_cursor(&ChatKeysetCursor {
+                version: 1,
+                binding,
+                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                first: last.run.started_at_ms,
+                second: last.run.run_id.clone(),
+                third: Some(last.message_id.clone()),
+            })?)
+        } else {
+            None
+        };
+        Ok(json!({ "runs": runs, "nextCursor": next_cursor }))
+    }
+
+    async fn chats_dispatch_get_run_record(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchRunParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let run = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.getRunRecord",
+            open.actor
+                .chat_dispatch_get_run_record(open.workspace_id, params.run_id),
+        )
+        .await?;
+        Ok(run.as_ref().map(run_json).unwrap_or(Value::Null))
+    }
+
+    async fn chats_dispatch_thread_paused(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatThreadParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let paused = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.isThreadPaused",
+            open.actor
+                .chat_dispatch_thread_paused(open.workspace_id, params.thread_id),
+        )
+        .await?;
+        Ok(json!(paused))
+    }
+
+    async fn chats_dispatch_get_thread_pause_state(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatThreadParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let pause = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.getThreadPauseState",
+            open.actor
+                .chat_dispatch_get_thread_pause_state(open.workspace_id, params.thread_id),
+        )
+        .await?;
+        Ok(pause.as_ref().map(pause_json).unwrap_or(Value::Null))
+    }
+
+    async fn chats_dispatch_recent_count(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchRecentCountParams = parse(params)?;
+        if !params.since_ms.is_finite() {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
+        }
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let count = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.recentCount",
+            open.actor.chat_dispatch_recent_count(
+                open.workspace_id,
+                params.thread_id,
+                params.since_ms,
+            ),
+        )
+        .await?;
+        Ok(json!(count))
+    }
+
+    async fn chats_dispatch_fail_pending_for_thread(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchFailPendingParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let changed = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.failPendingForThread",
+            open.actor.chat_dispatch_fail_pending_for_thread(
+                open.workspace_id,
+                params.thread_id,
+                params.reason,
+                now_ms()?,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!(changed))
+    }
+
+    async fn chats_dispatch_record_run_message(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchRecordRunMessageParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let inserted = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.recordRunMessage",
+            open.actor.chat_dispatch_record_run_message(
+                open.workspace_id,
+                params.message_id,
+                params.run_id,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!(inserted))
+    }
+
+    async fn chats_dispatch_set_thread_paused(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchSetPausedParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let pause = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.setThreadPaused",
+            open.actor.chat_dispatch_set_thread_paused(
+                open.workspace_id,
+                params.thread_id,
+                params.paused,
+                params.reason,
+                now_ms()?,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(pause_json(&pause))
+    }
+
+    async fn chats_dispatch_mark_failure_note_posted(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchRunParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let run = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.markFailureNotePosted",
+            open.actor.chat_dispatch_mark_failure_note_posted(
+                open.workspace_id,
+                params.run_id,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(run_json(&run))
+    }
+
+    async fn chats_dispatch_requeue_failed_trigger(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchRequeueParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let requeued = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.requeueFailedTrigger",
+            open.actor.chat_dispatch_requeue_failed_trigger(
+                open.workspace_id,
+                params.trigger_message_id,
+                params.run_id,
+                now_ms()?,
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(json!(requeued))
+    }
+
+    async fn chats_dispatch_list_app_quit_recoveries(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatPageParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let binding =
+            chat_cursor_binding("chats.dispatch.listAppQuitRecoveries", &workspace_id, &[]);
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let after = cursor
+            .as_ref()
+            .map(|cursor| (cursor.first, cursor.second.clone()));
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.listAppQuitRecoveries",
+            open.actor
+                .chat_dispatch_list_app_quit_recoveries(workspace_id, after, page_limit + 1),
+        )
+        .await?;
+        let values: Vec<Value> = rows
+            .iter()
+            .take(page_limit as usize)
+            .map(|recovery| {
+                json!({
+                    "run": run_json(&recovery.run),
+                    "attemptCount": recovery.attempt_count,
+                })
+            })
+            .collect();
+        let included = bounded_chat_page_len(&values)?;
+        let next_cursor = dispatch_page_cursor(
+            &rows,
+            included,
+            cursor.as_ref().map_or(0, |cursor| cursor.consumed),
+            binding,
+            |recovery| (recovery.run.started_at_ms, recovery.run.run_id.clone()),
+        )?;
+        Ok(json!({
+            "recoveries": values[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
     }
 
     async fn chats_dispatch_complete(
@@ -4896,6 +5842,44 @@ struct ChatThreadParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatThreadsListForFileParams {
+    object_id: String,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatPageParams {
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatAgentReadCoordinateParams {
+    created_at_ms: i64,
+    message_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatAgentReadMarkParams {
+    thread_id: String,
+    up_to: ChatAgentReadCoordinateParams,
+    expected_revision: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatOwnerParams {
+    owner_user_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatReadStateMarkParams {
     thread_id: String,
     up_to_sequence: i64,
@@ -4941,6 +5925,9 @@ struct ChatBookmarkFindParams {
 struct ChatBookmarkListPendingParams {
     owner_user_id: String,
     limit: Option<i64>,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -5026,6 +6013,74 @@ struct ChatDispatchClaimParams {
     #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
     log_path: Option<String>,
     now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchRunPageParams {
+    run_id: String,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchMessageParams {
+    message_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchThreadRunsParams {
+    thread_id: String,
+    limit: Option<i64>,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchRunParams {
+    run_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchRecentCountParams {
+    thread_id: String,
+    since_ms: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchFailPendingParams {
+    thread_id: String,
+    reason: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchRecordRunMessageParams {
+    message_id: String,
+    run_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchSetPausedParams {
+    thread_id: String,
+    paused: bool,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchRequeueParams {
+    trigger_message_id: String,
+    run_id: String,
 }
 
 #[derive(Deserialize)]
@@ -5378,6 +6433,34 @@ fn thread_json(thread: &ChatThread) -> Value {
     })
 }
 
+fn thread_b2_json(thread: &ChatThread) -> Value {
+    let mut value = json!({
+        "id": thread.thread_id,
+        "workspaceId": thread.workspace_id,
+        "title": thread.title,
+        "createdAtMs": thread.created_at_ms,
+        "updatedAtMs": thread.updated_at_ms,
+    });
+    let object = value.as_object_mut().expect("thread is an object");
+    if let Some(channel_id) = &thread.channel_id {
+        object.insert("channelId".to_owned(), json!(channel_id));
+    }
+    if let Some(object_id) = &thread.linked_object_id {
+        let mut linked_file = json!({
+            "objectId": object_id,
+            "linkedAtMs": thread.linked_at_ms.expect("validated linked thread"),
+        });
+        if let Some(path_hint) = &thread.linked_path_hint {
+            linked_file
+                .as_object_mut()
+                .expect("linked file is an object")
+                .insert("pathHint".to_owned(), json!(path_hint));
+        }
+        object.insert("linkedFile".to_owned(), linked_file);
+    }
+    value
+}
+
 fn message_json(message: &ChatMessage) -> Value {
     json!({
         "workspaceId": message.workspace_id,
@@ -5402,6 +6485,17 @@ fn read_state_json(state: &ChatThreadReadState) -> Value {
         "workspaceId": state.workspace_id,
         "threadId": state.thread_id,
         "lastReadSequence": state.last_read_sequence,
+        "revision": state.revision,
+        "updatedAtMs": state.updated_at_ms,
+    })
+}
+
+fn agent_read_state_json(state: &ChatAgentReadState) -> Value {
+    json!({
+        "workspaceId": state.workspace_id,
+        "threadId": state.thread_id,
+        "lastReadCreatedAtMs": state.last_read_created_at_ms,
+        "lastReadMessageId": state.last_read_message_id,
         "revision": state.revision,
         "updatedAtMs": state.updated_at_ms,
     })
@@ -5437,55 +6531,102 @@ fn follow_json(workspace_id: &str, follow: &ChatFollow) -> Value {
 }
 
 fn bookmark_json(workspace_id: &str, bookmark: &ChatBookmark) -> Value {
-    json!({
+    let mut value = json!({
         "bookmarkId": bookmark.bookmark_id,
         "workspaceId": workspace_id,
         "ownerUserId": bookmark.owner_user_id,
         "targetKind": bookmark.target_kind,
         "targetId": bookmark.target_id,
         "threadId": bookmark.thread_id,
-        "messageId": bookmark.message_id,
         "mode": bookmark.mode,
         "destinationPath": bookmark.destination_path,
         "state": bookmark.state,
         "generation": bookmark.generation,
         "projectedGeneration": bookmark.projected_generation,
         "projectionState": bookmark.projection_state,
-        "projectionObjectId": bookmark.projection_object_id,
         "createdAtMs": bookmark.created_at_ms,
         "updatedAtMs": bookmark.updated_at_ms,
-        "lastProjectedAtMs": bookmark.last_projected_at_ms,
-        "failureReason": bookmark.failure_reason,
-    })
+    });
+    let object = value.as_object_mut().expect("bookmark is an object");
+    if let Some(message_id) = &bookmark.message_id {
+        object.insert("messageId".to_owned(), json!(message_id));
+    }
+    if let Some(projection_object_id) = &bookmark.projection_object_id {
+        object.insert("projectionObjectId".to_owned(), json!(projection_object_id));
+    }
+    if let Some(last_projected_at_ms) = bookmark.last_projected_at_ms {
+        object.insert("lastProjectedAtMs".to_owned(), json!(last_projected_at_ms));
+    }
+    if let Some(failure_reason) = &bookmark.failure_reason {
+        object.insert("failureReason".to_owned(), json!(failure_reason));
+    }
+    value
 }
 
 fn dispatch_claim_json(claim: &DispatchClaim) -> Value {
-    json!({
-        "dispatch": {
-            "workspaceId": claim.dispatch.workspace_id,
-            "triggerMessageId": claim.dispatch.trigger_message_id,
-            "threadId": claim.dispatch.thread_id,
-            "state": claim.dispatch.state,
-            "runId": claim.dispatch.run_id,
-            "failureReason": claim.dispatch.failure_reason,
-            "attemptCount": claim.dispatch.attempt_count,
-            "createdAtMs": claim.dispatch.created_at_ms,
-            "updatedAtMs": claim.dispatch.updated_at_ms,
-        },
-        "run": {
-            "workspaceId": claim.run.workspace_id,
-            "runId": claim.run.run_id,
-            "threadId": claim.run.thread_id,
-            "triggerMessageId": claim.run.trigger_message_id,
-            "command": claim.run.command,
-            "startedAtMs": claim.run.started_at_ms,
-            "endedAtMs": claim.run.ended_at_ms,
-            "exitCode": claim.run.exit_code,
-            "failureReason": claim.run.failure_reason,
-            "logPath": claim.run.log_path,
-            "failureNotePosted": claim.run.failure_note_posted,
-        },
-    })
+    json!({ "dispatch": dispatch_json(&claim.dispatch), "run": run_json(&claim.run) })
+}
+
+fn dispatch_json(dispatch: &DispatchRecord) -> Value {
+    let mut value = json!({
+        "workspaceId": dispatch.workspace_id,
+        "triggerMessageId": dispatch.trigger_message_id,
+        "threadId": dispatch.thread_id,
+        "state": dispatch.state,
+        "attemptCount": dispatch.attempt_count,
+        "createdAtMs": dispatch.created_at_ms,
+        "updatedAtMs": dispatch.updated_at_ms,
+    });
+    let object = value.as_object_mut().expect("dispatch is an object");
+    if let Some(run_id) = &dispatch.run_id {
+        object.insert("runId".to_owned(), json!(run_id));
+    }
+    if let Some(failure_reason) = &dispatch.failure_reason {
+        object.insert("failureReason".to_owned(), json!(failure_reason));
+    }
+    value
+}
+
+fn run_json(run: &AgentRunRecord) -> Value {
+    let mut value = json!({
+        "workspaceId": run.workspace_id,
+        "runId": run.run_id,
+        "threadId": run.thread_id,
+        "triggerMessageId": run.trigger_message_id,
+        "command": run.command,
+        "startedAtMs": run.started_at_ms,
+        "failureNotePosted": run.failure_note_posted,
+    });
+    let object = value.as_object_mut().expect("run is an object");
+    if let Some(ended_at_ms) = run.ended_at_ms {
+        object.insert("endedAtMs".to_owned(), json!(ended_at_ms));
+    }
+    if let Some(exit_code) = run.exit_code {
+        object.insert("exitCode".to_owned(), json!(exit_code));
+    }
+    if let Some(failure_reason) = &run.failure_reason {
+        object.insert("failureReason".to_owned(), json!(failure_reason));
+    }
+    if let Some(log_path) = &run.log_path {
+        object.insert("logPath".to_owned(), json!(log_path));
+    }
+    value
+}
+
+fn pause_json(pause: &ThreadDispatchPause) -> Value {
+    let mut value = json!({
+        "workspaceId": pause.workspace_id,
+        "threadId": pause.thread_id,
+        "paused": pause.paused,
+        "updatedAtMs": pause.updated_at_ms,
+    });
+    if let Some(reason) = &pause.reason {
+        value
+            .as_object_mut()
+            .expect("pause is an object")
+            .insert("reason".to_owned(), json!(reason));
+    }
+    value
 }
 
 fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
@@ -5922,11 +7063,17 @@ fn map_runtime(error: RuntimeError) -> WireError {
             DomainError::InvalidInput { .. } => Some("invalid-input"),
             DomainError::StateCorrupt { .. } => Some("state-corrupt"),
             DomainError::Storage(_) => Some("persist-failed"),
+            DomainError::Chat { code, .. } => Some(*code),
             _ => None,
         };
         if let Some(message) = message {
             let code = match domain {
-                DomainError::Storage(_) | DomainError::StateCorrupt { .. } => ErrorCode::Internal,
+                DomainError::Storage(_)
+                | DomainError::StateCorrupt { .. }
+                | DomainError::Chat {
+                    code: "state-corrupt",
+                    ..
+                } => ErrorCode::Internal,
                 // Same severity split as map_domain_code: decode/key failures
                 // are internal state problems, not caller mistakes.
                 DomainError::Crypto(error) => match error {
