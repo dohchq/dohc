@@ -1180,7 +1180,7 @@ export function decodeChatsResult<M extends ChatsMethod>(
     case CHATS_METHOD.dispatchRunRecordsForThread: {
       const object = objectValue(value, label, ["runs", "nextCursor"]);
       const runsObject = objectValue(object.runs ?? null, `${label}.runs`);
-      const runs: Record<string, ChatRun> = {};
+      const runs: Record<string, ChatRun> = Object.create(null);
       for (const [messageId, run] of Object.entries(runsObject)) {
         runs[messageId] = decodeChatRun(run ?? null, `${label}.runs.${messageId}`);
       }

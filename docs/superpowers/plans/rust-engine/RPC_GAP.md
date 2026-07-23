@@ -172,6 +172,19 @@ refuses some handles its own scanner indexes (agent.ops_v2 throws on
 JS, succeeds on Rust). Deliberate oracle-bug fix; parity suites must
 expect it; moot for data post-R15.
 
+CROSS-ENGINE DELTA (PR #225 codex r4): linked thread timestamp SHARED
+LATENT INCONSISTENCY — an imported `chat.thread.create` with
+`linkedObjectId` but no `linkedAtMs` is accepted and stored with
+`linked_at_ms = NULL` by BOTH engines' apply paths (the oracle uses
+`linkedAtMs ?? null` at linkedChatStore.ts:4432; Rust matches), then
+throws corrupt on read in BOTH engines (the oracle's `threadFromRow`
+passes NULL to `numberValue` at :653/:1498; Rust `map_thread_row`
+requires the timestamp for a linked owner). This is adversarial-only:
+well-behaved peers pair the fields when minting a linked thread, and the
+issue is moot post-R15. Rust intentionally does not add an import-side
+requirement because that would diverge from the oracle and stall the
+origin's ack stream.
+
 CROSS-ENGINE DELTA (RPC-A r18): secret path SPELLING — TS normalize-stores
 (percent-disguises collapse); Rust stores the spelling the write carried
 and resolves verbatim (the secretness gate still classifies via

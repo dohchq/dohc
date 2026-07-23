@@ -401,6 +401,41 @@ describe("B2 chats wire contract and loopback", () => {
     expect([...seen].sort()).toEqual(Object.values(CHATS_METHOD).sort());
   });
 
+  it("preserves prototype-named message ids in a null-prototype run map", () => {
+    const run: JsonValue = {
+      workspaceId: WORKSPACE,
+      runId: "run-prototype-key",
+      threadId: "thread",
+      triggerMessageId: "trigger",
+      command: "agent",
+      startedAtMs: 1,
+      failureNotePosted: false,
+    };
+    const wireRuns: { [key: string]: JsonValue | undefined } = {};
+    for (const messageId of ["__proto__", "constructor"]) {
+      Object.defineProperty(wireRuns, messageId, {
+        value: run,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      });
+    }
+
+    const decoded = decodeChatsResult(CHATS_METHOD.dispatchRunRecordsForThread, {
+      runs: wireRuns,
+      nextCursor: null,
+    });
+
+    // MUTATION: replacing Object.create(null) with {} drops __proto__ into the
+    // prototype setter instead of preserving the caller-supplied message id.
+    expect(Object.getPrototypeOf(decoded.runs)).toBeNull();
+    expect(Object.keys(decoded.runs)).toEqual(["__proto__", "constructor"]);
+    expect(Object.prototype.hasOwnProperty.call(decoded.runs, "__proto__")).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(decoded.runs, "constructor")).toBe(true);
+    expect(decoded.runs["__proto__"]?.runId).toBe("run-prototype-key");
+    expect(decoded.runs["constructor"]?.runId).toBe("run-prototype-key");
+  });
+
   it("enforces LWW bumps, cursor binding, ledger dedup, and mention-derived scanning", async () => {
     const engine = new ChatsLoopbackEngine();
     engine.seedChannel({

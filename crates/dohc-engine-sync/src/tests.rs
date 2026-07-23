@@ -95,6 +95,35 @@ fn decision_winner(engine: &EngineStore) -> (String, i64, String, i64) {
 }
 
 #[test]
+fn imported_decision_refuses_unsafe_at_ms_without_row_or_ack() {
+    let (_scratch, _path, mut engine) = store();
+    let operation = envelope(
+        "unsafe-decision-time",
+        0,
+        "chat.decision.set",
+        decision_payload("open", i64::MAX, None),
+    );
+
+    // MUTATION: dropping the persisted-safe atMs bound journals a decision that
+    // the cross-engine read contract cannot represent.
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    let row_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM chat_decisions", [], |row| row.get(0))
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("decision row count");
+    assert_eq!(row_count, 0);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "unsafe-decision-time").expect("ack"),
+        -1
+    );
+}
+
+#[test]
 fn decision_lww_is_permutation_convergent_and_resolved_wins_ties() {
     let ops = [
         envelope(
@@ -241,6 +270,35 @@ fn reaction_import_preserves_remote_time_verbatim() {
     apply_chat_envelope(&mut engine, &future, &NoFaults).expect("apply");
     // MUTATION: receiver-clock clamping remote atMs -> identical envelopes store different total-order keys on different peers.
     assert_eq!(reaction_winner(&engine).1, 9_999_999_999);
+}
+
+#[test]
+fn imported_reaction_refuses_unsafe_at_ms_without_row_or_ack() {
+    let (_scratch, _path, mut engine) = store();
+    let operation = envelope(
+        "unsafe-reaction-time",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "👍", i64::MAX, "Ada"),
+    );
+
+    // MUTATION: dropping the persisted-safe atMs bound journals a reaction that
+    // subsequently makes reaction reads state-corrupt.
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    let row_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM chat_reactions", [], |row| row.get(0))
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("reaction row count");
+    assert_eq!(row_count, 0);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "unsafe-reaction-time").expect("ack"),
+        -1
+    );
 }
 
 #[test]
@@ -1252,6 +1310,47 @@ fn imported_feed_read_set_refuses_unbounded_or_empty_identities() {
             apply_chat_envelope(&mut engine, &operation, &NoFaults),
             Err(SyncError::InvalidInput { .. })
         ));
+    }
+}
+
+#[test]
+fn imported_feed_read_refuses_unsafe_timestamps_without_row_or_ack() {
+    for (origin, last_seen_created_at_ms, at_ms) in [
+        ("unsafe-feed-read-time", 1, i64::MAX),
+        ("unsafe-feed-read-cursor", i64::MAX, 1),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        let operation = envelope(
+            origin,
+            0,
+            "chat.feed.read.set",
+            json!({
+                "ownerUserId": "owner",
+                "lastSeenCreatedAtMs": last_seen_created_at_ms,
+                "lastSeenMessageId": "message",
+                "atMs": at_ms
+            }),
+        );
+
+        // MUTATION: dropping either persisted-safe timestamp bound journals a
+        // feed-read row that cannot cross the DOP1/JavaScript read contract.
+        assert!(matches!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults),
+            Err(SyncError::InvalidInput { .. })
+        ));
+        let row_count: i64 = engine
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM chat_feed_read_state", [], |row| {
+                    row.get(0)
+                })
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })
+            .expect("feed read row count");
+        assert_eq!(row_count, 0);
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", origin).expect("ack"),
+            -1
+        );
     }
 }
 

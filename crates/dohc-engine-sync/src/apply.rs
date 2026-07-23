@@ -150,6 +150,10 @@ fn is_replicated_timestamp(value: i64) -> bool {
     (0..=crate::MAX_WIRE_INTEGER).contains(&value)
 }
 
+fn is_persisted_safe_integer(value: i64) -> bool {
+    (-crate::MAX_WIRE_INTEGER..=crate::MAX_WIRE_INTEGER).contains(&value)
+}
+
 fn is_replicated_channel_slug(value: &str) -> bool {
     is_bounded_replicated_id(value, 200)
         && value.split('-').all(|part| {
@@ -760,6 +764,7 @@ fn apply_decision(
     if p.thread_id.is_empty()
         || p.message_id.is_empty()
         || !matches!(p.state.as_str(), "open" | "resolved")
+        || !is_persisted_safe_integer(p.at_ms)
         || p.resolved_by_message_id
             .as_ref()
             .is_some_and(String::is_empty)
@@ -797,6 +802,7 @@ fn apply_reaction(
         || !is_reaction_emoji_verbatim(&p.emoji)
         || !matches!(p.author_kind.as_str(), "human" | "agent")
         || !matches!(p.state.as_str(), "added" | "removed")
+        || !is_persisted_safe_integer(p.at_ms)
     {
         return Err(SyncError::InvalidInput {
             reason: "chat reaction payload is invalid",
@@ -860,6 +866,8 @@ fn apply_feed_read(
         || p.owner_user_id.encode_utf16().count() > 256
         || p.last_seen_message_id.is_empty()
         || p.last_seen_message_id.encode_utf16().count() > 256
+        || !is_persisted_safe_integer(p.last_seen_created_at_ms)
+        || !is_persisted_safe_integer(p.at_ms)
     {
         return Err(SyncError::InvalidInput {
             reason: "chat feed read payload is invalid",
