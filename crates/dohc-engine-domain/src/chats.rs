@@ -1868,6 +1868,19 @@ fn is_mention_body(ch: char) -> bool {
     is_mention_alnum(ch) || matches!(ch, '.' | '_' | '-')
 }
 
+fn normalize_mention_candidate(candidate: &str) -> Option<String> {
+    if !candidate.chars().next().is_some_and(is_mention_alnum)
+        || !candidate.chars().all(is_mention_body)
+    {
+        return None;
+    }
+    let candidate = candidate.trim_end_matches(['.', '_', '-']);
+    if candidate.is_empty() {
+        return None;
+    }
+    Some(candidate.nfc().flat_map(char::to_lowercase).collect())
+}
+
 fn range_contains(ranges: &[(usize, usize)], offset: usize) -> bool {
     ranges
         .iter()
@@ -1964,13 +1977,9 @@ pub fn parse_mention_handles(body: &str) -> Vec<String> {
             }
             raw.push(candidate);
         }
-        while raw.ends_with(['.', '_', '-']) {
-            raw.pop();
-        }
-        if raw.is_empty() {
+        let Some(normalized) = normalize_mention_candidate(&raw) else {
             continue;
-        }
-        let normalized: String = raw.nfc().flat_map(char::to_lowercase).collect();
+        };
         if seen.insert(normalized.clone()) {
             handles.push(normalized);
         }
@@ -2011,18 +2020,8 @@ pub fn index_message_mentions_in_tx(
 }
 
 fn normalize_mention_handle(handle: &str) -> Result<String, DomainError> {
-    let handle = handle.to_ascii_lowercase();
-    if handle.is_empty()
-        || !handle
-            .chars()
-            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
-    {
-        return Err(DomainError::chat(
-            "invalid-message-body",
-            "Mention handle is invalid.",
-        ));
-    }
-    Ok(handle)
+    normalize_mention_candidate(handle)
+        .ok_or_else(|| DomainError::chat("invalid-message-body", "Mention handle is invalid."))
 }
 
 fn normalize_verified_user_id(value: Option<&str>) -> Result<Option<String>, DomainError> {

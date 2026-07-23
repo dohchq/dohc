@@ -746,6 +746,13 @@ fn imported_thread_rejects_invalid_owner_shape_and_linked_path() {
             "threadId": "thread",
             "title": "",
             "createdAtMs": 1,
+            "channelSlug": "general",
+            "linkedPathHint": "notes/file.md"
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
             "linkedObjectId": "object",
             "linkedPathHint": "notes/../escape.md"
         }),

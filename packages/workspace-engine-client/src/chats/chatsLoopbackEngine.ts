@@ -1516,6 +1516,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
   ): JsonValue {
     const runId = normalizeNonempty(requiredString(params, "runId"), "invalid-input");
     if (state.runs.has(runId)) throw new Error("state-corrupt");
+    if ([...state.dispatches.values()].some((row) => row.state === "running")) return null;
     const dispatch = [...state.dispatches.values()]
       .filter((row) => row.state === "pending" && !(state.pauses.get(row.threadId)?.paused ?? false))
       .sort((left, right) => left.createdAtMs - right.createdAtMs || compareText(left.triggerMessageId, right.triggerMessageId))[0];

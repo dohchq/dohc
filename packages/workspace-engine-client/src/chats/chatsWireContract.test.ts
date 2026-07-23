@@ -541,6 +541,72 @@ describe("B2 chats wire contract and loopback", () => {
     ).rejects.toThrow("idempotency-key-reuse-mismatch");
   });
 
+  it("keeps dispatch claims single-flight until the open run ends", async () => {
+    const running = new ChatsLoopbackEngine();
+    running.seedDispatch({
+      workspaceId: WORKSPACE,
+      triggerMessageId: "first-trigger",
+      threadId: "first-thread",
+      state: "pending",
+      createdAtMs: 10,
+    });
+    running.seedDispatch({
+      workspaceId: WORKSPACE,
+      triggerMessageId: "next-trigger",
+      threadId: "next-thread",
+      state: "pending",
+      createdAtMs: 20,
+    });
+    expect(
+      (await call(running, 1, CHATS_METHOD.dispatchClaimNextPending, {
+        runId: "open-run",
+        nowMs: 30,
+      }))?.dispatch.triggerMessageId,
+    ).toBe("first-trigger");
+    // MUTATION: omit the workspace-wide running-dispatch guard -> the next trigger is double-claimed.
+    expect(
+      await call(running, 2, CHATS_METHOD.dispatchClaimNextPending, {
+        runId: "blocked-run",
+        nowMs: 31,
+      }),
+    ).toBeNull();
+
+    const ended = new ChatsLoopbackEngine();
+    ended.seedDispatch({
+      workspaceId: WORKSPACE,
+      triggerMessageId: "first-trigger",
+      threadId: "first-thread",
+      state: "done",
+      runId: "open-run",
+      attemptCount: 1,
+      createdAtMs: 10,
+      updatedAtMs: 32,
+    });
+    ended.seedRun({
+      workspaceId: WORKSPACE,
+      runId: "open-run",
+      threadId: "first-thread",
+      triggerMessageId: "first-trigger",
+      command: "",
+      startedAtMs: 30,
+      endedAtMs: 32,
+      exitCode: 0,
+    });
+    ended.seedDispatch({
+      workspaceId: WORKSPACE,
+      triggerMessageId: "next-trigger",
+      threadId: "next-thread",
+      state: "pending",
+      createdAtMs: 20,
+    });
+    expect(
+      (await call(ended, 3, CHATS_METHOD.dispatchClaimNextPending, {
+        runId: "next-run",
+        nowMs: 33,
+      }))?.dispatch.triggerMessageId,
+    ).toBe("next-trigger");
+  });
+
   it("refuses over-cap projections without returning partial markdown", async () => {
     const engine = new ChatsLoopbackEngine();
     engine.seedChannel({

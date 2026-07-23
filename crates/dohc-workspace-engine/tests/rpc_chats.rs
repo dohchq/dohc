@@ -793,7 +793,8 @@ async fn rpc_b2_mentions_backfill_and_scanner_contracts() {
             tx.execute(
                 "INSERT INTO chat_messages \
                  (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) \
-                 VALUES ('rpc-b2-mentions','thread',0,'message','human','Ada','hello @agent',20)",
+                 VALUES ('rpc-b2-mentions','thread',0,'message','human','Ada',\
+                         'hello @agent @agent.ops_v2 @ſK',20)",
                 [],
             )
             .map_err(StorageError::persist_public)?;
@@ -827,6 +828,22 @@ async fn rpc_b2_mentions_backfill_and_scanner_contracts() {
             "nextCursor": null
         })
     );
+    for (query, normalized) in [
+        ("AGENT.OPS_V2...", "agent.ops_v2"),
+        ("\u{017F}\u{212A}_", "\u{017F}k"),
+    ] {
+        let mentions = call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.mentions.listForHandle",
+            json!({ "handle": query, "unreadByAgentOnly": false, "pageLimit": 10 }),
+        )
+        .await;
+        // MUTATION: retain the narrow ASCII alphanumeric/hyphen validator -> this indexed row is unqueryable.
+        assert_eq!(mentions["mentions"][0]["handle"], json!(normalized));
+        assert_eq!(mentions["mentions"][0]["messageId"], json!("message"));
+    }
     let first = call(
         &transport,
         &handle,
