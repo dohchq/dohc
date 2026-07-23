@@ -16,6 +16,7 @@ import {
 
 const INBAND_LIMIT_BYTES = 48 * 1024;
 const COMPARE_PAGE_SIZE = 200;
+const MAX_MERGE_LINES = 2_000;
 const ACCEPTED_ORIGINS = new Set<string>([
   "api",
   "local-file",
@@ -41,6 +42,7 @@ interface InternalMoment {
   before?: LoopbackFile;
   after?: LoopbackFile;
   beforePath?: string;
+  writeAuthorFingerprint?: string | null;
 }
 
 interface LoopbackVersion {
@@ -190,6 +192,121 @@ function decodeBase64(value: string): number[] {
   const bytes = [...Buffer.from(value, "base64")];
   if (encodeBase64(bytes) !== value) throw new Error("invalid-input");
   return bytes;
+}
+
+function comparePaths(left: string, right: string): number {
+  return left === right ? 0 : left > right ? 1 : -1;
+}
+
+interface LineHunk {
+  baseStart: number;
+  baseEnd: number;
+  replacement: string[];
+}
+
+type MarkdownMergeResult =
+  | { status: "merged"; text: string }
+  | { status: "conflict" };
+
+function diffHunks(base: string[], side: string[]): LineHunk[] {
+  const rowCount = base.length;
+  const columnCount = side.length;
+  const lcs = Array.from(
+    { length: rowCount + 1 },
+    () => Array<number>(columnCount + 1).fill(0),
+  );
+  for (let row = rowCount - 1; row >= 0; row -= 1) {
+    for (let column = columnCount - 1; column >= 0; column -= 1) {
+      lcs[row]![column] = base[row] === side[column]
+        ? lcs[row + 1]![column + 1]! + 1
+        : Math.max(lcs[row + 1]![column]!, lcs[row]![column + 1]!);
+    }
+  }
+
+  const hunks: LineHunk[] = [];
+  let row = 0;
+  let column = 0;
+  let pendingStart: number | undefined;
+  let pendingReplacement: string[] = [];
+  const flush = (baseEnd: number): void => {
+    if (pendingStart === undefined) return;
+    hunks.push({ baseStart: pendingStart, baseEnd, replacement: pendingReplacement });
+    pendingStart = undefined;
+    pendingReplacement = [];
+  };
+
+  while (row < rowCount && column < columnCount) {
+    if (base[row] === side[column]) {
+      flush(row);
+      row += 1;
+      column += 1;
+    } else if (lcs[row + 1]![column]! >= lcs[row]![column + 1]!) {
+      pendingStart ??= row;
+      row += 1;
+    } else {
+      pendingStart ??= row;
+      pendingReplacement.push(side[column]!);
+      column += 1;
+    }
+  }
+  if (row < rowCount || column < columnCount) {
+    pendingStart ??= row;
+    pendingReplacement.push(...side.slice(column));
+    hunks.push({
+      baseStart: pendingStart,
+      baseEnd: rowCount,
+      replacement: pendingReplacement,
+    });
+  } else {
+    flush(row);
+  }
+  return hunks;
+}
+
+function mergeMarkdown(base: string, local: string, remote: string): MarkdownMergeResult {
+  if (local === remote) return { status: "merged", text: local };
+  if (local === base) return { status: "merged", text: remote };
+  if (remote === base) return { status: "merged", text: local };
+
+  const baseLines = base.split("\n");
+  const localLines = local.split("\n");
+  const remoteLines = remote.split("\n");
+  if ([baseLines.length, localLines.length, remoteLines.length].some((count) => count > MAX_MERGE_LINES)) {
+    return { status: "conflict" };
+  }
+
+  const localHunks = diffHunks(baseLines, localLines);
+  const remoteHunks = diffHunks(baseLines, remoteLines);
+  for (const localHunk of localHunks) {
+    for (const remoteHunk of remoteHunks) {
+      const bothInsertAtSameOffset =
+        localHunk.baseStart === localHunk.baseEnd &&
+        remoteHunk.baseStart === remoteHunk.baseEnd &&
+        localHunk.baseStart === remoteHunk.baseStart;
+      const sameStartWithInsertion =
+        localHunk.baseStart === remoteHunk.baseStart &&
+        (localHunk.baseStart === localHunk.baseEnd) !==
+          (remoteHunk.baseStart === remoteHunk.baseEnd);
+      const overlapping =
+        localHunk.baseStart < remoteHunk.baseEnd &&
+        remoteHunk.baseStart < localHunk.baseEnd;
+      if (bothInsertAtSameOffset || sameStartWithInsertion || overlapping) {
+        return { status: "conflict" };
+      }
+    }
+  }
+
+  const hunks = [...localHunks, ...remoteHunks].sort(
+    (left, right) => left.baseStart - right.baseStart,
+  );
+  const output: string[] = [];
+  let cursor = 0;
+  for (const hunk of hunks) {
+    output.push(...baseLines.slice(cursor, hunk.baseStart), ...hunk.replacement);
+    cursor = hunk.baseEnd;
+  }
+  output.push(...baseLines.slice(cursor));
+  return { status: "merged", text: output.join("\n") };
 }
 
 export class VersionedLoopbackEngine implements EngineTransport {
@@ -411,6 +528,28 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const replayFingerprint = this.textWriteFingerprint(params, origin, objectId, momentId);
     const replay = this.replay(state, requestId, params, replayFingerprint);
     if (replay) return replay;
+    const existingMoment = state.moments.get(momentId);
+    const authorFingerprint = this.writeAuthorFingerprint(params);
+    if (existingMoment) {
+      const exact =
+        existingMoment.wire.versionId === version.id &&
+        existingMoment.wire.path === path &&
+        existingMoment.wire.operation === "write" &&
+        existingMoment.wire.afterContentKind === "text" &&
+        existingMoment.after?.contentKind === "text" &&
+        existingMoment.after.text === text &&
+        existingMoment.wire.metadataOrigin === origin &&
+        (existingMoment.writeAuthorFingerprint ?? null) === authorFingerprint;
+      if (exact) {
+        const recorded = copyFile(existingMoment.after!);
+        return {
+          object: this.fileObject(workspace, recorded.objectId, existingMoment.wire.recordedAtMs),
+          snapshot: this.textSnapshot(workspace, version.id, path, recorded),
+          moment: this.capMoment(existingMoment.wire),
+          deduped: true,
+        };
+      }
+    }
     this.assertFreshMoment(state, momentId);
     const before = version.files.get(path);
     // The daemon binds the input object id to NEW paths only — an existing
@@ -427,7 +566,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
       momentLog: before ? [...before.momentLog] : [],
     };
     const moment = this.makeMoment(version, path, momentId, "write", file, before, now);
-    const internal = { wire: moment, before: before && copyFile(before), after: copyFile(file) };
+    const internal = {
+      wire: moment,
+      before: before && copyFile(before),
+      after: copyFile(file),
+      writeAuthorFingerprint: authorFingerprint,
+    };
     file.momentLog.push(internal);
     version.files.set(path, file);
     state.moments.set(momentId, internal);
@@ -778,7 +922,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const limit = Math.min(500, Math.max(1, optionalNumber(params, "limit") ?? 200));
     const files = [...version.files.entries()]
       .filter(([path]) => afterPath === undefined || path > afterPath)
-      .sort(([left], [right]) => left.localeCompare(right));
+      .sort(([left], [right]) => comparePaths(left, right));
     const page = files.slice(0, limit);
     return {
       files: page.map(([path, file]) => ({
@@ -868,7 +1012,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       name,
       createdAtMs: this.clock++,
       forkVersionId: from.id,
-      forkMomentId: this.latestMomentId(from),
+      forkMomentId: this.latestMomentId(state, from.id),
       files: new Map([...from.files].map(([path, file]) => [path, copyFile(file)])),
       textForkBase: new Map([...from.files].map(([path, file]) => [path, copyFile(file)])),
       secrets: new Map(from.secrets),
@@ -919,12 +1063,20 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const incoming = source.files.get(path);
     const current = target.files.get(path);
     const base = source.textForkBase.get(path);
-    return {
-      status:
-        this.filesEqual(incoming, current) || this.filesEqual(incoming, base)
-          ? "unchanged"
-          : "merged",
-    };
+    if (this.filesEqual(incoming, current) || this.filesEqual(incoming, base)) {
+      return { status: "unchanged" };
+    }
+    if (this.filesEqual(current, base)) return { status: "merged" };
+    if (
+      base?.contentKind === "text" &&
+      current?.contentKind === "text" &&
+      incoming?.contentKind === "text"
+    ) {
+      return {
+        status: mergeMarkdown(base.text ?? "", current.text ?? "", incoming.text ?? "").status,
+      };
+    }
+    return { status: "conflict" };
   }
 
   private merge(
@@ -1001,16 +1153,27 @@ export class VersionedLoopbackEngine implements EngineTransport {
       this.recordReplay(state, requestId, params, result, fingerprint);
       return result;
     }
+    let textToWrite = incoming?.text;
     if (!this.filesEqual(current, base)) {
-      const result: JsonObject = {
-        status: "conflict",
-        deduped: false,
-        materializeEnqueued: false,
-        materialized: false,
-        materializeOutcome: "skipped",
-      };
-      this.recordReplay(state, requestId, params, result, fingerprint);
-      return result;
+      const cleanMerge =
+        base?.contentKind === "text" &&
+        current?.contentKind === "text" &&
+        incoming?.contentKind === "text"
+          ? mergeMarkdown(base.text ?? "", current.text ?? "", incoming.text ?? "")
+          : { status: "conflict" as const };
+      if (cleanMerge.status === "merged") {
+        textToWrite = cleanMerge.text;
+      } else {
+        const result: JsonObject = {
+          status: "conflict",
+          deduped: false,
+          materializeEnqueued: false,
+          materialized: false,
+          materializeOutcome: "skipped",
+        };
+        this.recordReplay(state, requestId, params, result, fingerprint);
+        return result;
+      }
     }
     const materializeEnqueued = target.id === state.activeVersionId;
     if (!incoming) {
@@ -1045,6 +1208,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const now = optionalNumber(params, "nowMs") ?? this.clock++;
     const copied: LoopbackFile = {
       ...copyFile(incoming),
+      text: textToWrite,
       // Daemon parity: a path that already exists in the target keeps its
       // object identity; the source id binds only NEW target paths.
       objectId: before?.objectId ?? objectId,
@@ -1081,23 +1245,30 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const target = this.version(state, requiredString(params, "targetVersionId", "compareFiles"));
     const afterPath = optionalString(params, "afterPath");
     const paths = [...new Set([...source.files.keys(), ...target.files.keys()])]
-      .filter((path) => (afterPath === undefined || path > afterPath) && !this.filesEqual(source.files.get(path), target.files.get(path)))
-      .sort();
-    const changes = paths.map((path) => {
+      .filter((path) => afterPath === undefined || path > afterPath)
+      .sort(comparePaths);
+    const scannedPaths = paths.slice(0, COMPARE_PAGE_SIZE);
+    const changes = scannedPaths.flatMap((path) => {
       const sourceFile = source.files.get(path);
       const targetFile = target.files.get(path);
+      if (this.filesEqual(sourceFile, targetFile)) return [];
       const status: VersionChangeStatus = !targetFile ? "added" : !sourceFile ? "deleted" : "modified";
       const entry: JsonObject = { path, status };
       if (sourceFile?.contentKind === "binary" || targetFile?.contentKind === "binary") entry.binary = true;
-      return entry;
+      return [entry];
     });
-    let included = Math.min(COMPARE_PAGE_SIZE, changes.length);
+    let included = changes.length;
     const budget = Math.max(1, optionalNumber(params, "byteBudget") ?? Number.MAX_SAFE_INTEGER);
     // Daemon parity: the byte-budget cut has a PROGRESS GUARANTEE — the first
     // row always ships under a tiny budget (only the hard frame cap refuses).
     while (included > 1 && Buffer.byteLength(JSON.stringify(changes.slice(0, included))) > budget) included -= 1;
     const entries = changes.slice(0, included);
-    return { entries, nextCursor: included < changes.length ? paths[included - 1] ?? null : null };
+    const nextCursor = included < changes.length
+      ? (entries.at(-1)?.path as string | undefined) ?? null
+      : scannedPaths.length === COMPARE_PAGE_SIZE
+        ? scannedPaths.at(-1) ?? null
+        : null;
+    return { entries, nextCursor };
   }
 
   private secretWrite(state: WorkspaceState, workspace: string, params: JsonObject): JsonValue {
@@ -1606,7 +1777,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
     before: LoopbackFile | undefined,
     recordedAtMs = this.clock++,
   ): MomentRecord {
-    const afterText = after.contentKind === "text" ? after.text ?? "" : null;
+    const deleted = operation === "delete";
+    const afterText = !deleted && after.contentKind === "text" ? after.text ?? "" : null;
     const beforeText = before?.contentKind === "text" ? before.text ?? "" : null;
     return {
       momentOrder: this.clock++,
@@ -1617,8 +1789,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       recordedAtMs,
       operation,
       afterContentKind: after.contentKind,
-      afterBlobSha256: after.contentKind === "text" ? sha256(afterText ?? "") : null,
-      afterBinarySha256: after.binarySha ?? null,
+      afterBlobSha256: !deleted && after.contentKind === "text" ? sha256(afterText ?? "") : null,
+      afterBinarySha256: deleted ? null : after.binarySha ?? null,
       beforePresent: before !== undefined,
       beforeContentKind: before?.contentKind ?? "text",
       beforeBlobSha256: before?.contentKind === "text" ? sha256(beforeText ?? "") : null,
@@ -1628,7 +1800,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
       author: null,
       syncRecordOnly: false,
       afterText,
-      afterByteLength: after.contentKind === "text" ? utf8Length(afterText ?? "") : after.bytes?.length ?? null,
+      afterByteLength: deleted
+        ? null
+        : after.contentKind === "text"
+          ? utf8Length(afterText ?? "")
+          : after.bytes?.length ?? null,
       afterInbandLimitBytes: null,
       beforeText,
       beforeByteLength: before === undefined ? null : before.contentKind === "text" ? utf8Length(beforeText ?? "") : before.bytes?.length ?? null,
@@ -1688,8 +1864,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return value;
   }
 
-  private latestMomentId(version: LoopbackVersion): string | undefined {
-    return [...version.files.values()].sort((left, right) => right.updatedAtMs - left.updatedAtMs)[0]?.latestMomentId;
+  private latestMomentId(state: WorkspaceState, versionId: string): string | undefined {
+    return [...state.moments.values()]
+      .map((moment) => moment.wire)
+      .filter((moment) => moment.versionId === versionId && !moment.syncRecordOnly)
+      .sort((left, right) => right.momentOrder - left.momentOrder)[0]?.momentId;
   }
 
   private latestSecretMoment(

@@ -2070,6 +2070,304 @@ describe("loopback contract enforcement", () => {
     ).rejects.toThrow("version-name-conflict");
     // MUTATION: remove the name lookup before minting the id -> duplicate succeeds.
   });
+
+  it("classifies overlapping divergent edits as conflict and disjoint edits as merged", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({ workspace: WORKSPACE, path: "overlap.md", text: "a\nb\nc" });
+    engine.seedTextFile({ workspace: WORKSPACE, path: "disjoint.md", text: "a\nb\nc" });
+    const feature = decodeVersionRecord(
+      await call(engine, 1, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        name: "compare-three-way",
+        fromVersionId: "main",
+      }),
+    );
+    await call(engine, 2, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "overlap.md",
+      text: "a\ntarget\nc",
+      origin: "api",
+    });
+    await call(engine, 3, VERSIONED_METHOD.textWrite, {
+      versionId: feature.id,
+      path: "overlap.md",
+      text: "a\nsource\nc",
+      origin: "api",
+    });
+    await call(engine, 4, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "disjoint.md",
+      text: "target\nb\nc",
+      origin: "api",
+    });
+    await call(engine, 5, VERSIONED_METHOD.textWrite, {
+      versionId: feature.id,
+      path: "disjoint.md",
+      text: "a\nb\nsource",
+      origin: "api",
+    });
+
+    expect(
+      await call(engine, 6, VERSIONED_METHOD.versionsCompare, {
+        sourceVersionId: feature.id,
+        targetVersionId: "main",
+        path: "overlap.md",
+      }),
+    ).toEqual({ status: "conflict" });
+    expect(
+      await call(engine, 7, VERSIONED_METHOD.versionsCompare, {
+        sourceVersionId: feature.id,
+        targetVersionId: "main",
+        path: "disjoint.md",
+      }),
+    ).toEqual({ status: "merged" });
+  });
+
+  it("writes clean three-way merges and refuses overlapping merge hunks", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({ workspace: WORKSPACE, path: "clean.md", text: "a\nb\nc" });
+    engine.seedTextFile({ workspace: WORKSPACE, path: "conflict.md", text: "a\nb\nc" });
+    const feature = decodeVersionRecord(
+      await call(engine, 1, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        name: "merge-three-way",
+        fromVersionId: "main",
+      }),
+    );
+    await call(engine, 2, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "clean.md",
+      text: "target\nb\nc",
+      origin: "api",
+    });
+    await call(engine, 3, VERSIONED_METHOD.textWrite, {
+      versionId: feature.id,
+      path: "clean.md",
+      text: "a\nb\nsource",
+      origin: "api",
+    });
+    await call(engine, 4, VERSIONED_METHOD.textWrite, {
+      versionId: "main",
+      path: "conflict.md",
+      text: "a\ntarget\nc",
+      origin: "api",
+    });
+    await call(engine, 5, VERSIONED_METHOD.textWrite, {
+      versionId: feature.id,
+      path: "conflict.md",
+      text: "a\nsource\nc",
+      origin: "api",
+    });
+
+    expect(
+      decodeVersionsMergeResult(
+        await call(engine, 6, VERSIONED_METHOD.versionsMerge, {
+          sourceVersionId: feature.id,
+          targetVersionId: "main",
+          path: "clean.md",
+          origin: "api",
+        }),
+      ).status,
+    ).toBe("merged");
+    expect(
+      decodeVersionedTextReadResult(
+        await call(engine, 7, VERSIONED_METHOD.textRead, {
+          versionId: "main",
+          path: "clean.md",
+        }),
+      )?.text,
+    ).toBe("target\nb\nsource");
+    expect(
+      decodeVersionsMergeResult(
+        await call(engine, 8, VERSIONED_METHOD.versionsMerge, {
+          sourceVersionId: feature.id,
+          targetVersionId: "main",
+          path: "conflict.md",
+          origin: "api",
+        }),
+      ).status,
+    ).toBe("conflict");
+  });
+
+  it("paginates mixed-case text paths in SQLite binary order", async () => {
+    const engine = new VersionedLoopbackEngine();
+    for (const path of ["A.md", "Z.md", "a.md"]) {
+      engine.seedTextFile({ workspace: WORKSPACE, path, text: path });
+    }
+
+    const first = (await call(engine, 1, VERSIONED_METHOD.textList, {
+      versionId: "main",
+      limit: 1,
+    })) as JsonObject;
+    const second = (await call(engine, 2, VERSIONED_METHOD.textList, {
+      versionId: "main",
+      limit: 1,
+      afterPath: first.nextAfterPath,
+    })) as JsonObject;
+    const third = (await call(engine, 3, VERSIONED_METHOD.textList, {
+      versionId: "main",
+      limit: 1,
+      afterPath: second.nextAfterPath,
+    })) as JsonObject;
+    const listedPath = (page: JsonObject): JsonValue =>
+      ((page.files as JsonValue[])[0] as JsonObject).path ?? null;
+
+    expect([listedPath(first), listedPath(second), listedPath(third)]).toEqual([
+      "A.md",
+      "Z.md",
+      "a.md",
+    ]);
+    expect(third.nextAfterPath).toBeNull();
+  });
+
+  it("preserves text and binary delete preimages in moments.list and moments.get", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({ workspace: WORKSPACE, path: "deleted.md", text: "before delete" });
+    engine.seedBinaryFile({ workspace: WORKSPACE, path: "deleted.bin", bytes: [0, 1, 255] });
+    const textDelete = decodeVersionedTextDeleteResult(
+      await call(engine, 1, VERSIONED_METHOD.textDelete, {
+        versionId: "main",
+        path: "deleted.md",
+        origin: "api",
+        requestId: "delete-text-preimage",
+      }),
+    );
+    const binaryDelete = decodeVersionedTextDeleteResult(
+      await call(engine, 2, VERSIONED_METHOD.textDelete, {
+        versionId: "main",
+        path: "deleted.bin",
+        origin: "api",
+        requestId: "delete-binary-preimage",
+      }),
+    );
+    const textMoment = decodeMomentsGetResult(
+      await call(engine, 3, VERSIONED_METHOD.momentsGet, {
+        momentId: textDelete.moment.momentId,
+      }),
+    );
+    const binaryMoment = decodeMomentsGetResult(
+      await call(engine, 4, VERSIONED_METHOD.momentsGet, {
+        momentId: binaryDelete.moment.momentId,
+      }),
+    );
+
+    expect(textMoment).toMatchObject({
+      beforePresent: true,
+      beforeContentKind: "text",
+      beforeText: "before delete",
+      beforeByteLength: 13,
+      beforeBlobSha256: textDelete.before.sha256,
+      afterText: null,
+      afterByteLength: null,
+      afterBlobSha256: null,
+    });
+    expect(binaryMoment).toMatchObject({
+      beforePresent: true,
+      beforeContentKind: "binary",
+      beforeText: null,
+      beforeByteLength: 3,
+      beforeBinarySha256: binaryDelete.before.sha256,
+      afterText: null,
+      afterByteLength: null,
+      afterBinarySha256: null,
+    });
+    const listed = decodeMomentsListResult(
+      await call(engine, 5, VERSIONED_METHOD.momentsList, { versionId: "main" }),
+    );
+    expect(
+      listed.moments
+        .filter((moment) => moment.operation === "delete")
+        .map((moment) => [moment.path, moment.beforeByteLength]),
+    ).toEqual([
+      ["deleted.bin", 3],
+      ["deleted.md", 13],
+    ]);
+  });
+
+  it("replays an exact momentId text write and rejects a changed payload", async () => {
+    const engine = new VersionedLoopbackEngine();
+    const params: VersionedTextWriteParams = {
+      versionId: "main",
+      objectId: "exact-object",
+      path: "exact.md",
+      text: "same payload",
+      momentId: "exact-moment",
+      origin: "api",
+    };
+    const first = decodeVersionedTextWriteResult(
+      await call(engine, 1, VERSIONED_METHOD.textWrite, params),
+    );
+    const replay = decodeVersionedTextWriteResult(
+      await call(engine, 2, VERSIONED_METHOD.textWrite, params),
+    );
+
+    expect(replay.moment).toEqual(first.moment);
+    expect(replay.deduped).toBe(true);
+    await expect(
+      call(engine, 3, VERSIONED_METHOD.textWrite, { ...params, text: "different payload" }),
+    ).rejects.toThrow("duplicate-id");
+  });
+
+  it("limits compareFiles before filtering unchanged rows", async () => {
+    const engine = new VersionedLoopbackEngine();
+    for (let index = 0; index < 200; index += 1) {
+      const path = `same-${index.toString().padStart(3, "0")}.md`;
+      engine.seedTextFile({ workspace: WORKSPACE, path, text: "same" });
+    }
+    const feature = decodeVersionRecord(
+      await call(engine, 1, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        name: "compare-scan-window",
+        fromVersionId: "main",
+      }),
+    );
+    engine.seedTextFile({ workspace: WORKSPACE, path: "zz-change.md", text: "changed" });
+
+    const first = decodeVersionsCompareFilesResult(
+      await call(engine, 2, VERSIONED_METHOD.versionsCompareFiles, {
+        sourceVersionId: "main",
+        targetVersionId: feature.id,
+      }),
+    );
+    expect(first).toEqual({ entries: [], nextCursor: "same-199.md" });
+    const second = decodeVersionsCompareFilesResult(
+      await call(engine, 3, VERSIONED_METHOD.versionsCompareFiles, {
+        sourceVersionId: "main",
+        targetVersionId: feature.id,
+        afterPath: first.nextCursor ?? undefined,
+      }),
+    );
+    expect(second).toEqual({
+      entries: [{ path: "zz-change.md", status: "added" }],
+      nextCursor: null,
+    });
+  });
+
+  it("uses the newest moment including deletes as a named version fork point", async () => {
+    const engine = new VersionedLoopbackEngine();
+    engine.seedTextFile({ workspace: WORKSPACE, path: "survives.md", text: "old head" });
+    engine.seedTextFile({ workspace: WORKSPACE, path: "removed.md", text: "remove me" });
+    const deleted = decodeVersionedTextDeleteResult(
+      await call(engine, 1, VERSIONED_METHOD.textDelete, {
+        versionId: "main",
+        path: "removed.md",
+        origin: "api",
+        requestId: "latest-delete",
+      }),
+    );
+    const feature = decodeVersionRecord(
+      await call(engine, 2, VERSIONED_METHOD.versionsCreateNamed, {
+        workspaceId: WORKSPACE,
+        name: "fork-after-delete",
+        fromVersionId: "main",
+      }),
+    );
+
+    expect(feature.forkPoint).toEqual({
+      versionId: "main",
+      momentId: deleted.moment.momentId,
+    });
+  });
 });
 
 describe("versioned result decoder rejection", () => {
