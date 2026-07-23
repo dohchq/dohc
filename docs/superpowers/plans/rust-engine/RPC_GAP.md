@@ -209,6 +209,47 @@ diverge from the oracle and stall the origin's ack stream. Any attachment-id
 forgery hardening belongs at the relay/RPC-E trust boundary and must cover
 both engines; there is no Rust code change for this finding.
 
+CROSS-ENGINE DELTA (PR #225 codex r4/r5/r7 + claude): structural-timestamp
+SAFE-INTEGER apply bounds — RUST BOUNDS, STRICTER THAN THE ORACLE'S
+`isFinite`-ONLY APPLY, but MATCHES the DOP1 WIRE representability. Every
+imported chat cell/structural timestamp — reaction/decision `at_ms`,
+feed-read `at_ms`, attachment `created_at_ms`, message `createdAtMs`,
+channel `createdAtMs`, and (r7) `chat.follow.set` `at_ms` — is bounded on
+apply with `is_persisted_safe_integer` (dohc-engine-sync apply.rs; signed
+`-MAX_WIRE_INTEGER..=MAX_WIRE_INTEGER`, `MAX_WIRE_INTEGER = 2^53-1`). The
+ORACLE's replicated apply validators check only `Number.isFinite`
+(linkedChatStore.ts, e.g. the follow arm ~:4686), so in a strict
+differential test the oracle STORES a finite-but-non-safe value (e.g. `2^53`)
+while Rust REJECTS it with `InvalidInput`. This is NOT a fresh divergence
+class: values beyond `2^53-1` cannot traverse the DOP1 wire (the frame/limits
+decoders are safe-int bounded on BOTH engines), so such a value could never
+legitimately arrive over replication; bounding the apply makes the domain
+consistent with the wire it must round-trip. It costs no honest-data parity
+(real clocks are ~13 orders of magnitude below `2^53` ms ≈ year 285000).
+Differential/parity suites MUST expect the delta on a hand-fed `2^53` cell
+op. REGRESSION: `imported_follow_refuses_unsafe_at_ms_without_row_or_ack`
+(dohc-engine-sync) + the sibling cell tests. Moot for data post-R15.
+
+  SUB-NOTE (claude r-opus, P3, RECORDED NOT FIXED): the LOCAL LWW mints
+  `set_follow` / `set_feed_read` (dohc-engine-domain chats.rs) compute
+  `at_ms = now_ms.max(prior + 1)` and journal the replicated op WITHOUT a
+  safe-integer bound — unlike `create_thread` / message-send, which bound
+  `now_ms`. So if a hostile peer first primed a follow/feed-read row at exactly
+  `MAX_WIRE_INTEGER` (the max the apply now allows), a subsequent LOCAL toggle
+  would mint `at_ms = 2^53`, an op the wire cannot carry and Rust's own apply
+  would reject on a peer. Left as bug-for-bug parity, NOT bounded: (a) the
+  oracle's `setFollow` derives `at_ms` from an internal `nowMs()` clock (no
+  caller field) and has the same latent inability to replicate `2^53`, so
+  bounding would be stricter than the oracle; (b) the value is RENDERABLE on
+  both engines (`map_follow_row` / oracle `numberValue` are `isFinite`-only),
+  so unlike the linked-timestamp delta above it is not accept-then-brick; (c)
+  bounding the mint would REFUSE a legitimate local user action (a follow
+  toggle) to guard an edge unreachable without a hostile peer priming
+  `prior = 2^53-1`. DD3's apply bound is the reachable defense (it stops the
+  hostile IMPORT). Adversarial-only, moot post-R15 (single-user dogfood has no
+  hostile peers; the reset wipes primed rows). Revisit if a reviewer pushes for
+  local-mint symmetry (cf. the linked-timestamp reversal).
+
 CROSS-ENGINE DELTA (RPC-A r18): secret path SPELLING — TS normalize-stores
 (percent-disguises collapse); Rust stores the spelling the write carried
 and resolves verbatim (the secretness gate still classifies via
