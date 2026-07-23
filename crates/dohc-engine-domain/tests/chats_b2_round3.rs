@@ -1,0 +1,790 @@
+use dohc_engine_domain::{
+    ChatActorKind, ChatChannelKind, ChatReactionState, FollowState, FollowTargetKind,
+    LinkedChatStore, NoFaults, ResolveDecision, SendMessage, SetFollow, SetReaction,
+    StartChannelThread, reaction_id_for,
+};
+use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use rusqlite::params;
+
+const WS: &str = "b2-round3";
+const NO_FAULTS: NoFaults = NoFaults;
+
+fn store() -> (ScratchDir, EngineStore) {
+    let scratch = ScratchDir::new().expect("scratch");
+    let path = scratch.engine_db_path().expect("db path");
+    let store = EngineStore::open(&path, 1).expect("store");
+    (scratch, store)
+}
+
+fn seed_channel(store: &mut EngineStore) {
+    LinkedChatStore::new(store)
+        .create_channel(
+            WS,
+            "channel",
+            "General",
+            ChatChannelKind::Channel,
+            10,
+            &NO_FAULTS,
+        )
+        .expect("channel");
+}
+
+fn start(
+    store: &mut EngineStore,
+    thread_id: &str,
+    message_id: &str,
+    at_ms: i64,
+    needs_decision: bool,
+) {
+    LinkedChatStore::new(store)
+        .start_channel_thread(
+            &StartChannelThread {
+                workspace_id: WS.to_owned(),
+                channel_id: "channel".to_owned(),
+                thread_id: thread_id.to_owned(),
+                message_id: message_id.to_owned(),
+                title: None,
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".to_owned(),
+                author_user_id: Some("ada".to_owned()),
+                origin: None,
+                body: format!("opening {message_id}"),
+                needs_decision,
+                attachments: Vec::new(),
+                now_ms: at_ms,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("start");
+}
+
+fn send(
+    store: &mut EngineStore,
+    thread_id: &str,
+    message_id: &str,
+    at_ms: i64,
+    needs_decision: bool,
+) {
+    LinkedChatStore::new(store)
+        .send_message(
+            &SendMessage {
+                workspace_id: WS.to_owned(),
+                thread_id: thread_id.to_owned(),
+                message_id: message_id.to_owned(),
+                author_kind: ChatActorKind::Agent,
+                author_display_name: "Agent".to_owned(),
+                author_user_id: Some("agent".to_owned()),
+                parent_message_id: None,
+                origin: None,
+                body: format!("message {message_id}"),
+                needs_decision,
+                attachments: Vec::new(),
+                now_ms: at_ms,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("send");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn set_reaction(
+    store: &mut EngineStore,
+    request_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    emoji: &str,
+    author_id: &str,
+    state: ChatReactionState,
+    now_ms: i64,
+) -> Result<dohc_engine_domain::ChatReaction, dohc_engine_domain::DomainError> {
+    LinkedChatStore::new(store).set_reaction(
+        &SetReaction {
+            workspace_id: WS.to_owned(),
+            thread_id: thread_id.to_owned(),
+            message_id: message_id.to_owned(),
+            emoji: emoji.to_owned(),
+            author_id: author_id.to_owned(),
+            author_kind: ChatActorKind::Human,
+            author_display_name: author_id.to_owned(),
+            state,
+            now_ms,
+            request_id: request_id.to_owned(),
+        },
+        &NO_FAULTS,
+    )
+}
+
+fn resolve(
+    store: &mut EngineStore,
+    request_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    resolver: &str,
+    now_ms: i64,
+) -> Result<dohc_engine_domain::ChatDecision, dohc_engine_domain::DomainError> {
+    LinkedChatStore::new(store).resolve_decision(
+        &ResolveDecision {
+            workspace_id: WS.to_owned(),
+            thread_id: thread_id.to_owned(),
+            message_id: message_id.to_owned(),
+            resolved_by_message_id: resolver.to_owned(),
+            now_ms,
+            request_id: request_id.to_owned(),
+        },
+        &NO_FAULTS,
+    )
+}
+
+#[test]
+fn reaction_id_is_deterministic_across_peers() {
+    let first = reaction_id_for("m1", "👍", "alice");
+    let second = reaction_id_for("m1", "👍", "alice");
+    // MUTATION: deriving ids from local randomness or the mutation timestamp -> peers address different cells.
+    assert_eq!(first, "reaction_nxgdfvb2hr4vetwrk357dtmpb4");
+    assert_eq!(first, second);
+}
+
+#[test]
+fn reaction_local_toggle_bumps_past_prior_cell() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "message", 20, false);
+    let removed = set_reaction(
+        &mut store,
+        "remove",
+        "thread",
+        "message",
+        "👍",
+        "Ada",
+        ChatReactionState::Removed,
+        100,
+    )
+    .expect("remove");
+    let added = set_reaction(
+        &mut store,
+        "add",
+        "thread",
+        "message",
+        "👍",
+        "Ada",
+        ChatReactionState::Added,
+        100,
+    )
+    .expect("add");
+    // MUTATION: using wall time without the per-cell +1 bump -> equal-time remove wins over the later re-add.
+    assert_eq!(removed.at_ms, 100);
+    assert_eq!(added.at_ms, 101);
+    assert_eq!(added.state, ChatReactionState::Added);
+}
+
+#[test]
+fn reaction_set_requires_message_in_thread_and_workspace() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "message", 20, false);
+    let missing = set_reaction(
+        &mut store,
+        "missing",
+        "thread",
+        "other",
+        "👍",
+        "Ada",
+        ChatReactionState::Added,
+        30,
+    );
+    // MUTATION: checking only a message id or skipping the visibility head check -> an absent target receives a reaction.
+    assert!(matches!(
+        missing,
+        Err(dohc_engine_domain::DomainError::Chat {
+            code: "message-not-found",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn reaction_set_rejects_non_emoji_graphemes() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "message", 20, false);
+    let invalid = set_reaction(
+        &mut store,
+        "invalid",
+        "thread",
+        "message",
+        "not-an-emoji",
+        "Ada",
+        ChatReactionState::Added,
+        30,
+    );
+    // MUTATION: accepting arbitrary short strings as reaction keys -> hostile text renders as a reaction pill.
+    assert!(matches!(
+        invalid,
+        Err(dohc_engine_domain::DomainError::Chat {
+            code: "invalid-message-body",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn reaction_row_and_journal_share_origin_coordinate() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "message", 20, false);
+    set_reaction(
+        &mut store,
+        "coordinate",
+        "thread",
+        "message",
+        "👍",
+        "Ada",
+        ChatReactionState::Added,
+        30,
+    )
+    .expect("reaction");
+    let coordinates: ((String, i64), (String, i64)) = store
+        .read_with(|conn| {
+            let row = conn
+                .query_row(
+                    "SELECT origin_id, origin_seq FROM chat_reactions WHERE workspace_id = ?1",
+                    [WS],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(StorageError::corrupt_public)?;
+            let op = conn
+                .query_row(
+                    "SELECT origin_id, origin_seq FROM replication_log \
+                     WHERE workspace_id = ?1 AND op_kind = 'chat.reaction.set'",
+                    [WS],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(StorageError::corrupt_public)?;
+            Ok::<_, StorageError>((row, op))
+        })
+        .expect("coordinates");
+    // MUTATION: allocating a second journal sequence after the row upsert -> the replicated tie-break differs from the stored cell.
+    assert_eq!(coordinates.0, coordinates.1);
+}
+
+#[test]
+fn reaction_read_hides_tombstones_and_orphans() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "message", 20, false);
+    set_reaction(
+        &mut store,
+        "tombstone",
+        "thread",
+        "message",
+        "👍",
+        "Ada",
+        ChatReactionState::Removed,
+        30,
+    )
+    .expect("tombstone");
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "INSERT INTO chat_reactions \
+                 (workspace_id,reaction_id,thread_id,message_id,emoji,author_id,author_kind,\
+                  author_display_name,state,at_ms,origin_id,origin_seq) \
+                 VALUES (?1,?2,'thread','orphan','🎉','Bob','human','Bob','added',31,'peer',0)",
+                params![WS, reaction_id_for("orphan", "🎉", "Bob")],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("orphan");
+    let visible = LinkedChatStore::new(&mut store)
+        .list_reactions(WS, "thread", None, 10)
+        .expect("list");
+    let durable: i64 = store
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM chat_reactions", [], |row| row.get(0))
+                .map_err(StorageError::corrupt_public)
+        })
+        .expect("durable count");
+    // MUTATION: omitting the state filter or message inner join -> tombstones/orphans leak to readers.
+    assert!(visible.is_empty());
+    assert_eq!(durable, 2);
+}
+
+#[test]
+fn personal_feed_hydrates_active_reactions_per_item_in_stable_order() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "message", 20, false);
+    LinkedChatStore::new(&mut store)
+        .set_follow(
+            &SetFollow {
+                workspace_id: WS.to_owned(),
+                owner_user_id: "viewer".to_owned(),
+                replication_owner_user_id: None,
+                target_kind: FollowTargetKind::Thread,
+                target_id: "thread".to_owned(),
+                state: FollowState::Following,
+                now_ms: 21,
+            },
+            &NO_FAULTS,
+        )
+        .expect("follow");
+    set_reaction(
+        &mut store,
+        "late",
+        "thread",
+        "message",
+        "🎉",
+        "Bob",
+        ChatReactionState::Added,
+        40,
+    )
+    .expect("late");
+    set_reaction(
+        &mut store,
+        "early",
+        "thread",
+        "message",
+        "👍",
+        "Ada",
+        ChatReactionState::Added,
+        30,
+    )
+    .expect("early");
+    let page = LinkedChatStore::new(&mut store)
+        .list_personal_feed(WS, "viewer", Some(10), None)
+        .expect("feed");
+    // MUTATION: retaining the parked empty field or failing to sort per candidate -> feed reaction pills disappear or reorder.
+    assert_eq!(
+        page.items[0]
+            .reactions
+            .iter()
+            .map(|reaction| reaction.emoji.as_str())
+            .collect::<Vec<_>>(),
+        vec!["👍", "🎉"]
+    );
+}
+
+#[test]
+fn reaction_request_replay_does_not_mint_a_later_cell() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "message", 20, false);
+    let first = set_reaction(
+        &mut store,
+        "replay",
+        "thread",
+        "message",
+        "👍",
+        "Ada",
+        ChatReactionState::Added,
+        30,
+    )
+    .expect("first");
+    let replay = set_reaction(
+        &mut store,
+        "replay",
+        "thread",
+        "message",
+        "👍",
+        "Ada",
+        ChatReactionState::Added,
+        999,
+    )
+    .expect("replay");
+    let ops: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log WHERE op_kind = 'chat.reaction.set'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("ops");
+    // MUTATION: fingerprinting nowMs or skipping the request ledger -> retry mints a later cell and second op.
+    assert_eq!(replay.at_ms, first.at_ms);
+    assert_eq!(ops, 1);
+}
+
+#[test]
+fn decision_open_is_atomic_with_start_and_send() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "opening", 20, true);
+    send(&mut store, "thread", "reply", 30, true);
+    let (cells, ops): (i64, i64) = store
+        .read_with(|conn| {
+            Ok::<_, StorageError>((
+                conn.query_row("SELECT COUNT(*) FROM chat_decisions", [], |row| row.get(0))
+                    .map_err(StorageError::corrupt_public)?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log WHERE op_kind = 'chat.decision.set'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::corrupt_public)?,
+            ))
+        })
+        .expect("counts");
+    // MUTATION: omitting either in-transaction decision write -> a sent decision prompt has no matching cell/op.
+    assert_eq!((cells, ops), (2, 2));
+
+    let failed = LinkedChatStore::new(&mut store).send_message(
+        &SendMessage {
+            workspace_id: WS.to_owned(),
+            thread_id: "thread".to_owned(),
+            message_id: "rolled-back".to_owned(),
+            author_kind: ChatActorKind::Agent,
+            author_display_name: "Agent".to_owned(),
+            author_user_id: None,
+            parent_message_id: None,
+            origin: None,
+            body: "rolled back".to_owned(),
+            needs_decision: true,
+            attachments: Vec::new(),
+            now_ms: 40,
+            request_id: None,
+        },
+        ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist).as_ref(),
+    );
+    assert!(failed.is_err());
+    let leaked: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_decisions WHERE message_id = 'rolled-back'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("leak count");
+    // MUTATION: committing the decision outside the message transaction -> a failed send leaks an orphan open decision.
+    assert_eq!(leaked, 0);
+}
+
+#[test]
+fn decision_resolve_malformed_resolver_is_invalid_message_body() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "decision", 20, true);
+    let malformed = resolve(&mut store, "malformed", "thread", "decision", "", 30);
+    // MUTATION: classifying malformed wire input as store corruption -> caller mistakes surface as INTERNAL.
+    assert!(matches!(
+        malformed,
+        Err(dohc_engine_domain::DomainError::Chat {
+            code: "invalid-message-body",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn decision_resolve_uses_monotonic_time_and_exact_journal_coordinate() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "decision", 30, true);
+    let decision = resolve(
+        &mut store,
+        "resolve",
+        "thread",
+        "decision",
+        "future-resolver",
+        20,
+    )
+    .expect("resolve");
+    let coordinates: ((String, i64), (String, i64)) = store
+        .read_with(|conn| {
+            let row = conn
+                .query_row(
+                    "SELECT origin_id, origin_seq FROM chat_decisions WHERE message_id = 'decision'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(StorageError::corrupt_public)?;
+            let op = conn
+                .query_row(
+                    "SELECT origin_id, origin_seq FROM replication_log \
+                     WHERE op_kind = 'chat.decision.set' ORDER BY origin_seq DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .map_err(StorageError::corrupt_public)?;
+            Ok::<_, StorageError>((row, op))
+        })
+        .expect("coordinates");
+    // MUTATION: using the stale wall clock or a second sequence allocation -> resolve loses monotonicity or diverges on peers.
+    assert_eq!(decision.at_ms, 31);
+    assert_eq!(coordinates.0, coordinates.1);
+}
+
+#[test]
+fn decision_resolve_returns_existing_winner_idempotently() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "decision", 20, true);
+    let first = resolve(
+        &mut store,
+        "first",
+        "thread",
+        "decision",
+        "resolver-one",
+        30,
+    )
+    .expect("first");
+    let second = resolve(
+        &mut store,
+        "second",
+        "thread",
+        "decision",
+        "resolver-two",
+        999,
+    )
+    .expect("second");
+    // MUTATION: writing another resolved cell for an already-resolved decision -> a later retry changes the winning resolver.
+    assert_eq!(second, first);
+    assert_eq!(
+        second.resolved_by_message_id.as_deref(),
+        Some("resolver-one")
+    );
+}
+
+#[test]
+fn decision_read_hides_orphan_cells() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "message", 20, false);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "INSERT INTO chat_decisions \
+                 (workspace_id,thread_id,message_id,state,resolved_by_message_id,at_ms,origin_id,origin_seq) \
+                 VALUES (?1,'thread','orphan','open',NULL,30,'peer',0)",
+                [WS],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("orphan");
+    let visible = LinkedChatStore::new(&mut store)
+        .list_thread_decisions(WS, "thread", None, 10)
+        .expect("list");
+    let durable: i64 = store
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM chat_decisions", [], |row| row.get(0))
+                .map_err(StorageError::corrupt_public)
+        })
+        .expect("durable");
+    // MUTATION: removing the message inner join -> head-check-free imported decisions leak before their target arrives.
+    assert!(visible.is_empty());
+    assert_eq!(durable, 1);
+}
+
+#[test]
+fn decision_request_replay_does_not_append_a_second_op() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "decision", 20, true);
+    let first = resolve(&mut store, "replay", "thread", "decision", "resolver", 30).expect("first");
+    let replay =
+        resolve(&mut store, "replay", "thread", "decision", "resolver", 999).expect("replay");
+    let ops: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log WHERE op_kind = 'chat.decision.set'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("ops");
+    // MUTATION: failing to replay through the request ledger -> retry appends a second resolve op.
+    assert_eq!(replay, first);
+    assert_eq!(ops, 2, "one open op plus one resolve op");
+}
+
+#[test]
+fn channel_threads_order_by_newest_activity() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "alpha", "alpha-opening", 20, false);
+    start(&mut store, "beta", "beta-opening", 30, false);
+    send(&mut store, "alpha", "alpha-latest", 40, false);
+    let summaries = LinkedChatStore::new(&mut store)
+        .list_channel_threads(WS, "channel", None, 10)
+        .expect("summaries");
+    // MUTATION: ordering by creation/opening message instead of thread activity -> the recently updated thread stays below beta.
+    assert_eq!(
+        summaries
+            .iter()
+            .map(|summary| summary.thread.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["alpha", "beta"]
+    );
+}
+
+#[test]
+fn channel_summary_clamps_corrupt_overcount_cursor_and_rejects_negative_cursor() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "message", 20, false);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "UPDATE chat_thread_read_state SET last_read_sequence = 10 \
+                 WHERE workspace_id = ?1 AND thread_id = 'thread'",
+                [WS],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("overcount");
+    let summaries = LinkedChatStore::new(&mut store)
+        .list_channel_threads(WS, "channel", None, 10)
+        .expect("clamped");
+    // MUTATION: trusting a persisted over-count cursor -> summary reports more reads than messages or a negative unread count.
+    assert_eq!(summaries[0].last_read_sequence, 1);
+    assert_eq!(summaries[0].unread_count, 0);
+
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "UPDATE chat_thread_read_state SET last_read_sequence = -1 \
+                 WHERE workspace_id = ?1 AND thread_id = 'thread'",
+                [WS],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("negative");
+    let corrupt = LinkedChatStore::new(&mut store).list_channel_threads(WS, "channel", None, 10);
+    // MUTATION: clamping negative corruption to zero -> tampered state silently becomes a plausible unread summary.
+    assert!(matches!(
+        corrupt,
+        Err(dohc_engine_domain::DomainError::StateCorrupt { .. })
+    ));
+}
+
+#[test]
+fn channel_summary_counts_only_visible_open_decisions() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "visible", 20, true);
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "INSERT INTO chat_decisions \
+                 (workspace_id,thread_id,message_id,state,resolved_by_message_id,at_ms,origin_id,origin_seq) \
+                 VALUES (?1,'thread','orphan','open',NULL,21,'peer',0)",
+                [WS],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("orphan");
+    let summaries = LinkedChatStore::new(&mut store)
+        .list_channel_threads(WS, "channel", None, 10)
+        .expect("summaries");
+    // MUTATION: counting decision rows without joining present targets -> the orphan inflates openDecisionCount.
+    assert_eq!(summaries[0].open_decision_count, 1);
+}
+
+#[test]
+fn channel_summary_uses_earliest_message_and_500_char_snippet() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "later", 20, false);
+    send(&mut store, "thread", "earlier", 10, false);
+    let body = format!("{}  tail", "x".repeat(498));
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "UPDATE chat_messages SET body = ?1 WHERE workspace_id = ?2 AND message_id = 'earlier'",
+                params![body, WS],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("body");
+    let summaries = LinkedChatStore::new(&mut store)
+        .list_channel_threads(WS, "channel", None, 10)
+        .expect("summaries");
+    let opening = summaries[0]
+        .opening_message
+        .as_ref()
+        .expect("opening message");
+    // MUTATION: selecting message_order or truncating 500 units without trim-before-ellipsis -> wrong opening id/snippet bytes.
+    assert_eq!(opening.message_id, "earlier");
+    assert_eq!(opening.body_snippet, format!("{}…", "x".repeat(498)));
+}
+
+#[test]
+fn channel_summary_returns_only_active_opening_reactions_in_stable_order() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "opening", 20, false);
+    set_reaction(
+        &mut store,
+        "late",
+        "thread",
+        "opening",
+        "🎉",
+        "Bob",
+        ChatReactionState::Added,
+        40,
+    )
+    .expect("late");
+    set_reaction(
+        &mut store,
+        "early",
+        "thread",
+        "opening",
+        "👍",
+        "Ada",
+        ChatReactionState::Added,
+        30,
+    )
+    .expect("early");
+    set_reaction(
+        &mut store,
+        "removed",
+        "thread",
+        "opening",
+        "👀",
+        "Eve",
+        ChatReactionState::Removed,
+        35,
+    )
+    .expect("removed");
+    send(&mut store, "thread", "reply", 50, false);
+    set_reaction(
+        &mut store,
+        "reply-only",
+        "thread",
+        "reply",
+        "👻",
+        "Mallory",
+        ChatReactionState::Added,
+        60,
+    )
+    .expect("reply reaction");
+    let summaries = LinkedChatStore::new(&mut store)
+        .list_channel_threads(WS, "channel", None, 10)
+        .expect("summaries");
+    let opening = summaries[0]
+        .opening_message
+        .as_ref()
+        .expect("opening message");
+    // MUTATION: hydrating all thread reactions or tombstones without `(atMs,reactionId)` order -> reply/removed pills leak or reorder.
+    assert_eq!(
+        opening
+            .reactions
+            .iter()
+            .map(|reaction| reaction.emoji.as_str())
+            .collect::<Vec<_>>(),
+        vec!["👍", "🎉"]
+    );
+}

@@ -4,7 +4,7 @@ use serde::Deserialize;
 
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, attachment_id_for, channel_slug_for_name,
-    parse_mention_handles, validate_addressable_plaintext_path,
+    is_reaction_emoji_verbatim, parse_mention_handles, validate_addressable_plaintext_path,
 };
 
 use crate::journal::{ack_tx, crashes, read_ack_tx};
@@ -573,7 +573,13 @@ fn apply_decision(
     op: &ReplicationEnvelope,
     p: DecisionSet,
 ) -> Result<(), SyncError> {
-    if !matches!(p.state.as_str(), "open" | "resolved")
+    if p.thread_id.is_empty()
+        || p.message_id.is_empty()
+        || p.at_ms < 0
+        || !matches!(p.state.as_str(), "open" | "resolved")
+        || p.resolved_by_message_id
+            .as_ref()
+            .is_some_and(String::is_empty)
         || (p.state == "resolved") != p.resolved_by_message_id.is_some()
     {
         return Err(SyncError::InvalidInput {
@@ -600,7 +606,15 @@ fn apply_reaction(
     op: &ReplicationEnvelope,
     p: ReactionSet,
 ) -> Result<(), SyncError> {
-    if !matches!(p.author_kind.as_str(), "human" | "agent")
+    if p.reaction_id.is_empty()
+        || p.message_id.is_empty()
+        || p.thread_id.is_empty()
+        || p.emoji.is_empty()
+        || p.author_id.is_empty()
+        || p.author_display_name.is_empty()
+        || p.at_ms < 0
+        || !is_reaction_emoji_verbatim(&p.emoji)
+        || !matches!(p.author_kind.as_str(), "human" | "agent")
         || !matches!(p.state.as_str(), "added" | "removed")
     {
         return Err(SyncError::InvalidInput {

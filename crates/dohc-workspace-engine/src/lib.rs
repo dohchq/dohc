@@ -13,19 +13,20 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use dohc_engine_collab::{CollabError, ContentKind, DocKey, Lease, LeaseRegistry, Regime};
 use dohc_engine_domain::{
-    AgentRunRecord, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatAgentReadState,
-    ChatAttachment, ChatBookmark, ChatChannel, ChatChannelKind, ChatChannelSummary,
-    ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatThread,
+    AgentRunRecord, BookmarkMode, BookmarkTargetKind, ChannelThreadSummary, ChatActorKind,
+    ChatAgentReadState, ChatAttachment, ChatBookmark, ChatChannel, ChatChannelKind,
+    ChatChannelSummary, ChatDecision, ChatDecisionState, ChatFeedReadState, ChatFileMention,
+    ChatFollow, ChatMention, ChatMessage, ChatReaction, ChatReactionState, ChatThread,
     ChatThreadReadState, CompareTextFileVersions, ComparisonStatus, ConflictChoice,
     ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus,
     CreateFileThread, CreateNamedVersion, DeleteTextFile, DispatchClaim, DispatchRecord,
     DomainError, FeedCursorValue, FollowState, FollowTargetKind, LocalAttachmentInput,
     MarkdownMergeResult, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult, MomentOp,
-    RenameTextFile, ResolveConflictKind, ResolveTextConflict, RollbackTextFileMutation,
-    SaveBookmark, SecretDelete, SecretDiskIntent, SecretMomentRecord, SecretWrite, SendMessage,
-    SetFollow, StartChannelThread, TextConflict, TextSnapshot, ThreadDispatchPause,
-    VersionFileChangeStatus, VersionRecord, WriteBinary, WriteText, merge_markdown,
-    validate_addressable_plaintext_path,
+    RenameTextFile, ResolveConflictKind, ResolveDecision, ResolveTextConflict,
+    RollbackTextFileMutation, SaveBookmark, SecretDelete, SecretDiskIntent, SecretMomentRecord,
+    SecretWrite, SendMessage, SetFollow, SetReaction, StartChannelThread, TextConflict,
+    TextSnapshot, ThreadDispatchPause, VersionFileChangeStatus, VersionRecord, WriteBinary,
+    WriteText, merge_markdown, validate_addressable_plaintext_path,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -583,6 +584,10 @@ impl EngineService {
                 self.chats_threads_list_for_file(&ctx, request.workspace, request.params)
                     .await?
             }
+            "chats.threads.listForChannel" => {
+                self.chats_threads_list_for_channel(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "chats.threads.findChannelId" => {
                 self.chats_threads_find_channel_id(&ctx, request.workspace, request.params)
                     .await?
@@ -595,6 +600,32 @@ impl EngineService {
                     request.idempotency_key,
                 )
                 .await?
+            }
+            "chats.decisions.resolve" => {
+                self.chats_decisions_resolve(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                    request.idempotency_key,
+                )
+                .await?
+            }
+            "chats.decisions.listForThread" => {
+                self.chats_decisions_list_for_thread(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.reactions.set" => {
+                self.chats_reactions_set(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                    request.idempotency_key,
+                )
+                .await?
+            }
+            "chats.reactions.list" => {
+                self.chats_reactions_list(&ctx, request.workspace, request.params)
+                    .await?
             }
             "chats.attachments.listForThread" => {
                 self.chats_attachments_list_for_thread(&ctx, request.workspace, request.params)
@@ -3004,6 +3035,7 @@ impl EngineService {
                     author_user_id: params.author_user_id,
                     origin: params.origin,
                     body: params.body,
+                    needs_decision: params.needs_decision,
                     attachments: params
                         .attachments
                         .unwrap_or_default()
@@ -3135,6 +3167,64 @@ impl EngineService {
                 consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
                 first: last.created_at_ms,
                 second: last.thread_id.clone(),
+                third: None,
+            })?)
+        } else {
+            None
+        };
+        Ok(json!({
+            "threads": values[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
+    }
+
+    async fn chats_threads_list_for_channel(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatThreadsListForChannelParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let binding = chat_cursor_binding(
+            "chats.threads.listForChannel",
+            &workspace_id,
+            &[&params.channel_id],
+        );
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let after = cursor
+            .as_ref()
+            .map(|cursor| (cursor.first, cursor.second.clone()));
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.threads.listForChannel",
+            open.actor.chat_threads_list_for_channel(
+                workspace_id,
+                params.channel_id,
+                after,
+                page_limit + 1,
+            ),
+        )
+        .await?;
+        let values: Vec<Value> = rows
+            .iter()
+            .take(page_limit as usize)
+            .map(channel_thread_summary_json)
+            .collect();
+        let included = bounded_chat_page_len(&values)?;
+        let next_cursor = if rows.len() > included {
+            let last = rows
+                .get(included.saturating_sub(1))
+                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            Some(encode_chat_cursor(&ChatKeysetCursor {
+                version: 1,
+                binding,
+                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                first: last.thread.updated_at_ms,
+                second: last.thread.thread_id.clone(),
                 third: None,
             })?)
         } else {
@@ -3393,6 +3483,7 @@ impl EngineService {
                     parent_message_id: params.parent_message_id,
                     origin: params.origin,
                     body: params.body,
+                    needs_decision: params.needs_decision,
                     attachments: params
                         .attachments
                         .unwrap_or_default()
@@ -3407,6 +3498,181 @@ impl EngineService {
         )
         .await?;
         Ok(message_json(&message))
+    }
+
+    async fn chats_decisions_resolve(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+        request_id: Option<String>,
+    ) -> Result<Value, WireError> {
+        let params: ChatDecisionResolveParams = parse(params)?;
+        let request_id = required_idempotency_key(request_id)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let decision = Self::read_under_ctx(
+            &cancellation,
+            "chats.decisions.resolve",
+            open.actor.chat_decision_resolve(
+                ResolveDecision {
+                    workspace_id: open.workspace_id,
+                    thread_id: params.thread_id,
+                    message_id: params.message_id,
+                    resolved_by_message_id: params.resolved_by_message_id,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                    request_id,
+                },
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(decision_json(&decision))
+    }
+
+    async fn chats_decisions_list_for_thread(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatThreadPageParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let binding = chat_cursor_binding(
+            "chats.decisions.listForThread",
+            &workspace_id,
+            &[&params.thread_id],
+        );
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let after = cursor
+            .as_ref()
+            .map(|cursor| (cursor.first, cursor.second.clone()));
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.decisions.listForThread",
+            open.actor
+                .chat_decisions_list(workspace_id, params.thread_id, after, page_limit + 1),
+        )
+        .await?;
+        let values: Vec<Value> = rows
+            .iter()
+            .take(page_limit as usize)
+            .map(decision_json)
+            .collect();
+        let included = bounded_chat_page_len(&values)?;
+        let next_cursor = if rows.len() > included {
+            let last = rows
+                .get(included.saturating_sub(1))
+                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            Some(encode_chat_cursor(&ChatKeysetCursor {
+                version: 1,
+                binding,
+                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                first: last.at_ms,
+                second: last.message_id.clone(),
+                third: None,
+            })?)
+        } else {
+            None
+        };
+        Ok(json!({
+            "decisions": values[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
+    }
+
+    async fn chats_reactions_set(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+        request_id: Option<String>,
+    ) -> Result<Value, WireError> {
+        let params: ChatReactionSetParams = parse(params)?;
+        let request_id = required_idempotency_key(request_id)?;
+        let state = match params.state.as_str() {
+            "added" => ChatReactionState::Added,
+            "removed" => ChatReactionState::Removed,
+            _ => return Err(wire(ErrorCode::InvalidParams, "invalid-parameters")),
+        };
+        let author_kind = parse_actor_kind(&params.author.kind)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let reaction = Self::read_under_ctx(
+            &cancellation,
+            "chats.reactions.set",
+            open.actor.chat_reaction_set(
+                SetReaction {
+                    workspace_id: open.workspace_id,
+                    thread_id: params.thread_id,
+                    message_id: params.message_id,
+                    emoji: params.emoji,
+                    author_id: params.author.author_id,
+                    author_kind,
+                    author_display_name: params.author.display_name,
+                    state,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                    request_id,
+                },
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(reaction_json(&reaction))
+    }
+
+    async fn chats_reactions_list(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatThreadPageParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let binding =
+            chat_cursor_binding("chats.reactions.list", &workspace_id, &[&params.thread_id]);
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let after = cursor
+            .as_ref()
+            .map(|cursor| (cursor.first, cursor.second.clone()));
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.reactions.list",
+            open.actor
+                .chat_reactions_list(workspace_id, params.thread_id, after, page_limit + 1),
+        )
+        .await?;
+        let values: Vec<Value> = rows
+            .iter()
+            .take(page_limit as usize)
+            .map(reaction_json)
+            .collect();
+        let included = bounded_chat_page_len(&values)?;
+        let next_cursor = if rows.len() > included {
+            let last = rows
+                .get(included.saturating_sub(1))
+                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            Some(encode_chat_cursor(&ChatKeysetCursor {
+                version: 1,
+                binding,
+                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                first: last.at_ms,
+                second: last.reaction_id.clone(),
+                third: None,
+            })?)
+        } else {
+            None
+        };
+        Ok(json!({
+            "reactions": values[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
     }
 
     async fn chats_messages_list(
@@ -3717,9 +3983,7 @@ impl EngineService {
                 let mut value = json!({
                     "message": feed_message_json(&item.message),
                     "thread": feed_thread_json(&item.thread),
-                    // Reactions are an unported RPC-B2 domain; the contract field
-                    // still exists and must be an empty array for shape validation.
-                    "reactions": [],
+                    "reactions": item.reactions.iter().map(reaction_json).collect::<Vec<_>>(),
                     "matchedBy": item.matched_by.iter().map(follow_target_kind_json).collect::<Vec<_>>(),
                 });
                 let object = value.as_object_mut().expect("feed item is an object");
@@ -6112,6 +6376,8 @@ struct ChatThreadStartParams {
     author_user_id: Option<String>,
     origin: Option<String>,
     body: String,
+    #[serde(default)]
+    needs_decision: bool,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null_attachments"
@@ -6174,12 +6440,51 @@ struct ChatMessageSendParams {
     parent_message_id: Option<String>,
     origin: Option<String>,
     body: String,
+    #[serde(default)]
+    needs_decision: bool,
     #[serde(
         default,
         deserialize_with = "deserialize_optional_non_null_attachments"
     )]
     attachments: Option<Vec<ChatLocalAttachmentParams>>,
     now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDecisionResolveParams {
+    thread_id: String,
+    message_id: String,
+    resolved_by_message_id: String,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatReactionAuthorParams {
+    author_id: String,
+    kind: String,
+    display_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatReactionSetParams {
+    thread_id: String,
+    message_id: String,
+    emoji: String,
+    author: ChatReactionAuthorParams,
+    state: String,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatThreadPageParams {
+    thread_id: String,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -6200,6 +6505,15 @@ struct ChatThreadParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatThreadsListForFileParams {
     object_id: String,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatThreadsListForChannelParams {
+    channel_id: String,
     page_limit: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
     cursor: Option<String>,
@@ -6722,6 +7036,12 @@ fn reject_capture_origin(origin: Option<&str>) -> Result<(), WireError> {
     }
 }
 
+fn required_idempotency_key(request_id: Option<String>) -> Result<String, WireError> {
+    request_id
+        .filter(|request_id| !request_id.is_empty())
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "idempotency-key-required"))
+}
+
 fn channel_json(channel: &ChatChannel) -> Value {
     json!({
         "workspaceId": channel.workspace_id,
@@ -6856,6 +7176,38 @@ fn thread_b2_json(thread: &ChatThread) -> Value {
     value
 }
 
+fn channel_thread_summary_json(summary: &ChannelThreadSummary) -> Value {
+    let mut value = json!({
+        "thread": thread_b2_json(&summary.thread),
+        "messageCount": summary.message_count,
+        "lastReadSequence": summary.last_read_sequence,
+        "unreadCount": summary.unread_count,
+        "openDecisionCount": summary.open_decision_count,
+    });
+    if let Some(opening) = &summary.opening_message {
+        value
+            .as_object_mut()
+            .expect("channel thread summary is an object")
+            .insert(
+                "openingMessage".to_owned(),
+                json!({
+                    "id": opening.message_id,
+                    "author": {
+                        "kind": match opening.author_kind {
+                            ChatActorKind::Human => "human",
+                            ChatActorKind::Agent => "agent",
+                        },
+                        "displayName": opening.author_display_name,
+                    },
+                    "createdAtMs": opening.created_at_ms,
+                    "bodySnippet": opening.body_snippet,
+                    "reactions": opening.reactions.iter().map(reaction_json).collect::<Vec<_>>(),
+                }),
+            );
+    }
+    value
+}
+
 fn message_json(message: &ChatMessage) -> Value {
     let mut value = json!({
         "id": message.message_id,
@@ -6881,6 +7233,50 @@ fn message_json(message: &ChatMessage) -> Value {
     }
     if let Some(origin) = &message.origin {
         object.insert("origin".to_owned(), json!(origin));
+    }
+    value
+}
+
+fn reaction_json(reaction: &ChatReaction) -> Value {
+    json!({
+        "reactionId": reaction.reaction_id,
+        "threadId": reaction.thread_id,
+        "messageId": reaction.message_id,
+        "emoji": reaction.emoji,
+        "author": {
+            "authorId": reaction.author_id,
+            "kind": match reaction.author_kind {
+                ChatActorKind::Human => "human",
+                ChatActorKind::Agent => "agent",
+            },
+            "displayName": reaction.author_display_name,
+        },
+        "state": match reaction.state {
+            ChatReactionState::Added => "added",
+            ChatReactionState::Removed => "removed",
+        },
+        "atMs": reaction.at_ms,
+    })
+}
+
+fn decision_json(decision: &ChatDecision) -> Value {
+    let mut value = json!({
+        "threadId": decision.thread_id,
+        "messageId": decision.message_id,
+        "state": match decision.state {
+            ChatDecisionState::Open => "open",
+            ChatDecisionState::Resolved => "resolved",
+        },
+        "atMs": decision.at_ms,
+    });
+    if let Some(resolved_by_message_id) = &decision.resolved_by_message_id {
+        value
+            .as_object_mut()
+            .expect("decision is an object")
+            .insert(
+                "resolvedByMessageId".to_owned(),
+                json!(resolved_by_message_id),
+            );
     }
     value
 }

@@ -43,7 +43,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use unicode_normalization::UnicodeNormalization as _;
 
 // ------------------------------------------------------------------- constants
@@ -75,6 +75,12 @@ const MAX_ATTACHMENT_OBJECT_ID_UTF16_UNITS: usize = 200;
 /// Section-heading fields use the production attachment bounds.
 const MAX_ATTACHMENT_HEADING_TEXT_UTF16_UNITS: usize = 300;
 const MAX_ATTACHMENT_HEADING_ANCHOR_UTF16_UNITS: usize = 400;
+/// Reaction emoji bound (`REACTION_EMOJI_MAX_CHARS`) in JavaScript UTF-16 units.
+const MAX_REACTION_EMOJI_UTF16_UNITS: usize = 32;
+/// Reaction author ids use the same bounded identity posture as relay user ids.
+const MAX_REACTION_AUTHOR_ID_UTF16_UNITS: usize = 200;
+/// Opening-message preview bound used by channel summaries.
+const OPENING_MESSAGE_BODY_SNIPPET_UTF16_UNITS: usize = 500;
 /// The logical file-mention lookup never exposes more than the oracle's newest
 /// 2,000 matching attachment rows, even when the wire drains multiple pages.
 pub const MAX_FILE_MENTION_RESULTS: i64 = 2_000;
@@ -225,6 +231,82 @@ pub struct ChatMessage {
     pub attachments: Vec<ChatAttachment>,
 }
 
+/// The state of one reaction LWW cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatReactionState {
+    Added,
+    Removed,
+}
+
+impl ChatReactionState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Removed => "removed",
+        }
+    }
+
+    fn from_db(raw: &str) -> Result<Self, DomainError> {
+        match raw {
+            "added" => Ok(Self::Added),
+            "removed" => Ok(Self::Removed),
+            _ => Err(DomainError::StateCorrupt {
+                reason: "chat reaction has an unknown state",
+            }),
+        }
+    }
+}
+
+/// One durable reaction LWW cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatReaction {
+    pub reaction_id: String,
+    pub thread_id: String,
+    pub message_id: String,
+    pub emoji: String,
+    pub author_id: String,
+    pub author_kind: ChatActorKind,
+    pub author_display_name: String,
+    pub state: ChatReactionState,
+    pub at_ms: i64,
+}
+
+/// The state of one decision LWW cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatDecisionState {
+    Open,
+    Resolved,
+}
+
+impl ChatDecisionState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Resolved => "resolved",
+        }
+    }
+
+    fn from_db(raw: &str) -> Result<Self, DomainError> {
+        match raw {
+            "open" => Ok(Self::Open),
+            "resolved" => Ok(Self::Resolved),
+            _ => Err(DomainError::StateCorrupt {
+                reason: "chat decision has an unknown state",
+            }),
+        }
+    }
+}
+
+/// One durable decision LWW cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatDecision {
+    pub thread_id: String,
+    pub message_id: String,
+    pub state: ChatDecisionState,
+    pub resolved_by_message_id: Option<String>,
+    pub at_ms: i64,
+}
+
 /// A durable file attachment / file mention target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatAttachment {
@@ -373,16 +455,31 @@ pub struct ChatFeedItem {
     pub channel: Option<ChatChannel>,
     pub parent_message: Option<ChatMessage>,
     pub opening_message: Option<ChatMessage>,
-    /// Reactions are an RPC-B2 domain; keep the required feed field empty until
-    /// that domain is ported rather than returning the old coordinate-only shape.
     pub reactions: Vec<ChatReaction>,
     pub matched_by: Vec<FollowTargetKind>,
 }
 
-/// Placeholder for the unported RPC-B2 reaction domain. Feed hydration always
-/// returns an empty vector today, but the typed field prevents shape regression.
+/// Opening-message projection used by a channel thread summary.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatReaction;
+pub struct ChannelOpeningMessage {
+    pub message_id: String,
+    pub author_kind: ChatActorKind,
+    pub author_display_name: String,
+    pub created_at_ms: i64,
+    pub body_snippet: String,
+    pub reactions: Vec<ChatReaction>,
+}
+
+/// The full aggregate consumed by desktop and MCP channel listings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelThreadSummary {
+    pub thread: ChatThread,
+    pub message_count: i64,
+    pub last_read_sequence: i64,
+    pub unread_count: i64,
+    pub open_decision_count: i64,
+    pub opening_message: Option<ChannelOpeningMessage>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FeedCandidate {
@@ -563,6 +660,7 @@ pub struct StartChannelThread {
     pub author_user_id: Option<String>,
     pub origin: Option<String>,
     pub body: String,
+    pub needs_decision: bool,
     pub attachments: Vec<LocalAttachmentInput>,
     pub now_ms: i64,
     /// Optional idempotency key. When set, an after-commit-before-ack retry with
@@ -583,6 +681,7 @@ pub struct SendMessage {
     pub parent_message_id: Option<String>,
     pub origin: Option<String>,
     pub body: String,
+    pub needs_decision: bool,
     pub attachments: Vec<LocalAttachmentInput>,
     pub now_ms: i64,
     /// Optional idempotency key (see [`StartChannelThread::request_id`]).
@@ -598,6 +697,32 @@ pub struct LocalAttachmentInput {
     pub heading_text: Option<String>,
     pub heading_anchor: Option<String>,
     pub heading_occurrence: Option<i64>,
+}
+
+/// Inputs to [`LinkedChatStore::set_reaction`].
+#[derive(Debug, Clone)]
+pub struct SetReaction {
+    pub workspace_id: String,
+    pub thread_id: String,
+    pub message_id: String,
+    pub emoji: String,
+    pub author_id: String,
+    pub author_kind: ChatActorKind,
+    pub author_display_name: String,
+    pub state: ChatReactionState,
+    pub now_ms: i64,
+    pub request_id: String,
+}
+
+/// Inputs to [`LinkedChatStore::resolve_decision`].
+#[derive(Debug, Clone)]
+pub struct ResolveDecision {
+    pub workspace_id: String,
+    pub thread_id: String,
+    pub message_id: String,
+    pub resolved_by_message_id: String,
+    pub now_ms: i64,
+    pub request_id: String,
 }
 
 /// Inputs to file-linked [`LinkedChatStore::create_thread`].
@@ -722,6 +847,18 @@ pub fn bookmark_id_for(
     hasher.update(target_id.as_bytes());
     let digest = hasher.finalize();
     format!("bookmark_{}", base32_lowercase_no_padding(&digest[..16]))
+}
+
+/// Stable cross-peer reaction identity derived from the reaction cell key.
+pub fn reaction_id_for(message_id: &str, emoji: &str, author_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(message_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(emoji.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(author_id.as_bytes());
+    let digest = hasher.finalize();
+    format!("reaction_{}", base32_lowercase_no_padding(&digest[..16]))
 }
 
 /// A projection field must be non-empty, not `.`/`..`, contain no `/`, `\`, or
@@ -911,6 +1048,248 @@ fn normalize_replicated_chat_id(value: &str, reason: &'static str) -> Result<Str
     }
 }
 
+/// Verbatim hostile-peer reaction validation. This mirrors the oracle's one
+/// regional-indicator pair or one extended-pictographic atom, optionally joined
+/// to more atoms with ZWJ. It intentionally performs no NFC normalization.
+pub fn is_reaction_emoji_verbatim(value: &str) -> bool {
+    if value.is_empty() || value.encode_utf16().count() > MAX_REACTION_EMOJI_UTF16_UNITS {
+        return false;
+    }
+    let chars: Vec<char> = value.chars().collect();
+    let mut at = 0usize;
+    if !consume_reaction_emoji_atom(&chars, &mut at) {
+        return false;
+    }
+    while at < chars.len() {
+        if chars[at] != '\u{200d}' {
+            return false;
+        }
+        at += 1;
+        if !consume_reaction_emoji_atom(&chars, &mut at) {
+            return false;
+        }
+    }
+    true
+}
+
+fn consume_reaction_emoji_atom(chars: &[char], at: &mut usize) -> bool {
+    let Some(&first) = chars.get(*at) else {
+        return false;
+    };
+    if is_regional_indicator(first) {
+        let Some(&second) = chars.get(*at + 1) else {
+            return false;
+        };
+        if !is_regional_indicator(second) {
+            return false;
+        }
+        *at += 2;
+        return true;
+    }
+    if !is_extended_pictographic(first) {
+        return false;
+    }
+    *at += 1;
+    while chars.get(*at).is_some_and(|ch| {
+        matches!(*ch, '\u{fe0f}' | '\u{20e3}') || ('\u{1f3fb}'..='\u{1f3ff}').contains(ch)
+    }) {
+        *at += 1;
+    }
+    true
+}
+
+fn is_regional_indicator(ch: char) -> bool {
+    ('\u{1f1e6}'..='\u{1f1ff}').contains(&ch)
+}
+
+fn is_extended_pictographic(ch: char) -> bool {
+    let codepoint = ch as u32;
+    EXTENDED_PICTOGRAPHIC_RANGES
+        .binary_search_by(|(start, end)| {
+            if codepoint < *start {
+                std::cmp::Ordering::Greater
+            } else if codepoint > *end {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+// Unicode `Extended_Pictographic` ranges used by the TypeScript oracle's
+// `\p{Extended_Pictographic}` regex. Kept as ranges rather than a permissive
+// emoji-block approximation so hostile peers cannot smuggle non-emoji dingbats.
+const EXTENDED_PICTOGRAPHIC_RANGES: &[(u32, u32)] = &[
+    (0x00a9, 0x00a9),
+    (0x00ae, 0x00ae),
+    (0x203c, 0x203c),
+    (0x2049, 0x2049),
+    (0x2122, 0x2122),
+    (0x2139, 0x2139),
+    (0x2194, 0x2199),
+    (0x21a9, 0x21aa),
+    (0x231a, 0x231b),
+    (0x2328, 0x2328),
+    (0x23cf, 0x23cf),
+    (0x23e9, 0x23f3),
+    (0x23f8, 0x23fa),
+    (0x24c2, 0x24c2),
+    (0x25aa, 0x25ab),
+    (0x25b6, 0x25b6),
+    (0x25c0, 0x25c0),
+    (0x25fb, 0x25fe),
+    (0x2600, 0x2604),
+    (0x260e, 0x260e),
+    (0x2611, 0x2611),
+    (0x2614, 0x2615),
+    (0x2618, 0x2618),
+    (0x261d, 0x261d),
+    (0x2620, 0x2620),
+    (0x2622, 0x2623),
+    (0x2626, 0x2626),
+    (0x262a, 0x262a),
+    (0x262e, 0x262f),
+    (0x2638, 0x263a),
+    (0x2640, 0x2640),
+    (0x2642, 0x2642),
+    (0x2648, 0x2653),
+    (0x265f, 0x2660),
+    (0x2663, 0x2663),
+    (0x2665, 0x2666),
+    (0x2668, 0x2668),
+    (0x267b, 0x267b),
+    (0x267e, 0x267f),
+    (0x2692, 0x2697),
+    (0x2699, 0x2699),
+    (0x269b, 0x269c),
+    (0x26a0, 0x26a1),
+    (0x26a7, 0x26a7),
+    (0x26aa, 0x26ab),
+    (0x26b0, 0x26b1),
+    (0x26bd, 0x26be),
+    (0x26c4, 0x26c5),
+    (0x26c8, 0x26c8),
+    (0x26ce, 0x26cf),
+    (0x26d1, 0x26d1),
+    (0x26d3, 0x26d4),
+    (0x26e9, 0x26ea),
+    (0x26f0, 0x26f5),
+    (0x26f7, 0x26fa),
+    (0x26fd, 0x26fd),
+    (0x2702, 0x2702),
+    (0x2705, 0x2705),
+    (0x2708, 0x270d),
+    (0x270f, 0x270f),
+    (0x2712, 0x2712),
+    (0x2714, 0x2714),
+    (0x2716, 0x2716),
+    (0x271d, 0x271d),
+    (0x2721, 0x2721),
+    (0x2728, 0x2728),
+    (0x2733, 0x2734),
+    (0x2744, 0x2744),
+    (0x2747, 0x2747),
+    (0x274c, 0x274c),
+    (0x274e, 0x274e),
+    (0x2753, 0x2755),
+    (0x2757, 0x2757),
+    (0x2763, 0x2764),
+    (0x2795, 0x2797),
+    (0x27a1, 0x27a1),
+    (0x27b0, 0x27b0),
+    (0x27bf, 0x27bf),
+    (0x2934, 0x2935),
+    (0x2b05, 0x2b07),
+    (0x2b1b, 0x2b1c),
+    (0x2b50, 0x2b50),
+    (0x2b55, 0x2b55),
+    (0x3030, 0x3030),
+    (0x303d, 0x303d),
+    (0x3297, 0x3297),
+    (0x3299, 0x3299),
+    (0x1f004, 0x1f004),
+    (0x1f02c, 0x1f02f),
+    (0x1f094, 0x1f09f),
+    (0x1f0af, 0x1f0b0),
+    (0x1f0c0, 0x1f0c0),
+    (0x1f0cf, 0x1f0d0),
+    (0x1f0f6, 0x1f0ff),
+    (0x1f170, 0x1f171),
+    (0x1f17e, 0x1f17f),
+    (0x1f18e, 0x1f18e),
+    (0x1f191, 0x1f19a),
+    (0x1f1ae, 0x1f1e5),
+    (0x1f201, 0x1f20f),
+    (0x1f21a, 0x1f21a),
+    (0x1f22f, 0x1f22f),
+    (0x1f232, 0x1f23a),
+    (0x1f23c, 0x1f23f),
+    (0x1f249, 0x1f25f),
+    (0x1f266, 0x1f321),
+    (0x1f324, 0x1f393),
+    (0x1f396, 0x1f397),
+    (0x1f399, 0x1f39b),
+    (0x1f39e, 0x1f3f0),
+    (0x1f3f3, 0x1f3f5),
+    (0x1f3f7, 0x1f3fa),
+    (0x1f400, 0x1f4fd),
+    (0x1f4ff, 0x1f53d),
+    (0x1f549, 0x1f54e),
+    (0x1f550, 0x1f567),
+    (0x1f56f, 0x1f570),
+    (0x1f573, 0x1f57a),
+    (0x1f587, 0x1f587),
+    (0x1f58a, 0x1f58d),
+    (0x1f590, 0x1f590),
+    (0x1f595, 0x1f596),
+    (0x1f5a4, 0x1f5a5),
+    (0x1f5a8, 0x1f5a8),
+    (0x1f5b1, 0x1f5b2),
+    (0x1f5bc, 0x1f5bc),
+    (0x1f5c2, 0x1f5c4),
+    (0x1f5d1, 0x1f5d3),
+    (0x1f5dc, 0x1f5de),
+    (0x1f5e1, 0x1f5e1),
+    (0x1f5e3, 0x1f5e3),
+    (0x1f5e8, 0x1f5e8),
+    (0x1f5ef, 0x1f5ef),
+    (0x1f5f3, 0x1f5f3),
+    (0x1f5fa, 0x1f64f),
+    (0x1f680, 0x1f6c5),
+    (0x1f6cb, 0x1f6d2),
+    (0x1f6d5, 0x1f6e5),
+    (0x1f6e9, 0x1f6e9),
+    (0x1f6eb, 0x1f6f0),
+    (0x1f6f3, 0x1f6ff),
+    (0x1f7da, 0x1f7ff),
+    (0x1f80c, 0x1f80f),
+    (0x1f848, 0x1f84f),
+    (0x1f85a, 0x1f85f),
+    (0x1f888, 0x1f88f),
+    (0x1f8ae, 0x1f8af),
+    (0x1f8bc, 0x1f8bf),
+    (0x1f8c2, 0x1f8cf),
+    (0x1f8d9, 0x1f8ff),
+    (0x1f90c, 0x1f93a),
+    (0x1f93c, 0x1f945),
+    (0x1f947, 0x1f9ff),
+    (0x1fa58, 0x1fa5f),
+    (0x1fa6e, 0x1faff),
+    (0x1fc00, 0x1fffd),
+];
+
+fn normalize_reaction_emoji(value: &str) -> Result<String, DomainError> {
+    let normalized = nfc(value.trim_matches(is_js_trim_ws));
+    if !is_reaction_emoji_verbatim(&normalized) {
+        return Err(DomainError::chat(
+            "invalid-message-body",
+            "Reaction emoji must be a single emoji grapheme.",
+        ));
+    }
+    Ok(normalized)
+}
+
 /// Claim metadata follows `normalizeCommand`: an omitted command is the EMPTY
 /// string (the oracle's default) and empty/whitespace commands are preserved
 /// verbatim — only NUL (and the daemon's metadata length cap) refuse.
@@ -1058,6 +1437,24 @@ pub fn chat_thread_display_title(stored_title: &str, first_body: Option<&str>) -
         .take(THREAD_SNIPPET_TITLE_MAX_CHARS.saturating_sub(1))
         .collect();
     format!("{}\u{2026}", kept.trim_end())
+}
+
+fn opening_message_body_snippet(body: &str) -> String {
+    if body.encode_utf16().count() <= OPENING_MESSAGE_BODY_SNIPPET_UTF16_UNITS {
+        return body.to_owned();
+    }
+    let mut units = 0usize;
+    let mut end = 0usize;
+    for (offset, ch) in body.char_indices() {
+        let width = ch.len_utf16();
+        if units + width >= OPENING_MESSAGE_BODY_SNIPPET_UTF16_UNITS {
+            break;
+        }
+        units += width;
+        end = offset + ch.len_utf8();
+    }
+    let prefix = body[..end].trim_end_matches(is_js_trim_ws);
+    format!("{prefix}\u{2026}")
 }
 
 /// Indexed message text (`chatIndexText`): author, optional agent marker, body.
@@ -2089,6 +2486,7 @@ impl<'a> LinkedChatStore<'a> {
             display_name.as_bytes(),
             author_user_id.as_deref().unwrap_or("").as_bytes(),
             origin.as_deref().unwrap_or("").as_bytes(),
+            if input.needs_decision { b"1" } else { b"0" },
             attachment_fingerprint.as_slice(),
         ]);
         // Exactly-once pre-check (single-writer: authoritative). A committed
@@ -2227,6 +2625,17 @@ impl<'a> LinkedChatStore<'a> {
                 &serde_json::Value::Object(message_payload.clone()),
                 now,
             )?;
+            if input.needs_decision {
+                journal_decision_set(
+                    tx,
+                    &input.workspace_id,
+                    &input.thread_id,
+                    &input.message_id,
+                    ChatDecisionState::Open,
+                    None,
+                    now,
+                )?;
+            }
             let message_attachments = add_local_attachments(
                 tx,
                 &input.workspace_id,
@@ -2318,6 +2727,7 @@ impl<'a> LinkedChatStore<'a> {
             author_user_id.as_deref().unwrap_or("").as_bytes(),
             parent.as_deref().unwrap_or("").as_bytes(),
             origin.as_deref().unwrap_or("").as_bytes(),
+            if input.needs_decision { b"1" } else { b"0" },
             attachment_fingerprint.as_slice(),
         ]);
         if let Some(request_id) = &input.request_id
@@ -2443,6 +2853,17 @@ impl<'a> LinkedChatStore<'a> {
                 &serde_json::Value::Object(payload.clone()),
                 now,
             )?;
+            if input.needs_decision {
+                journal_decision_set(
+                    tx,
+                    &input.workspace_id,
+                    &input.thread_id,
+                    &input.message_id,
+                    ChatDecisionState::Open,
+                    None,
+                    now,
+                )?;
+            }
             let message_attachments = add_local_attachments(
                 tx,
                 &input.workspace_id,
@@ -2469,6 +2890,330 @@ impl<'a> LinkedChatStore<'a> {
             })
         })?;
         committed(outcome)
+    }
+
+    /// Set one reaction LWW cell and journal the exact winning origin coordinate.
+    pub fn set_reaction(
+        &mut self,
+        input: &SetReaction,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatReaction, DomainError> {
+        non_empty(
+            &input.workspace_id,
+            "invalid-channel-name",
+            "workspace_id must not be empty",
+        )?;
+        let thread_id = normalize_replicated_chat_id(&input.thread_id, "thread id is invalid")?;
+        validate_message_id(&input.message_id)?;
+        let emoji = normalize_reaction_emoji(&input.emoji)?;
+        let author_id = input.author_id.trim().to_owned();
+        if author_id.is_empty()
+            || author_id.encode_utf16().count() > MAX_REACTION_AUTHOR_ID_UTF16_UNITS
+        {
+            return Err(DomainError::chat(
+                "invalid-sender",
+                "Reaction author id is invalid.",
+            ));
+        }
+        let author_display_name = normalize_display_name(&input.author_display_name)?;
+        if input.now_ms < 0 {
+            return Err(DomainError::chat(
+                "invalid-message-body",
+                "Reaction timestamp is invalid.",
+            ));
+        }
+        if input.request_id.is_empty() {
+            return Err(DomainError::InvalidInput {
+                reason: "idempotency key is required",
+            });
+        }
+        let payload_hash = hash_fields(&[
+            thread_id.as_bytes(),
+            input.message_id.as_bytes(),
+            emoji.as_bytes(),
+            author_id.as_bytes(),
+            input.author_kind.as_str().as_bytes(),
+            author_display_name.as_bytes(),
+            input.state.as_str().as_bytes(),
+        ]);
+        if let Some(recorded) = self
+            .store
+            .read_with(|conn| lookup_request(conn, &input.request_id))?
+        {
+            if recorded != payload_hash {
+                return Err(DomainError::IdempotencyKeyReuseMismatch);
+            }
+            return self.store.read_with(|conn| {
+                require_reaction_cell(
+                    conn,
+                    &input.workspace_id,
+                    &input.message_id,
+                    &emoji,
+                    &author_id,
+                )
+            });
+        }
+
+        let input = input.clone();
+        let outcome = self.store.write_with(faults, |tx| {
+            require_thread(tx, &input.workspace_id, &thread_id)?;
+            if !thread_has_message(tx, &input.workspace_id, &thread_id, &input.message_id)? {
+                return Err(DomainError::chat(
+                    "message-not-found",
+                    "Reaction target was not found in this chat thread.",
+                ));
+            }
+            let prior_at_ms: Option<i64> = tx
+                .query_row(
+                    "SELECT at_ms FROM chat_reactions \
+                     WHERE workspace_id = ?1 AND message_id = ?2 AND emoji = ?3 AND author_id = ?4",
+                    params![input.workspace_id, input.message_id, emoji, author_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            if prior_at_ms.is_some_and(|at_ms| at_ms < 0) {
+                return Err(DomainError::StateCorrupt {
+                    reason: "chat reaction has a negative timestamp",
+                });
+            }
+            let bumped = prior_at_ms
+                .map(|at_ms| {
+                    at_ms.checked_add(1).ok_or(DomainError::StateCorrupt {
+                        reason: "chat reaction timestamp overflowed",
+                    })
+                })
+                .transpose()?
+                .unwrap_or(i64::MIN);
+            let at_ms = input.now_ms.max(bumped);
+            let reaction_id = reaction_id_for(&input.message_id, &emoji, &author_id);
+            let (origin_id, origin_seq) =
+                local_replication_coordinate(tx, &input.workspace_id, at_ms)?;
+            upsert_reaction_lww(
+                tx,
+                &input.workspace_id,
+                &reaction_id,
+                &thread_id,
+                &input.message_id,
+                &emoji,
+                &author_id,
+                input.author_kind,
+                &author_display_name,
+                input.state,
+                at_ms,
+                &origin_id,
+                origin_seq,
+            )?;
+            let payload = serde_json::json!({
+                "reactionId": reaction_id,
+                "threadId": thread_id,
+                "messageId": input.message_id,
+                "emoji": emoji,
+                "authorId": author_id,
+                "authorKind": input.author_kind.as_str(),
+                "authorDisplayName": author_display_name,
+                "state": input.state.as_str(),
+                "atMs": at_ms,
+            });
+            insert_local_replication_op(
+                tx,
+                &input.workspace_id,
+                &origin_id,
+                origin_seq,
+                "chat.reaction.set",
+                &payload,
+                at_ms,
+            )?;
+            record_request(tx, Some(&input.request_id), &payload_hash, at_ms)?;
+            require_reaction_cell(
+                tx,
+                &input.workspace_id,
+                &input.message_id,
+                &emoji,
+                &author_id,
+            )
+        })?;
+        committed(outcome)
+    }
+
+    /// List active, visible reaction cells in stable `(at_ms,reaction_id)` order.
+    pub fn list_reactions(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChatReaction>, DomainError> {
+        if limit <= 0 || limit > MAX_MESSAGE_PAGE {
+            return Err(DomainError::InvalidInput {
+                reason: "reaction page limit is invalid",
+            });
+        }
+        self.store.read_with(|conn| {
+            let thread = require_thread(conn, workspace_id, thread_id)?;
+            let (has_after, after_ms, after_id) = match after {
+                Some((at_ms, id)) => (1, at_ms, id),
+                None => (0, 0, String::new()),
+            };
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT r.reaction_id, r.thread_id, r.message_id, r.emoji, r.author_id, \
+                            r.author_kind, r.author_display_name, r.state, r.at_ms \
+                     FROM chat_reactions r \
+                     JOIN chat_messages m ON m.workspace_id = r.workspace_id \
+                       AND m.thread_id = r.thread_id AND m.message_id = r.message_id \
+                     WHERE r.workspace_id = ?1 AND r.thread_id = ?2 AND r.state = 'added' \
+                       AND (?3 = 0 OR r.at_ms > ?4 OR (r.at_ms = ?4 AND r.reaction_id > ?5)) \
+                     ORDER BY r.at_ms, r.reaction_id LIMIT ?6",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        thread.thread_id,
+                        has_after,
+                        after_ms,
+                        after_id,
+                        limit
+                    ],
+                    map_reaction_row,
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            collect(rows)
+        })
+    }
+
+    /// Resolve a decision cell. An already-resolved winner is returned unchanged.
+    pub fn resolve_decision(
+        &mut self,
+        input: &ResolveDecision,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatDecision, DomainError> {
+        non_empty(
+            &input.workspace_id,
+            "invalid-channel-name",
+            "workspace_id must not be empty",
+        )?;
+        let thread_id = normalize_replicated_chat_id(&input.thread_id, "thread id is invalid")?;
+        validate_message_id(&input.message_id)?;
+        if input.resolved_by_message_id.is_empty() {
+            return Err(DomainError::chat(
+                "invalid-message-body",
+                "Resolving message id is invalid.",
+            ));
+        }
+        validate_message_id(&input.resolved_by_message_id).map_err(|_| {
+            DomainError::chat("invalid-message-body", "Resolving message id is invalid.")
+        })?;
+        if input.now_ms < 0 {
+            return Err(DomainError::chat(
+                "invalid-message-body",
+                "Decision timestamp is invalid.",
+            ));
+        }
+        if input.request_id.is_empty() {
+            return Err(DomainError::InvalidInput {
+                reason: "idempotency key is required",
+            });
+        }
+        let payload_hash = hash_fields(&[
+            thread_id.as_bytes(),
+            input.message_id.as_bytes(),
+            input.resolved_by_message_id.as_bytes(),
+        ]);
+        if let Some(recorded) = self
+            .store
+            .read_with(|conn| lookup_request(conn, &input.request_id))?
+        {
+            if recorded != payload_hash {
+                return Err(DomainError::IdempotencyKeyReuseMismatch);
+            }
+            return self.store.read_with(|conn| {
+                require_decision(conn, &input.workspace_id, &thread_id, &input.message_id)
+            });
+        }
+
+        let input = input.clone();
+        let outcome = self.store.write_with(faults, |tx| {
+            require_thread(tx, &input.workspace_id, &thread_id)?;
+            let current = require_decision(tx, &input.workspace_id, &thread_id, &input.message_id)?;
+            if current.state == ChatDecisionState::Resolved {
+                record_request(tx, Some(&input.request_id), &payload_hash, current.at_ms)?;
+                return Ok(current);
+            }
+            if current.at_ms < 0 {
+                return Err(DomainError::StateCorrupt {
+                    reason: "chat decision has a negative timestamp",
+                });
+            }
+            let next = current
+                .at_ms
+                .checked_add(1)
+                .ok_or(DomainError::StateCorrupt {
+                    reason: "chat decision timestamp overflowed",
+                })?;
+            let at_ms = input.now_ms.max(next);
+            journal_decision_set(
+                tx,
+                &input.workspace_id,
+                &thread_id,
+                &input.message_id,
+                ChatDecisionState::Resolved,
+                Some(&input.resolved_by_message_id),
+                at_ms,
+            )?;
+            record_request(tx, Some(&input.request_id), &payload_hash, at_ms)?;
+            require_decision(tx, &input.workspace_id, &thread_id, &input.message_id)
+        })?;
+        committed(outcome)
+    }
+
+    /// List visible decision cells in stable `(at_ms,message_id)` order.
+    pub fn list_thread_decisions(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChatDecision>, DomainError> {
+        if limit <= 0 || limit > MAX_MESSAGE_PAGE {
+            return Err(DomainError::InvalidInput {
+                reason: "decision page limit is invalid",
+            });
+        }
+        self.store.read_with(|conn| {
+            let thread = require_thread(conn, workspace_id, thread_id)?;
+            let (has_after, after_ms, after_id) = match after {
+                Some((at_ms, id)) => (1, at_ms, id),
+                None => (0, 0, String::new()),
+            };
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT d.thread_id, d.message_id, d.state, d.resolved_by_message_id, d.at_ms \
+                     FROM chat_decisions d \
+                     JOIN chat_messages m ON m.workspace_id = d.workspace_id \
+                       AND m.thread_id = d.thread_id AND m.message_id = d.message_id \
+                     WHERE d.workspace_id = ?1 AND d.thread_id = ?2 \
+                       AND (?3 = 0 OR d.at_ms > ?4 OR (d.at_ms = ?4 AND d.message_id > ?5)) \
+                     ORDER BY d.at_ms, d.message_id LIMIT ?6",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        thread.thread_id,
+                        has_after,
+                        after_ms,
+                        after_id,
+                        limit
+                    ],
+                    map_decision_row,
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            collect(rows)
+        })
     }
 
     /// Replay a previously-committed `start_channel_thread` for an exactly-once
@@ -2516,6 +3261,140 @@ impl<'a> LinkedChatStore<'a> {
                 .query_map(params![workspace_id, MAX_LIST_ROWS], map_thread_row)
                 .map_err(DomainError::sql_corrupt)?;
             collect(rows)
+        })
+    }
+
+    /// Full per-thread aggregate for one real channel, newest activity first.
+    pub fn list_channel_threads(
+        &self,
+        workspace_id: &str,
+        channel_id: &str,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChannelThreadSummary>, DomainError> {
+        if !(1..=501).contains(&limit) {
+            return Err(DomainError::chat(
+                "invalid-cursor",
+                "Page limit is invalid.",
+            ));
+        }
+        let (has_after, after_updated_at_ms, after_thread_id) = match after {
+            Some((updated_at_ms, thread_id)) => (1_i64, updated_at_ms, thread_id),
+            None => (0_i64, 0_i64, String::new()),
+        };
+        self.store.read_with(|conn| {
+            let channel = require_channel(conn, workspace_id, channel_id)?;
+            let threads = {
+                let mut stmt = conn
+                    .prepare_cached(
+                        "SELECT t.workspace_id, t.thread_id, t.title, t.created_at_ms, \
+                                t.updated_at_ms, t.channel_id, t.linked_object_id, \
+                                t.linked_path_hint, t.linked_at_ms, \
+                                (SELECT m.body FROM chat_messages m \
+                                 WHERE m.workspace_id = t.workspace_id \
+                                   AND m.thread_id = t.thread_id \
+                                 ORDER BY m.created_at_ms, m.message_id LIMIT 1), \
+                                EXISTS(SELECT 1 FROM chat_channels c \
+                                  WHERE c.workspace_id = t.workspace_id \
+                                    AND c.channel_id = t.channel_id) \
+                         FROM chat_threads t \
+                         WHERE t.workspace_id = ?1 AND t.channel_id = ?2 \
+                           AND (?3 = 0 OR t.updated_at_ms < ?4 \
+                             OR (t.updated_at_ms = ?4 AND t.thread_id < ?5)) \
+                         ORDER BY t.updated_at_ms DESC, t.thread_id DESC LIMIT ?6",
+                    )
+                    .map_err(DomainError::sql_corrupt)?;
+                let rows = stmt
+                    .query_map(
+                        params![
+                            workspace_id,
+                            channel.channel_id,
+                            has_after,
+                            after_updated_at_ms,
+                            after_thread_id,
+                            limit
+                        ],
+                        map_thread_row,
+                    )
+                    .map_err(DomainError::sql_corrupt)?;
+                collect(rows)?
+            };
+            let mut summaries = Vec::with_capacity(threads.len());
+            for thread in threads {
+                let message_count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM chat_messages \
+                         WHERE workspace_id = ?1 AND thread_id = ?2",
+                        params![workspace_id, thread.thread_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(DomainError::sql_corrupt)?;
+                if !persisted_nonnegative_safe(message_count) {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "channel summary message count is corrupt",
+                    });
+                }
+                let stored_read_sequence: Option<i64> = conn
+                    .query_row(
+                        "SELECT last_read_sequence FROM chat_thread_read_state \
+                         WHERE workspace_id = ?1 AND thread_id = ?2",
+                        params![workspace_id, thread.thread_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(DomainError::sql_corrupt)?;
+                let stored_read_sequence = stored_read_sequence.unwrap_or(0);
+                if !persisted_nonnegative_safe(stored_read_sequence) {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "channel summary read cursor is corrupt",
+                    });
+                }
+                let last_read_sequence = stored_read_sequence.min(message_count);
+                let open_decision_count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM chat_decisions d \
+                         JOIN chat_messages m ON m.workspace_id = d.workspace_id \
+                           AND m.thread_id = d.thread_id AND m.message_id = d.message_id \
+                         WHERE d.workspace_id = ?1 AND d.thread_id = ?2 AND d.state = 'open'",
+                        params![workspace_id, thread.thread_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(DomainError::sql_corrupt)?;
+                if !persisted_nonnegative_safe(open_decision_count) {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "channel summary decision count is corrupt",
+                    });
+                }
+                let opening_message =
+                    first_message_for_thread(conn, workspace_id, &thread.thread_id)?
+                        .map(|message| {
+                            let reactions = active_reactions_for_messages(
+                                conn,
+                                workspace_id,
+                                std::slice::from_ref(&message.message_id),
+                            )?
+                            .remove(&message.message_id)
+                            .unwrap_or_default();
+                            Ok::<_, DomainError>(ChannelOpeningMessage {
+                                message_id: message.message_id,
+                                author_kind: message.author_kind,
+                                author_display_name: message.author_display_name,
+                                created_at_ms: message.created_at_ms,
+                                body_snippet: opening_message_body_snippet(&message.body),
+                                reactions,
+                            })
+                        })
+                        .transpose()?;
+                summaries.push(ChannelThreadSummary {
+                    thread,
+                    message_count,
+                    last_read_sequence,
+                    unread_count: message_count - last_read_sequence,
+                    open_decision_count,
+                    opening_message,
+                });
+            }
+            Ok(summaries)
         })
     }
 
@@ -3543,6 +4422,12 @@ impl<'a> LinkedChatStore<'a> {
             } else {
                 None
             };
+            let candidate_message_ids: Vec<String> = candidates
+                .iter()
+                .map(|candidate| candidate.message_id.clone())
+                .collect();
+            let mut reactions_by_message_id =
+                active_reactions_for_messages(conn, workspace_id, &candidate_message_ids)?;
             let mut items = Vec::with_capacity(candidates.len());
             for candidate in candidates {
                 let message = require_message(conn, workspace_id, &candidate.message_id)?;
@@ -3628,13 +4513,14 @@ impl<'a> LinkedChatStore<'a> {
                     matched_by.push(FollowTargetKind::Channel);
                 }
                 items.push(ChatFeedItem {
+                    reactions: reactions_by_message_id
+                        .remove(&message.message_id)
+                        .unwrap_or_default(),
                     message,
                     thread,
                     channel,
                     parent_message,
                     opening_message,
-                    // Reactions are deliberately empty until the RPC-B2 domain is ported.
-                    reactions: Vec::new(),
                     matched_by,
                 });
             }
@@ -5559,6 +6445,45 @@ fn attachments_for_message(
     collect(rows)
 }
 
+fn active_reactions_for_messages(
+    conn: &Connection,
+    workspace_id: &str,
+    message_ids: &[String],
+) -> Result<HashMap<String, Vec<ChatReaction>>, DomainError> {
+    let mut grouped = HashMap::new();
+    if message_ids.is_empty() {
+        return Ok(grouped);
+    }
+    let message_ids_json =
+        serde_json::to_string(message_ids).map_err(|_| DomainError::StateCorrupt {
+            reason: "reaction hydration id set is corrupt",
+        })?;
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT r.reaction_id, r.thread_id, r.message_id, r.emoji, r.author_id, \
+                    r.author_kind, r.author_display_name, r.state, r.at_ms \
+             FROM chat_reactions r \
+             JOIN chat_messages m ON m.workspace_id = r.workspace_id \
+               AND m.thread_id = r.thread_id AND m.message_id = r.message_id \
+             WHERE r.workspace_id = ?1 \
+               AND r.message_id IN (SELECT value FROM json_each(?2)) \
+               AND r.state = 'added' \
+             ORDER BY r.message_id, r.at_ms, r.reaction_id",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let rows = stmt
+        .query_map(params![workspace_id, message_ids_json], map_reaction_row)
+        .map_err(DomainError::sql_corrupt)?;
+    for row in rows {
+        let reaction = row.map_err(DomainError::sql_corrupt)??;
+        grouped
+            .entry(reaction.message_id.clone())
+            .or_insert_with(Vec::new)
+            .push(reaction);
+    }
+    Ok(grouped)
+}
+
 fn hydrate_message_attachments(
     conn: &Connection,
     workspace_id: &str,
@@ -5897,6 +6822,149 @@ fn upsert_follow_lww(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn upsert_reaction_lww(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    reaction_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    emoji: &str,
+    author_id: &str,
+    author_kind: ChatActorKind,
+    author_display_name: &str,
+    state: ChatReactionState,
+    at_ms: i64,
+    origin_id: &str,
+    origin_seq: i64,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "INSERT INTO chat_reactions \
+         (workspace_id,reaction_id,thread_id,message_id,emoji,author_id,author_kind,\
+          author_display_name,state,at_ms,origin_id,origin_seq) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) \
+         ON CONFLICT(workspace_id,message_id,emoji,author_id) DO UPDATE SET \
+           reaction_id=excluded.reaction_id,thread_id=excluded.thread_id,\
+           author_kind=excluded.author_kind,author_display_name=excluded.author_display_name,\
+           state=excluded.state,at_ms=excluded.at_ms,origin_id=excluded.origin_id,\
+           origin_seq=excluded.origin_seq \
+         WHERE excluded.at_ms > chat_reactions.at_ms \
+            OR (excluded.at_ms = chat_reactions.at_ms AND \
+                (excluded.state > chat_reactions.state OR \
+                 (excluded.state = chat_reactions.state AND \
+                  (excluded.origin_id > chat_reactions.origin_id OR \
+                   (excluded.origin_id = chat_reactions.origin_id AND \
+                    excluded.origin_seq > chat_reactions.origin_seq)))))",
+        params![
+            workspace_id,
+            reaction_id,
+            thread_id,
+            message_id,
+            emoji,
+            author_id,
+            author_kind.as_str(),
+            author_display_name,
+            state.as_str(),
+            at_ms,
+            origin_id,
+            origin_seq
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upsert_decision_lww(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    state: ChatDecisionState,
+    resolved_by_message_id: Option<&str>,
+    at_ms: i64,
+    origin_id: &str,
+    origin_seq: i64,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "INSERT INTO chat_decisions \
+         (workspace_id,thread_id,message_id,state,resolved_by_message_id,at_ms,origin_id,origin_seq) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8) \
+         ON CONFLICT(workspace_id,message_id) DO UPDATE SET \
+           thread_id=excluded.thread_id,state=excluded.state,\
+           resolved_by_message_id=excluded.resolved_by_message_id,at_ms=excluded.at_ms,\
+           origin_id=excluded.origin_id,origin_seq=excluded.origin_seq \
+         WHERE excluded.at_ms > chat_decisions.at_ms \
+            OR (excluded.at_ms = chat_decisions.at_ms AND \
+                (CASE excluded.state WHEN 'resolved' THEN 1 ELSE 0 END) > \
+                (CASE chat_decisions.state WHEN 'resolved' THEN 1 ELSE 0 END)) \
+            OR (excluded.at_ms = chat_decisions.at_ms \
+                AND excluded.state = chat_decisions.state \
+                AND (excluded.origin_id > chat_decisions.origin_id OR \
+                     (excluded.origin_id = chat_decisions.origin_id \
+                      AND excluded.origin_seq > chat_decisions.origin_seq)))",
+        params![
+            workspace_id,
+            thread_id,
+            message_id,
+            state.as_str(),
+            resolved_by_message_id,
+            at_ms,
+            origin_id,
+            origin_seq
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
+fn journal_decision_set(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    state: ChatDecisionState,
+    resolved_by_message_id: Option<&str>,
+    at_ms: i64,
+) -> Result<(), DomainError> {
+    let (origin_id, origin_seq) = local_replication_coordinate(tx, workspace_id, at_ms)?;
+    upsert_decision_lww(
+        tx,
+        workspace_id,
+        thread_id,
+        message_id,
+        state,
+        resolved_by_message_id,
+        at_ms,
+        &origin_id,
+        origin_seq,
+    )?;
+    let mut payload = serde_json::json!({
+        "threadId": thread_id,
+        "messageId": message_id,
+        "state": state.as_str(),
+        "atMs": at_ms,
+    });
+    if let Some(resolver) = resolved_by_message_id {
+        payload
+            .as_object_mut()
+            .expect("decision payload is an object")
+            .insert(
+                "resolvedByMessageId".to_owned(),
+                serde_json::json!(resolver),
+            );
+    }
+    insert_local_replication_op(
+        tx,
+        workspace_id,
+        &origin_id,
+        origin_seq,
+        "chat.decision.set",
+        &payload,
+        at_ms,
+    )
+}
+
 /// Return the local origin and the next sequence from the replication journal.
 /// This is deliberately transaction-local: the LWW register must store the
 /// exact coordinate that a local replication op would use, and RPC callers
@@ -6104,6 +7172,47 @@ fn require_message(
         .ok_or_else(|| DomainError::chat("message-not-found", "Chat message was not found."))?;
     hydrate_message_attachments(conn, workspace_id, &mut message)?;
     Ok(message)
+}
+
+fn require_reaction_cell(
+    conn: &Connection,
+    workspace_id: &str,
+    message_id: &str,
+    emoji: &str,
+    author_id: &str,
+) -> Result<ChatReaction, DomainError> {
+    conn.query_row(
+        "SELECT reaction_id, thread_id, message_id, emoji, author_id, author_kind, \
+                author_display_name, state, at_ms \
+         FROM chat_reactions WHERE workspace_id = ?1 AND message_id = ?2 \
+           AND emoji = ?3 AND author_id = ?4",
+        params![workspace_id, message_id, emoji, author_id],
+        map_reaction_row,
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?
+    .transpose()?
+    .ok_or(DomainError::StateCorrupt {
+        reason: "reaction upsert left no row",
+    })
+}
+
+fn require_decision(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+    message_id: &str,
+) -> Result<ChatDecision, DomainError> {
+    conn.query_row(
+        "SELECT thread_id, message_id, state, resolved_by_message_id, at_ms \
+         FROM chat_decisions WHERE workspace_id = ?1 AND thread_id = ?2 AND message_id = ?3",
+        params![workspace_id, thread_id, message_id],
+        map_decision_row,
+    )
+    .optional()
+    .map_err(DomainError::sql_corrupt)?
+    .transpose()?
+    .ok_or_else(|| DomainError::chat("decision-not-found", "Chat decision was not found."))
 }
 
 fn agent_read_state_for_thread(
@@ -6635,6 +7744,85 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
             attachments: Vec::new(),
         }),
     )
+}
+
+fn map_reaction_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<ChatReaction, DomainError>> {
+    let reaction_id: String = row.get(0)?;
+    let thread_id: String = row.get(1)?;
+    let message_id: String = row.get(2)?;
+    let emoji: String = row.get(3)?;
+    let author_id: String = row.get(4)?;
+    let author_kind: String = row.get(5)?;
+    let author_display_name: String = row.get(6)?;
+    let state: String = row.get(7)?;
+    let at_ms: i64 = row.get(8)?;
+    Ok((|| {
+        let author_kind = ChatActorKind::from_db(&author_kind)?;
+        let state = ChatReactionState::from_db(&state)?;
+        let display_name_valid = matches!(
+            normalize_display_name(&author_display_name),
+            Ok(normalized) if normalized == author_display_name
+        );
+        if reaction_id.is_empty()
+            || thread_id.is_empty()
+            || message_id.is_empty()
+            || author_id.is_empty()
+            || author_id.encode_utf16().count() > MAX_REACTION_AUTHOR_ID_UTF16_UNITS
+            || !is_reaction_emoji_verbatim(&emoji)
+            || !display_name_valid
+            || !persisted_nonnegative_safe(at_ms)
+        {
+            return Err(DomainError::StateCorrupt {
+                reason: "chat reaction row is corrupt",
+            });
+        }
+        Ok(ChatReaction {
+            reaction_id,
+            thread_id,
+            message_id,
+            emoji,
+            author_id,
+            author_kind,
+            author_display_name,
+            state,
+            at_ms,
+        })
+    })())
+}
+
+fn map_decision_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<ChatDecision, DomainError>> {
+    let thread_id: String = row.get(0)?;
+    let message_id: String = row.get(1)?;
+    let state: String = row.get(2)?;
+    let resolved_by_message_id: Option<String> = row.get(3)?;
+    let at_ms: i64 = row.get(4)?;
+    Ok((|| {
+        let state = ChatDecisionState::from_db(&state)?;
+        let resolver_is_valid = resolved_by_message_id
+            .as_ref()
+            .is_none_or(|message_id| !message_id.is_empty());
+        if thread_id.is_empty()
+            || message_id.is_empty()
+            || !persisted_nonnegative_safe(at_ms)
+            || !resolver_is_valid
+            || (state == ChatDecisionState::Resolved) != resolved_by_message_id.is_some()
+        {
+            return Err(DomainError::StateCorrupt {
+                reason: "chat decision row is corrupt",
+            });
+        }
+        Ok(ChatDecision {
+            thread_id,
+            message_id,
+            state,
+            resolved_by_message_id,
+            at_ms,
+        })
+    })())
 }
 
 fn map_attachment_row(

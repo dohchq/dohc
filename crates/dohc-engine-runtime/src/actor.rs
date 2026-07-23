@@ -39,28 +39,29 @@ use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
     AgentRunRecord, AgentUnreadThreadRow, BinaryHead, BinaryHeadMeta, BinaryWriteResult,
     CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureManifestSeedEntry,
-    CaptureRetire, CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ChatAgentReadState,
-    ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
-    ChatChannelSummary, ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention,
-    ChatMessage, ChatMessagePage, ChatThread, ChatThreadReadState, CompareTextFileVersions,
-    CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile, DispatchClaim,
-    DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText, LinkedChatStore,
-    ListMomentsQuery, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult, MomentPage,
-    MomentRecord, PendingBookmarkRow, RenameResult, RenameTextFile, ResolveTextConflict,
-    ResolveTextConflictResult, RollbackTextFileMutation, RunRecordLink, SaveBookmark,
-    SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore, SecretMomentPage,
-    SecretMomentRecord, SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage,
-    SetFollow, SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict, TextSnapshot,
-    ThreadDispatchPause, VersionFileChangePage, VersionRecord, VersionedTextComparison,
-    VersionedTextStore, WriteBinary, WriteResult, WriteText, apply_secret_file_from_version,
-    binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
-    capture_manifest_seed, capture_secret_retire, compare_secret_files_page_keyless,
-    delete_secret_file_keyless, derive_capture_object_id, enqueue_binary_delete,
-    enqueue_binary_rename, enqueue_write, fork_version_keyless, get_secret_moment_keyless,
-    has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
-    list_secret_files_keyless_page, list_secret_moments_page_keyless, restore_secret_file_verbatim,
-    secret_file_len_keyless, select_snapshot_by_path_in_tx, validate_addressable_plaintext_path,
-    write_binary_in_tx, write_projected_text_in_tx, write_text_in_tx,
+    CaptureRetire, CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ChannelThreadSummary,
+    ChatAgentReadState, ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel,
+    ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState,
+    ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage, ChatReaction,
+    ChatThread, ChatThreadReadState, CompareTextFileVersions, CreateFileThread, CreateNamedVersion,
+    DeleteResult, DeleteTextFile, DispatchClaim, DispatchRecovery, DomainError, InbandBinary,
+    InbandSecret, InbandText, LinkedChatStore, ListMomentsQuery, MentionCursor,
+    MergeTextFileFromVersion, MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow,
+    RenameResult, RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
+    RollbackTextFileMutation, RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete,
+    SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretRestoreResult,
+    SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction, SnapshotMetadata,
+    SnapshotView, StartChannelThread, TextConflict, TextSnapshot, ThreadDispatchPause,
+    VersionFileChangePage, VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary,
+    WriteResult, WriteText, apply_secret_file_from_version, binary_delete_job_id,
+    binary_rename_delete_job_id, binary_rename_write_job_id, capture_manifest_seed,
+    capture_secret_retire, compare_secret_files_page_keyless, delete_secret_file_keyless,
+    derive_capture_object_id, enqueue_binary_delete, enqueue_binary_rename, enqueue_write,
+    fork_version_keyless, get_secret_moment_keyless, has_secret_state,
+    insert_text_conflict_if_absent, list_secret_files_keyless, list_secret_files_keyless_page,
+    list_secret_moments_page_keyless, restore_secret_file_verbatim, secret_file_len_keyless,
+    select_snapshot_by_path_in_tx, validate_addressable_plaintext_path, write_binary_in_tx,
+    write_projected_text_in_tx, write_text_in_tx,
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, StdBackoff, StdReplacer, materialize_one};
 use dohc_engine_storage::{
@@ -705,6 +706,13 @@ enum Command {
         limit: i64,
         reply: oneshot::Sender<Result<Vec<ChatThread>, RuntimeError>>,
     },
+    ChatThreadsListForChannel {
+        workspace_id: String,
+        channel_id: String,
+        after: Option<(i64, String)>,
+        limit: i64,
+        reply: oneshot::Sender<Result<Vec<ChannelThreadSummary>, RuntimeError>>,
+    },
     ChatThreadFindChannelId {
         workspace_id: String,
         thread_id: String,
@@ -749,6 +757,30 @@ enum Command {
         input: Box<SendMessage>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<ChatMessage, RuntimeError>>,
+    },
+    ChatDecisionResolve {
+        input: Box<ResolveDecision>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<ChatDecision, RuntimeError>>,
+    },
+    ChatDecisionsList {
+        workspace_id: String,
+        thread_id: String,
+        after: Option<(i64, String)>,
+        limit: i64,
+        reply: oneshot::Sender<Result<Vec<ChatDecision>, RuntimeError>>,
+    },
+    ChatReactionSet {
+        input: Box<SetReaction>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<ChatReaction, RuntimeError>>,
+    },
+    ChatReactionsList {
+        workspace_id: String,
+        thread_id: String,
+        after: Option<(i64, String)>,
+        limit: i64,
+        reply: oneshot::Sender<Result<Vec<ChatReaction>, RuntimeError>>,
     },
     ChatMessagesList {
         workspace_id: String,
@@ -2897,6 +2929,27 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    pub async fn chat_threads_list_for_channel(
+        &self,
+        workspace_id: String,
+        channel_id: String,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChannelThreadSummary>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChatThreadsListForChannel {
+                workspace_id,
+                channel_id,
+                after,
+                limit,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     pub async fn chat_thread_find_channel_id(
         &self,
         workspace_id: String,
@@ -3029,6 +3082,82 @@ impl ActorHandle {
             .send(Command::ChatMessageSend {
                 input: Box::new(input),
                 token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn chat_decision_resolve(
+        &self,
+        input: ResolveDecision,
+        token: CancellationToken,
+    ) -> Result<ChatDecision, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChatDecisionResolve {
+                input: Box::new(input),
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn chat_decisions_list(
+        &self,
+        workspace_id: String,
+        thread_id: String,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChatDecision>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChatDecisionsList {
+                workspace_id,
+                thread_id,
+                after,
+                limit,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn chat_reaction_set(
+        &self,
+        input: SetReaction,
+        token: CancellationToken,
+    ) -> Result<ChatReaction, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChatReactionSet {
+                input: Box::new(input),
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn chat_reactions_list(
+        &self,
+        workspace_id: String,
+        thread_id: String,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChatReaction>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ChatReactionsList {
+                workspace_id,
+                thread_id,
+                after,
+                limit,
                 reply,
             })
             .await
@@ -5057,6 +5186,18 @@ fn worker_main(
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
+            Command::ChatThreadsListForChannel {
+                workspace_id,
+                channel_id,
+                after,
+                limit,
+                reply,
+            } => {
+                let outcome = LinkedChatStore::new(&mut store)
+                    .list_channel_threads(&workspace_id, &channel_id, after, limit)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
             Command::ChatThreadFindChannelId {
                 workspace_id,
                 thread_id,
@@ -5158,6 +5299,58 @@ fn worker_main(
                         .send_message(&input, &NoFaults)
                         .map_err(RuntimeError::from)
                 };
+                let _ = reply.send(outcome);
+            }
+            Command::ChatDecisionResolve {
+                input,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    LinkedChatStore::new(&mut store)
+                        .resolve_decision(&input, &NoFaults)
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::ChatDecisionsList {
+                workspace_id,
+                thread_id,
+                after,
+                limit,
+                reply,
+            } => {
+                let outcome = LinkedChatStore::new(&mut store)
+                    .list_thread_decisions(&workspace_id, &thread_id, after, limit)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ChatReactionSet {
+                input,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    LinkedChatStore::new(&mut store)
+                        .set_reaction(&input, &NoFaults)
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::ChatReactionsList {
+                workspace_id,
+                thread_id,
+                after,
+                limit,
+                reply,
+            } => {
+                let outcome = LinkedChatStore::new(&mut store)
+                    .list_reactions(&workspace_id, &thread_id, after, limit)
+                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::ChatMessagesList {

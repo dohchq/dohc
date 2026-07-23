@@ -103,6 +103,242 @@ async fn call_with_idempotency(
         .result
 }
 
+async fn call_error_with_idempotency(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: &mut u64,
+    method: &str,
+    idempotency_key: &str,
+    params: Value,
+) -> dohc_engine_protocol::error::WireError {
+    *id += 1;
+    let mut request = request(*id, method, Some(handle.clone()), params);
+    request.idempotency_key = Some(idempotency_key.to_owned());
+    transport
+        .call(RequestContext::unbounded(), request)
+        .await
+        .unwrap_err()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_reactions_decisions_and_personal_feed_hydration() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-round3").await;
+    let mut id = 10;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.channels.create",
+        json!({
+            "channelId": "channel",
+            "name": "General",
+            "kind": "channel",
+            "nowMs": 10,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel",
+            "threadId": "thread",
+            "messageId": "decision",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "authorUserId": "ada",
+            "body": "Choose",
+            "needsDecision": true,
+            "nowMs": 20,
+        }),
+    )
+    .await;
+    let decisions = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.decisions.listForThread",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    // MUTATION: omitting needsDecision from the strict DTO/domain input -> the opening decision is absent over DOP1.
+    assert_eq!(decisions["decisions"][0]["state"], json!("open"));
+
+    let resolved = call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.decisions.resolve",
+        "resolve",
+        json!({
+            "threadId": "thread",
+            "messageId": "decision",
+            "resolvedByMessageId": "not-present-yet",
+            "nowMs": 30,
+        }),
+    )
+    .await;
+    // MUTATION: requiring the resolver row to exist -> a valid head-check-free resolver is rejected.
+    assert_eq!(resolved["resolvedByMessageId"], json!("not-present-yet"));
+    let malformed = call_error_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.decisions.resolve",
+        "malformed",
+        json!({
+            "threadId": "thread",
+            "messageId": "decision",
+            "resolvedByMessageId": "",
+            "nowMs": 31,
+        }),
+    )
+    .await;
+    // MUTATION: mapping malformed resolver input to state-corrupt -> wire code becomes INTERNAL.
+    assert_eq!(malformed.code, ErrorCode::InvalidParams);
+    assert_eq!(malformed.message, "invalid-message-body");
+
+    let reaction = call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.set",
+        "reaction",
+        json!({
+            "threadId": "thread",
+            "messageId": "decision",
+            "emoji": "👍",
+            "author": {
+                "authorId": "ada",
+                "kind": "human",
+                "displayName": "Ada",
+            },
+            "state": "added",
+            "nowMs": 40,
+        }),
+    )
+    .await;
+    assert_eq!(reaction["emoji"], json!("👍"));
+    let invalid_state = call_error_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.set",
+        "bad-state",
+        json!({
+            "threadId": "thread",
+            "messageId": "decision",
+            "emoji": "👍",
+            "author": {
+                "authorId": "ada",
+                "kind": "human",
+                "displayName": "Ada",
+            },
+            "state": "unknown",
+        }),
+    )
+    .await;
+    // MUTATION: routing an unknown wire literal through persisted-row decoding -> caller input is mislabeled INTERNAL.
+    assert_eq!(invalid_state.code, ErrorCode::InvalidParams);
+    assert_eq!(invalid_state.message, "invalid-parameters");
+    let reactions = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.reactions.list",
+        json!({ "threadId": "thread" }),
+    )
+    .await;
+    assert_eq!(
+        reactions["reactions"][0]["reactionId"],
+        reaction["reactionId"]
+    );
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.follows.set",
+        json!({
+            "ownerUserId": "viewer",
+            "targetKind": "thread",
+            "targetId": "thread",
+            "state": "following",
+            "nowMs": 41,
+        }),
+    )
+    .await;
+    let feed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.feed.listPersonal",
+        json!({ "ownerUserId": "viewer", "limit": 10 }),
+    )
+    .await;
+    // MUTATION: serializing the parked `reactions: []` placeholder -> active feed reactions vanish at the wire boundary.
+    assert_eq!(feed["items"][0]["reactions"][0]["emoji"], json!("👍"));
+
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.start",
+        json!({
+            "channelId": "channel",
+            "threadId": "newer-thread",
+            "messageId": "newer-opening",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Newer",
+            "nowMs": 50,
+        }),
+    )
+    .await;
+    let first_page = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({ "channelId": "channel", "pageLimit": 1 }),
+    )
+    .await;
+    assert_eq!(
+        first_page["threads"][0]["thread"]["id"],
+        json!("newer-thread")
+    );
+    let next_cursor = first_page["nextCursor"]
+        .as_str()
+        .expect("channel summary cursor")
+        .to_owned();
+    let second_page = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.listForChannel",
+        json!({
+            "channelId": "channel",
+            "pageLimit": 1,
+            "cursor": next_cursor,
+        }),
+    )
+    .await;
+    let summary = &second_page["threads"][0];
+    // MUTATION: shipping a prefix-only channel list or omitting the full aggregate -> older page/full opening reaction is unavailable.
+    assert_eq!(summary["thread"]["id"], json!("thread"));
+    assert_eq!(summary["messageCount"], json!(1));
+    assert_eq!(summary["openDecisionCount"], json!(0));
+    assert_eq!(
+        summary["openingMessage"]["reactions"][0]["emoji"],
+        json!("👍")
+    );
+    assert!(second_page["nextCursor"].is_null());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rpc_b2_attachment_and_file_thread_contracts() {
     let scratch = ScratchDir::new().expect("scratch");

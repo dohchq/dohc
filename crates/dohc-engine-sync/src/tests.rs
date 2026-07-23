@@ -38,6 +38,235 @@ fn insert_probe(tx: &rusqlite::Transaction<'_>, op: &ReplicationEnvelope) -> Res
     Ok(())
 }
 
+fn reaction_payload(state: &str, emoji: &str, at_ms: i64, author_id: &str) -> serde_json::Value {
+    json!({
+        "reactionId": format!("reaction-{author_id}"),
+        "messageId": "message",
+        "threadId": "thread",
+        "emoji": emoji,
+        "authorId": author_id,
+        "authorKind": "human",
+        "authorDisplayName": author_id,
+        "atMs": at_ms,
+        "state": state,
+    })
+}
+
+fn decision_payload(state: &str, at_ms: i64, resolver: Option<&str>) -> serde_json::Value {
+    let mut payload = json!({
+        "threadId": "thread",
+        "messageId": "message",
+        "state": state,
+        "atMs": at_ms,
+    });
+    if let Some(resolver) = resolver {
+        payload["resolvedByMessageId"] = json!(resolver);
+    }
+    payload
+}
+
+fn reaction_winner(engine: &EngineStore) -> (String, i64, String, i64) {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state, at_ms, origin_id, origin_seq FROM chat_reactions \
+                 WHERE workspace_id = 'ws' AND message_id = 'message'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("reaction winner")
+}
+
+fn decision_winner(engine: &EngineStore) -> (String, i64, String, i64) {
+    engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state, at_ms, origin_id, origin_seq FROM chat_decisions \
+                 WHERE workspace_id = 'ws' AND message_id = 'message'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("decision winner")
+}
+
+#[test]
+fn decision_lww_is_permutation_convergent_and_resolved_wins_ties() {
+    let ops = [
+        envelope(
+            "alpha",
+            0,
+            "chat.decision.set",
+            decision_payload("open", 100, None),
+        ),
+        envelope(
+            "beta",
+            0,
+            "chat.decision.set",
+            decision_payload("resolved", 100, Some("resolver")),
+        ),
+        envelope(
+            "omega",
+            0,
+            "chat.decision.set",
+            decision_payload("open", 100, None),
+        ),
+    ];
+    let permutations = [
+        [0usize, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let mut winners = Vec::new();
+    for order in permutations {
+        let (_scratch, _path, mut engine) = store();
+        for index in order {
+            apply_chat_envelope(&mut engine, &ops[index], &NoFaults).expect("apply");
+        }
+        winners.push(decision_winner(&engine));
+    }
+    // MUTATION: using arrival order or origin before resolvedRank -> equal-time peers disagree or an open cell beats resolved.
+    assert!(winners.iter().all(|winner| winner == &winners[0]));
+    assert_eq!(winners[0].0, "resolved");
+    assert_eq!(winners[0].2, "beta");
+}
+
+#[test]
+fn reaction_lww_remove_wins_equal_time_and_origin_breaks_remaining_ties() {
+    let (_scratch, _path, mut engine) = store();
+    let added = envelope(
+        "omega",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "👍", 100, "Ada"),
+    );
+    let removed = envelope(
+        "alpha",
+        0,
+        "chat.reaction.set",
+        reaction_payload("removed", "👍", 100, "Ada"),
+    );
+    apply_chat_envelope(&mut engine, &added, &NoFaults).expect("added");
+    apply_chat_envelope(&mut engine, &removed, &NoFaults).expect("removed");
+    // MUTATION: ranking origin before state -> lexically larger added beats an equal-time remove.
+    assert_eq!(reaction_winner(&engine).0, "removed");
+
+    let low = envelope(
+        "beta",
+        0,
+        "chat.reaction.set",
+        reaction_payload("removed", "🎉", 200, "Bob"),
+    );
+    let high = envelope(
+        "zeta",
+        0,
+        "chat.reaction.set",
+        reaction_payload("removed", "🎉", 200, "Bob"),
+    );
+    apply_chat_envelope(&mut engine, &high, &NoFaults).expect("high");
+    apply_chat_envelope(&mut engine, &low, &NoFaults).expect("low");
+    let winner: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT origin_id FROM chat_reactions WHERE emoji = '🎉'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("winner");
+    // MUTATION: omitting the origin tie-break -> equal-time/equal-state application becomes arrival-dependent.
+    assert_eq!(winner, "zeta");
+}
+
+#[test]
+fn reaction_lww_is_permutation_convergent() {
+    let ops = [
+        envelope(
+            "alpha",
+            0,
+            "chat.reaction.set",
+            reaction_payload("added", "👍", 100, "Ada"),
+        ),
+        envelope(
+            "beta",
+            0,
+            "chat.reaction.set",
+            reaction_payload("removed", "👍", 100, "Ada"),
+        ),
+        envelope(
+            "omega",
+            0,
+            "chat.reaction.set",
+            reaction_payload("added", "👍", 101, "Ada"),
+        ),
+    ];
+    let permutations = [
+        [0usize, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let mut winners = Vec::new();
+    for order in permutations {
+        let (_scratch, _path, mut engine) = store();
+        for index in order {
+            apply_chat_envelope(&mut engine, &ops[index], &NoFaults).expect("apply");
+        }
+        winners.push(reaction_winner(&engine));
+    }
+    // MUTATION: replacing the total-order max with last-writer arrival -> permutations settle to different rows.
+    assert!(winners.iter().all(|winner| winner == &winners[0]));
+    assert_eq!(winners[0], ("added".to_owned(), 101, "omega".to_owned(), 0));
+}
+
+#[test]
+fn reaction_import_preserves_remote_time_verbatim() {
+    let (_scratch, _path, mut engine) = store();
+    let future = envelope(
+        "peer",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "👍", 9_999_999_999, "Ada"),
+    );
+    apply_chat_envelope(&mut engine, &future, &NoFaults).expect("apply");
+    // MUTATION: receiver-clock clamping remote atMs -> identical envelopes store different total-order keys on different peers.
+    assert_eq!(reaction_winner(&engine).1, 9_999_999_999);
+}
+
+#[test]
+fn reaction_import_rejects_non_emoji_graphemes() {
+    for hostile in ["hello", "http://evil.invalid", "👍 nice", "✁"] {
+        let (_scratch, _path, mut engine) = store();
+        let invalid = envelope(
+            "mallory",
+            0,
+            "chat.reaction.set",
+            reaction_payload("added", hostile, 100, "Mallory"),
+        );
+        let result = apply_chat_envelope(&mut engine, &invalid, &NoFaults);
+        // MUTATION: trusting peer-side IPC validation -> arbitrary text lands in the reaction cell key.
+        assert!(matches!(result, Err(SyncError::InvalidInput { .. })));
+    }
+    let (_scratch, _path, mut engine) = store();
+    let flag = envelope(
+        "peer",
+        0,
+        "chat.reaction.set",
+        reaction_payload("added", "🇺🇸", 100, "Ada"),
+    );
+    // MUTATION: validating one scalar instead of one emoji grapheme -> a valid regional-indicator flag is rejected.
+    assert!(apply_chat_envelope(&mut engine, &flag, &NoFaults).is_ok());
+}
+
 struct AlwaysLive;
 
 impl LeaseProbe for AlwaysLive {
