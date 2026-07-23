@@ -1149,19 +1149,25 @@ fn imported_message_append_refuses_each_oracle_invalid_field() {
 }
 
 #[test]
-fn imported_message_over_64k_refuses_before_mentions_or_persistence() {
+fn imported_message_append_applies_verbatim_without_a_body_cap() {
+    // Oracle parity (linkedChatStore.ts:4442-4464): the replicated
+    // chat.message.append validator checks body only for `length === 0` — it
+    // does NOT cap body size (the 64 KiB cap lives solely in the local-mint
+    // normalizeBody). Adding an import-path cap here would STALL an origin's
+    // ack stream on a body the oracle accepts. Oversized bodies are fronted by
+    // the DOP1 64 KiB per-string wire bound and both engines' mint caps.
     let (_scratch, _path, mut engine) = store();
-    imported_chat_fixture(&mut engine, "oversized-message");
+    imported_chat_fixture(&mut engine, "large-message");
     let operation = envelope(
-        "oversized-message",
+        "large-message",
         3,
         "chat.message.append",
         json!({
-            "messageId": "oversized",
+            "messageId": "large",
             "threadId": "thread-imported",
             "authorKind": "human",
             "authorDisplayName": "Ada",
-            "body": format!("@must-not-index {}", "x".repeat(64 * 1024)),
+            "body": format!("@indexed {}", "x".repeat(64 * 1024)),
             "createdAtMs": 30
         }),
     );
@@ -1170,25 +1176,25 @@ fn imported_message_over_64k_refuses_before_mentions_or_persistence() {
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
                 conn.query_row(
-                    "SELECT COUNT(*) FROM chat_messages WHERE message_id = 'oversized'",
+                    "SELECT COUNT(*) FROM chat_messages WHERE message_id = 'large'",
                     [],
                     |row| row.get(0),
                 )?,
                 conn.query_row(
-                    "SELECT COUNT(*) FROM chat_mentions WHERE message_id = 'oversized'",
+                    "SELECT COUNT(*) FROM chat_mentions WHERE message_id = 'large' AND handle = 'indexed'",
                     [],
                     |row| row.get(0),
                 )?,
             ))
         })
-        .expect("oversized persistence counts");
-    // MUTATION: omit the UTF-8 byte cap, or check it after mention parsing ->
-    // this peer operation persists/indexes and advances the origin.
-    assert!(matches!(result, Err(SyncError::InvalidInput { .. })));
-    assert_eq!((messages, mentions), (0, 0));
+        .expect("large persistence counts");
+    // MUTATION: re-add an import-path body cap -> this oracle-legal op refuses
+    // and wedges the origin's ack stream instead of applying+indexing.
+    assert!(matches!(result, Ok(ApplyOutcome::Applied(()))));
+    assert_eq!((messages, mentions), (1, 1));
     assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "oversized-message").expect("ack"),
-        2
+        read_replication_acked_seq(&engine, "ws", "large-message").expect("ack"),
+        3
     );
 }
 

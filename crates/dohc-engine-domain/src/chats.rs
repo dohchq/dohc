@@ -4326,8 +4326,6 @@ impl<'a> LinkedChatStore<'a> {
                 return Ok::<_, DomainError>(current);
             };
             let requested = (up_to_created_at_ms, up_to_message_id.clone());
-            let clamped_to_negative_latest =
-                up_to_created_at_ms >= 0 && requested > latest && latest.0 < 0;
             let target = if requested > latest {
                 latest
             } else {
@@ -4337,8 +4335,12 @@ impl<'a> LinkedChatStore<'a> {
                 current.last_read_created_at_ms,
                 current.last_read_message_id.clone(),
             );
-            let has_current = current.revision != 0 || !current.last_read_message_id.is_empty();
-            if target <= current_coordinate && (has_current || !clamped_to_negative_latest) {
+            // Oracle parity (linkedChatStore.ts:3101-3109): no-op when the
+            // clamped target is at or below the current cursor — a fresh cursor
+            // is the (0, "") floor, so a negative-timestamp latest leaves the
+            // thread unread-but-unmarkable exactly like the oracle (the daemon
+            // does NOT advance onto a negative coordinate the oracle refuses).
+            if target <= current_coordinate {
                 return Ok(current);
             }
             let revision = current

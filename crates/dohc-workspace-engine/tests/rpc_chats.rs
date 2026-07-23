@@ -985,11 +985,15 @@ async fn synced_negative_agent_read_cursor_round_trips_over_the_wire() {
         }),
     )
     .await;
-    // MUTATION: compare the clamped negative coordinate to the synthetic zero
-    // cursor, or reject signed coordinates in the read/serialization chain.
-    assert_eq!(state["lastReadCreatedAtMs"], json!(-10));
-    assert_eq!(state["lastReadMessageId"], json!("negative-message"));
-    assert_eq!(state["revision"], json!(1));
+    // Oracle parity (linkedChatStore.ts:3101-3109): the clamped target is the
+    // negative latest, which sits below the fresh (0, "") cursor floor, so the
+    // mark is a NO-OP — the thread stays unread-but-unmarkable exactly like the
+    // oracle. The read/serialization chain must still accept the signed
+    // coordinate the daemon reads back (no state-corrupt).
+    // MUTATION: advance onto the negative coordinate -> the no-op assertions fail.
+    assert_eq!(state["lastReadCreatedAtMs"], json!(0));
+    assert_eq!(state["lastReadMessageId"], json!(""));
+    assert_eq!(state["revision"], json!(0));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
