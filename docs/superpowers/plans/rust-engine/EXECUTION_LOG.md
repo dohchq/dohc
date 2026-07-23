@@ -2105,3 +2105,58 @@ next round caught. The compounding lesson became structure:
   (blob-chunk egress + the secret-aware disk executor + slash-spelling
   ruling), GATE6 packet, macOS evidence, R15 rehearsal + go/no-go (ICE
   STOP).
+
+
+## 2026-07-23 — RPC-B2 merged (#225): the production chat follow-up surface
+
+- MERGED 22:19Z as 4513bf9c (squash). The production-called chat reads +
+  the reactions/decisions/mentions/follows/bookmarks/dispatch domain
+  work over the daemon chats surface: file-linked threads/projection,
+  thread attachments, channel wire-id verify, plus the LinkedChatStore
+  parity for reactions, decisions, mentions, follows, bookmarks, and the
+  desktop dispatch store — 40 behaviors.
+- THE REVIEW ARC: fable-5 build + review rounds (through 48becef1), then
+  the fable-5 credit exhaustion mid-review; the remainder (from 4260dd47)
+  was Opus-4.8-orchestrated with codex (gpt-5.6-sol) still doing the
+  implementation, all logged for fable-5 retro-review. 8 codex rounds, 6
+  CodeRabbit rounds, 5 local-claude rounds, and 1 fresh-context opus-4.8
+  adversarial pass to quiet. THE THROUGHLINE — cross-engine
+  representability: the apply must bound any field a typed client decoder
+  or read mapper bounds, because values beyond the JS-safe range cannot
+  round-trip the DOP1 wire. Standouts:
+  - Every imported cell/structural timestamp (reaction/decision/feed-read
+    at_ms, attachment/message/channel createdAtMs, follow at_ms) bounded
+    on apply with is_persisted_safe_integer — stricter than the oracle's
+    isFinite-only apply, matching the wire. Recorded as a CROSS-ENGINE
+    DELTA.
+  - Linked-thread timestamp REJECT-ON-APPLY (a half-linked
+    chat.thread.create is refused), deliberately stricter than the
+    oracle's accept-then-brick — the one reversal of the arc (declined in
+    r7, reversed in r6/CR after both bots pushed on the inconsistency).
+  - Local mints kept replicable: control-char linked objectIds refused;
+    channel-thread start guards the stored channelSlug/channelWireId with
+    bounds byte-identical to the apply validator; follow at_ms bounded.
+  - Loopback fidelity: null-proto decoder maps (proto-pollution);
+    normalized per-method idempotency fingerprints omitting now_ms;
+    message body stored via the daemon's normalize_body (CRLF->LF +
+    trimEnd + 64 KiB cap) instead of NFC-trim-both.
+  - Mention-backfill completion marker in engine_requests (kind
+    chat-mention-backfill), committing atomically with the last batch.
+- Declines that survived (all bug-for-bug oracle parity, adversarial-only,
+  moot post-R15, recorded in RPC_GAP): attachment identity (peer
+  attachmentId trusted when objectId absent) + attachment objectId control
+  chars on replicated apply; bookmark requeue timestamps carrying safe
+  negatives verbatim; the local set_follow/set_feed_read now_ms honesty
+  assumption. The distinguishing criterion held throughout: REJECT only
+  when the op is unrenderable on both engines; otherwise MATCH the oracle.
+- Every supervision-grade guard carries a named MUTATION test; the
+  orchestrator mutation-verified the critical ones (control-char objectId
+  refusal, channel-identity guard, follow at_ms bound, loopback body
+  normalization) by restoring each bug and watching the named test fail.
+  Full-workspace gate green each pushed head (fmt/clippy/build/test/
+  cargo-deny). NOTE: the review triage, decline rulings, and commit
+  authorship from 4260dd47 onward were Opus-4.8 (documented for fable-5
+  retro-review per the standing model rule).
+- REMAINING toward GATE6: RPC-D2 (blob-chunk egress producer + the
+  secret-aware disk executor + secret slash-spelling ruling), GATE6
+  packet, macOS evidence, R15 rehearsal + go/no-go (ICE STOP).
