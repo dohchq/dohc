@@ -994,6 +994,11 @@ fn imported_attachment_rejects_invalid_heading_and_bounds() {
             "path_must_be_normalized",
             json!({"objectId":"object","pathHint":"notes/./file.md"}),
         ),
+        (
+            "heading_anchor_bound",
+            json!({"objectId":"object","headingText":"Heading","headingAnchor":"a".repeat(401),"headingOccurrence":0}),
+        ),
+        ("object_id_bound", json!({"objectId":"o".repeat(201)})),
     ];
     for (case, fields) in cases {
         let (_scratch, _path, mut engine) = store();
