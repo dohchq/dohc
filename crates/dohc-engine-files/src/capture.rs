@@ -22,7 +22,9 @@
 
 use crate::error::FilesError;
 use crate::reconcile::{CaptureOp, IngestReason, ReconcileController, ReconcilePlan};
-use dohc_engine_storage::{FaultInjector, FaultPoint};
+use dohc_engine_storage::FaultInjector;
+#[cfg(feature = "fault-injection")]
+use dohc_engine_storage::FaultPoint;
 
 /// A contained per-path domain apply failure. It is deliberately content-free.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]

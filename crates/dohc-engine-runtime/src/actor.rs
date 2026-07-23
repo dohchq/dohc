@@ -28,30 +28,42 @@
 
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
-use crate::search::{SearchResult, search_workspace};
+use crate::search::{
+    SearchResult, delete_file_search_index, ensure_search_index_for_version, search_workspace,
+    upsert_file_search_index,
+};
 use dohc_engine_collab::{
     AppendOutcome, CloseOutcome, ContentKind, DocKey, Projection, Regime, Ydoc,
 };
 use dohc_engine_crypto::SecretDataKey;
 use dohc_engine_domain::{
-    BinaryHead, BinaryHeadMeta, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
-    CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult, CaptureSecret,
-    CaptureSecretRetire, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
-    ChatChannelSummary, ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMessage, ChatMessagePage,
-    ChatThread, ChatThreadReadState, DispatchClaim, InbandBinary, InbandSecret, InbandText,
-    LinkedChatStore, ListMomentsQuery, MomentPage, MomentRecord, ResolveTextConflict,
-    ResolveTextConflictResult, SaveBookmark, SecretFileStat, SecretFileStore, SecretMomentRecord,
-    SecretWriteResult, SendMessage, SetFollow, SnapshotMetadata, SnapshotView, StartChannelThread,
-    TextConflict, TextSnapshot, VersionRecord, VersionedTextStore, WriteResult, WriteText,
-    capture_manifest_seed, capture_secret_retire, derive_capture_object_id, enqueue_write,
-    has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
-    list_secret_files_keyless_page, secret_file_len_keyless, select_snapshot_by_path_in_tx,
-    write_projected_text_in_tx,
+    BinaryHead, BinaryHeadMeta, BinaryWriteResult, CaptureIngest, CaptureIngestBinary,
+    CaptureIngestBinaryResult, CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult,
+    CaptureSecret, CaptureSecretRetire, ChatBookmark, ChatBookmarkTransition, ChatChannel,
+    ChatChannelKind, ChatChannelSummary, ChatFeedPage, ChatFeedReadState, ChatFollow, ChatMessage,
+    ChatMessagePage, ChatThread, ChatThreadReadState, CompareTextFileVersions, CreateNamedVersion,
+    DeleteResult, DeleteTextFile, DispatchClaim, DomainError, InbandBinary, InbandSecret,
+    InbandText, LinkedChatStore, ListMomentsQuery, MergeTextFileFromVersion, MergeTextFileResult,
+    MomentPage, MomentRecord, RenameResult, RenameTextFile, ResolveTextConflict,
+    ResolveTextConflictResult, RollbackTextFileMutation, SaveBookmark, SecretComparePage,
+    SecretDelete, SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord,
+    SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage, SetFollow, SnapshotMetadata,
+    SnapshotView, StartChannelThread, TextConflict, TextSnapshot, VersionFileChangePage,
+    VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult,
+    WriteText, apply_secret_file_from_version, binary_delete_job_id, binary_rename_delete_job_id,
+    binary_rename_write_job_id, capture_manifest_seed, capture_secret_retire,
+    compare_secret_files_page_keyless, delete_secret_file_keyless, derive_capture_object_id,
+    enqueue_binary_delete, enqueue_binary_rename, enqueue_write, fork_version_keyless,
+    get_secret_moment_keyless, has_secret_state, insert_text_conflict_if_absent,
+    list_secret_files_keyless, list_secret_files_keyless_page, list_secret_moments_page_keyless,
+    restore_secret_file_verbatim, secret_file_len_keyless, select_snapshot_by_path_in_tx,
+    validate_addressable_plaintext_path, write_binary_in_tx, write_projected_text_in_tx,
+    write_text_in_tx,
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, StdBackoff, StdReplacer, materialize_one};
 use dohc_engine_storage::{
-    CompoundWrite, Document, EngineStore, FaultInjector, NoFaults, Preimage, StorageError,
-    TxnOutcome, WriteOutcome,
+    CompoundWrite, Document, EngineStore, FaultInjector, JobStatus, MaterializationJob, NoFaults,
+    Preimage, StorageError, TxnOutcome, WriteOutcome,
 };
 use dohc_engine_sync::{
     ApplyOutcome, ConflictApplyResult, ReplicationEnvelope, apply_conflict_envelope,
@@ -70,6 +82,38 @@ use tokio_util::sync::CancellationToken;
 /// Bound on the actor's command queue. Backpressure blocks the sender rather
 /// than growing an unbounded queue (`plan §Rust policy`: bounded everything).
 const COMMAND_QUEUE_CAPACITY: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostCommitMaterializeOutcome {
+    Applied,
+    Skipped,
+    Conflict,
+    Superseded,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryWriteExecutionResult {
+    pub write: BinaryWriteResult,
+    pub materialized: bool,
+    pub materialize_outcome: PostCommitMaterializeOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeExecutionResult {
+    pub merge: MergeTextFileResult,
+    pub materialize_enqueued: bool,
+    pub materialized: bool,
+    pub materialize_outcome: PostCommitMaterializeOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RollbackExecutionResult {
+    pub deduped: bool,
+    pub materialize_enqueued: bool,
+    pub materialized: bool,
+    pub materialize_outcome: PostCommitMaterializeOutcome,
+}
 
 /// Physical channel capacity: the data bound plus ONE slot reserved at spawn
 /// for the `Close` command (see [`WorkspaceActor::close`]). Reserving keeps the
@@ -197,9 +241,62 @@ enum Command {
     },
     VersionedTextWrite {
         input: WriteText,
+        root_dir: Option<PathBuf>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<WriteResult, RuntimeError>>,
+    },
+    VersionedBinaryWrite {
+        input: WriteBinary,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<BinaryWriteExecutionResult, RuntimeError>>,
+    },
+    VersionedTextRename {
+        input: RenameTextFile,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<RenameResult, RuntimeError>>,
+    },
+    VersionedTextDelete {
+        input: DeleteTextFile,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<DeleteResult, RuntimeError>>,
+    },
+    VersionedTextRollback {
+        input: RollbackTextFileMutation,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<RollbackExecutionResult, RuntimeError>>,
+    },
+    VersionedTextCompare {
+        input: CompareTextFileVersions,
+        reply: oneshot::Sender<Result<VersionedTextComparison, RuntimeError>>,
+    },
+    VersionedTextMerge {
+        input: MergeTextFileFromVersion,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<MergeExecutionResult, RuntimeError>>,
+    },
+    CompareVersionFilesPage {
+        workspace_id: String,
+        source_version_id: String,
+        target_version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+        reply: oneshot::Sender<Result<VersionFileChangePage, RuntimeError>>,
     },
     CaptureIngest {
         input: CaptureIngest,
@@ -244,6 +341,12 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<TextSnapshot>, RuntimeError>>,
     },
+    ResolvePathObject {
+        workspace_id: String,
+        version_id: String,
+        path: String,
+        reply: oneshot::Sender<Result<Option<String>, RuntimeError>>,
+    },
     ListVersions {
         workspace_id: String,
         reply: oneshot::Sender<Result<Vec<VersionRecord>, RuntimeError>>,
@@ -281,6 +384,11 @@ enum Command {
         path: String,
         reply: oneshot::Sender<Result<Option<BinaryHeadMeta>, RuntimeError>>,
     },
+    ReadBinaryBlob {
+        workspace_id: String,
+        sha256: String,
+        reply: oneshot::Sender<Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError>>,
+    },
     ReadTextInband {
         workspace_id: String,
         version_id: String,
@@ -302,6 +410,75 @@ enum Command {
         key: Box<SecretDataKey>,
         cap: usize,
         reply: oneshot::Sender<Result<Option<InbandSecret>, RuntimeError>>,
+    },
+    WriteSecretFile {
+        input: Box<SecretWrite>,
+        key: Box<SecretDataKey>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<SecretWriteResult, RuntimeError>>,
+    },
+    DeleteSecretFile {
+        input: SecretDelete,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Option<SecretMomentRecord>, RuntimeError>>,
+    },
+    ForkSecretVersion {
+        workspace_id: String,
+        from_version_id: String,
+        to_version_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<(), RuntimeError>>,
+    },
+    ListSecretMoments {
+        workspace_id: String,
+        version_id: Option<String>,
+        path: Option<String>,
+        before_moment_order: Option<i64>,
+        limit: usize,
+        reply: oneshot::Sender<Result<SecretMomentPage, RuntimeError>>,
+    },
+    GetSecretMoment {
+        workspace_id: String,
+        moment_id: String,
+        reply: oneshot::Sender<Result<Option<SecretMomentRecord>, RuntimeError>>,
+    },
+    CompareSecretFiles {
+        workspace_id: String,
+        source_version_id: String,
+        target_version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+        key: Option<Box<SecretDataKey>>,
+        reply: oneshot::Sender<Result<SecretComparePage, RuntimeError>>,
+    },
+    ApplySecretFile {
+        workspace_id: String,
+        path: String,
+        from_version_id: String,
+        to_version_id: String,
+        moment_id: String,
+        metadata_origin: String,
+        metadata_summary: Option<String>,
+        metadata_correlation_id: Option<String>,
+        now_ms: i64,
+        key: Box<SecretDataKey>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<SecretWriteResult, RuntimeError>>,
+    },
+    RestoreSecretFile {
+        workspace_id: String,
+        path: String,
+        before_moment_id: String,
+        moment_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<SecretRestoreResult, RuntimeError>>,
     },
     ListSecretFiles {
         workspace_id: String,
@@ -331,6 +508,30 @@ enum Command {
     ActiveVersionId {
         workspace_id: String,
         reply: oneshot::Sender<Result<String, RuntimeError>>,
+    },
+    ActiveVersion {
+        workspace_id: String,
+        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
+    },
+    EnsureMainVersion {
+        workspace_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
+    },
+    SetActiveVersion {
+        workspace_id: String,
+        version_id: String,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
+    },
+    CreateNamedVersion {
+        input: CreateNamedVersion,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
     },
     CaptureManifestSeed {
         workspace_id: String,
@@ -434,6 +635,15 @@ enum Command {
         now_ms: i64,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Vec<SearchResult>, RuntimeError>>,
+    },
+    EnsureSearchIndex {
+        root_dir: PathBuf,
+        workspace_id: String,
+        version_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<(), RuntimeError>>,
     },
     ChatChannelCreate {
         workspace_id: String,
@@ -1080,8 +1290,183 @@ impl ActorHandle {
         self.tx
             .send(Command::VersionedTextWrite {
                 input,
+                root_dir: None,
                 faults,
                 token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Execute an RPC text write with its FTS row in the same transaction.
+    pub async fn versioned_text_write_indexed(
+        &self,
+        input: WriteText,
+        root_dir: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<WriteResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedTextWrite {
+                input,
+                root_dir: Some(root_dir),
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    /// Execute, index, and materialize a caller-originated binary write on the
+    /// actor's sole writer thread.
+    pub async fn versioned_binary_write(
+        &self,
+        input: WriteBinary,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<BinaryWriteExecutionResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedBinaryWrite {
+                input,
+                root_dir,
+                self_writes,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn versioned_text_rename(
+        &self,
+        input: RenameTextFile,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<RenameResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedTextRename {
+                input,
+                root_dir,
+                self_writes,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn versioned_text_delete(
+        &self,
+        input: DeleteTextFile,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<DeleteResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedTextDelete {
+                input,
+                root_dir,
+                self_writes,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn versioned_text_rollback(
+        &self,
+        input: RollbackTextFileMutation,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<RollbackExecutionResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedTextRollback {
+                input,
+                root_dir,
+                self_writes,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn versioned_text_compare(
+        &self,
+        input: CompareTextFileVersions,
+    ) -> Result<VersionedTextComparison, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedTextCompare { input, reply })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn versioned_text_merge(
+        &self,
+        input: MergeTextFileFromVersion,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<MergeExecutionResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::VersionedTextMerge {
+                input,
+                root_dir,
+                self_writes,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn compare_version_files_page(
+        &self,
+        workspace_id: String,
+        source_version_id: String,
+        target_version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+    ) -> Result<VersionFileChangePage, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CompareVersionFilesPage {
+                workspace_id,
+                source_version_id,
+                target_version_id,
+                after_path,
+                limit,
                 reply,
             })
             .await
@@ -1254,6 +1639,23 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    pub async fn read_binary_blob(
+        &self,
+        workspace_id: String,
+        sha256: String,
+    ) -> Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReadBinaryBlob {
+                workspace_id,
+                sha256,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Text head with the body hydrated only under `cap` — one actor turn.
     pub async fn read_text_inband(
         &self,
@@ -1316,6 +1718,202 @@ impl ActorHandle {
                 path,
                 key: Box::new(key),
                 cap,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn write_secret_file(
+        &self,
+        input: SecretWrite,
+        key: SecretDataKey,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<SecretWriteResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::WriteSecretFile {
+                input: Box::new(input),
+                key: Box::new(key),
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn delete_secret_file(
+        &self,
+        input: SecretDelete,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::DeleteSecretFile {
+                input,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn fork_secret_version(
+        &self,
+        workspace_id: String,
+        from_version_id: String,
+        to_version_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ForkSecretVersion {
+                workspace_id,
+                from_version_id,
+                to_version_id,
+                now_ms,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn list_secret_moments(
+        &self,
+        workspace_id: String,
+        version_id: Option<String>,
+        path: Option<String>,
+        before_moment_order: Option<i64>,
+        limit: usize,
+    ) -> Result<SecretMomentPage, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ListSecretMoments {
+                workspace_id,
+                version_id,
+                path,
+                before_moment_order,
+                limit,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn get_secret_moment(
+        &self,
+        workspace_id: String,
+        moment_id: String,
+    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::GetSecretMoment {
+                workspace_id,
+                moment_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn compare_secret_files(
+        &self,
+        workspace_id: String,
+        source_version_id: String,
+        target_version_id: String,
+        after_path: Option<String>,
+        limit: usize,
+        key: Option<SecretDataKey>,
+    ) -> Result<SecretComparePage, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CompareSecretFiles {
+                workspace_id,
+                source_version_id,
+                target_version_id,
+                after_path,
+                limit,
+                key: key.map(Box::new),
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn apply_secret_file(
+        &self,
+        workspace_id: String,
+        path: String,
+        from_version_id: String,
+        to_version_id: String,
+        moment_id: String,
+        metadata_origin: String,
+        metadata_summary: Option<String>,
+        metadata_correlation_id: Option<String>,
+        now_ms: i64,
+        key: SecretDataKey,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<SecretWriteResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ApplySecretFile {
+                workspace_id,
+                path,
+                from_version_id,
+                to_version_id,
+                moment_id,
+                metadata_origin,
+                metadata_summary,
+                metadata_correlation_id,
+                now_ms,
+                key: Box::new(key),
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn restore_secret_file(
+        &self,
+        workspace_id: String,
+        path: String,
+        before_moment_id: String,
+        moment_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<SecretRestoreResult, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::RestoreSecretFile {
+                workspace_id,
+                path,
+                before_moment_id,
+                moment_id,
+                now_ms,
+                faults,
+                token,
                 reply,
             })
             .await
@@ -1421,6 +2019,82 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    pub async fn active_version(
+        &self,
+        workspace_id: String,
+    ) -> Result<VersionRecord, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ActiveVersion {
+                workspace_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn ensure_main_version(
+        &self,
+        workspace_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<VersionRecord, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::EnsureMainVersion {
+                workspace_id,
+                now_ms,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn set_active_version(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<VersionRecord, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::SetActiveVersion {
+                workspace_id,
+                version_id,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn create_named_version(
+        &self,
+        input: CreateNamedVersion,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<VersionRecord, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::CreateNamedVersion {
+                input,
+                faults,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Every captured path with its content identity, for seeding a fresh
     /// files-layer manifest on workspace (re)open (deleted-while-closed
     /// files must retire against the seed, never survive an empty baseline).
@@ -1517,6 +2191,25 @@ impl ActorHandle {
                 version_id,
                 path,
                 token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn resolve_path_object(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        path: String,
+    ) -> Result<Option<String>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ResolvePathObject {
+                workspace_id,
+                version_id,
+                path,
                 reply,
             })
             .await
@@ -1802,6 +2495,31 @@ impl ActorHandle {
                 query,
                 limit,
                 now_ms,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn ensure_search_index(
+        &self,
+        root_dir: PathBuf,
+        workspace_id: String,
+        version_id: String,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
+    ) -> Result<(), RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::EnsureSearchIndex {
+                root_dir,
+                workspace_id,
+                version_id,
+                now_ms,
+                faults,
                 token,
                 reply,
             })
@@ -2580,12 +3298,133 @@ fn worker_main(
             }
             Command::VersionedTextWrite {
                 input,
+                root_dir,
                 faults,
                 token,
                 reply,
             } => {
-                let outcome =
-                    versioned_text_write_on_store(&mut store, &input, faults.as_ref(), &token);
+                let outcome = versioned_text_write_on_store(
+                    &mut store,
+                    &input,
+                    root_dir.as_deref(),
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::VersionedBinaryWrite {
+                input,
+                root_dir,
+                self_writes,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = versioned_binary_write_on_store(
+                    &mut store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::VersionedTextRename {
+                input,
+                root_dir,
+                self_writes,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = versioned_text_rename_on_store(
+                    &mut store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::VersionedTextDelete {
+                input,
+                root_dir,
+                self_writes,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = versioned_text_delete_on_store(
+                    &mut store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::VersionedTextRollback {
+                input,
+                root_dir,
+                self_writes,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = versioned_text_rollback_on_store(
+                    &mut store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::VersionedTextCompare { input, reply } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .compare_text_file_versions(&input)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::VersionedTextMerge {
+                input,
+                root_dir,
+                self_writes,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = versioned_text_merge_on_store(
+                    &mut store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = reply.send(outcome);
+            }
+            Command::CompareVersionFilesPage {
+                workspace_id,
+                source_version_id,
+                target_version_id,
+                after_path,
+                limit,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .compare_version_files_page(
+                        &workspace_id,
+                        &source_version_id,
+                        &target_version_id,
+                        after_path.as_deref(),
+                        limit,
+                    )
+                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::CaptureIngest {
@@ -2710,6 +3549,16 @@ fn worker_main(
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
+            Command::ReadBinaryBlob {
+                workspace_id,
+                sha256,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .read_binary_blob(&workspace_id, &sha256)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
             Command::ReadTextInband {
                 workspace_id,
                 version_id,
@@ -2745,6 +3594,173 @@ fn worker_main(
                 let outcome = SecretFileStore::new(&mut store, &key)
                     .materialize_secret_file_inband(&workspace_id, &version_id, &path, cap)
                     .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::WriteSecretFile {
+                input,
+                key,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    SecretFileStore::new(&mut store, &key)
+                        .write_secret_file(&input, faults.as_ref())
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::DeleteSecretFile {
+                input,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    delete_secret_file_keyless(&mut store, &input, faults.as_ref())
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::ForkSecretVersion {
+                workspace_id,
+                from_version_id,
+                to_version_id,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    fork_version_keyless(
+                        &mut store,
+                        &workspace_id,
+                        &from_version_id,
+                        &to_version_id,
+                        now_ms,
+                        faults.as_ref(),
+                    )
+                    .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::ListSecretMoments {
+                workspace_id,
+                version_id,
+                path,
+                before_moment_order,
+                limit,
+                reply,
+            } => {
+                let outcome = list_secret_moments_page_keyless(
+                    &store,
+                    &workspace_id,
+                    version_id.as_deref(),
+                    path.as_deref(),
+                    before_moment_order,
+                    limit,
+                )
+                .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::GetSecretMoment {
+                workspace_id,
+                moment_id,
+                reply,
+            } => {
+                let outcome = get_secret_moment_keyless(&store, &workspace_id, &moment_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::CompareSecretFiles {
+                workspace_id,
+                source_version_id,
+                target_version_id,
+                after_path,
+                limit,
+                key,
+                reply,
+            } => {
+                let outcome = compare_secret_files_page_keyless(
+                    &store,
+                    key.as_deref(),
+                    &workspace_id,
+                    &source_version_id,
+                    &target_version_id,
+                    after_path.as_deref(),
+                    limit,
+                )
+                .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ApplySecretFile {
+                workspace_id,
+                path,
+                from_version_id,
+                to_version_id,
+                moment_id,
+                metadata_origin,
+                metadata_summary,
+                metadata_correlation_id,
+                now_ms,
+                key,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    apply_secret_file_from_version(
+                        &mut store,
+                        &key,
+                        &dohc_engine_domain::ApplySecretFileFromVersion {
+                            workspace_id,
+                            path,
+                            from_version_id,
+                            to_version_id,
+                            moment_id,
+                            metadata_origin,
+                            metadata_summary,
+                            metadata_correlation_id,
+                            now_ms,
+                        },
+                        faults.as_ref(),
+                    )
+                    .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::RestoreSecretFile {
+                workspace_id,
+                path,
+                before_moment_id,
+                moment_id,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    restore_secret_file_verbatim(
+                        &mut store,
+                        &workspace_id,
+                        &path,
+                        &before_moment_id,
+                        &moment_id,
+                        now_ms,
+                        faults.as_ref(),
+                    )
+                    .map_err(RuntimeError::from)
+                };
                 let _ = reply.send(outcome);
             }
             Command::ListSecretFiles {
@@ -2813,6 +3829,62 @@ fn worker_main(
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
+            Command::ActiveVersion {
+                workspace_id,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .get_active_version(&workspace_id)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::EnsureMainVersion {
+                workspace_id,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    VersionedTextStore::new(&mut store)
+                        .ensure_main_version(&workspace_id, "main", now_ms, faults.as_ref())
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::SetActiveVersion {
+                workspace_id,
+                version_id,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    VersionedTextStore::new(&mut store)
+                        .set_active_version(&workspace_id, &version_id, faults.as_ref())
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::CreateNamedVersion {
+                input,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    VersionedTextStore::new(&mut store)
+                        .create_named_version(&input, faults.as_ref())
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
             Command::CaptureManifestSeed {
                 workspace_id,
                 version_id,
@@ -2845,6 +3917,17 @@ fn worker_main(
                         .read_text(&workspace_id, &version_id, &path)
                         .map_err(RuntimeError::from)
                 };
+                let _ = reply.send(outcome);
+            }
+            Command::ResolvePathObject {
+                workspace_id,
+                version_id,
+                path,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .object_id_for_path(&workspace_id, &version_id, &path)
+                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::YdocApply {
@@ -2988,6 +4071,17 @@ fn worker_main(
                         // pipeline.
                         if job.job_id.starts_with("secret-mat_") {
                             continue;
+                        }
+                        if let Some(moment_id) =
+                            job.job_id.strip_prefix("binary-rename-1-delete-mat_")
+                        {
+                            let write_job_id = binary_rename_write_job_id(moment_id);
+                            let destination_ready = store
+                                .load_materialization_job(&write_job_id)?
+                                .is_some_and(|write_job| write_job.status == JobStatus::Complete);
+                            if !destination_ready {
+                                continue;
+                            }
                         }
                         match materialize_one(
                             &store,
@@ -3604,6 +4698,33 @@ fn worker_main(
                 };
                 let _ = reply.send(outcome);
             }
+            Command::EnsureSearchIndex {
+                root_dir,
+                workspace_id,
+                version_id,
+                now_ms,
+                faults,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    store
+                        .read_with(|conn| {
+                            ensure_search_index_for_version(
+                                conn,
+                                &root_dir,
+                                &workspace_id,
+                                &version_id,
+                                now_ms,
+                                faults.as_ref(),
+                            )
+                        })
+                        .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
             Command::Close => {
                 // FIFO ordering means every command enqueued before Close has
                 // already been served; there is nothing left to drain.
@@ -3658,6 +4779,24 @@ fn ydoc_marker_has_durable_state(marker: &dohc_engine_collab::Marker) -> bool {
     marker.head_update_seq > 0 || marker.head_snapshot_seq > 0 || marker.base_claimed
 }
 
+fn ensure_mutation_version_on_store(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<(), RuntimeError> {
+    let mut versions = VersionedTextStore::new(store);
+    if versions.get_main_version(workspace_id)?.is_some() {
+        return Ok(());
+    }
+    if version_id != "main" {
+        return Err(DomainError::VersionNotFound.into());
+    }
+    versions.ensure_main_version(workspace_id, "main", now_ms, faults)?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn ydoc_open_state_on_store(
     store: &mut EngineStore,
@@ -3673,21 +4812,18 @@ fn ydoc_open_state_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    let canonical_path = validate_addressable_plaintext_path(path)?;
     // Bootstrap: the first live doc in an EMPTY workspace must be creatable —
     // without this, read_text errors VersionNotFound before the absent-path
     // flow can run (capture normally creates main, but nothing has captured).
-    VersionedTextStore::new(store).ensure_main_version(
-        workspace_id,
-        version_id,
-        now_ms,
-        &NoFaults,
-    )?;
-    let head = VersionedTextStore::new(store).read_text(workspace_id, version_id, path)?;
+    ensure_mutation_version_on_store(store, workspace_id, version_id, now_ms, &NoFaults)?;
+    let head =
+        VersionedTextStore::new(store).read_text(workspace_id, version_id, &canonical_path)?;
     let head_sha = head.as_ref().map(|snapshot| snapshot.blob_sha256.clone());
     let object_id = match head.as_ref() {
         Some(snapshot) => snapshot.object_id.clone(),
         None => {
-            let derived = derive_capture_object_id(workspace_id, version_id, path);
+            let derived = derive_capture_object_id(workspace_id, version_id, &canonical_path);
             // A derived id still LIVE at another alias means this path's
             // former file was renamed away: capture's locked resolution mints
             // an order-disambiguated id for that case, which open-time cannot
@@ -4363,13 +5499,15 @@ fn ydoc_close_session_on_store(
 fn versioned_text_write_on_store(
     store: &mut EngineStore,
     input: &WriteText,
+    root_dir: Option<&std::path::Path>,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<WriteResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store).ensure_main_version(
+    ensure_mutation_version_on_store(
+        store,
         &input.workspace_id,
         &input.version_id,
         input.now_ms,
@@ -4378,9 +5516,540 @@ fn versioned_text_write_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store)
-        .write_text(input, faults)
-        .map_err(RuntimeError::from)
+    let Some(root_dir) = root_dir else {
+        return VersionedTextStore::new(store)
+            .write_text(input, faults)
+            .map_err(RuntimeError::from);
+    };
+    let outcome = store.write_with(faults, |tx| {
+        let result = write_text_in_tx(tx, input).map_err(RuntimeError::from)?;
+        if !result.deduped {
+            upsert_file_search_index(
+                tx,
+                root_dir,
+                &input.workspace_id,
+                &input.version_id,
+                &result.snapshot.object_id,
+                &result.snapshot.path,
+                &result.snapshot.text,
+            )
+            .map_err(RuntimeError::from)?;
+        }
+        Ok::<_, RuntimeError>(result)
+    })?;
+    match outcome {
+        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn versioned_binary_write_on_store(
+    store: &mut EngineStore,
+    input: &WriteBinary,
+    root_dir: &std::path::Path,
+    self_writes: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<BinaryWriteExecutionResult, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    ensure_mutation_version_on_store(
+        store,
+        &input.workspace_id,
+        &input.version_id,
+        input.now_ms,
+        faults,
+    )?;
+    let outcome = store.write_with(faults, |tx| {
+        let result = write_binary_in_tx(tx, input).map_err(RuntimeError::from)?;
+        if !result.deduped {
+            delete_file_search_index(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.object_id,
+            )
+            .map_err(RuntimeError::from)?;
+        }
+        Ok::<_, RuntimeError>(result)
+    })?;
+    let result = match outcome {
+        TxnOutcome::Committed(result) => result,
+        TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
+    };
+    if !result.deduped && !result.materialize_enqueued {
+        // A NON-ACTIVE version write is DB-only. Disk mirrors the active
+        // version, so there is no job to run and no self-write to suppress.
+        return Ok(BinaryWriteExecutionResult {
+            write: result,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
+    }
+
+    // Request-ledger reconstruction returns the ORIGINAL moment. A replay must
+    // probe that moment's durable job, not the caller's newly supplied id: a
+    // transient first materialization can leave the original job pending.
+    let job = match store.load_materialization_job(&result.moment.moment_id) {
+        Ok(Some(job)) => job,
+        Ok(None) if result.deduped => {
+            return Ok(BinaryWriteExecutionResult {
+                write: result,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+            });
+        }
+        Ok(None) => {
+            return Ok(BinaryWriteExecutionResult {
+                write: result,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
+        }
+        Err(error) => {
+            // The wire result self-describes the outcome; stderr keeps the
+            // server-side trail (the DOP1 wire owns stdin/stdout).
+            eprintln!(
+                "engine: binary write committed but loading its materialization job failed: {error}"
+            );
+            return Ok(BinaryWriteExecutionResult {
+                write: result,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
+        }
+    };
+    if result.deduped && job.status != JobStatus::Pending {
+        return Ok(BinaryWriteExecutionResult {
+            write: result,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
+    }
+    let (materialized, materialize_outcome) = materialize_pending_job(
+        store,
+        root_dir,
+        &input.workspace_id,
+        &job,
+        self_writes,
+        input.now_ms,
+        faults,
+    );
+    Ok(BinaryWriteExecutionResult {
+        write: result,
+        materialized,
+        materialize_outcome,
+    })
+}
+
+fn materialize_pending_job(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    workspace_id: &str,
+    job: &MaterializationJob,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> (bool, PostCommitMaterializeOutcome) {
+    // Register before replacement: the watcher may observe the write as soon
+    // as the atomic rename lands. Every non-applied outcome retracts the
+    // identity because no self-write is then available to consume it.
+    self_writes.record(workspace_id, &job.target_path, &job.content_sha256);
+    let outcome = materialize_one(
+        store,
+        root_dir,
+        job,
+        DurabilityPolicy::per_os(),
+        &StdReplacer,
+        &StdBackoff,
+        now_ms,
+        faults,
+    );
+    let (materialized, reported) = match outcome {
+        Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
+            (true, PostCommitMaterializeOutcome::Applied)
+        }
+        Ok(JobOutcome::Conflict) => (false, PostCommitMaterializeOutcome::Conflict),
+        Ok(JobOutcome::Superseded) => (false, PostCommitMaterializeOutcome::Superseded),
+        Ok(JobOutcome::Crashed(_)) => (false, PostCommitMaterializeOutcome::Error),
+        Err(error) => {
+            eprintln!(
+                "engine: post-commit materialization failed for {}: {error}",
+                job.target_path
+            );
+            (false, PostCommitMaterializeOutcome::Error)
+        }
+    };
+    if !materialized {
+        self_writes.retract(workspace_id, &job.target_path, &job.content_sha256);
+    }
+    (materialized, reported)
+}
+
+fn search_domain(error: crate::search::SearchError) -> dohc_engine_domain::DomainError {
+    match error {
+        crate::search::SearchError::Storage(error) => {
+            dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
+        }
+        crate::search::SearchError::Store(error) => dohc_engine_domain::DomainError::Storage(error),
+        crate::search::SearchError::Corrupt(reason)
+        | crate::search::SearchError::Bounds(reason) => {
+            dohc_engine_domain::DomainError::StateCorrupt { reason }
+        }
+    }
+}
+
+fn versioned_text_rename_on_store(
+    store: &mut EngineStore,
+    input: &RenameTextFile,
+    root_dir: &std::path::Path,
+    self_writes: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<RenameResult, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let result = VersionedTextStore::new(store)
+        .rename_text_file_with(input, faults, |tx, result| {
+            delete_file_search_index(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.object.object_id,
+            )
+            .map_err(search_domain)?;
+            if result.moment.after_content_kind == "text" {
+                upsert_file_search_index(
+                    tx,
+                    root_dir,
+                    &input.workspace_id,
+                    &input.version_id,
+                    &result.object.object_id,
+                    &result.after.path,
+                    &result.after.text,
+                )
+                .map_err(search_domain)?;
+            }
+            enqueue_binary_rename(tx, result)?;
+            Ok(())
+        })
+        .map_err(RuntimeError::from)?;
+    if result.moment.after_content_kind == "binary" {
+        let write_ready = materialize_expected_job(
+            store,
+            root_dir,
+            &input.workspace_id,
+            &binary_rename_write_job_id(&result.moment.moment_id),
+            self_writes,
+            result.moment.recorded_at_ms,
+            faults,
+        );
+        if write_ready {
+            materialize_expected_job(
+                store,
+                root_dir,
+                &input.workspace_id,
+                &binary_rename_delete_job_id(&result.moment.moment_id),
+                self_writes,
+                result.moment.recorded_at_ms,
+                faults,
+            );
+        }
+    }
+    Ok(result)
+}
+
+fn versioned_text_delete_on_store(
+    store: &mut EngineStore,
+    input: &DeleteTextFile,
+    root_dir: &std::path::Path,
+    self_writes: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<DeleteResult, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let outcome = store.write_with(faults, |tx| {
+        let result =
+            dohc_engine_domain::delete_text_in_tx(tx, input).map_err(RuntimeError::from)?;
+        if !result.deduped {
+            delete_file_search_index(
+                tx,
+                &input.workspace_id,
+                &input.version_id,
+                &result.object.object_id,
+            )
+            .map_err(RuntimeError::from)?;
+            enqueue_binary_delete(tx, &result).map_err(RuntimeError::from)?;
+        }
+        Ok::<_, RuntimeError>(result)
+    })?;
+    match outcome {
+        TxnOutcome::Committed(result) => {
+            if result.moment.before_content_kind == "binary" {
+                materialize_expected_job(
+                    store,
+                    root_dir,
+                    &input.workspace_id,
+                    &binary_delete_job_id(&result.moment.moment_id),
+                    self_writes,
+                    result.moment.recorded_at_ms,
+                    faults,
+                );
+            }
+            Ok(result)
+        }
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn materialize_expected_job(
+    store: &EngineStore,
+    root_dir: &std::path::Path,
+    workspace_id: &str,
+    job_id: &str,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> bool {
+    let job = match store.load_materialization_job(job_id) {
+        Ok(Some(job)) => job,
+        Ok(None) => return false,
+        Err(error) => {
+            eprintln!("engine: loading post-commit materialization job failed: {error}");
+            return false;
+        }
+    };
+    match job.status {
+        JobStatus::Complete => true,
+        JobStatus::Pending => {
+            materialize_pending_job(
+                store,
+                root_dir,
+                workspace_id,
+                &job,
+                self_writes,
+                now_ms,
+                faults,
+            )
+            .0
+        }
+        JobStatus::Conflict => false,
+    }
+}
+
+fn versioned_text_rollback_on_store(
+    store: &mut EngineStore,
+    input: &RollbackTextFileMutation,
+    root_dir: &std::path::Path,
+    self_writes: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<RollbackExecutionResult, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let deduped = VersionedTextStore::new(store).rollback_text_file_mutation_with(
+        input,
+        faults,
+        |tx, object_id, restored_text| {
+            delete_file_search_index(tx, &input.workspace_id, &input.version_id, object_id)
+                .map_err(search_domain)?;
+            if let Some((path, text)) = restored_text {
+                upsert_file_search_index(
+                    tx,
+                    root_dir,
+                    &input.workspace_id,
+                    &input.version_id,
+                    object_id,
+                    path,
+                    text,
+                )
+                .map_err(search_domain)?;
+            }
+            Ok(())
+        },
+    )?;
+    let job_id = format!("rollback-restore_{}", input.mutation_moment_id);
+    // The rollback tx is already committed: a failed job load must not turn
+    // into an RPC refusal — the caller would believe a durable rollback
+    // failed. Mirror the binary-write seam and self-describe the outcome.
+    let job = match store.load_materialization_job(&job_id) {
+        Ok(Some(job)) => job,
+        Ok(None) if deduped => {
+            return Ok(RollbackExecutionResult {
+                deduped: true,
+                materialize_enqueued: false,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+            });
+        }
+        Ok(None) => {
+            return Ok(RollbackExecutionResult {
+                deduped,
+                materialize_enqueued: false,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+            });
+        }
+        Err(error) => {
+            eprintln!("engine: rollback committed but loading its restore job failed: {error}");
+            return Ok(RollbackExecutionResult {
+                deduped,
+                materialize_enqueued: true,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
+        }
+    };
+    if deduped && job.status != JobStatus::Pending {
+        return Ok(RollbackExecutionResult {
+            deduped: true,
+            materialize_enqueued: false,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
+    }
+    let (materialized, materialize_outcome) = materialize_pending_job(
+        store,
+        root_dir,
+        &input.workspace_id,
+        &job,
+        self_writes,
+        job.created_at_ms,
+        faults,
+    );
+    Ok(RollbackExecutionResult {
+        deduped,
+        materialize_enqueued: true,
+        materialized,
+        materialize_outcome,
+    })
+}
+
+fn versioned_text_merge_on_store(
+    store: &mut EngineStore,
+    input: &MergeTextFileFromVersion,
+    root_dir: &std::path::Path,
+    self_writes: &dyn SelfWriteRecorder,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<MergeExecutionResult, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let target_is_active = VersionedTextStore::new(store)
+        .get_active_version(&input.workspace_id)
+        .map_err(RuntimeError::from)?
+        .version_id
+        == input.target_version_id;
+    let result = VersionedTextStore::new(store)
+        .merge_text_file_from_version_with(input, faults, |tx, result| {
+            match result {
+                MergeTextFileResult::Write { write, .. } => upsert_file_search_index(
+                    tx,
+                    root_dir,
+                    &input.workspace_id,
+                    &input.target_version_id,
+                    &write.object.object_id,
+                    &write.snapshot.path,
+                    &write.snapshot.text,
+                )
+                .map_err(search_domain)?,
+                MergeTextFileResult::Delete { delete, .. } => delete_file_search_index(
+                    tx,
+                    &input.workspace_id,
+                    &input.target_version_id,
+                    &delete.object.object_id,
+                )
+                .map_err(search_domain)?,
+                MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => {}
+            }
+            Ok(())
+        })
+        .map_err(RuntimeError::from)?;
+    let (moment_id, deduped) = match &result {
+        MergeTextFileResult::Write { write, .. } => {
+            (write.moment.moment_id.as_str(), write.deduped)
+        }
+        MergeTextFileResult::Delete { delete, .. } => {
+            (delete.moment.moment_id.as_str(), delete.deduped)
+        }
+        MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => {
+            return Ok(MergeExecutionResult {
+                merge: result,
+                materialize_enqueued: false,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+            });
+        }
+    };
+    if !target_is_active {
+        return Ok(MergeExecutionResult {
+            merge: result,
+            materialize_enqueued: false,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
+    }
+
+    let job_id = format!("merge-mat_{moment_id}");
+    let job = match store.load_materialization_job(&job_id) {
+        Ok(Some(job)) => job,
+        Ok(None) if deduped => {
+            return Ok(MergeExecutionResult {
+                merge: result,
+                materialize_enqueued: false,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+            });
+        }
+        Ok(None) => {
+            return Ok(MergeExecutionResult {
+                merge: result,
+                materialize_enqueued: true,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
+        }
+        Err(error) => {
+            eprintln!(
+                "engine: merge committed but loading its materialization job failed: {error}"
+            );
+            return Ok(MergeExecutionResult {
+                merge: result,
+                materialize_enqueued: !deduped,
+                materialized: false,
+                materialize_outcome: PostCommitMaterializeOutcome::Error,
+            });
+        }
+    };
+    if deduped && job.status != JobStatus::Pending {
+        return Ok(MergeExecutionResult {
+            merge: result,
+            materialize_enqueued: false,
+            materialized: false,
+            materialize_outcome: PostCommitMaterializeOutcome::Skipped,
+        });
+    }
+    let (materialized, materialize_outcome) = materialize_pending_job(
+        store,
+        root_dir,
+        &input.workspace_id,
+        &job,
+        self_writes,
+        input.now_ms,
+        faults,
+    );
+    Ok(MergeExecutionResult {
+        merge: result,
+        materialize_enqueued: !deduped,
+        materialized,
+        materialize_outcome,
+    })
 }
 
 fn capture_ingest_on_store(
@@ -4392,7 +6061,8 @@ fn capture_ingest_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store).ensure_main_version(
+    ensure_mutation_version_on_store(
+        store,
         &input.workspace_id,
         &input.version_id,
         input.now_ms,
@@ -4415,7 +6085,8 @@ fn capture_ingest_binary_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store).ensure_main_version(
+    ensure_mutation_version_on_store(
+        store,
         &input.workspace_id,
         &input.version_id,
         input.now_ms,
@@ -4439,7 +6110,8 @@ fn capture_secret_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store).ensure_main_version(
+    ensure_mutation_version_on_store(
+        store,
         &input.workspace_id,
         &input.version_id,
         input.now_ms,
@@ -4462,7 +6134,8 @@ fn capture_secret_retire_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store).ensure_main_version(
+    ensure_mutation_version_on_store(
+        store,
         &input.workspace_id,
         &input.version_id,
         input.now_ms,
@@ -4483,7 +6156,8 @@ fn capture_retire_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    VersionedTextStore::new(store).ensure_main_version(
+    ensure_mutation_version_on_store(
+        store,
         &input.workspace_id,
         &input.version_id,
         input.now_ms,

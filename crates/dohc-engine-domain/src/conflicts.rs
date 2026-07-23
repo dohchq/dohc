@@ -1,11 +1,13 @@
 //! Durable text-conflict objects and exact-head resolution gates.
 
 use crate::error::DomainError;
-use crate::records::{DeleteResult, DeleteTextFile, TextSnapshot, WriteResult, WriteText};
+use crate::records::{
+    DeleteResult, DeleteTextFile, RenameResult, TextSnapshot, WriteResult, WriteText,
+};
 use crate::store::{
     VersionedTextStore, delete_text_in_tx, hash_fields, lookup_request, moment_exists,
     next_moment_order, record_request, validate_delete_input, validate_path, validate_write_input,
-    write_text_in_tx,
+    version_is_active, write_text_in_tx,
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
@@ -734,6 +736,13 @@ pub fn enqueue_write(
     preimage: Preimage,
     prefix: &str,
 ) -> Result<(), DomainError> {
+    if !version_is_active(
+        tx,
+        &result.snapshot.workspace_id,
+        &result.snapshot.version_id,
+    )? {
+        return Ok(());
+    }
     let sha = put_binary_blob(tx, result.snapshot.text.as_bytes())?;
     enqueue_job(
         tx,
@@ -755,6 +764,9 @@ pub fn enqueue_delete(
     result: &DeleteResult,
     prefix: &str,
 ) -> Result<(), DomainError> {
+    if !version_is_active(tx, &result.before.workspace_id, &result.before.version_id)? {
+        return Ok(());
+    }
     let sha = put_binary_blob(tx, result.before.text.as_bytes())?;
     enqueue_delete_job(
         tx,
@@ -768,6 +780,96 @@ pub fn enqueue_delete(
         },
     )?;
     Ok(())
+}
+
+pub fn binary_rename_write_job_id(moment_id: &str) -> String {
+    format!("binary-rename-0-write-mat_{moment_id}")
+}
+
+pub fn binary_rename_delete_job_id(moment_id: &str) -> String {
+    format!("binary-rename-1-delete-mat_{moment_id}")
+}
+
+pub fn binary_delete_job_id(moment_id: &str) -> String {
+    format!("binary-delete-mat_{moment_id}")
+}
+
+/// Enqueue the two durable disk operations for an active-version binary
+/// rename. The lexical job-id order writes the destination before removing the
+/// source during startup replay.
+pub fn enqueue_binary_rename(
+    tx: &Transaction<'_>,
+    result: &RenameResult,
+) -> Result<bool, DomainError> {
+    if result.deduped || result.moment.after_content_kind != "binary" {
+        return Ok(false);
+    }
+    if !version_is_active(tx, &result.after.workspace_id, &result.after.version_id)? {
+        return Ok(false);
+    }
+    let sha = result
+        .moment
+        .after_binary_sha256
+        .as_deref()
+        .ok_or(DomainError::StateCorrupt {
+            reason: "binary rename moment has no binary hash",
+        })?;
+    enqueue_job(
+        tx,
+        &MaterializationJobSpec {
+            job_id: binary_rename_write_job_id(&result.moment.moment_id),
+            target_path: result.after.path.clone(),
+            content_sha256: sha.to_owned(),
+            preimage: Preimage::Absent,
+            target_generation: result.moment.moment_order,
+            now_ms: result.moment.recorded_at_ms,
+        },
+    )?;
+    enqueue_delete_job(
+        tx,
+        &MaterializationJobSpec {
+            job_id: binary_rename_delete_job_id(&result.moment.moment_id),
+            target_path: result.before.path.clone(),
+            content_sha256: sha.to_owned(),
+            preimage: Preimage::Present(sha.to_owned()),
+            target_generation: result.moment.moment_order,
+            now_ms: result.moment.recorded_at_ms,
+        },
+    )?;
+    Ok(true)
+}
+
+/// Enqueue an active-version binary delete. Inactive versions are DB-only
+/// because the working tree mirrors only the active head.
+pub fn enqueue_binary_delete(
+    tx: &Transaction<'_>,
+    result: &DeleteResult,
+) -> Result<bool, DomainError> {
+    if result.deduped || result.moment.before_content_kind != "binary" {
+        return Ok(false);
+    }
+    if !version_is_active(tx, &result.before.workspace_id, &result.before.version_id)? {
+        return Ok(false);
+    }
+    let sha = result
+        .moment
+        .before_binary_sha256
+        .as_deref()
+        .ok_or(DomainError::StateCorrupt {
+            reason: "binary delete moment has no binary hash",
+        })?;
+    enqueue_delete_job(
+        tx,
+        &MaterializationJobSpec {
+            job_id: binary_delete_job_id(&result.moment.moment_id),
+            target_path: result.before.path.clone(),
+            content_sha256: sha.to_owned(),
+            preimage: Preimage::Present(sha.to_owned()),
+            target_generation: result.moment.moment_order,
+            now_ms: result.moment.recorded_at_ms,
+        },
+    )?;
+    Ok(true)
 }
 
 /// Apply a verified binary file state inside a caller-owned transaction.
@@ -917,7 +1019,9 @@ pub fn write_binary_file_in_tx(
         },
         before,
     )?;
-    if let Some(preimage) = &input.materialize {
+    if let Some(preimage) = &input.materialize
+        && version_is_active(tx, &input.workspace_id, &input.version_id)?
+    {
         enqueue_job(
             tx,
             &MaterializationJobSpec {
@@ -1066,6 +1170,7 @@ fn delete_input(input: &ResolveTextConflict, version_id: &str, path: &str) -> De
         version_id: version_id.to_owned(),
         path: path.to_owned(),
         moment_id: input.delete_moment_id.clone(),
+        request_id: None,
         metadata_origin: input.metadata_origin.clone(),
         author_json: input.author_json.clone(),
         now_ms: input.now_ms,

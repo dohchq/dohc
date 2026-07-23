@@ -1390,6 +1390,27 @@ CREATE INDEX ydoc_deferred_updates_by_doc
 /// The `id` of the deferred Y.Doc coordinates migration.
 pub(crate) const YDOC_DEFERRED_MIGRATION_ID: &str = "v1-ydoc-deferred-updates";
 
+/// Classifies rows in the shared request ledger so mutation-specific cleanup
+/// cannot evict an unrelated subsystem's idempotency record. Nullable by
+/// design: legacy `result_seq = -1` is ambiguous between chats and the first
+/// Y.Doc update, while zero is shared by chats and versioned no-op results, so
+/// raw-hash rows at either sentinel remain fail-safe unclassified. Positive
+/// raw-hash rows are versioned only when the database has no `documents` rows:
+/// every CAL-1 compound commit creates one, so their presence makes positive
+/// legacy request rows ambiguous and the fail-safe classification is `NULL`.
+const V1_ENGINE_REQUEST_KIND_DDL: &str = "\
+ALTER TABLE engine_requests ADD COLUMN kind TEXT;
+UPDATE engine_requests SET kind = 'ydoc' WHERE result_seq < -1;
+UPDATE engine_requests SET kind = 'merge' WHERE payload_hash LIKE '{%';
+UPDATE engine_requests SET kind = 'versioned'
+ WHERE result_seq > 0
+   AND kind IS NULL
+   AND NOT EXISTS (SELECT 1 FROM documents);
+";
+
+/// The `id` of the request-ledger kind migration.
+pub(crate) const ENGINE_REQUEST_KIND_MIGRATION_ID: &str = "v1-engine-request-kind";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1482,6 +1503,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: YDOC_DEFERRED_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_YDOC_DEFERRED_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 13,
+        id: ENGINE_REQUEST_KIND_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_ENGINE_REQUEST_KIND_DDL,
         sets_user_version: None,
     },
 ];
@@ -1791,11 +1819,10 @@ mod tests {
     // waiting for a real future schema change.
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     fn two_migrations() -> Vec<Migration> {
-        // The frozen list now ends at ordinal 12 (deferred Y.Doc
-        // coordinates), so a synthetic probe appends at ordinal 13.
+        // A synthetic probe always appends immediately after the frozen list.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: 13,
+            ordinal: BASELINE_COUNT,
             id: "r04-probe",
             kind: MigrationKind::Transactional,
             sql: M2_SQL,
@@ -1804,7 +1831,7 @@ mod tests {
         v
     }
 
-    /// Count of frozen baseline migrations through the reverse alias index.
+    /// Count of frozen baseline migrations.
     const BASELINE_COUNT: u32 = BASELINE_MIGRATIONS.len() as u32;
 
     #[test]
@@ -1833,6 +1860,65 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM engine_ownership", [], |r| r.get(0))
             .expect("own");
         assert_eq!(owns, 1);
+    }
+
+    #[test]
+    fn request_kind_migration_backfills_provable_legacy_rows() {
+        let ctx = MigrationContext::current(1_250);
+        let migrate = |name: &str, seed_document: bool| {
+            let dir = tempdir();
+            let path = dir.join(format!("{name}.db"));
+            let mut conn = open_bare(&path);
+            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..13], &ctx, &NoFaults)
+                .expect("pre-kind migrations");
+            conn.execute_batch(
+                "INSERT INTO engine_requests
+                 (request_id, payload_hash, result_seq, committed_at) VALUES
+                 ('ydoc', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', -2, 1),
+                 ('merge', '{\"payload_hash\":\"hash\",\"outcome\":{\"kind\":\"unchanged\",\"reason\":\"already-same\"}}', 9, 2),
+                 ('chat-or-versioned-noop', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 0, 3),
+                 ('chat-or-first-ydoc', 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', -1, 4),
+                 ('positive', 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', 7, 5);",
+            )
+            .expect("legacy request rows");
+            if seed_document {
+                conn.execute(
+                    "INSERT INTO documents (doc_id, body, updated_at_ms) VALUES ('cal-1', 'body', 6)",
+                    [],
+                )
+                .expect("CAL-1 document discriminator");
+            }
+            let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+                .expect("kind migration");
+            assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+            let kind = |request_id: &str| {
+                conn.query_row(
+                    "SELECT kind FROM engine_requests WHERE request_id = ?1",
+                    [request_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .expect("legacy kind")
+            };
+            // MUTATION: remove the negative-sequence classification -> fails.
+            assert_eq!(kind("ydoc").as_deref(), Some("ydoc"));
+            // MUTATION: classify by positive result_seq before JSON shape -> fails.
+            assert_eq!(kind("merge").as_deref(), Some("merge"));
+            // MUTATION: guess that zero belongs to chats or versioning -> fails.
+            assert_eq!(kind("chat-or-versioned-noop"), None);
+            // MUTATION: guess that -1 belongs to chats or Y.Doc -> fails.
+            assert_eq!(kind("chat-or-first-ydoc"), None);
+            kind("positive")
+        };
+
+        // MUTATION: ignore the documents-table discriminator -> this becomes
+        // `versioned` and can later evict an ambiguous compound ledger row.
+        assert_eq!(migrate("with-documents", true), None);
+        // MUTATION: invert the zero-documents branch -> the provably versioned
+        // positive row remains unclassified.
+        assert_eq!(
+            migrate("without-documents", false).as_deref(),
+            Some("versioned")
+        );
     }
 
     #[test]
@@ -2312,13 +2398,18 @@ mod tests {
 
         let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("apply baseline through the deferred Y.Doc coordinates table");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 13 });
+        assert_eq!(
+            outcome,
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_COUNT
+            }
+        );
         let max_ordinal: i64 = conn
             .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
                 row.get(0)
             })
             .expect("latest migration ordinal");
-        assert_eq!(max_ordinal, 12);
+        assert_eq!(max_ordinal, i64::from(BASELINE_COUNT - 1));
         let index_present: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' \
@@ -2351,7 +2442,12 @@ mod tests {
 
         let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("apply reverse alias index migration");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 2 });
+        assert_eq!(
+            outcome,
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_COUNT - 11
+            }
+        );
         let columns: Vec<String> = conn
             .prepare("SELECT name FROM pragma_index_info('idx_path_aliases_workspace_object') ORDER BY seqno")
             .expect("prepare reverse alias index columns")
@@ -2365,7 +2461,7 @@ mod tests {
                 row.get(0)
             })
             .expect("latest migration ordinal");
-        assert_eq!(max_ordinal, 12);
+        assert_eq!(max_ordinal, i64::from(BASELINE_COUNT - 1));
     }
 
     #[test]
@@ -2975,10 +3071,16 @@ mod tests {
         // sync migration (6), conflicts migration (7), shadow-clone migration
         // (8), binary-conflict-sides migration (9), binary-head migration (10),
         // reverse alias index migration (11), deferred Y.Doc coordinates
-        // migration (12), AND the probe (13).
+        // migration (12), request-ledger kind migration (13), AND the probe
+        // (14).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 13 });
+        assert_eq!(
+            out,
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_COUNT
+            }
+        );
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -3075,7 +3177,7 @@ mod tests {
         }
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 13,
+            ordinal: BASELINE_COUNT,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
@@ -3093,7 +3195,7 @@ mod tests {
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();
         changed.push(Migration {
-            ordinal: 13,
+            ordinal: BASELINE_COUNT,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
@@ -3113,7 +3215,7 @@ mod tests {
         // baseline first (transactional), then a non-transactional idempotent step.
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: 13,
+            ordinal: BASELINE_COUNT,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",

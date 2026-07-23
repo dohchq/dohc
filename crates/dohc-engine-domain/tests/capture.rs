@@ -91,6 +91,7 @@ fn recapturing_a_renamed_path_mints_a_distinct_object() {
                 from_path: "a.md".to_owned(),
                 to_path: "b.md".to_owned(),
                 moment_id: "rename-a-to-b".to_owned(),
+                request_id: None,
                 metadata_origin: "rpc-test".to_owned(),
                 author_json: None,
                 now_ms: 20,
@@ -362,7 +363,13 @@ fn request_ids_replay_ingest_and_retire_exactly_once() {
         .capture_retire(&delete_replay, &NO_FAULTS)
         .expect("retire replay");
     assert!(replay_delete.deduped);
-    assert_eq!(replay_delete.retired, first_delete.retired);
+    // The replayed inner result reports ITS OWN dedupe honestly; every
+    // other field must match the original byte-for-byte.
+    let mut expected = first_delete.retired.clone();
+    if let Some(expected) = expected.as_mut() {
+        expected.deduped = true;
+    }
+    assert_eq!(replay_delete.retired, expected);
     assert_eq!(moment_count(&mut store), 2);
 }
 
@@ -601,7 +608,10 @@ fn rollback_of_a_capture_binary_moment_still_restores_disk() {
                 version_id: VERSION.to_owned(),
                 path: "flip.md".to_owned(),
                 mutation_moment_id: flipped.moment_id.clone(),
+                request_id: None,
                 legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
             },
             &NO_FAULTS,
         )
@@ -716,7 +726,10 @@ fn recapture_after_rollback_reclaims_the_marker_row() {
                 version_id: VERSION.to_owned(),
                 path: "doc.bin".to_owned(),
                 mutation_moment_id: first.moment_id.clone(),
+                request_id: None,
                 legacy_before_text: None,
+                metadata_origin: "restore".to_owned(),
+                author_json: None,
             },
             &NO_FAULTS,
         )

@@ -78,7 +78,7 @@ pub struct VersionRecord {
 }
 
 /// The materialized current state of a text object within a version.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TextSnapshot {
     pub workspace_id: String,
     pub version_id: String,
@@ -164,6 +164,7 @@ pub struct InbandText {
     pub version_id: String,
     pub object_id: String,
     pub path: String,
+    pub content_kind: String,
     pub text: Option<String>,
     pub byte_length: i64,
     pub blob_sha256: String,
@@ -292,6 +293,23 @@ pub struct WriteText {
     pub request_id: Option<String>,
 }
 
+/// Inputs to a caller-originated binary write. Bytes are stored in the binary
+/// blob table and the resulting head is materialized by the runtime actor.
+#[derive(Debug, Clone)]
+pub struct WriteBinary {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub object_id: String,
+    pub path: String,
+    pub bytes: Vec<u8>,
+    pub moment_id: String,
+    pub metadata_origin: String,
+    pub author_json: Option<String>,
+    pub now_ms: i64,
+    /// Optional idempotency key: a same-payload retry replays exactly-once.
+    pub request_id: Option<String>,
+}
+
 /// Inputs to [`crate::VersionedTextStore::capture_ingest`].
 #[derive(Debug, Clone)]
 pub struct CaptureIngest {
@@ -372,6 +390,7 @@ pub struct DeleteTextFile {
     pub version_id: String,
     pub path: String,
     pub moment_id: String,
+    pub request_id: Option<String>,
     pub metadata_origin: String,
     pub author_json: Option<String>,
     pub now_ms: i64,
@@ -385,6 +404,7 @@ pub struct RenameTextFile {
     pub from_path: String,
     pub to_path: String,
     pub moment_id: String,
+    pub request_id: Option<String>,
     pub metadata_origin: String,
     pub author_json: Option<String>,
     pub now_ms: i64,
@@ -397,7 +417,10 @@ pub struct RollbackTextFileMutation {
     pub version_id: String,
     pub path: String,
     pub mutation_moment_id: String,
+    pub request_id: Option<String>,
     pub legacy_before_text: Option<String>,
+    pub metadata_origin: String,
+    pub author_json: Option<String>,
 }
 
 /// Inputs to [`crate::VersionedTextStore::create_named_version`].
@@ -415,10 +438,31 @@ pub struct CreateNamedVersion {
 /// The result of a successful [`crate::VersionedTextStore::write_text`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteResult {
+    pub object: FileObjectRecord,
     pub snapshot: TextSnapshot,
     pub moment: MomentRecord,
     /// True when no new moment was needed (request replay or equal content).
     pub deduped: bool,
+}
+
+/// Result of a caller-originated binary write. Binary bodies never travel in
+/// this record; the content address and byte length are sufficient for the
+/// mutation response and materializer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryWriteResult {
+    pub object: FileObjectRecord,
+    pub object_id: String,
+    pub path: String,
+    pub sha256: String,
+    pub byte_length: i64,
+    pub updated_at_ms: i64,
+    pub moment: MomentRecord,
+    pub deduped: bool,
+    /// True when a materialization job was enqueued — only for writes into
+    /// the workspace's ACTIVE version. Disk mirrors the active version; a
+    /// non-active write is DB-only (materializing it would hand the capture
+    /// baseline another version's bytes to ingest into the active one).
+    pub materialize_enqueued: bool,
 }
 
 /// The result of a successful [`crate::VersionedTextStore::delete_text_file`].
@@ -427,6 +471,7 @@ pub struct DeleteResult {
     pub object: FileObjectRecord,
     pub before: TextSnapshot,
     pub moment: MomentRecord,
+    pub deduped: bool,
 }
 
 /// The result of [`crate::VersionedTextStore::capture_retire`].
@@ -445,4 +490,27 @@ pub struct RenameResult {
     pub before: TextSnapshot,
     pub after: TextSnapshot,
     pub moment: MomentRecord,
+    pub deduped: bool,
+}
+
+/// Inputs to [`crate::apply_secret_file_from_version`].
+#[derive(Debug, Clone)]
+pub struct ApplySecretFileFromVersion {
+    pub workspace_id: String,
+    pub path: String,
+    pub from_version_id: String,
+    pub to_version_id: String,
+    pub moment_id: String,
+    pub metadata_origin: String,
+    pub metadata_summary: Option<String>,
+    pub metadata_correlation_id: Option<String>,
+    pub now_ms: i64,
+}
+
+/// A workspace-referenced binary blob read under the in-band cap: over-cap
+/// answers carry the recorded length only, bytes stay unhydrated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryBlobRead {
+    pub byte_length: i64,
+    pub bytes: Option<Vec<u8>>,
 }

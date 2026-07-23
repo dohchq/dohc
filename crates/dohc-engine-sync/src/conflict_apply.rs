@@ -742,6 +742,7 @@ fn apply_mirrored_delete(
         version_id: conflict.target_version_id.clone(),
         path: conflict.path.clone(),
         moment_id: mirrored_id(envelope, "delete"),
+        request_id: None,
         metadata_origin: "sync".to_owned(),
         author_json: None,
         now_ms: envelope.recorded_at_ms,

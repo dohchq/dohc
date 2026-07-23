@@ -8,9 +8,9 @@ use dohc_engine_domain::{
     ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus, CreateNamedVersion,
     DeleteTextFile, DomainError, MergeTextFileFromVersion, MergeTextFileResult,
     MergeUnchangedReason, NoFaults, ResolveConflictKind, ResolveTextConflict, SnapshotContent,
-    TextConflict, TextSnapshot, VersionFileChangeStatus, VersionedTextStore, WriteBinaryFile,
-    WriteText, insert_text_conflict_if_absent, live_state_matches_conflict_current,
-    store::text_blob_sha256, write_binary_file_in_tx,
+    TextConflict, TextSnapshot, VersionFileChangeEntry, VersionFileChangeStatus,
+    VersionedTextStore, WriteBinaryFile, WriteText, insert_text_conflict_if_absent,
+    live_state_matches_conflict_current, store::text_blob_sha256, write_binary_file_in_tx,
 };
 use dohc_engine_files::{DurabilityPolicy, JobOutcome, NoBackoff, StdReplacer, run_pending_jobs};
 use dohc_engine_storage::{
@@ -21,6 +21,24 @@ use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 
 const WS: &str = "ws-r06";
 const NO_FAULTS: NoFaults = NoFaults;
+
+#[test]
+fn compare_files_never_hydrates_full_text_body() {
+    // MUTATION: add a text or sha payload field to the paged entry -> this exhaustive destructure fails to compile.
+    let entry = VersionFileChangeEntry {
+        path: "large.md".to_owned(),
+        status: VersionFileChangeStatus::Modified,
+        binary: false,
+    };
+    let VersionFileChangeEntry {
+        path,
+        status,
+        binary,
+    } = entry;
+    assert_eq!(path, "large.md");
+    assert_eq!(status, VersionFileChangeStatus::Modified);
+    assert!(!binary);
+}
 
 fn write(version: &str, path: &str, text: &str, moment: &str, object: &str) -> WriteText {
     WriteText {
@@ -43,6 +61,7 @@ fn delete(version: &str, path: &str, moment: &str) -> DeleteTextFile {
         version_id: version.to_owned(),
         path: path.to_owned(),
         moment_id: moment.to_owned(),
+        request_id: None,
         metadata_origin: "user".to_owned(),
         author_json: None,
         now_ms: 110,
@@ -122,6 +141,7 @@ fn merge_input(path: &str, moment: &str, conflict: &str, object: &str) -> MergeT
         path: path.to_owned(),
         object_id: object.to_owned(),
         moment_id: moment.to_owned(),
+        request_id: None,
         conflict_id: conflict.to_owned(),
         metadata_origin: "agent".to_owned(),
         author_json: None,
@@ -130,7 +150,69 @@ fn merge_input(path: &str, moment: &str, conflict: &str, object: &str) -> MergeT
 }
 
 #[test]
-fn compare_requires_named_durable_fork_base_and_classifies_all_statuses() {
+fn empty_main_fork_compares_and_merges_its_first_file_with_an_absent_base() {
+    // MUTATION: restore the fork_base_snapshots row-count gate -> both the
+    // comparison and merge fail with fork-base-not-found.
+    let (_scratch, mut store) = open();
+    let mut versions = VersionedTextStore::new(&mut store);
+    fork(&mut versions);
+    versions
+        .write_text(
+            &write(
+                "feat",
+                "first.md",
+                "the branch's first file",
+                "empty-fork-first",
+                "empty-fork-object",
+            ),
+            &NO_FAULTS,
+        )
+        .expect("first branch write");
+
+    let comparison = versions
+        .compare_text_file_versions(&CompareTextFileVersions {
+            workspace_id: WS.to_owned(),
+            target_version_id: "main".to_owned(),
+            source_version_id: "feat".to_owned(),
+            path: "first.md".to_owned(),
+        })
+        .expect("empty fork comparison");
+    assert!(comparison.base.is_none());
+    assert!(comparison.current.is_none());
+    assert_eq!(
+        comparison
+            .incoming
+            .as_ref()
+            .map(|snapshot| snapshot.text.as_str()),
+        Some("the branch's first file")
+    );
+
+    assert!(matches!(
+        versions
+            .merge_text_file_from_version(
+                &merge_input(
+                    "first.md",
+                    "empty-fork-merge",
+                    "empty-fork-conflict",
+                    "empty-fork-target-object",
+                ),
+                &NO_FAULTS,
+            )
+            .expect("empty fork merge"),
+        MergeTextFileResult::Write { .. }
+    ));
+    assert_eq!(
+        versions
+            .read_text(WS, "main", "first.md")
+            .expect("read merged first file")
+            .expect("merged first file exists")
+            .text,
+        "the branch's first file"
+    );
+}
+
+#[test]
+fn compare_requires_named_fork_metadata_and_classifies_all_statuses() {
     let (_scratch, mut store) = open();
     let mut vt = VersionedTextStore::new(&mut store);
     for (index, path) in ["same.md", "incoming.md", "current.md", "diverged.md"]
@@ -210,15 +292,16 @@ fn compare_requires_named_durable_fork_base_and_classifies_all_statuses() {
         })
         .expect("delete durable bases");
     let vt = VersionedTextStore::new(&mut store);
-    let err = vt
+    let comparison = vt
         .compare_text_file_versions(&CompareTextFileVersions {
             workspace_id: WS.to_owned(),
             target_version_id: "main".to_owned(),
             source_version_id: "feat".to_owned(),
             path: "same.md".to_owned(),
         })
-        .expect_err("durable rows required");
-    assert_eq!(err.code(), "fork-base-not-found");
+        .expect("fork metadata still proves an absent per-path base");
+    assert!(comparison.base.is_none());
+    assert_eq!(comparison.status, ComparisonStatus::Same);
 }
 
 #[test]
@@ -371,6 +454,155 @@ fn merge_decision_tree_writes_deletes_merges_and_opens_conflict() {
         .expect("job")
         .expect("delete job");
     assert_eq!(delete_job.operation, MaterializationOperation::Delete);
+}
+
+#[test]
+fn merge_materialization_is_gated_to_the_active_target_version_across_reopen() {
+    // MUTATION: enqueue merge jobs unconditionally -> the inactive assertion
+    // fails and startup replay overwrites the active working-tree bytes.
+    let (scratch, mut store) = open();
+    {
+        let mut versions = VersionedTextStore::new(&mut store);
+        versions
+            .write_text(
+                &write(
+                    "main",
+                    "gated.md",
+                    "active-base",
+                    "gate-base",
+                    "gate-object",
+                ),
+                &NO_FAULTS,
+            )
+            .expect("base");
+        fork(&mut versions);
+        versions
+            .create_named_version(
+                &CreateNamedVersion {
+                    workspace_id: WS.to_owned(),
+                    new_version_id: "source".to_owned(),
+                    name: "source".to_owned(),
+                    from_version_id: "feat".to_owned(),
+                    now_ms: 60,
+                    request_id: None,
+                },
+                &NO_FAULTS,
+            )
+            .expect("source fork");
+        versions
+            .write_text(
+                &write("source", "gated.md", "incoming", "gate-source", "ignored"),
+                &NO_FAULTS,
+            )
+            .expect("source write");
+        let inactive = MergeTextFileFromVersion {
+            workspace_id: WS.to_owned(),
+            target_version_id: "feat".to_owned(),
+            source_version_id: "source".to_owned(),
+            path: "gated.md".to_owned(),
+            object_id: "ignored".to_owned(),
+            moment_id: "gate-inactive-merge".to_owned(),
+            request_id: Some("gate-inactive-request".to_owned()),
+            conflict_id: "gate-inactive-conflict".to_owned(),
+            metadata_origin: "agent".to_owned(),
+            author_json: None,
+            now_ms: 70,
+        };
+        assert!(matches!(
+            versions
+                .merge_text_file_from_version(&inactive, &NO_FAULTS)
+                .expect("inactive merge"),
+            MergeTextFileResult::Write { .. }
+        ));
+    }
+    assert!(
+        store
+            .list_pending_materialization_jobs()
+            .expect("inactive pending jobs")
+            .is_empty(),
+        "inactive-target merge must be DB-only"
+    );
+
+    let target = scratch.join("gated.md");
+    std::fs::write(&target, "active-base").expect("working tree preimage");
+    drop(store);
+    let db = scratch.engine_db_path().expect("db");
+    let store = EngineStore::open(&db, 80).expect("reopen");
+    assert!(
+        run_pending_jobs(
+            &store,
+            scratch.path(),
+            DurabilityPolicy::per_os(),
+            &StdReplacer,
+            &NoBackoff,
+            81,
+            &NO_FAULTS,
+        )
+        .expect("startup replay")
+        .is_empty()
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("working tree after reopen"),
+        "active-base"
+    );
+
+    drop(store);
+    let (_active_scratch, mut active_store) = open();
+    {
+        let mut versions = VersionedTextStore::new(&mut active_store);
+        versions
+            .write_text(
+                &write(
+                    "main",
+                    "active-gated.md",
+                    "active-base",
+                    "active-gate-base",
+                    "active-gate-object",
+                ),
+                &NO_FAULTS,
+            )
+            .expect("active base");
+        fork(&mut versions);
+        versions
+            .write_text(
+                &write(
+                    "feat",
+                    "active-gated.md",
+                    "incoming",
+                    "active-gate-source",
+                    "ignored",
+                ),
+                &NO_FAULTS,
+            )
+            .expect("active source");
+    }
+    let active = MergeTextFileFromVersion {
+        workspace_id: WS.to_owned(),
+        target_version_id: "main".to_owned(),
+        source_version_id: "feat".to_owned(),
+        path: "active-gated.md".to_owned(),
+        object_id: "ignored".to_owned(),
+        moment_id: "gate-active-merge".to_owned(),
+        request_id: Some("gate-active-request".to_owned()),
+        conflict_id: "gate-active-conflict".to_owned(),
+        metadata_origin: "agent".to_owned(),
+        author_json: None,
+        now_ms: 90,
+    };
+    assert!(matches!(
+        VersionedTextStore::new(&mut active_store)
+            .merge_text_file_from_version(&active, &NO_FAULTS)
+            .expect("active merge"),
+        MergeTextFileResult::Write { .. }
+    ));
+    assert_eq!(
+        active_store
+            .list_pending_materialization_jobs()
+            .expect("active pending jobs")
+            .len(),
+        1,
+        "active-target merge must enqueue its generic write"
+    );
 }
 
 #[test]
@@ -1205,6 +1437,80 @@ fn merge_refuses_to_clobber_a_binary_head_at_the_target() {
     );
     assert_eq!(blob, None, "a surviving binary head has no text blob");
     assert_eq!(bin.as_deref(), Some(bin_sha.as_str()));
+}
+
+#[test]
+fn exact_merge_retry_reconstructs_recorded_outcome_before_binary_head_comparison() {
+    let (_scratch, mut store) = open();
+    let mut versions = VersionedTextStore::new(&mut store);
+    versions
+        .write_text(
+            &write("main", "retry.md", "base", "retry-base", "retry-object"),
+            &NO_FAULTS,
+        )
+        .expect("base");
+    fork(&mut versions);
+    versions
+        .write_text(
+            &write("feat", "retry.md", "incoming", "retry-incoming", "ignored"),
+            &NO_FAULTS,
+        )
+        .expect("incoming");
+
+    let mut input = merge_input(
+        "retry.md",
+        "retry-merge",
+        "retry-conflict",
+        "retry-merge-object",
+    );
+    input.request_id = Some("exact-merge-retry".to_owned());
+    let first = versions
+        .merge_text_file_from_version(&input, &NO_FAULTS)
+        .expect("first merge");
+    let (first_comparison, first_moment_id) = match first {
+        MergeTextFileResult::Write { comparison, write } => {
+            assert!(!write.deduped);
+            (comparison, write.moment.moment_id)
+        }
+        other => panic!("expected merged write, got {other:?}"),
+    };
+    drop(versions);
+
+    let binary_sha = write_binary(
+        &mut store,
+        "main",
+        "retry.md",
+        b"\0later binary head\xff",
+        "ignored-existing-object",
+        "retry-binary",
+        Preimage::Present(text_blob_sha256("incoming")),
+    );
+
+    // MUTATION: reconstruct by re-running the live comparison before consulting
+    // the recorded comparison -> this exact retry fails binary-head-not-text.
+    let replay = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version(&input, &NO_FAULTS)
+        .expect("exact retry returns the recorded merge");
+    match replay {
+        MergeTextFileResult::Write { comparison, write } => {
+            assert_eq!(comparison, first_comparison);
+            assert_eq!(write.moment.moment_id, first_moment_id);
+            assert!(write.deduped);
+        }
+        other => panic!("expected replayed merged write, got {other:?}"),
+    }
+
+    let live_binary_sha: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT binary_sha256 FROM snapshots WHERE workspace_id = ?1 \
+                 AND version_id = 'main' AND path = 'retry.md'",
+                [WS],
+                |row| row.get(0),
+            )
+        })
+        .expect("binary head survives replay");
+    assert_eq!(live_binary_sha, binary_sha);
 }
 
 /// S2 (BINHEAD): the exact-head gate must not defer FOREVER on a legacy binary

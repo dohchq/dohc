@@ -14,10 +14,14 @@ use dohc_engine_collab::{CollabError, ContentKind, DocKey, Lease, LeaseRegistry,
 use dohc_engine_domain::{
     BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatBookmark, ChatChannel, ChatChannelKind,
     ChatChannelSummary, ChatFeedReadState, ChatFollow, ChatMessage, ChatThread,
-    ChatThreadReadState, ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata,
-    ConflictResolution, ConflictStatus, DispatchClaim, DomainError, FeedCursorValue, FollowState,
-    FollowTargetKind, ResolveConflictKind, ResolveTextConflict, SaveBookmark, SendMessage,
-    SetFollow, StartChannelThread, TextConflict, TextSnapshot, WriteText,
+    ChatThreadReadState, CompareTextFileVersions, ComparisonStatus, ConflictChoice,
+    ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus,
+    CreateNamedVersion, DeleteTextFile, DispatchClaim, DomainError, FeedCursorValue, FollowState,
+    FollowTargetKind, MarkdownMergeResult, MergeTextFileFromVersion, MergeTextFileResult, MomentOp,
+    RenameTextFile, ResolveConflictKind, ResolveTextConflict, RollbackTextFileMutation,
+    SaveBookmark, SecretDelete, SecretDiskIntent, SecretMomentRecord, SecretWrite, SendMessage,
+    SetFollow, StartChannelThread, TextConflict, TextSnapshot, VersionFileChangeStatus,
+    VersionRecord, WriteBinary, WriteText, merge_markdown, validate_addressable_plaintext_path,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -26,11 +30,12 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_runtime::{
     ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, LifecycleState, NoFaults,
-    RuntimeError, SearchError, SearchSurface, WorkspaceSupervisor,
+    PostCommitMaterializeOutcome, RuntimeError, SearchError, SearchSurface, WorkspaceSupervisor,
 };
 use dohc_engine_sync::{ReplicationEnvelope, SyncError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -248,6 +253,38 @@ impl EngineService {
                 self.versioned_text_write(&ctx, &request, request.params.clone())
                     .await?
             }
+            "versionedBinary.write" => {
+                self.versioned_binary_write(&ctx, &request, request.params.clone())
+                    .await?
+            }
+            "versionedText.rename" => {
+                self.versioned_text_rename(&ctx, &request, request.params.clone())
+                    .await?
+            }
+            "versionedText.delete" => {
+                self.versioned_text_delete(&ctx, &request, request.params.clone())
+                    .await?
+            }
+            "versionedText.rollback" => {
+                self.versioned_text_rollback(&ctx, &request, request.params.clone())
+                    .await?
+            }
+            "versionedText.merge" => {
+                self.versioned_text_merge(&ctx, &request, request.params.clone())
+                    .await?
+            }
+            "versionedText.compare" => {
+                self.versioned_text_compare(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "versions.compareFiles" => {
+                self.versions_compare_files(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "versions.createNamed" => {
+                self.versions_create_named(&ctx, &request, request.params.clone())
+                    .await?
+            }
             "versionedText.read" => {
                 self.versioned_text_read(&ctx, request.workspace, request.params)
                     .await?
@@ -306,9 +343,24 @@ impl EngineService {
                 self.search_query(&ctx, request.workspace, request.params)
                     .await?
             }
+            "search.ensureIndex" => {
+                self.search_ensure_index(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "watcher.status" => self.watcher_status(request.workspace)?,
             "capture.flush" => self.capture_flush(&ctx, request.workspace).await?,
-            "versions.active" => self.versions_active(&ctx, request.workspace).await?,
+            "versions.active" => {
+                self.versions_active(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "versions.ensureMain" => {
+                self.versions_ensure_main(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "versions.setActive" => {
+                self.versions_set_active(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "versions.list" => {
                 self.versions_list(&ctx, request.workspace, request.params)
                     .await?
@@ -321,6 +373,10 @@ impl EngineService {
                 self.versioned_binary_read(&ctx, request.workspace, request.params)
                     .await?
             }
+            "versionedBinary.readBlob" => {
+                self.versioned_binary_read_blob(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "moments.list" => {
                 self.moments_list(&ctx, request.workspace, request.params)
                     .await?
@@ -331,6 +387,38 @@ impl EngineService {
             }
             "secrets.list" => {
                 self.secrets_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.write" => {
+                self.secrets_write(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.delete" => {
+                self.secrets_delete(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.fork" => {
+                self.secrets_fork(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.moments.list" => {
+                self.secrets_moments_list(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.moments.get" => {
+                self.secrets_moments_get(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.compare" => {
+                self.secrets_compare(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.apply" => {
+                self.secrets_apply(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "secrets.restore" => {
+                self.secrets_restore(&ctx, request.workspace, request.params)
                     .await?
             }
             "secrets.materialize" => {
@@ -699,6 +787,86 @@ impl EngineService {
         Ok(json!({ "closed": closed }))
     }
 
+    fn generated_rpc_id(
+        &self,
+        prefix: &str,
+        wire_request_id: u64,
+        request_id: Option<&str>,
+        path: &str,
+    ) -> String {
+        let mut digest = Sha256::new();
+        let wire_request_id = wire_request_id.to_string();
+        let fields: Vec<&[u8]> = match request_id {
+            Some(request_id) => vec![request_id.as_bytes(), path.as_bytes()],
+            None => vec![
+                self.session_epoch.as_bytes(),
+                wire_request_id.as_bytes(),
+                path.as_bytes(),
+            ],
+        };
+        for field in fields {
+            digest.update((field.len() as u64).to_le_bytes());
+            digest.update(field);
+        }
+        format!("{prefix}-{:x}", digest.finalize())
+    }
+
+    /// Acquire the ordering guard shared with `ydoc.open` before probing a
+    /// path lease. The caller must retain the returned OWNED guard until its
+    /// actor mutation has completed: check-without-lease -> mutation and
+    /// probe -> lease -> authoritative re-read are mutually exclusive orders.
+    async fn mutation_session_guard(
+        &self,
+        cancellation: &OperationCancellation,
+        operation: &str,
+    ) -> Result<tokio::sync::OwnedMutexGuard<()>, WireError> {
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                Err(cancellation.interruption(operation))
+            }
+            serial = Arc::clone(&self.session_ops).lock_owned() => Ok(serial),
+        }
+    }
+
+    async fn ensure_path_not_leased(
+        &self,
+        open: &OpenWorkspace,
+        version_id: &str,
+        path: &str,
+    ) -> Result<(), WireError> {
+        let canonical_path = validate_addressable_plaintext_path(path)
+            .map_err(|error| map_runtime(RuntimeError::Domain(error)))?;
+        let existing = match open
+            .actor
+            .resolve_path_object(
+                open.workspace_id.clone(),
+                version_id.to_owned(),
+                canonical_path.clone(),
+            )
+            .await
+        {
+            Ok(existing) => existing,
+            Err(RuntimeError::Domain(
+                DomainError::WorkspaceNotFound | DomainError::VersionNotFound,
+            )) => None,
+            Err(error) => return Err(map_runtime(error)),
+        };
+        let object_id = existing.unwrap_or_else(|| {
+            dohc_engine_domain::derive_capture_object_id(
+                &open.workspace_id,
+                version_id,
+                &canonical_path,
+            )
+        });
+        let key = DocKey::new(open.workspace_id.clone(), version_id.to_owned(), object_id)
+            .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-input"))?;
+        if self.leases.scoped(&open.root).is_held(&key) {
+            return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
+        }
+        Ok(())
+    }
+
     async fn versioned_text_write(
         &self,
         ctx: &RequestContext,
@@ -707,20 +875,477 @@ impl EngineService {
     ) -> Result<Value, WireError> {
         let params: VersionedTextWriteParams = parse(params)?;
         let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let path = params.path.clone();
+        let text = params.text;
+        if text.len() > MAX_INBAND_CONTENT_BYTES {
+            return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
+        }
+        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
+        let session_serial = self
+            .mutation_session_guard(&cancellation, "versionedText.write (queued)")
+            .await?;
+        self.ensure_path_not_leased(&open, &params.version_id, &path)
+            .await?;
+        let request_id = params
+            .request_id
+            .or_else(|| request.idempotency_key.clone());
+        let object_id = params.object_id.unwrap_or_else(|| {
+            self.generated_rpc_id("object", request.id, request_id.as_deref(), &path)
+        });
+        let moment_id = params.moment_id.unwrap_or_else(|| {
+            self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path)
+        });
         let result = open
             .actor
-            .versioned_text_write(
+            .versioned_text_write_indexed(
                 WriteText {
+                    workspace_id: open.workspace_id.clone(),
+                    version_id: params.version_id,
+                    object_id,
+                    path,
+                    text,
+                    moment_id,
+                    request_id,
+                    metadata_origin: origin,
+                    author_json,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                },
+                open.root.clone(),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await;
+        drop(session_serial);
+        let result = result.map_err(map_runtime)?;
+        Ok(json!({
+            "object": file_object_json(&result.object),
+            "snapshot": snapshot_json(&result.snapshot),
+            "moment": moment_json(&result.moment),
+            "deduped": result.deduped,
+        }))
+    }
+
+    async fn versioned_binary_write(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedBinaryWriteParams = parse(params)?;
+        let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let path = params.path.clone();
+        let bytes = match (params.bytes, params.bytes_base64) {
+            (Some(bytes), None) => bytes,
+            (None, Some(encoded)) => base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-input"))?,
+            _ => return Err(wire(ErrorCode::InvalidParams, "invalid-input")),
+        };
+        if bytes.len() > MAX_INBAND_CONTENT_BYTES {
+            return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
+        }
+        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let session_serial = self
+            .mutation_session_guard(&cancellation, "versionedBinary.write (queued)")
+            .await?;
+        self.ensure_path_not_leased(&open, &params.version_id, &path)
+            .await?;
+        let request_id = params
+            .request_id
+            .or_else(|| request.idempotency_key.clone());
+        let object_id = params.object_id.unwrap_or_else(|| {
+            self.generated_rpc_id("object", request.id, request_id.as_deref(), &path)
+        });
+        let moment_id = params.moment_id.unwrap_or_else(|| {
+            self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path)
+        });
+        let execution = open
+            .actor
+            .versioned_binary_write(
+                WriteBinary {
+                    workspace_id: open.workspace_id.clone(),
+                    version_id: params.version_id,
+                    object_id,
+                    path,
+                    bytes,
+                    moment_id,
+                    metadata_origin: origin,
+                    author_json,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                    request_id,
+                },
+                open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await;
+        drop(session_serial);
+        let execution = execution.map_err(map_runtime)?;
+        let result = execution.write;
+        Ok(json!({
+            "object": file_object_json(&result.object),
+            "snapshot": {
+                "objectId": result.object_id,
+                "path": result.path,
+                "contentKind": "binary",
+                "text": "",
+                "sha256": result.sha256,
+                "byteLength": result.byte_length,
+                "updatedAtMs": result.updated_at_ms,
+                "latestMomentId": result.moment.moment_id,
+            },
+            "moment": moment_json(&result.moment),
+            "deduped": result.deduped,
+            "materializeEnqueued": result.materialize_enqueued,
+            "materialized": execution.materialized,
+            "materializeOutcome": materialize_outcome_name(execution.materialize_outcome),
+        }))
+    }
+
+    async fn versioned_text_rename(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedTextRenameParams = parse(params)?;
+        let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let from_path = params.from_path.clone();
+        let to_path = params.to_path.clone();
+        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let session_serial = self
+            .mutation_session_guard(&cancellation, "versionedText.rename (queued)")
+            .await?;
+        self.ensure_path_not_leased(&open, &params.version_id, &from_path)
+            .await?;
+        self.ensure_path_not_leased(&open, &params.version_id, &to_path)
+            .await?;
+        let request_id = params
+            .request_id
+            .or_else(|| request.idempotency_key.clone());
+        let moment_id =
+            self.generated_rpc_id("moment", request.id, request_id.as_deref(), &to_path);
+        let result = open
+            .actor
+            .versioned_text_rename(
+                RenameTextFile {
                     workspace_id: open.workspace_id,
                     version_id: params.version_id,
-                    object_id: params.object_id,
-                    path: params.path,
-                    text: params.text,
-                    moment_id: params.moment_id,
-                    metadata_origin: params.metadata_origin,
-                    author_json: params.author_json,
+                    from_path,
+                    to_path,
+                    moment_id,
+                    request_id,
+                    metadata_origin: origin,
+                    author_json,
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
+                },
+                open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await;
+        drop(session_serial);
+        let result = result.map_err(map_runtime)?;
+        Ok(json!({
+            "object": file_object_json(&result.object),
+            "before": snapshot_metadata_json(
+                &result.before,
+                &result.moment.before_content_kind,
+                result.moment.before_binary_sha256.as_deref(),
+                result.moment.before_byte_length,
+            ),
+            "after": snapshot_metadata_json(
+                &result.after,
+                &result.moment.after_content_kind,
+                result.moment.after_binary_sha256.as_deref(),
+                result.moment.after_byte_length,
+            ),
+            "moment": moment_json(&result.moment),
+            "deduped": result.deduped,
+        }))
+    }
+
+    async fn versioned_text_delete(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedTextDeleteParams = parse(params)?;
+        let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let path = params.path.clone();
+        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let session_serial = self
+            .mutation_session_guard(&cancellation, "versionedText.delete (queued)")
+            .await?;
+        self.ensure_path_not_leased(&open, &params.version_id, &path)
+            .await?;
+        let request_id = params
+            .request_id
+            .or_else(|| request.idempotency_key.clone());
+        let moment_id = self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path);
+        let result = open
+            .actor
+            .versioned_text_delete(
+                DeleteTextFile {
+                    workspace_id: open.workspace_id,
+                    version_id: params.version_id,
+                    path,
+                    moment_id,
+                    request_id,
+                    metadata_origin: origin,
+                    author_json,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                },
+                open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await;
+        drop(session_serial);
+        let result = result.map_err(map_runtime)?;
+        Ok(json!({
+            "object": file_object_json(&result.object),
+            "before": snapshot_metadata_json(
+                &result.before,
+                &result.moment.before_content_kind,
+                result.moment.before_binary_sha256.as_deref(),
+                result.moment.before_byte_length,
+            ),
+            "moment": moment_json(&result.moment),
+            "deduped": result.deduped,
+        }))
+    }
+
+    async fn versioned_text_rollback(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedTextRollbackParams = parse(params)?;
+        let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let path = validate_addressable_plaintext_path(&params.path)
+            .map_err(|error| map_runtime(RuntimeError::Domain(error)))?;
+        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let session_serial = self
+            .mutation_session_guard(&cancellation, "versionedText.rollback (queued)")
+            .await?;
+        self.ensure_path_not_leased(&open, &params.version_id, &path)
+            .await?;
+        let restore_path = open
+            .actor
+            .get_moment(open.workspace_id.clone(), params.mutation_moment_id.clone())
+            .await
+            .map_err(map_runtime)?
+            .filter(|moment| {
+                moment.version_id == params.version_id
+                    && moment.path == path
+                    && moment.operation == MomentOp::Rename
+            });
+        if let Some(before_moment_id) =
+            restore_path.and_then(|moment| moment.before_latest_moment_id)
+            && let Some(before) = open
+                .actor
+                .get_moment(open.workspace_id.clone(), before_moment_id)
+                .await
+                .map_err(map_runtime)?
+            && before.path != path
+        {
+            self.ensure_path_not_leased(&open, &params.version_id, &before.path)
+                .await?;
+        }
+        let request_id = params
+            .request_id
+            .or_else(|| request.idempotency_key.clone());
+        let result = open
+            .actor
+            .versioned_text_rollback(
+                RollbackTextFileMutation {
+                    workspace_id: open.workspace_id,
+                    version_id: params.version_id,
+                    path,
+                    mutation_moment_id: params.mutation_moment_id,
+                    request_id,
+                    legacy_before_text: params.legacy_before_text,
+                    metadata_origin: origin,
+                    author_json,
+                },
+                open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await;
+        drop(session_serial);
+        let result = result.map_err(map_runtime)?;
+        Ok(json!({
+            "rolledBack": true,
+            "deduped": result.deduped,
+            "materializeEnqueued": result.materialize_enqueued,
+            "materialized": result.materialized,
+            "materializeOutcome": materialize_outcome_name(result.materialize_outcome),
+        }))
+    }
+
+    async fn versioned_text_compare(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedTextCompareParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let comparison = Self::read_under_ctx(
+            &cancellation,
+            "versionedText.compare",
+            open.actor.versioned_text_compare(CompareTextFileVersions {
+                workspace_id: open.workspace_id,
+                target_version_id: params.target_version_id,
+                source_version_id: params.source_version_id,
+                path: params.path.clone(),
+            }),
+        )
+        .await?;
+        Ok(json!({ "status": comparison_wire_status(&comparison) }))
+    }
+
+    async fn versioned_text_merge(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedTextMergeParams = parse(params)?;
+        let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let path = params.path.clone();
+        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let session_serial = self
+            .mutation_session_guard(&cancellation, "versions.merge (queued)")
+            .await?;
+        self.ensure_path_not_leased(&open, &params.target_version_id, &path)
+            .await?;
+        let request_id = params
+            .request_id
+            .or_else(|| request.idempotency_key.clone());
+        let object_id = self.generated_rpc_id("object", request.id, request_id.as_deref(), &path);
+        let moment_id = self.generated_rpc_id("moment", request.id, request_id.as_deref(), &path);
+        let conflict_id =
+            self.generated_rpc_id("conflict", request.id, request_id.as_deref(), &path);
+        let result = open
+            .actor
+            .versioned_text_merge(
+                MergeTextFileFromVersion {
+                    workspace_id: open.workspace_id,
+                    target_version_id: params.target_version_id,
+                    source_version_id: params.source_version_id,
+                    path,
+                    object_id,
+                    moment_id,
+                    request_id,
+                    conflict_id,
+                    metadata_origin: origin,
+                    author_json,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                },
+                open.root.clone(),
+                Arc::new(self.self_writes.scoped(&open.root)),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await;
+        drop(session_serial);
+        let execution = result.map_err(map_runtime)?;
+        let materialize_enqueued = execution.materialize_enqueued;
+        let materialized = execution.materialized;
+        let materialize_outcome = materialize_outcome_name(execution.materialize_outcome);
+        Ok(match execution.merge {
+            MergeTextFileResult::Unchanged { deduped, .. } => json!({
+                "status": "unchanged",
+                "deduped": deduped,
+                "materializeEnqueued": materialize_enqueued,
+                "materialized": materialized,
+                "materializeOutcome": materialize_outcome,
+            }),
+            MergeTextFileResult::Write { write, .. } => json!({
+                "status": "merged",
+                "writeKind": "write",
+                "object": file_object_json(&write.object),
+                "snapshot": snapshot_metadata_json(&write.snapshot, "text", None, None),
+                "moment": moment_json(&write.moment),
+                "deduped": write.deduped,
+                "materializeEnqueued": materialize_enqueued,
+                "materialized": materialized,
+                "materializeOutcome": materialize_outcome,
+            }),
+            MergeTextFileResult::Delete { delete, .. } => json!({
+                "status": "merged",
+                "writeKind": "delete",
+                "object": file_object_json(&delete.object),
+                "moment": moment_json(&delete.moment),
+                "deduped": delete.deduped,
+                "materializeEnqueued": materialize_enqueued,
+                "materialized": materialized,
+                "materializeOutcome": materialize_outcome,
+            }),
+            MergeTextFileResult::Conflict { deduped, .. } => json!({
+                "status": "conflict",
+                "deduped": deduped,
+                "materializeEnqueued": materialize_enqueued,
+                "materialized": materialized,
+                "materializeOutcome": materialize_outcome,
+            }),
+        })
+    }
+
+    async fn versions_create_named(
+        &self,
+        ctx: &RequestContext,
+        request: &Request,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionsCreateNamedParams = parse(params)?;
+        let open = self.open(request.workspace.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let new_version_id = self.generated_rpc_id(
+            "version",
+            request.id,
+            request.idempotency_key.as_deref(),
+            &params.name,
+        );
+        let cancellation = OperationCancellation::new(ctx);
+        let version = open
+            .actor
+            .create_named_version(
+                CreateNamedVersion {
+                    workspace_id: open.workspace_id,
+                    new_version_id,
+                    name: params.name,
+                    from_version_id: params.from_version_id,
+                    now_ms: now_ms()?,
                     request_id: request.idempotency_key.clone(),
                 },
                 Arc::new(NoFaults),
@@ -728,7 +1353,65 @@ impl EngineService {
             )
             .await
             .map_err(map_runtime)?;
-        Ok(json!({ "snapshot": snapshot_json(&result.snapshot), "deduped": result.deduped }))
+        Ok(version_record_json(&version))
+    }
+
+    async fn versions_compare_files(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionsCompareFilesParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let page = Self::read_under_ctx(
+            &cancellation,
+            "versions.compareFiles",
+            open.actor.compare_version_files_page(
+                open.workspace_id,
+                params.source_version_id,
+                params.target_version_id,
+                params.after_path,
+                200,
+            ),
+        )
+        .await?;
+        let entries: Vec<Value> = page
+            .entries
+            .iter()
+            .map(|change| {
+                let status = match change.status {
+                    VersionFileChangeStatus::Added => "added",
+                    VersionFileChangeStatus::Modified => "modified",
+                    VersionFileChangeStatus::Deleted => "deleted",
+                };
+                if change.binary {
+                    json!({ "path": change.path, "status": status, "binary": true })
+                } else {
+                    json!({ "path": change.path, "status": status })
+                }
+            })
+            .collect();
+        let budget = params
+            .byte_budget
+            .unwrap_or(MOMENTS_PAGE_BYTE_BUDGET)
+            .clamp(1, SINGLE_ROW_HARD_CAP_BYTES);
+        let included = byte_budget_cut_serialized(&entries, budget);
+        if included == 0 && !entries.is_empty() {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
+        }
+        let byte_truncated = included < entries.len();
+        let next_cursor = if byte_truncated {
+            entries[included - 1]["path"].as_str().map(str::to_owned)
+        } else {
+            page.next_after_path
+        };
+        Ok(json!({
+            "entries": entries[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
     }
 
     async fn versioned_text_read(
@@ -757,15 +1440,17 @@ impl EngineService {
         Ok(match snapshot {
             None => Value::Null,
             Some(snapshot) => {
-                let over_cap = snapshot.text.is_none();
+                let over_cap = snapshot.content_kind == "text" && snapshot.text.is_none();
                 let mut body = json!({
                     "workspaceId": snapshot.workspace_id,
                     "versionId": snapshot.version_id,
                     "objectId": snapshot.object_id,
                     "path": snapshot.path,
+                    "contentKind": snapshot.content_kind,
                     "text": snapshot.text,
                     "byteLength": snapshot.byte_length,
                     "blobSha256": snapshot.blob_sha256,
+                    "sha256": snapshot.blob_sha256,
                     "updatedAtMs": snapshot.updated_at_ms,
                     "latestMomentId": snapshot.latest_moment_id,
                     "metadataOrigin": snapshot.metadata_origin
@@ -883,27 +1568,73 @@ impl EngineService {
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
+        params: Value,
     ) -> Result<Value, WireError> {
+        let params: WorkspaceOnlyParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let cancellation = OperationCancellation::new(ctx);
-        let version_id = tokio::select! {
+        let version = tokio::select! {
             biased;
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("versions.active"));
             }
-            result = open.actor.active_version_id(open.workspace_id) => result,
+            result = open.actor.active_version(open.workspace_id) => match result {
+                Ok(version) => version,
+                Err(RuntimeError::Domain(DomainError::WorkspaceNotFound)) => return Ok(Value::Null),
+                Err(error) => return Err(map_runtime(error)),
+            },
         };
-        Ok(match version_id {
-            Ok(version_id) => json!({ "versionId": version_id }),
-            // A workspace with no versioned rows yet has no active version:
-            // the TS getActiveVersion answers null there, not an error. The
-            // workspace_id came from the daemon's own handle table, so
-            // WorkspaceNotFound here can only mean "nothing versioned yet".
-            Err(RuntimeError::Domain(DomainError::WorkspaceNotFound)) => {
-                json!({ "versionId": Value::Null })
-            }
-            Err(error) => return Err(map_runtime(error)),
-        })
+        Ok(version_record_json(&version))
+    }
+
+    async fn versions_ensure_main(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: WorkspaceOnlyParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let version = open
+            .actor
+            .ensure_main_version(
+                open.workspace_id,
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(version_record_json(&version))
+    }
+
+    async fn versions_set_active(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionsSetActiveParams = parse(params)?;
+        if params.version_id.is_empty() || params.version_id.trim() != params.version_id {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-version"));
+        }
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let version = open
+            .actor
+            .set_active_version(
+                open.workspace_id,
+                params.version_id,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(version_record_json(&version))
     }
 
     async fn versions_list(
@@ -1059,17 +1790,22 @@ impl EngineService {
         // ONE actor turn: the cap is decided in the query, so a replaced
         // head can never smuggle an over-cap blob into memory, and the
         // recorded length is integrity-checked against the stored bytes.
-        let head = Self::read_under_ctx(
-            &cancellation,
-            "versionedBinary.read",
-            open.actor.read_binary_inband(
+        let head = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("versionedBinary.read"));
+            }
+            result = open.actor.read_binary_inband(
                 open.workspace_id,
                 params.version_id,
                 params.path,
                 MAX_INBAND_CONTENT_BYTES,
-            ),
-        )
-        .await?;
+            ) => match result {
+                Ok(head) => head,
+                Err(RuntimeError::Domain(DomainError::TextHeadNotBinary)) => return Ok(Value::Null),
+                Err(error) => return Err(map_runtime(error)),
+            },
+        };
         Ok(match head {
             None => Value::Null,
             Some(head) => match head.bytes {
@@ -1087,6 +1823,42 @@ impl EngineService {
                     "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
                 }),
             },
+        })
+    }
+
+    async fn versioned_binary_read_blob(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: VersionedBinaryReadBlobParams = parse(params)?;
+        if params.sha256.len() != 64 || !params.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
+        }
+        // Stored digests are canonical lowercase hex; an uppercase spelling of
+        // a referenced digest must find it, not miss the exact-match lookup.
+        let sha256 = params.sha256.to_ascii_lowercase();
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let read = Self::read_under_ctx(
+            &cancellation,
+            "versionedBinary.readBlob",
+            open.actor.read_binary_blob(open.workspace_id, sha256),
+        )
+        .await?
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "file-not-found"))?;
+        Ok(match read.bytes {
+            Some(bytes) => json!({
+                "bytesBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+            }),
+            None => json!({
+                "bytesBase64": Value::Null,
+                "byteLength": read.byte_length,
+                "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+            }),
         })
     }
 
@@ -1138,6 +1910,8 @@ impl EngineService {
             if serde_json::to_string(first).map_or(0, |s| s.len()) > MOMENTS_PAGE_BYTE_BUDGET {
                 first["afterText"] = Value::Null;
                 first["beforeText"] = Value::Null;
+                first["afterInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
+                first["beforeInbandLimitBytes"] = json!(MAX_INBAND_CONTENT_BYTES);
             }
         }
         let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
@@ -1246,6 +2020,455 @@ impl EngineService {
         Ok(json!({
             "secrets": row_values[..included].to_vec(),
             "nextAfterPath": next_after_path,
+        }))
+    }
+
+    async fn load_or_create_secret_key(
+        &self,
+        cancellation: &OperationCancellation,
+        open: &OpenWorkspace,
+        operation: &'static str,
+    ) -> Result<dohc_engine_crypto::SecretDataKey, WireError> {
+        let key_root = open.root.clone();
+        let key_task =
+            tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_root));
+        let loaded = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption(operation));
+            }
+            loaded = key_task => loaded
+                .map_err(|_| wire(ErrorCode::Internal, "key-corrupt"))?
+                .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error))))?,
+        };
+        if let Some(key) = loaded {
+            return Ok(key);
+        }
+
+        let has_state = Self::read_under_ctx(
+            cancellation,
+            operation,
+            open.actor.secret_state_exists(open.workspace_id.clone()),
+        )
+        .await?;
+        if has_state {
+            return Err(wire(ErrorCode::Internal, "key-corrupt"));
+        }
+
+        let key_root = open.root.clone();
+        let key_task =
+            tokio::task::spawn_blocking(move || dohc_engine_crypto::create_key_file(&key_root));
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => Err(cancellation.interruption(operation)),
+            created = key_task => created
+                .map_err(|_| wire(ErrorCode::Internal, "key-corrupt"))?
+                .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error)))),
+        }
+    }
+
+    async fn secrets_write(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsWriteParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let path = params.path.clone();
+        let text = params.text;
+        if text.len() > MAX_INBAND_CONTENT_BYTES {
+            return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
+        }
+        let origin = validated_origin(Some(&params.origin), None)?;
+        let cancellation = OperationCancellation::new(ctx);
+        // Prove the version reference and secret-floor routing keylessly before
+        // any key-file load/mint. Invalid calls must remain side-effect-free.
+        Self::read_under_ctx(
+            &cancellation,
+            "secrets.write (validate)",
+            open.actor.secret_file_len(
+                open.workspace_id.clone(),
+                params.version_id.clone(),
+                path.clone(),
+            ),
+        )
+        .await?;
+        let key = self
+            .load_or_create_secret_key(&cancellation, &open, "secrets.write (key load)")
+            .await?;
+        let result = open
+            .actor
+            .write_secret_file(
+                SecretWrite {
+                    workspace_id: open.workspace_id,
+                    version_id: params.version_id,
+                    path,
+                    text,
+                    moment_id: params.moment_id,
+                    metadata_origin: origin,
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: now_ms()?,
+                    disk_intent: SecretDiskIntent::Materialize,
+                },
+                key,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({
+            "changed": result.changed,
+            "moment": result.moment.as_ref().map(secret_moment_json),
+        }))
+    }
+
+    async fn secrets_delete(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsDeleteParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let path = params.path.clone();
+        let origin = validated_origin(Some(&params.origin), None)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let moment = open
+            .actor
+            .delete_secret_file(
+                SecretDelete {
+                    workspace_id: open.workspace_id,
+                    version_id: params.version_id,
+                    path,
+                    moment_id: params.moment_id,
+                    metadata_origin: origin,
+                    metadata_summary: None,
+                    now_ms: now_ms()?,
+                },
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({ "moment": moment.as_ref().map(secret_moment_json) }))
+    }
+
+    async fn secrets_fork(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsForkParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        open.actor
+            .fork_secret_version(
+                open.workspace_id,
+                params.from_version_id,
+                params.to_version_id,
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({}))
+    }
+
+    async fn secrets_moments_list(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsMomentsListParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let path = params.path.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let limit = params.limit.unwrap_or(200).clamp(1, 500);
+        let mut page = Self::read_under_ctx(
+            &cancellation,
+            "secrets.moments.list",
+            open.actor.list_secret_moments(
+                open.workspace_id,
+                params.version_id,
+                path,
+                params.before_moment_order,
+                limit,
+            ),
+        )
+        .await?;
+        let rows: Vec<Value> = page.moments.iter().map(secret_moment_json).collect();
+        let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
+        if included == 0 && !rows.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
+        if included < rows.len() {
+            page.next_before_moment_order = page.moments[..included]
+                .last()
+                .map(|moment| moment.moment_order);
+        }
+        Ok(json!({
+            "moments": rows[..included].to_vec(),
+            "nextBeforeMomentOrder": page.next_before_moment_order,
+        }))
+    }
+
+    async fn secrets_moments_get(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsMomentsGetParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let moment = Self::read_under_ctx(
+            &cancellation,
+            "secrets.moments.get",
+            open.actor
+                .get_secret_moment(open.workspace_id, params.moment_id),
+        )
+        .await?;
+        Ok(moment.as_ref().map_or(Value::Null, secret_moment_json))
+    }
+
+    async fn secrets_compare(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsCompareParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        // Validate both version references before key state can affect error
+        // precedence. These one-row keyless probes never hydrate ciphertext.
+        Self::read_under_ctx(
+            &cancellation,
+            "secrets.compare (source version)",
+            open.actor.list_secret_files_page(
+                open.workspace_id.clone(),
+                params.source_version_id.clone(),
+                None,
+                1,
+            ),
+        )
+        .await?;
+        Self::read_under_ctx(
+            &cancellation,
+            "secrets.compare (target version)",
+            open.actor.list_secret_files_page(
+                open.workspace_id.clone(),
+                params.target_version_id.clone(),
+                None,
+                1,
+            ),
+        )
+        .await?;
+        let has_state = Self::read_under_ctx(
+            &cancellation,
+            "secrets.compare",
+            open.actor.secret_state_exists(open.workspace_id.clone()),
+        )
+        .await?;
+        let key = if has_state {
+            let key_root = open.root.clone();
+            let key_task =
+                tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_root));
+            let loaded = tokio::select! {
+                biased;
+                () = cancellation.token.cancelled() => {
+                    return Err(cancellation.interruption("secrets.compare (key load)"));
+                }
+                loaded = key_task => loaded
+                    .map_err(|_| wire(ErrorCode::Internal, "key-corrupt"))?
+                    .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error))))?,
+            };
+            Some(loaded.ok_or_else(|| wire(ErrorCode::Internal, "key-corrupt"))?)
+        } else {
+            None
+        };
+        let limit = params.limit.unwrap_or(200).clamp(1, 500);
+        let page = Self::read_under_ctx(
+            &cancellation,
+            "secrets.compare",
+            open.actor.compare_secret_files(
+                open.workspace_id,
+                params.source_version_id,
+                params.target_version_id,
+                params.after_path,
+                limit,
+                key,
+            ),
+        )
+        .await?;
+        let rows: Vec<Value> = page
+            .entries
+            .iter()
+            .map(|entry| {
+                json!({
+                    "path": entry.path,
+                    "status": match entry.status {
+                        VersionFileChangeStatus::Added => "added",
+                        VersionFileChangeStatus::Modified => "modified",
+                        VersionFileChangeStatus::Deleted => "deleted",
+                    },
+                })
+            })
+            .collect();
+        let included = byte_budget_cut_serialized(&rows, MOMENTS_PAGE_BYTE_BUDGET);
+        if included == 0 && !rows.is_empty() {
+            return Err(wire(
+                ErrorCode::Internal,
+                "a listing row exceeds the response frame budget",
+            ));
+        }
+        let byte_truncated = included < rows.len();
+        let next_after_path = if byte_truncated {
+            page.entries[..included]
+                .last()
+                .map(|entry| entry.path.clone())
+        } else {
+            page.next_after_path
+        };
+        Ok(json!({
+            "entries": rows[..included].to_vec(),
+            "nextAfterPath": next_after_path,
+        }))
+    }
+
+    async fn secrets_apply(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsApplyParams = parse(params)?;
+        // Secret-path gate UP FRONT so the error surface is identical across
+        // key states (a non-secret path refuses the same way with or without
+        // a key on disk).
+        if dohc_engine_files::policy::classify_engine_file_path(&params.path)
+            != dohc_engine_files::policy::PathClassification::Secret
+        {
+            return Err(wire(ErrorCode::InvalidParams, "not-secret-path"));
+        }
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let origin = validated_origin(Some(&params.origin), None)?;
+        let path = params.path.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        for (operation, version_id) in [
+            ("secrets.apply (source version)", &params.source_version_id),
+            ("secrets.apply (target version)", &params.target_version_id),
+        ] {
+            let validation = Self::read_under_ctx(
+                &cancellation,
+                operation,
+                open.actor.list_secret_files_page(
+                    open.workspace_id.clone(),
+                    version_id.clone(),
+                    None,
+                    1,
+                ),
+            )
+            .await;
+            match validation {
+                Ok(_) => {}
+                Err(error) if error.message == "invalid-version" => {
+                    return Err(wire(ErrorCode::InvalidParams, "invalid-version"));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        let key_root = open.root.clone();
+        let key_task =
+            tokio::task::spawn_blocking(move || dohc_engine_crypto::load_key_file(&key_root));
+        let key = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("secrets.apply (key load)"));
+            }
+            loaded = key_task => loaded
+                .map_err(|_| wire(ErrorCode::Internal, "key-corrupt"))?
+                .map_err(|error| map_runtime(RuntimeError::Domain(DomainError::Crypto(error))))?,
+        };
+        let Some(key) = key else {
+            let has_state = Self::read_under_ctx(
+                &cancellation,
+                "secrets.apply (key state)",
+                open.actor.secret_state_exists(open.workspace_id.clone()),
+            )
+            .await?;
+            if has_state {
+                return Err(wire(ErrorCode::Internal, "key-corrupt"));
+            }
+            return Ok(json!({ "changed": false, "moment": Value::Null }));
+        };
+        let result = open
+            .actor
+            .apply_secret_file(
+                open.workspace_id,
+                path,
+                params.source_version_id,
+                params.target_version_id,
+                params.moment_id,
+                origin,
+                params.summary,
+                params.correlation_id,
+                now_ms()?,
+                key,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({
+            "changed": result.changed,
+            "moment": result.moment.as_ref().map(secret_moment_json),
+        }))
+    }
+
+    async fn secrets_restore(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SecretsRestoreParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let path = params.path.clone();
+        let cancellation = OperationCancellation::new(ctx);
+        let result = open
+            .actor
+            .restore_secret_file(
+                open.workspace_id,
+                path,
+                params.before_moment_id,
+                params.moment_id,
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({
+            "restored": result.restored,
+            "restoredMomentId": result.restored_moment_id,
+            "path": result.path,
         }))
     }
 
@@ -2928,6 +4151,42 @@ impl EngineService {
         ))
     }
 
+    async fn search_ensure_index(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SearchEnsureIndexParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
+        let cancellation = OperationCancellation::new(ctx);
+        let versions = Self::read_under_ctx(
+            &cancellation,
+            "search.ensureIndex (version)",
+            open.actor.list_versions(open.workspace_id.clone()),
+        )
+        .await?;
+        if !versions
+            .iter()
+            .any(|version| version.version_id == params.version_id)
+        {
+            return Err(wire(ErrorCode::InvalidParams, "version-not-found"));
+        }
+        open.actor
+            .ensure_search_index(
+                open.root,
+                open.workspace_id,
+                params.version_id,
+                now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            )
+            .await
+            .map_err(map_runtime)?;
+        Ok(json!({}))
+    }
+
     fn open(&self, handle: Option<&WorkspaceHandle>) -> Result<OpenWorkspace, WireError> {
         let handle = handle.ok_or_else(workspace_unavailable)?;
         lock(&self.handles)
@@ -3050,14 +4309,166 @@ struct WorkspaceOpenParams {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VersionedTextWriteParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
     version_id: String,
-    object_id: String,
+    #[serde(default)]
+    object_id: Option<String>,
     path: String,
     text: String,
-    moment_id: String,
-    metadata_origin: String,
+    #[serde(default)]
+    moment_id: Option<String>,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    metadata_origin: Option<String>,
+    #[serde(default)]
+    author: Option<Value>,
+    #[serde(default)]
     author_json: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
     now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedBinaryWriteParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    version_id: String,
+    #[serde(default)]
+    object_id: Option<String>,
+    path: String,
+    #[serde(default)]
+    bytes: Option<Vec<u8>>,
+    #[serde(default)]
+    bytes_base64: Option<String>,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    metadata_origin: Option<String>,
+    #[serde(default)]
+    author: Option<Value>,
+    #[serde(default)]
+    author_json: Option<String>,
+    #[serde(default)]
+    moment_id: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextRenameParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    version_id: String,
+    from_path: String,
+    to_path: String,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    metadata_origin: Option<String>,
+    #[serde(default)]
+    author: Option<Value>,
+    #[serde(default)]
+    author_json: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextDeleteParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    version_id: String,
+    path: String,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    metadata_origin: Option<String>,
+    #[serde(default)]
+    author: Option<Value>,
+    #[serde(default)]
+    author_json: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextRollbackParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    version_id: String,
+    path: String,
+    mutation_moment_id: String,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    metadata_origin: Option<String>,
+    #[serde(default)]
+    author: Option<Value>,
+    #[serde(default)]
+    author_json: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    legacy_before_text: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextCompareParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    path: String,
+    source_version_id: String,
+    target_version_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedTextMergeParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    path: String,
+    source_version_id: String,
+    target_version_id: String,
+    #[serde(default)]
+    origin: Option<String>,
+    #[serde(default)]
+    metadata_origin: Option<String>,
+    #[serde(default)]
+    author: Option<Value>,
+    #[serde(default)]
+    author_json: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+    #[serde(default)]
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionsCompareFilesParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    source_version_id: String,
+    target_version_id: String,
+    #[serde(default)]
+    after_path: Option<String>,
+    #[serde(default)]
+    byte_budget: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -3076,12 +4487,121 @@ struct VersionsListParams {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionsCreateNamedParams {
+    workspace_id: String,
+    name: String,
+    from_version_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceOnlyParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionsSetActiveParams {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    version_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SecretsListParams {
     version_id: String,
     #[serde(default)]
     after_path: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsWriteParams {
+    workspace_id: String,
+    version_id: String,
+    path: String,
+    text: String,
+    origin: String,
+    moment_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsDeleteParams {
+    workspace_id: String,
+    version_id: String,
+    path: String,
+    origin: String,
+    moment_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsForkParams {
+    workspace_id: String,
+    from_version_id: String,
+    to_version_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsMomentsListParams {
+    workspace_id: String,
+    #[serde(default)]
+    version_id: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    before_moment_order: Option<i64>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsMomentsGetParams {
+    workspace_id: String,
+    moment_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsCompareParams {
+    workspace_id: String,
+    source_version_id: String,
+    target_version_id: String,
+    #[serde(default)]
+    after_path: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsApplyParams {
+    workspace_id: String,
+    path: String,
+    source_version_id: String,
+    target_version_id: String,
+    moment_id: String,
+    origin: String,
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    correlation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SecretsRestoreParams {
+    workspace_id: String,
+    path: String,
+    before_moment_id: String,
+    moment_id: String,
 }
 
 #[derive(Deserialize)]
@@ -3099,6 +4619,13 @@ struct VersionedTextListParams {
 struct VersionPathParams {
     version_id: String,
     path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct VersionedBinaryReadBlobParams {
+    workspace_id: String,
+    sha256: String,
 }
 
 #[derive(Deserialize)]
@@ -3283,6 +4810,13 @@ struct SearchParams {
     query: String,
     limit: Option<i64>,
     now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SearchEnsureIndexParams {
+    workspace_id: String,
+    version_id: String,
 }
 
 #[derive(Deserialize)]
@@ -3955,6 +5489,18 @@ fn dispatch_claim_json(claim: &DispatchClaim) -> Value {
 }
 
 fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
+    let after_inband_limit = (moment.after_content_kind == "text"
+        && moment.after_text.is_none()
+        && moment
+            .after_byte_length
+            .is_some_and(|length| length as usize > MAX_INBAND_CONTENT_BYTES))
+    .then_some(MAX_INBAND_CONTENT_BYTES);
+    let before_inband_limit = (moment.before_content_kind == "text"
+        && moment.before_text.is_none()
+        && moment
+            .before_byte_length
+            .is_some_and(|length| length as usize > MAX_INBAND_CONTENT_BYTES))
+    .then_some(MAX_INBAND_CONTENT_BYTES);
     json!({
         "momentOrder": moment.moment_order,
         "momentId": moment.moment_id,
@@ -3981,8 +5527,28 @@ fn moment_json(moment: &dohc_engine_domain::MomentRecord) -> Value {
         // the same self-describing in-band cap as every content read.
         "afterText": inband_text(moment.after_text.as_deref()),
         "afterByteLength": moment.after_byte_length,
+        "afterInbandLimitBytes": after_inband_limit,
         "beforeText": inband_text(moment.before_text.as_deref()),
         "beforeByteLength": moment.before_byte_length,
+        "beforeInbandLimitBytes": before_inband_limit,
+    })
+}
+
+fn secret_moment_json(moment: &SecretMomentRecord) -> Value {
+    json!({
+        "id": moment.moment_id,
+        "workspaceId": moment.workspace_id,
+        "versionId": moment.version_id,
+        "path": moment.path,
+        "recordedAtMs": moment.recorded_at_ms,
+        "operation": moment.operation.as_str(),
+        "metadata": {
+            "origin": moment.metadata_origin,
+            "summary": moment.metadata_summary,
+            "correlationId": moment.metadata_correlation_id,
+        },
+        "momentOrder": moment.moment_order,
+        "protected": true,
     })
 }
 
@@ -4043,11 +5609,90 @@ fn snapshot_json(snapshot: &TextSnapshot) -> Value {
         "objectId": snapshot.object_id,
         "path": snapshot.path,
         "text": snapshot.text,
+        "contentKind": "text",
+        "sha256": snapshot.blob_sha256,
+        "byteLength": snapshot.text.len(),
         "blobSha256": snapshot.blob_sha256,
         "updatedAtMs": snapshot.updated_at_ms,
         "latestMomentId": snapshot.latest_moment_id,
         "metadataOrigin": snapshot.metadata_origin
     })
+}
+
+fn file_object_json(object: &dohc_engine_domain::FileObjectRecord) -> Value {
+    json!({
+        "id": object.object_id,
+        "workspaceId": object.workspace_id,
+        "createdAtMs": object.created_at_ms,
+    })
+}
+
+fn version_record_json(version: &VersionRecord) -> Value {
+    let mut value = json!({
+        "id": version.version_id,
+        "workspaceId": version.workspace_id,
+        "kind": version.kind.as_str(),
+        "name": version.name,
+        "createdAtMs": version.created_at_ms,
+    });
+    if let Some(fork_version_id) = &version.fork_version_id {
+        let mut fork_point = json!({ "versionId": fork_version_id });
+        if let Some(moment_id) = &version.fork_moment_id {
+            fork_point["momentId"] = json!(moment_id);
+        }
+        value["forkPoint"] = fork_point;
+    }
+    value
+}
+
+fn snapshot_metadata_json(
+    snapshot: &TextSnapshot,
+    content_kind: &str,
+    binary_sha256: Option<&str>,
+    binary_byte_length: Option<i64>,
+) -> Value {
+    let (sha256, byte_length) = if content_kind == "binary" {
+        (
+            binary_sha256.unwrap_or(&snapshot.blob_sha256),
+            binary_byte_length.unwrap_or_default().max(0) as usize,
+        )
+    } else {
+        (snapshot.blob_sha256.as_str(), snapshot.text.len())
+    };
+    json!({
+        "workspaceId": snapshot.workspace_id,
+        "versionId": snapshot.version_id,
+        "objectId": snapshot.object_id,
+        "path": snapshot.path,
+        "contentKind": content_kind,
+        "sha256": sha256,
+        "byteLength": byte_length,
+        "updatedAtMs": snapshot.updated_at_ms,
+        "latestMomentId": snapshot.latest_moment_id,
+        "metadataOrigin": snapshot.metadata_origin,
+    })
+}
+
+fn comparison_wire_status(
+    comparison: &dohc_engine_domain::VersionedTextComparison,
+) -> &'static str {
+    match comparison.status {
+        ComparisonStatus::Same | ComparisonStatus::CurrentChanged => "unchanged",
+        ComparisonStatus::IncomingChanged => "merged",
+        ComparisonStatus::Diverged => match (
+            comparison.base.as_ref(),
+            comparison.current.as_ref(),
+            comparison.incoming.as_ref(),
+        ) {
+            (Some(base), Some(current), Some(incoming)) => {
+                match merge_markdown(&base.text, &current.text, &incoming.text) {
+                    MarkdownMergeResult::Merged(_) => "merged",
+                    MarkdownMergeResult::Conflict => "conflict",
+                }
+            }
+            _ => "conflict",
+        },
+    }
 }
 
 fn conflict_json(conflict: &TextConflict) -> Value {
@@ -4120,6 +5765,79 @@ where
     String::deserialize(deserializer).map(Some)
 }
 
+fn materialize_outcome_name(outcome: PostCommitMaterializeOutcome) -> &'static str {
+    match outcome {
+        PostCommitMaterializeOutcome::Applied => "applied",
+        PostCommitMaterializeOutcome::Skipped => "skipped",
+        PostCommitMaterializeOutcome::Conflict => "conflict",
+        PostCommitMaterializeOutcome::Superseded => "superseded",
+        PostCommitMaterializeOutcome::Error => "error",
+    }
+}
+
+fn validate_workspace_param(candidate: Option<&str>, resolved: &str) -> Result<(), WireError> {
+    if candidate.is_some_and(|candidate| candidate != resolved) {
+        return Err(wire(ErrorCode::InvalidParams, "invalid-workspace"));
+    }
+    Ok(())
+}
+
+fn validated_origin(
+    origin: Option<&str>,
+    legacy_origin: Option<&str>,
+) -> Result<String, WireError> {
+    let value = origin
+        .or(legacy_origin)
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "invalid-metadata"))?;
+    match value {
+        "api" | "local-file" | "restore" | "sync" | "unknown" => Ok(value.to_owned()),
+        // Compatibility for pre-RPC-D callers. The new `origin` field remains
+        // the closed five-set; legacy `metadataOrigin: agent` represented an
+        // API write before author attribution became a separate field.
+        "agent" if origin.is_none() => Ok("api".to_owned()),
+        _ => Err(wire(ErrorCode::InvalidParams, "invalid-metadata")),
+    }
+}
+
+fn validated_author(
+    author: Option<&Value>,
+    legacy_author_json: Option<&str>,
+) -> Result<Option<String>, WireError> {
+    if author.is_some() && legacy_author_json.is_some() {
+        return Err(wire(ErrorCode::InvalidParams, "invalid-metadata"));
+    }
+    let value = match author {
+        Some(value) => value.clone(),
+        None => match legacy_author_json {
+            Some(raw) => serde_json::from_str(raw)
+                .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-metadata"))?,
+            None => return Ok(None),
+        },
+    };
+    let object = value
+        .as_object()
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "invalid-metadata"))?;
+    let nonempty = |field: &str| {
+        object
+            .get(field)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    };
+    let run_valid = object
+        .get("agentRunId")
+        .is_none_or(|value| value.as_str().is_some_and(|value| !value.is_empty()));
+    if object.get("kind").and_then(Value::as_str) != Some("agent")
+        || !nonempty("agentId")
+        || !nonempty("onBehalfOf")
+        || !run_valid
+    {
+        return Err(wire(ErrorCode::InvalidParams, "invalid-metadata"));
+    }
+    serde_json::to_string(&value)
+        .map(Some)
+        .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-metadata"))
+}
+
 fn parse<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, WireError> {
     serde_json::from_value(value).map_err(|_| wire(ErrorCode::InvalidParams, "invalid parameters"))
 }
@@ -4182,6 +5900,51 @@ fn map_runtime(error: RuntimeError) -> WireError {
     if matches!(&error, RuntimeError::Collab(CollabError::UnsettledClose)) {
         return wire(ErrorCode::InvalidParams, "ydoc-unsettled-close");
     }
+    if let RuntimeError::Domain(domain) = &error {
+        let message = match domain {
+            DomainError::IdempotencyKeyReuseMismatch => Some("idempotency-key-reuse-mismatch"),
+            DomainError::DuplicateMomentId => Some("duplicate-id"),
+            DomainError::FileNotFound => Some("file-not-found"),
+            DomainError::TargetPathExists => Some("target-path-exists"),
+            DomainError::VersionNotFound => Some("version-not-found"),
+            DomainError::InvalidVersion => Some("invalid-version"),
+            DomainError::VersionNameConflict => Some("version-name-conflict"),
+            DomainError::InvalidVersionName => Some("invalid-version-name"),
+            DomainError::DuplicateId => Some("duplicate-id"),
+            DomainError::ForkBaseNotFound => Some("fork-base-not-found"),
+            DomainError::ConflictStaleTarget => Some("conflict-stale-target"),
+            DomainError::BinaryHeadNotText => Some("binary-head-not-text"),
+            DomainError::InvalidPath { .. } => Some("invalid-path"),
+            DomainError::InvalidText { .. } => Some("invalid-text"),
+            DomainError::NotSecretPath => Some("not-secret-path"),
+            DomainError::SecretMomentNotFound => Some("moment-not-found"),
+            DomainError::Crypto(error) => Some(error.code()),
+            DomainError::InvalidInput { .. } => Some("invalid-input"),
+            DomainError::StateCorrupt { .. } => Some("state-corrupt"),
+            DomainError::Storage(_) => Some("persist-failed"),
+            _ => None,
+        };
+        if let Some(message) = message {
+            let code = match domain {
+                DomainError::Storage(_) | DomainError::StateCorrupt { .. } => ErrorCode::Internal,
+                // Same severity split as map_domain_code: decode/key failures
+                // are internal state problems, not caller mistakes.
+                DomainError::Crypto(error) => match error {
+                    dohc_engine_crypto::CryptoError::InvalidIvLength
+                    | dohc_engine_crypto::CryptoError::InvalidTagLength
+                    | dohc_engine_crypto::CryptoError::PlaintextTooLarge
+                    | dohc_engine_crypto::CryptoError::PlaintextNotUtf8
+                    | dohc_engine_crypto::CryptoError::InvalidBase64 => ErrorCode::InvalidParams,
+                    dohc_engine_crypto::CryptoError::DecryptFailed
+                    | dohc_engine_crypto::CryptoError::InvalidKeyLength
+                    | dohc_engine_crypto::CryptoError::KeyFileMalformed
+                    | dohc_engine_crypto::CryptoError::EnvelopeUnwrapFailed => ErrorCode::Internal,
+                },
+                _ => ErrorCode::InvalidParams,
+            };
+            return wire(code, message);
+        }
+    }
     let code = match error {
         RuntimeError::Overloaded => ErrorCode::Overloaded,
         RuntimeError::Cancelled => ErrorCode::Cancelled,
@@ -4219,8 +5982,11 @@ fn map_domain_code(error: DomainError) -> ErrorCode {
         },
         DomainError::WorkspaceNotFound
         | DomainError::VersionNotFound
+        | DomainError::InvalidVersion
         | DomainError::WorkspaceMismatch
         | DomainError::VersionNameConflict
+        | DomainError::InvalidVersionName
+        | DomainError::DuplicateId
         | DomainError::DuplicateMomentId
         | DomainError::FileNotFound
         | DomainError::BinaryHeadNotText
@@ -4362,6 +6128,80 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn binary_write_records_suppression_in_the_root_scoped_registry() {
+        // MUTATION: pass the process-global suppression registry to the actor
+        // instead of the root-scoped view -> the scoped lookup is empty.
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let service = EngineService::new();
+        let workspace_id = "binary-root-scoped-suppression";
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+
+        // Keep the assertion deterministic: no watcher remains to consume the
+        // suppression identity between materialization and inspection.
+        let open = service.open(Some(&handle)).expect("open workspace");
+        let canonical_root = open.root.clone();
+        open.shutdown_capture().await;
+
+        let request = Request {
+            id: 1,
+            method: "versionedBinary.write".to_owned(),
+            workspace: Some(handle.clone()),
+            deadline_ms: None,
+            idempotency_key: None,
+            params: json!({
+                "versionId": "main",
+                "path": "scoped.bin",
+                "bytes": [7, 8, 9],
+                "origin": "api",
+            }),
+        };
+        let result = service
+            .versioned_binary_write(
+                &RequestContext::unbounded(),
+                &request,
+                request.params.clone(),
+            )
+            .await
+            .expect("binary write");
+        let sha256 = result["snapshot"]["sha256"]
+            .as_str()
+            .expect("binary sha256");
+
+        assert!(
+            service.self_writes.scoped(&canonical_root).has_pending(
+                workspace_id,
+                "scoped.bin",
+                sha256
+            ),
+            "binary materialization must register in the capture driver's root-scoped view"
+        );
+        assert!(
+            !service
+                .self_writes
+                .has_pending(workspace_id, "scoped.bin", sha256),
+            "the process-global unscoped namespace must remain empty"
+        );
+
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+    }
+
     #[tokio::test]
     async fn cancelled_workspace_open_does_not_wait_for_open_lock() {
         let service = Arc::new(EngineService::new());
@@ -4390,6 +6230,71 @@ mod tests {
             .expect_err("cancelled queued open must fail");
         assert_eq!(result.code, ErrorCode::Cancelled);
         drop(held);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mutation_write_waits_for_session_ops_before_lease_check_and_commit() {
+        // MUTATION: remove the versionedText.write session_ops acquisition ->
+        // the write completes while this test still holds the ydoc ordering guard.
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = Arc::new(EngineService::with_supervisor(supervisor));
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "mutation-session-serial"
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+
+        let held = Arc::clone(&service.session_ops).lock_owned().await;
+        let writing_service = Arc::clone(&service);
+        let writing_handle = handle.clone();
+        let mut writing = tokio::spawn(async move {
+            let ctx = RequestContext::unbounded();
+            let request = Request {
+                id: 1,
+                method: "versionedText.write".to_owned(),
+                workspace: Some(writing_handle),
+                deadline_ms: None,
+                idempotency_key: None,
+                params: json!({
+                    "versionId": "main",
+                    "path": "serialized.md",
+                    "text": "must wait",
+                    "origin": "api",
+                    "requestId": "mutation-session-serial-write"
+                }),
+            };
+            writing_service
+                .versioned_text_write(&ctx, &request, request.params.clone())
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut writing)
+                .await
+                .is_err(),
+            "the write path must block behind the same guard held by ydoc.open"
+        );
+
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(10), writing)
+            .await
+            .expect("write completed after guard release")
+            .expect("write task")
+            .expect("versioned text write");
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

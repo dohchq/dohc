@@ -372,8 +372,8 @@ async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
             if !send_error(
                 output,
                 None,
-                ErrorCode::InvalidEnvelope,
-                "blob streams are not supported by this method surface",
+                ErrorCode::InvalidParams,
+                "blob-ingest-unsupported",
             )
             .await
             {
@@ -467,7 +467,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 mod tests {
     use super::*;
     use dohc_engine_protocol::transport::RequestContext;
-    use dohc_engine_protocol::wire::{Request as WireRequest, Response as WireResponse};
+    use dohc_engine_protocol::wire::{BlobStart, Request as WireRequest, Response as WireResponse};
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::task::{Context as TaskContext, Poll};
@@ -703,6 +703,39 @@ mod tests {
                 result: serde_json::Value::Null,
             })
         }
+    }
+
+    #[tokio::test]
+    async fn inbound_blob_start_is_refused_as_unsupported_ingest() {
+        // MUTATION: accept BlobStart or use the generic envelope error -> the exact refusal fails.
+        let service = Arc::new(CountingService {
+            calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let supervisor = Arc::new(Supervisor::new(SupervisorConfig::default(), service));
+        let (output, mut received) = tokio::sync::mpsc::channel(1);
+        let (writer_gone, _) = tokio::sync::watch::channel(false);
+        let active_requests = Arc::new(Mutex::new(HashSet::new()));
+        let mut request_tasks = JoinSet::new();
+        let keep_running = dispatch_authenticated(
+            Envelope::BlobStart(BlobStart {
+                request_id: 7,
+                stream_id: 9,
+                total_bytes: Some(3),
+                sha256: None,
+            }),
+            &supervisor,
+            &output,
+            &writer_gone,
+            &active_requests,
+            &mut request_tasks,
+        )
+        .await;
+        assert!(!keep_running);
+        let Envelope::Error(error) = received.recv().await.expect("error envelope") else {
+            panic!("BlobStart must produce an error envelope");
+        };
+        assert_eq!(error.error.code, ErrorCode::InvalidParams);
+        assert_eq!(error.error.message, "blob-ingest-unsupported");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

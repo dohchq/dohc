@@ -83,7 +83,7 @@ async fn clone_marked_shadow_replay_composes_real_domains_end_to_end() {
                     "path": "notes/hello.md",
                     "text": "hello shadow replay",
                     "momentId": "moment-1",
-                    "metadataOrigin": "shadow-replay",
+                    "metadataOrigin": "api",
                     "nowMs": 100
                 }),
             ),
@@ -304,7 +304,7 @@ async fn first_parity_rejected_ydoc_apply_is_atomic_and_valid_retry_creates_line
                     "path": "parity.md",
                     "text": "seed",
                     "momentId": "moment-parity",
-                    "metadataOrigin": "test",
+                    "metadataOrigin": "api",
                     "nowMs": 100
                 }),
             ),

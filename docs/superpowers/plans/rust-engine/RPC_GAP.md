@@ -122,9 +122,44 @@ MAX_INBAND_CONTENT_BYTES = INBAND_CONTENT_CAP_BYTES = 48 KiB — NOT the
 64 KiB wire-string bound, which is the DOP1 envelope limit above it).
 Real binaries and text past the 48 KiB cap need the protocol's blob-chunk
 streaming (BlobStart exists in the wire contract; NO daemon producer
-yet) — cutover-relevant for readBinaryFile and large text reads; owned by
-RPC-D.
+yet) — cutover-relevant for readBinaryFile and large text reads.
+RE-SCOPED (RPC-D pre-PR adversarial review, 2026-07-22): the EGRESS
+producer moves to shard RPC-D2 (sole caller is desktop binary restore;
+needed pre-cutover, NOT pre-PR — a GATE6 dependency). RPC-D ships
+readBlob's metadata-only over-cap answer and refuses inbound BlobStart
+with "blob-ingest-unsupported".
 
+RPC-D2 ALSO owns the secret-aware DISK executor (recorded at PR #223
+review): RPC-D's secret surface is DB-authoritative — secrets.write/
+apply/restore enqueue secret-mat_ jobs and every delete flavor records
+its completed generation marker, but the generic job replayer SKIPS
+secret jobs (plaintext requires the key, which the daemon never holds
+at replay time), so the materialized workspace file stays absent/stale
+until the executor lands. Pre-cutover no production caller reads the
+materialized secret path through the daemon; the recorded jobs/markers
+let the executor settle disk state exactly once when it arrives.
+The executor must also decide the CROSS-VERSION disk semantics: marker
+generations are workspace-wide orders keyed by path, and a delete in a
+non-active version records a marker that outranks an older pending job
+for the ACTIVE version's same path — which job wins disk is its call.
+GATE6-blocking.
+
+
+CROSS-ENGINE DELTA (PR #223 claude r4): secret path SLASH-SPELLING —
+the Rust SECRET store keys rows by the verbatim path while the oracle
+stores validateUserWritePath().normalized (slash cleanup), and the Rust
+TEXT store normalizes slashes too. Edge spellings ("a//b.env") create
+two Rust secret rows where the oracle collapses to one, and both
+materialize onto the same disk file. Self-consistent within Rust
+(write/read/list all verbatim); owed a ruling alongside the RPC-D2
+secret disk executor — GATE6-BLOCKING (two secret rows materializing
+onto one disk file is a plaintext clobber/mask hazard). ALSO recorded
+(same review): the daemon rollback's engine_requests purge filtered by
+bare result_seq in a table shared with the collab durable ledger and
+the storage compound-write ledger. DISCHARGED in-PR (codex r7): the
+engine_requests table gained a kind column (migration 13, every writer
+stamped — versioned/merge/ydoc/compound/chat) and the purge is scoped
+to kind='versioned'; legacy NULL-kind rows are never swept.
 
 CROSS-ENGINE DELTA (RPC-A r18): secret path SPELLING — TS normalize-stores
 (percent-disguises collapse); Rust stores the spelling the write carried

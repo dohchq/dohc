@@ -26,6 +26,11 @@ pub enum DomainError {
     #[error("version not found")]
     VersionNotFound,
 
+    /// A secret-surface version reference is invalid. This is distinct from
+    /// the text domain's `VersionNotFound` compatibility code.
+    #[error("secret version reference is invalid")]
+    InvalidVersion,
+
     /// An object id resolved to a different workspace than the caller named.
     #[error("object belongs to a different workspace")]
     WorkspaceMismatch,
@@ -34,6 +39,14 @@ pub enum DomainError {
     /// workspace.
     #[error("a version with that name already exists")]
     VersionNameConflict,
+
+    /// A named version must be non-empty and have no surrounding whitespace.
+    #[error("version name is invalid")]
+    InvalidVersionName,
+
+    /// A generated/caller-supplied durable id already exists.
+    #[error("generated id already exists")]
+    DuplicateId,
 
     /// A caller-supplied `moment_id` is already present in this workspace
     /// (moment ids are unique per workspace; a duplicate would collide history).
@@ -138,8 +151,11 @@ impl DomainError {
             DomainError::Storage(err) => err.code(),
             DomainError::WorkspaceNotFound => "workspace-not-found",
             DomainError::VersionNotFound => "version-not-found",
+            DomainError::InvalidVersion => "invalid-version",
             DomainError::WorkspaceMismatch => "workspace-mismatch",
             DomainError::VersionNameConflict => "version-name-conflict",
+            DomainError::InvalidVersionName => "invalid-version-name",
+            DomainError::DuplicateId => "duplicate-id",
             DomainError::DuplicateMomentId => "duplicate-moment-id",
             DomainError::FileNotFound => "file-not-found",
             DomainError::BinaryHeadNotText => "binary-head-not-text",

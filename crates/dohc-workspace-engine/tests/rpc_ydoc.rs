@@ -567,11 +567,9 @@ async fn settle_without_a_seeded_lineage_refuses_and_leaves_the_file_intact() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn settle_refuses_after_the_path_changes_owners() {
+async fn a_rival_write_on_a_live_session_path_refuses_session_busy() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
-    // An unrelated captured file establishes the main version; the contested
-    // path itself stays absent until the rival write claims it.
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
     let service = Arc::new(EngineService::new());
@@ -604,57 +602,47 @@ async fn settle_refuses_after_the_path_changes_owners() {
     )
     .await;
 
-    // Another writer claims the same path with a DIFFERENT object before the
-    // session settles.
-    call(
-        &transport,
-        &handle,
-        4,
-        "versionedText.write",
-        json!({
-            "versionId": "main",
-            "objectId": "other-object",
-            "path": "notes/claimed.md",
-            "text": "the other owner's content",
-            "momentId": "moment-other-owner",
-            "metadataOrigin": "agent"
-        }),
-    )
-    .await;
-
-    // Mutation check: drop the object_id ownership comparison in
-    // ydoc_settle_on_store to restore the bug — the stale session projection
-    // then overwrites the other object's head and this refusal assertion
-    // fails (and the content assertion below would read "session text").
-    let refused = transport
+    // RPC-D's lease rule closed the old rival-claim window: a
+    // versionedText.write against a path whose derived object a live
+    // session leases now refuses instead of silently changing the owner
+    // under the editor. (Settle-time ownership over a REBOUND head stays
+    // covered by the runtime rebind test.) Mutation check: drop the lease
+    // guard from the versionedText.write arm — this write succeeds and the
+    // refusal assertion fails.
+    let rival = transport
         .call(
             RequestContext::unbounded(),
             request(
-                5,
-                "ydoc.settle",
+                4,
+                "versionedText.write",
                 Some(handle.clone()),
-                json!({ "sessionId": session_id, "summary": "stale owner" }),
+                json!({
+                    "versionId": "main",
+                    "objectId": "other-object",
+                    "path": "notes/claimed.md",
+                    "text": "the other owner's content",
+                    "momentId": "moment-other-owner",
+                    "metadataOrigin": "agent"
+                }),
             ),
         )
         .await
-        .expect_err("settling after the path changed owners must refuse");
-    assert_eq!(refused.code, ErrorCode::InvalidParams);
+        .expect_err("a rival write on a live session's path must refuse");
+    assert_eq!(rival.code, ErrorCode::InvalidParams);
+    assert_eq!(rival.message, "ydoc-session-busy");
 
-    let head = call(
+    // The session settles cleanly - nothing changed the path under it.
+    let settled = call(
         &transport,
         &handle,
-        6,
-        "versionedText.read",
-        json!({ "versionId": "main", "path": "notes/claimed.md" }),
+        5,
+        "ydoc.settle",
+        json!({ "sessionId": session_id, "summary": "still owned" }),
     )
     .await;
-    assert_eq!(head["text"], json!("the other owner's content"));
-    assert_eq!(head["objectId"], json!("other-object"));
+    assert_eq!(settled["markdown"], json!("session text"));
 
-    // The session cannot settle (stale owner) and cannot prune-close
-    // (UnsettledClose guard: recorded edits with no matching artifact) —
-    // workspace.close is the teardown path that releases its lease.
-    call(&transport, &handle, 7, "workspace.close", json!({})).await;
+    call(&transport, &handle, 6, "workspace.close", json!({})).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

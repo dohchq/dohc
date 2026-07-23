@@ -2,7 +2,7 @@
 
 use crate::conflicts::{
     ConflictChoice, ConflictFileState, ConflictMetadata, ConflictStatus, TextConflict,
-    enqueue_delete, enqueue_write, insert_text_conflict_if_absent,
+    enqueue_delete, enqueue_write, insert_text_conflict_if_absent, load_text_conflict_in_tx,
 };
 use crate::error::DomainError;
 use crate::records::{
@@ -10,11 +10,13 @@ use crate::records::{
     WriteText,
 };
 use crate::store::{
-    VersionedTextStore, delete_text_in_tx, validate_delete_input, validate_path,
-    validate_write_input, write_text_in_tx,
+    VersionedTextStore, delete_result_from_moment, delete_text_in_tx, get_moment, hash_fields,
+    lookup_request, record_merge_request, validate_delete_input, validate_path,
+    validate_write_input, write_result_from_moment, write_text_in_tx,
 };
 use dohc_engine_storage::{FaultInjector, Preimage, StorageError, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_MERGE_LINES: usize = 2_000;
@@ -25,7 +27,7 @@ pub enum MarkdownMergeResult {
     Conflict,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ComparisonStatus {
     Same,
     IncomingChanged,
@@ -33,7 +35,7 @@ pub enum ComparisonStatus {
     Diverged,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionedTextComparison {
     pub workspace_id: String,
     pub path: String,
@@ -61,6 +63,7 @@ pub struct MergeTextFileFromVersion {
     pub path: String,
     pub object_id: String,
     pub moment_id: String,
+    pub request_id: Option<String>,
     pub conflict_id: String,
     pub metadata_origin: String,
     pub author_json: Option<String>,
@@ -78,6 +81,7 @@ pub enum MergeTextFileResult {
     Unchanged {
         reason: MergeUnchangedReason,
         comparison: VersionedTextComparison,
+        deduped: bool,
     },
     Write {
         comparison: VersionedTextComparison,
@@ -90,7 +94,32 @@ pub enum MergeTextFileResult {
     Conflict {
         comparison: VersionedTextComparison,
         conflict: Box<TextConflict>,
+        deduped: bool,
     },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MergeLedgerRecord {
+    payload_hash: String,
+    outcome: MergeLedgerOutcome,
+    #[serde(default)]
+    comparison: Option<VersionedTextComparison>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+enum MergeLedgerOutcome {
+    Write { moment_id: String },
+    Delete { moment_id: String },
+    Conflict { conflict_id: String },
+    Unchanged { reason: MergeLedgerUnchangedReason },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum MergeLedgerUnchangedReason {
+    AlreadySame,
+    SourceUnchanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +135,19 @@ pub struct VersionFileChange {
     pub status: VersionFileChangeStatus,
     pub current: Option<SnapshotContent>,
     pub incoming: Option<SnapshotContent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionFileChangeEntry {
+    pub path: String,
+    pub status: VersionFileChangeStatus,
+    pub binary: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionFileChangePage {
+    pub entries: Vec<VersionFileChangeEntry>,
+    pub next_after_path: Option<String>,
 }
 
 /// Port of `mergeMarkdown.ts`: LCS-aligned line hunks with conservative
@@ -207,9 +249,52 @@ impl VersionedTextStore<'_> {
         input: &MergeTextFileFromVersion,
         faults: &dyn FaultInjector,
     ) -> Result<MergeTextFileResult, DomainError> {
-        // note: request-id replay is deferred until all four result variants can be reconstructed.
+        self.merge_text_file_from_version_with(input, faults, |_, _| Ok(()))
+    }
+
+    /// Merge with a caller-supplied same-transaction side effect (used by the
+    /// runtime to keep FTS synchronized with a merged write/delete).
+    pub fn merge_text_file_from_version_with<F>(
+        &mut self,
+        input: &MergeTextFileFromVersion,
+        faults: &dyn FaultInjector,
+        after: F,
+    ) -> Result<MergeTextFileResult, DomainError>
+    where
+        F: Fn(&Connection, &MergeTextFileResult) -> Result<(), DomainError>,
+    {
         validate_path(&input.path)?;
+        let (author_kind, author_json) = match input.author_json.as_deref() {
+            Some(author_json) => (b"some".as_slice(), author_json.as_bytes()),
+            None => (b"none".as_slice(), b"".as_slice()),
+        };
+        let payload_hash = hash_fields(&[
+            input.workspace_id.as_bytes(),
+            input.target_version_id.as_bytes(),
+            input.source_version_id.as_bytes(),
+            input.path.as_bytes(),
+            input.moment_id.as_bytes(),
+            input.object_id.as_bytes(),
+            input.conflict_id.as_bytes(),
+            input.metadata_origin.as_bytes(),
+            author_kind,
+            author_json,
+        ]);
         let outcome = self.store.write_with(faults, |tx| {
+            if let Some(request_id) = &input.request_id
+                && let Some(recorded) = lookup_request(tx, request_id)?
+            {
+                // A request id recorded by a DIFFERENT operation kind stores a
+                // raw hash, not merge-ledger JSON: that is key reuse, not
+                // engine corruption.
+                let Ok(recorded) = decode_merge_ledger(&recorded.payload_hash) else {
+                    return Err(DomainError::IdempotencyKeyReuseMismatch);
+                };
+                if recorded.payload_hash != payload_hash {
+                    return Err(DomainError::IdempotencyKeyReuseMismatch);
+                }
+                return reconstruct_merge(tx, input, &recorded);
+            }
             let compare_input = CompareTextFileVersions {
                 workspace_id: input.workspace_id.clone(),
                 target_version_id: input.target_version_id.clone(),
@@ -218,16 +303,20 @@ impl VersionedTextStore<'_> {
             };
             let comparison = compare_text_file_versions_in_db(tx, &compare_input)?;
             if file_states_equal(&comparison.current, &comparison.incoming) {
-                return Ok(MergeTextFileResult::Unchanged {
+                let result = MergeTextFileResult::Unchanged {
                     reason: MergeUnchangedReason::AlreadySame,
                     comparison,
-                });
+                    deduped: false,
+                };
+                return finish_merge(tx, input, &payload_hash, result, &after);
             }
             if file_states_equal(&comparison.incoming, &comparison.base) {
-                return Ok(MergeTextFileResult::Unchanged {
+                let result = MergeTextFileResult::Unchanged {
                     reason: MergeUnchangedReason::SourceUnchanged,
                     comparison,
-                });
+                    deduped: false,
+                };
+                return finish_merge(tx, input, &payload_hash, result, &after);
             }
 
             if file_states_equal(&comparison.current, &comparison.base) {
@@ -242,13 +331,15 @@ impl VersionedTextStore<'_> {
                             Preimage::Present(snapshot.blob_sha256.clone())
                         });
                     enqueue_write(tx, &write, preimage, "merge")?;
-                    return Ok(MergeTextFileResult::Write { comparison, write });
+                    let result = MergeTextFileResult::Write { comparison, write };
+                    return finish_merge(tx, input, &payload_hash, result, &after);
                 }
                 let delete_input = merge_delete_input(input);
                 validate_delete_input(&delete_input)?;
                 let delete = delete_text_in_tx(tx, &delete_input)?;
                 enqueue_delete(tx, &delete, "merge")?;
-                return Ok(MergeTextFileResult::Delete { comparison, delete });
+                let result = MergeTextFileResult::Delete { comparison, delete };
+                return finish_merge(tx, input, &payload_hash, result, &after);
             }
 
             if let (Some(base), Some(current), Some(incoming)) =
@@ -265,7 +356,8 @@ impl VersionedTextStore<'_> {
                     Preimage::Present(current.blob_sha256.clone()),
                     "merge",
                 )?;
-                return Ok(MergeTextFileResult::Write { comparison, write });
+                let result = MergeTextFileResult::Write { comparison, write };
+                return finish_merge(tx, input, &payload_hash, result, &after);
             }
 
             if input.conflict_id.is_empty() {
@@ -285,10 +377,12 @@ impl VersionedTextStore<'_> {
                 params![conflict.conflict_id, conflict.created_at_ms],
             )
             .map_err(DomainError::sql_persist)?;
-            Ok(MergeTextFileResult::Conflict {
+            let result = MergeTextFileResult::Conflict {
                 comparison,
                 conflict: Box::new(conflict),
-            })
+                deduped: false,
+            };
+            finish_merge(tx, input, &payload_hash, result, &after)
         })?;
         committed(outcome)
     }
@@ -300,20 +394,7 @@ impl VersionedTextStore<'_> {
         target_version_id: &str,
     ) -> Result<Vec<VersionFileChange>, DomainError> {
         self.store.read_with(|conn| {
-            for version_id in [source_version_id, target_version_id] {
-                let exists: Option<i64> = conn
-                    .query_row(
-                        "SELECT 1 FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
-                        params![workspace_id, version_id],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(DomainError::sql_corrupt)?;
-                if exists.is_none() {
-                    return Err(DomainError::VersionNotFound);
-                }
-            }
-            Ok(())
+            validate_compare_versions(conn, workspace_id, source_version_id, target_version_id)
         })?;
         let target = self.list_snapshots(workspace_id, target_version_id)?;
         let source = self.list_snapshots(workspace_id, source_version_id)?;
@@ -358,6 +439,291 @@ impl VersionedTextStore<'_> {
         }
         Ok(changes)
     }
+
+    /// Metadata-only keyset page for the compareFiles RPC. Content equality is
+    /// decided from the kind-specific stored digest, never hydrated bodies.
+    pub fn compare_version_files_page(
+        &self,
+        workspace_id: &str,
+        source_version_id: &str,
+        target_version_id: &str,
+        after_path: Option<&str>,
+        limit: usize,
+    ) -> Result<VersionFileChangePage, DomainError> {
+        if limit == 0 {
+            return Err(DomainError::InvalidInput {
+                reason: "limit must be positive",
+            });
+        }
+        // `usize as i64` wraps on overflow and SQLite treats a negative LIMIT
+        // as unbounded — refuse instead of full-scanning.
+        let limit_i64 = i64::try_from(limit).map_err(|_| DomainError::InvalidInput {
+            reason: "limit must be positive",
+        })?;
+        self.store.read_with(|conn| {
+            validate_compare_versions(conn, workspace_id, source_version_id, target_version_id)?;
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT t.path, t.content_kind, t.blob_sha256, t.binary_sha256, \
+                            s.path, s.content_kind, s.blob_sha256, s.binary_sha256 \
+                     FROM (SELECT path, content_kind, blob_sha256, binary_sha256 FROM snapshots \
+                           WHERE workspace_id = ?1 AND version_id = ?2) AS t \
+                     FULL OUTER JOIN \
+                          (SELECT path, content_kind, blob_sha256, binary_sha256 FROM snapshots \
+                           WHERE workspace_id = ?1 AND version_id = ?3) AS s \
+                       ON t.path = s.path \
+                     WHERE COALESCE(t.path, s.path) > ?4 \
+                     ORDER BY COALESCE(t.path, s.path) LIMIT ?5",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        target_version_id,
+                        source_version_id,
+                        after_path.unwrap_or(""),
+                        limit_i64
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, Option<String>>(7)?,
+                        ))
+                    },
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let mut entries = Vec::new();
+            let mut rows_fetched = 0usize;
+            let mut last_scanned_path = None;
+            for row in rows {
+                let (t_path, t_kind, t_blob, t_bin, s_path, s_kind, s_blob, s_bin) =
+                    row.map_err(DomainError::sql_corrupt)?;
+                rows_fetched += 1;
+                let path =
+                    t_path
+                        .as_ref()
+                        .or(s_path.as_ref())
+                        .ok_or(DomainError::StateCorrupt {
+                            reason: "version comparison row has no path",
+                        })?;
+                last_scanned_path = Some(path.clone());
+                let entry = match (&t_path, &s_path) {
+                    (None, Some(_)) => Some(VersionFileChangeEntry {
+                        path: path.clone(),
+                        status: VersionFileChangeStatus::Added,
+                        binary: s_kind.as_deref() == Some("binary"),
+                    }),
+                    (Some(_), None) => Some(VersionFileChangeEntry {
+                        path: path.clone(),
+                        status: VersionFileChangeStatus::Deleted,
+                        binary: t_kind.as_deref() == Some("binary"),
+                    }),
+                    (Some(_), Some(_)) => {
+                        let same = t_kind == s_kind
+                            && match t_kind.as_deref() {
+                                Some("text") => t_blob == s_blob,
+                                Some("binary") => t_bin == s_bin,
+                                _ => {
+                                    return Err(DomainError::StateCorrupt {
+                                        reason: "snapshot has an invalid content kind",
+                                    });
+                                }
+                            };
+                        (!same).then(|| VersionFileChangeEntry {
+                            path: path.clone(),
+                            status: VersionFileChangeStatus::Modified,
+                            binary: t_kind.as_deref() == Some("binary")
+                                || s_kind.as_deref() == Some("binary"),
+                        })
+                    }
+                    (None, None) => unreachable!(),
+                };
+                if let Some(entry) = entry {
+                    entries.push(entry);
+                }
+            }
+            Ok(VersionFileChangePage {
+                entries,
+                next_after_path: (rows_fetched == limit)
+                    .then_some(last_scanned_path)
+                    .flatten(),
+            })
+        })
+    }
+}
+
+fn validate_compare_versions(
+    conn: &Connection,
+    workspace_id: &str,
+    source_version_id: &str,
+    target_version_id: &str,
+) -> Result<(), DomainError> {
+    for version_id in [source_version_id, target_version_id] {
+        let exists: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+                params![workspace_id, version_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(DomainError::sql_corrupt)?;
+        if exists.is_none() {
+            return Err(DomainError::VersionNotFound);
+        }
+    }
+    Ok(())
+}
+
+fn finish_merge<F>(
+    tx: &Connection,
+    input: &MergeTextFileFromVersion,
+    payload_hash: &str,
+    result: MergeTextFileResult,
+    after: &F,
+) -> Result<MergeTextFileResult, DomainError>
+where
+    F: Fn(&Connection, &MergeTextFileResult) -> Result<(), DomainError>,
+{
+    after(tx, &result)?;
+    let result_seq = match &result {
+        MergeTextFileResult::Write { write, .. } => write.moment.moment_order,
+        MergeTextFileResult::Delete { delete, .. } => delete.moment.moment_order,
+        MergeTextFileResult::Unchanged { .. } | MergeTextFileResult::Conflict { .. } => 0,
+    };
+    let comparison = match &result {
+        MergeTextFileResult::Write { comparison, .. }
+        | MergeTextFileResult::Delete { comparison, .. }
+        | MergeTextFileResult::Unchanged { comparison, .. }
+        | MergeTextFileResult::Conflict { comparison, .. } => comparison.clone(),
+    };
+    let ledger = MergeLedgerRecord {
+        payload_hash: payload_hash.to_owned(),
+        outcome: merge_ledger_outcome(&result),
+        comparison: Some(comparison),
+    };
+    let ledger_json = serde_json::to_string(&ledger).map_err(|_| DomainError::StateCorrupt {
+        reason: "merge ledger outcome could not be encoded",
+    })?;
+    record_merge_request(
+        tx,
+        input.request_id.as_deref(),
+        &ledger_json,
+        result_seq,
+        input.now_ms,
+    )?;
+    Ok(result)
+}
+
+fn reconstruct_merge(
+    conn: &Connection,
+    input: &MergeTextFileFromVersion,
+    recorded: &MergeLedgerRecord,
+) -> Result<MergeTextFileResult, DomainError> {
+    // Exact retries reconstruct the comparison that was part of the committed
+    // result. Re-reading live heads here would let a later binary replacement
+    // turn an acknowledged merge into `binary-head-not-text`. The fallback is
+    // only for ledgers written before comparison snapshots were recorded.
+    let comparison = match &recorded.comparison {
+        Some(comparison) => comparison.clone(),
+        None => compare_text_file_versions_in_db(
+            conn,
+            &CompareTextFileVersions {
+                workspace_id: input.workspace_id.clone(),
+                target_version_id: input.target_version_id.clone(),
+                source_version_id: input.source_version_id.clone(),
+                path: input.path.clone(),
+            },
+        )?,
+    };
+    if let MergeLedgerOutcome::Write { moment_id } | MergeLedgerOutcome::Delete { moment_id } =
+        &recorded.outcome
+    {
+        let moment =
+            get_moment(conn, &input.workspace_id, moment_id)?.ok_or(DomainError::StateCorrupt {
+                reason: "deduped merge moment is missing",
+            })?;
+        if moment.version_id != input.target_version_id || moment.path != input.path {
+            return Err(DomainError::StateCorrupt {
+                reason: "deduped merge moment does not match its request",
+            });
+        }
+        return match (&recorded.outcome, moment.operation) {
+            (MergeLedgerOutcome::Write { .. }, crate::records::MomentOp::Write) => {
+                Ok(MergeTextFileResult::Write {
+                    comparison,
+                    write: write_result_from_moment(conn, &input.workspace_id, moment, true)?,
+                })
+            }
+            (MergeLedgerOutcome::Delete { .. }, crate::records::MomentOp::Delete) => {
+                Ok(MergeTextFileResult::Delete {
+                    comparison,
+                    delete: delete_result_from_moment(conn, &input.workspace_id, moment, true)?,
+                })
+            }
+            _ => Err(DomainError::StateCorrupt {
+                reason: "deduped merge moment kind does not match its recorded outcome",
+            }),
+        };
+    }
+    match &recorded.outcome {
+        MergeLedgerOutcome::Unchanged { reason } => Ok(MergeTextFileResult::Unchanged {
+            reason: match reason {
+                MergeLedgerUnchangedReason::AlreadySame => MergeUnchangedReason::AlreadySame,
+                MergeLedgerUnchangedReason::SourceUnchanged => {
+                    MergeUnchangedReason::SourceUnchanged
+                }
+            },
+            comparison,
+            deduped: true,
+        }),
+        MergeLedgerOutcome::Conflict { conflict_id } => {
+            let conflict = load_text_conflict_in_tx(conn, &input.workspace_id, conflict_id)?
+                .ok_or(DomainError::StateCorrupt {
+                    reason: "deduped merge conflict is missing",
+                })?;
+            Ok(MergeTextFileResult::Conflict {
+                comparison,
+                conflict: Box::new(conflict),
+                deduped: true,
+            })
+        }
+        MergeLedgerOutcome::Write { .. } | MergeLedgerOutcome::Delete { .. } => unreachable!(),
+    }
+}
+
+fn merge_ledger_outcome(result: &MergeTextFileResult) -> MergeLedgerOutcome {
+    match result {
+        MergeTextFileResult::Write { write, .. } => MergeLedgerOutcome::Write {
+            moment_id: write.moment.moment_id.clone(),
+        },
+        MergeTextFileResult::Delete { delete, .. } => MergeLedgerOutcome::Delete {
+            moment_id: delete.moment.moment_id.clone(),
+        },
+        MergeTextFileResult::Conflict { conflict, .. } => MergeLedgerOutcome::Conflict {
+            conflict_id: conflict.conflict_id.clone(),
+        },
+        MergeTextFileResult::Unchanged { reason, .. } => MergeLedgerOutcome::Unchanged {
+            reason: match reason {
+                MergeUnchangedReason::AlreadySame => MergeLedgerUnchangedReason::AlreadySame,
+                MergeUnchangedReason::SourceUnchanged => {
+                    MergeLedgerUnchangedReason::SourceUnchanged
+                }
+            },
+        },
+    }
+}
+
+fn decode_merge_ledger(raw: &str) -> Result<MergeLedgerRecord, DomainError> {
+    serde_json::from_str(raw).map_err(|_| DomainError::StateCorrupt {
+        reason: "merge request ledger outcome is invalid",
+    })
 }
 
 fn compare_text_file_versions_in_db(
@@ -392,18 +758,6 @@ fn compare_text_file_versions_in_db(
     {
         return Err(DomainError::ForkBaseNotFound);
     }
-    let base_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM fork_base_snapshots \
-             WHERE workspace_id = ?1 AND version_id = ?2",
-            params![input.workspace_id, input.source_version_id],
-            |row| row.get(0),
-        )
-        .map_err(DomainError::sql_corrupt)?;
-    if base_count == 0 {
-        return Err(DomainError::ForkBaseNotFound);
-    }
-
     // BINHEAD: the three-way text comparison below reads snapshots via an inner
     // `JOIN blobs`, so a binary head (`blob_sha256 = NULL`) reads as ABSENT. If
     // any of the three sides holds a binary head at this path, a text merge
@@ -543,6 +897,7 @@ fn merge_delete_input(input: &MergeTextFileFromVersion) -> DeleteTextFile {
         version_id: input.target_version_id.clone(),
         path: input.path.clone(),
         moment_id: input.moment_id.clone(),
+        request_id: None,
         metadata_origin: input.metadata_origin.clone(),
         author_json: input.author_json.clone(),
         now_ms: input.now_ms,

@@ -265,8 +265,9 @@ impl EngineStore {
         let seq = tx.last_insert_rowid();
 
         tx.execute(
-            "INSERT INTO engine_requests (request_id, payload_hash, result_seq, committed_at) \
-             VALUES (?1, ?2, ?3, ?4)",
+            "INSERT INTO engine_requests \
+             (request_id, payload_hash, result_seq, committed_at, kind) \
+             VALUES (?1, ?2, ?3, ?4, 'compound')",
             rusqlite::params![write.request_id, payload_hash, seq, write.now_ms],
         )
         .map_err(StorageError::persist)?;

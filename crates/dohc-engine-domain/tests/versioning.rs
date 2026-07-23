@@ -4,10 +4,11 @@
 //! both sides, and close/reopen/mutate durability.
 
 use dohc_engine_domain::{
-    CreateNamedVersion, DeleteTextFile, ListMomentsQuery, MomentOp, NoFaults, RenameTextFile,
-    RollbackTextFileMutation, SnapshotContent, VersionKind, VersionedTextStore, WriteText,
+    CreateNamedVersion, DeleteTextFile, ListMomentsQuery, MergeTextFileFromVersion,
+    MergeTextFileResult, MomentOp, NoFaults, RenameTextFile, RollbackTextFileMutation,
+    SnapshotContent, VersionKind, VersionedTextStore, WriteText,
 };
-use dohc_engine_storage::EngineStore;
+use dohc_engine_storage::{CompoundWrite, EngineStore, WriteOutcome};
 use dohc_engine_testkit::ScratchDir;
 
 const NO_FAULTS: NoFaults = NoFaults;
@@ -40,6 +41,7 @@ fn delete(version: &str, path: &str, moment: &str, now: i64) -> DeleteTextFile {
         version_id: version.to_owned(),
         path: path.to_owned(),
         moment_id: moment.to_owned(),
+        request_id: None,
         metadata_origin: "user".to_owned(),
         author_json: None,
         now_ms: now,
@@ -53,6 +55,7 @@ fn rename(version: &str, from: &str, to: &str, moment: &str, now: i64) -> Rename
         from_path: from.to_owned(),
         to_path: to.to_owned(),
         moment_id: moment.to_owned(),
+        request_id: None,
         metadata_origin: "user".to_owned(),
         author_json: None,
         now_ms: now,
@@ -65,7 +68,10 @@ fn rollback(version: &str, path: &str, moment: &str) -> RollbackTextFileMutation
         version_id: version.to_owned(),
         path: path.to_owned(),
         mutation_moment_id: moment.to_owned(),
+        request_id: None,
         legacy_before_text: None,
+        metadata_origin: "restore".to_owned(),
+        author_json: None,
     }
 }
 
@@ -394,6 +400,155 @@ fn rollback_clears_idempotency_ledger_so_stale_retry_does_not_replay() {
     assert!(!second_retry.deduped);
     assert_eq!(second_retry.snapshot.text, "two");
     assert_eq!(second_retry.moment.moment_id, "m2");
+}
+
+#[test]
+fn rollback_purges_versioned_and_merge_requests_but_preserves_compound_rows() {
+    // MUTATION: drop the kind predicate -> the compound collision is deleted.
+    // MUTATION: drop `merge` from the IN list -> the merge retry reconstructs a
+    // deleted moment instead of re-executing.
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+
+    VersionedTextStore::new(&mut store)
+        .write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+        .expect("first versioned write");
+
+    // The first versioned write consumed replication seq 1. This compound
+    // write therefore records result_seq 2, which intentionally collides with
+    // the next versioned moment_order.
+    let compound = CompoundWrite {
+        request_id: "compound-collision".to_owned(),
+        doc_id: "compound-document".to_owned(),
+        body: "durable body".to_owned(),
+        op_kind: "compound-write".to_owned(),
+        now_ms: 15,
+    };
+    assert_eq!(
+        store
+            .commit_compound(&compound, &NO_FAULTS)
+            .expect("compound write"),
+        WriteOutcome::Acked {
+            seq: 2,
+            deduped: false,
+        }
+    );
+
+    let mut second = write("main", "a.md", "two", "m2", "o1", 20);
+    second.request_id = Some("versioned-collision".to_owned());
+    {
+        let mut versions = VersionedTextStore::new(&mut store);
+        let written = versions
+            .write_text(&second, &NO_FAULTS)
+            .expect("second versioned write");
+        assert_eq!(written.moment.moment_order, 2);
+        versions
+            .rollback_text_file_mutation(&rollback("main", "a.md", "m2"), &NO_FAULTS)
+            .expect("rollback second versioned write");
+    }
+
+    let surviving_kind: Option<String> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT kind FROM engine_requests WHERE request_id = 'compound-collision'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("compound ledger survives");
+    assert_eq!(surviving_kind.as_deref(), Some("compound"));
+
+    let merge = MergeTextFileFromVersion {
+        workspace_id: WS.to_owned(),
+        target_version_id: "main".to_owned(),
+        source_version_id: "feat".to_owned(),
+        path: "a.md".to_owned(),
+        object_id: "ignored".to_owned(),
+        moment_id: "merge-retry-moment".to_owned(),
+        request_id: Some("merge-retry-request".to_owned()),
+        conflict_id: "merge-retry-conflict".to_owned(),
+        metadata_origin: "user".to_owned(),
+        author_json: None,
+        now_ms: 40,
+    };
+    {
+        let mut versions = VersionedTextStore::new(&mut store);
+        versions
+            .create_named_version(
+                &CreateNamedVersion {
+                    workspace_id: WS.to_owned(),
+                    new_version_id: "feat".to_owned(),
+                    name: "feature".to_owned(),
+                    from_version_id: "main".to_owned(),
+                    now_ms: 30,
+                    request_id: None,
+                },
+                &NO_FAULTS,
+            )
+            .expect("fork for merge");
+        versions
+            .write_text(
+                &write("feat", "a.md", "three", "merge-source", "ignored", 35),
+                &NO_FAULTS,
+            )
+            .expect("merge source write");
+        versions
+            .set_active_version(WS, "feat", &NO_FAULTS)
+            .expect("make merge target inactive");
+        assert!(matches!(
+            versions
+                .merge_text_file_from_version(&merge, &NO_FAULTS)
+                .expect("first merge"),
+            MergeTextFileResult::Write { .. }
+        ));
+        versions
+            .rollback_text_file_mutation(
+                &rollback("main", "a.md", "merge-retry-moment"),
+                &NO_FAULTS,
+            )
+            .expect("rollback merge moment");
+    }
+    let merge_ledger_count: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM engine_requests WHERE request_id = 'merge-retry-request'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("merge ledger count");
+    assert_eq!(merge_ledger_count, 0);
+    let merge_retry = VersionedTextStore::new(&mut store)
+        .merge_text_file_from_version(&merge, &NO_FAULTS)
+        .expect("merge retry re-executes");
+    assert!(matches!(
+        merge_retry,
+        MergeTextFileResult::Write { write, .. }
+            if !write.deduped && write.moment.moment_id == "merge-retry-moment"
+    ));
+
+    let surviving_kind_after_merge: Option<String> = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT kind FROM engine_requests WHERE request_id = 'compound-collision'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("compound ledger still survives merge rollback");
+    assert_eq!(surviving_kind_after_merge.as_deref(), Some("compound"));
+
+    assert_eq!(
+        store
+            .commit_compound(&compound, &NO_FAULTS)
+            .expect("compound replay"),
+        WriteOutcome::Acked {
+            seq: 2,
+            deduped: true,
+        }
+    );
 }
 
 // oracle: a reserved / absolute / traversal path is rejected.
@@ -1318,5 +1473,52 @@ fn rollback_legacy_moment_without_preimage_or_text_is_rejected() {
             .expect_err("missing legacy preimage")
             .code(),
         "invalid-input"
+    );
+}
+
+#[test]
+fn binary_write_rejects_the_reserved_capture_origin_at_the_domain_door() {
+    // MUTATION: drop the binary-door reservation -> an internal caller can
+    // mark DB-only bytes capture-owned and the next disk pass retires them.
+    let scratch = ScratchDir::new().unwrap();
+    let mut store = EngineStore::open(&scratch.engine_db_path().unwrap(), 1).unwrap();
+    bootstrap(&mut store);
+    let error = VersionedTextStore::new(&mut store)
+        .write_binary(
+            &dohc_engine_domain::WriteBinary {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: "bin-object".to_owned(),
+                path: "asset.bin".to_owned(),
+                bytes: vec![1, 2, 3],
+                moment_id: "bin-capture-origin".to_owned(),
+                metadata_origin: "capture".to_owned(),
+                author_json: None,
+                now_ms: 10,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect_err("reserved origin must refuse");
+    assert_eq!(error.code(), "invalid-input", "unexpected error: {error}");
+    let (moments, blobs, requests) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row("SELECT COUNT(*) FROM moments", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                conn.query_row("SELECT COUNT(*) FROM binary_blobs", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+                conn.query_row("SELECT COUNT(*) FROM engine_requests", [], |row| {
+                    row.get::<_, i64>(0)
+                })?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(
+        (moments, blobs, requests),
+        (0, 0, 0),
+        "a refused reserved-origin write must leave no rows behind"
     );
 }

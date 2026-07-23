@@ -51,39 +51,45 @@ pub use chats::{
 pub use conflicts::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
     ConflictRowUpdate, ConflictStatus, ResolveConflictKind, ResolveTextConflict,
-    ResolveTextConflictResult, TextConflict, WriteBinaryFile, enqueue_delete, enqueue_write,
-    insert_text_conflict_if_absent, live_state_matches_conflict_current, load_text_conflict_in_tx,
-    select_snapshot_by_path_in_tx, update_text_conflict_row, write_binary_file_in_tx,
+    ResolveTextConflictResult, TextConflict, WriteBinaryFile, binary_delete_job_id,
+    binary_rename_delete_job_id, binary_rename_write_job_id, enqueue_binary_delete,
+    enqueue_binary_rename, enqueue_delete, enqueue_write, insert_text_conflict_if_absent,
+    live_state_matches_conflict_current, load_text_conflict_in_tx, select_snapshot_by_path_in_tx,
+    update_text_conflict_row, write_binary_file_in_tx,
 };
 pub use error::DomainError;
 pub use merge::{
     CompareTextFileVersions, ComparisonStatus, MAX_MERGE_LINES, MarkdownMergeResult,
     MergeTextFileFromVersion, MergeTextFileResult, MergeUnchangedReason, VersionFileChange,
-    VersionFileChangeStatus, VersionedTextComparison, comparison_status, file_states_equal,
-    merge_markdown,
+    VersionFileChangeEntry, VersionFileChangePage, VersionFileChangeStatus,
+    VersionedTextComparison, comparison_status, file_states_equal, merge_markdown,
 };
 pub use normalize::NormalizedState;
 pub use records::{
-    BinaryHead, BinaryHeadMeta, CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult,
-    CaptureRetire, CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile,
-    FileObjectRecord, InbandBinary, InbandSecret, InbandText, ListMomentsQuery, MomentOp,
-    MomentPage, MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation,
-    SnapshotContent, SnapshotMetadata, SnapshotView, TextSnapshot, VersionKind, VersionRecord,
-    WriteResult, WriteText,
+    ApplySecretFileFromVersion, BinaryBlobRead, BinaryHead, BinaryHeadMeta, BinaryWriteResult,
+    CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
+    CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord,
+    InbandBinary, InbandSecret, InbandText, ListMomentsQuery, MomentOp, MomentPage, MomentRecord,
+    RenameResult, RenameTextFile, RollbackTextFileMutation, SnapshotContent, SnapshotMetadata,
+    SnapshotView, TextSnapshot, VersionKind, VersionRecord, WriteBinary, WriteResult, WriteText,
 };
 pub use secrets::{
-    CaptureSecret, CaptureSecretRetire, SecretDelete, SecretDiskIntent, SecretFileStat,
-    SecretFileStore, SecretMomentRecord, SecretOp, SecretWrite, SecretWriteResult,
-    capture_secret_retire, delete_secret_file_keyless, derive_capture_secret_moment_id,
-    derive_capture_secret_retire_moment_id, has_secret_state, list_secret_files_keyless,
-    list_secret_files_keyless_page, secret_file_len_keyless,
+    CaptureSecret, CaptureSecretRetire, SecretCompareEntry, SecretComparePage, SecretDelete,
+    SecretDiskIntent, SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord,
+    SecretOp, SecretRestoreResult, SecretWrite, SecretWriteResult, apply_secret_file_from_version,
+    capture_secret_retire, compare_secret_files_page_keyless, delete_secret_file_keyless,
+    derive_capture_secret_moment_id, derive_capture_secret_retire_moment_id, fork_version_keyless,
+    get_secret_moment_keyless, has_secret_state, list_secret_files_keyless,
+    list_secret_files_keyless_page, list_secret_moments_keyless, list_secret_moments_page_keyless,
+    restore_secret_file_verbatim, secret_file_len_keyless,
 };
 pub use store::{
     CaptureManifestSeedEntry, INBAND_CONTENT_CAP_BYTES, MAX_CAPTURE_BINARY_FILE_BYTES,
     MAX_TEXT_BYTES, SECRET_SEED_SENTINEL_SHA, VersionedTextStore, capture_manifest_seed,
     delete_text_in_tx, derive_capture_moment_id, derive_capture_object_id,
-    derive_capture_retire_moment_id, object_has_live_alias, validate_delete_input,
-    validate_write_input, write_projected_text_in_tx, write_text_in_tx,
+    derive_capture_retire_moment_id, object_has_live_alias, validate_addressable_plaintext_path,
+    validate_delete_input, validate_write_input, write_binary_in_tx, write_projected_text_in_tx,
+    write_text_in_tx,
 };
 
 // Re-export the storage surface a domain caller needs on the common path.
