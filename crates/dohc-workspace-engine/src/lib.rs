@@ -14,16 +14,18 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use dohc_engine_collab::{CollabError, ContentKind, DocKey, Lease, LeaseRegistry, Regime};
 use dohc_engine_domain::{
     AgentRunRecord, BookmarkMode, BookmarkTargetKind, ChatActorKind, ChatAgentReadState,
-    ChatBookmark, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatFeedReadState, ChatFollow,
-    ChatMessage, ChatThread, ChatThreadReadState, CompareTextFileVersions, ComparisonStatus,
-    ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
-    ConflictStatus, CreateNamedVersion, DeleteTextFile, DispatchClaim, DispatchRecord, DomainError,
-    FeedCursorValue, FollowState, FollowTargetKind, MarkdownMergeResult, MergeTextFileFromVersion,
-    MergeTextFileResult, MomentOp, RenameTextFile, ResolveConflictKind, ResolveTextConflict,
-    RollbackTextFileMutation, SaveBookmark, SecretDelete, SecretDiskIntent, SecretMomentRecord,
-    SecretWrite, SendMessage, SetFollow, StartChannelThread, TextConflict, TextSnapshot,
-    ThreadDispatchPause, VersionFileChangeStatus, VersionRecord, WriteBinary, WriteText,
-    merge_markdown, validate_addressable_plaintext_path,
+    ChatAttachment, ChatBookmark, ChatChannel, ChatChannelKind, ChatChannelSummary,
+    ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatThread,
+    ChatThreadReadState, CompareTextFileVersions, ComparisonStatus, ConflictChoice,
+    ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution, ConflictStatus,
+    CreateFileThread, CreateNamedVersion, DeleteTextFile, DispatchClaim, DispatchRecord,
+    DomainError, FeedCursorValue, FollowState, FollowTargetKind, LocalAttachmentInput,
+    MarkdownMergeResult, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult, MomentOp,
+    RenameTextFile, ResolveConflictKind, ResolveTextConflict, RollbackTextFileMutation,
+    SaveBookmark, SecretDelete, SecretDiskIntent, SecretMomentRecord, SecretWrite, SendMessage,
+    SetFollow, StartChannelThread, TextConflict, TextSnapshot, ThreadDispatchPause,
+    VersionFileChangeStatus, VersionRecord, WriteBinary, WriteText, merge_markdown,
+    validate_addressable_plaintext_path,
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
@@ -564,6 +566,15 @@ impl EngineService {
                 )
                 .await?
             }
+            "chats.threads.create" => {
+                self.chats_threads_create(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                    request.idempotency_key,
+                )
+                .await?
+            }
             "chats.threads.list" => {
                 self.chats_threads_list(&ctx, request.workspace, request.params)
                     .await?
@@ -584,6 +595,18 @@ impl EngineService {
                     request.idempotency_key,
                 )
                 .await?
+            }
+            "chats.attachments.listForThread" => {
+                self.chats_attachments_list_for_thread(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.attachments.listFileMentions" => {
+                self.chats_attachments_list_file_mentions(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "chats.mentions.listForHandle" => {
+                self.chats_mentions_list_for_handle(&ctx, request.workspace, request.params)
+                    .await?
             }
             "chats.messages.list" => {
                 self.chats_messages_list(&ctx, request.workspace, request.params)
@@ -677,6 +700,14 @@ impl EngineService {
             "chats.dispatch.enqueue" => {
                 self.chats_dispatch_enqueue(&ctx, request.workspace, request.params)
                     .await?
+            }
+            "chats.dispatch.recordEligibleTriggers" => {
+                self.chats_dispatch_record_eligible_triggers(
+                    &ctx,
+                    request.workspace,
+                    request.params,
+                )
+                .await?
             }
             "chats.dispatch.claimNextPending" => {
                 self.chats_dispatch_claim_next_pending(&ctx, request.workspace, request.params)
@@ -865,6 +896,15 @@ impl EngineService {
             supervisor: self.supervisor,
             db_path: Some(db_path.clone()),
         };
+        // Mandatory readiness barrier: derived mention rows must exist before
+        // this workspace can expose a mention read or advance the dispatch
+        // scan cursor past an older `@agent` message.
+        Self::read_under_ctx(
+            &cancellation,
+            "workspace.open (mention backfill)",
+            actor.chat_mentions_backfill(params.workspace_id.clone(), cancellation.token.clone()),
+        )
+        .await?;
         // Startup replay BEFORE the files layer exists: jobs left pending by
         // a crash, a transient settle failure, or a pulled replication apply
         // land on disk while nothing is watching (no suppression window),
@@ -2964,6 +3004,12 @@ impl EngineService {
                     author_user_id: params.author_user_id,
                     origin: params.origin,
                     body: params.body,
+                    attachments: params
+                        .attachments
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(LocalAttachmentInput::from)
+                        .collect(),
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
@@ -2971,7 +3017,40 @@ impl EngineService {
             ),
         )
         .await?;
-        Ok(json!({ "thread": thread_json(&thread), "message": message_json(&message) }))
+        Ok(json!({ "thread": thread_b2_json(&thread), "message": message_json(&message) }))
+    }
+
+    async fn chats_threads_create(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+        request_id: Option<String>,
+    ) -> Result<Value, WireError> {
+        let params: ChatThreadCreateParams = parse(params)?;
+        let request_id = request_id
+            .filter(|request_id| !request_id.is_empty())
+            .ok_or_else(|| wire(ErrorCode::InvalidParams, "idempotency-key-required"))?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let thread = Self::read_under_ctx(
+            &cancellation,
+            "chats.threads.create",
+            open.actor.chat_thread_create(
+                CreateFileThread {
+                    workspace_id: open.workspace_id,
+                    thread_id: params.thread_id,
+                    title: params.title,
+                    linked_object_id: params.linked_file.object_id,
+                    linked_path_hint: params.linked_file.path_hint,
+                    now_ms: params.now_ms.unwrap_or(now_ms()?),
+                    request_id,
+                },
+                cancellation.token(),
+            ),
+        )
+        .await?;
+        Ok(thread_b2_json(&thread))
     }
 
     async fn chats_threads_list(
@@ -3093,6 +3172,201 @@ impl EngineService {
         Ok(channel_id.map_or(Value::Null, Value::String))
     }
 
+    async fn chats_attachments_list_for_thread(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatAttachmentsListForThreadParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let binding = chat_cursor_binding(
+            "chats.attachments.listForThread",
+            &workspace_id,
+            &[&params.thread_id],
+        );
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let after = cursor
+            .as_ref()
+            .map(|cursor| (cursor.first, cursor.second.clone()));
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.attachments.listForThread",
+            open.actor.chat_attachments_list_for_thread(
+                workspace_id,
+                params.thread_id,
+                after,
+                page_limit + 1,
+            ),
+        )
+        .await?;
+        let values: Vec<Value> = rows
+            .iter()
+            .take(page_limit as usize)
+            .map(attachment_json)
+            .collect();
+        let included = bounded_chat_page_len(&values)?;
+        let has_more = rows.len() > included;
+        let next_cursor = if has_more {
+            let last = rows
+                .get(included.saturating_sub(1))
+                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            Some(encode_chat_cursor(&ChatKeysetCursor {
+                version: 1,
+                binding,
+                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                first: last.created_at_ms,
+                second: last.attachment_id.clone(),
+                third: None,
+            })?)
+        } else {
+            None
+        };
+        Ok(json!({
+            "attachments": values[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
+    }
+
+    async fn chats_attachments_list_file_mentions(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatAttachmentsListFileMentionsParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let binding = chat_cursor_binding(
+            "chats.attachments.listFileMentions",
+            &workspace_id,
+            &[
+                params.object_id.as_deref().unwrap_or_default(),
+                params.path_hint.as_deref().unwrap_or_default(),
+            ],
+        );
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let consumed = cursor.as_ref().map_or(0, |cursor| cursor.consumed);
+        if consumed >= dohc_engine_domain::MAX_FILE_MENTION_RESULTS {
+            return Ok(json!({ "mentions": [], "nextCursor": Value::Null }));
+        }
+        let remaining = dohc_engine_domain::MAX_FILE_MENTION_RESULTS - consumed;
+        let fetch_limit = (page_limit + 1).min(remaining);
+        let after = cursor
+            .as_ref()
+            .map(|cursor| (cursor.first, cursor.second.clone()));
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.attachments.listFileMentions",
+            open.actor.chat_attachments_list_file_mentions(
+                workspace_id,
+                params.object_id,
+                params.path_hint,
+                after,
+                fetch_limit,
+            ),
+        )
+        .await?;
+        let logical_page = page_limit.min(remaining) as usize;
+        let values: Vec<Value> = rows
+            .iter()
+            .take(logical_page)
+            .map(file_mention_json)
+            .collect();
+        let included = bounded_chat_page_len(&values)?;
+        let has_more = consumed + (included as i64) < dohc_engine_domain::MAX_FILE_MENTION_RESULTS
+            && rows.len() > included;
+        let next_cursor = if has_more {
+            let last = rows
+                .get(included.saturating_sub(1))
+                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            Some(encode_chat_cursor(&ChatKeysetCursor {
+                version: 1,
+                binding,
+                consumed: consumed + included as i64,
+                first: last.attachment.created_at_ms,
+                second: last.attachment.attachment_id.clone(),
+                third: None,
+            })?)
+        } else {
+            None
+        };
+        Ok(json!({
+            "mentions": values[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
+    }
+
+    async fn chats_mentions_list_for_handle(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatMentionsListForHandleParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let workspace_id = open.workspace_id.clone();
+        let page_limit = chat_page_limit(params.page_limit)?;
+        let unread_filter = if params.unread_by_agent_only {
+            "unread"
+        } else {
+            "all"
+        };
+        let binding = chat_cursor_binding(
+            "chats.mentions.listForHandle",
+            &workspace_id,
+            &[&params.handle, unread_filter],
+        );
+        let cursor = decode_chat_cursor(params.cursor.as_deref(), &binding)?;
+        let after = cursor.as_ref().map(|cursor| MentionCursor {
+            created_at_ms: cursor.first,
+            message_id: cursor.second.clone(),
+        });
+        let cancellation = OperationCancellation::new(ctx);
+        let rows = Self::read_under_ctx(
+            &cancellation,
+            "chats.mentions.listForHandle",
+            open.actor.chat_mentions_list_for_handle(
+                workspace_id,
+                params.handle,
+                params.unread_by_agent_only,
+                after,
+                page_limit + 1,
+            ),
+        )
+        .await?;
+        let values: Vec<Value> = rows
+            .iter()
+            .take(page_limit as usize)
+            .map(mention_json)
+            .collect();
+        let included = bounded_chat_page_len(&values)?;
+        let next_cursor = if rows.len() > included {
+            let last = rows
+                .get(included.saturating_sub(1))
+                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            Some(encode_chat_cursor(&ChatKeysetCursor {
+                version: 1,
+                binding,
+                consumed: cursor.as_ref().map_or(0, |cursor| cursor.consumed) + included as i64,
+                first: last.created_at_ms,
+                second: last.message_id.clone(),
+                third: None,
+            })?)
+        } else {
+            None
+        };
+        Ok(json!({
+            "mentions": values[..included].to_vec(),
+            "nextCursor": next_cursor,
+        }))
+    }
+
     async fn chats_messages_send(
         &self,
         ctx: &RequestContext,
@@ -3119,6 +3393,12 @@ impl EngineService {
                     parent_message_id: params.parent_message_id,
                     origin: params.origin,
                     body: params.body,
+                    attachments: params
+                        .attachments
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(LocalAttachmentInput::from)
+                        .collect(),
                     now_ms: params.now_ms.unwrap_or(now_ms()?),
                     request_id,
                 },
@@ -3808,6 +4088,29 @@ impl EngineService {
             "bookmark": bookmark_json(&workspace_id, &transition.bookmark),
             "applied": transition.applied,
         }))
+    }
+
+    async fn chats_dispatch_record_eligible_triggers(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ChatDispatchRecordEligibleParams = parse(params)?;
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let inserted = Self::read_under_ctx(
+            &cancellation,
+            "chats.dispatch.recordEligibleTriggers",
+            open.actor.chat_dispatch_record_eligible_triggers(
+                open.workspace_id,
+                params.verified_user_id,
+                now_ms()?,
+                cancellation.token.clone(),
+            ),
+        )
+        .await?;
+        Ok(json!(inserted))
     }
 
     async fn chats_dispatch_enqueue(
@@ -5809,6 +6112,54 @@ struct ChatThreadStartParams {
     author_user_id: Option<String>,
     origin: Option<String>,
     body: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null_attachments"
+    )]
+    attachments: Option<Vec<ChatLocalAttachmentParams>>,
+    now_ms: Option<i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatLocalAttachmentParams {
+    object_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    path_hint: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    heading_text: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    heading_anchor: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_i64")]
+    heading_occurrence: Option<i64>,
+}
+
+impl From<ChatLocalAttachmentParams> for LocalAttachmentInput {
+    fn from(value: ChatLocalAttachmentParams) -> Self {
+        LocalAttachmentInput {
+            object_id: value.object_id,
+            path_hint: value.path_hint,
+            heading_text: value.heading_text,
+            heading_anchor: value.heading_anchor,
+            heading_occurrence: value.heading_occurrence,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatLinkedFileParams {
+    object_id: String,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    path_hint: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatThreadCreateParams {
+    thread_id: String,
+    title: String,
+    linked_file: ChatLinkedFileParams,
     now_ms: Option<i64>,
 }
 
@@ -5823,6 +6174,11 @@ struct ChatMessageSendParams {
     parent_message_id: Option<String>,
     origin: Option<String>,
     body: String,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null_attachments"
+    )]
+    attachments: Option<Vec<ChatLocalAttachmentParams>>,
     now_ms: Option<i64>,
 }
 
@@ -5844,6 +6200,38 @@ struct ChatThreadParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ChatThreadsListForFileParams {
     object_id: String,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatAttachmentsListForThreadParams {
+    thread_id: String,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatAttachmentsListFileMentionsParams {
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    object_id: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    path_hint: Option<String>,
+    page_limit: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatMentionsListForHandleParams {
+    handle: String,
+    #[serde(default)]
+    unread_by_agent_only: bool,
     page_limit: Option<i64>,
     #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
     cursor: Option<String>,
@@ -5994,6 +6382,13 @@ struct ChatBookmarkMarkStaleParams {
     generation: i64,
     #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
     failure_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ChatDispatchRecordEligibleParams {
+    #[serde(default, deserialize_with = "deserialize_optional_non_null_string")]
+    verified_user_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -6462,21 +6857,86 @@ fn thread_b2_json(thread: &ChatThread) -> Value {
 }
 
 fn message_json(message: &ChatMessage) -> Value {
-    json!({
+    let mut value = json!({
+        "id": message.message_id,
         "workspaceId": message.workspace_id,
         "threadId": message.thread_id,
-        "messageId": message.message_id,
-        "messageOrder": message.message_order,
-        "authorKind": match message.author_kind {
+        "author": {
+            "kind": match message.author_kind {
+                ChatActorKind::Human => "human",
+                ChatActorKind::Agent => "agent",
+            },
+            "displayName": message.author_display_name,
+        },
+        "body": message.body,
+        "createdAtMs": message.created_at_ms,
+        "attachments": message.attachments.iter().map(attachment_json).collect::<Vec<_>>(),
+    });
+    let object = value.as_object_mut().expect("message is an object");
+    if let Some(author_user_id) = &message.author_user_id {
+        object.insert("authorUserId".to_owned(), json!(author_user_id));
+    }
+    if let Some(parent_message_id) = &message.parent_message_id {
+        object.insert("parentMessageId".to_owned(), json!(parent_message_id));
+    }
+    if let Some(origin) = &message.origin {
+        object.insert("origin".to_owned(), json!(origin));
+    }
+    value
+}
+
+fn attachment_json(attachment: &ChatAttachment) -> Value {
+    let mut value = json!({
+        "attachmentId": attachment.attachment_id,
+        "threadId": attachment.thread_id,
+        "messageId": attachment.message_id,
+        "targetKind": "file",
+        "createdAtMs": attachment.created_at_ms,
+    });
+    let object = value.as_object_mut().expect("attachment is an object");
+    if let Some(object_id) = &attachment.object_id {
+        object.insert("objectId".to_owned(), json!(object_id));
+    }
+    if let Some(path_hint) = &attachment.path_hint {
+        object.insert("pathHint".to_owned(), json!(path_hint));
+    }
+    if let Some(heading_text) = &attachment.heading_text {
+        object.insert("headingText".to_owned(), json!(heading_text));
+    }
+    if let Some(heading_anchor) = &attachment.heading_anchor {
+        object.insert("headingAnchor".to_owned(), json!(heading_anchor));
+    }
+    if let Some(heading_occurrence) = attachment.heading_occurrence {
+        object.insert("headingOccurrence".to_owned(), json!(heading_occurrence));
+    }
+    value
+}
+
+fn file_mention_json(mention: &ChatFileMention) -> Value {
+    let mut value = json!({
+        "attachment": attachment_json(&mention.attachment),
+        "message": message_json(&mention.message),
+        "thread": thread_b2_json(&mention.thread),
+    });
+    if let Some(channel) = &mention.channel {
+        value
+            .as_object_mut()
+            .expect("file mention is an object")
+            .insert("channel".to_owned(), channel_json(channel));
+    }
+    value
+}
+
+fn mention_json(mention: &ChatMention) -> Value {
+    json!({
+        "threadId": mention.thread_id,
+        "messageId": mention.message_id,
+        "handle": mention.handle,
+        "authorKind": match mention.author_kind {
             ChatActorKind::Human => "human",
             ChatActorKind::Agent => "agent",
         },
-        "authorDisplayName": message.author_display_name,
-        "authorUserId": message.author_user_id,
-        "parentMessageId": message.parent_message_id,
-        "origin": message.origin,
-        "body": message.body,
-        "createdAtMs": message.created_at_ms,
+        "createdAtMs": mention.created_at_ms,
     })
 }
 
@@ -6904,6 +7364,22 @@ where
     D: serde::Deserializer<'de>,
 {
     String::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_optional_non_null_i64<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    i64::deserialize(deserializer).map(Some)
+}
+
+fn deserialize_optional_non_null_attachments<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<ChatLocalAttachmentParams>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<ChatLocalAttachmentParams>::deserialize(deserializer).map(Some)
 }
 
 fn materialize_outcome_name(outcome: PostCommitMaterializeOutcome) -> &'static str {

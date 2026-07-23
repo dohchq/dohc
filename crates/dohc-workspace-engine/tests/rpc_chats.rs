@@ -6,6 +6,7 @@ use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Request, WorkspaceHandle},
 };
+use dohc_engine_storage::{EngineStore, NoFaults, StorageError};
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
 use serde_json::{Value, json};
@@ -103,6 +104,289 @@ async fn call_with_idempotency(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_attachment_and_file_thread_contracts() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-attachments").await;
+    let mut id = 10;
+    let thread = call_with_idempotency(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.threads.create",
+        "create-file-thread",
+        json!({
+            "threadId": "file-thread",
+            "title": "File thread",
+            "linkedFile": { "objectId": "object-1", "pathHint": "notes/file.md" },
+            "nowMs": 20,
+        }),
+    )
+    .await;
+    // MUTATION: omit linked owner hydration -> canonical Thread loses its stable file identity.
+    assert_eq!(
+        thread,
+        json!({
+            "id": "file-thread",
+            "workspaceId": "rpc-b2-attachments",
+            "title": "File thread",
+            "createdAtMs": 20,
+            "updatedAtMs": 20,
+            "linkedFile": {
+                "objectId": "object-1",
+                "pathHint": "notes/file.md",
+                "linkedAtMs": 20,
+            }
+        })
+    );
+    let sent = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.messages.send",
+        json!({
+            "threadId": "file-thread",
+            "messageId": "message-1",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "See the source",
+            "attachments": [{
+                "objectId": "object-1",
+                "pathHint": "notes/file.md",
+                "headingText": "Heading",
+                "headingAnchor": "heading",
+                "headingOccurrence": 0
+            }],
+            "nowMs": 30,
+        }),
+    )
+    .await;
+    // MUTATION: omit authoritative attachment hydration from send -> result is incomplete.
+    assert_eq!(
+        sent["attachments"].as_array().expect("attachments").len(),
+        1
+    );
+    assert_eq!(sent["id"], json!("message-1"));
+    let attachments = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.attachments.listForThread",
+        json!({ "threadId": "file-thread", "pageLimit": 10 }),
+    )
+    .await;
+    assert_eq!(
+        attachments["attachments"]
+            .as_array()
+            .expect("attachment page")
+            .len(),
+        1
+    );
+    let mentions = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.attachments.listFileMentions",
+        json!({
+            "objectId": "object-1",
+            "pathHint": "notes/reused.md",
+            "pageLimit": 10
+        }),
+    )
+    .await;
+    // MUTATION: hydrate only the selected attachment -> nested message attachment list is empty.
+    assert_eq!(
+        mentions["mentions"][0]["message"]["attachments"]
+            .as_array()
+            .expect("hydrated attachments")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    let db_path = scratch.engine_db_path().expect("db path");
+    let mut store = EngineStore::open(&db_path, 1).expect("store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_channels \
+                 (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) \
+                 VALUES ('rpc-b2-cap','channel','Channel','channel','channel',1,1)",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            for index in 0..=2_000_i64 {
+                let thread_id = format!("thread-{index:04}");
+                let message_id = format!("message-{index:04}");
+                let attachment_id = format!("attachment-{index:04}");
+                tx.execute(
+                    "INSERT INTO chat_threads \
+                     (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) \
+                     VALUES ('rpc-b2-cap',?1,'Thread',?2,?2,'channel')",
+                    rusqlite::params![thread_id, index],
+                )
+                .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO chat_messages \
+                     (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) \
+                     VALUES ('rpc-b2-cap',?1,0,?2,'human','Ada','Body',?3)",
+                    rusqlite::params![thread_id, message_id, index],
+                )
+                .map_err(StorageError::persist_public)?;
+                tx.execute(
+                    "INSERT INTO chat_attachments \
+                     (workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) \
+                     VALUES ('rpc-b2-cap',?1,?2,?3,'file','wanted',?4)",
+                    rusqlite::params![attachment_id, thread_id, message_id, index],
+                )
+                .map_err(StorageError::persist_public)?;
+            }
+            tx.execute(
+                "INSERT INTO chat_attachments \
+                 (workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,created_at_ms) \
+                 VALUES ('rpc-b2-cap','other-target','thread-2000','message-2000','file','other',2000)",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed");
+    drop(store);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-cap").await;
+    let mut id = 10;
+    let mut cursor: Option<String> = None;
+    let mut mentions = Vec::new();
+    loop {
+        let mut params = json!({ "objectId": "wanted", "pageLimit": 500 });
+        if let Some(value) = &cursor {
+            params["cursor"] = json!(value);
+        }
+        let page = call(
+            &transport,
+            &handle,
+            &mut id,
+            "chats.attachments.listFileMentions",
+            params,
+        )
+        .await;
+        mentions.extend(
+            page["mentions"]
+                .as_array()
+                .expect("mention page")
+                .iter()
+                .cloned(),
+        );
+        cursor = page["nextCursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    // MUTATION: omit the logical 2,000 cap -> the oldest selected row is exposed.
+    assert_eq!(mentions.len(), 2_000);
+    assert_eq!(mentions[0]["message"]["id"], json!("message-2000"));
+    assert!(
+        mentions
+            .iter()
+            .all(|mention| mention["message"]["id"] != json!("message-0000"))
+    );
+    // MUTATION: hydrate only matching attachments -> the newest message loses its other target.
+    assert_eq!(
+        mentions[0]["message"]["attachments"]
+            .as_array()
+            .expect("all attachments")
+            .len(),
+        2
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rpc_b2_mentions_backfill_and_scanner_contracts() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    let db_path = scratch.engine_db_path().expect("db path");
+    let mut store = EngineStore::open(&db_path, 1).expect("store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_channels \
+                 (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) \
+                 VALUES ('rpc-b2-mentions','channel','Channel','channel','channel',1,1)",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "INSERT INTO chat_threads \
+                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) \
+                 VALUES ('rpc-b2-mentions','thread','Thread',20,20,'channel')",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "INSERT INTO chat_messages \
+                 (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) \
+                 VALUES ('rpc-b2-mentions','thread',0,'message','human','Ada','hello @agent',20)",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed pre-index database");
+    drop(store);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-mentions").await;
+    let mut id = 10;
+    let mentions = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.mentions.listForHandle",
+        json!({ "handle": "AGENT", "unreadByAgentOnly": false, "pageLimit": 10 }),
+    )
+    .await;
+    // MUTATION: handing out the workspace before backfill makes this first read empty.
+    assert_eq!(
+        mentions,
+        json!({
+            "mentions": [{
+                "threadId": "thread",
+                "messageId": "message",
+                "handle": "agent",
+                "authorKind": "human",
+                "createdAtMs": 20
+            }],
+            "nextCursor": null
+        })
+    );
+    let first = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.recordEligibleTriggers",
+        json!({}),
+    )
+    .await;
+    let retry = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.dispatch.recordEligibleTriggers",
+        json!({}),
+    )
+    .await;
+    // MUTATION: scan-before-backfill or a non-idempotent ledger changes this pair.
+    assert_eq!((first, retry), (json!(1), json!(0)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn review_round_7_normalizes_persisted_chat_identities() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -192,7 +476,7 @@ async fn review_round_7_normalizes_persisted_chat_identities() {
         }),
     )
     .await;
-    assert_eq!(started["thread"]["threadId"], json!("thread-round-7"));
+    assert_eq!(started["thread"]["id"], json!("thread-round-7"));
     assert_eq!(started["message"]["threadId"], json!("thread-round-7"));
     for (thread_id, message_id) in [
         (format!("bad{}thread", '\u{0001}'), "bad-control"),
@@ -622,8 +906,8 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         }),
     )
     .await;
-    assert_eq!(started["thread"]["threadId"], json!("thread-1"));
-    assert_eq!(started["message"]["messageOrder"], json!(0));
+    assert_eq!(started["thread"]["id"], json!("thread-1"));
+    assert_eq!(started["message"]["id"], json!("message-0"));
 
     let overlong_send = call_error(
         &transport,
@@ -885,7 +1169,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
             }),
         )
         .await;
-        assert_eq!(sent["messageOrder"], json!(sequence));
+        assert_eq!(sent["id"], json!(format!("message-{sequence:03}")));
     }
 
     let channels = call(

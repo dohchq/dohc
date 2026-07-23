@@ -1,6 +1,9 @@
 use std::sync::Mutex;
 
-use dohc_engine_domain::{AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, channel_slug_for_name};
+use dohc_engine_domain::{
+    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, LinkedChatStore,
+    SaveBookmark, attachment_id_for, channel_slug_for_name,
+};
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 use rusqlite::params;
@@ -303,6 +306,278 @@ fn imported_opening_message_uses_zero_based_order() {
         })
         .expect("opening message order");
     assert_eq!(order, 0);
+}
+
+fn imported_chat_fixture(engine: &mut EngineStore, origin: &str) {
+    let operations = [
+        envelope(
+            origin,
+            0,
+            "chat.channel.create",
+            json!({
+                "channelId": "channel-imported",
+                "name": "Imported",
+                "slug": "imported",
+                "kind": "channel",
+                "createdAtMs": 10
+            }),
+        ),
+        envelope(
+            origin,
+            1,
+            "chat.thread.create",
+            json!({
+                "threadId": "thread-imported",
+                "title": "Imported thread",
+                "createdAtMs": 20,
+                "channelSlug": "imported",
+                "channelWireId": "channel-imported"
+            }),
+        ),
+        envelope(
+            origin,
+            2,
+            "chat.message.append",
+            json!({
+                "messageId": "message-imported",
+                "threadId": "thread-imported",
+                "authorKind": "human",
+                "authorDisplayName": "Ada",
+                "body": "Opening",
+                "createdAtMs": 20
+            }),
+        ),
+    ];
+    for operation in operations {
+        apply_chat_envelope(engine, &operation, &NoFaults).expect("fixture operation");
+    }
+}
+
+fn live_bookmark(engine: &mut EngineStore) -> String {
+    LinkedChatStore::new(engine)
+        .save_bookmark(
+            &SaveBookmark {
+                workspace_id: "ws".to_owned(),
+                owner_user_id: "owner".to_owned(),
+                target_kind: BookmarkTargetKind::Thread,
+                target_id: "thread-imported".to_owned(),
+                mode: BookmarkMode::Live,
+                destination_path: "bookmarks/imported.md".to_owned(),
+                now_ms: 30,
+            },
+            &NoFaults,
+        )
+        .expect("bookmark")
+        .bookmark_id
+}
+
+#[test]
+fn imported_message_requeues_active_live_bookmarks() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "message-bookmark");
+    let bookmark_id = live_bookmark(&mut engine);
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "UPDATE chat_bookmark_outbox SET projection_state='failed',failure_reason='old' \
+                 WHERE workspace_id='ws' AND bookmark_id=?1",
+                [&bookmark_id],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("failed outbox");
+    let message = envelope(
+        "message-bookmark",
+        3,
+        "chat.message.append",
+        json!({
+            "messageId": "message-imported-2",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Reply",
+            "createdAtMs": 40
+        }),
+    );
+    apply_chat_envelope(&mut engine, &message, &NoFaults).expect("message");
+    let state: (i64, String, Option<String>, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT generation,projection_state,failure_reason,updated_at_ms \
+                 FROM chat_bookmark_outbox WHERE workspace_id='ws' AND bookmark_id=?1",
+                [&bookmark_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+        })
+        .expect("outbox");
+    // MUTATION: omit the receiver-local bump from imported message apply -> stale generation/state remains.
+    assert_eq!(state, (2, "pending".to_owned(), None, 40));
+}
+
+#[test]
+fn imported_message_indexes_mentions_only_when_inserted() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "mention-index");
+    let first = envelope(
+        "mention-index",
+        3,
+        "chat.message.append",
+        json!({
+            "messageId": "mention-message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "hello @one",
+            "createdAtMs": 40
+        }),
+    );
+    let duplicate_id = envelope(
+        "mention-index",
+        4,
+        "chat.message.append",
+        json!({
+            "messageId": "mention-message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "hostile duplicate @two",
+            "createdAtMs": 50
+        }),
+    );
+    apply_chat_envelope(&mut engine, &first, &NoFaults).expect("first message");
+    apply_chat_envelope(&mut engine, &duplicate_id, &NoFaults).expect("duplicate id");
+    let handles: Vec<String> = engine
+        .read_with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT handle FROM chat_mentions WHERE message_id='mention-message' ORDER BY handle",
+            )?;
+            stmt.query_map([], |row| row.get(0))?.collect()
+        })
+        .expect("mention handles");
+    // MUTATION: indexing before checking INSERT OR IGNORE admits the duplicate payload's handle.
+    assert_eq!(handles, vec!["one"]);
+}
+
+#[test]
+fn imported_attachment_requeues_active_live_bookmarks() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "attachment-bookmark");
+    let bookmark_id = live_bookmark(&mut engine);
+    let attachment = envelope(
+        "attachment-peer",
+        0,
+        "chat.attachment.add",
+        json!({
+            "attachmentId": attachment_id_for("message-imported", "object", None, None),
+            "threadId": "thread-imported",
+            "messageId": "message-imported",
+            "targetKind": "file",
+            "objectId": "object",
+            "pathHint": "notes/file.md",
+            "createdAtMs": 41
+        }),
+    );
+    apply_chat_envelope(&mut engine, &attachment, &NoFaults).expect("attachment");
+    let state: (i64, String, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT generation,projection_state,updated_at_ms FROM chat_bookmark_outbox \
+                 WHERE workspace_id='ws' AND bookmark_id=?1",
+                [&bookmark_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .expect("outbox");
+    // MUTATION: omit the receiver-local bump from imported attachment apply -> bookmark is not reprojected.
+    assert_eq!(state, (2, "pending".to_owned(), 41));
+}
+
+#[test]
+fn imported_attachment_recomputes_id_and_rejects_mismatch() {
+    let (_scratch, _path, mut engine) = store();
+    let invalid = envelope(
+        "hostile-attachment",
+        0,
+        "chat.attachment.add",
+        json!({
+            "attachmentId": "forged",
+            "threadId": "thread",
+            "messageId": "message",
+            "targetKind": "file",
+            "objectId": "object",
+            "createdAtMs": 10
+        }),
+    );
+    let result = apply_chat_envelope(&mut engine, &invalid, &NoFaults);
+    // MUTATION: trust the peer's attachment id -> forged content identity is persisted and acked.
+    assert!(matches!(result, Err(SyncError::InvalidInput { .. })));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "hostile-attachment").expect("ack"),
+        -1
+    );
+}
+
+#[test]
+fn imported_attachment_rejects_invalid_heading_and_bounds() {
+    let cases = [
+        ("heading_triplet_partial", json!({"headingText":"Heading"})),
+        (
+            "heading_requires_object",
+            json!({"headingText":"Heading","headingAnchor":"anchor","headingOccurrence":0}),
+        ),
+        (
+            "heading_text_bound",
+            json!({"objectId":"object","headingText":"x".repeat(301),"headingAnchor":"anchor","headingOccurrence":0}),
+        ),
+        (
+            "heading_control_character",
+            json!({"objectId":"object","headingText":"bad\u{0007}","headingAnchor":"anchor","headingOccurrence":0}),
+        ),
+        (
+            "heading_occurrence_nonnegative",
+            json!({"objectId":"object","headingText":"Heading","headingAnchor":"anchor","headingOccurrence":-1}),
+        ),
+        (
+            "path_must_be_normalized",
+            json!({"objectId":"object","pathHint":"notes/./file.md"}),
+        ),
+    ];
+    for (case, fields) in cases {
+        let (_scratch, _path, mut engine) = store();
+        let mut payload = json!({
+            "attachmentId": "placeholder",
+            "threadId": "thread",
+            "messageId": "message",
+            "targetKind": "file",
+            "createdAtMs": 10
+        });
+        payload
+            .as_object_mut()
+            .expect("payload")
+            .extend(fields.as_object().expect("fields").clone());
+        if let Some(object_id) = payload.get("objectId").and_then(serde_json::Value::as_str) {
+            let heading_anchor = payload
+                .get("headingAnchor")
+                .and_then(serde_json::Value::as_str);
+            let occurrence = payload
+                .get("headingOccurrence")
+                .and_then(serde_json::Value::as_i64);
+            payload["attachmentId"] = json!(attachment_id_for(
+                "message",
+                object_id,
+                heading_anchor,
+                occurrence
+            ));
+        }
+        let operation = envelope(case, 0, "chat.attachment.add", payload);
+        let result = apply_chat_envelope(&mut engine, &operation, &NoFaults);
+        // MUTATION: remove this hostile-peer heading/path guard -> the named malformed case applies.
+        assert!(
+            matches!(result, Err(SyncError::InvalidInput { .. })),
+            "case {case}"
+        );
+    }
 }
 
 #[test]

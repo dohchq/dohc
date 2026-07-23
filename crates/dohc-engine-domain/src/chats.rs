@@ -43,6 +43,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use unicode_normalization::UnicodeNormalization as _;
 
 // ------------------------------------------------------------------- constants
@@ -69,6 +70,14 @@ const MAX_CHANNEL_NAME_CHARS: usize = 80;
 const MAX_DISPLAY_NAME_CHARS: usize = 200;
 /// Opaque relay user-id char cap (`normalizeAuthorUserId`).
 const MAX_AUTHOR_USER_ID_CHARS: usize = 200;
+/// Stable file-object ids are trimmed and bounded like `normalizeObjectId`.
+const MAX_ATTACHMENT_OBJECT_ID_UTF16_UNITS: usize = 200;
+/// Section-heading fields use the production attachment bounds.
+const MAX_ATTACHMENT_HEADING_TEXT_UTF16_UNITS: usize = 300;
+const MAX_ATTACHMENT_HEADING_ANCHOR_UTF16_UNITS: usize = 400;
+/// The logical file-mention lookup never exposes more than the oracle's newest
+/// 2,000 matching attachment rows, even when the wire drains multiple pages.
+pub const MAX_FILE_MENTION_RESULTS: i64 = 2_000;
 /// Feed cursor string cap (`decodeFeedCursor`).
 const MAX_FEED_CURSOR_LEN: usize = 512;
 /// Feed cursor message-id char cap (`decodeFeedCursor`).
@@ -210,6 +219,43 @@ pub struct ChatMessage {
     pub parent_message_id: Option<String>,
     pub origin: Option<String>,
     pub body: String,
+    pub created_at_ms: i64,
+    /// Authoritative attachment hydration. This is always present, including
+    /// as an empty vector, at the domain and RPC boundaries.
+    pub attachments: Vec<ChatAttachment>,
+}
+
+/// A durable file attachment / file mention target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatAttachment {
+    pub attachment_id: String,
+    pub thread_id: String,
+    pub message_id: String,
+    pub object_id: Option<String>,
+    pub path_hint: Option<String>,
+    pub heading_text: Option<String>,
+    pub heading_anchor: Option<String>,
+    pub heading_occurrence: Option<i64>,
+    pub created_at_ms: i64,
+}
+
+/// One fully hydrated file-mention result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatFileMention {
+    pub attachment: ChatAttachment,
+    pub message: ChatMessage,
+    pub thread: ChatThread,
+    pub channel: Option<ChatChannel>,
+}
+
+/// One indexed `@handle` occurrence, hydrated through its authoritative
+/// message and thread at read time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatMention {
+    pub thread_id: String,
+    pub message_id: String,
+    pub handle: String,
+    pub author_kind: ChatActorKind,
     pub created_at_ms: i64,
 }
 
@@ -495,6 +541,13 @@ pub struct DispatchRecovery {
     pub attempt_count: i64,
 }
 
+/// Ascending keyset coordinate used by mention reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MentionCursor {
+    pub created_at_ms: i64,
+    pub message_id: String,
+}
+
 // ---------------------------------------------------------------------- inputs
 
 /// Inputs to [`LinkedChatStore::start_channel_thread`].
@@ -510,6 +563,7 @@ pub struct StartChannelThread {
     pub author_user_id: Option<String>,
     pub origin: Option<String>,
     pub body: String,
+    pub attachments: Vec<LocalAttachmentInput>,
     pub now_ms: i64,
     /// Optional idempotency key. When set, an after-commit-before-ack retry with
     /// the same key + payload replays the recorded result exactly-once instead of
@@ -529,9 +583,33 @@ pub struct SendMessage {
     pub parent_message_id: Option<String>,
     pub origin: Option<String>,
     pub body: String,
+    pub attachments: Vec<LocalAttachmentInput>,
     pub now_ms: i64,
     /// Optional idempotency key (see [`StartChannelThread::request_id`]).
     pub request_id: Option<String>,
+}
+
+/// Caller-supplied attachment target before normalization and deterministic id
+/// derivation. Optional section coordinates are an all-or-none triplet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalAttachmentInput {
+    pub object_id: String,
+    pub path_hint: Option<String>,
+    pub heading_text: Option<String>,
+    pub heading_anchor: Option<String>,
+    pub heading_occurrence: Option<i64>,
+}
+
+/// Inputs to file-linked [`LinkedChatStore::create_thread`].
+#[derive(Debug, Clone)]
+pub struct CreateFileThread {
+    pub workspace_id: String,
+    pub thread_id: String,
+    pub title: String,
+    pub linked_object_id: String,
+    pub linked_path_hint: Option<String>,
+    pub now_ms: i64,
+    pub request_id: String,
 }
 
 /// Inputs to [`LinkedChatStore::set_follow`].
@@ -1055,6 +1133,187 @@ fn normalize_optional_thread_title(title: Option<&str>) -> Result<String, Domain
     }
 }
 
+/// Required-title variant used by file-linked thread creation.
+fn normalize_thread_title(title: &str) -> Result<String, DomainError> {
+    let normalized = title.trim_matches(is_js_trim_ws);
+    if normalized.is_empty() || normalized.encode_utf16().count() > MAX_THREAD_TITLE_CHARS {
+        return Err(DomainError::chat(
+            "invalid-thread-title",
+            "Thread title is required.",
+        ));
+    }
+    Ok(normalized.to_owned())
+}
+
+fn normalize_attachment_object_id(object_id: &str) -> Result<String, DomainError> {
+    let normalized = object_id.trim_matches(is_js_trim_ws);
+    if normalized.is_empty()
+        || normalized.encode_utf16().count() > MAX_ATTACHMENT_OBJECT_ID_UTF16_UNITS
+    {
+        return Err(DomainError::chat(
+            "invalid-path",
+            "Linked file object id is invalid.",
+        ));
+    }
+    Ok(normalized.to_owned())
+}
+
+fn normalize_attachment_path_hint(path: &str) -> Result<String, DomainError> {
+    crate::validate_addressable_plaintext_path(path)
+        .map_err(|_| DomainError::chat("invalid-path", "Linked file path is invalid."))
+}
+
+fn normalize_attachment_heading(
+    value: &str,
+    label: &'static str,
+    max_utf16_units: usize,
+) -> Result<String, DomainError> {
+    let normalized = nfc(value);
+    let normalized = normalized.trim_matches(is_js_trim_ws);
+    if normalized.is_empty()
+        || normalized.encode_utf16().count() > max_utf16_units
+        || has_projection_control_char(normalized)
+    {
+        return Err(DomainError::chat("invalid-path", label));
+    }
+    Ok(normalized.to_owned())
+}
+
+fn normalize_attachments(
+    attachments: &[LocalAttachmentInput],
+) -> Result<Vec<LocalAttachmentInput>, DomainError> {
+    let mut normalized = Vec::with_capacity(attachments.len());
+    let mut seen = HashSet::new();
+    for attachment in attachments {
+        let object_id = normalize_attachment_object_id(&attachment.object_id)?;
+        let path_hint = attachment
+            .path_hint
+            .as_deref()
+            .map(normalize_attachment_path_hint)
+            .transpose()?;
+        let has_heading = attachment.heading_text.is_some()
+            || attachment.heading_anchor.is_some()
+            || attachment.heading_occurrence.is_some();
+        if has_heading
+            && (attachment.heading_text.is_none()
+                || attachment.heading_anchor.is_none()
+                || attachment.heading_occurrence.is_none())
+        {
+            return Err(DomainError::chat(
+                "invalid-path",
+                "A section mention requires heading text, anchor, and occurrence.",
+            ));
+        }
+        let heading_text = attachment
+            .heading_text
+            .as_deref()
+            .map(|value| {
+                normalize_attachment_heading(
+                    value,
+                    "Heading text is invalid.",
+                    MAX_ATTACHMENT_HEADING_TEXT_UTF16_UNITS,
+                )
+            })
+            .transpose()?;
+        let heading_anchor = attachment
+            .heading_anchor
+            .as_deref()
+            .map(|value| {
+                normalize_attachment_heading(
+                    value,
+                    "Heading anchor is invalid.",
+                    MAX_ATTACHMENT_HEADING_ANCHOR_UTF16_UNITS,
+                )
+            })
+            .transpose()?;
+        let heading_occurrence = attachment.heading_occurrence;
+        if heading_occurrence.is_some_and(|value| !persisted_nonnegative_safe(value)) {
+            return Err(DomainError::chat(
+                "invalid-path",
+                "Heading occurrence is invalid.",
+            ));
+        }
+        let target = (
+            object_id.clone(),
+            heading_anchor.clone(),
+            heading_occurrence,
+        );
+        if !seen.insert(target) {
+            continue;
+        }
+        normalized.push(LocalAttachmentInput {
+            object_id,
+            path_hint,
+            heading_text,
+            heading_anchor,
+            heading_occurrence,
+        });
+    }
+    Ok(normalized)
+}
+
+/// Deterministic attachment identity, byte-for-byte with `attachmentIdFor`.
+pub fn attachment_id_for(
+    message_id: &str,
+    object_id: &str,
+    heading_anchor: Option<&str>,
+    heading_occurrence: Option<i64>,
+) -> String {
+    let mut hasher = Sha256::new();
+    if heading_anchor.is_none() && heading_occurrence.is_none() {
+        hasher.update(message_id.as_bytes());
+        hasher.update(b"file");
+        hasher.update(object_id.as_bytes());
+    } else {
+        hasher.update(message_id.as_bytes());
+        hasher.update(b"\0file\0");
+        hasher.update(object_id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(heading_anchor.unwrap_or_default().as_bytes());
+        hasher.update(b"\0");
+        if let Some(occurrence) = heading_occurrence {
+            hasher.update(occurrence.to_string().as_bytes());
+        }
+    }
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn attachment_fingerprint_bytes(attachments: &[LocalAttachmentInput]) -> Vec<u8> {
+    fn frame(out: &mut Vec<u8>, value: Option<&str>) {
+        match value {
+            Some(value) => {
+                out.push(1);
+                out.extend_from_slice(&(value.len() as u64).to_be_bytes());
+                out.extend_from_slice(value.as_bytes());
+            }
+            None => out.push(0),
+        }
+    }
+    let mut out = Vec::new();
+    out.extend_from_slice(&(attachments.len() as u64).to_be_bytes());
+    for attachment in attachments {
+        frame(&mut out, Some(&attachment.object_id));
+        frame(&mut out, attachment.path_hint.as_deref());
+        frame(&mut out, attachment.heading_text.as_deref());
+        frame(&mut out, attachment.heading_anchor.as_deref());
+        frame(
+            &mut out,
+            attachment
+                .heading_occurrence
+                .as_ref()
+                .map(|value| value.to_string())
+                .as_deref(),
+        );
+    }
+    out
+}
+
 /// `normalizeDisplayName`: trim, 1..=200 chars.
 fn normalize_display_name(display_name: &str) -> Result<String, DomainError> {
     let normalized = display_name.trim();
@@ -1126,6 +1385,216 @@ fn normalize_read_sequence(value: i64) -> Result<i64, DomainError> {
         ));
     }
     Ok(value)
+}
+
+fn is_js_whitespace(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0009}'
+            ..='\u{000D}'
+                | '\u{0020}'
+                | '\u{00A0}'
+                | '\u{1680}'
+                | '\u{2000}'..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
+    )
+}
+
+fn is_mention_alnum(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '\u{017F}' | '\u{212A}')
+}
+
+fn is_mention_body(ch: char) -> bool {
+    is_mention_alnum(ch) || matches!(ch, '.' | '_' | '-')
+}
+
+fn range_contains(ranges: &[(usize, usize)], offset: usize) -> bool {
+    ranges
+        .iter()
+        .any(|(start, end)| *start <= offset && offset < *end)
+}
+
+fn js_trim(value: &str) -> &str {
+    value.trim_matches(is_js_whitespace)
+}
+
+/// Candidate-agnostic mention scanner shared by local writes, imported apply,
+/// and the mandatory historical backfill. This mirrors `scanMentionTokens`
+/// with `ignoreCode: true`, including fenced and inline backtick suppression.
+pub fn parse_mention_handles(body: &str) -> Vec<String> {
+    let mut ignored = Vec::<(usize, usize)>::new();
+    let mut open_fence: Option<(char, usize, usize)> = None;
+    let mut line_start = 0usize;
+    for line_with_newline in body.split_inclusive('\n') {
+        let line = line_with_newline
+            .strip_suffix('\n')
+            .unwrap_or(line_with_newline);
+        let content = line.strip_suffix('\r').unwrap_or(line);
+        let trimmed_start = content.trim_start_matches([' ', '\t']);
+        let marker_char = trimmed_start.chars().next();
+        let marker_len = marker_char.map_or(0, |marker| {
+            trimmed_start.chars().take_while(|ch| *ch == marker).count()
+        });
+        match open_fence {
+            Some((marker, minimum, start))
+                if marker_char == Some(marker)
+                    && marker_len >= minimum
+                    && js_trim(content).chars().all(|ch| ch == marker) =>
+            {
+                ignored.push((start, line_start + content.len()));
+                open_fence = None;
+            }
+            None if matches!(marker_char, Some('`' | '~')) && marker_len >= 3 => {
+                open_fence = Some((marker_char.expect("matched marker"), marker_len, line_start));
+            }
+            _ => {}
+        }
+        line_start += line_with_newline.len();
+    }
+    if let Some((_, _, start)) = open_fence {
+        ignored.push((start, body.len()));
+    }
+
+    let bytes = body.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] != b'`' || range_contains(&ignored, index) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < bytes.len() && bytes[index] == b'`' {
+            index += 1;
+        }
+        let run = index - start;
+        let mut search = index;
+        let mut close = None;
+        while search < bytes.len() {
+            if bytes[search] != b'`' || range_contains(&ignored, search) {
+                search += 1;
+                continue;
+            }
+            let close_start = search;
+            while search < bytes.len() && bytes[search] == b'`' {
+                search += 1;
+            }
+            if search - close_start == run {
+                close = Some(search);
+                break;
+            }
+        }
+        if let Some(end) = close {
+            ignored.push((start, end));
+            index = end;
+        }
+    }
+
+    let chars: Vec<(usize, char)> = body.char_indices().collect();
+    let mut handles = Vec::new();
+    let mut seen = HashSet::new();
+    for (position, (offset, ch)) in chars.iter().copied().enumerate() {
+        if ch != '@' || range_contains(&ignored, offset) {
+            continue;
+        }
+        if position > 0 {
+            let previous = chars[position - 1].1;
+            if !is_js_whitespace(previous) && !matches!(previous, '(' | '[' | '{') {
+                continue;
+            }
+        }
+        let Some((_, first)) = chars.get(position + 1).copied() else {
+            continue;
+        };
+        if !is_mention_alnum(first) {
+            continue;
+        }
+        let mut raw = String::new();
+        for (_, candidate) in chars.iter().skip(position + 1).copied() {
+            if !is_mention_body(candidate) {
+                break;
+            }
+            raw.push(candidate);
+        }
+        while raw.ends_with(['.', '_', '-']) {
+            raw.pop();
+        }
+        if raw.is_empty() {
+            continue;
+        }
+        let normalized: String = raw.nfc().flat_map(char::to_lowercase).collect();
+        if seen.insert(normalized.clone()) {
+            handles.push(normalized);
+        }
+    }
+    handles
+}
+
+/// Insert the complete derived mention set for one authoritative message.
+/// The caller owns the surrounding message transaction.
+pub fn index_message_mentions_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    author_kind: ChatActorKind,
+    body: &str,
+    created_at_ms: i64,
+) -> Result<usize, DomainError> {
+    let mut inserted = 0usize;
+    for handle in parse_mention_handles(body) {
+        inserted += conn
+            .execute(
+                "INSERT OR IGNORE INTO chat_mentions \
+                 (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    workspace_id,
+                    thread_id,
+                    message_id,
+                    handle,
+                    author_kind.as_str(),
+                    created_at_ms
+                ],
+            )
+            .map_err(DomainError::sql_persist)?;
+    }
+    Ok(inserted)
+}
+
+fn normalize_mention_handle(handle: &str) -> Result<String, DomainError> {
+    let handle = handle.to_ascii_lowercase();
+    if handle.is_empty()
+        || !handle
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
+    {
+        return Err(DomainError::chat(
+            "invalid-message-body",
+            "Mention handle is invalid.",
+        ));
+    }
+    Ok(handle)
+}
+
+fn normalize_verified_user_id(value: Option<&str>) -> Result<Option<String>, DomainError> {
+    match value {
+        None => Ok(None),
+        Some(value)
+            if !value.is_empty()
+                && value.encode_utf16().count() <= MAX_DISPATCH_ID_UTF16_UNITS
+                && !value.contains('\0') =>
+        {
+            Ok(Some(value.to_owned()))
+        }
+        Some(_) => Err(DomainError::InvalidInput {
+            reason: "verified user id is invalid",
+        }),
+    }
 }
 
 // ----------------------------------------------------------------------- store
@@ -1468,6 +1937,117 @@ impl<'a> LinkedChatStore<'a> {
 
     // ------------------------------------------------------- threads/messages
 
+    /// Create one file-linked thread with exactly one owner. The row, search
+    /// header, relay-visible op, compatibility journal row, and request ledger
+    /// commit in one actor transaction.
+    pub fn create_thread(
+        &mut self,
+        input: &CreateFileThread,
+        faults: &dyn FaultInjector,
+    ) -> Result<ChatThread, DomainError> {
+        non_empty(
+            &input.workspace_id,
+            "invalid-thread-owner",
+            "workspace_id must not be empty",
+        )?;
+        let thread_id = normalize_replicated_chat_id(&input.thread_id, "thread id is invalid")?;
+        let title = normalize_thread_title(&input.title)?;
+        let object_id = normalize_attachment_object_id(&input.linked_object_id)?;
+        let path_hint = input
+            .linked_path_hint
+            .as_deref()
+            .map(normalize_attachment_path_hint)
+            .transpose()?;
+        if input.request_id.is_empty() {
+            return Err(DomainError::InvalidInput {
+                reason: "idempotency key is required",
+            });
+        }
+        let payload_hash = hash_fields(&[
+            input.workspace_id.as_bytes(),
+            thread_id.as_bytes(),
+            title.as_bytes(),
+            object_id.as_bytes(),
+            path_hint.as_deref().unwrap_or_default().as_bytes(),
+        ]);
+        if let Some(recorded) = self
+            .store
+            .read_with(|conn| lookup_request(conn, &input.request_id))?
+        {
+            if recorded != payload_hash {
+                return Err(DomainError::IdempotencyKeyReuseMismatch);
+            }
+            return self
+                .store
+                .read_with(|conn| require_thread(conn, &input.workspace_id, &thread_id));
+        }
+
+        let input = input.clone();
+        let thread_id_c = thread_id.clone();
+        let title_c = title.clone();
+        let object_id_c = object_id.clone();
+        let path_hint_c = path_hint.clone();
+        let outcome = self.store.write_with(faults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_threads \
+                 (workspace_id, thread_id, title, created_at_ms, updated_at_ms, \
+                  linked_object_id, linked_path_hint, linked_at_ms, channel_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?4, NULL)",
+                params![
+                    input.workspace_id,
+                    thread_id_c,
+                    title_c,
+                    input.now_ms,
+                    object_id_c,
+                    path_hint_c
+                ],
+            )
+            .map_err(DomainError::sql_persist)?;
+            upsert_chat_search_index_row(
+                tx,
+                &input.workspace_id,
+                &thread_id_c,
+                CHAT_THREAD_HEADER_MESSAGE_ID,
+                &title_c,
+            )
+            .map_err(DomainError::sql_persist)?;
+            let mut payload = serde_json::json!({
+                "threadId": thread_id_c,
+                "title": title_c,
+                "createdAtMs": input.now_ms,
+                "linkedObjectId": object_id_c,
+                "linkedAtMs": input.now_ms,
+            });
+            if let Some(path_hint) = &path_hint_c {
+                payload
+                    .as_object_mut()
+                    .expect("thread payload is an object")
+                    .insert("linkedPathHint".to_owned(), serde_json::json!(path_hint));
+            }
+            journal_local_op_in_tx(
+                tx,
+                &input.workspace_id,
+                "chat.thread.create",
+                &payload,
+                input.now_ms,
+            )?;
+            journal(tx, &thread_id_c, "chat.thread.create", input.now_ms)?;
+            record_request(tx, Some(&input.request_id), &payload_hash, input.now_ms)?;
+            Ok::<_, DomainError>(ChatThread {
+                workspace_id: input.workspace_id.clone(),
+                thread_id: thread_id_c.clone(),
+                title: title_c.clone(),
+                created_at_ms: input.now_ms,
+                updated_at_ms: input.now_ms,
+                channel_id: None,
+                linked_object_id: Some(object_id_c.clone()),
+                linked_path_hint: path_hint_c.clone(),
+                linked_at_ms: Some(input.now_ms),
+            })
+        })?;
+        committed(outcome)
+    }
+
     /// Atomically create a channel thread AND its first message in ONE
     /// transaction (`startChannelThread`). A failed send never strands an empty
     /// thread: the thread row, the message row (order 0), the read-cursor
@@ -1495,6 +2075,8 @@ impl<'a> LinkedChatStore<'a> {
         let author_user_id = normalize_author_user_id(input.author_user_id.as_deref())?;
         let origin = normalize_origin(input.origin.as_deref())?;
         let body = normalize_body(&input.body)?;
+        let attachments = normalize_attachments(&input.attachments)?;
+        let attachment_fingerprint = attachment_fingerprint_bytes(&attachments);
         let now = input.now_ms;
 
         let payload_hash = hash_fields(&[
@@ -1507,6 +2089,7 @@ impl<'a> LinkedChatStore<'a> {
             display_name.as_bytes(),
             author_user_id.as_deref().unwrap_or("").as_bytes(),
             origin.as_deref().unwrap_or("").as_bytes(),
+            attachment_fingerprint.as_slice(),
         ]);
         // Exactly-once pre-check (single-writer: authoritative). A committed
         // retry replays the recorded thread+message instead of hitting the PK.
@@ -1532,6 +2115,7 @@ impl<'a> LinkedChatStore<'a> {
         let display_c = display_name.clone();
         let author_user_c = author_user_id.clone();
         let origin_c = origin.clone();
+        let attachments_c = attachments.clone();
         let outcome = self.store.write_with(faults, |tx| {
             let channel = require_channel(tx, &input.workspace_id, &input.channel_id)?;
             tx.execute(
@@ -1560,6 +2144,15 @@ impl<'a> LinkedChatStore<'a> {
                 ],
             )
             .map_err(DomainError::sql_persist)?;
+            index_message_mentions_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.thread_id,
+                &input.message_id,
+                input.author_kind,
+                &body_c,
+                now,
+            )?;
             mark_live_bookmarks_pending(tx, &input.workspace_id, &input.thread_id, now)?;
             if input.author_kind == ChatActorKind::Human {
                 advance_read_cursor(tx, &input.workspace_id, &input.thread_id, 1, now, None)?;
@@ -1634,6 +2227,14 @@ impl<'a> LinkedChatStore<'a> {
                 &serde_json::Value::Object(message_payload.clone()),
                 now,
             )?;
+            let message_attachments = add_local_attachments(
+                tx,
+                &input.workspace_id,
+                &input.thread_id,
+                &input.message_id,
+                &attachments_c,
+                now,
+            )?;
             journal(tx, &input.thread_id, "chat.thread.create", now)?;
             journal(tx, &input.message_id, "chat.message.append", now)?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
@@ -1660,6 +2261,7 @@ impl<'a> LinkedChatStore<'a> {
                 origin: origin_c.clone(),
                 body: body_c.clone(),
                 created_at_ms: now,
+                attachments: message_attachments,
             };
             Ok::<_, DomainError>((thread, message))
         })?;
@@ -1703,6 +2305,8 @@ impl<'a> LinkedChatStore<'a> {
             Some(p) => Some(p.clone()),
         };
         let body = normalize_body(&input.body)?;
+        let attachments = normalize_attachments(&input.attachments)?;
+        let attachment_fingerprint = attachment_fingerprint_bytes(&attachments);
         let now = input.now_ms;
 
         let payload_hash = hash_fields(&[
@@ -1714,6 +2318,7 @@ impl<'a> LinkedChatStore<'a> {
             author_user_id.as_deref().unwrap_or("").as_bytes(),
             parent.as_deref().unwrap_or("").as_bytes(),
             origin.as_deref().unwrap_or("").as_bytes(),
+            attachment_fingerprint.as_slice(),
         ]);
         if let Some(request_id) = &input.request_id
             && let Some(recorded) = self
@@ -1732,6 +2337,7 @@ impl<'a> LinkedChatStore<'a> {
         let origin_c = origin.clone();
         let body_c = body.clone();
         let parent_c = parent.clone();
+        let attachments_c = attachments.clone();
         let outcome = self.store.write_with(faults, |tx| {
             require_thread(tx, &input.workspace_id, &input.thread_id)?;
             if let Some(parent_id) = &parent_c
@@ -1763,6 +2369,15 @@ impl<'a> LinkedChatStore<'a> {
                 ],
             )
             .map_err(DomainError::sql_persist)?;
+            index_message_mentions_in_tx(
+                tx,
+                &input.workspace_id,
+                &input.thread_id,
+                &input.message_id,
+                input.author_kind,
+                &body_c,
+                now,
+            )?;
             tx.execute(
                 "UPDATE chat_threads SET updated_at_ms = ?3 \
                  WHERE workspace_id = ?1 AND thread_id = ?2",
@@ -1828,6 +2443,14 @@ impl<'a> LinkedChatStore<'a> {
                 &serde_json::Value::Object(payload.clone()),
                 now,
             )?;
+            let message_attachments = add_local_attachments(
+                tx,
+                &input.workspace_id,
+                &input.thread_id,
+                &input.message_id,
+                &attachments_c,
+                now,
+            )?;
             journal(tx, &input.message_id, "chat.message.append", now)?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
             Ok::<_, DomainError>(ChatMessage {
@@ -1842,6 +2465,7 @@ impl<'a> LinkedChatStore<'a> {
                 origin: origin_c.clone(),
                 body: body_c.clone(),
                 created_at_ms: now,
+                attachments: message_attachments,
             })
         })?;
         committed(outcome)
@@ -1978,6 +2602,280 @@ impl<'a> LinkedChatStore<'a> {
         })
     }
 
+    /// Visible attachments for a present workspace thread, ordered by
+    /// `(created_at_ms, attachment_id)`. The message inner join hides retained
+    /// orphan attachment rows without deleting them.
+    pub fn list_thread_attachments(
+        &self,
+        workspace_id: &str,
+        thread_id: &str,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChatAttachment>, DomainError> {
+        if !(1..=501).contains(&limit) {
+            return Err(DomainError::chat(
+                "invalid-cursor",
+                "Page limit is invalid.",
+            ));
+        }
+        let (has_after, after_created_at_ms, after_attachment_id) = match after {
+            Some((created_at_ms, attachment_id)) => (1_i64, created_at_ms, attachment_id),
+            None => (0_i64, 0_i64, String::new()),
+        };
+        self.store.read_with(|conn| {
+            require_thread(conn, workspace_id, thread_id)?;
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT a.attachment_id, a.thread_id, a.message_id, a.target_kind, \
+                            a.object_id, a.path_hint, a.heading_text, a.heading_anchor, \
+                            a.heading_occurrence, a.created_at_ms \
+                     FROM chat_attachments a JOIN chat_messages m \
+                       ON m.workspace_id = a.workspace_id AND m.thread_id = a.thread_id \
+                      AND m.message_id = a.message_id \
+                     WHERE a.workspace_id = ?1 AND a.thread_id = ?2 \
+                       AND (?3 = 0 OR a.created_at_ms > ?4 \
+                         OR (a.created_at_ms = ?4 AND a.attachment_id > ?5)) \
+                     ORDER BY a.created_at_ms, a.attachment_id LIMIT ?6",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        thread_id,
+                        has_after,
+                        after_created_at_ms,
+                        after_attachment_id,
+                        limit
+                    ],
+                    map_attachment_row,
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            collect(rows)
+        })
+    }
+
+    /// Newest file mentions with object-id precedence, a complete message /
+    /// thread / optional-channel hydration, and fail-closed missing entities.
+    pub fn list_file_mentions(
+        &self,
+        workspace_id: &str,
+        object_id: Option<&str>,
+        path_hint: Option<&str>,
+        after: Option<(i64, String)>,
+        limit: i64,
+    ) -> Result<Vec<ChatFileMention>, DomainError> {
+        if !(1..=501).contains(&limit) {
+            return Err(DomainError::chat(
+                "invalid-cursor",
+                "Page limit is invalid.",
+            ));
+        }
+        let object_id = object_id.map(normalize_attachment_object_id).transpose()?;
+        let path_hint = path_hint.map(normalize_attachment_path_hint).transpose()?;
+        if object_id.is_none() && path_hint.is_none() {
+            return Err(DomainError::chat(
+                "invalid-path",
+                "A file mention lookup requires an object id or path hint.",
+            ));
+        }
+        let selector = object_id
+            .as_deref()
+            .or(path_hint.as_deref())
+            .unwrap_or_default();
+        let (has_after, after_created_at_ms, after_attachment_id) = match after {
+            Some((created_at_ms, attachment_id)) => (1_i64, created_at_ms, attachment_id),
+            None => (0_i64, 0_i64, String::new()),
+        };
+        self.store.read_with(|conn| {
+            let predicate = if object_id.is_some() {
+                "a.object_id = ?2"
+            } else {
+                "a.path_hint = ?2"
+            };
+            let sql = format!(
+                "SELECT a.attachment_id, a.thread_id, a.message_id, a.target_kind, \
+                        a.object_id, a.path_hint, a.heading_text, a.heading_anchor, \
+                        a.heading_occurrence, a.created_at_ms \
+                 FROM chat_attachments a JOIN chat_messages m \
+                   ON m.workspace_id = a.workspace_id AND m.thread_id = a.thread_id \
+                  AND m.message_id = a.message_id \
+                 WHERE a.workspace_id = ?1 AND {predicate} \
+                   AND (?3 = 0 OR a.created_at_ms < ?4 \
+                     OR (a.created_at_ms = ?4 AND a.attachment_id < ?5)) \
+                 ORDER BY a.created_at_ms DESC, a.attachment_id DESC LIMIT ?6"
+            );
+            let mut stmt = conn.prepare(&sql).map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        selector,
+                        has_after,
+                        after_created_at_ms,
+                        after_attachment_id,
+                        limit
+                    ],
+                    map_attachment_row,
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let attachments = collect(rows)?;
+            drop(stmt);
+            let mut mentions = Vec::with_capacity(attachments.len());
+            for attachment in attachments {
+                let message = require_message(conn, workspace_id, &attachment.message_id)?;
+                if message.thread_id != attachment.thread_id {
+                    return Err(DomainError::StateCorrupt {
+                        reason: "file mention message belongs to another thread",
+                    });
+                }
+                let thread = require_thread(conn, workspace_id, &message.thread_id)?;
+                let channel = match thread.channel_id.as_deref() {
+                    Some(channel_id) => Some(require_channel(conn, workspace_id, channel_id)?),
+                    None => None,
+                };
+                mentions.push(ChatFileMention {
+                    attachment,
+                    message,
+                    thread,
+                    channel,
+                });
+            }
+            Ok(mentions)
+        })
+    }
+
+    /// Idempotently derive missing mention rows for every authoritative
+    /// message in a workspace. Workspace readiness runs this before exposing
+    /// mention reads or the eligible-trigger scanner.
+    pub fn backfill_mentions(
+        &mut self,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<i64, DomainError> {
+        non_empty(
+            workspace_id,
+            "invalid-channel-name",
+            "workspace_id must not be empty",
+        )?;
+        let outcome = self.store.write_with(faults, |tx| {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT thread_id, message_id, author_kind, body, created_at_ms \
+                     FROM chat_messages WHERE workspace_id = ?1 \
+                     ORDER BY created_at_ms, message_id",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(params![workspace_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })
+                .map_err(DomainError::sql_corrupt)?;
+            let messages: Vec<_> = rows
+                .collect::<Result<_, _>>()
+                .map_err(DomainError::sql_corrupt)?;
+            drop(stmt);
+            let mut inserted = 0usize;
+            for (thread_id, message_id, author_kind, body, created_at_ms) in messages {
+                let author_kind = ChatActorKind::from_db(&author_kind)?;
+                inserted += index_message_mentions_in_tx(
+                    tx,
+                    workspace_id,
+                    &thread_id,
+                    &message_id,
+                    author_kind,
+                    &body,
+                    created_at_ms,
+                )?;
+            }
+            i64::try_from(inserted).map_err(|_| DomainError::StateCorrupt {
+                reason: "mention backfill count overflowed",
+            })
+        })?;
+        committed(outcome)
+    }
+
+    /// Mention rows for a normalized handle in ascending message-coordinate
+    /// order. Inner joins fail closed over missing messages or threads.
+    pub fn list_mentions_for_handle(
+        &self,
+        workspace_id: &str,
+        handle: &str,
+        unread_only: bool,
+        after: Option<MentionCursor>,
+        limit: i64,
+    ) -> Result<Vec<ChatMention>, DomainError> {
+        if !(1..=501).contains(&limit) {
+            return Err(DomainError::chat(
+                "invalid-cursor",
+                "Page limit is invalid.",
+            ));
+        }
+        let handle = normalize_mention_handle(handle)?;
+        let (has_after, after_created_at_ms, after_message_id) = match after {
+            Some(after) => (1_i64, after.created_at_ms, after.message_id),
+            None => (0_i64, 0_i64, String::new()),
+        };
+        self.store.read_with(|conn| {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT x.thread_id, x.message_id, x.handle, x.author_kind, x.created_at_ms \
+                     FROM chat_mentions x \
+                     JOIN chat_messages m ON m.workspace_id = x.workspace_id \
+                       AND m.thread_id = x.thread_id AND m.message_id = x.message_id \
+                     JOIN chat_threads t ON t.workspace_id = x.workspace_id \
+                       AND t.thread_id = x.thread_id \
+                     LEFT JOIN chat_agent_read_state ars ON ars.workspace_id = x.workspace_id \
+                       AND ars.thread_id = x.thread_id \
+                     WHERE x.workspace_id = ?1 AND x.handle = ?2 \
+                       AND (?3 = 0 OR ars.thread_id IS NULL \
+                         OR x.created_at_ms > ars.last_read_created_at_ms \
+                         OR (x.created_at_ms = ars.last_read_created_at_ms \
+                           AND x.message_id > ars.last_read_message_id)) \
+                       AND (?4 = 0 OR x.created_at_ms > ?5 \
+                         OR (x.created_at_ms = ?5 AND x.message_id > ?6)) \
+                     ORDER BY x.created_at_ms, x.message_id LIMIT ?7",
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            let rows = stmt
+                .query_map(
+                    params![
+                        workspace_id,
+                        handle,
+                        i64::from(unread_only),
+                        has_after,
+                        after_created_at_ms,
+                        after_message_id,
+                        limit
+                    ],
+                    |row| {
+                        let thread_id: String = row.get(0)?;
+                        let message_id: String = row.get(1)?;
+                        let handle: String = row.get(2)?;
+                        let author_kind: String = row.get(3)?;
+                        let created_at_ms: i64 = row.get(4)?;
+                        Ok(
+                            ChatActorKind::from_db(&author_kind).map(|author_kind| ChatMention {
+                                thread_id,
+                                message_id,
+                                handle,
+                                author_kind,
+                                created_at_ms,
+                            }),
+                        )
+                    },
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            collect(rows)
+        })
+    }
+
     /// Threads whose latest message is human-authored and beyond the agent
     /// cursor, newest coordinate first.
     pub fn list_agent_unread_threads(
@@ -2096,6 +2994,9 @@ impl<'a> LinkedChatStore<'a> {
                 .query_map(params![workspace_id, thread_id, after, probe], map_message_row)
                 .map_err(DomainError::sql_corrupt)?;
             let mut messages: Vec<ChatMessage> = collect(rows)?;
+            for message in &mut messages {
+                hydrate_message_attachments(conn, workspace_id, message)?;
+            }
             let next = if messages.len() as i64 > limit {
                 messages.truncate(limit as usize);
                 messages.last().map(|m| m.message_order)
@@ -3347,6 +4248,83 @@ impl<'a> LinkedChatStore<'a> {
 
     // ------------------------------------------------------------- dispatch
 
+    /// Scan new message timestamps and atomically seed all eligible, previously
+    /// unseen agent triggers plus the monotonic high-water cursor.
+    pub fn record_eligible_triggers(
+        &mut self,
+        workspace_id: &str,
+        verified_user_id: Option<&str>,
+        at_ms: i64,
+        faults: &dyn FaultInjector,
+    ) -> Result<i64, DomainError> {
+        non_empty(
+            workspace_id,
+            "invalid-channel-name",
+            "workspace_id must not be empty",
+        )?;
+        let verified_user_id = normalize_verified_user_id(verified_user_id)?;
+        let outcome = self.store.write_with(faults, |tx| {
+            let prior: Option<i64> = tx
+                .query_row(
+                    "SELECT max_created_at_ms FROM chat_dispatch_scan_cursor \
+                     WHERE workspace_id = ?1",
+                    params![workspace_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            let scan_after = prior.map_or(-1, |value| value.saturating_sub(1).max(-1));
+            let inserted = tx
+                .execute(
+                    "INSERT OR IGNORE INTO chat_dispatch_ledger \
+                     (workspace_id, trigger_message_id, thread_id, state, run_id, \
+                      failure_reason, attempt_count, created_at_ms, updated_at_ms) \
+                     SELECT m.workspace_id, m.message_id, m.thread_id, 'pending', NULL, \
+                            NULL, 0, m.created_at_ms, ?3 \
+                     FROM chat_messages m \
+                     JOIN chat_threads t ON t.workspace_id = m.workspace_id \
+                       AND t.thread_id = m.thread_id \
+                     LEFT JOIN chat_channels c ON c.workspace_id = t.workspace_id \
+                       AND c.channel_id = t.channel_id \
+                     LEFT JOIN chat_dispatch_ledger l ON l.workspace_id = m.workspace_id \
+                       AND l.trigger_message_id = m.message_id \
+                     WHERE m.workspace_id = ?1 AND m.created_at_ms > ?2 \
+                       AND l.trigger_message_id IS NULL \
+                       AND m.author_kind = 'human' \
+                       AND (m.origin IS NULL OR m.origin <> 'cli') \
+                       AND (m.author_user_id IS NULL \
+                         OR (?4 IS NOT NULL AND m.author_user_id = ?4)) \
+                       AND (c.kind = 'agent' OR EXISTS ( \
+                         SELECT 1 FROM chat_mentions x \
+                         WHERE x.workspace_id = m.workspace_id \
+                           AND x.message_id = m.message_id AND x.handle = 'agent'))",
+                    params![workspace_id, scan_after, at_ms, verified_user_id],
+                )
+                .map_err(DomainError::sql_persist)?;
+            let scanned_max: Option<i64> = tx
+                .query_row(
+                    "SELECT MAX(created_at_ms) FROM chat_messages \
+                     WHERE workspace_id = ?1 AND created_at_ms > ?2",
+                    params![workspace_id, scan_after],
+                    |row| row.get(0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            if let Some(scanned_max) = scanned_max {
+                tx.execute(
+                    "INSERT INTO chat_dispatch_scan_cursor \
+                     (workspace_id, max_created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3) \
+                     ON CONFLICT(workspace_id) DO UPDATE SET \
+                       max_created_at_ms = MAX(chat_dispatch_scan_cursor.max_created_at_ms, excluded.max_created_at_ms), \
+                       updated_at_ms = excluded.updated_at_ms",
+                    params![workspace_id, scanned_max, at_ms],
+                )
+                .map_err(DomainError::sql_persist)?;
+            }
+            i64::try_from(inserted).map_err(|_| dispatch_corrupt())
+        })?;
+        committed(outcome)
+    }
+
     /// Enqueue a durable dispatch trigger for a message (`recordDispatchTrigger`
     /// posture): idempotent per `(workspace, trigger_message_id)`.
     pub fn enqueue_dispatch(
@@ -4463,6 +5441,134 @@ fn mark_live_bookmarks_pending(
     Ok(())
 }
 
+fn insert_attachment(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    attachment: &ChatAttachment,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO chat_attachments \
+         (workspace_id, attachment_id, thread_id, message_id, target_kind, object_id, \
+          path_hint, heading_text, heading_anchor, heading_occurrence, created_at_ms) \
+         VALUES (?1, ?2, ?3, ?4, 'file', ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            workspace_id,
+            attachment.attachment_id,
+            attachment.thread_id,
+            attachment.message_id,
+            attachment.object_id,
+            attachment.path_hint,
+            attachment.heading_text,
+            attachment.heading_anchor,
+            attachment.heading_occurrence,
+            attachment.created_at_ms
+        ],
+    )
+    .map_err(DomainError::sql_persist)?;
+    Ok(())
+}
+
+fn add_local_attachments(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    thread_id: &str,
+    message_id: &str,
+    attachments: &[LocalAttachmentInput],
+    created_at_ms: i64,
+) -> Result<Vec<ChatAttachment>, DomainError> {
+    let mut stored = Vec::with_capacity(attachments.len());
+    for input in attachments {
+        let attachment = ChatAttachment {
+            attachment_id: attachment_id_for(
+                message_id,
+                &input.object_id,
+                input.heading_anchor.as_deref(),
+                input.heading_occurrence,
+            ),
+            thread_id: thread_id.to_owned(),
+            message_id: message_id.to_owned(),
+            object_id: Some(input.object_id.clone()),
+            path_hint: input.path_hint.clone(),
+            heading_text: input.heading_text.clone(),
+            heading_anchor: input.heading_anchor.clone(),
+            heading_occurrence: input.heading_occurrence,
+            created_at_ms,
+        };
+        insert_attachment(tx, workspace_id, &attachment)?;
+        let mut payload = serde_json::json!({
+            "attachmentId": attachment.attachment_id,
+            "threadId": attachment.thread_id,
+            "messageId": attachment.message_id,
+            "targetKind": "file",
+            "objectId": attachment.object_id,
+            "createdAtMs": attachment.created_at_ms,
+        });
+        let payload = payload
+            .as_object_mut()
+            .expect("attachment payload is an object");
+        if let Some(path_hint) = &attachment.path_hint {
+            payload.insert("pathHint".to_owned(), serde_json::json!(path_hint));
+        }
+        if let Some(heading_text) = &attachment.heading_text {
+            payload.insert("headingText".to_owned(), serde_json::json!(heading_text));
+        }
+        if let Some(heading_anchor) = &attachment.heading_anchor {
+            payload.insert(
+                "headingAnchor".to_owned(),
+                serde_json::json!(heading_anchor),
+            );
+        }
+        if let Some(heading_occurrence) = attachment.heading_occurrence {
+            payload.insert(
+                "headingOccurrence".to_owned(),
+                serde_json::json!(heading_occurrence),
+            );
+        }
+        journal_local_op_in_tx(
+            tx,
+            workspace_id,
+            "chat.attachment.add",
+            &serde_json::Value::Object(payload.clone()),
+            created_at_ms,
+        )?;
+        stored.push(attachment);
+    }
+    Ok(stored)
+}
+
+fn attachments_for_message(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+    message_id: &str,
+) -> Result<Vec<ChatAttachment>, DomainError> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT attachment_id, thread_id, message_id, target_kind, object_id, path_hint, \
+                    heading_text, heading_anchor, heading_occurrence, created_at_ms \
+             FROM chat_attachments WHERE workspace_id = ?1 AND thread_id = ?2 AND message_id = ?3 \
+             ORDER BY created_at_ms, attachment_id",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let rows = stmt
+        .query_map(
+            params![workspace_id, thread_id, message_id],
+            map_attachment_row,
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    collect(rows)
+}
+
+fn hydrate_message_attachments(
+    conn: &Connection,
+    workspace_id: &str,
+    message: &mut ChatMessage,
+) -> Result<(), DomainError> {
+    message.attachments =
+        attachments_for_message(conn, workspace_id, &message.thread_id, &message.message_id)?;
+    Ok(())
+}
+
 /// Whether a `(created_at_ms, message_id)` coordinate names a message currently
 /// visible to `owner_user_id` under the personal-feed predicate. Used to gate
 /// `mark_feed_seen` so receiver-private read state can't skip past unseen items.
@@ -4984,17 +6090,20 @@ fn require_message(
     workspace_id: &str,
     message_id: &str,
 ) -> Result<ChatMessage, DomainError> {
-    conn.query_row(
-        "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
+    let mut message = conn
+        .query_row(
+            "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms \
          FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
-        params![workspace_id, message_id],
-        map_message_row,
-    )
-    .optional()
-    .map_err(DomainError::sql_corrupt)?
-    .transpose()?
-    .ok_or_else(|| DomainError::chat("message-not-found", "Chat message was not found."))
+            params![workspace_id, message_id],
+            map_message_row,
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?
+        .transpose()?
+        .ok_or_else(|| DomainError::chat("message-not-found", "Chat message was not found."))?;
+    hydrate_message_attachments(conn, workspace_id, &mut message)?;
+    Ok(message)
 }
 
 fn agent_read_state_for_thread(
@@ -5049,16 +6158,21 @@ fn message_by_id(
     workspace_id: &str,
     message_id: &str,
 ) -> Result<Option<ChatMessage>, DomainError> {
-    conn.query_row(
-        "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
+    let mut message = conn
+        .query_row(
+            "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms \
          FROM chat_messages WHERE workspace_id = ?1 AND message_id = ?2",
-        params![workspace_id, message_id],
-        map_message_row,
-    )
-    .optional()
-    .map_err(DomainError::sql_corrupt)?
-    .transpose()
+            params![workspace_id, message_id],
+            map_message_row,
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?
+        .transpose()?;
+    if let Some(message) = &mut message {
+        hydrate_message_attachments(conn, workspace_id, message)?;
+    }
+    Ok(message)
 }
 
 fn first_message_for_thread(
@@ -5066,17 +6180,22 @@ fn first_message_for_thread(
     workspace_id: &str,
     thread_id: &str,
 ) -> Result<Option<ChatMessage>, DomainError> {
-    conn.query_row(
-        "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
+    let mut message = conn
+        .query_row(
+            "SELECT workspace_id, thread_id, message_order, message_id, author_kind, \
          author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms \
          FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 \
          ORDER BY created_at_ms, message_id LIMIT 1",
-        params![workspace_id, thread_id],
-        map_message_row,
-    )
-    .optional()
-    .map_err(DomainError::sql_corrupt)?
-    .transpose()
+            params![workspace_id, thread_id],
+            map_message_row,
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?
+        .transpose()?;
+    if let Some(message) = &mut message {
+        hydrate_message_attachments(conn, workspace_id, message)?;
+    }
+    Ok(message)
 }
 
 fn active_follow_exists(
@@ -5513,8 +6632,52 @@ fn map_message_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatMessa
             origin,
             body,
             created_at_ms,
+            attachments: Vec::new(),
         }),
     )
+}
+
+fn map_attachment_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<Result<ChatAttachment, DomainError>> {
+    let attachment_id: String = row.get(0)?;
+    let thread_id: String = row.get(1)?;
+    let message_id: String = row.get(2)?;
+    let target_kind: String = row.get(3)?;
+    let object_id: Option<String> = row.get(4)?;
+    let path_hint: Option<String> = row.get(5)?;
+    let heading_text: Option<String> = row.get(6)?;
+    let heading_anchor: Option<String> = row.get(7)?;
+    let heading_occurrence: Option<i64> = row.get(8)?;
+    let created_at_ms: i64 = row.get(9)?;
+    let any_heading =
+        heading_text.is_some() || heading_anchor.is_some() || heading_occurrence.is_some();
+    let all_heading =
+        heading_text.is_some() && heading_anchor.is_some() && heading_occurrence.is_some();
+    if target_kind != "file"
+        || attachment_id.is_empty()
+        || thread_id.is_empty()
+        || message_id.is_empty()
+        || (any_heading && !all_heading)
+        || heading_occurrence.is_some_and(|value| !persisted_nonnegative_safe(value))
+        || !persisted_nonnegative_safe(created_at_ms)
+    {
+        return Ok(Err(DomainError::chat(
+            "state-corrupt",
+            "Chat attachment row is corrupt.",
+        )));
+    }
+    Ok(Ok(ChatAttachment {
+        attachment_id,
+        thread_id,
+        message_id,
+        object_id,
+        path_hint,
+        heading_text,
+        heading_anchor,
+        heading_occurrence,
+        created_at_ms,
+    }))
 }
 
 fn map_follow_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<ChatFollow, DomainError>> {

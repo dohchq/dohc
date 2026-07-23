@@ -2,7 +2,10 @@ use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Deserialize;
 
-use dohc_engine_domain::{AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, channel_slug_for_name};
+use dohc_engine_domain::{
+    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, attachment_id_for, channel_slug_for_name,
+    parse_mention_handles, validate_addressable_plaintext_path,
+};
 
 use crate::journal::{ack_tx, crashes, read_ack_tx};
 use crate::{ReplicationEnvelope, SyncError};
@@ -146,6 +149,8 @@ struct ThreadCreate {
     title: String,
     created_at_ms: i64,
     linked_object_id: Option<String>,
+    linked_path_hint: Option<String>,
+    linked_at_ms: Option<i64>,
     channel_slug: Option<String>,
     channel_wire_id: Option<String>,
 }
@@ -367,6 +372,20 @@ fn apply_thread(
             reason: "chat thread owner shape is invalid",
         });
     }
+    if payload.linked_object_id.is_none()
+        && (payload.linked_path_hint.is_some() || payload.linked_at_ms.is_some())
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "chat thread linked owner shape is invalid",
+        });
+    }
+    if let Some(path) = payload.linked_path_hint.as_deref()
+        && !matches!(validate_addressable_plaintext_path(path), Ok(normalized) if normalized == path)
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "chat thread linked path is invalid",
+        });
+    }
     let channel_id = if channel_shape {
         Some(resolve_or_create_placeholder(tx, op, &payload)?)
     } else {
@@ -375,8 +394,8 @@ fn apply_thread(
     tx.execute(
         "INSERT OR IGNORE INTO chat_threads \
          (workspace_id, thread_id, title, created_at_ms, updated_at_ms, linked_object_id, linked_path_hint, linked_at_ms, channel_id) \
-         VALUES (?1, ?2, ?3, ?4, ?4, ?5, NULL, NULL, ?6)",
-        params![op.workspace_id, payload.thread_id, payload.title, payload.created_at_ms, payload.linked_object_id, channel_id],
+          VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7, ?8)",
+        params![op.workspace_id, payload.thread_id, payload.title, payload.created_at_ms, payload.linked_object_id, payload.linked_path_hint, payload.linked_at_ms, channel_id],
     )
     .map_err(SyncError::persist)?;
     Ok(())
@@ -483,13 +502,32 @@ fn apply_message(
     } else {
         None
     };
-    tx.execute(
+    let inserted = tx.execute(
         "INSERT OR IGNORE INTO chat_messages \
          (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![op.workspace_id, payload.thread_id, order, payload.message_id, payload.author_kind, payload.author_display_name, payload.author_user_id, stored_parent, payload.origin, payload.body, payload.created_at_ms],
     )
     .map_err(SyncError::persist)?;
+    if inserted == 0 {
+        return Ok(());
+    }
+    for handle in parse_mention_handles(&payload.body) {
+        tx.execute(
+            "INSERT OR IGNORE INTO chat_mentions \
+             (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                op.workspace_id,
+                payload.thread_id,
+                payload.message_id,
+                handle,
+                payload.author_kind,
+                payload.created_at_ms
+            ],
+        )
+        .map_err(SyncError::persist)?;
+    }
     if let Some(parent) = payload
         .parent_message_id
         .as_deref()
@@ -521,6 +559,12 @@ fn apply_message(
         params![op.workspace_id, payload.thread_id, payload.created_at_ms],
     )
     .map_err(SyncError::persist)?;
+    mark_live_bookmarks_pending(
+        tx,
+        &op.workspace_id,
+        &payload.thread_id,
+        payload.created_at_ms,
+    )?;
     Ok(())
 }
 
@@ -632,7 +676,50 @@ fn apply_attachment(
     op: &ReplicationEnvelope,
     p: AttachmentAdd,
 ) -> Result<(), SyncError> {
-    if p.target_kind != "file" || p.heading_occurrence.is_some_and(|value| value < 0) {
+    let heading_parts_present = [
+        p.heading_text.is_some(),
+        p.heading_anchor.is_some(),
+        p.heading_occurrence.is_some(),
+    ];
+    let has_heading = heading_parts_present.iter().any(|present| *present);
+    let all_heading = heading_parts_present.iter().all(|present| *present);
+    let valid_path = p.path_hint.as_deref().is_none_or(|path| {
+        matches!(validate_addressable_plaintext_path(path), Ok(normalized) if normalized == path)
+    });
+    let valid_object = p.object_id.as_deref().is_none_or(|object_id| {
+        !object_id.is_empty()
+            && object_id.encode_utf16().count() <= 200
+            && p.attachment_id
+                == attachment_id_for(
+                    &p.message_id,
+                    object_id,
+                    p.heading_anchor.as_deref(),
+                    p.heading_occurrence,
+                )
+    });
+    let valid_heading = !has_heading
+        || (all_heading
+            && p.object_id.is_some()
+            && p.heading_text.as_deref().is_some_and(|value| {
+                !value.is_empty()
+                    && value.encode_utf16().count() <= 300
+                    && !has_projection_control_char(value)
+            })
+            && p.heading_anchor.as_deref().is_some_and(|value| {
+                !value.is_empty()
+                    && value.encode_utf16().count() <= 400
+                    && !has_projection_control_char(value)
+            })
+            && p.heading_occurrence
+                .is_some_and(|value| (0..=9_007_199_254_740_991).contains(&value)));
+    if p.attachment_id.is_empty()
+        || p.thread_id.is_empty()
+        || p.message_id.is_empty()
+        || p.target_kind != "file"
+        || !valid_object
+        || !valid_path
+        || !valid_heading
+    {
         return Err(SyncError::InvalidInput {
             reason: "chat attachment payload is invalid",
         });
@@ -642,6 +729,32 @@ fn apply_attachment(
          (workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,path_hint,heading_text,heading_anchor,heading_occurrence,created_at_ms) \
          VALUES (?1,?2,?3,?4,'file',?5,?6,?7,?8,?9,?10)",
         params![op.workspace_id,p.attachment_id,p.thread_id,p.message_id,p.object_id,p.path_hint,p.heading_text,p.heading_anchor,p.heading_occurrence,p.created_at_ms],
+    )
+    .map_err(SyncError::persist)?;
+    mark_live_bookmarks_pending(tx, &op.workspace_id, &p.thread_id, p.created_at_ms)?;
+    Ok(())
+}
+
+fn has_projection_control_char(value: &str) -> bool {
+    value
+        .chars()
+        .any(|character| (character as u32) <= 0x1f || (character as u32) == 0x7f)
+}
+
+fn mark_live_bookmarks_pending(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    thread_id: &str,
+    at_ms: i64,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "UPDATE chat_bookmark_outbox \
+         SET generation = generation + 1, projection_state = 'pending', \
+             failure_reason = NULL, updated_at_ms = ?3 \
+         WHERE workspace_id = ?1 AND bookmark_id IN ( \
+           SELECT bookmark_id FROM chat_bookmarks \
+           WHERE workspace_id = ?1 AND thread_id = ?2 AND mode = 'live' AND state = 'active')",
+        params![workspace_id, thread_id, at_ms],
     )
     .map_err(SyncError::persist)?;
     Ok(())

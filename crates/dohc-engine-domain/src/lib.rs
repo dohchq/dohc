@@ -39,15 +39,18 @@ pub mod store;
 
 pub use chats::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, AgentRunRecord, AgentUnreadThreadRow, BookmarkMode,
-    BookmarkTargetKind, ChatActorKind, ChatAgentReadState, ChatBookmark, ChatBookmarkTransition,
-    ChatChannel, ChatChannelKind, ChatChannelSummary, ChatFeedItem, ChatFeedPage,
-    ChatFeedReadState, ChatFollow, ChatMessage, ChatMessagePage, ChatReaction, ChatThread,
-    ChatThreadReadState, DispatchClaim, DispatchRecord, DispatchRecovery, FeedCursorValue,
-    FollowState, FollowTargetKind, GENERAL_CHANNEL_NAME, GENERAL_CHANNEL_WIRE_ID,
-    LINKED_CHAT_PROJECTION_KIND, LinkedChatStore, MAX_MESSAGE_BODY_BYTES, MAX_MESSAGE_PAGE,
-    PendingBookmarkRow, RunRecordLink, SaveBookmark, SendMessage, SetFollow, StartChannelThread,
-    ThreadDispatchPause, base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name,
-    decode_feed_cursor, encode_feed_cursor, linked_chat_projection_path,
+    BookmarkTargetKind, ChatActorKind, ChatAgentReadState, ChatAttachment, ChatBookmark,
+    ChatBookmarkTransition, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatFeedItem,
+    ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention, ChatMessage,
+    ChatMessagePage, ChatReaction, ChatThread, ChatThreadReadState, CreateFileThread,
+    DispatchClaim, DispatchRecord, DispatchRecovery, FeedCursorValue, FollowState,
+    FollowTargetKind, GENERAL_CHANNEL_NAME, GENERAL_CHANNEL_WIRE_ID, LINKED_CHAT_PROJECTION_KIND,
+    LinkedChatStore, LocalAttachmentInput, MAX_FILE_MENTION_RESULTS, MAX_MESSAGE_BODY_BYTES,
+    MAX_MESSAGE_PAGE, MentionCursor, PendingBookmarkRow, RunRecordLink, SaveBookmark, SendMessage,
+    SetFollow, StartChannelThread, ThreadDispatchPause, attachment_id_for,
+    base32_lowercase_no_padding, bookmark_id_for, channel_slug_for_name, decode_feed_cursor,
+    encode_feed_cursor, index_message_mentions_in_tx, linked_chat_projection_path,
+    parse_mention_handles,
 };
 pub use conflicts::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,
