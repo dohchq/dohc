@@ -4146,7 +4146,7 @@ impl EngineService {
         let workspace_id = open.workspace_id.clone();
         let logical_limit = params.limit.unwrap_or(50);
         if !(1..=200).contains(&logical_limit) {
-            return Err(wire(ErrorCode::InvalidParams, "invalid-bookmark-target"));
+            return Err(wire(ErrorCode::InvalidParams, "invalid-parameters"));
         }
         let page_limit = chat_page_limit(params.page_limit)?;
         let logical_limit_binding = logical_limit.to_string();
@@ -4320,7 +4320,7 @@ impl EngineService {
         let params: ChatBookmarkArchiveParams = parse(params)?;
         let request_id = request_id
             .filter(|request_id| !request_id.is_empty())
-            .ok_or_else(|| wire(ErrorCode::InvalidParams, "invalid-parameters"))?;
+            .ok_or_else(|| wire(ErrorCode::InvalidParams, "idempotency-key-required"))?;
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id.clone();
         let cancellation = OperationCancellation::new(ctx);

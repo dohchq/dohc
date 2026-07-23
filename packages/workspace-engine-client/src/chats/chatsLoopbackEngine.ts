@@ -1306,6 +1306,9 @@ export class ChatsLoopbackEngine implements EngineTransport {
         if (follows.has(`thread\0${thread.id}`)) matchedBy.push("thread");
         if (thread.channelId && follows.has(`channel\0${thread.channelId}`)) matchedBy.push("channel");
         if (message.authorUserId && follows.has(`person\0${message.authorUserId}`)) matchedBy.push("person");
+        if (message.author.kind === "agent" && follows.has(`agent\0${message.author.displayName}`)) {
+          matchedBy.push("agent");
+        }
         const channel = thread.channelId ? state.channels.get(thread.channelId) : undefined;
         return {
           message: { ...message, attachments: [] },

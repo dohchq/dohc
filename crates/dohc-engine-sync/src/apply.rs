@@ -4,7 +4,8 @@ use serde::Deserialize;
 
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, attachment_id_for, channel_slug_for_name,
-    is_reaction_emoji_verbatim, parse_mention_handles, validate_addressable_plaintext_path,
+    has_projection_control_char, is_reaction_emoji_verbatim, parse_mention_handles,
+    validate_addressable_plaintext_path,
 };
 
 use crate::journal::{ack_tx, crashes, read_ack_tx};
@@ -735,21 +736,21 @@ fn apply_attachment(
             reason: "chat attachment payload is invalid",
         });
     }
-    tx.execute(
-        "INSERT OR IGNORE INTO chat_attachments \
+    let inserted = tx
+        .execute(
+            "INSERT OR IGNORE INTO chat_attachments \
          (workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,path_hint,heading_text,heading_anchor,heading_occurrence,created_at_ms) \
          VALUES (?1,?2,?3,?4,'file',?5,?6,?7,?8,?9,?10)",
-        params![op.workspace_id,p.attachment_id,p.thread_id,p.message_id,p.object_id,p.path_hint,p.heading_text,p.heading_anchor,p.heading_occurrence,p.created_at_ms],
-    )
-    .map_err(SyncError::persist)?;
+            params![op.workspace_id,p.attachment_id,p.thread_id,p.message_id,p.object_id,p.path_hint,p.heading_text,p.heading_anchor,p.heading_occurrence,p.created_at_ms],
+        )
+        .map_err(SyncError::persist)?;
+    // Idempotent replay of an already-applied attachment must not bump the
+    // bookmark outbox again (matches the message apply above).
+    if inserted == 0 {
+        return Ok(());
+    }
     mark_live_bookmarks_pending(tx, &op.workspace_id, &p.thread_id, p.created_at_ms)?;
     Ok(())
-}
-
-fn has_projection_control_char(value: &str) -> bool {
-    value
-        .chars()
-        .any(|character| (character as u32) <= 0x1f || (character as u32) == 0x7f)
 }
 
 fn mark_live_bookmarks_pending(

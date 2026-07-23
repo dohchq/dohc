@@ -753,6 +753,22 @@ fn imported_attachment_requeues_active_live_bookmarks() {
         .expect("outbox");
     // MUTATION: omit the receiver-local bump from imported attachment apply -> bookmark is not reprojected.
     assert_eq!(state, (2, "pending".to_owned(), 41));
+
+    // A redelivered coordinate replays idempotently: the attachment row is
+    // already present, so the outbox generation must NOT bump again.
+    apply_chat_envelope(&mut engine, &attachment, &NoFaults).expect("attachment replay");
+    let replayed: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT generation FROM chat_bookmark_outbox \
+                 WHERE workspace_id='ws' AND bookmark_id=?1",
+                [&bookmark_id],
+                |row| row.get(0),
+            )
+        })
+        .expect("outbox after replay");
+    // MUTATION: bump the outbox on a replayed attachment envelope -> the generation double-increments.
+    assert_eq!(replayed, 2);
 }
 
 #[test]

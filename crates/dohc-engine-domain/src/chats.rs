@@ -904,7 +904,7 @@ fn normalize_projection_field(field: &str, value: &str) -> Result<String, Domain
 
 /// The control-char class shared by the projection/heading/channel validators
 /// (`PROJECTION_FIELD_CONTROL_CHAR = /[\x00-\x1f\x7f]/u`).
-fn has_projection_control_char(value: &str) -> bool {
+pub fn has_projection_control_char(value: &str) -> bool {
     value
         .chars()
         .any(|c| (c as u32) <= 0x1f || (c as u32) == 0x7f)
@@ -2953,7 +2953,7 @@ impl<'a> LinkedChatStore<'a> {
         let thread_id = normalize_replicated_chat_id(&input.thread_id, "thread id is invalid")?;
         validate_message_id(&input.message_id)?;
         let emoji = normalize_reaction_emoji(&input.emoji)?;
-        let author_id = input.author_id.trim().to_owned();
+        let author_id = input.author_id.trim_matches(is_js_trim_ws).to_owned();
         if author_id.is_empty()
             || author_id.encode_utf16().count() > MAX_REACTION_AUTHOR_ID_UTF16_UNITS
         {
