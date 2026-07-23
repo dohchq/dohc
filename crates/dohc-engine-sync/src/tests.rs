@@ -572,9 +572,9 @@ fn imported_opening_message_uses_zero_based_order() {
 }
 
 #[test]
-fn imported_thread_rejects_linked_object_without_linked_timestamp() {
+fn imported_thread_allows_linked_object_without_linked_timestamp() {
     let (_scratch, _path, mut engine) = store();
-    let malformed = envelope(
+    let operation = envelope(
         "half-linked",
         0,
         "chat.thread.create",
@@ -585,9 +585,174 @@ fn imported_thread_rejects_linked_object_without_linked_timestamp() {
             "linkedObjectId": "object-1"
         }),
     );
-    let result = apply_chat_envelope(&mut engine, &malformed, &NoFaults);
-    // MUTATION: drop the linkedObjectId/linkedAtMs pairing guard -> this half-linked row persists.
-    assert!(matches!(result, Err(SyncError::InvalidInput { .. })));
+    let result = apply_chat_envelope(&mut engine, &operation, &NoFaults);
+    // MUTATION: require linkedAtMs whenever linkedObjectId is present -> this oracle-valid row refuses.
+    assert_eq!(
+        result.expect("thread without linked timestamp"),
+        ApplyOutcome::Applied(())
+    );
+    let linked_at: Option<i64> = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT linked_at_ms FROM chat_threads WHERE workspace_id='ws' AND thread_id='thread-half-linked'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("linked timestamp");
+    assert_eq!(linked_at, None);
+}
+
+fn assert_imported_thread_rejected(payload: serde_json::Value) {
+    let (_scratch, _path, mut engine) = store();
+    let operation = envelope("invalid-thread", 0, "chat.thread.create", payload);
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "invalid-thread").expect("ack"),
+        -1
+    );
+}
+
+#[test]
+fn imported_thread_rejects_negative_or_unsafe_timestamps() {
+    for payload in [
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": -1,
+            "linkedObjectId": "object"
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": MAX_WIRE_INTEGER + 1,
+            "linkedObjectId": "object"
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "linkedObjectId": "object",
+            "linkedAtMs": -1
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "linkedObjectId": "object",
+            "linkedAtMs": MAX_WIRE_INTEGER + 1
+        }),
+    ] {
+        // MUTATION: accept signed i64 timestamps without the oracle's nonnegative safe-integer gate.
+        assert_imported_thread_rejected(payload);
+    }
+}
+
+#[test]
+fn imported_thread_rejects_unbounded_untrimmed_or_control_identifiers() {
+    for payload in [
+        json!({
+            "threadId": " thread",
+            "title": "",
+            "createdAtMs": 1,
+            "linkedObjectId": "object"
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "linkedObjectId": "\u{FEFF}object"
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "channelSlug": "general",
+            "channelWireId": "wire\u{7f}"
+        }),
+        json!({
+            "threadId": "a".repeat(257),
+            "title": "",
+            "createdAtMs": 1,
+            "linkedObjectId": "object"
+        }),
+    ] {
+        // MUTATION: use the generic byte-only bounded check -> trim-unstable/control ids can persist.
+        assert_imported_thread_rejected(payload);
+    }
+}
+
+#[test]
+fn imported_thread_rejects_overlong_or_trim_unstable_titles() {
+    for title in [
+        " padded ".to_owned(),
+        "\u{FEFF}title".to_owned(),
+        "a".repeat(201),
+    ] {
+        // MUTATION: omit the title UTF-16 length/JS-trim stability gate.
+        assert_imported_thread_rejected(json!({
+            "threadId": "thread",
+            "title": title,
+            "createdAtMs": 1,
+            "linkedObjectId": "object"
+        }));
+    }
+}
+
+#[test]
+fn imported_thread_rejects_channel_slugs_outside_oracle_grammar() {
+    for channel_slug in [
+        "General".to_owned(),
+        "two--words".to_owned(),
+        "-leading".to_owned(),
+        "a".repeat(201),
+    ] {
+        // MUTATION: treat channelSlug as a generic non-empty id -> invalid aliases create placeholders.
+        assert_imported_thread_rejected(json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "channelSlug": channel_slug
+        }));
+    }
+}
+
+#[test]
+fn imported_thread_rejects_invalid_owner_shape_and_linked_path() {
+    for payload in [
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "linkedObjectId": "object",
+            "channelSlug": "general"
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "channelSlug": "general",
+            "linkedAtMs": 1
+        }),
+        json!({
+            "threadId": "thread",
+            "title": "",
+            "createdAtMs": 1,
+            "linkedObjectId": "object",
+            "linkedPathHint": "notes/../escape.md"
+        }),
+    ] {
+        // MUTATION: relax exact-one-owner or normalized-path enforcement.
+        assert_imported_thread_rejected(payload);
+    }
 }
 
 fn imported_chat_fixture(engine: &mut EngineStore, origin: &str) {
@@ -660,22 +825,10 @@ fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
         envelope(
             "verbatim",
             5,
-            "chat.thread.create",
-            json!({
-                "threadId": "file-thread-negative",
-                "title": "Imported file thread",
-                "createdAtMs": -30,
-                "linkedObjectId": "object-negative",
-                "linkedAtMs": -31
-            }),
-        ),
-        envelope(
-            "verbatim",
-            6,
             "chat.message.append",
             json!({
                 "messageId": "file-message-negative",
-                "threadId": "file-thread-negative",
+                "threadId": "thread-imported",
                 "authorKind": "human",
                 "authorDisplayName": "",
                 "body": "Imported negative attachment",
@@ -684,7 +837,7 @@ fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
         ),
         envelope(
             "verbatim",
-            7,
+            6,
             "chat.attachment.add",
             json!({
                 "attachmentId": attachment_id_for(
@@ -693,7 +846,7 @@ fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
                     None,
                     None
                 ),
-                "threadId": "file-thread-negative",
+                "threadId": "thread-imported",
                 "messageId": "file-message-negative",
                 "targetKind": "file",
                 "objectId": "object-negative",
@@ -729,11 +882,11 @@ fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
     let decisions = LinkedChatStore::new(&mut engine)
         .list_thread_decisions("ws", "thread-imported", None, 10)
         .expect("list imported decision");
-    let threads = LinkedChatStore::new(&mut engine)
-        .list_threads_for_file("ws", "object-negative", None, 10)
-        .expect("list imported thread");
+    let messages = LinkedChatStore::new(&mut engine)
+        .list_messages("ws", "thread-imported", 10, None)
+        .expect("list imported message");
     let attachments = LinkedChatStore::new(&mut engine)
-        .list_thread_attachments("ws", "file-thread-negative", None, 10)
+        .list_thread_attachments("ws", "thread-imported", None, 10)
         .expect("list imported attachment");
 
     // MUTATION: re-tighten any verbatim row mapper -> its corresponding read fails here.
@@ -747,13 +900,15 @@ fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
     assert_eq!(feed.items[0].reactions[0].at_ms, -10);
     assert_eq!(decisions[0].at_ms, -9);
     assert_eq!(
-        (
-            threads[0].created_at_ms,
-            threads[0].linked_at_ms,
-            attachments[0].created_at_ms
-        ),
-        (-30, Some(-31), -28)
+        messages
+            .messages
+            .iter()
+            .find(|message| message.message_id == "file-message-negative")
+            .expect("negative message")
+            .created_at_ms,
+        -29
     );
+    assert_eq!(attachments[0].created_at_ms, -28);
 
     let local_reaction = LinkedChatStore::new(&mut engine)
         .set_reaction(
@@ -896,7 +1051,7 @@ fn imported_message_indexes_mentions_only_when_inserted() {
 }
 
 #[test]
-fn imported_attachment_requeues_active_live_bookmarks() {
+fn imported_attachment_cross_origin_duplicate_requeues_active_live_bookmarks() {
     let (_scratch, _path, mut engine) = store();
     imported_chat_fixture(&mut engine, "attachment-bookmark");
     let bookmark_id = live_bookmark(&mut engine);
@@ -928,10 +1083,15 @@ fn imported_attachment_requeues_active_live_bookmarks() {
     // MUTATION: omit the receiver-local bump from imported attachment apply -> bookmark is not reprojected.
     assert_eq!(state, (2, "pending".to_owned(), 41));
 
-    // A redelivered coordinate replays idempotently: the attachment row is
-    // already present, so the outbox generation must NOT bump again.
-    apply_chat_envelope(&mut engine, &attachment, &NoFaults).expect("attachment replay");
-    let replayed: i64 = engine
+    let cross_origin_duplicate = envelope(
+        "attachment-peer-two",
+        0,
+        "chat.attachment.add",
+        attachment.payload.clone(),
+    );
+    apply_chat_envelope(&mut engine, &cross_origin_duplicate, &NoFaults)
+        .expect("cross-origin duplicate");
+    let duplicated: i64 = engine
         .read_with(|conn| {
             conn.query_row(
                 "SELECT generation FROM chat_bookmark_outbox \
@@ -940,9 +1100,9 @@ fn imported_attachment_requeues_active_live_bookmarks() {
                 |row| row.get(0),
             )
         })
-        .expect("outbox after replay");
-    // MUTATION: bump the outbox on a replayed attachment envelope -> the generation double-increments.
-    assert_eq!(replayed, 2);
+        .expect("outbox after cross-origin duplicate");
+    // MUTATION: gate the bump on INSERT OR IGNORE's affected-row count -> this reachable duplicate stays at 2.
+    assert_eq!(duplicated, 3);
 }
 
 #[test]

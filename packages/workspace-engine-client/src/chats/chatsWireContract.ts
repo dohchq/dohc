@@ -706,7 +706,7 @@ export function decodeChatMessage(value: JsonValue, label = "chat message"): Cha
     threadId: stringValue(object, "threadId", label),
     author: decodeChatActor(object.author ?? null, `${label}.author`),
     body: stringValue(object, "body", label),
-    createdAtMs: safeInteger(object, "createdAtMs", label),
+    createdAtMs: safeInteger(object, "createdAtMs", label, false),
     attachments: arrayValue(object, "attachments", label).map((entry, index) =>
       decodeChatAttachment(entry, `${label}.attachments[${index}]`)),
   };
@@ -886,8 +886,8 @@ function decodeChannel(value: JsonValue, label: string): ChatChannel {
     name: stringValue(object, "name", label),
     slug: stringValue(object, "slug", label),
     kind: enumValue(object, "kind", label, ["channel", "dm", "agent"]),
-    createdAtMs: safeInteger(object, "createdAtMs", label),
-    updatedAtMs: safeInteger(object, "updatedAtMs", label),
+    createdAtMs: safeInteger(object, "createdAtMs", label, false),
+    updatedAtMs: safeInteger(object, "updatedAtMs", label, false),
   };
 }
 
@@ -913,7 +913,7 @@ function decodeMention(value: JsonValue, label: string): ChatMention {
     messageId: stringValue(object, "messageId", label),
     handle: stringValue(object, "handle", label),
     authorKind: enumValue(object, "authorKind", label, ["human", "agent"]),
-    createdAtMs: safeInteger(object, "createdAtMs", label),
+    createdAtMs: safeInteger(object, "createdAtMs", label, false),
   };
 }
 
@@ -937,7 +937,7 @@ function decodeChannelThread(value: JsonValue, label: string): ChatChannelThread
     result.openingMessage = {
       id: stringValue(opening, "id", openingLabel),
       author: decodeChatActor(opening.author ?? null, `${openingLabel}.author`),
-      createdAtMs: safeInteger(opening, "createdAtMs", openingLabel),
+      createdAtMs: safeInteger(opening, "createdAtMs", openingLabel, false),
       bodySnippet: stringValue(opening, "bodySnippet", openingLabel),
       reactions: arrayValue(opening, "reactions", openingLabel).map((entry, index) =>
         decodeChatReaction(entry, `${openingLabel}.reactions[${index}]`)),
@@ -997,8 +997,8 @@ function decodeFeed(value: JsonValue, label: string): ChatFeedPage {
         name: stringValue(channel, "name", channelLabel),
         slug: stringValue(channel, "slug", channelLabel),
         kind: enumValue(channel, "kind", channelLabel, ["channel", "dm", "agent"]),
-        createdAtMs: safeInteger(channel, "createdAtMs", channelLabel),
-        updatedAtMs: safeInteger(channel, "updatedAtMs", channelLabel),
+        createdAtMs: safeInteger(channel, "createdAtMs", channelLabel, false),
+        updatedAtMs: safeInteger(channel, "updatedAtMs", channelLabel, false),
       };
     }
     return result;
@@ -1012,7 +1012,7 @@ function decodeFeed(value: JsonValue, label: string): ChatFeedPage {
     readState = {
       workspaceId: stringValue(state, "workspaceId", stateLabel),
       ownerUserId: stringValue(state, "ownerUserId", stateLabel),
-      lastSeenCreatedAtMs: safeInteger(state, "lastSeenCreatedAtMs", stateLabel),
+      lastSeenCreatedAtMs: safeInteger(state, "lastSeenCreatedAtMs", stateLabel, false),
       lastSeenMessageId: stringValue(state, "lastSeenMessageId", stateLabel),
       updatedAtMs: safeInteger(state, "updatedAtMs", stateLabel),
     };

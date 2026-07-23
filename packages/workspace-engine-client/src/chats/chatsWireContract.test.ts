@@ -630,6 +630,89 @@ describe("B2 chats wire contract and loopback", () => {
     ).rejects.toThrow("invalid-parameters");
   });
 
+  it("uses invalid-parameters for listPending logical limit above 200", async () => {
+    const engine = new ChatsLoopbackEngine();
+    // MUTATION: retain invalid-bookmark-target for limit > 200 -> daemon/loopback errors diverge.
+    await expect(
+      call(engine, 1, CHATS_METHOD.bookmarkListPending, {
+        ownerUserId: "viewer",
+        limit: 201,
+      }),
+    ).rejects.toThrow("invalid-parameters");
+  });
+
+  it("kind-gates feed author follows by user id in oracle matchedBy order", async () => {
+    const engine = new ChatsLoopbackEngine();
+    engine.seedChannel({
+      workspace: WORKSPACE,
+      channelId: "channel",
+      wireId: "channel-wire",
+      name: "General",
+    });
+    await call(
+      engine,
+      1,
+      CHATS_METHOD.threadStart,
+      {
+        channelId: "channel",
+        threadId: "human-thread",
+        messageId: "human-opening",
+        authorKind: "human",
+        authorDisplayName: "Ada Display",
+        authorUserId: "ada",
+        body: "Human",
+        nowMs: 10,
+      },
+      "human-start",
+    );
+    await call(
+      engine,
+      2,
+      CHATS_METHOD.threadStart,
+      {
+        channelId: "channel",
+        threadId: "agent-thread",
+        messageId: "agent-opening",
+        authorKind: "agent",
+        authorDisplayName: "Agent Display",
+        authorUserId: "agent-user",
+        body: "Agent",
+        nowMs: 11,
+      },
+      "agent-start",
+    );
+
+    engine.seedFollow(WORKSPACE, "person-viewer", "person", "ada");
+    engine.seedFollow(WORKSPACE, "person-viewer", "person", "agent-user");
+    const personFeed = await call(engine, 3, CHATS_METHOD.feedListPersonal, {
+      ownerUserId: "person-viewer",
+    });
+    // MUTATION: let a person follow match every author kind -> agent-opening leaks here.
+    expect(personFeed.items.map((item) => item.message.id)).toEqual(["human-opening"]);
+
+    engine.seedFollow(WORKSPACE, "agent-viewer", "agent", "agent-user");
+    const agentFeed = await call(engine, 4, CHATS_METHOD.feedListPersonal, {
+      ownerUserId: "agent-viewer",
+    });
+    // MUTATION: match agent follows by displayName -> this id-addressed follow misses.
+    expect(agentFeed.items.map((item) => item.message.id)).toEqual(["agent-opening"]);
+    expect(agentFeed.items[0]?.matchedBy).toEqual(["agent"]);
+
+    for (const [kind, target] of [
+      ["person", "ada"],
+      ["thread", "human-thread"],
+      ["channel", "channel-wire"],
+    ] as const) {
+      engine.seedFollow(WORKSPACE, "order-viewer", kind, target);
+    }
+    const orderedFeed = await call(engine, 5, CHATS_METHOD.feedListPersonal, {
+      ownerUserId: "order-viewer",
+    });
+    const humanItem = orderedFeed.items.find((item) => item.message.id === "human-opening");
+    // MUTATION: push thread/channel matches before the author match -> order differs from the oracle.
+    expect(humanItem?.matchedBy).toEqual(["person", "thread", "channel"]);
+  });
+
   it("matches default channel follows by wire id", async () => {
     const engine = new ChatsLoopbackEngine();
     engine.seedChannel({
@@ -775,6 +858,126 @@ describe("chats result decoder rejection", () => {
         createdAtMs: -28,
       }).createdAtMs,
     ).toBe(-28);
+
+    const negativeMessage: JsonValue = {
+      id: "negative-message",
+      workspaceId: "workspace",
+      threadId: "thread",
+      author: { kind: "human", displayName: "" },
+      body: "Imported",
+      createdAtMs: -40,
+      attachments: [],
+    };
+    // This is the shared message-row decoder used by messages.list-shaped rows.
+    expect(decodeChatMessage(negativeMessage).createdAtMs).toBe(-40);
+
+    const feed = decodeChatsResult(CHATS_METHOD.feedListPersonal, {
+      items: [{
+        message: negativeMessage,
+        thread: {
+          id: "thread",
+          workspaceId: "workspace",
+          title: "Imported",
+          createdAtMs: -41,
+          updatedAtMs: -40,
+          channelId: "channel",
+        },
+        reactions: [],
+        matchedBy: ["person"],
+        channel: {
+          id: "channel",
+          workspaceId: "workspace",
+          name: "Imported",
+          slug: "imported",
+          kind: "channel",
+          createdAtMs: -42,
+          updatedAtMs: -41,
+        },
+      }],
+      nextCursor: null,
+      headCursor: null,
+      readState: {
+        workspaceId: "workspace",
+        ownerUserId: "viewer",
+        lastSeenCreatedAtMs: -40,
+        lastSeenMessageId: "negative-message",
+        updatedAtMs: 1,
+      },
+    });
+    expect(feed.items[0]?.message.createdAtMs).toBe(-40);
+    expect(feed.items[0]?.channel?.createdAtMs).toBe(-42);
+    expect(feed.readState?.lastSeenCreatedAtMs).toBe(-40);
+
+    const summaries = decodeChatsResult(CHATS_METHOD.threadsListForChannel, {
+      threads: [{
+        thread: {
+          id: "thread",
+          workspaceId: "workspace",
+          title: "Imported",
+          createdAtMs: -41,
+          updatedAtMs: -40,
+          channelId: "channel",
+        },
+        messageCount: 1,
+        lastReadSequence: 0,
+        unreadCount: 1,
+        openDecisionCount: 0,
+        openingMessage: {
+          id: "negative-message",
+          author: { kind: "human", displayName: "" },
+          createdAtMs: -40,
+          bodySnippet: "Imported",
+          reactions: [],
+        },
+      }],
+      nextCursor: null,
+    });
+    expect(summaries.threads[0]?.openingMessage?.createdAtMs).toBe(-40);
+
+    const mentions = decodeChatsResult(CHATS_METHOD.mentionsListForHandle, {
+      mentions: [{
+        threadId: "thread",
+        messageId: "negative-message",
+        handle: "agent",
+        authorKind: "human",
+        createdAtMs: -40,
+      }],
+      nextCursor: null,
+    });
+    expect(mentions.mentions[0]?.createdAtMs).toBe(-40);
+
+    const fileMentions = decodeChatsResult(CHATS_METHOD.attachmentsListFileMentions, {
+      mentions: [{
+        attachment: {
+          attachmentId: "attachment",
+          threadId: "thread",
+          messageId: "negative-message",
+          targetKind: "file",
+          objectId: "object",
+          createdAtMs: -39,
+        },
+        message: negativeMessage,
+        thread: {
+          id: "thread",
+          workspaceId: "workspace",
+          title: "Imported",
+          createdAtMs: -41,
+          updatedAtMs: -40,
+          channelId: "channel",
+        },
+        channel: {
+          workspaceId: "workspace",
+          channelId: "channel",
+          name: "Imported",
+          slug: "imported",
+          kind: "channel",
+          createdAtMs: -42,
+          updatedAtMs: -41,
+        },
+      }],
+      nextCursor: null,
+    });
+    expect(fileMentions.mentions[0]?.channel?.updatedAtMs).toBe(-41);
   });
 
   it("reports a wrong-typed nested field path", () => {

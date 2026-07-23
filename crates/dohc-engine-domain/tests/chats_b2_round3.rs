@@ -1,7 +1,7 @@
 use dohc_engine_domain::{
-    ChatActorKind, ChatChannelKind, ChatReactionState, FollowState, FollowTargetKind,
-    LinkedChatStore, NoFaults, ResolveDecision, SendMessage, SetFollow, SetReaction,
-    StartChannelThread, reaction_id_for,
+    ChatActorKind, ChatChannelKind, ChatReactionState, CreateFileThread, FollowState,
+    FollowTargetKind, LinkedChatStore, NoFaults, ResolveDecision, SendMessage, SetFollow,
+    SetReaction, StartChannelThread, reaction_id_for,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -787,4 +787,199 @@ fn channel_summary_returns_only_active_opening_reactions_in_stable_order() {
             .collect::<Vec<_>>(),
         vec!["👍", "🎉"]
     );
+}
+
+#[test]
+fn js_trimmed_author_user_id_matches_person_follow() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    LinkedChatStore::new(&mut store)
+        .start_channel_thread(
+            &StartChannelThread {
+                workspace_id: WS.to_owned(),
+                channel_id: "channel".to_owned(),
+                thread_id: "trimmed-author".to_owned(),
+                message_id: "opening".to_owned(),
+                title: None,
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".to_owned(),
+                author_user_id: Some("\u{FEFF}ada\u{FEFF}".to_owned()),
+                origin: None,
+                body: "Opening".to_owned(),
+                needs_decision: false,
+                attachments: Vec::new(),
+                now_ms: 20,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("thread");
+    LinkedChatStore::new(&mut store)
+        .set_follow(
+            &SetFollow {
+                workspace_id: WS.to_owned(),
+                owner_user_id: "viewer".to_owned(),
+                replication_owner_user_id: None,
+                target_kind: FollowTargetKind::Person,
+                target_id: "ada".to_owned(),
+                state: FollowState::Following,
+                now_ms: 21,
+            },
+            &NO_FAULTS,
+        )
+        .expect("follow");
+    let feed = LinkedChatStore::new(&mut store)
+        .list_personal_feed(WS, "viewer", Some(10), None)
+        .expect("feed");
+    // MUTATION: use Rust trim instead of JS trim -> the stored U+FEFF-edged id misses this follow.
+    assert_eq!(feed.items.len(), 1);
+    assert_eq!(feed.items[0].message.author_user_id.as_deref(), Some("ada"));
+    assert_eq!(feed.items[0].matched_by, vec![FollowTargetKind::Person]);
+}
+
+#[test]
+fn lone_bom_display_name_is_invalid_sender() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    let result = LinkedChatStore::new(&mut store).start_channel_thread(
+        &StartChannelThread {
+            workspace_id: WS.to_owned(),
+            channel_id: "channel".to_owned(),
+            thread_id: "invalid-display".to_owned(),
+            message_id: "opening".to_owned(),
+            title: None,
+            author_kind: ChatActorKind::Human,
+            author_display_name: "\u{FEFF}".to_owned(),
+            author_user_id: None,
+            origin: None,
+            body: "Opening".to_owned(),
+            needs_decision: false,
+            attachments: Vec::new(),
+            now_ms: 20,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    );
+    // MUTATION: use Rust trim -> U+FEFF survives as a non-empty display name.
+    assert!(matches!(
+        result,
+        Err(dohc_engine_domain::DomainError::Chat {
+            code: "invalid-sender",
+            ..
+        })
+    ));
+}
+
+#[test]
+fn channel_name_and_optional_thread_title_use_js_trim() {
+    let (_scratch, mut store) = store();
+    let channel = LinkedChatStore::new(&mut store)
+        .create_channel(
+            WS,
+            "channel",
+            "\u{FEFF}General\u{FEFF}",
+            ChatChannelKind::Channel,
+            10,
+            &NO_FAULTS,
+        )
+        .expect("channel");
+    LinkedChatStore::new(&mut store)
+        .start_channel_thread(
+            &StartChannelThread {
+                workspace_id: WS.to_owned(),
+                channel_id: "channel".to_owned(),
+                thread_id: "untitled".to_owned(),
+                message_id: "opening".to_owned(),
+                title: Some("\u{FEFF}".to_owned()),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".to_owned(),
+                author_user_id: None,
+                origin: None,
+                body: "Opening".to_owned(),
+                needs_decision: false,
+                attachments: Vec::new(),
+                now_ms: 20,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        )
+        .expect("thread");
+    let stored_title: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT title FROM chat_threads WHERE workspace_id = ?1 AND thread_id = 'untitled'",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("stored title");
+    // MUTATION: use Rust trim for either sibling -> BOMs remain in the name/title.
+    assert_eq!(channel.name, "General");
+    assert_eq!(stored_title, "");
+}
+
+#[test]
+fn thread_mutations_reject_negative_timestamps_before_journaling() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    let start_result = LinkedChatStore::new(&mut store).start_channel_thread(
+        &StartChannelThread {
+            workspace_id: WS.to_owned(),
+            channel_id: "channel".to_owned(),
+            thread_id: "negative-channel-thread".to_owned(),
+            message_id: "negative-opening".to_owned(),
+            title: None,
+            author_kind: ChatActorKind::Human,
+            author_display_name: "Ada".to_owned(),
+            author_user_id: None,
+            origin: None,
+            body: "Opening".to_owned(),
+            needs_decision: false,
+            attachments: Vec::new(),
+            now_ms: -1,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    );
+    let create_result = LinkedChatStore::new(&mut store).create_thread(
+        &CreateFileThread {
+            workspace_id: WS.to_owned(),
+            thread_id: "negative-file-thread".to_owned(),
+            title: "File thread".to_owned(),
+            linked_object_id: "object".to_owned(),
+            linked_path_hint: None,
+            now_ms: -1,
+            request_id: "negative-file-thread".to_owned(),
+        },
+        &NO_FAULTS,
+    );
+    let journaled: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log WHERE workspace_id = ?1 AND op_kind = 'chat.thread.create'",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("journal count");
+    // MUTATION: allow either negative local timestamp -> Rust mints a thread op JS peers refuse.
+    assert!(start_result.is_err());
+    assert!(create_result.is_err());
+    assert_eq!(journaled, 0);
+}
+
+#[test]
+fn agent_read_negative_coordinate_noops_without_revision() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    start(&mut store, "thread", "opening", 20, false);
+    let state = LinkedChatStore::new(&mut store)
+        .mark_thread_read_by_agent(WS, "thread", -1, "before", None, 30, &NO_FAULTS)
+        .expect("negative coordinate");
+    // MUTATION: retain the nonnegative cursor gate -> this oracle-valid clamp no-op errors.
+    assert_eq!(state.last_read_created_at_ms, 0);
+    assert_eq!(state.last_read_message_id, "");
+    assert_eq!(state.revision, 0);
 }

@@ -1312,8 +1312,16 @@ export class ChatsLoopbackEngine implements EngineTransport {
             channel?.wireId !== undefined &&
             follows.has(`channel\0${channel.wireId}`)
           ) ||
-          follows.has(`person\0${message.authorUserId ?? ""}`) ||
-          (message.author.kind === "agent" && follows.has(`agent\0${message.author.displayName}`))
+          (
+            message.author.kind === "human" &&
+            message.authorUserId !== undefined &&
+            follows.has(`person\0${message.authorUserId}`)
+          ) ||
+          (
+            message.author.kind === "agent" &&
+            message.authorUserId !== undefined &&
+            follows.has(`agent\0${message.authorUserId}`)
+          )
         );
       })
       .sort((left, right) => right.createdAtMs - left.createdAtMs || compareText(right.id, left.id))
@@ -1322,6 +1330,15 @@ export class ChatsLoopbackEngine implements EngineTransport {
         const channel = thread.channelId ? state.channels.get(thread.channelId) : undefined;
         const isOpeningMessage = threadMessages(state, thread.id)[0]?.id === message.id;
         const matchedBy: ChatFeedItem["matchedBy"] = [];
+        if (
+          message.authorUserId &&
+          (
+            (message.author.kind === "human" && follows.has(`person\0${message.authorUserId}`)) ||
+            (message.author.kind === "agent" && follows.has(`agent\0${message.authorUserId}`))
+          )
+        ) {
+          matchedBy.push(message.author.kind === "agent" ? "agent" : "person");
+        }
         if (follows.has(`thread\0${thread.id}`)) matchedBy.push("thread");
         if (
           isOpeningMessage &&
@@ -1330,10 +1347,6 @@ export class ChatsLoopbackEngine implements EngineTransport {
           follows.has(`channel\0${channel.wireId}`)
         ) {
           matchedBy.push("channel");
-        }
-        if (message.authorUserId && follows.has(`person\0${message.authorUserId}`)) matchedBy.push("person");
-        if (message.author.kind === "agent" && follows.has(`agent\0${message.author.displayName}`)) {
-          matchedBy.push("agent");
         }
         return {
           message: { ...message, attachments: [] },
@@ -1391,7 +1404,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
   ): JsonValue {
     const owner = requiredString(params, "ownerUserId", "invalid-follow-target");
     const logicalLimit = optionalSafeInteger(params, "limit", 1) ?? 50;
-    if (logicalLimit > 200) throw new Error("invalid-bookmark-target");
+    if (logicalLimit > 200) throw new Error("invalid-parameters");
     const rows = [...state.bookmarks.values()]
       .filter((bookmark) =>
         bookmark.ownerUserId === owner &&

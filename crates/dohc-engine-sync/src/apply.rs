@@ -132,6 +132,31 @@ fn non_empty(value: &str) -> Result<(), SyncError> {
     crate::model::bounded(value, "chat identifier must be non-empty and bounded")
 }
 
+fn is_js_trim_ws(c: char) -> bool {
+    c == '\u{FEFF}' || (c.is_whitespace() && c != '\u{0085}')
+}
+
+fn is_bounded_replicated_id(value: &str, max_utf16_units: usize) -> bool {
+    !value.is_empty()
+        && value.encode_utf16().count() <= max_utf16_units
+        && value.trim_matches(is_js_trim_ws) == value
+        && !has_projection_control_char(value)
+}
+
+fn is_replicated_timestamp(value: i64) -> bool {
+    (0..=crate::MAX_WIRE_INTEGER).contains(&value)
+}
+
+fn is_replicated_channel_slug(value: &str) -> bool {
+    is_bounded_replicated_id(value, 200)
+        && value.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChannelCreate {
@@ -366,15 +391,38 @@ fn apply_thread(
     op: &ReplicationEnvelope,
     payload: ThreadCreate,
 ) -> Result<(), SyncError> {
-    non_empty(&payload.thread_id)?;
+    if !is_bounded_replicated_id(&payload.thread_id, 256)
+        || payload.title.encode_utf16().count() > 200
+        || (!payload.title.is_empty() && payload.title.trim_matches(is_js_trim_ws) != payload.title)
+        || !is_replicated_timestamp(payload.created_at_ms)
+        || payload
+            .linked_object_id
+            .as_deref()
+            .is_some_and(|value| !is_bounded_replicated_id(value, 200))
+        || payload
+            .linked_at_ms
+            .is_some_and(|value| !is_replicated_timestamp(value))
+        || payload
+            .channel_slug
+            .as_deref()
+            .is_some_and(|value| !is_replicated_channel_slug(value))
+        || payload
+            .channel_wire_id
+            .as_deref()
+            .is_some_and(|value| !is_bounded_replicated_id(value, 256))
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "chat thread payload is invalid",
+        });
+    }
     let channel_shape = payload.channel_slug.is_some() || payload.channel_wire_id.is_some();
     if channel_shape == payload.linked_object_id.is_some() {
         return Err(SyncError::InvalidInput {
             reason: "chat thread owner shape is invalid",
         });
     }
-    if payload.linked_object_id.is_some() != payload.linked_at_ms.is_some()
-        || payload.linked_object_id.is_none() && payload.linked_path_hint.is_some()
+    if payload.linked_object_id.is_none()
+        && (payload.linked_path_hint.is_some() || payload.linked_at_ms.is_some())
     {
         return Err(SyncError::InvalidInput {
             reason: "chat thread linked owner shape is invalid",
@@ -736,19 +784,13 @@ fn apply_attachment(
             reason: "chat attachment payload is invalid",
         });
     }
-    let inserted = tx
-        .execute(
-            "INSERT OR IGNORE INTO chat_attachments \
+    tx.execute(
+        "INSERT OR IGNORE INTO chat_attachments \
          (workspace_id,attachment_id,thread_id,message_id,target_kind,object_id,path_hint,heading_text,heading_anchor,heading_occurrence,created_at_ms) \
          VALUES (?1,?2,?3,?4,'file',?5,?6,?7,?8,?9,?10)",
-            params![op.workspace_id,p.attachment_id,p.thread_id,p.message_id,p.object_id,p.path_hint,p.heading_text,p.heading_anchor,p.heading_occurrence,p.created_at_ms],
-        )
-        .map_err(SyncError::persist)?;
-    // Idempotent replay of an already-applied attachment must not bump the
-    // bookmark outbox again (matches the message apply above).
-    if inserted == 0 {
-        return Ok(());
-    }
+        params![op.workspace_id,p.attachment_id,p.thread_id,p.message_id,p.object_id,p.path_hint,p.heading_text,p.heading_anchor,p.heading_occurrence,p.created_at_ms],
+    )
+    .map_err(SyncError::persist)?;
     mark_live_bookmarks_pending(tx, &op.workspace_id, &p.thread_id, p.created_at_ms)?;
     Ok(())
 }

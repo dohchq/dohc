@@ -1556,7 +1556,7 @@ pub fn upsert_chat_search_index_row(
 /// `normalizeChannelName`: NFC then trim, 1..=80 chars, no control chars.
 fn normalize_channel_name(name: &str) -> Result<String, DomainError> {
     let normalized = nfc(name);
-    let normalized = normalized.trim().to_owned();
+    let normalized = normalized.trim_matches(is_js_trim_ws).to_owned();
     let count = normalized.chars().count();
     if normalized.is_empty()
         || count > MAX_CHANNEL_NAME_CHARS
@@ -1574,9 +1574,9 @@ fn normalize_channel_name(name: &str) -> Result<String, DomainError> {
 fn normalize_optional_thread_title(title: Option<&str>) -> Result<String, DomainError> {
     match title {
         None => Ok(String::new()),
-        Some(t) if t.trim().is_empty() => Ok(String::new()),
+        Some(t) if t.trim_matches(is_js_trim_ws).is_empty() => Ok(String::new()),
         Some(t) => {
-            let normalized = t.trim().to_owned();
+            let normalized = t.trim_matches(is_js_trim_ws).to_owned();
             if normalized.chars().count() > MAX_THREAD_TITLE_CHARS {
                 return Err(DomainError::chat(
                     "invalid-thread-title",
@@ -1771,7 +1771,7 @@ fn attachment_fingerprint_bytes(attachments: &[LocalAttachmentInput]) -> Vec<u8>
 
 /// `normalizeDisplayName`: trim, 1..=200 chars.
 fn normalize_display_name(display_name: &str) -> Result<String, DomainError> {
-    let normalized = display_name.trim();
+    let normalized = display_name.trim_matches(is_js_trim_ws);
     if normalized.is_empty() || normalized.chars().count() > MAX_DISPLAY_NAME_CHARS {
         return Err(DomainError::chat(
             "invalid-sender",
@@ -1786,7 +1786,7 @@ fn normalize_author_user_id(value: Option<&str>) -> Result<Option<String>, Domai
     match value {
         None => Ok(None),
         Some(v) => {
-            let normalized = v.trim();
+            let normalized = v.trim_matches(is_js_trim_ws);
             if normalized.is_empty() || normalized.chars().count() > MAX_AUTHOR_USER_ID_CHARS {
                 return Err(DomainError::chat(
                     "invalid-sender",
@@ -2402,6 +2402,12 @@ impl<'a> LinkedChatStore<'a> {
             .as_deref()
             .map(normalize_attachment_path_hint)
             .transpose()?;
+        if input.now_ms < 0 {
+            return Err(DomainError::chat(
+                "invalid-message-body",
+                "Thread timestamp is invalid.",
+            ));
+        }
         if input.request_id.is_empty() {
             return Err(DomainError::InvalidInput {
                 reason: "idempotency key is required",
@@ -2522,6 +2528,12 @@ impl<'a> LinkedChatStore<'a> {
         let attachments = normalize_attachments(&input.attachments)?;
         let attachment_fingerprint = attachment_fingerprint_bytes(&attachments);
         let now = input.now_ms;
+        if now < 0 {
+            return Err(DomainError::chat(
+                "invalid-message-body",
+                "Thread timestamp is invalid.",
+            ));
+        }
 
         let payload_hash = hash_fields(&[
             thread_id.as_bytes(),
@@ -4251,7 +4263,7 @@ impl<'a> LinkedChatStore<'a> {
         now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<ChatAgentReadState, DomainError> {
-        if !persisted_nonnegative_safe(up_to_created_at_ms) || up_to_message_id.is_empty() {
+        if !persisted_safe_integer(up_to_created_at_ms) || up_to_message_id.is_empty() {
             return Err(DomainError::chat(
                 "invalid-read-cursor",
                 "Agent read cursor is invalid.",

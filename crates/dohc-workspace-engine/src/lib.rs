@@ -4154,10 +4154,7 @@ impl EngineService {
             .take(take as usize)
             .map(|row| bookmark_json(&workspace_id, &row.bookmark))
             .collect();
-        let included = byte_budget_cut_serialized(&row_values, CHAT_PAGE_BYTE_BUDGET);
-        if included == 0 && !row_values.is_empty() {
-            return Err(wire(ErrorCode::LimitExceeded, "row-exceeds-wire-limit"));
-        }
+        let included = bounded_chat_page_len(&row_values)?;
         let next_consumed = consumed + included as i64;
         let has_more = next_consumed < logical_limit && rows.len() > included;
         let next_cursor = if has_more {
