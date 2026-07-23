@@ -3992,7 +3992,7 @@ impl EngineService {
             open.actor.chat_feed_list_personal(
                 open.workspace_id,
                 params.owner_user_id,
-                params.limit.map(|limit| limit.min(100)),
+                params.limit,
                 params.cursor,
             ),
         )

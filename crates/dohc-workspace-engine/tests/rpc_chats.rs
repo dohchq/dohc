@@ -86,6 +86,27 @@ async fn call_error(
         .unwrap_err()
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chats_feed_list_personal_refuses_limit_above_cap() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "feed-limit-cap").await;
+    let mut id = 1;
+
+    // MUTATION: clamp an over-cap feed limit at the RPC boundary -> the caller
+    // gets a successful, semantically different page instead of invalid input.
+    let error = call_error(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.feed.listPersonal",
+        json!({ "ownerUserId": "owner", "limit": 101 }),
+    )
+    .await;
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+    assert_eq!(error.message, "invalid-follow-target");
+}
+
 async fn call_with_idempotency(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -2094,14 +2115,12 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     .await;
     assert_eq!(follows["follows"].as_array().expect("follows").len(), 1);
 
-    // The feed domain caps at 100. The RPC clamps a larger request before it
-    // reaches the domain and preserves its cursor for the next keyset page.
     let feed = call(
         &transport,
         &first_handle,
         &mut id,
         "chats.feed.listPersonal",
-        json!({ "ownerUserId": "owner-1", "limit": 500 }),
+        json!({ "ownerUserId": "owner-1", "limit": 100 }),
     )
     .await;
     assert_eq!(feed["items"].as_array().expect("feed items").len(), 100);
@@ -2164,7 +2183,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &first_handle,
         &mut id,
         "chats.feed.listPersonal",
-        json!({ "ownerUserId": "owner-1", "limit": 500 }),
+        json!({ "ownerUserId": "owner-1", "limit": 100 }),
     )
     .await;
     assert_eq!(feed_after_seen["headCursor"], feed["headCursor"]);

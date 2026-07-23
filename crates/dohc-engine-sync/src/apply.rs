@@ -293,6 +293,11 @@ fn apply_channel(
             reason: "chat channel kind is invalid",
         });
     }
+    if !is_persisted_safe_integer(payload.created_at_ms) {
+        return Err(SyncError::InvalidInput {
+            reason: "chat channel timestamp is invalid",
+        });
+    }
     // Reserved agent-channel invariant (linkedChatStore.ts replicated apply):
     // the agent kind, the reserved "My agent" name, and its canonical slug all
     // hold IFF the op carries the reserved agent wire id — so a remote op can
@@ -648,6 +653,7 @@ fn apply_message(
             .as_deref()
             .is_some_and(|origin| origin != "cli")
         || payload.body.is_empty()
+        || !is_persisted_safe_integer(payload.created_at_ms)
     {
         return Err(SyncError::InvalidInput {
             reason: "chat message payload is invalid",

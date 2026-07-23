@@ -1387,7 +1387,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         };
       });
     const limit = optionalSafeInteger(params, "limit", 1) ?? 20;
-    if (limit > 100) throw new Error("invalid-cursor");
+    if (limit > 100) throw new Error("invalid-follow-target");
     const cursorParams: ChatsJsonObject = {
       pageLimit: limit,
       ...(params.cursor === undefined ? {} : { cursor: params.cursor }),

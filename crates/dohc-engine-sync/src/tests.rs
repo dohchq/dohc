@@ -630,6 +630,45 @@ fn imported_opening_message_uses_zero_based_order() {
 }
 
 #[test]
+fn imported_channel_refuses_unsafe_created_at_ms_without_row_or_ack() {
+    let (_scratch, _path, mut engine) = store();
+    let operation = envelope(
+        "unsafe-channel-time",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "unsafe-channel",
+            "name": "Unsafe",
+            "slug": "unsafe",
+            "kind": "channel",
+            "createdAtMs": i64::MAX
+        }),
+    );
+
+    // MUTATION: dropping the persisted-safe createdAtMs bound journals a
+    // channel that the typed client cannot decode.
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    let row_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_channels WHERE workspace_id='ws'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("channel row count");
+    assert_eq!(row_count, 0);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "unsafe-channel-time").expect("ack"),
+        -1
+    );
+}
+
+#[test]
 fn imported_thread_allows_linked_object_without_linked_timestamp() {
     let (_scratch, _path, mut engine) = store();
     let operation = envelope(
@@ -1204,6 +1243,47 @@ fn imported_message_append_refuses_each_oracle_invalid_field() {
             2
         );
     }
+}
+
+#[test]
+fn imported_message_refuses_unsafe_created_at_ms_without_row_or_ack() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "unsafe-message-time");
+    let operation = envelope(
+        "unsafe-message-time",
+        3,
+        "chat.message.append",
+        json!({
+            "messageId": "unsafe-message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Unsafe timestamp",
+            "createdAtMs": i64::MAX
+        }),
+    );
+
+    // MUTATION: dropping the persisted-safe createdAtMs bound journals a
+    // message that makes every typed response carrying it undecodable.
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    let row_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_messages WHERE workspace_id='ws' AND message_id='unsafe-message'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("message row count");
+    assert_eq!(row_count, 0);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "unsafe-message-time").expect("ack"),
+        2
+    );
 }
 
 #[test]

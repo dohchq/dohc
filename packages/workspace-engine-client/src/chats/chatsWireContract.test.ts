@@ -799,6 +799,18 @@ describe("B2 chats wire contract and loopback", () => {
     ).rejects.toThrow("invalid-parameters");
   });
 
+  it("uses invalid-follow-target for a personal feed limit above 100", async () => {
+    const engine = new ChatsLoopbackEngine();
+    // MUTATION: restore the loopback's cursor error for limit > 100 -> its
+    // error identity diverges from the daemon domain contract.
+    await expect(
+      call(engine, 1, CHATS_METHOD.feedListPersonal, {
+        ownerUserId: "viewer",
+        limit: 101,
+      }),
+    ).rejects.toThrow("invalid-follow-target");
+  });
+
   it("kind-gates feed author follows by user id in oracle matchedBy order", async () => {
     const engine = new ChatsLoopbackEngine();
     engine.seedChannel({

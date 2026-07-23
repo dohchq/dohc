@@ -185,6 +185,19 @@ issue is moot post-R15. Rust intentionally does not add an import-side
 requirement because that would diverge from the oracle and stall the
 origin's ack stream.
 
+CROSS-ENGINE DELTA (PR #225 codex r5): attachment object identity SHARED
+TRUST BOUNDARY — an imported `chat.attachment.add` without `objectId` is
+accepted by BOTH engines with the peer's `attachmentId` trusted verbatim
+and not recomputed. The oracle gates its object-id checks and attachment-id
+recomputation behind `payload.objectId !== undefined && (...)`
+(`linkedChatStore.ts:4626-4634`), which short-circuits when the field is
+absent; Rust intentionally matches. This is adversarial-only because
+well-behaved minting always carries `objectId`, and it is moot post-R15.
+Rust does not add an import-side object-id requirement: doing so would
+diverge from the oracle and stall the origin's ack stream. Any attachment-id
+forgery hardening belongs at the relay/RPC-E trust boundary and must cover
+both engines; there is no Rust code change for this finding.
+
 CROSS-ENGINE DELTA (RPC-A r18): secret path SPELLING — TS normalize-stores
 (percent-disguises collapse); Rust stores the spelling the write carried
 and resolves verbatim (the secretness gate still classifies via
