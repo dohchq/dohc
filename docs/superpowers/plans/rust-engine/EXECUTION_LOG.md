@@ -2069,3 +2069,39 @@ next round caught. The compounding lesson became structure:
   wrappers + loopback parity) building; then adversarial pre-review ->
   PR -> review loop. NEXT after RPC-D: RPC-B2 -> GATE6 packet -> macOS
   evidence -> R15 go/no-go package (ICE STOP).
+
+
+## 2026-07-23 — RPC-D merged (#223): the mutating text/version/secret daemon surface
+
+- MERGED 00:29Z as a5b3a484 (squash; migration 13 = engine_requests.kind
+  + provable backfill). The largest shard of the program: ~25 wire
+  contracts (versionedText write/rename/delete/rollback/read/list,
+  versionedBinary write/read/readBlob, versions
+  createNamed+fork/setActive/ensureMain/active/merge/compare/
+  compareFiles, the full secrets surface with three-way apply and
+  verbatim-ciphertext restore, moments inband caps, search.ensureIndex)
+  plus the typed client contract and a high-fidelity loopback engine.
+- THE REVIEW ARC: fable-5 adversarial pre-review (15 findings,
+  FIX-FIRST — headline: secrets.apply is the oracle's THREE-WAY MERGE;
+  RPC body normalization was CORRUPTING file/secret bodies; a
+  versions.active null-parity regression), then 16 codex rounds, 7
+  CodeRabbit rounds, and 4 local claude rounds to quiet. Standouts:
+  paths flow VERBATIM (the PR's own NFC normalization was wrong);
+  workspace-scoped + fail-closed blob reads; binary-write requestId
+  ledger; session_ops-serialized lease checks (write-behind-editor race
+  closed); version-gated materialization across all 14 enqueue sites +
+  merge draining its own jobs; rollback cancelling stale pending jobs
+  across version switches; cross-history moment-id uniqueness;
+  kind-scoped ledger purge (discharges the GATE6 shared-ledger
+  obligation IN-PR); empty fork bases merging. Declines that survived:
+  identity posture (recorded), CAL-1 compound reachability (converted
+  to a per-database documents-table proof).
+- Every supervision-grade guard carries a named MUTATION test;
+  orchestrator mutation-verified the critical ones by restoring each
+  bug and watching the named test fail (apply no-op, fork-base guard,
+  workspace scoping, kind-scoped purge, version gate, lease
+  canonicalization, cross-table ids, FTS replay guard).
+- REMAINING toward GATE6: RPC-B2 (production chat follow-ups), RPC-D2
+  (blob-chunk egress + the secret-aware disk executor + slash-spelling
+  ruling), GATE6 packet, macOS evidence, R15 rehearsal + go/no-go (ICE
+  STOP).
