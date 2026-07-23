@@ -669,35 +669,22 @@ fn imported_channel_refuses_unsafe_created_at_ms_without_row_or_ack() {
 }
 
 #[test]
-fn imported_thread_allows_linked_object_without_linked_timestamp() {
-    let (_scratch, _path, mut engine) = store();
-    let operation = envelope(
-        "half-linked",
-        0,
-        "chat.thread.create",
-        json!({
-            "threadId": "thread-half-linked",
-            "title": "Half linked",
-            "createdAtMs": 20,
-            "linkedObjectId": "object-1"
-        }),
-    );
-    let result = apply_chat_envelope(&mut engine, &operation, &NoFaults);
-    // MUTATION: require linkedAtMs whenever linkedObjectId is present -> this oracle-valid row refuses.
-    assert_eq!(
-        result.expect("thread without linked timestamp"),
-        ApplyOutcome::Applied(())
-    );
-    let linked_at: Option<i64> = engine
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT linked_at_ms FROM chat_threads WHERE workspace_id='ws' AND thread_id='thread-half-linked'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .expect("linked timestamp");
-    assert_eq!(linked_at, None);
+fn imported_thread_rejects_linked_object_without_linked_timestamp() {
+    // A file-linked thread MUST carry linkedAtMs. The oracle accepts this op
+    // (storing linked_at_ms NULL) but then bricks its OWN read (threadFromRow
+    // numberValue(null) throws corruptStore) — a latent oracle bug. We reject
+    // the malformed op at apply, deliberately STRICTER than the oracle, so no
+    // durable-unreadable linked thread is ever persisted. Honest mint always
+    // pairs the fields; only a corrupt/hostile peer hits this.
+    // MUTATION: drop the linkedObjectId-requires-linkedAtMs guard -> the op is
+    // accepted, stored with linked_at_ms NULL, and every later thread read for
+    // it throws state-corrupt.
+    assert_imported_thread_rejected(json!({
+        "threadId": "thread-half-linked",
+        "title": "Half linked",
+        "createdAtMs": 20,
+        "linkedObjectId": "object-1"
+    }));
 }
 
 fn assert_imported_thread_rejected(payload: serde_json::Value) {

@@ -443,6 +443,18 @@ fn apply_thread(
             reason: "chat thread linked owner shape is invalid",
         });
     }
+    // A file-linked thread MUST carry its linkedAtMs. The oracle accepts this
+    // op (storing linked_at_ms NULL) but then its OWN reader throws corruptStore
+    // (threadFromRow numberValue(null)) — a latent oracle bug that bricks the
+    // read surface on both engines. We reject the malformed op at apply
+    // (fail-closed), which is deliberately stricter than the oracle; honest
+    // mint always pairs the fields, so only a corrupt/hostile op is refused.
+    // See the CROSS-ENGINE DELTA note in RPC_GAP.md.
+    if payload.linked_object_id.is_some() && payload.linked_at_ms.is_none() {
+        return Err(SyncError::InvalidInput {
+            reason: "chat thread linked owner requires a linked timestamp",
+        });
+    }
     if let Some(path) = payload.linked_path_hint.as_deref()
         && !matches!(validate_addressable_plaintext_path(path), Ok(normalized) if normalized == path)
     {

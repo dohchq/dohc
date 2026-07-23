@@ -172,18 +172,29 @@ refuses some handles its own scanner indexes (agent.ops_v2 throws on
 JS, succeeds on Rust). Deliberate oracle-bug fix; parity suites must
 expect it; moot for data post-R15.
 
-CROSS-ENGINE DELTA (PR #225 codex r4): linked thread timestamp SHARED
-LATENT INCONSISTENCY — an imported `chat.thread.create` with
-`linkedObjectId` but no `linkedAtMs` is accepted and stored with
-`linked_at_ms = NULL` by BOTH engines' apply paths (the oracle uses
-`linkedAtMs ?? null` at linkedChatStore.ts:4432; Rust matches), then
-throws corrupt on read in BOTH engines (the oracle's `threadFromRow`
-passes NULL to `numberValue` at :653/:1498; Rust `map_thread_row`
-requires the timestamp for a linked owner). This is adversarial-only:
-well-behaved peers pair the fields when minting a linked thread, and the
-issue is moot post-R15. Rust intentionally does not add an import-side
-requirement because that would diverge from the oracle and stall the
-origin's ack stream.
+CROSS-ENGINE DELTA (PR #225 codex r4/r6 + CodeRabbit): linked thread
+timestamp — RUST REJECTS-ON-APPLY, DELIBERATELY STRICTER THAN THE
+ORACLE. An imported `chat.thread.create` with `linkedObjectId` but no
+`linkedAtMs` is a malformed op that the ORACLE accepts and stores with
+`linked_at_ms = NULL` (`linkedAtMs ?? null` at linkedChatStore.ts:4432)
+and then BRICKS on its OWN read — `threadFromRow` passes NULL to
+`numberValue` (:653/:1498) and throws corruptStore, so the row is
+unrenderable on the oracle too. **Policy (named, tested): the Rust
+receiver REJECTS the op at apply** (`chat.thread.create` requires
+`linkedAtMs` whenever `linkedObjectId` is present, dohc-engine-sync
+apply.rs) — fail-closed, consistent with `map_thread_row`, so no
+durable-unreadable linked thread is ever persisted. This is a
+deliberate stricter-than-oracle divergence: the oracle's
+accept-then-brick is a latent bug we do NOT replicate. It costs no
+honest-data parity — well-behaved mint always pairs the fields
+(:2122/:2157), so only a corrupt/hostile op is refused (its origin's
+ack stream fail-closed halts at that op, the correct response to a
+malformed replicated write; the relay/RPC-E layer owns hostile-origin
+quarantine). Differential/parity suites MUST expect the delta: a
+half-linked import → oracle acks-then-bricks, Rust refuses.
+REGRESSION TEST: `imported_thread_rejects_linked_object_without_linked_timestamp`
+(dohc-engine-sync). Moot for data post-R15 (the reset wipes any
+pre-existing NULL-linked rows).
 
 CROSS-ENGINE DELTA (PR #225 codex r5): attachment object identity SHARED
 TRUST BOUNDARY — an imported `chat.attachment.add` without `objectId` is
