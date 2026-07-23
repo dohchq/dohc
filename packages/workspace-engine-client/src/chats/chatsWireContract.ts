@@ -869,7 +869,7 @@ function decodeAgentRead(value: JsonValue, label: string): ChatAgentReadState {
   return {
     workspaceId: stringValue(object, "workspaceId", label),
     threadId: stringValue(object, "threadId", label),
-    lastReadCreatedAtMs: safeInteger(object, "lastReadCreatedAtMs", label),
+    lastReadCreatedAtMs: safeInteger(object, "lastReadCreatedAtMs", label, false),
     lastReadMessageId: stringValue(object, "lastReadMessageId", label),
     revision: safeInteger(object, "revision", label),
     updatedAtMs: safeInteger(object, "updatedAtMs", label),

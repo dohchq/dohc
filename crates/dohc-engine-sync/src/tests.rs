@@ -1149,6 +1149,50 @@ fn imported_message_append_refuses_each_oracle_invalid_field() {
 }
 
 #[test]
+fn imported_message_over_64k_refuses_before_mentions_or_persistence() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "oversized-message");
+    let operation = envelope(
+        "oversized-message",
+        3,
+        "chat.message.append",
+        json!({
+            "messageId": "oversized",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": format!("@must-not-index {}", "x".repeat(64 * 1024)),
+            "createdAtMs": 30
+        }),
+    );
+    let result = apply_chat_envelope(&mut engine, &operation, &NoFaults);
+    let (messages, mentions): (i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_messages WHERE message_id = 'oversized'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_mentions WHERE message_id = 'oversized'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("oversized persistence counts");
+    // MUTATION: omit the UTF-8 byte cap, or check it after mention parsing ->
+    // this peer operation persists/indexes and advances the origin.
+    assert!(matches!(result, Err(SyncError::InvalidInput { .. })));
+    assert_eq!((messages, mentions), (0, 0));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "oversized-message").expect("ack"),
+        2
+    );
+}
+
+#[test]
 fn imported_follow_set_refuses_unbounded_or_empty_identities() {
     for (owner, target) in [
         ("".to_owned(), "target".to_owned()),

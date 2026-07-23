@@ -3,9 +3,9 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Deserializer};
 
 use dohc_engine_domain::{
-    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, attachment_id_for, channel_slug_for_name,
-    has_projection_control_char, is_js_trim_ws, is_reaction_emoji_verbatim, parse_mention_handles,
-    validate_addressable_plaintext_path,
+    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, MAX_MESSAGE_BODY_BYTES, attachment_id_for,
+    channel_slug_for_name, has_projection_control_char, is_js_trim_ws, is_reaction_emoji_verbatim,
+    parse_mention_handles, validate_addressable_plaintext_path,
 };
 
 use crate::journal::{ack_tx, crashes, read_ack_tx};
@@ -644,6 +644,7 @@ fn apply_message(
             .as_deref()
             .is_some_and(|origin| origin != "cli")
         || payload.body.is_empty()
+        || payload.body.len() > MAX_MESSAGE_BODY_BYTES
     {
         return Err(SyncError::InvalidInput {
             reason: "chat message payload is invalid",

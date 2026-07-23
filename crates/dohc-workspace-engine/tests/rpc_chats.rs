@@ -7,6 +7,7 @@ use dohc_engine_protocol::{
     wire::{Request, WorkspaceHandle},
 };
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError};
+use dohc_engine_sync::{ReplicationEnvelope, apply_chat_envelope};
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
 use serde_json::{Value, json};
@@ -663,6 +664,45 @@ async fn rpc_b2_attachment_and_file_thread_contracts() {
             .len(),
         1
     );
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.follows.set",
+        json!({
+            "ownerUserId": "feed-viewer",
+            "targetKind": "thread",
+            "targetId": "file-thread",
+            "state": "following",
+            "nowMs": 31,
+        }),
+    )
+    .await;
+    let feed = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.feed.listPersonal",
+        json!({ "ownerUserId": "feed-viewer", "limit": 10 }),
+    )
+    .await;
+    // MUTATION: route Feed through the legacy slim serializers -> both of
+    // these authoritative B2 fields disappear.
+    assert_eq!(
+        feed["items"][0]["message"]["attachments"]
+            .as_array()
+            .expect("feed message attachments")
+            .len(),
+        1
+    );
+    assert_eq!(
+        feed["items"][0]["thread"]["linkedFile"],
+        json!({
+            "objectId": "object-1",
+            "pathHint": "notes/file.md",
+            "linkedAtMs": 20,
+        })
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -768,7 +808,7 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rpc_b2_mentions_backfill_and_scanner_contracts() {
+async fn rpc_b2_mentions_backfill_marker_makes_second_open_a_noop() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
     let db_path = scratch.engine_db_path().expect("db path");
@@ -862,6 +902,94 @@ async fn rpc_b2_mentions_backfill_and_scanner_contracts() {
     .await;
     // MUTATION: scan-before-backfill or a non-idempotent ledger changes this pair.
     assert_eq!((first, retry), (json!(1), json!(0)));
+
+    call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
+    let conn = rusqlite::Connection::open(&db_path).expect("open closed engine db");
+    conn.execute(
+        "INSERT INTO chat_messages \
+         (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) \
+         VALUES ('rpc-b2-mentions','thread',1,'raw-after-marker','human','Ada','@raw',30)",
+        [],
+    )
+    .expect("insert raw post-marker message");
+    drop(conn);
+
+    let reopened = open_workspace(&transport, &scratch, id + 1, "rpc-b2-mentions").await;
+    let raw_mentions = call(
+        &transport,
+        &reopened,
+        &mut id,
+        "chats.mentions.listForHandle",
+        json!({ "handle": "raw", "unreadByAgentOnly": false, "pageLimit": 10 }),
+    )
+    .await;
+    // MUTATION: drop or ignore the durable completion marker -> the second
+    // open reparses this raw fixture row and hides the write-time-indexing
+    // invariant by making it visible.
+    assert!(
+        raw_mentions["mentions"]
+            .as_array()
+            .expect("raw mentions")
+            .is_empty()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn synced_negative_agent_read_cursor_round_trips_over_the_wire() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
+    let db_path = scratch.engine_db_path().expect("db path");
+    let mut store = EngineStore::open(&db_path, 1).expect("store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_threads \
+                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms,linked_object_id,linked_at_ms) \
+                 VALUES ('rpc-negative-agent-read','negative-thread','Imported',0,0,'negative-object',0)",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed local thread");
+    let operation = ReplicationEnvelope {
+        workspace_id: "rpc-negative-agent-read".to_owned(),
+        origin_id: "peer".to_owned(),
+        origin_seq: 0,
+        op_kind: "chat.message.append".to_owned(),
+        payload: json!({
+            "messageId": "negative-message",
+            "threadId": "negative-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Peer",
+            "body": "Imported",
+            "createdAtMs": -10,
+        }),
+        recorded_at_ms: 1,
+    };
+    apply_chat_envelope(&mut store, &operation, &NoFaults).expect("apply synced chat row");
+    drop(store);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, 1, "rpc-negative-agent-read").await;
+    let mut id = 10;
+    let state = call(
+        &transport,
+        &handle,
+        &mut id,
+        "chats.agentReadState.markThreadRead",
+        json!({
+            "threadId": "negative-thread",
+            "upTo": { "createdAtMs": 0, "messageId": "after" },
+        }),
+    )
+    .await;
+    // MUTATION: compare the clamped negative coordinate to the synthetic zero
+    // cursor, or reject signed coordinates in the read/serialization chain.
+    assert_eq!(state["lastReadCreatedAtMs"], json!(-10));
+    assert_eq!(state["lastReadMessageId"], json!("negative-message"));
+    assert_eq!(state["revision"], json!(1));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

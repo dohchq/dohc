@@ -41,6 +41,7 @@ interface WorkspaceState {
   reactions: Map<string, ChatReaction>;
   mentions: ChatMention[];
   agentReads: Map<string, ChatAgentReadState>;
+  humanReads: Map<string, number>;
   follows: Map<string, Set<string>>;
   bookmarks: Map<string, ChatBookmark>;
   dispatches: Map<string, ChatDispatch>;
@@ -533,6 +534,13 @@ export class ChatsLoopbackEngine implements EngineTransport {
     state.follows.set(ownerUserId, follows);
   }
 
+  seedThreadRead(workspace: string, threadId: string, lastReadSequence: number): void {
+    if (!Number.isSafeInteger(lastReadSequence) || lastReadSequence < 0) {
+      throw new Error("invalid-read-cursor");
+    }
+    this.workspace(workspace).humanReads.set(threadId, lastReadSequence);
+  }
+
   seedBookmark(input: SeedBookmarkInput): ChatBookmark {
     const state = this.workspace(input.workspaceId);
     const key = bookmarkKey(input.ownerUserId, input.bookmarkId);
@@ -932,8 +940,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
       .sort((left, right) => right.updatedAtMs - left.updatedAtMs || compareText(right.id, left.id))
       .map((thread) => {
         const messages = threadMessages(state, thread.id);
-        const read = state.agentReads.get(thread.id);
-        const lastReadSequence = Math.min(read ? this.readSequence(messages, read) : 0, messages.length);
+        const lastReadSequence = Math.min(
+          state.humanReads.get(thread.id) ?? 0,
+          messages.length,
+        );
         const opening = messages[0];
         return {
           thread,
@@ -1348,18 +1358,19 @@ export class ChatsLoopbackEngine implements EngineTransport {
         ) {
           matchedBy.push("channel");
         }
+        const openingMessage = isOpeningMessage
+          ? undefined
+          : threadMessages(state, thread.id)[0];
+        const parentMessage = message.parentMessageId
+          ? state.messages.get(message.parentMessageId)
+          : undefined;
         return {
-          message: { ...message, attachments: [] },
-          thread: {
-            id: thread.id,
-            workspaceId: thread.workspaceId,
-            title: thread.title,
-            createdAtMs: thread.createdAtMs,
-            updatedAtMs: thread.updatedAtMs,
-            ...(thread.channelId ? { channelId: thread.channelId } : {}),
-          },
+          message,
+          thread,
           reactions: activeMessageReactions(state, message.id),
           matchedBy,
+          ...(parentMessage ? { parentMessage } : {}),
+          ...(openingMessage ? { openingMessage } : {}),
           ...(channel
             ? {
                 channel: {
@@ -1813,6 +1824,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         reactions: new Map(),
         mentions: [],
         agentReads: new Map(),
+        humanReads: new Map(),
         follows: new Map(),
         bookmarks: new Map(),
         dispatches: new Map(),

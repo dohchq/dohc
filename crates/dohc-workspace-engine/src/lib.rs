@@ -4002,8 +4002,8 @@ impl EngineService {
             .iter()
             .map(|item| {
                 let mut value = json!({
-                    "message": feed_message_json(&item.message),
-                    "thread": feed_thread_json(&item.thread),
+                    "message": message_json(&item.message),
+                    "thread": thread_b2_json(&item.thread),
                     "reactions": item.reactions.iter().map(reaction_json).collect::<Vec<_>>(),
                     "matchedBy": item.matched_by.iter().map(follow_target_kind_json).collect::<Vec<_>>(),
                 });
@@ -4014,13 +4014,13 @@ impl EngineService {
                 if let Some(parent_message) = &item.parent_message {
                     object.insert(
                         "parentMessage".to_owned(),
-                        feed_message_json(parent_message),
+                        message_json(parent_message),
                     );
                 }
                 if let Some(opening_message) = &item.opening_message {
                     object.insert(
                         "openingMessage".to_owned(),
-                        feed_message_json(opening_message),
+                        message_json(opening_message),
                     );
                 }
                 value
@@ -7097,52 +7097,6 @@ fn feed_channel_json(channel: &ChatChannel) -> Value {
         "createdAtMs": channel.created_at_ms,
         "updatedAtMs": channel.updated_at_ms,
     })
-}
-
-fn feed_thread_json(thread: &ChatThread) -> Value {
-    let mut value = json!({
-        "id": thread.thread_id,
-        "workspaceId": thread.workspace_id,
-        "title": thread.title,
-        "createdAtMs": thread.created_at_ms,
-        "updatedAtMs": thread.updated_at_ms,
-    });
-    if let Some(channel_id) = &thread.channel_id {
-        value
-            .as_object_mut()
-            .expect("feed thread is an object")
-            .insert("channelId".to_owned(), json!(channel_id));
-    }
-    value
-}
-
-fn feed_message_json(message: &ChatMessage) -> Value {
-    let mut value = json!({
-        "id": message.message_id,
-        "workspaceId": message.workspace_id,
-        "threadId": message.thread_id,
-        "author": {
-            "kind": match message.author_kind {
-                ChatActorKind::Human => "human",
-                ChatActorKind::Agent => "agent",
-            },
-            "displayName": message.author_display_name,
-        },
-        "body": message.body,
-        "createdAtMs": message.created_at_ms,
-        "attachments": [],
-    });
-    let object = value.as_object_mut().expect("feed message is an object");
-    if let Some(author_user_id) = &message.author_user_id {
-        object.insert("authorUserId".to_owned(), json!(author_user_id));
-    }
-    if let Some(parent_message_id) = &message.parent_message_id {
-        object.insert("parentMessageId".to_owned(), json!(parent_message_id));
-    }
-    if let Some(origin) = &message.origin {
-        object.insert("origin".to_owned(), json!(origin));
-    }
-    value
 }
 
 fn follow_target_kind_json(kind: &FollowTargetKind) -> Value {

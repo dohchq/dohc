@@ -200,11 +200,17 @@ describe("B2 chats wire contract and loopback", () => {
       await roundTrip(CHATS_METHOD.followsEnsureDefaults, { ownerUserId: "viewer" }),
     ).toBeNull();
     engine.seedFollow(WORKSPACE, "viewer", "thread", "file-thread");
-    expect(
-      (await roundTrip(CHATS_METHOD.feedListPersonal, {
-        ownerUserId: "viewer",
-      })).items.some((item) => item.message.id === "file-message"),
-    ).toBe(true);
+    const feed = await roundTrip(CHATS_METHOD.feedListPersonal, {
+      ownerUserId: "viewer",
+    });
+    const fileFeedItem = feed.items.find((item) => item.message.id === "file-message");
+    expect(fileFeedItem?.message.attachments).toHaveLength(1);
+    expect(fileFeedItem?.thread.linkedFile).toEqual({
+      objectId: "object-1",
+      pathHint: "notes/original.md",
+      linkedAtMs: 20,
+    });
+    // MUTATION: legacy slim Feed copies erase attachments and linked-file metadata.
 
     for (const bookmarkId of ["find", "archive", "pending", "failed", "stale"]) {
       engine.seedBookmark({
@@ -864,6 +870,59 @@ describe("B2 chats wire contract and loopback", () => {
     expect(feed.items[0]?.matchedBy).toEqual(["channel"]);
   });
 
+  it("uses the human sequence cursor for channel summaries", async () => {
+    const engine = new ChatsLoopbackEngine();
+    engine.seedChannel({
+      workspace: WORKSPACE,
+      channelId: "channel",
+      name: "General",
+    });
+    await call(
+      engine,
+      1,
+      CHATS_METHOD.threadStart,
+      {
+        channelId: "channel",
+        threadId: "thread",
+        messageId: "opening",
+        authorKind: "human",
+        authorDisplayName: "Ada",
+        body: "Opening",
+        nowMs: 10,
+      },
+      "start",
+    );
+    await call(
+      engine,
+      2,
+      CHATS_METHOD.messageSend,
+      {
+        threadId: "thread",
+        messageId: "second",
+        authorKind: "human",
+        authorDisplayName: "Ada",
+        body: "Second",
+        nowMs: 20,
+      },
+      "send",
+    );
+    await call(engine, 3, CHATS_METHOD.agentReadMarkThreadRead, {
+      threadId: "thread",
+      upTo: { createdAtMs: 999, messageId: "after" },
+    });
+    engine.seedThreadRead(WORKSPACE, "thread", 1);
+
+    const page = await call(engine, 4, CHATS_METHOD.threadsListForChannel, {
+      channelId: "channel",
+    });
+    // MUTATION: derive this summary from agentReads -> the fully-read agent
+    // cursor reports 2/0 instead of the human cursor's 1/1.
+    expect(page.threads[0]).toMatchObject({
+      lastReadSequence: 1,
+      unreadCount: 1,
+    });
+  });
+
   it("coalesces every pending trigger in the claimed thread", async () => {
     const engine = new ChatsLoopbackEngine();
     for (const [triggerMessageId, createdAtMs] of [
@@ -1025,6 +1084,15 @@ describe("chats result decoder rejection", () => {
     expect(feed.items[0]?.channel?.createdAtMs).toBe(-42);
     expect(feed.readState?.lastSeenCreatedAtMs).toBe(-40);
     expect(feed.readState?.updatedAtMs).toBe(-39);
+    const agentRead = decodeChatsResult(CHATS_METHOD.agentReadMarkThreadRead, {
+      workspaceId: "workspace",
+      threadId: "thread",
+      lastReadCreatedAtMs: -40,
+      lastReadMessageId: "negative-message",
+      revision: 1,
+      updatedAtMs: 10,
+    });
+    expect(agentRead.lastReadCreatedAtMs).toBe(-40);
 
     const summaries = decodeChatsResult(CHATS_METHOD.threadsListForChannel, {
       threads: [{

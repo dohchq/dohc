@@ -3729,7 +3729,20 @@ impl<'a> LinkedChatStore<'a> {
             "invalid-channel-name",
             "workspace_id must not be empty",
         )?;
+        let marker_id = mention_backfill_marker_id(workspace_id);
+        let marker_hash = hash_fields(&[b"chat-mention-backfill-v1", workspace_id.as_bytes()]);
         let outcome = self.store.write_with(faults, |tx| {
+            let complete: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM engine_requests \
+                     WHERE request_id = ?1 AND kind = 'chat-mention-backfill')",
+                    params![marker_id],
+                    |row| row.get(0),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            if complete {
+                return Ok::<_, DomainError>(0);
+            }
             let mut stmt = tx
                 .prepare(
                     "SELECT thread_id, message_id, author_kind, body, created_at_ms \
@@ -3765,9 +3778,21 @@ impl<'a> LinkedChatStore<'a> {
                     created_at_ms,
                 )?;
             }
-            i64::try_from(inserted).map_err(|_| DomainError::StateCorrupt {
+            let inserted = i64::try_from(inserted).map_err(|_| DomainError::StateCorrupt {
                 reason: "mention backfill count overflowed",
-            })
+            })?;
+            // This existing bookkeeping ledger is workspace-keyed through the
+            // deterministic marker id. The marker commits with the final
+            // derived rows, so a crash can expose neither half-completion nor
+            // a false-complete scan.
+            tx.execute(
+                "INSERT INTO engine_requests \
+                 (request_id, payload_hash, result_seq, committed_at, kind) \
+                 VALUES (?1, ?2, -1, 0, 'chat-mention-backfill')",
+                params![marker_id, marker_hash],
+            )
+            .map_err(DomainError::sql_persist)?;
+            Ok(inserted)
         })?;
         committed(outcome)
     }
@@ -4301,6 +4326,8 @@ impl<'a> LinkedChatStore<'a> {
                 return Ok::<_, DomainError>(current);
             };
             let requested = (up_to_created_at_ms, up_to_message_id.clone());
+            let clamped_to_negative_latest =
+                up_to_created_at_ms >= 0 && requested > latest && latest.0 < 0;
             let target = if requested > latest {
                 latest
             } else {
@@ -4310,7 +4337,8 @@ impl<'a> LinkedChatStore<'a> {
                 current.last_read_created_at_ms,
                 current.last_read_message_id.clone(),
             );
-            if target <= current_coordinate {
+            let has_current = current.revision != 0 || !current.last_read_message_id.is_empty();
+            if target <= current_coordinate && (has_current || !clamped_to_negative_latest) {
                 return Ok(current);
             }
             let revision = current
@@ -7338,7 +7366,7 @@ fn agent_read_state_for_thread(
             updated_at_ms: 0,
         });
     };
-    if !persisted_nonnegative_safe(created_at_ms)
+    if !persisted_safe_integer(created_at_ms)
         || !persisted_nonnegative_safe(revision)
         || !persisted_nonnegative_safe(updated_at_ms)
     {
@@ -7627,6 +7655,13 @@ fn hash_fields(fields: &[&[u8]]) -> String {
         let _ = write!(out, "{byte:02x}");
     }
     out
+}
+
+fn mention_backfill_marker_id(workspace_id: &str) -> String {
+    format!(
+        "dohc:chat-mention-backfill:{}",
+        hash_fields(&[workspace_id.as_bytes()])
+    )
 }
 
 // -------------------------------------------------------------------- mappers
