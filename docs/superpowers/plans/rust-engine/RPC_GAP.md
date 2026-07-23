@@ -1,7 +1,10 @@
 # Daemon RPC gap analysis — desktop surface vs dispatched methods
 
-Snapshot 2026-07-22 (RPC-A MERGED #217; FCOMP-E merged #215; RPC-B MERGED
-#218; RPC-C MERGED #220; RPC-D in flight on codex/rust-engine-rpc-d).
+Snapshot 2026-07-23 (RPC-A MERGED #217; FCOMP-E merged #215; RPC-B MERGED
+#218; RPC-C MERGED #220; RPC-D MERGED #223 as a5b3a484 — the mutating
+text/version/secret surface, typed client contract, and loopback are on
+main; remaining daemon gaps are RPC-B2, RPC-D2 (blob egress + secret
+disk executor), and RPC-E).
 Source: full sweep of the R13b dormant
 adapter, every desktop engine call site, and the daemon/actor/domain layers.
 This scopes the "grow daemon RPCs for cutover-needed desktop surfaces" shard
