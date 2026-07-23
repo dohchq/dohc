@@ -1515,7 +1515,23 @@ export class ChatsLoopbackEngine implements EngineTransport {
     params: ChatsJsonObject,
   ): JsonValue {
     const runId = normalizeNonempty(requiredString(params, "runId"), "invalid-input");
-    if (state.runs.has(runId)) throw new Error("state-corrupt");
+    const existingRun = state.runs.get(runId);
+    if (existingRun) {
+      const existingDispatch = [...state.dispatches.values()].find(
+        (row) => row.state === "running" && row.runId === runId,
+      );
+      if (existingRun.endedAtMs === undefined && existingDispatch) {
+        return jsonResult({ dispatch: existingDispatch, run: existingRun });
+      }
+      throw new Error("invalid-input");
+    }
+    if (
+      [...this.workspaces.entries()].some(
+        ([workspaceId, candidate]) => workspaceId !== workspace && candidate.runs.has(runId),
+      )
+    ) {
+      throw new Error("invalid-input");
+    }
     if ([...state.dispatches.values()].some((row) => row.state === "running")) return null;
     const dispatch = [...state.dispatches.values()]
       .filter((row) => row.state === "pending" && !(state.pauses.get(row.threadId)?.paused ?? false))

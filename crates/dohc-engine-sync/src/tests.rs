@@ -762,6 +762,88 @@ fn imported_thread_rejects_invalid_owner_shape_and_linked_path() {
     }
 }
 
+#[test]
+fn imported_slug_only_thread_binds_the_existing_channel() {
+    let (_scratch, _path, mut engine) = store();
+    let channel = envelope(
+        "slug-only",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "existing-channel",
+            "name": "Existing",
+            "slug": "existing",
+            "kind": "channel",
+            "createdAtMs": 10
+        }),
+    );
+    let thread = envelope(
+        "slug-only",
+        1,
+        "chat.thread.create",
+        json!({
+            "threadId": "legacy-thread",
+            "title": "",
+            "createdAtMs": 20,
+            "channelSlug": "existing"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &channel, &NoFaults).expect("channel");
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("thread");
+    let (channel_id, channel_count, placeholder_count): (String, i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT channel_id FROM chat_threads \
+                     WHERE workspace_id = 'ws' AND thread_id = 'legacy-thread'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_channels WHERE workspace_id = 'ws'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM chat_channel_placeholders WHERE workspace_id = 'ws'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("binding");
+    // MUTATION: treating channelSlug as a wire id mints a duplicate placeholder.
+    assert_eq!(channel_id, "existing-channel");
+    assert_eq!(channel_count, 1);
+    assert_eq!(placeholder_count, 0);
+}
+
+#[test]
+fn imported_thread_with_forged_agent_slug_is_refused() {
+    let (_scratch, _path, mut engine) = store();
+    let operation = envelope(
+        "forged-agent-slug",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "forged-agent-thread",
+            "title": "",
+            "createdAtMs": 20,
+            "channelSlug": channel_slug_for_name(AGENT_CHANNEL_NAME)
+        }),
+    );
+    // MUTATION: dropping the canonical-agent-slug iff reserved-wire invariant
+    // lets an ordinary channel impersonate the dispatch channel.
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "forged-agent-slug").expect("ack"),
+        -1
+    );
+}
+
 fn imported_chat_fixture(engine: &mut EngineStore, origin: &str) {
     let operations = [
         envelope(
@@ -837,7 +919,7 @@ fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
                 "messageId": "file-message-negative",
                 "threadId": "thread-imported",
                 "authorKind": "human",
-                "authorDisplayName": "",
+                "authorDisplayName": "Ada",
                 "body": "Imported negative attachment",
                 "createdAtMs": -29
             }),
@@ -949,6 +1031,178 @@ fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
         .expect("local decision after import");
     assert_eq!(local_reaction.at_ms, 0);
     assert_eq!(local_decision.at_ms, 0);
+}
+
+#[test]
+fn imported_message_append_refuses_each_oracle_invalid_field() {
+    let invalid_payloads = [
+        json!({
+            "messageId": "",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "other",
+            "authorDisplayName": "Ada",
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "",
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "authorUserId": "",
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "authorUserId": null,
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "parentMessageId": "",
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "parentMessageId": null,
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "origin": "desktop",
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "origin": null,
+            "body": "Body",
+            "createdAtMs": 20
+        }),
+        json!({
+            "messageId": "message",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "",
+            "createdAtMs": 20
+        }),
+    ];
+    for payload in invalid_payloads {
+        let (_scratch, _path, mut engine) = store();
+        imported_chat_fixture(&mut engine, "invalid-message");
+        let operation = envelope("invalid-message", 3, "chat.message.append", payload);
+        // MUTATION: omitting any message.append oracle predicate journals a
+        // payload that the TypeScript receiver refuses.
+        assert!(matches!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults),
+            Err(SyncError::InvalidInput { .. })
+        ));
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", "invalid-message").expect("ack"),
+            2
+        );
+    }
+}
+
+#[test]
+fn imported_follow_set_refuses_unbounded_or_empty_identities() {
+    for (owner, target) in [
+        ("".to_owned(), "target".to_owned()),
+        ("owner".to_owned(), "".to_owned()),
+        ("😀".repeat(129), "target".to_owned()),
+        ("owner".to_owned(), "😀".repeat(129)),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        let operation = envelope(
+            "invalid-follow",
+            0,
+            "chat.follow.set",
+            json!({
+                "ownerUserId": owner,
+                "targetKind": "person",
+                "targetId": target,
+                "state": "following",
+                "atMs": -1
+            }),
+        );
+        // MUTATION: dropping either 1..=256 UTF-16 bound admits an oracle-invalid cell key.
+        assert!(matches!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults),
+            Err(SyncError::InvalidInput { .. })
+        ));
+    }
+}
+
+#[test]
+fn imported_feed_read_set_refuses_unbounded_or_empty_identities() {
+    for (owner, message) in [
+        ("".to_owned(), "message".to_owned()),
+        ("owner".to_owned(), "".to_owned()),
+        ("😀".repeat(129), "message".to_owned()),
+        ("owner".to_owned(), "😀".repeat(129)),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        let operation = envelope(
+            "invalid-feed-read",
+            0,
+            "chat.feed.read.set",
+            json!({
+                "ownerUserId": owner,
+                "lastSeenCreatedAtMs": -2,
+                "lastSeenMessageId": message,
+                "atMs": -1
+            }),
+        );
+        // MUTATION: dropping either 1..=256 UTF-16 bound admits an oracle-invalid read row.
+        assert!(matches!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults),
+            Err(SyncError::InvalidInput { .. })
+        ));
+    }
 }
 
 fn live_bookmark(engine: &mut EngineStore) -> String {

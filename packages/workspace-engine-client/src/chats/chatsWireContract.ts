@@ -1014,7 +1014,7 @@ function decodeFeed(value: JsonValue, label: string): ChatFeedPage {
       ownerUserId: stringValue(state, "ownerUserId", stateLabel),
       lastSeenCreatedAtMs: safeInteger(state, "lastSeenCreatedAtMs", stateLabel, false),
       lastSeenMessageId: stringValue(state, "lastSeenMessageId", stateLabel),
-      updatedAtMs: safeInteger(state, "updatedAtMs", stateLabel),
+      updatedAtMs: safeInteger(state, "updatedAtMs", stateLabel, false),
     };
   }
   return {

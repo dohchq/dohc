@@ -164,6 +164,14 @@ engine_requests table gained a kind column (migration 13, every writer
 stamped — versioned/merge/ydoc/compound/chat) and the purge is scoped
 to kind='versioned'; legacy NULL-kind rows are never swept.
 
+CROSS-ENGINE DELTA (PR #225 claude r3): mention-handle READ validation
+— the Rust read validator shares the scanner's exact alphabet (dots,
+underscores, the U+017F/U+212A fold chars), so every indexed handle is
+queryable; the TS oracle's normalizeMentionHandle (/^[a-z0-9-]+$/)
+refuses some handles its own scanner indexes (agent.ops_v2 throws on
+JS, succeeds on Rust). Deliberate oracle-bug fix; parity suites must
+expect it; moot for data post-R15.
+
 CROSS-ENGINE DELTA (RPC-A r18): secret path SPELLING — TS normalize-stores
 (percent-disguises collapse); Rust stores the spelling the write carried
 and resolves verbatim (the secretness gate still classifies via

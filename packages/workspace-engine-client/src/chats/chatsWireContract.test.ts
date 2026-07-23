@@ -607,6 +607,57 @@ describe("B2 chats wire contract and loopback", () => {
     ).toBe("next-trigger");
   });
 
+  it("returns the durable claim when the same running run id retries", async () => {
+    const engine = new ChatsLoopbackEngine();
+    engine.seedDispatch({
+      workspaceId: WORKSPACE,
+      triggerMessageId: "trigger",
+      threadId: "thread",
+      state: "pending",
+      createdAtMs: 10,
+    });
+    const first = await call(engine, 1, CHATS_METHOD.dispatchClaimNextPending, {
+      runId: "retry-run",
+      command: "agent",
+      nowMs: 20,
+    });
+    const retry = await call(engine, 2, CHATS_METHOD.dispatchClaimNextPending, {
+      runId: "retry-run",
+      command: "ignored-on-retry",
+      nowMs: 21,
+    });
+    // MUTATION: rejecting every known run id loses the daemon's response-loss retry contract.
+    expect(retry).toEqual(first);
+  });
+
+  it("refuses ended and foreign run-id reuse as invalid input", async () => {
+    const engine = new ChatsLoopbackEngine();
+    engine.seedRun({
+      workspaceId: WORKSPACE,
+      runId: "ended-run",
+      threadId: "ended-thread",
+      triggerMessageId: "ended-trigger",
+      command: "",
+      startedAtMs: 10,
+      endedAtMs: 20,
+    });
+    engine.seedRun({
+      workspaceId: "other-workspace",
+      runId: "foreign-run",
+      threadId: "foreign-thread",
+      triggerMessageId: "foreign-trigger",
+      command: "",
+      startedAtMs: 10,
+    });
+    for (const runId of ["ended-run", "foreign-run"]) {
+      // MUTATION: treating known ended/foreign ids as state corruption diverges
+      // from the daemon's explicit caller-facing invalid-input refusal.
+      await expect(
+        call(engine, 1, CHATS_METHOD.dispatchClaimNextPending, { runId, nowMs: 30 }),
+      ).rejects.toThrow("invalid-input");
+    }
+  });
+
   it("refuses over-cap projections without returning partial markdown", async () => {
     const engine = new ChatsLoopbackEngine();
     engine.seedChannel({
@@ -967,12 +1018,13 @@ describe("chats result decoder rejection", () => {
         ownerUserId: "viewer",
         lastSeenCreatedAtMs: -40,
         lastSeenMessageId: "negative-message",
-        updatedAtMs: 1,
+        updatedAtMs: -39,
       },
     });
     expect(feed.items[0]?.message.createdAtMs).toBe(-40);
     expect(feed.items[0]?.channel?.createdAtMs).toBe(-42);
     expect(feed.readState?.lastSeenCreatedAtMs).toBe(-40);
+    expect(feed.readState?.updatedAtMs).toBe(-39);
 
     const summaries = decodeChatsResult(CHATS_METHOD.threadsListForChannel, {
       threads: [{

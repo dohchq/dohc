@@ -920,6 +920,151 @@ fn channel_name_and_optional_thread_title_use_js_trim() {
 }
 
 #[test]
+fn optional_thread_title_caps_utf16_units_before_journaling() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    let accepted = LinkedChatStore::new(&mut store).start_channel_thread(
+        &StartChannelThread {
+            workspace_id: WS.to_owned(),
+            channel_id: "channel".to_owned(),
+            thread_id: "title-boundary".to_owned(),
+            message_id: "title-boundary-opening".to_owned(),
+            title: Some("😀".repeat(100)),
+            author_kind: ChatActorKind::Human,
+            author_display_name: "Ada".to_owned(),
+            author_user_id: None,
+            origin: None,
+            body: "Opening".to_owned(),
+            needs_decision: false,
+            attachments: Vec::new(),
+            now_ms: 20,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    );
+    let rejected = LinkedChatStore::new(&mut store).start_channel_thread(
+        &StartChannelThread {
+            workspace_id: WS.to_owned(),
+            channel_id: "channel".to_owned(),
+            thread_id: "title-over-cap".to_owned(),
+            message_id: "title-over-cap-opening".to_owned(),
+            title: Some("😀".repeat(101)),
+            author_kind: ChatActorKind::Human,
+            author_display_name: "Ada".to_owned(),
+            author_user_id: None,
+            origin: None,
+            body: "Opening".to_owned(),
+            needs_decision: false,
+            attachments: Vec::new(),
+            now_ms: 21,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    );
+    let poisoned_ops: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log \
+                 WHERE workspace_id = ?1 AND payload_json LIKE '%title-over-cap%'",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("poisoned op count");
+    // MUTATION: count Unicode scalar values instead of UTF-16 units -> the
+    // 101-astral title journals a thread.create every TypeScript peer refuses.
+    assert!(accepted.is_ok());
+    assert!(rejected.is_err());
+    assert_eq!(poisoned_ops, 0);
+}
+
+#[test]
+fn channel_sender_and_author_caps_use_utf16_units() {
+    let (_scratch, mut store) = store();
+    let accepted_channel = LinkedChatStore::new(&mut store).create_channel(
+        WS,
+        "boundary-channel",
+        &format!("a{}b", "😀".repeat(39)),
+        ChatChannelKind::Channel,
+        10,
+        &NO_FAULTS,
+    );
+    let rejected_channel = LinkedChatStore::new(&mut store).create_channel(
+        WS,
+        "over-cap-channel",
+        &format!("a{}", "😀".repeat(40)),
+        ChatChannelKind::Channel,
+        11,
+        &NO_FAULTS,
+    );
+    let accepted_sender = LinkedChatStore::new(&mut store).start_channel_thread(
+        &StartChannelThread {
+            workspace_id: WS.to_owned(),
+            channel_id: "boundary-channel".to_owned(),
+            thread_id: "sender-boundary".to_owned(),
+            message_id: "sender-boundary-opening".to_owned(),
+            title: None,
+            author_kind: ChatActorKind::Human,
+            author_display_name: format!("a{}b", "😀".repeat(99)),
+            author_user_id: Some(format!("a{}b", "😀".repeat(99))),
+            origin: None,
+            body: "Opening".to_owned(),
+            needs_decision: false,
+            attachments: Vec::new(),
+            now_ms: 20,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    );
+    let rejected_display = LinkedChatStore::new(&mut store).start_channel_thread(
+        &StartChannelThread {
+            workspace_id: WS.to_owned(),
+            channel_id: "boundary-channel".to_owned(),
+            thread_id: "display-over-cap".to_owned(),
+            message_id: "display-over-cap-opening".to_owned(),
+            title: None,
+            author_kind: ChatActorKind::Human,
+            author_display_name: format!("a{}", "😀".repeat(100)),
+            author_user_id: None,
+            origin: None,
+            body: "Opening".to_owned(),
+            needs_decision: false,
+            attachments: Vec::new(),
+            now_ms: 21,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    );
+    let rejected_author = LinkedChatStore::new(&mut store).start_channel_thread(
+        &StartChannelThread {
+            workspace_id: WS.to_owned(),
+            channel_id: "boundary-channel".to_owned(),
+            thread_id: "author-over-cap".to_owned(),
+            message_id: "author-over-cap-opening".to_owned(),
+            title: None,
+            author_kind: ChatActorKind::Human,
+            author_display_name: "Ada".to_owned(),
+            author_user_id: Some(format!("a{}", "😀".repeat(100))),
+            origin: None,
+            body: "Opening".to_owned(),
+            needs_decision: false,
+            attachments: Vec::new(),
+            now_ms: 22,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    );
+    // MUTATION: count Rust chars in any sibling normalizer -> its over-cap
+    // astral input is accepted even though JavaScript length exceeds the cap.
+    assert!(accepted_channel.is_ok());
+    assert!(rejected_channel.is_err());
+    assert!(accepted_sender.is_ok());
+    assert!(rejected_display.is_err());
+    assert!(rejected_author.is_err());
+}
+
+#[test]
 fn thread_mutations_reject_negative_timestamps_before_journaling() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);
@@ -965,6 +1110,60 @@ fn thread_mutations_reject_negative_timestamps_before_journaling() {
         })
         .expect("journal count");
     // MUTATION: allow either negative local timestamp -> Rust mints a thread op JS peers refuse.
+    assert!(start_result.is_err());
+    assert!(create_result.is_err());
+    assert_eq!(journaled, 0);
+}
+
+#[test]
+fn thread_mutations_reject_timestamps_above_the_wire_integer_max() {
+    let (_scratch, mut store) = store();
+    seed_channel(&mut store);
+    let above_max = 9_007_199_254_740_992;
+    let start_result = LinkedChatStore::new(&mut store).start_channel_thread(
+        &StartChannelThread {
+            workspace_id: WS.to_owned(),
+            channel_id: "channel".to_owned(),
+            thread_id: "unsafe-channel-thread".to_owned(),
+            message_id: "unsafe-opening".to_owned(),
+            title: None,
+            author_kind: ChatActorKind::Human,
+            author_display_name: "Ada".to_owned(),
+            author_user_id: None,
+            origin: None,
+            body: "Opening".to_owned(),
+            needs_decision: false,
+            attachments: Vec::new(),
+            now_ms: above_max,
+            request_id: None,
+        },
+        &NO_FAULTS,
+    );
+    let create_result = LinkedChatStore::new(&mut store).create_thread(
+        &CreateFileThread {
+            workspace_id: WS.to_owned(),
+            thread_id: "unsafe-file-thread".to_owned(),
+            title: "File thread".to_owned(),
+            linked_object_id: "object".to_owned(),
+            linked_path_hint: None,
+            now_ms: above_max,
+            request_id: "unsafe-file-thread".to_owned(),
+        },
+        &NO_FAULTS,
+    );
+    let journaled: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM replication_log \
+                 WHERE workspace_id = ?1 AND op_kind = 'chat.thread.create'",
+                [WS],
+                |row| row.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
+        })
+        .expect("journal count");
+    // MUTATION: check only the lower timestamp bound -> an unsafe integer is
+    // journaled even though both strict receivers refuse it.
     assert!(start_result.is_err());
     assert!(create_result.is_err());
     assert_eq!(journaled, 0);
