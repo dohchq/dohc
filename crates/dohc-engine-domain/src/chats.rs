@@ -1093,12 +1093,27 @@ fn normalize_dispatch_run_id(run_id: &str) -> Result<String, DomainError> {
 
 /// Caller-minted local ids are normalized before they become replicated ids,
 /// then checked with `isBoundedReplicatedId`'s exact trim/control/UTF-16 rules.
+fn is_bounded_replicated_chat_id(value: &str, max_utf16_units: usize) -> bool {
+    !value.is_empty()
+        && value.encode_utf16().count() <= max_utf16_units
+        && value.trim_matches(is_js_trim_ws) == value
+        && !has_projection_control_char(value)
+}
+
+fn is_replicated_channel_slug(value: &str) -> bool {
+    is_bounded_replicated_chat_id(value, 200)
+        && value.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+}
+
 fn normalize_replicated_chat_id(value: &str, reason: &'static str) -> Result<String, DomainError> {
     let normalized = value.trim_matches(is_js_trim_ws);
-    if normalized.is_empty()
-        || normalized.encode_utf16().count() > MAX_REPLICATED_CHAT_ID_UTF16_UNITS
+    if !is_bounded_replicated_chat_id(normalized, MAX_REPLICATED_CHAT_ID_UTF16_UNITS)
         || normalized.len() > MAX_REPLICATED_CHAT_ID_UTF8_BYTES
-        || has_projection_control_char(normalized)
     {
         Err(DomainError::InvalidInput { reason })
     } else {
@@ -1602,9 +1617,7 @@ fn normalize_thread_title(title: &str) -> Result<String, DomainError> {
 
 fn normalize_attachment_object_id(object_id: &str) -> Result<String, DomainError> {
     let normalized = object_id.trim_matches(is_js_trim_ws);
-    if normalized.is_empty()
-        || normalized.encode_utf16().count() > MAX_ATTACHMENT_OBJECT_ID_UTF16_UNITS
-    {
+    if !is_bounded_replicated_chat_id(normalized, MAX_ATTACHMENT_OBJECT_ID_UTF16_UNITS) {
         return Err(DomainError::chat(
             "invalid-path",
             "Linked file object id is invalid.",
@@ -2575,6 +2588,17 @@ impl<'a> LinkedChatStore<'a> {
         let attachments_c = attachments.clone();
         let outcome = self.store.write_with(faults, |tx| {
             let channel = require_channel(tx, &input.workspace_id, &input.channel_id)?;
+            let channel_wire_id =
+                wire_id_for_channel_id(tx, &input.workspace_id, &channel.channel_id)?;
+            if !is_replicated_channel_slug(&channel.slug)
+                || channel_wire_id
+                    .as_deref()
+                    .is_some_and(|wire_id| !is_bounded_replicated_chat_id(wire_id, 256))
+            {
+                return Err(DomainError::StateCorrupt {
+                    reason: "chat channel identity cannot be replicated",
+                });
+            }
             tx.execute(
                 "INSERT INTO chat_threads \
                  (workspace_id, thread_id, title, created_at_ms, updated_at_ms, \
@@ -2636,11 +2660,6 @@ impl<'a> LinkedChatStore<'a> {
                 &message_search_text,
             )
             .map_err(DomainError::sql_persist)?;
-            let channel_wire_id = wire_id_for_channel_id(
-                tx,
-                &input.workspace_id,
-                &channel.channel_id,
-            )?;
             let mut thread_payload = serde_json::json!({
                 "threadId": input.thread_id,
                 "title": title_c,

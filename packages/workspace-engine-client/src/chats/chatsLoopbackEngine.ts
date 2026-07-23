@@ -204,6 +204,18 @@ function normalizeNonempty(value: string, code: string): string {
   return normalized;
 }
 
+function normalizeTrimmed(value: string, code: string): string {
+  const normalized = value.trim();
+  if (normalized.length === 0) throw new Error(code);
+  return normalized;
+}
+
+function normalizeMessageBody(value: string): string {
+  const normalized = value.replace(/\r\n?/gu, "\n").trimEnd();
+  if (normalized.length === 0) throw new Error("invalid-message-body");
+  return normalized;
+}
+
 function normalizePath(path: string): string {
   const normalized = path.normalize("NFC").replaceAll("\\", "/").trim();
   if (
@@ -715,7 +727,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
     }
     if (typeof key !== "string" || key.length === 0) return operation();
     const ledgerKey = `${workspace}\0${request.method}\0${key}`;
-    const fingerprint = JSON.stringify(params);
+    const fingerprint = this.writeFingerprint(request.method, workspace, params);
     const prior = this.ledger.get(ledgerKey);
     if (prior) {
       if (prior.fingerprint !== fingerprint) throw new Error("idempotency-key-reuse-mismatch");
@@ -724,6 +736,172 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const result = operation();
     this.ledger.set(ledgerKey, { fingerprint, result: jsonClone(result) });
     return result;
+  }
+
+  private writeFingerprint(
+    method: string,
+    workspace: string,
+    params: ChatsJsonObject,
+  ): string {
+    switch (method) {
+      case CHATS_METHOD.threadStart:
+        optionalSafeInteger(params, "nowMs");
+        return JSON.stringify([
+          normalizeTrimmed(requiredString(params, "threadId"), "invalid-input"),
+          requiredString(params, "messageId", "invalid-message-body"),
+          requiredString(params, "channelId"),
+          optionalString(params, "title")?.trim() ?? "",
+          normalizeMessageBody(requiredString(params, "body", "invalid-message-body")),
+          requiredString(params, "authorKind", "invalid-sender"),
+          normalizeTrimmed(
+            requiredString(params, "authorDisplayName", "invalid-sender"),
+            "invalid-sender",
+          ),
+          this.optionalNormalizedString(params, "authorUserId", "invalid-sender"),
+          this.normalizedOrigin(params),
+          optionalBoolean(params, "needsDecision") ?? false,
+          this.attachmentFingerprint(params),
+        ]);
+      case CHATS_METHOD.threadCreate: {
+        optionalSafeInteger(params, "nowMs");
+        const linked = strictObject(params.linkedFile ?? null, "linkedFile", [
+          "objectId", "pathHint",
+        ]);
+        const pathHint = optionalString(linked, "pathHint");
+        return JSON.stringify([
+          workspace,
+          normalizeTrimmed(requiredString(params, "threadId"), "invalid-input"),
+          normalizeTrimmed(
+            requiredString(params, "title", "invalid-thread-title"),
+            "invalid-thread-title",
+          ),
+          normalizeTrimmed(
+            requiredString(linked, "objectId", "invalid-path"),
+            "invalid-path",
+          ),
+          pathHint === undefined ? "" : normalizePath(pathHint),
+        ]);
+      }
+      case CHATS_METHOD.messageSend:
+        optionalSafeInteger(params, "nowMs");
+        return JSON.stringify([
+          requiredString(params, "threadId"),
+          requiredString(params, "messageId", "invalid-message-body"),
+          normalizeMessageBody(requiredString(params, "body", "invalid-message-body")),
+          requiredString(params, "authorKind", "invalid-sender"),
+          normalizeTrimmed(
+            requiredString(params, "authorDisplayName", "invalid-sender"),
+            "invalid-sender",
+          ),
+          this.optionalNormalizedString(params, "authorUserId", "invalid-sender"),
+          optionalString(params, "parentMessageId") ?? "",
+          this.normalizedOrigin(params),
+          optionalBoolean(params, "needsDecision") ?? false,
+          this.attachmentFingerprint(params),
+        ]);
+      case CHATS_METHOD.decisionResolve:
+        optionalSafeInteger(params, "nowMs");
+        return JSON.stringify([
+          normalizeTrimmed(requiredString(params, "threadId"), "invalid-input"),
+          requiredString(params, "messageId"),
+          requiredString(params, "resolvedByMessageId", "invalid-message-body"),
+        ]);
+      case CHATS_METHOD.reactionSet: {
+        optionalSafeInteger(params, "nowMs");
+        const author = strictObject(params.author ?? null, "author", [
+          "authorId", "kind", "displayName",
+        ]);
+        return JSON.stringify([
+          normalizeTrimmed(requiredString(params, "threadId"), "invalid-input"),
+          requiredString(params, "messageId"),
+          validateEmoji(requiredString(params, "emoji", "invalid-message-body")),
+          normalizeTrimmed(
+            requiredString(author, "authorId", "invalid-sender"),
+            "invalid-sender",
+          ),
+          requiredString(author, "kind", "invalid-sender"),
+          normalizeTrimmed(
+            requiredString(author, "displayName", "invalid-sender"),
+            "invalid-sender",
+          ),
+          requiredString(params, "state", "invalid-parameters"),
+        ]);
+      }
+      case CHATS_METHOD.bookmarkMarkPending:
+        return JSON.stringify([
+          workspace,
+          normalizeTrimmed(
+            requiredString(params, "ownerUserId", "invalid-follow-target"),
+            "invalid-follow-target",
+          ),
+          normalizeTrimmed(
+            requiredString(params, "bookmarkId", "invalid-bookmark-target"),
+            "invalid-bookmark-target",
+          ),
+        ]);
+      default:
+        throw new Error(`Unsupported replay method: ${method}`);
+    }
+  }
+
+  private optionalNormalizedString(
+    params: ChatsJsonObject,
+    key: string,
+    code: string,
+  ): string {
+    const value = optionalString(params, key);
+    return value === undefined ? "" : normalizeTrimmed(value, code);
+  }
+
+  private normalizedOrigin(params: ChatsJsonObject): string {
+    const origin = optionalString(params, "origin");
+    if (origin !== undefined && origin !== "cli") throw new Error("invalid-message-body");
+    return origin ?? "";
+  }
+
+  private attachmentFingerprint(
+    params: ChatsJsonObject,
+  ): Array<[string, string, string, string, number | null]> {
+    const values = params.attachments;
+    if (values === undefined) return [];
+    if (!Array.isArray(values)) throw new Error("invalid-parameters");
+    const seen = new Set<string>();
+    const normalized: Array<[string, string, string, string, number | null]> = [];
+    for (const [index, value] of values.entries()) {
+      const input = strictObject(value, `attachments[${index}]`, [
+        "objectId", "pathHint", "headingText", "headingAnchor", "headingOccurrence",
+      ]);
+      const objectId = normalizeTrimmed(
+        requiredString(input, "objectId", "invalid-path"),
+        "invalid-path",
+      );
+      const pathHintInput = optionalString(input, "pathHint");
+      const pathHint = pathHintInput === undefined ? "" : normalizePath(pathHintInput);
+      const headingTextInput = optionalString(input, "headingText");
+      const headingAnchorInput = optionalString(input, "headingAnchor");
+      const headingOccurrence = optionalSafeInteger(input, "headingOccurrence");
+      const headingCount = [
+        headingTextInput, headingAnchorInput, headingOccurrence,
+      ].filter((entry) => entry !== undefined).length;
+      if (headingCount !== 0 && headingCount !== 3) throw new Error("invalid-path");
+      const headingText = headingTextInput === undefined
+        ? ""
+        : normalizeNonempty(headingTextInput, "invalid-path");
+      const headingAnchor = headingAnchorInput === undefined
+        ? ""
+        : normalizeNonempty(headingAnchorInput, "invalid-path");
+      const dedup = `${objectId}\0${headingAnchor}\0${headingOccurrence ?? ""}`;
+      if (seen.has(dedup)) continue;
+      seen.add(dedup);
+      normalized.push([
+        objectId,
+        pathHint,
+        headingText,
+        headingAnchor,
+        headingOccurrence ?? null,
+      ]);
+    }
+    return normalized;
   }
 
   private channelGetWireId(state: WorkspaceState, params: ChatsJsonObject): JsonValue {

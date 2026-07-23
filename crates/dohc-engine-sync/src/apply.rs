@@ -856,6 +856,7 @@ fn apply_follow(
         || p.target_id.is_empty()
         || p.target_id.encode_utf16().count() > 256
         || !matches!(p.state.as_str(), "following" | "unfollowed")
+        || !is_persisted_safe_integer(p.at_ms)
     {
         return Err(SyncError::InvalidInput {
             reason: "chat follow payload is invalid",

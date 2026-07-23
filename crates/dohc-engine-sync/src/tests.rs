@@ -1353,6 +1353,41 @@ fn imported_follow_set_refuses_unbounded_or_empty_identities() {
 }
 
 #[test]
+fn imported_follow_refuses_unsafe_at_ms_without_row_or_ack() {
+    let (_scratch, _path, mut engine) = store();
+    let operation = envelope(
+        "unsafe-follow-time",
+        0,
+        "chat.follow.set",
+        json!({
+            "ownerUserId": "owner",
+            "targetKind": "person",
+            "targetId": "target",
+            "state": "following",
+            "atMs": i64::MAX
+        }),
+    );
+
+    // MUTATION: dropping the persisted-safe bound persists an LWW value that
+    // follow-bearing JavaScript responses cannot represent.
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &operation, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    let row_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM chat_follows", [], |row| row.get(0))
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("follow row count");
+    assert_eq!(row_count, 0);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "unsafe-follow-time").expect("ack"),
+        -1
+    );
+}
+
+#[test]
 fn imported_feed_read_set_refuses_unbounded_or_empty_identities() {
     for (owner, message) in [
         ("".to_owned(), "message".to_owned()),

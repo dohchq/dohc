@@ -1170,6 +1170,71 @@ fn thread_mutations_reject_timestamps_above_the_wire_integer_max() {
 }
 
 #[test]
+fn channel_thread_start_refuses_unreplicable_stored_channel_identity() {
+    for corrupt_wire_id in [false, true] {
+        let (_scratch, mut store) = store();
+        seed_channel(&mut store);
+        store
+            .write_with(&NO_FAULTS, |tx| {
+                if corrupt_wire_id {
+                    tx.execute(
+                        "UPDATE chat_channel_wire_ids SET wire_id = ' padded-wire ' \
+                         WHERE workspace_id = ?1 AND channel_id = 'channel'",
+                        [WS],
+                    )
+                    .map_err(StorageError::persist_public)?;
+                } else {
+                    tx.execute(
+                        "UPDATE chat_channels SET slug = 'invalid slug' \
+                         WHERE workspace_id = ?1 AND channel_id = 'channel'",
+                        [WS],
+                    )
+                    .map_err(StorageError::persist_public)?;
+                }
+                Ok::<_, StorageError>(())
+            })
+            .expect("corrupt imported channel identity");
+        let result = LinkedChatStore::new(&mut store).start_channel_thread(
+            &StartChannelThread {
+                workspace_id: WS.to_owned(),
+                channel_id: "channel".to_owned(),
+                thread_id: "thread".to_owned(),
+                message_id: "opening".to_owned(),
+                title: None,
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".to_owned(),
+                author_user_id: None,
+                origin: None,
+                body: "Opening".to_owned(),
+                needs_decision: false,
+                attachments: Vec::new(),
+                now_ms: 20,
+                request_id: None,
+            },
+            &NO_FAULTS,
+        );
+        let journaled: i64 = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM replication_log \
+                     WHERE workspace_id = ?1 AND op_kind = 'chat.thread.create'",
+                    [WS],
+                    |row| row.get(0),
+                )
+                .map_err(StorageError::corrupt_public)
+            })
+            .expect("journal count");
+        // MUTATION: trusting imported channel metadata lets a local start mint
+        // a channelSlug/channelWireId that apply_thread rejects.
+        assert!(matches!(
+            result,
+            Err(dohc_engine_domain::DomainError::StateCorrupt { .. })
+        ));
+        assert_eq!(journaled, 0);
+    }
+}
+
+#[test]
 fn agent_read_negative_coordinate_noops_without_revision() {
     let (_scratch, mut store) = store();
     seed_channel(&mut store);

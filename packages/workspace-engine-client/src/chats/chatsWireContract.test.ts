@@ -582,6 +582,45 @@ describe("B2 chats wire contract and loopback", () => {
     ).rejects.toThrow("idempotency-key-reuse-mismatch");
   });
 
+  it("deduplicates a normalized chat write retry with a different nowMs", async () => {
+    const engine = new ChatsLoopbackEngine();
+    const first = await call(
+      engine,
+      1,
+      CHATS_METHOD.threadCreate,
+      {
+        threadId: " file-thread ",
+        title: " File thread ",
+        linkedFile: {
+          objectId: " object ",
+          pathHint: "notes\\file.md",
+        },
+        nowMs: 10,
+      },
+      "normalized-file-thread",
+    );
+    const replay = await call(
+      engine,
+      2,
+      CHATS_METHOD.threadCreate,
+      {
+        nowMs: 999,
+        linkedFile: {
+          pathHint: "notes/file.md",
+          objectId: "object",
+        },
+        title: "File thread",
+        threadId: "file-thread",
+      },
+      "normalized-file-thread",
+    );
+
+    // MUTATION: fingerprinting raw params (including nowMs or insertion order)
+    // turns this semantic retry into idempotency-key-reuse-mismatch.
+    expect(replay).toEqual(first);
+    expect(replay.createdAtMs).toBe(10);
+  });
+
   it("keeps dispatch claims single-flight until the open run ends", async () => {
     const running = new ChatsLoopbackEngine();
     running.seedDispatch({

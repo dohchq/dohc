@@ -385,6 +385,43 @@ fn file_thread_requires_exactly_one_linked_owner() {
 }
 
 #[test]
+fn local_file_thread_create_refuses_newline_in_linked_object_id() {
+    let (_scratch, mut store) = store();
+    let result = LinkedChatStore::new(&mut store).create_thread(
+        &CreateFileThread {
+            workspace_id: WS.to_owned(),
+            thread_id: "thread".to_owned(),
+            title: "File thread".to_owned(),
+            linked_object_id: "object\nid".to_owned(),
+            linked_path_hint: None,
+            now_ms: 20,
+            request_id: "request".to_owned(),
+        },
+        &NO_FAULTS,
+    );
+    let counts: (i64, i64) = store
+        .read_with(|conn| {
+            Ok::<_, StorageError>((
+                conn.query_row("SELECT COUNT(*) FROM chat_threads", [], |row| row.get(0))
+                    .map_err(StorageError::corrupt_public)?,
+                conn.query_row("SELECT COUNT(*) FROM replication_log", [], |row| row.get(0))
+                    .map_err(StorageError::corrupt_public)?,
+            ))
+        })
+        .expect("counts");
+    // MUTATION: dropping the control-character gate mints a thread op that its
+    // own replicated apply contract refuses.
+    assert!(matches!(
+        result,
+        Err(dohc_engine_domain::DomainError::Chat {
+            code: "invalid-path",
+            ..
+        })
+    ));
+    assert_eq!(counts, (0, 0));
+}
+
+#[test]
 fn file_thread_create_search_and_replication_are_atomic() {
     let (_scratch, mut store) = store();
     let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
