@@ -123,3 +123,36 @@ Append-only. Every entry: date, decision, decider, rationale pointer.
 | 7 | Agent-run attribution | Rust authority; agent-runs.json becomes derived projection |
 | 8 | Dogfood duration | minimum 2 weeks before stable |
 | 9 | Mobile/web hosts | deferred; portability guardrails stand |
+
+## R15 cutover go/no-go — RESOLVED (Ice, 2026-07-25)
+
+Ice reviewed `R15_GONOGO.md` and decided all six. **The flip is AUTHORIZED**, to be
+executed AFTER decisions 1-6 land and the clone-reset rehearsal runs. Ice explicitly
+accepted the dogfood data wipe ("feel free to flip and wipe my current dohc data").
+
+| # | Decision | Resolution (Ice, 2026-07-25) |
+| --- | --- | --- |
+| R15-1 | Pre-R15 migration | DO IT — one migration PR at **ordinal 14** adding the secret ownership column + the moments payload-provenance columns, before the reset |
+| R15-2 | macOS evidence | RUN IT — full-mode gate + cutoverBlocking soak, **on Blacksmith's macOS runner** (`blacksmith-6vcpu-macos-15`), not GitHub's `macos-latest` |
+| R15-3 | Richdoc at cutover | **FINISH THE CONVERTER** — port full-fidelity `yDocToMarkdown` semantics to Rust (no dropped headings/lists/links/code); do NOT ship the lossy subset |
+| R15-4 | Version-switch projection | **WIRE UP THE REFRESH** — switch-time (set-active-time) secret + file re-materialization, restoring oracle-faithful switch UX |
+| R15-5 | Secret rename-TOCTOU | **LAND THE REAL FIX** — fd-relative `openat2(RESOLVE_NO_SYMLINKS)` / per-component `openat(O_NOFOLLOW)` + `renameat` (and the Windows handle-relative equivalent). Chosen over enforcing single-user because Ice clarified he **may run dohc on machines where OTHER OS USERS share the host** (shared dev box / server / network-mounted workspace). That is exactly the TOCTOU threat model — another local account with write access to the workspace dir — so the single-user assumption is NOT an acceptable basis |
+| R15-6 | Cutover scope + the flip | **FINISH THE UNFINISHED PIECES** — RPC-E (relay/replication) and R13b-rest (desktop-adapter remainder) are IN SCOPE before the flip. Flip + dogfood-data wipe AUTHORIZED; >=2-week dogfood then R16 |
+
+### Consequence of R15-5 (other OS users may share the host)
+NOTE ON SCOPE: this is about OTHER OS USER ACCOUNTS/PROCESSES on the same machine —
+NOT about sharing a dohc account, and NOT the product's teammate-collaboration
+surface (that flows through the relay/collab layer and is R15-6). Ice confirmed the
+former is a real deployment shape for him.
+Removing the single-user assumption invalidates several items that were accepted or
+deferred ONLY under it; they are now in-scope-or-revisit:
+- **Identity posture / per-user socket auth** (recorded across shards as "the
+  daemon's DOP1 client IS the desktop main process; per-user socket auth is R15+
+  scope") — if another OS user can reach the daemon socket, they can drive the
+  engine as you. IN SCOPE with R15-6.
+- **Shared-trust-boundary declines** (RPC_GAP): attachment identity + objectId
+  control chars on replicated apply are bug-for-bug oracle parity accepted as
+  "adversarial-only"; forgery hardening was assigned to the relay/RPC-E boundary,
+  which is now in scope (R15-6).
+- **BEHAVIOR_DELTA's TOCTOU note** must be updated from "accepted residual" to
+  "closed" once R15-5 lands.
