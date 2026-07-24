@@ -277,13 +277,14 @@ impl Ydoc {
     fn project_plaintext(&self) -> Result<String, CollabError> {
         let text = self.doc.get_or_insert_text(ROOT_PLAINTEXT);
         let txn = self.doc.transact();
-        let mut output = ProjectionBuffer::new();
-        for diff in text.diff(&txn, YChange::identity) {
-            if let Out::Any(Any::String(value)) = diff.insert {
-                output.push_str(&value)?;
-            }
+        // yrs exposes no incremental plain-string reader. `get_string` is the
+        // smallest materialization here because it ignores formatting runs,
+        // unlike `diff`, but it still allocates eagerly. A UTF-16 code-unit
+        // count bounds its worst-case UTF-8 result before that allocation.
+        if text.len(&txn) as usize > MAX_PROJECTION_BYTES {
+            return Err(projection_too_large(text.len(&txn) as usize));
         }
-        Ok(output.into_string())
+        ensure_projection_string(text.get_string(&txn))
     }
 
     /// The exact plaintext content (the [`ROOT_PLAINTEXT`] `Y.Text` string). The
@@ -345,6 +346,13 @@ impl Ydoc {
     }
 
     fn project_richdoc(&self) -> Result<String, CollabError> {
+        self.project_richdoc_with_node_budget(MAX_PROJECTION_NODES)
+    }
+
+    fn project_richdoc_with_node_budget(
+        &self,
+        projection_node_budget: usize,
+    ) -> Result<String, CollabError> {
         let mut out = ProjectionBuffer::new();
         // Acquire BOTH roots before opening the read txn: yrs `get_or_insert_*`
         // takes the store lock, so calling one while a transaction is live
@@ -353,7 +361,7 @@ impl Ydoc {
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
         let txn = self.doc.transact();
         let mut has_frontmatter = false;
-        let mut remaining_nodes = MAX_PROJECTION_NODES;
+        let mut remaining_nodes = projection_node_budget;
         let mut source_text_bytes = 0usize;
         if frontmatter.len(&txn) > 0 {
             has_frontmatter = true;
@@ -643,7 +651,7 @@ fn projection_out_json<T: ReadTxn>(
             "type": "text",
             "delta": projection_diffs_json(
                 txn,
-                text.diff(txn, YChange::identity),
+                materialize_projection_diffs(&text, txn, *remaining_nodes)?,
                 depth + 1,
                 remaining_nodes,
                 source_bytes,
@@ -692,6 +700,37 @@ fn projection_out_json<T: ReadTxn>(
     }
 }
 
+fn materialize_projection_diffs<T, R>(
+    text: &R,
+    txn: &T,
+    remaining_nodes: usize,
+) -> ProjectionResult<Vec<yrs::types::text::Diff<YChange>>>
+where
+    T: ReadTxn,
+    R: Text,
+{
+    // `Text::diff` has no public incremental alternative in yrs 0.27.3: it
+    // always finishes a complete Vec<Diff>. Every emitted run contains at
+    // least one visible text unit or embed, so visible length is a conservative
+    // upper bound on run count. Refuse before calling `diff` when that bound
+    // cannot fit the remaining projection budget.
+    if text.len(txn) as usize > remaining_nodes {
+        return Err(CollabError::ProjectionTooComplex {
+            max_depth: MAX_PROJECTION_DEPTH,
+            max_nodes: MAX_PROJECTION_NODES,
+        });
+    }
+    #[cfg(test)]
+    PROJECTION_DIFF_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
+    Ok(text.diff(txn, YChange::identity))
+}
+
+#[cfg(test)]
+thread_local! {
+    static PROJECTION_DIFF_MATERIALIZATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 fn projection_xml_json<T: ReadTxn>(
     txn: &T,
     node: XmlOut,
@@ -732,7 +771,7 @@ fn projection_xml_json<T: ReadTxn>(
             "type": "xmlText",
             "delta": projection_diffs_json(
                 txn,
-                text.diff(txn, YChange::identity),
+                materialize_projection_diffs(&text, txn, *remaining_nodes)?,
                 depth + 1,
                 remaining_nodes,
                 source_bytes,
@@ -1146,7 +1185,7 @@ fn markdown_node<T: ReadTxn>(
     match node {
         XmlOut::Text(text) => {
             let mut runs = Vec::new();
-            for diff in text.diff(txn, YChange::identity) {
+            for diff in materialize_projection_diffs(&text, txn, *remaining_nodes)? {
                 let text = match diff.insert {
                     Out::Any(Any::String(text)) => {
                         *source_text_bytes =
@@ -1164,35 +1203,84 @@ fn markdown_node<T: ReadTxn>(
                 *remaining_nodes -= 1;
                 let mut marks = Vec::new();
                 if let Some(attrs) = diff.attributes {
-                    push_mark(&mut marks, MarkKind::Link, attrs.get("link"));
-                    push_mark(&mut marks, MarkKind::Highlight, attrs.get("highlight"));
+                    for key in attrs.keys() {
+                        *source_text_bytes = checked_projection_len(*source_text_bytes, key.len())?;
+                    }
+                    push_mark(
+                        &mut marks,
+                        MarkKind::Link,
+                        attrs.get("link"),
+                        depth + 2,
+                        remaining_nodes,
+                        source_text_bytes,
+                    )?;
+                    push_mark(
+                        &mut marks,
+                        MarkKind::Highlight,
+                        attrs.get("highlight"),
+                        depth + 2,
+                        remaining_nodes,
+                        source_text_bytes,
+                    )?;
                     push_mark(
                         &mut marks,
                         MarkKind::Bold,
                         attrs.get("bold").or_else(|| attrs.get("strong")),
-                    );
-                    push_mark(&mut marks, MarkKind::Code, attrs.get("code"));
+                        depth + 2,
+                        remaining_nodes,
+                        source_text_bytes,
+                    )?;
+                    push_mark(
+                        &mut marks,
+                        MarkKind::Code,
+                        attrs.get("code"),
+                        depth + 2,
+                        remaining_nodes,
+                        source_text_bytes,
+                    )?;
                     push_mark(
                         &mut marks,
                         MarkKind::Italic,
                         attrs.get("italic").or_else(|| attrs.get("em")),
-                    );
+                        depth + 2,
+                        remaining_nodes,
+                        source_text_bytes,
+                    )?;
                     push_mark(
                         &mut marks,
                         MarkKind::Strike,
                         attrs.get("strike").or_else(|| attrs.get("strikethrough")),
-                    );
-                    push_mark(&mut marks, MarkKind::Underline, attrs.get("underline"));
+                        depth + 2,
+                        remaining_nodes,
+                        source_text_bytes,
+                    )?;
+                    push_mark(
+                        &mut marks,
+                        MarkKind::Underline,
+                        attrs.get("underline"),
+                        depth + 2,
+                        remaining_nodes,
+                        source_text_bytes,
+                    )?;
                 }
                 runs.push(TextRun { text, marks });
             }
             Ok(MarkdownNode::Text(runs))
         }
         XmlOut::Element(element) => {
-            let attrs = element
-                .attributes(txn)
-                .map(|(key, value)| (key.to_string(), out_json_attr(txn, value)))
-                .collect();
+            *source_text_bytes = checked_projection_len(*source_text_bytes, element.tag().len())?;
+            let mut attrs = BTreeMap::new();
+            for (key, value) in element.attributes(txn) {
+                *source_text_bytes = checked_projection_len(*source_text_bytes, key.len())?;
+                let value = projection_out_json_attr(
+                    txn,
+                    value,
+                    depth + 1,
+                    remaining_nodes,
+                    source_text_bytes,
+                )?;
+                attrs.insert(key.to_string(), value);
+            }
             let children = element
                 .children(txn)
                 .map(|child| {
@@ -1216,13 +1304,21 @@ fn markdown_node<T: ReadTxn>(
     }
 }
 
-fn push_mark(marks: &mut Vec<MarkdownMark>, kind: MarkKind, attrs: Option<&Any>) {
+fn push_mark(
+    marks: &mut Vec<MarkdownMark>,
+    kind: MarkKind,
+    attrs: Option<&Any>,
+    depth: usize,
+    remaining_nodes: &mut usize,
+    source_text_bytes: &mut usize,
+) -> ProjectionResult<()> {
     if let Some(attrs) = attrs {
         marks.push(MarkdownMark {
             kind,
-            attrs: any_to_json(attrs),
+            attrs: projection_any_to_json(attrs, depth, remaining_nodes, source_text_bytes)?,
         });
     }
+    Ok(())
 }
 
 fn markdown_document(children: &[MarkdownNode]) -> ProjectionResult<String> {
@@ -2268,8 +2364,11 @@ fn is_js_whitespace(character: char) -> bool {
 #[cfg(test)]
 mod projection_tests {
     use super::*;
+    use std::sync::Arc;
+
     use crate::limits::MAX_PROJECTION_BYTES;
     use yrs::types::xml::XmlIn;
+    use yrs::types::Attrs;
 
     fn xml_text(value: impl Into<String>) -> XmlIn {
         XmlTextPrelim::new(value).into()
@@ -2306,6 +2405,56 @@ mod projection_tests {
         remote
             .apply(&source.encode_full_state())
             .expect("test update is valid");
+        remote
+    }
+
+    fn nested_any_array(depth: usize, leaf: Any) -> Any {
+        (0..depth).fold(leaf, |value, _| Any::Array(Arc::from([value])))
+    }
+
+    fn remote_doc_with_element_attribute(tag: &str, key: &str, value: Any) -> Ydoc {
+        let source = Ydoc::wire();
+        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        {
+            let mut txn = source.doc.transact_mut();
+            let element = body.push_back(
+                &mut txn,
+                XmlElementPrelim::new(tag, std::iter::empty::<XmlIn>()),
+            );
+            element.insert_attribute(&mut txn, key, value);
+        }
+        let remote = Ydoc::wire();
+        remote
+            .apply(&source.encode_full_state())
+            .expect("hostile test update is valid");
+        remote
+    }
+
+    fn remote_doc_with_nested_mark_attribute(depth: usize) -> Ydoc {
+        let source = Ydoc::wire();
+        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        {
+            let mut txn = source.doc.transact_mut();
+            let outer = body.push_back(
+                &mut txn,
+                XmlElementPrelim::new("blockquote", std::iter::empty::<XmlIn>()),
+            );
+            let paragraph = outer.push_back(
+                &mut txn,
+                XmlElementPrelim::new("paragraph", std::iter::empty::<XmlIn>()),
+            );
+            let text = paragraph.push_back(&mut txn, XmlTextPrelim::new("x"));
+            text.format(
+                &mut txn,
+                0,
+                1,
+                Attrs::from([("link".into(), nested_any_array(depth, Any::Null))]),
+            );
+        }
+        let remote = Ydoc::wire();
+        remote
+            .apply(&source.encode_full_state())
+            .expect("hostile test update is valid");
         remote
     }
 
@@ -2377,16 +2526,26 @@ mod projection_tests {
         }));
         let doc = remote_doc_with_body([xml_element("table", &[], rows)]);
 
+        // The property under test is that the projection REFUSES before the
+        // amplifying allocation — 18 short rows padded to a 1 MiB column width
+        // would materialize ~18 MB. Either bound refusing is correct: the byte
+        // cap catches the padding, and the node/complexity budget catches the
+        // 1 MiB text run that produces the width. Pinning one variant made this
+        // test fail when the budget accounting tightened, even though the
+        // protection held.
         let error = doc
             .project(ContentKind::Richdoc)
             .expect_err("padding amplification must be refused");
-        assert!(matches!(
-            error,
-            CollabError::ProjectionTooLarge {
-                actual,
-                max: MAX_PROJECTION_BYTES
-            } if actual > MAX_PROJECTION_BYTES
-        ));
+        assert!(
+            matches!(
+                error,
+                CollabError::ProjectionTooLarge {
+                    actual,
+                    max: MAX_PROJECTION_BYTES
+                } if actual > MAX_PROJECTION_BYTES
+            ) || matches!(error, CollabError::ProjectionTooComplex { .. }),
+            "expected a projection bound to refuse, got {error:?}"
+        );
     }
 
     #[test]
@@ -2433,6 +2592,80 @@ mod projection_tests {
             child = xml_element("blockquote", &[], [child]);
         }
         let doc = remote_doc_with_body([child]);
+
+        assert!(matches!(
+            doc.project(ContentKind::Richdoc),
+            Err(CollabError::ProjectionTooComplex {
+                max_depth: MAX_PROJECTION_DEPTH,
+                max_nodes: MAX_PROJECTION_NODES
+            })
+        ));
+    }
+
+    #[test]
+    fn alternating_format_runs_are_refused_before_diff_materialization() {
+        const TEST_NODE_BUDGET: usize = 16;
+        const RUNS: usize = TEST_NODE_BUDGET * 2;
+
+        let source = Ydoc::wire();
+        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        {
+            let mut txn = source.doc.transact_mut();
+            let paragraph = body.push_back(
+                &mut txn,
+                XmlElementPrelim::new("paragraph", std::iter::empty::<XmlIn>()),
+            );
+            let text = paragraph.push_back(&mut txn, XmlTextPrelim::new("x".repeat(RUNS)));
+            for index in 0..RUNS {
+                text.format(
+                    &mut txn,
+                    index as u32,
+                    1,
+                    Attrs::from([("bold".into(), Any::Bool(index % 2 == 0))]),
+                );
+            }
+        }
+        let remote = Ydoc::wire();
+        remote
+            .apply(&source.encode_full_state())
+            .expect("hostile alternating-format update is valid");
+
+        PROJECTION_DIFF_MATERIALIZATIONS.with(|count| count.set(0));
+        assert!(matches!(
+            remote.project_richdoc_with_node_budget(TEST_NODE_BUDGET),
+            Err(CollabError::ProjectionTooComplex { .. })
+        ));
+        PROJECTION_DIFF_MATERIALIZATIONS.with(|count| {
+            assert_eq!(
+                count.get(),
+                0,
+                "yrs diff must not eagerly materialize runs after the preflight refuses them"
+            );
+        });
+    }
+
+    #[test]
+    fn oversized_remote_element_attribute_is_refused_at_projection_cap() {
+        let encoded_bytes = MAX_PROJECTION_BYTES + 1;
+        let raw_bytes = (encoded_bytes / 4) * 3 + 1;
+        let doc = remote_doc_with_element_attribute(
+            "paragraph",
+            "hostile",
+            Any::Buffer(Arc::from(vec![0_u8; raw_bytes])),
+        );
+
+        assert!(matches!(
+            doc.project(ContentKind::Richdoc),
+            Err(CollabError::ProjectionTooLarge {
+                actual,
+                max: MAX_PROJECTION_BYTES
+            }) if actual > MAX_PROJECTION_BYTES
+        ));
+    }
+
+    #[test]
+    fn deeply_nested_remote_mark_attribute_is_refused_at_projection_depth_cap() {
+        let doc = remote_doc_with_nested_mark_attribute(MAX_PROJECTION_DEPTH - 1);
 
         assert!(matches!(
             doc.project(ContentKind::Richdoc),
