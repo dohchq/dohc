@@ -1,6 +1,13 @@
 # GATE 6 — release-candidate evidence packet
 
-**Status: ASSEMBLED 2026-07-24.** GATE6 is the release-CANDIDATE gate.
+**Status: PACKET ASSEMBLED 2026-07-24 — GATE NOT YET CLOSED.** GATE6 is the
+release-CANDIDATE gate. This packet is the EVIDENCE; the gate itself stays PENDING
+until BOTH remaining criteria are recorded:
+1. an end-to-end **clone-reset rehearsal on REAL dogfood workspace byte-clones**
+   (the machinery is built + gate-verified by its rehearsal-on-clones test suite,
+   but it has NOT been run against Ice's real data — that needs Ice's machine), and
+2. **explicit Ice authorization** at the R15 go/no-go.
+Do NOT treat `SHARDS.tsv`/this packet as gate-closed before both land.
 
 **WHAT GATE6 ASSERTS:** the Rust engine is FEATURE-COMPLETE (every implementation
 shard done) and EVIDENCED (gate/soak/differential green, every claim below carrying
@@ -16,7 +23,7 @@ the CUTOVER-GATING items and the "open decisions" (§7).
 
 ---
 
-## 0. Completeness — all implementation shards done
+## 0. Completeness — no GATE6-BLOCKING implementation shard remains (deferred work listed)
 
 | shard | PR | status |
 |---|---|---|
@@ -29,7 +36,16 @@ the CUTOVER-GATING items and the "open decisions" (§7).
 | RPC-D2 (blob egress + secret-aware disk executor + slash norm) | #227 | done |
 | Integrator passes | #219/#221/#224/#226/#228 | merged |
 
-No implementation shard remains. R16 (legacy deletion) is POST-cutover by design.
+No **GATE6-blocking** implementation shard remains. Implementation that is
+DEFERRED (not done, deliberately out of GATE6 scope) — do NOT read this table as
+"code-complete, skip the cutover wiring":
+- **R13b-rest** — REST DEFERRED in SHARDS: remaining desktop-adapter surfaces
+  (main.ts / cli / mcp / shared-view + capture wiring). Scope decision at R15.
+- **RPC-E** (replication/relay cutover scope) — scoped at R15, not built.
+- **Switch-time secret+file re-materialization** — §6.CUTOVER-GATING item 1,
+  composition-layer wiring, not built.
+- **Richdoc full-fidelity projection** — §6.CUTOVER-GATING item 2, if option (a).
+R16 (legacy deletion) is POST-cutover by design.
 
 ## 1. Soak (cutoverBlocking tier) — PASS
 - Banked artifact: `tools/rust-engine-program/soak-evidence/2026-07-21-cutoverBlocking.json`,
@@ -59,12 +75,16 @@ No implementation shard remains. R16 (legacy deletion) is POST-cutover by design
 - R15-REHEARSE machinery re-verified continuously: its lib tests run in every gate's
   `cargo test --workspace`; the canonical main gate above is the freshest citation.
 
-## 4. Migration ledger — 13 migrations, ordinals 0-12, monotone
+## 4. Migration ledger — 14 migrations, ordinals 0-13, monotone; **NEXT ORDINAL = 14**
 baseline(0), v1-secrets(1), v1-ydoc(2), v1-chats(3), v1-search(4),
 v1-moment-before-link(5), v1-sync(6), v1-conflicts(7), v1-shadow-clone(8),
 v1-binary-conflict-sides(9), v1-binary-head(10), v1-path-aliases-object-index(11),
-v1-engine_requests-kind(12, RPC-D — kind-scoped ledger purge; every writer stamped).
+**v1-ydoc-deferred-updates(12)**, **v1-engine-request-kind(13** — RPC-D's
+kind-scoped ledger purge; every writer stamped**)**.
 RPC-B2 and RPC-D2 added NO new migrations (domain/logic only).
+**The pre-R15 migration decision (§7.1) must use ordinal 14** — treating 13 as free
+would collide with `v1-engine-request-kind`. Verify against
+`crates/dohc-engine-storage/src/migration.rs` `BASELINE_MIGRATIONS` before authoring.
 
 ## 5. Review rigor
 - ~50 merged PRs across the program; the RPC shards alone drew a very high review

@@ -2214,10 +2214,19 @@ next round caught. The compounding lesson became structure:
   deletion (post-cutover).
 
 
-## 2026-07-24 — GATE6 PASSED: release-candidate gate declared
+## 2026-07-24 — GATE6 packet ASSEMBLED — gate NOT closed (pending rehearsal evidence + Ice authorization)
 
-- WHAT GATE6 ASSERTS: the Rust engine is FEATURE-COMPLETE (every implementation
-  shard done) and EVIDENCED (gate/soak/differential green) — a release CANDIDATE.
+- GATE6's EVIDENCE PACKET is assembled (GATE6_PACKET.md); the GATE ITSELF IS NOT
+  CLOSED. Two plan-required criteria remain: (1) an end-to-end clone-reset REHEARSAL
+  on REAL dogfood workspace byte-clones (machinery built + gate-verified by its
+  rehearsal-on-clones suite, but NOT yet run against Ice's data), and (2) EXPLICIT
+  ICE AUTHORIZATION at the R15 go/no-go. Do not treat SHARDS.tsv as gate-closed.
+- WHAT THE PACKET ASSERTS: the engine is FEATURE-COMPLETE for GATE6's scope (no
+  GATE6-blocking implementation shard remains) and EVIDENCED (gate/soak/differential
+  green) — a release CANDIDATE. DEFERRED implementation still exists and is NOT
+  code-complete: R13b-rest (desktop-adapter remainder), RPC-E (relay/replication
+  cutover scope), switch-time re-materialization wiring, and richdoc full-fidelity
+  projection if that option is chosen.
   WHAT GATE6 DOES NOT ASSERT: cutover-READINESS. Several items are CUTOVER-GATING
   and are resolved at the R15 go/no-go, NOT here: (a) mid-session version-switch
   secret re-materialization — SetActiveVersion is DB-only, so disk secrets stay
@@ -2238,7 +2247,9 @@ next round caught. The compounding lesson became structure:
   - Soak (cutoverBlocking tier) v3 = PASS (rssDisposition PASS, 5564 cycles, clean
     shutdown), with the honest monitored-not-proven memory flag.
   - Differential TS-vs-Rust capture: 10/10 green both engines, tamper-checked (#215).
-  - Migration ledger: 13 migrations, ordinals 0-12, monotone.
+  - Migration ledger: 14 migrations, ordinals 0-13, monotone (12 =
+    v1-ydoc-deferred-updates, 13 = v1-engine-request-kind). NEXT ORDINAL = 14 —
+    the pre-R15 migration must not reuse 13.
   - Gate discipline: full-workspace gate on EVERY pushed head program-wide; every
     supervision-grade guard carries a named MUTATION test, criticals
     orchestrator-mutation-verified per shard.
