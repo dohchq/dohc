@@ -2160,3 +2160,55 @@ next round caught. The compounding lesson became structure:
 - REMAINING toward GATE6: RPC-D2 (blob-chunk egress producer + the
   secret-aware disk executor + secret slash-spelling ruling), GATE6
   packet, macOS evidence, R15 rehearsal + go/no-go (ICE STOP).
+
+
+## 2026-07-24 — RPC-D2 merged (#227): blob egress + the secret-aware disk executor — LAST IMPLEMENTATION SHARD
+
+- MERGED as 391bea2f (squash). The three GATE6-blocking obligations left
+  by RPC-D: SF1 blob-chunk egress producer (over-cap versionedBinary.readBlob
+  streams BlobStart + 256 KiB BlobChunk frames + FIN, capability-gated on
+  negotiated `blobs`, workspace-scoped, cancellation/deadline-checked,
+  byte-budget-bounded); SF2 the secret-aware disk executor; SF3 secret path
+  slash normalization to the oracle canonical key (resolves the RPC-D-era
+  slash-spelling delta).
+- THE REVIEW ARC — the most heavily-reviewed shard of the program: 8 codex
+  build/fix rounds + 4 adversarial pre-review passes (3 opus + CodeRabbit) +
+  orchestrator mutation-verification, ending CodeRabbit APPROVED + codex clean.
+  The pre-PR adversarial passes and the bots caught a chain of real defects
+  the gate alone passed over, each mutation-verified: (1) a version-agnostic
+  fence that let a NON-active-version secret mutation rewrite/delete the
+  ACTIVE version's on-disk secret — fixed by scoping the executor to the
+  active version (disk = active-version projection, non-active is DB-only,
+  mirroring versionedText); (2) deleted- AND restored-to-absent secret disk
+  REMANENCE (completed markers left the plaintext on disk) — fixed by
+  enqueuing pending delete jobs with adopt-current-disk removal; (3) a
+  per-job BRICK/DoS (a symlink/directory/decrypt failure aborted the whole
+  workspace.open) — fixed by per-job tolerance matching the generic replay
+  contract + the oracle's per-file skip, while KEEPING fail-closed (no
+  plaintext from unauthenticated bytes); (4) two SYMLINK-escape vectors on
+  plaintext writes (symlinked-ancestor traversal + predictable-temp
+  symlink-follow) — fixed by a root→target symlink-free ancestor walk and an
+  exclusive O_NOFOLLOW/reparse-not-followed temp create with crash-recovery;
+  (5) a conflict-path plaintext-temp LEAK on a failed best-effort remove;
+  (6) a LOST-on-activation secret (non-active jobs marked complete discarded
+  the only future disk intent) — fixed by leaving them pending + orphan
+  handling for deleted versions.
+- Every supervision-grade guard carries a named MUTATION test; the
+  orchestrator mutation-verified the critical ones (active-version scoping,
+  fail-closed, no-brick, delete/restore disk-removal, symlink safety, temp
+  recovery, plaintext-leak) and added Windows-runnable security tests when it
+  found the symlink tests were unix-only with no CI to run them.
+- ACCEPTED RESIDUAL (documented, not a no-op): the ancestor rename-TOCTOU is
+  narrowed but path-based, not fd-relative — a potential secret-disclosure/
+  overwrite risk accepted only under the single-user/local-first/owner-only/
+  no-sharing assumption; dirfd/openat2 + renameat closure REQUIRED before any
+  shared-secret model (BEHAVIOR_DELTA.md).
+- GAP recorded (RPC_GAP.md): daemon secret re-materialization on a MID-SESSION
+  version SWITCH is missing (SetActiveVersion is DB-only; only open-replay
+  materializes) — R13/GATE6 daemon-composition scope, not the secret executor.
+  Also 3 marginal P2 declines recorded (stale-plaintext-on-decrypt, single-
+  client id-reservation, tests-only in-process egress).
+- ALL RPC SHARDS ARE NOW DONE (A/B/C/D/B2/D2). Remaining to 100%: GATE6
+  release-candidate packet, macOS evidence, R15 rehearsal + go/no-go package
+  with SIX decisions (ICE STOP — the one mandatory human stop), R16 legacy
+  deletion (post-cutover).
