@@ -1546,7 +1546,13 @@ fn every_moment_writer_records_payload_provenance() {
             .expect("delete");
     }
 
-    type Provenance = (Option<String>, Option<String>, Option<String>, String);
+    type Provenance = (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    );
     let provenance = |moment_id: &str| -> Provenance {
         let id = moment_id.to_owned();
         store
@@ -1554,10 +1560,18 @@ fn every_moment_writer_records_payload_provenance() {
                 Ok::<Provenance, dohc_engine_domain::DomainError>(
                     conn.query_row(
                         "SELECT payload_before_path, payload_before_content_kind, \
-                         payload_before_blob_sha256, payload_after_path \
-                         FROM moments WHERE moment_id = ?1",
+                         payload_before_blob_sha256, payload_before_binary_sha256, \
+                         payload_after_path FROM moments WHERE moment_id = ?1",
                         rusqlite::params![id],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get(1)?,
+                                row.get(2)?,
+                                row.get(3)?,
+                                row.get(4)?,
+                            ))
+                        },
                     )
                     .expect("provenance columns"),
                 )
@@ -1585,7 +1599,11 @@ fn every_moment_writer_records_payload_provenance() {
     assert_eq!(first.0, None, "a first write has no payload-before path");
     assert_eq!(first.1, None, "a first write has no payload-before kind");
     assert_eq!(first.2, None, "a first write has no payload-before digest");
-    assert_eq!(first.3, "a.md", "payload-after path is where it landed");
+    assert_eq!(
+        first.3, None,
+        "a first write has no payload-before binary ref"
+    );
+    assert_eq!(first.4, "a.md", "payload-after path is where it landed");
 
     // An OVERWRITE carries the replaced content, at the same path.
     let overwrite = provenance("m2");
@@ -1596,7 +1614,8 @@ fn every_moment_writer_records_payload_provenance() {
         blob_of("m1"),
         "an overwrite's payload-before is the content it replaced"
     );
-    assert_eq!(overwrite.3, "a.md");
+    assert_eq!(overwrite.3, None, "a text preimage carries no binary ref");
+    assert_eq!(overwrite.4, "a.md");
 
     // THE CASE THAT DIVERGES: the payload moved a.md -> b.md.
     let renamed = provenance("m3");
@@ -1606,7 +1625,7 @@ fn every_moment_writer_records_payload_provenance() {
         "a rename's payload came FROM the source path"
     );
     assert_eq!(
-        renamed.3, "b.md",
+        renamed.4, "b.md",
         "a rename's payload landed at the destination"
     );
     assert_eq!(
@@ -1618,10 +1637,118 @@ fn every_moment_writer_records_payload_provenance() {
     // A DELETE carries the removed content on BOTH sides (oracle parity).
     let deleted = provenance("m4");
     assert_eq!(deleted.0.as_deref(), Some("b.md"));
-    assert_eq!(deleted.3, "b.md");
+    assert_eq!(deleted.4, "b.md");
     assert_eq!(
         deleted.2,
         blob_of("m4"),
         "a delete's payload-before is the content it removed"
     );
+}
+
+/// The binary head writer (`persist_binary_head_in_tx`) is the fourth moment
+/// writer and the only one that can record a BINARY payload-before, so it is
+/// the only coverage for `payload_before_binary_sha256`. Without this, deleting
+/// the payload columns from that INSERT — or swapping the text and binary
+/// digest parameters — leaves the whole suite green.
+#[test]
+fn the_binary_head_writer_records_payload_provenance() {
+    use dohc_engine_domain::WriteBinary;
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+
+    let binary = |path: &str, bytes: Vec<u8>, moment: &str, now: i64| WriteBinary {
+        workspace_id: WS.to_owned(),
+        version_id: "main".to_owned(),
+        object_id: "obj-bin".to_owned(),
+        path: path.to_owned(),
+        bytes,
+        moment_id: moment.to_owned(),
+        metadata_origin: "user".to_owned(),
+        author_json: None,
+        now_ms: now,
+        request_id: None,
+    };
+    {
+        let mut vt = VersionedTextStore::new(&mut store);
+        // A TEXT head first, so the second write has a text payload-before and
+        // the third has a BINARY one.
+        vt.write_text(
+            &write("main", "img.bin", "placeholder", "b1", "obj-bin", 10),
+            &NO_FAULTS,
+        )
+        .expect("text head");
+        vt.write_binary(&binary("img.bin", vec![1, 2, 3], "b2", 20), &NO_FAULTS)
+            .expect("binary over text");
+        vt.write_binary(&binary("img.bin", vec![4, 5, 6], "b3", 30), &NO_FAULTS)
+            .expect("binary over binary");
+    }
+
+    let row = |moment_id: &str| -> (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        String,
+    ) {
+        let id = moment_id.to_owned();
+        store
+            .read_with(move |conn| {
+                Ok::<_, dohc_engine_domain::DomainError>(
+                    conn.query_row(
+                        "SELECT payload_before_path, payload_before_content_kind, \
+                         payload_before_blob_sha256, payload_before_binary_sha256, \
+                         payload_after_path FROM moments WHERE moment_id = ?1",
+                        rusqlite::params![id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                    )
+                    .expect("provenance row"),
+                )
+            })
+            .expect("read provenance")
+    };
+    let digests = |moment_id: &str| -> (Option<String>, Option<String>) {
+        let id = moment_id.to_owned();
+        store
+            .read_with(move |conn| {
+                Ok::<_, dohc_engine_domain::DomainError>(
+                    conn.query_row(
+                        "SELECT after_blob_sha256, after_binary_sha256 \
+                         FROM moments WHERE moment_id = ?1",
+                        rusqlite::params![id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .expect("after digests"),
+                )
+            })
+            .expect("read after digests")
+    };
+
+    // Binary over TEXT: the payload-before is the replaced TEXT, so the digest
+    // belongs in the blob column and the binary column stays empty.
+    let over_text = row("b2");
+    assert_eq!(over_text.0.as_deref(), Some("img.bin"));
+    assert_eq!(over_text.1.as_deref(), Some("text"));
+    assert_eq!(
+        over_text.2,
+        digests("b1").0,
+        "a text preimage's digest belongs in the TEXT column"
+    );
+    assert_eq!(over_text.3, None, "a text preimage carries no binary ref");
+    assert_eq!(over_text.4, "img.bin");
+
+    // Binary over BINARY: the payload-before digest must land in the BINARY
+    // column, never the text one — the columns are not interchangeable.
+    let over_binary = row("b3");
+    assert_eq!(over_binary.0.as_deref(), Some("img.bin"));
+    assert_eq!(over_binary.1.as_deref(), Some("binary"));
+    assert_eq!(over_binary.2, None, "a binary preimage has no text blob");
+    assert_eq!(
+        over_binary.3,
+        digests("b2").1,
+        "a binary preimage's digest belongs in the BINARY column"
+    );
+    assert_eq!(over_binary.4, "img.bin");
 }
