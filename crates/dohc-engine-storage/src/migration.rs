@@ -1466,8 +1466,10 @@ pub(crate) const SECRET_CAPTURE_OWNERSHIP_MIGRATION_ID: &str = "v1-secret-captur
 const V1_MOMENT_PAYLOAD_PROVENANCE_DDL: &str =
     "ALTER TABLE moments ADD COLUMN payload_before_path TEXT;
 ALTER TABLE moments ADD COLUMN payload_before_content_kind TEXT;
-ALTER TABLE moments ADD COLUMN payload_before_blob_sha256 TEXT;
-ALTER TABLE moments ADD COLUMN payload_before_binary_sha256 TEXT;
+ALTER TABLE moments ADD COLUMN payload_before_blob_sha256 TEXT
+    REFERENCES blobs(sha256);
+ALTER TABLE moments ADD COLUMN payload_before_binary_sha256 TEXT
+    REFERENCES binary_blobs(sha256);
 ALTER TABLE moments ADD COLUMN payload_after_path TEXT;
 UPDATE moments SET payload_after_path = path;
 UPDATE moments SET
@@ -1482,7 +1484,17 @@ UPDATE moments SET
     payload_before_content_kind = before_content_kind,
     payload_before_blob_sha256 = before_blob_sha256,
     payload_before_binary_sha256 = before_binary_sha256
- WHERE before_present = 2;
+ WHERE before_present = 2
+   -- A rename whose producer link never resolved cannot say where its payload
+   -- came from. Ordinal 5's link backfill is best-effort and does leave NULLs,
+   -- and the oracle keys payload-before PRESENCE on the path column alone, so
+   -- filling the digest without the path would read as 'carried no before
+   -- payload' while holding one. Leave the whole group unset instead.
+   AND (operation <> 'rename' OR EXISTS (
+       SELECT 1 FROM moments producer
+        WHERE producer.workspace_id = moments.workspace_id
+          AND producer.moment_id = moments.before_latest_moment_id
+   ));
 ";
 
 /// The `id` of the moment payload-provenance migration.
@@ -1990,7 +2002,26 @@ mod tests {
                  before_present, before_blob_sha256, before_latest_moment_id,
                  metadata_origin)
                  VALUES ('ws', 3, 'm3', 'main', 'obj', 'b.md', 30, 'rename', 'sha-two',
-                         2, 'sha-two', 'm2', 'user');",
+                         2, 'sha-two', 'm2', 'user');
+             -- A BINARY preimage: its digest must backfill into the BINARY
+             -- column, never the text one.
+             INSERT INTO binary_blobs (sha256, byte_length, bytes)
+                 VALUES ('bin-one', 3, x'010203');
+             INSERT INTO moments (workspace_id, moment_order, moment_id, version_id,
+                 object_id, path, recorded_at_ms, operation, after_blob_sha256,
+                 after_content_kind, after_binary_sha256, before_present,
+                 before_content_kind, before_binary_sha256, before_latest_moment_id,
+                 metadata_origin)
+                 VALUES ('ws', 4, 'm4', 'main', 'obj', 'c.bin', 40, 'write', NULL,
+                         'binary', 'bin-one', 2, 'binary', 'bin-one', 'm3', 'user');
+             -- A rename whose producer link never resolved: ordinal 5's backfill
+             -- is best-effort, so this row really occurs.
+             INSERT INTO moments (workspace_id, moment_order, moment_id, version_id,
+                 object_id, path, recorded_at_ms, operation, after_blob_sha256,
+                 before_present, before_blob_sha256, before_latest_moment_id,
+                 metadata_origin)
+                 VALUES ('ws', 5, 'm5', 'main', 'obj', 'd.md', 50, 'rename', 'sha-two',
+                         2, 'sha-two', NULL, 'user');",
         )
         .expect("legacy moment rows");
 
@@ -1998,27 +2029,36 @@ mod tests {
             .expect("provenance migration");
         assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
 
-        let row = |moment_id: &str| -> (Option<String>, Option<String>, Option<String>, String) {
+        type Row = (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let row = |moment_id: &str| -> Row {
             conn.query_row(
                 "SELECT payload_before_path, payload_before_content_kind, \
-                 payload_before_blob_sha256, payload_after_path \
-                 FROM moments WHERE moment_id = ?1",
+                 payload_before_blob_sha256, payload_before_binary_sha256, \
+                 payload_after_path FROM moments WHERE moment_id = ?1",
                 [moment_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .expect("provenance row")
         };
+        let some = |v: &str| Some(v.to_owned());
 
         // MUTATION: drop the `before_present = 2` guard -> a first write gains a
         // payload-before it never had.
-        assert_eq!(row("m1"), (None, None, None, "a.md".to_owned()));
+        assert_eq!(row("m1"), (None, None, None, None, some("a.md")));
         assert_eq!(
             row("m2"),
             (
-                Some("a.md".to_owned()),
-                Some("text".to_owned()),
-                Some("sha-one".to_owned()),
-                "a.md".to_owned()
+                some("a.md"),
+                some("text"),
+                some("sha-one"),
+                None,
+                some("a.md")
             )
         );
         // MUTATION: backfill the rename's payload-before path from `path` -> the
@@ -2026,12 +2066,28 @@ mod tests {
         assert_eq!(
             row("m3"),
             (
-                Some("a.md".to_owned()),
-                Some("text".to_owned()),
-                Some("sha-two".to_owned()),
-                "b.md".to_owned()
+                some("a.md"),
+                some("text"),
+                some("sha-two"),
+                None,
+                some("b.md")
             )
         );
+        // A binary preimage's digest belongs in the BINARY column.
+        assert_eq!(
+            row("m4"),
+            (
+                some("c.bin"),
+                some("binary"),
+                None,
+                some("bin-one"),
+                some("c.bin")
+            )
+        );
+        // An unresolvable rename link cannot say where the payload came from,
+        // so the whole payload-before group stays unset rather than claiming a
+        // digest with no path — the oracle keys presence on the path alone.
+        assert_eq!(row("m5"), (None, None, None, None, some("d.md")));
     }
 
     #[test]

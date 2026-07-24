@@ -238,10 +238,12 @@ pub struct MomentRecord {
     /// before TEXT bodies (None for binary, absent, or OVER-CAP sides —
     /// bodies above the 48 KiB in-band cap are never loaded out of SQL;
     /// the byte lengths always are) and the COALESCEd text/binary byte
-    /// lengths. The oracle's richer
-    /// payload-provenance columns (payload_before_*, before-snapshot
-    /// identity fields) are NOT in the Rust schema — a recorded pre-R15
-    /// schema obligation.
+    /// lengths. The oracle's
+    /// payload_before_* columns ARE in the Rust schema as of migration
+    /// ordinal 15; its before-snapshot IDENTITY fields (before_object_id,
+    /// before_version_id, before_path, before_updated_at_ms,
+    /// before_metadata_*) are still absent — the remaining part of that
+    /// recorded pre-R15 schema obligation.
     pub after_text: Option<String>,
     pub after_byte_length: Option<i64>,
     pub before_text: Option<String>,
