@@ -1,4 +1,8 @@
-import type { AnyExtension, JSONContent } from '@tiptap/core'
+import type {
+  AnyExtension,
+  JSONContent,
+  MarkdownRendererHelpers,
+} from '@tiptap/core'
 import { getSchema } from '@tiptap/core'
 import { MarkdownManager } from '@tiptap/markdown'
 import { StarterKit } from '@tiptap/starter-kit'
@@ -33,12 +37,40 @@ const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 // multi-block ProseMirror cell uses a visible hard break instead of U+001F.
 const GFM_TABLE_CELL_BLOCK_SEPARATOR = '<br>'
 
+function prepareRenderedTableCell(markdown: string): string {
+  // Raw inline HTML is the canonical representation of cell block boundaries.
+  // The importer represents those tags as text, so normalize them before the
+  // table renderer measures the cell again.
+  markdown = markdown
+    .replaceAll('&amp;lt;br&amp;gt;', GFM_TABLE_CELL_BLOCK_SEPARATOR)
+    .replaceAll('&lt;br&gt;', GFM_TABLE_CELL_BLOCK_SEPARATOR)
+  let output = ''
+  let precedingBackslashes = 0
+
+  for (const character of markdown) {
+    if (character === '|' && precedingBackslashes % 2 === 0) {
+      output += '\\'
+    }
+    output += character
+    precedingBackslashes = character === '\\' ? precedingBackslashes + 1 : 0
+  }
+
+  return output
+}
+
 const MarkdownTable = Table.extend({
-  renderMarkdown: (node, helpers) => renderTableToMarkdown(
-    node,
-    helpers,
-    { cellLineSeparator: GFM_TABLE_CELL_BLOCK_SEPARATOR },
-  ),
+  renderMarkdown: (node, helpers) => {
+    const tableHelpers: MarkdownRendererHelpers = {
+      ...helpers,
+      renderChildren: (nodes, separator) =>
+        prepareRenderedTableCell(helpers.renderChildren(nodes, separator)),
+    }
+    return renderTableToMarkdown(
+      node,
+      tableHelpers,
+      { cellLineSeparator: GFM_TABLE_CELL_BLOCK_SEPARATOR },
+    )
+  },
 })
 
 const extensions: AnyExtension[] = [
@@ -149,55 +181,84 @@ function yDocBodyToJSON(doc: Y.Doc): JSONContent {
 
 export function serializeRichdocBody(root: JSONContent): string {
   const source = JSON.stringify(root)
-  const tablePipeSentinel = unusedSupplementaryCodePoint(source)
+  const sourceCharacters = new Set(source)
   const inlineCodeEntitySentinels = new Map<string, string>()
   const codeBlocks = new Map<string, string>()
-  const reservedTokens = new Set<string>()
+  const reservedTokens = new Set(
+    source.match(/\uE000DOHC_[A-Z_]+_\d+\uE001/gu) ?? [],
+  )
   let tokenIndex = 0
   const reserveToken = (kind: string): string => {
     let token: string
     do {
       token = `\uE000DOHC_${kind}_${tokenIndex}\uE001`
       tokenIndex += 1
-    } while (source.includes(token) || reservedTokens.has(token))
+    } while (reservedTokens.has(token))
     reservedTokens.add(token)
     return token
   }
 
-  const visit = (node: JSONContent): JSONContent => {
+  function visit(node: JSONContent, insideTableCell = false): JSONContent {
+    if (node.type === 'table' && node.content?.length) {
+      return {
+        ...node,
+        content: node.content.map((row, rowIndex) => ({
+          ...row,
+          content: row.content?.map(cell => ({
+            ...cell,
+            type: rowIndex === 0 ? 'tableHeader' : cell.type,
+            content: cell.content?.flatMap(prepareTableCellBlock),
+          })),
+        })),
+      }
+    }
+
     if (node.type === 'codeBlock' && node.content?.length) {
       const token = reserveToken('CODE_BLOCK')
       codeBlocks.set(token, textContent(node.content))
       return { ...node, content: [{ type: 'text', text: token }] }
     }
 
-    let content = node.content?.map(visit)
-
-    if (node.type === 'table' && content?.length) {
-      content = content.map((row, rowIndex) => ({
-        ...row,
-        content: row.content?.map(cell => ({
-          ...cell,
-          type: rowIndex === 0 ? 'tableHeader' : cell.type,
-          content: replaceText(cell.content, '|', tablePipeSentinel),
-        })),
-      }))
-    } else if (content?.length) {
-      content = renderInlineCodeRuns(content, inlineCodeEntitySentinels, source)
+    let content = insideTableCell
+      ? node.content?.flatMap(prepareTableCellBlock)
+      : node.content?.map(child => visit(child))
+    if (content?.length) {
+      content = renderInlineCodeRuns(
+        content,
+        inlineCodeEntitySentinels,
+        sourceCharacters,
+      )
     }
 
     return content ? { ...node, content } : { ...node }
   }
 
+  function prepareTableCellBlock(node: JSONContent): JSONContent[] {
+    if (node.type !== 'codeBlock') return [visit(node, true)]
+
+    return textContent(node.content ?? []).split('\n').map(line =>
+      visit({
+        type: 'paragraph',
+        content: line.length > 0
+          ? [{
+              type: 'text',
+              text: line,
+              marks: [{ type: 'code' }],
+            }]
+          : [],
+      }),
+    )
+  }
+
   const prepared = visit(root)
   let markdown = markdownManager.serialize(prepared)
-  markdown = restoreCharacterSentinels(markdown, new Map([
-    [tablePipeSentinel, '\\|'],
-    ...Array.from(
+  markdown = restoreCharacterSentinels(
+    markdown,
+    new Map(Array.from(
       inlineCodeEntitySentinels,
       ([character, sentinel]) => [sentinel, character] as const,
-    ),
-  ]))
+    )),
+  )
   return rewriteCodeBlockFences(markdown, codeBlocks)
 }
 
@@ -207,24 +268,10 @@ function textContent(content: JSONContent[]): string {
   ).join('')
 }
 
-function replaceText(
-  content: JSONContent[] | undefined,
-  needle: string,
-  replacement: string,
-): JSONContent[] | undefined {
-  return content?.map(node => ({
-    ...node,
-    text: typeof node.text === 'string'
-      ? node.text.replaceAll(needle, replacement)
-      : node.text,
-    content: replaceText(node.content, needle, replacement),
-  }))
-}
-
 function renderInlineCodeRuns(
   content: JSONContent[],
   entitySentinels: Map<string, string>,
-  source: string,
+  sourceCharacters: ReadonlySet<string>,
 ): JSONContent[] {
   const output: JSONContent[] = []
   for (let index = 0; index < content.length;) {
@@ -244,7 +291,9 @@ function renderInlineCodeRuns(
     const marks = node.marks?.filter(mark => mark.type !== 'code')
     output.push({
       ...node,
-      text: renderInlineCode(replaceCharacters(value, entitySentinels, source)),
+      text: renderInlineCode(
+        replaceCharacters(value, entitySentinels, sourceCharacters),
+      ),
       marks: marks?.length ? marks : undefined,
     })
     index = end
@@ -255,13 +304,16 @@ function renderInlineCodeRuns(
 function replaceCharacters(
   value: string,
   replacements: Map<string, string>,
-  source: string,
+  sourceCharacters: ReadonlySet<string>,
 ): string {
   return value.replace(/[&<>]/g, character => {
     const existing = replacements.get(character)
     if (existing) return existing
 
-    const sentinel = reserveInlineCodeEntitySentinel(source, replacements)
+    const sentinel = reserveInlineCodeEntitySentinel(
+      sourceCharacters,
+      replacements,
+    )
     replacements.set(character, sentinel)
     return sentinel
   })
@@ -358,21 +410,16 @@ function backtickFence(value: string, minimum: number): string {
   return '`'.repeat(Math.max(minimum, longest + 1))
 }
 
-function unusedSupplementaryCodePoint(source: string): string {
-  for (let codePoint = 0xF0000; codePoint <= 0xFFFFD; codePoint += 1) {
-    const candidate = String.fromCodePoint(codePoint)
-    if (!source.includes(candidate)) return candidate
-  }
-  throw new Error('could not reserve a table-pipe serialization sentinel')
-}
-
 function reserveInlineCodeEntitySentinel(
-  source: string,
+  sourceCharacters: ReadonlySet<string>,
   reserved: Map<string, string>,
 ): string {
   for (let codePoint = 0xE002; codePoint <= 0xF8FF; codePoint += 1) {
     const candidate = String.fromCodePoint(codePoint)
-    if (!source.includes(candidate) && !Array.from(reserved.values()).includes(candidate)) {
+    if (
+      !sourceCharacters.has(candidate)
+      && !Array.from(reserved.values()).includes(candidate)
+    ) {
       return candidate
     }
   }
@@ -383,6 +430,7 @@ function restoreCharacterSentinels(
   markdown: string,
   replacements: Map<string, string>,
 ): string {
+  if (replacements.size === 0) return markdown
   const matcher = new RegExp(
     Array.from(replacements.keys(), escapeRegExp).join('|'),
     'gu',

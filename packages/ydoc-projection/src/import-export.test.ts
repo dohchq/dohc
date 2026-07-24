@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { JSONContent } from '@tiptap/core'
 import {
   prosemirrorJSONToYXmlFragment,
@@ -520,6 +520,401 @@ describe('hocuspocus markdown import/export', () => {
     expect(output).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u)
   })
 
+  it('projects a multiline fenced code block in a table cell as legal inline content', () => {
+    const once = yDocToMarkdown(yDocFromBody([
+      {
+        type: 'table',
+        content: [
+          {
+            type: 'tableRow',
+            content: [{
+              type: 'tableHeader',
+              content: [{
+                type: 'paragraph',
+                content: [{ type: 'text', text: 'Code' }],
+              }],
+            }],
+          },
+          {
+            type: 'tableRow',
+            content: [{
+              type: 'tableCell',
+              content: [{
+                type: 'codeBlock',
+                attrs: { language: 'mermaid' },
+                content: [{
+                  type: 'text',
+                  text: 'const fence = ```;\nleft | right <&>',
+                }],
+              }],
+            }],
+          },
+          {
+            type: 'tableRow',
+            content: [{
+              type: 'tableCell',
+              content: [{
+                type: 'codeBlock',
+                attrs: { language: '' },
+              }],
+            }],
+          },
+        ],
+      },
+    ]))
+
+    expect(once).toContain(
+      '````const fence = ```;````<br>`left \\| right <&>`',
+    )
+    expect(yDocToMarkdown(markdownToYDoc(once))).toBe(once)
+    expect(yDocBodyJSON(markdownToYDoc(once)).content?.[0].content).toHaveLength(3)
+    expect(once).not.toContain('DOHC_CODE_BLOCK')
+    expect(once).not.toMatch(/[\uE000-\uF8FF\u{F0000}-\u{FFFFD}]/u)
+  })
+
+  it.each([
+    {
+      type: 'image',
+      node: {
+        type: 'image',
+        attrs: {
+          alt: 'plot | draft',
+          src: 'assets/plot|`draft`.png',
+          title: 'chart | `draft`',
+        },
+      },
+      expected: '![plot \\| draft](assets/plot\\|`draft`.png "chart \\| `draft`")',
+    },
+    {
+      type: 'escapedPunctuation',
+      node: { type: 'escapedPunctuation', attrs: { value: '|' } },
+      expected: '\\|',
+    },
+    {
+      type: 'wikilink',
+      node: {
+        type: 'wikilink',
+        attrs: { target: 'notes/`plan`', label: 'left | right' },
+      },
+      expected: '[[notes/`plan`\\|left \\| right]]',
+    },
+    {
+      type: 'inlineAtom',
+      node: {
+        type: 'inlineAtom',
+        attrs: {
+          atomId: 'one',
+          params: 'mode=left|`draft`',
+          source: 'atom:one mode=left|`draft`',
+        },
+      },
+      expected: '{{atom:one mode=left\\|`draft`}}',
+    },
+    {
+      type: 'mathInline',
+      node: { type: 'mathInline', attrs: { tex: 'a|`b`' } },
+      expected: '$a\\|`b`$',
+    },
+  ])('escapes table pipes emitted by the $type renderer', ({ node, expected }) => {
+    const once = serializeRichdocBody({
+      type: 'doc',
+      content: [{
+        type: 'table',
+        content: [
+          {
+            type: 'tableRow',
+            content: [{
+              type: 'tableHeader',
+              content: [{
+                type: 'paragraph',
+                content: [{ type: 'text', text: 'Value' }],
+              }],
+            }],
+          },
+          {
+            type: 'tableRow',
+            content: [{
+              type: 'tableCell',
+              content: [{ type: 'paragraph', content: [node] }],
+            }],
+          },
+        ],
+      }],
+    }).trimEnd()
+
+    expect(once).toContain(expected)
+    const roundTripDoc = markdownToYDoc(once)
+    expect(yDocToMarkdown(roundTripDoc)).toBe(once)
+    if (node.type !== 'escapedPunctuation') {
+      const roundTripNode = yDocBodyJSON(roundTripDoc)
+        .content?.[0].content?.[1].content?.[0].content?.[0].content?.[0]
+      expect(roundTripNode).toMatchObject(node)
+    }
+    expect(once).not.toMatch(/DOHC_[A-Z_]+_\d+/u)
+    expect(once).not.toMatch(/[\uE000-\uF8FF\u{F0000}-\u{FFFFD}]/u)
+  })
+
+  it('keeps the complete table-cell block and inline-node inventories explicit', () => {
+    const schema = getDohcProseMirrorSchema()
+    const tableCellContent = schema.nodes.tableCell.contentMatch
+    const directCellBlocks = Object.values(schema.nodes)
+      .filter(nodeType => tableCellContent.matchType(nodeType) !== null)
+      .map(nodeType => nodeType.name)
+      .sort()
+    const inlineNodes = Object.values(schema.nodes)
+      .filter(nodeType => nodeType.isInline)
+      .map(nodeType => nodeType.name)
+      .sort()
+
+    expect(directCellBlocks).toEqual([
+      'blockquote',
+      'bulletList',
+      'callout',
+      'codeBlock',
+      'heading',
+      'horizontalRule',
+      'mathBlock',
+      'orderedList',
+      'paragraph',
+      'table',
+      'taskList',
+    ])
+    expect(inlineNodes).toEqual([
+      'escapedPunctuation',
+      'hardBreak',
+      'image',
+      'inlineAtom',
+      'mathInline',
+      'text',
+      'wikilink',
+    ])
+  })
+
+  it.each([
+    {
+      type: 'blockquote',
+      block: {
+        type: 'blockquote',
+        content: [
+          {
+            type: 'paragraph',
+            content: [{ type: 'text', text: 'quote | `tick`' }],
+          },
+          {
+            type: 'codeBlock',
+            content: [{ type: 'text', text: 'nested | ```' }],
+          },
+        ],
+      },
+    },
+    {
+      type: 'bulletList',
+      block: {
+        type: 'bulletList',
+        content: [{
+          type: 'listItem',
+          content: [{
+            type: 'paragraph',
+            content: [{ type: 'text', text: 'bullet | `tick`' }],
+          }, {
+            type: 'codeBlock',
+            content: [{ type: 'text', text: 'nested | ```' }],
+          }],
+        }],
+      },
+    },
+    {
+      type: 'callout',
+      block: {
+        type: 'callout',
+        attrs: { calloutType: 'note', fold: '', title: 'Title | `tick`' },
+        content: [
+          {
+            type: 'paragraph',
+            content: [{ type: 'text', text: 'body | `tick`' }],
+          },
+          {
+            type: 'codeBlock',
+            content: [{ type: 'text', text: 'nested | ```' }],
+          },
+        ],
+      },
+    },
+    {
+      type: 'codeBlock',
+      block: {
+        type: 'codeBlock',
+        attrs: { language: 'txt' },
+        content: [{ type: 'text', text: 'code | ```' }],
+      },
+    },
+    {
+      type: 'heading',
+      block: {
+        type: 'heading',
+        attrs: { level: 2 },
+        content: [{ type: 'text', text: 'heading | `tick`' }],
+      },
+    },
+    {
+      type: 'horizontalRule',
+      block: { type: 'horizontalRule' },
+    },
+    {
+      type: 'mathBlock',
+      block: { type: 'mathBlock', attrs: { tex: 'a|`b`' } },
+    },
+    {
+      type: 'orderedList',
+      block: {
+        type: 'orderedList',
+        attrs: { start: 1 },
+        content: [{
+          type: 'listItem',
+          content: [{
+            type: 'paragraph',
+            content: [{ type: 'text', text: 'ordered | `tick`' }],
+          }, {
+            type: 'codeBlock',
+            content: [{ type: 'text', text: 'nested | ```' }],
+          }],
+        }],
+      },
+    },
+    {
+      type: 'paragraph',
+      block: {
+        type: 'paragraph',
+        content: [{ type: 'text', text: 'paragraph | `tick`' }],
+      },
+    },
+    {
+      type: 'table',
+      block: {
+        type: 'table',
+        content: [{
+          type: 'tableRow',
+          content: [{
+            type: 'tableHeader',
+            content: [{
+              type: 'paragraph',
+              content: [{ type: 'text', text: 'nested | `tick`' }],
+            }, {
+              type: 'codeBlock',
+              content: [{ type: 'text', text: 'deeper | ```' }],
+            }],
+          }],
+        }],
+      },
+    },
+    {
+      type: 'taskList',
+      block: {
+        type: 'taskList',
+        content: [{
+          type: 'taskItem',
+          attrs: { checked: false },
+          content: [{
+            type: 'paragraph',
+            content: [{ type: 'text', text: 'task | `tick`' }],
+          }, {
+            type: 'codeBlock',
+            content: [{ type: 'text', text: 'nested | ```' }],
+          }],
+        }],
+      },
+    },
+  ])('serializes the $type block shape inside a table cell without a sentinel', ({ block }) => {
+    const once = serializeRichdocBody({
+      type: 'doc',
+      content: [{
+        type: 'table',
+        content: [
+          {
+            type: 'tableRow',
+            content: [{
+              type: 'tableHeader',
+              content: [{
+                type: 'paragraph',
+                content: [{ type: 'text', text: 'Value' }],
+              }],
+            }],
+          },
+          {
+            type: 'tableRow',
+            content: [{
+              type: 'tableCell',
+              content: [block],
+            }],
+          },
+        ],
+      }],
+    }).trimEnd()
+
+    const normalized = yDocToMarkdown(markdownToYDoc(once))
+    expect(yDocToMarkdown(markdownToYDoc(normalized))).toBe(normalized)
+    expect(yDocBodyJSON(markdownToYDoc(once)).content?.[0].content?.[1].content)
+      .toHaveLength(1)
+    expect(once).not.toMatch(/DOHC_[A-Z_]+_\d+/u)
+    expect(once).not.toMatch(/[\uE000-\uF8FF\u{F0000}-\u{FFFFD}]/u)
+  })
+
+  it.each([
+    {
+      type: 'text',
+      content: [{ type: 'text', text: 'left | `right`' }],
+    },
+    {
+      type: 'hardBreak',
+      content: [
+        { type: 'text', text: 'left' },
+        { type: 'hardBreak' },
+        { type: 'text', text: 'right | `tick`' },
+      ],
+    },
+    {
+      type: 'text with link mark',
+      content: [{
+        type: 'text',
+        text: 'label',
+        marks: [{
+          type: 'link',
+          attrs: { href: 'https://example.com/left|`right`' },
+        }],
+      }],
+    },
+  ])('serializes the $type inline shape inside a table cell without a sentinel', ({ content }) => {
+    const once = serializeRichdocBody({
+      type: 'doc',
+      content: [{
+        type: 'table',
+        content: [
+          {
+            type: 'tableRow',
+            content: [{
+              type: 'tableHeader',
+              content: [{
+                type: 'paragraph',
+                content: [{ type: 'text', text: 'Value' }],
+              }],
+            }],
+          },
+          {
+            type: 'tableRow',
+            content: [{
+              type: 'tableCell',
+              content: [{ type: 'paragraph', content }],
+            }],
+          },
+        ],
+      }],
+    }).trimEnd()
+
+    expect(yDocToMarkdown(markdownToYDoc(once))).toBe(once)
+    expect(once).not.toMatch(/DOHC_[A-Z_]+_\d+/u)
+    expect(once).not.toMatch(/[\uE000-\uF8FF\u{F0000}-\u{FFFFD}]/u)
+  })
+
   it('round-trips per-column GFM alignment (left/center/right) losslessly', () => {
     // Phase 1 assumed per-column alignment was inexpressible; it is not. The
     // `align` cell attr (set by tableControls' column grip menu) serializes to
@@ -615,6 +1010,32 @@ describe('hocuspocus markdown import/export', () => {
       '',
       '``a`b`` / `` `edge` `` / `  spaced  ` / `   `',
     ].join('\n'))
+  })
+
+  it('reserves many code-block tokens without rescanning the source per block', () => {
+    const includes = vi.spyOn(String.prototype, 'includes')
+    try {
+      const markdown = serializeRichdocBody({
+        type: 'doc',
+        content: Array.from({ length: 200 }, (_, index) => ({
+          type: 'codeBlock',
+          attrs: { language: 'txt' },
+          content: [{ type: 'text', text: `block ${index}` }],
+        })),
+      })
+      const tokenSourceScans = includes.mock.calls.filter(
+        ([search]) =>
+          typeof search === 'string'
+          && /^\uE000DOHC_CODE_BLOCK_\d+\uE001$/u.test(search),
+      )
+
+      expect(tokenSourceScans).toHaveLength(0)
+      expect(markdown).toContain('block 0')
+      expect(markdown).toContain('block 199')
+      expect(markdown).not.toContain('DOHC_CODE_BLOCK')
+    } finally {
+      includes.mockRestore()
+    }
   })
 
   it('keeps HTML-special characters raw inside inline code', () => {
