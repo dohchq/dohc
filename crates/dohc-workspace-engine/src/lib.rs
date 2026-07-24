@@ -332,6 +332,13 @@ pub struct EngineService {
     /// lifetime's ledger rows (hash-mismatch refusals or false dedupes).
     session_epoch: String,
     self_writes: SelfWriteSuppression,
+    /// PER-EngineService by design. Production runs exactly ONE EngineService per
+    /// daemon process (the stdio host constructs a single service), so the
+    /// `BLOB_EGRESS_BYTE_BUDGET` resident-memory ceiling is per-process there.
+    /// The budget is per-instance (not a process-global static) so tests can
+    /// inject a small deterministic budget; if a future host ever runs multiple
+    /// EngineServices in one process, back this with a shared/global semaphore to
+    /// keep the ceiling aggregate.
     blob_egress_budget: BlobEgressBudget,
 }
 
