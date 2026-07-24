@@ -1411,6 +1411,33 @@ UPDATE engine_requests SET kind = 'versioned'
 /// The `id` of the request-ledger kind migration.
 pub(crate) const ENGINE_REQUEST_KIND_MIGRATION_ID: &str = "v1-engine-request-kind";
 
+/// Ordinal 14. Records secret-plaintext disk ownership in a column the engine
+/// stamps itself, replacing the `metadata_origin = 'local-file'` test three
+/// capture decisions used to key on. `local-file` is a member of the closed
+/// origin set an RPC caller or a replication peer may supply, so that test both
+/// let a remote writer claim ownership it never had AND denied it to an
+/// API-written secret the materializer really did put on disk.
+///
+/// The backfill uses the same disk truth the writers now stamp: a write moment
+/// owns its plaintext exactly when its materialization job COMPLETED — either
+/// because capture recorded the completed marker for plaintext it read off the
+/// workspace file, or because the materializer wrote that file. That
+/// reclassifies existing rows instead of carrying the origin-string rule
+/// forward.
+const V1_SECRET_CAPTURE_OWNERSHIP_DDL: &str = "\
+ALTER TABLE secret_moments ADD COLUMN capture_owned INTEGER NOT NULL DEFAULT 0;
+UPDATE secret_moments SET capture_owned = 1
+ WHERE after_present = 1
+   AND EXISTS (
+     SELECT 1 FROM materialization_jobs j
+      WHERE j.job_id = 'secret-mat_' || secret_moments.moment_id
+        AND j.status = 'complete'
+   );
+";
+
+/// The `id` of the secret capture-ownership migration.
+pub(crate) const SECRET_CAPTURE_OWNERSHIP_MIGRATION_ID: &str = "v1-secret-capture-ownership";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1510,6 +1537,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: ENGINE_REQUEST_KIND_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_ENGINE_REQUEST_KIND_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 14,
+        id: SECRET_CAPTURE_OWNERSHIP_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_SECRET_CAPTURE_OWNERSHIP_DDL,
         sets_user_version: None,
     },
 ];
@@ -1888,7 +1922,9 @@ mod tests {
                 )
                 .expect("CAL-1 document discriminator");
             }
-            let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            // Bounded at the kind migration so appending later ordinals cannot
+            // change what this asserts.
+            let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..14], &ctx, &NoFaults)
                 .expect("kind migration");
             assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
             let kind = |request_id: &str| {

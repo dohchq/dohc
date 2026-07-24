@@ -59,6 +59,6 @@ pub use limits::{
 };
 pub use materialize::{
     JobStatus, MaterializationJob, MaterializationJobSpec, MaterializationOperation, Preimage,
-    enqueue_delete_job, enqueue_job, record_completed_job,
+    enqueue_delete_job, enqueue_job, record_completed_job, stamp_secret_capture_owned,
 };
 pub use store::{CompoundWrite, Document, EngineStore, TxnOutcome, WriteOutcome};
