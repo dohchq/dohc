@@ -19,6 +19,8 @@
 #     `cargo run --bin dohc-soak-runner` alone would fail with a missing daemon.
 #   * The soak evidence JSON is MANDATORY — the upload fails if it is absent, so a
 #     green run can never be cited without the artifact behind it.
+#   * The runner is PINNED to a macOS version, never `-latest`: evidence has to
+#     name the OS it ran on.
 name: rust-engine-macos-evidence
 
 on:
@@ -45,7 +47,12 @@ env:
 jobs:
   macos-evidence:
     name: macOS gate + cutoverBlocking soak
-    runs-on: macos-latest
+    # Blacksmith's macOS runner (R15 decision #2). Apple Silicon M4 / ARM64 —
+    # the architecture apps/desktop actually ships on for Mac, so this is
+    # closer to the shipping target than an Intel runner would be. Pinned to
+    # macos-15 rather than -latest so a rolling OS bump cannot silently change
+    # what the cited evidence ran on.
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 150
     permissions:
       contents: read
@@ -56,6 +63,13 @@ jobs:
 
       - name: Install pinned Rust toolchain (rust-toolchain.toml)
         run: |
+          # A third-party runner image need not ship rustup the way GitHub's
+          # macOS image does, so install it rather than assume it.
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs               | sh -s -- -y --default-toolchain none --no-modify-path
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
           rustup show active-toolchain || rustup toolchain install
           rustc --version && cargo --version
 
@@ -67,6 +81,14 @@ jobs:
       - name: Install pinned cargo-deny (the gate counts cargo-deny=PASS as evidence)
         run: |
           cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
+          # Evidence has to name the machine it ran on — the whole point of a
+          # macOS run is the platform, so record it beside the tool versions.
+          {
+            echo "runner=${{ runner.name }} os=${{ runner.os }} arch=${{ runner.arch }}"
+            echo "runs-on=blacksmith-6vcpu-macos-15"
+            sw_vers
+            uname -a
+          } | tee -a macos-toolversions.log
           cargo-deny --version | tee -a macos-toolversions.log
           rustc --version | tee -a macos-toolversions.log
           node --version | tee -a macos-toolversions.log
