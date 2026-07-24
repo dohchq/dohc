@@ -9,10 +9,12 @@ until BOTH remaining criteria are recorded:
 2. **explicit Ice authorization** at the R15 go/no-go.
 Do NOT treat `SHARDS.tsv`/this packet as gate-closed before both land.
 
-**WHAT GATE6 ASSERTS:** the Rust engine is FEATURE-COMPLETE (every implementation
-shard done) and EVIDENCED (gate/soak/differential green, every claim below carrying
-its evidence and limitations). Every dependency (R14 robustness, R10b relay-epoch,
+**WHAT GATE6 ASSERTS:** NO GATE6-BLOCKING IMPLEMENTATION SHARD REMAINS, and the
+engine is EVIDENCED (gate/soak/differential green, every claim below carrying its
+evidence and limitations). Every dependency (R14 robustness, R10b relay-epoch,
 R15-REHEARSE, and all RPC shards A/B/C/D/B2/D2) is `gate passed` / `done`.
+This is NOT "code-complete": deferred implementation remains (R13b-rest, RPC-E,
+switch-time re-materialization wiring, richdoc full-fidelity projection) — see §0.
 
 **WHAT GATE6 DOES NOT ASSERT: cutover-READINESS.** The items in §6.CUTOVER-GATING
 below are real, not "non-blocking limitations," and MUST be resolved at the R15
@@ -174,6 +176,12 @@ declines; BINHEAD (discharged). See §8.
    (macos-latest, quick|full input) and the local `tools/rust-engine-program/
    macos-evidence.sh` (run on a Mac). Each reproduces the full-workspace gate +
    the cutoverBlocking soak and emits the verdict logs + soak-evidence JSON.
+   Both DEFAULT TO `full` (the bankable 30-60min soak); `quick` is explicitly
+   NON-GATING (the runner exits 0 with PASS-SCENARIOS-ONLY(trend-not-evaluated),
+   which CANNOT satisfy this packet's soak evidence). Both install cargo-deny and
+   FAIL on a `cargo-deny=SKIP` gate line, and both build the daemon + runner
+   release binaries (the soak resolves the daemon as a sibling). The local script
+   refuses non-Darwin hosts so a Linux/WSL run cannot masquerade as macOS proof.
    EXECUTION requires a Mac (a macOS CI runner or Ice's machine) — the Windows dev
    box cannot produce it. DECISION for Ice: dispatch the CI workflow, or run the
    script locally, before the R15 go/no-go. (This is a green-path confidence
