@@ -2265,3 +2265,28 @@ next round caught. The compounding lesson became structure:
   R15 go/no-go itself.
 - REMAINING to 100%: macOS evidence, R15 rehearsal + go/no-go (ICE STOP — the one
   mandatory human stop, resets Ice's dogfood data), R16 legacy deletion (post-cutover).
+
+
+## 2026-07-25 — R15 GO/NO-GO PACKAGE assembled — ICE STOP (awaiting authorization)
+
+- The program has reached its ONE MANDATORY HUMAN STOP. R15_GONOGO.md presents the
+  SIX decisions; nothing flips and no data is reset without Ice's explicit go.
+- Program state: all GATE6-blocking implementation done (RPC-A/B/C/D/B2/D2 merged);
+  evidence green (canonical main gate PASS, soak v3 PASS, differential 10/10,
+  14-migration ledger 0-13); GATE6 packet assembled (#229) but the GATE IS NOT
+  CLOSED — it still requires (1) the clone-reset rehearsal on REAL dogfood
+  byte-clones (machinery built + gate-verified, never run on Ice's data) and
+  (2) Ice's authorization. Both are resolved by this stop.
+- NOT code-complete by design: R13b-rest, RPC-E, switch-time re-materialization
+  wiring, and richdoc full-fidelity projection are deferred/decision-gated.
+- The six decisions: (1) pre-R15 migration at ordinal 14 (secret-ownership +
+  moments-provenance; cheap before the reset); (2) macOS evidence path (tooling
+  shipped + hardened; run `full` before the flip); (3) richdoc at cutover
+  (CUTOVER-GATING — the projection subset silently drops content);
+  (4) version-switch re-materialization (CUTOVER-GATING — stale/wrong on-disk
+  secrets until reopen); (5) secret rename-TOCTOU (CUTOVER-GATING — enforce the
+  single-user assumption in code/config, or land the dirfd/openat2 closure);
+  (6) cutover scope (RPC-E, R13b-rest) + the go/no-go itself (dogfood reset,
+  >=2-week dogfood plan, share-log-across-epoch-reset semantics).
+- Recommended order on a go: decisions 1-5 land -> rehearsal on real byte-clones ->
+  Ice authorization (closes GATE6) -> flip -> >=2-week dogfood -> R16 deletion.
