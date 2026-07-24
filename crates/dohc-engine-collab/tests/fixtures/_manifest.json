@@ -61,6 +61,7 @@
   "richdocProjection-known-lossy-code-fence-collision.json",
   "richdocProjection-known-lossy-inline-code-backticks.json",
   "richdocProjection-known-lossy-headerless-table.json",
+  "richdocProjection-known-lossy-multi-block-table-cell-separator.json",
   "richdocProjection-nested-marks-before-inline-nodes.json",
   "richdocProjection-frontmatter-table-first.json",
   "richdocProjection-link-delimiters.json",

@@ -669,6 +669,24 @@ const RICHDOC_PROJECTION_CASES = [
         xmlElement("codeBlock", { language: "lang`tick" }, [xmlText("code")]),
       ]),
   },
+  {
+    name: "known-lossy-multi-block-table-cell-separator",
+    makeDoc: () =>
+      directRichdoc([
+        table([
+          tableRow([
+            tableCell("tableHeader", "H"),
+          ]),
+          tableRow([
+            xmlElement(
+              "tableCell",
+              { colspan: 1, rowspan: 1 },
+              [paragraph("first"), paragraph("second")],
+            ),
+          ]),
+        ]),
+      ]),
+  },
 ];
 
 function makeRichdocProjection(index, fixture) {

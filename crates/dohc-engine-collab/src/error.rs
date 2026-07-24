@@ -29,6 +29,17 @@ pub enum CollabError {
     #[error("Y.Doc update is {actual} bytes, over the {max}-byte cap")]
     UpdateTooLarge { actual: usize, max: usize },
 
+    /// Markdown projection exceeded its materialization cap. This is checked
+    /// while rendering so hostile content cannot amplify a small Y.Doc into a
+    /// much larger temporary allocation before the boundary rejects it.
+    #[error("Y.Doc projection is at least {actual} bytes, over the {max}-byte cap")]
+    ProjectionTooLarge { actual: usize, max: usize },
+
+    /// Remote XML exceeded a structural projection bound before recursive
+    /// descent or content-derived collection allocation.
+    #[error("Y.Doc projection exceeds the {max_depth}-deep/{max_nodes}-node structural cap")]
+    ProjectionTooComplex { max_depth: usize, max_nodes: usize },
+
     /// An identifier (`workspace_id`/`version_id`/`object_id`/`origin_id`) is
     /// empty or over the length bound.
     #[error("invalid identifier: {reason}")]
@@ -103,6 +114,8 @@ impl CollabError {
             CollabError::ReplayParityViolation { .. } => "replay-parity-violation",
             CollabError::EmptyUpdate => "empty-update",
             CollabError::UpdateTooLarge { .. } => "update-too-large",
+            CollabError::ProjectionTooLarge { .. } => "projection-too-large",
+            CollabError::ProjectionTooComplex { .. } => "projection-too-complex",
             CollabError::InvalidIdentifier { .. } => "invalid-identifier",
             CollabError::ContentKindMismatch => "content-kind-mismatch",
             CollabError::BaseAlreadyClaimed => "base-already-claimed",

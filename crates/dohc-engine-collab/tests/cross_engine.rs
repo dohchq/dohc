@@ -93,7 +93,9 @@ fn assert_matches_expectation(fx: &Fixture, doc: &Ydoc) {
             );
             // The projection of a plaintext doc IS the exact text.
             assert_eq!(
-                doc.project(ContentKind::Plaintext).markdown,
+                doc.project(ContentKind::Plaintext)
+                    .expect("bounded plaintext projection")
+                    .markdown,
                 expected,
                 "plaintext projection seed {}",
                 fx.seed
@@ -131,7 +133,9 @@ fn assert_matches_expectation(fx: &Fixture, doc: &Ydoc) {
             }
             if let Some(expected_markdown) = fx.expected["markdown"].as_str() {
                 assert_eq!(
-                    doc.project(ContentKind::Richdoc).markdown,
+                    doc.project(ContentKind::Richdoc)
+                        .expect("bounded richdoc projection")
+                        .markdown,
                     expected_markdown,
                     "richdoc markdown projection seed {}",
                     fx.seed
@@ -190,14 +194,16 @@ fn richdoc_projection_matches_typescript_byte_for_byte() {
             .as_str()
             .expect("TypeScript markdown expectation");
         assert_eq!(
-            doc.project(ContentKind::Richdoc).markdown,
+            doc.project(ContentKind::Richdoc)
+                .expect("bounded richdoc projection")
+                .markdown,
             expected,
             "projection fixture {kind}"
         );
         cases += 1;
     }
     assert_eq!(
-        cases, 26,
+        cases, 27,
         "expected every curated richdoc projection fixture"
     );
 }
@@ -964,7 +970,10 @@ fn nested_frontmatter_keys_are_sorted_deterministically() {
     assert_eq!(doc.frontmatter_json(), fx.expected["frontmatter"]);
 
     // Projection sorts nested keys: alpha < beta < delta < gamma.
-    let markdown = doc.project(ContentKind::Richdoc).markdown;
+    let markdown = doc
+        .project(ContentKind::Richdoc)
+        .expect("bounded richdoc projection")
+        .markdown;
     let a = markdown.find("alpha").expect("alpha");
     let b = markdown.find("beta").expect("beta");
     let d = markdown.find("delta").expect("delta");

@@ -8133,6 +8133,8 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::ReplayParityViolation { .. }
         | CollabError::EmptyUpdate
         | CollabError::UpdateTooLarge { .. }
+        | CollabError::ProjectionTooLarge { .. }
+        | CollabError::ProjectionTooComplex { .. }
         | CollabError::InvalidIdentifier { .. }
         | CollabError::ContentKindMismatch
         | CollabError::BaseAlreadyClaimed

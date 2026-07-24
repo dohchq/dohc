@@ -41,6 +41,7 @@ use yrs::{
 };
 
 use crate::error::CollabError;
+use crate::limits::{MAX_PROJECTION_BYTES, MAX_PROJECTION_DEPTH, MAX_PROJECTION_NODES};
 
 /// The declared dohc root schema. The Yjs v1 wire format does not carry
 /// root-type kinds — a root's kind is defined by typed API access — so both
@@ -260,21 +261,29 @@ impl Ydoc {
 
     /// Project to markdown with provenance (constraint 4). Plaintext projects the
     /// exact `Y.Text`; richdoc projects sorted frontmatter + paragraph text.
-    pub fn project(&self, content_kind: ContentKind) -> Projection {
+    pub fn project(&self, content_kind: ContentKind) -> Result<Projection, CollabError> {
         let markdown = match content_kind {
             ContentKind::Plaintext => self.project_plaintext(),
             ContentKind::Richdoc => self.project_richdoc(),
-        };
-        Projection {
+        }?;
+        Ok(Projection {
             markdown,
             content_kind,
             source_state_vector_sha256: crate::hex_sha256(&self.encode_state_vector()),
             destructive: false,
-        }
+        })
     }
 
-    fn project_plaintext(&self) -> String {
-        self.plaintext_string()
+    fn project_plaintext(&self) -> Result<String, CollabError> {
+        let text = self.doc.get_or_insert_text(ROOT_PLAINTEXT);
+        let txn = self.doc.transact();
+        let mut output = ProjectionBuffer::new();
+        for diff in text.diff(&txn, YChange::identity) {
+            if let Out::Any(Any::String(value)) = diff.insert {
+                output.push_str(&value)?;
+            }
+        }
+        Ok(output.into_string())
     }
 
     /// The exact plaintext content (the [`ROOT_PLAINTEXT`] `Y.Text` string). The
@@ -335,8 +344,8 @@ impl Ydoc {
         paragraphs
     }
 
-    fn project_richdoc(&self) -> String {
-        let mut out = String::new();
+    fn project_richdoc(&self) -> Result<String, CollabError> {
+        let mut out = ProjectionBuffer::new();
         // Acquire BOTH roots before opening the read txn: yrs `get_or_insert_*`
         // takes the store lock, so calling one while a transaction is live
         // deadlocks (spike harness note).
@@ -344,32 +353,40 @@ impl Ydoc {
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
         let txn = self.doc.transact();
         let mut has_frontmatter = false;
+        let mut remaining_nodes = MAX_PROJECTION_NODES;
+        let mut source_text_bytes = 0usize;
         if frontmatter.len(&txn) > 0 {
             has_frontmatter = true;
             let mut entries: BTreeMap<String, Value> = BTreeMap::new();
             for (k, v) in frontmatter.iter(&txn) {
-                entries.insert(k.to_string(), out_json(&txn, v));
+                source_text_bytes = checked_projection_len(source_text_bytes, k.len())?;
+                entries.insert(
+                    k.to_string(),
+                    projection_out_json(&txn, v, 0, &mut remaining_nodes, &mut source_text_bytes)?,
+                );
             }
-            out.push_str("---\n");
+            out.push_str("---\n")?;
             for (k, v) in &entries {
-                out.push_str(&project_frontmatter(k, v));
+                out.push_str(&project_frontmatter(k, v)?)?;
             }
-            out.push_str("---");
+            out.push_str("---")?;
         }
         let children: Vec<MarkdownNode> = body
             .children(&txn)
-            .map(|child| markdown_node(&txn, child))
-            .collect();
-        let body_markdown = markdown_document(&children);
+            .map(|child| {
+                markdown_node(&txn, child, 0, &mut remaining_nodes, &mut source_text_bytes)
+            })
+            .collect::<ProjectionResult<_>>()?;
+        let body_markdown = markdown_document(&children)?;
         if has_frontmatter {
             out.push_str(if body_markdown.starts_with('\n') {
                 "\n"
             } else {
                 "\n\n"
-            });
+            })?;
         }
-        out.push_str(&body_markdown);
-        out
+        out.push_str(&body_markdown)?;
+        Ok(out.into_string())
     }
 
     // ---- Rust-side edit helpers (used to build lineages in unit tests without
@@ -572,6 +589,281 @@ fn out_json_attr<T: ReadTxn>(txn: &T, out: Out) -> Value {
     }
 }
 
+fn consume_projection_value_node(
+    depth: usize,
+    remaining_nodes: &mut usize,
+) -> ProjectionResult<()> {
+    if depth > MAX_PROJECTION_DEPTH || *remaining_nodes == 0 {
+        return Err(CollabError::ProjectionTooComplex {
+            max_depth: MAX_PROJECTION_DEPTH,
+            max_nodes: MAX_PROJECTION_NODES,
+        });
+    }
+    *remaining_nodes -= 1;
+    Ok(())
+}
+
+fn projection_out_json<T: ReadTxn>(
+    txn: &T,
+    out: Out,
+    depth: usize,
+    remaining_nodes: &mut usize,
+    source_bytes: &mut usize,
+) -> ProjectionResult<Value> {
+    consume_projection_value_node(depth, remaining_nodes)?;
+    match out {
+        Out::YMap(map) => {
+            let mut entries = BTreeMap::new();
+            for (key, value) in map.iter(txn) {
+                *source_bytes = checked_projection_len(*source_bytes, key.len())?;
+                entries.insert(
+                    key.to_string(),
+                    projection_out_json(txn, value, depth + 1, remaining_nodes, source_bytes)?,
+                );
+            }
+            Ok(json!({
+                "type": "map",
+                "value": Value::Object(entries.into_iter().collect())
+            }))
+        }
+        Out::YArray(array) => {
+            let mut items = Vec::new();
+            for value in array.iter(txn) {
+                items.push(projection_out_json(
+                    txn,
+                    value,
+                    depth + 1,
+                    remaining_nodes,
+                    source_bytes,
+                )?);
+            }
+            Ok(json!({ "type": "array", "value": items }))
+        }
+        Out::YText(text) => Ok(json!({
+            "type": "text",
+            "delta": projection_diffs_json(
+                txn,
+                text.diff(txn, YChange::identity),
+                depth + 1,
+                remaining_nodes,
+                source_bytes,
+            )?
+        })),
+        Out::YXmlFragment(fragment) => {
+            let mut children = Vec::new();
+            for child in fragment.children(txn) {
+                children.push(projection_xml_json(
+                    txn,
+                    child,
+                    depth + 1,
+                    remaining_nodes,
+                    source_bytes,
+                )?);
+            }
+            Ok(json!({ "type": "xmlFragment", "children": children }))
+        }
+        Out::YXmlElement(element) => projection_xml_json(
+            txn,
+            XmlOut::Element(element),
+            depth + 1,
+            remaining_nodes,
+            source_bytes,
+        ),
+        Out::YXmlText(text) => projection_xml_json(
+            txn,
+            XmlOut::Text(text),
+            depth + 1,
+            remaining_nodes,
+            source_bytes,
+        ),
+        Out::Any(any) => Ok(json!({
+            "type": "any",
+            "value": projection_any_to_json(
+                &any,
+                depth + 1,
+                remaining_nodes,
+                source_bytes,
+            )?
+        })),
+        other => {
+            let debug = ensure_projection_string(format!("{other:?}"))?;
+            Ok(json!({ "type": "unsupported", "debug": debug }))
+        }
+    }
+}
+
+fn projection_xml_json<T: ReadTxn>(
+    txn: &T,
+    node: XmlOut,
+    depth: usize,
+    remaining_nodes: &mut usize,
+    source_bytes: &mut usize,
+) -> ProjectionResult<Value> {
+    consume_projection_value_node(depth, remaining_nodes)?;
+    match node {
+        XmlOut::Element(element) => {
+            *source_bytes = checked_projection_len(*source_bytes, element.tag().len())?;
+            let mut attrs = BTreeMap::new();
+            for (key, value) in element.attributes(txn) {
+                *source_bytes = checked_projection_len(*source_bytes, key.len())?;
+                attrs.insert(
+                    key.to_string(),
+                    projection_out_json_attr(txn, value, depth + 1, remaining_nodes, source_bytes)?,
+                );
+            }
+            let mut children = Vec::new();
+            for child in element.children(txn) {
+                children.push(projection_xml_json(
+                    txn,
+                    child,
+                    depth + 1,
+                    remaining_nodes,
+                    source_bytes,
+                )?);
+            }
+            Ok(json!({
+                "type": "element",
+                "tag": element.tag().to_string(),
+                "attrs": Value::Object(attrs.into_iter().collect()),
+                "children": children,
+            }))
+        }
+        XmlOut::Text(text) => Ok(json!({
+            "type": "xmlText",
+            "delta": projection_diffs_json(
+                txn,
+                text.diff(txn, YChange::identity),
+                depth + 1,
+                remaining_nodes,
+                source_bytes,
+            )?
+        })),
+        XmlOut::Fragment(fragment) => {
+            let mut children = Vec::new();
+            for child in fragment.children(txn) {
+                children.push(projection_xml_json(
+                    txn,
+                    child,
+                    depth + 1,
+                    remaining_nodes,
+                    source_bytes,
+                )?);
+            }
+            Ok(json!({ "type": "xmlFragment", "children": children }))
+        }
+    }
+}
+
+fn projection_out_json_attr<T: ReadTxn>(
+    txn: &T,
+    out: Out,
+    depth: usize,
+    remaining_nodes: &mut usize,
+    source_bytes: &mut usize,
+) -> ProjectionResult<Value> {
+    match out {
+        Out::Any(any) => projection_any_to_json(&any, depth, remaining_nodes, source_bytes),
+        other => projection_out_json(txn, other, depth, remaining_nodes, source_bytes),
+    }
+}
+
+fn projection_diffs_json<T: ReadTxn, D>(
+    _txn: &T,
+    diffs: Vec<yrs::types::text::Diff<D>>,
+    depth: usize,
+    remaining_nodes: &mut usize,
+    source_bytes: &mut usize,
+) -> ProjectionResult<Value> {
+    let mut items = Vec::new();
+    for diff in diffs {
+        consume_projection_value_node(depth, remaining_nodes)?;
+        let insert = match diff.insert {
+            Out::Any(any) => {
+                projection_any_to_json(&any, depth + 1, remaining_nodes, source_bytes)?
+            }
+            other => {
+                consume_projection_value_node(depth + 1, remaining_nodes)?;
+                json!(ensure_projection_string(format!("{other:?}"))?)
+            }
+        };
+        let attrs = if let Some(attrs) = diff.attributes {
+            let mut sorted = BTreeMap::new();
+            for (key, value) in attrs.iter() {
+                *source_bytes = checked_projection_len(*source_bytes, key.len())?;
+                sorted.insert(
+                    key.to_string(),
+                    projection_any_to_json(value, depth + 1, remaining_nodes, source_bytes)?,
+                );
+            }
+            Some(Value::Object(sorted.into_iter().collect()))
+        } else {
+            None
+        };
+        items.push(match attrs {
+            Some(attrs) => json!({ "insert": insert, "attrs": attrs }),
+            None => json!({ "insert": insert }),
+        });
+    }
+    Ok(Value::Array(items))
+}
+
+fn projection_any_to_json(
+    any: &Any,
+    depth: usize,
+    remaining_nodes: &mut usize,
+    source_bytes: &mut usize,
+) -> ProjectionResult<Value> {
+    consume_projection_value_node(depth, remaining_nodes)?;
+    match any {
+        Any::Null | Any::Undefined => Ok(Value::Null),
+        Any::Bool(value) => Ok(json!(value)),
+        Any::Number(value) => {
+            if value.fract() == 0.0 && value.is_finite() && value.abs() < 9.007_199_254_740_992e15 {
+                Ok(json!(*value as i64))
+            } else {
+                Ok(json!(value))
+            }
+        }
+        Any::BigInt(value) => Ok(json!(value)),
+        Any::String(value) => {
+            *source_bytes = checked_projection_len(*source_bytes, value.len())?;
+            Ok(json!(value.as_ref()))
+        }
+        Any::Buffer(value) => {
+            let encoded_len = value
+                .len()
+                .div_ceil(3)
+                .checked_mul(4)
+                .ok_or_else(|| projection_too_large(usize::MAX))?;
+            *source_bytes = checked_projection_len(*source_bytes, encoded_len)?;
+            Ok(json!({ "__bytes__": base64_encode(value.as_ref()) }))
+        }
+        Any::Array(values) => {
+            let mut items = Vec::new();
+            for value in values.iter() {
+                items.push(projection_any_to_json(
+                    value,
+                    depth + 1,
+                    remaining_nodes,
+                    source_bytes,
+                )?);
+            }
+            Ok(Value::Array(items))
+        }
+        Any::Map(map) => {
+            let mut sorted = BTreeMap::new();
+            for (key, value) in map.iter() {
+                *source_bytes = checked_projection_len(*source_bytes, key.len())?;
+                sorted.insert(
+                    key.clone(),
+                    projection_any_to_json(value, depth + 1, remaining_nodes, source_bytes)?,
+                );
+            }
+            Ok(Value::Object(sorted.into_iter().collect()))
+        }
+    }
+}
+
 fn diffs_json<D>(diffs: Vec<yrs::types::text::Diff<D>>) -> Value {
     let items: Vec<Value> = diffs
         .into_iter()
@@ -648,7 +940,82 @@ fn base64_encode(bytes: &[u8]) -> String {
 
 // ---- markdown projection helpers -------------------------------------------
 
-fn project_frontmatter(key: &str, value: &Value) -> String {
+type ProjectionResult<T> = Result<T, CollabError>;
+
+fn projection_too_large(actual: usize) -> CollabError {
+    CollabError::ProjectionTooLarge {
+        actual,
+        max: MAX_PROJECTION_BYTES,
+    }
+}
+
+fn checked_projection_len(current: usize, additional: usize) -> Result<usize, CollabError> {
+    let attempted = current
+        .checked_add(additional)
+        .ok_or_else(|| projection_too_large(usize::MAX))?;
+    if attempted > MAX_PROJECTION_BYTES {
+        Err(projection_too_large(attempted))
+    } else {
+        Ok(attempted)
+    }
+}
+
+fn ensure_projection_string(value: String) -> Result<String, CollabError> {
+    if value.len() > MAX_PROJECTION_BYTES {
+        Err(projection_too_large(value.len()))
+    } else {
+        Ok(value)
+    }
+}
+
+struct ProjectionBuffer {
+    value: String,
+}
+
+impl ProjectionBuffer {
+    fn new() -> Self {
+        Self {
+            value: String::new(),
+        }
+    }
+
+    fn with_capacity(capacity: usize) -> Result<Self, CollabError> {
+        if capacity > MAX_PROJECTION_BYTES {
+            return Err(projection_too_large(capacity));
+        }
+        Ok(Self {
+            value: String::with_capacity(capacity),
+        })
+    }
+
+    fn push_str(&mut self, value: &str) -> Result<(), CollabError> {
+        checked_projection_len(self.value.len(), value.len())?;
+        self.value.push_str(value);
+        Ok(())
+    }
+
+    fn push(&mut self, value: char) -> Result<(), CollabError> {
+        checked_projection_len(self.value.len(), value.len_utf8())?;
+        self.value.push(value);
+        Ok(())
+    }
+
+    fn push_repeat(&mut self, value: char, count: usize) -> Result<(), CollabError> {
+        let bytes = value
+            .len_utf8()
+            .checked_mul(count)
+            .ok_or_else(|| projection_too_large(usize::MAX))?;
+        checked_projection_len(self.value.len(), bytes)?;
+        self.value.extend(std::iter::repeat_n(value, count));
+        Ok(())
+    }
+
+    fn into_string(self) -> String {
+        self.value
+    }
+}
+
+fn project_frontmatter(key: &str, value: &Value) -> ProjectionResult<String> {
     match value {
         Value::Object(map) if map.get("type") == Some(&json!("any")) => {
             scalar_line(key, map.get("value").unwrap_or(&Value::Null))
@@ -657,21 +1024,40 @@ fn project_frontmatter(key: &str, value: &Value) -> String {
     }
 }
 
-fn scalar_line(key: &str, value: &Value) -> String {
+fn scalar_line(key: &str, value: &Value) -> ProjectionResult<String> {
+    let mut output = ProjectionBuffer::new();
     match value {
-        Value::String(s) => format!("{key}: {s}\n"),
+        Value::String(value) => {
+            output.push_str(key)?;
+            output.push_str(": ")?;
+            output.push_str(value)?;
+            output.push('\n')?;
+        }
         Value::Object(map) => {
             // Nested map: emit sorted `key:` block (constraint 2 — keys already
             // sorted by `any_to_json`'s BTreeMap).
-            let mut out = format!("{key}:\n");
+            output.push_str(key)?;
+            output.push_str(":\n")?;
             for (k, v) in map {
-                out.push_str(&format!("  {}\n", scalar_line(k, v).trim_end()));
+                let child = scalar_line(k, v)?;
+                output.push_str("  ")?;
+                output.push_str(child.trim_end())?;
+                output.push('\n')?;
             }
-            out
         }
-        Value::Null => format!("{key}: null\n"),
-        other => format!("{key}: {other}\n"),
+        Value::Null => {
+            output.push_str(key)?;
+            output.push_str(": null\n")?;
+        }
+        other => {
+            output.push_str(key)?;
+            output.push_str(": ")?;
+            let value = ensure_projection_string(serde_json::to_string(other).unwrap_or_default())?;
+            output.push_str(&value)?;
+            output.push('\n')?;
+        }
     }
+    Ok(output.into_string())
 }
 
 #[derive(Debug)]
@@ -743,42 +1129,65 @@ struct RenderContext<'a> {
     index: usize,
 }
 
-fn markdown_node<T: ReadTxn>(txn: &T, node: XmlOut) -> MarkdownNode {
+fn markdown_node<T: ReadTxn>(
+    txn: &T,
+    node: XmlOut,
+    depth: usize,
+    remaining_nodes: &mut usize,
+    source_text_bytes: &mut usize,
+) -> ProjectionResult<MarkdownNode> {
+    if depth > MAX_PROJECTION_DEPTH || *remaining_nodes == 0 {
+        return Err(CollabError::ProjectionTooComplex {
+            max_depth: MAX_PROJECTION_DEPTH,
+            max_nodes: MAX_PROJECTION_NODES,
+        });
+    }
+    *remaining_nodes -= 1;
     match node {
-        XmlOut::Text(text) => MarkdownNode::Text(
-            text.diff(txn, YChange::identity)
-                .into_iter()
-                .filter_map(|diff| {
-                    let text = match diff.insert {
-                        Out::Any(Any::String(text)) => text.to_string(),
-                        _ => return None,
-                    };
-                    let mut marks = Vec::new();
-                    if let Some(attrs) = diff.attributes {
-                        push_mark(&mut marks, MarkKind::Link, attrs.get("link"));
-                        push_mark(&mut marks, MarkKind::Highlight, attrs.get("highlight"));
-                        push_mark(
-                            &mut marks,
-                            MarkKind::Bold,
-                            attrs.get("bold").or_else(|| attrs.get("strong")),
-                        );
-                        push_mark(&mut marks, MarkKind::Code, attrs.get("code"));
-                        push_mark(
-                            &mut marks,
-                            MarkKind::Italic,
-                            attrs.get("italic").or_else(|| attrs.get("em")),
-                        );
-                        push_mark(
-                            &mut marks,
-                            MarkKind::Strike,
-                            attrs.get("strike").or_else(|| attrs.get("strikethrough")),
-                        );
-                        push_mark(&mut marks, MarkKind::Underline, attrs.get("underline"));
+        XmlOut::Text(text) => {
+            let mut runs = Vec::new();
+            for diff in text.diff(txn, YChange::identity) {
+                let text = match diff.insert {
+                    Out::Any(Any::String(text)) => {
+                        *source_text_bytes =
+                            checked_projection_len(*source_text_bytes, text.len())?;
+                        text.to_string()
                     }
-                    Some(TextRun { text, marks })
-                })
-                .collect(),
-        ),
+                    _ => continue,
+                };
+                if *remaining_nodes == 0 {
+                    return Err(CollabError::ProjectionTooComplex {
+                        max_depth: MAX_PROJECTION_DEPTH,
+                        max_nodes: MAX_PROJECTION_NODES,
+                    });
+                }
+                *remaining_nodes -= 1;
+                let mut marks = Vec::new();
+                if let Some(attrs) = diff.attributes {
+                    push_mark(&mut marks, MarkKind::Link, attrs.get("link"));
+                    push_mark(&mut marks, MarkKind::Highlight, attrs.get("highlight"));
+                    push_mark(
+                        &mut marks,
+                        MarkKind::Bold,
+                        attrs.get("bold").or_else(|| attrs.get("strong")),
+                    );
+                    push_mark(&mut marks, MarkKind::Code, attrs.get("code"));
+                    push_mark(
+                        &mut marks,
+                        MarkKind::Italic,
+                        attrs.get("italic").or_else(|| attrs.get("em")),
+                    );
+                    push_mark(
+                        &mut marks,
+                        MarkKind::Strike,
+                        attrs.get("strike").or_else(|| attrs.get("strikethrough")),
+                    );
+                    push_mark(&mut marks, MarkKind::Underline, attrs.get("underline"));
+                }
+                runs.push(TextRun { text, marks });
+            }
+            Ok(MarkdownNode::Text(runs))
+        }
         XmlOut::Element(element) => {
             let attrs = element
                 .attributes(txn)
@@ -786,20 +1195,24 @@ fn markdown_node<T: ReadTxn>(txn: &T, node: XmlOut) -> MarkdownNode {
                 .collect();
             let children = element
                 .children(txn)
-                .map(|child| markdown_node(txn, child))
-                .collect();
-            MarkdownNode::Element {
+                .map(|child| {
+                    markdown_node(txn, child, depth + 1, remaining_nodes, source_text_bytes)
+                })
+                .collect::<ProjectionResult<_>>()?;
+            Ok(MarkdownNode::Element {
                 tag: element.tag().to_string(),
                 attrs,
                 children,
-            }
+            })
         }
-        XmlOut::Fragment(fragment) => MarkdownNode::Fragment(
+        XmlOut::Fragment(fragment) => Ok(MarkdownNode::Fragment(
             fragment
                 .children(txn)
-                .map(|child| markdown_node(txn, child))
-                .collect(),
-        ),
+                .map(|child| {
+                    markdown_node(txn, child, depth + 1, remaining_nodes, source_text_bytes)
+                })
+                .collect::<ProjectionResult<_>>()?,
+        )),
     }
 }
 
@@ -812,13 +1225,13 @@ fn push_mark(marks: &mut Vec<MarkdownMark>, kind: MarkKind, attrs: Option<&Any>)
     }
 }
 
-fn markdown_document(children: &[MarkdownNode]) -> String {
+fn markdown_document(children: &[MarkdownNode]) -> ProjectionResult<String> {
     let attrs = BTreeMap::new();
-    let rendered = render_nodes(children, "doc", &attrs, "\n\n");
+    let rendered = render_nodes(children, "doc", &attrs, "\n\n")?;
     if markdown_output_is_empty(&rendered) {
-        String::new()
+        Ok(String::new())
     } else {
-        trim_js_end(&rendered).to_string()
+        Ok(trim_js_end(&rendered).to_string())
     }
 }
 
@@ -832,26 +1245,27 @@ fn render_nodes(
     parent_tag: &str,
     parent_attrs: &BTreeMap<String, Value>,
     separator: &str,
-) -> String {
-    nodes
-        .iter()
-        .enumerate()
-        .map(|(index, node)| {
-            render_node(
-                node,
-                RenderContext {
-                    parent_tag,
-                    parent_attrs,
-                    previous: index.checked_sub(1).map(|previous| &nodes[previous]),
-                    index,
-                },
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(separator)
+) -> ProjectionResult<String> {
+    let mut output = ProjectionBuffer::new();
+    for (index, node) in nodes.iter().enumerate() {
+        if index != 0 {
+            output.push_str(separator)?;
+        }
+        let rendered = render_node(
+            node,
+            RenderContext {
+                parent_tag,
+                parent_attrs,
+                previous: index.checked_sub(1).map(|previous| &nodes[previous]),
+                index,
+            },
+        )?;
+        output.push_str(&rendered)?;
+    }
+    Ok(output.into_string())
 }
 
-fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> String {
+fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> ProjectionResult<String> {
     match node {
         MarkdownNode::Text(_) => render_inline(std::slice::from_ref(node), false),
         MarkdownNode::Fragment(children) => {
@@ -866,9 +1280,9 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> String {
             "paragraph" => {
                 if children.is_empty() {
                     if context.previous.is_some_and(is_empty_paragraph) {
-                        "&nbsp;".to_string()
+                        Ok("&nbsp;".to_string())
                     } else {
-                        String::new()
+                        Ok(String::new())
                     }
                 } else {
                     render_inline(children, false)
@@ -876,10 +1290,20 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> String {
             }
             "heading" => {
                 if children.is_empty() {
-                    String::new()
+                    Ok(String::new())
                 } else {
-                    let level = attr_i64(attrs, "level").unwrap_or(1).max(0) as usize;
-                    format!("{} {}", "#".repeat(level), render_inline(children, false))
+                    // StarterKit's heading schema supports levels 1 through 6.
+                    // Remote Y.Doc updates bypass that schema, so clamp hostile
+                    // values before allocating. The TS serializer repeats raw
+                    // out-of-range positive levels and can itself fail; level
+                    // six is the closest safe schema-valid projection.
+                    let level = attr_i64(attrs, "level").unwrap_or(1).clamp(1, 6) as usize;
+                    let inline = render_inline(children, false)?;
+                    let mut output = ProjectionBuffer::with_capacity(level + 1 + inline.len())?;
+                    output.push_repeat('#', level)?;
+                    output.push(' ')?;
+                    output.push_str(&inline)?;
+                    Ok(output.into_string())
                 }
             }
             "blockquote" => render_prefixed_blocks(children, tag, attrs, ">", None),
@@ -891,20 +1315,20 @@ fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> String {
                 render_list_item(children, &context, Some(prefix))
             }
             "codeBlock" => render_code_block(attrs, children),
-            "horizontalRule" => "---".to_string(),
-            "hardBreak" => "  \n".to_string(),
+            "horizontalRule" => Ok("---".to_string()),
+            "hardBreak" => Ok("  \n".to_string()),
             "image" => render_image(attrs),
-            "escapedPunctuation" => {
-                format!(
-                    "\\{}",
-                    escape_markdown_line_breaks(&attr_js_string(attrs, "value"))
-                )
-            }
+            "escapedPunctuation" => ensure_projection_string(format!(
+                "\\{}",
+                escape_markdown_line_breaks(&attr_js_string(attrs, "value"))
+            )),
             "wikilink" => render_wikilink(attrs),
             "inlineAtom" => render_inline_atom(attrs),
             "callout" => render_callout(attrs, children),
-            "mathInline" => format!("${}$", attr_js_string(attrs, "tex")),
-            "mathBlock" => format!("$${}$$", attr_js_string(attrs, "tex")),
+            "mathInline" => ensure_projection_string(format!("${}$", attr_js_string(attrs, "tex"))),
+            "mathBlock" => {
+                ensure_projection_string(format!("$${}$$", attr_js_string(attrs, "tex")))
+            }
             "table" => render_table(children),
             "tableRow" | "tableCell" | "tableHeader" => render_nodes(children, tag, attrs, ""),
             _ => render_nodes(children, tag, attrs, ""),
@@ -926,52 +1350,68 @@ fn render_prefixed_blocks(
     parent_attrs: &BTreeMap<String, Value>,
     prefix: &str,
     header: Option<&str>,
-) -> String {
-    let blocks: Vec<String> = children
-        .iter()
-        .enumerate()
-        .map(|(index, child)| {
-            let rendered = render_node(
-                child,
-                RenderContext {
-                    parent_tag,
-                    parent_attrs,
-                    previous: index.checked_sub(1).map(|previous| &children[previous]),
-                    index,
-                },
-            );
-            prefix_lines(&rendered, prefix)
-        })
-        .collect();
-    let body = blocks.join(&format!("\n{prefix}\n"));
+) -> ProjectionResult<String> {
+    let separator = format!("\n{prefix}\n");
+    let mut body = ProjectionBuffer::new();
+    for (index, child) in children.iter().enumerate() {
+        let rendered = render_node(
+            child,
+            RenderContext {
+                parent_tag,
+                parent_attrs,
+                previous: index.checked_sub(1).map(|previous| &children[previous]),
+                index,
+            },
+        )?;
+        if index != 0 {
+            body.push_str(&separator)?;
+        }
+        body.push_str(&prefix_lines(&rendered, prefix)?)?;
+    }
+    let body = body.into_string();
     match header {
-        Some(header) if body.is_empty() => format!("{prefix} {header}"),
-        Some(header) => format!("{prefix} {header}\n{body}"),
-        None => body,
+        Some(header) if body.is_empty() => {
+            let mut output = ProjectionBuffer::new();
+            output.push_str(prefix)?;
+            output.push(' ')?;
+            output.push_str(header)?;
+            Ok(output.into_string())
+        }
+        Some(header) => {
+            let mut output = ProjectionBuffer::new();
+            output.push_str(prefix)?;
+            output.push(' ')?;
+            output.push_str(header)?;
+            output.push('\n')?;
+            output.push_str(&body)?;
+            Ok(output.into_string())
+        }
+        None => Ok(body),
     }
 }
 
-fn prefix_lines(block: &str, prefix: &str) -> String {
-    block
-        .split('\n')
-        .map(|line| {
-            if trim_js(line).is_empty() {
-                prefix.to_string()
-            } else {
-                format!("{prefix} {line}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+fn prefix_lines(block: &str, prefix: &str) -> ProjectionResult<String> {
+    let mut output = ProjectionBuffer::new();
+    for (index, line) in block.split('\n').enumerate() {
+        if index != 0 {
+            output.push('\n')?;
+        }
+        output.push_str(prefix)?;
+        if !trim_js(line).is_empty() {
+            output.push(' ')?;
+            output.push_str(line)?;
+        }
+    }
+    Ok(output.into_string())
 }
 
 fn render_list_item(
     children: &[MarkdownNode],
     context: &RenderContext<'_>,
     task_prefix: Option<&str>,
-) -> String {
+) -> ProjectionResult<String> {
     let Some((first, nested)) = children.split_first() else {
-        return String::new();
+        return Ok(String::new());
     };
     let prefix = task_prefix.map_or_else(
         || match context.parent_tag {
@@ -979,7 +1419,9 @@ fn render_list_item(
                 let start = attr_i64(context.parent_attrs, "start")
                     .filter(|start| *start != 0)
                     .unwrap_or(1);
-                format!("{}. ", start + context.index as i64)
+                let ordinal =
+                    start.saturating_add(i64::try_from(context.index).unwrap_or(i64::MAX));
+                format!("{ordinal}. ")
             }
             _ => "- ".to_string(),
         },
@@ -993,8 +1435,10 @@ fn render_list_item(
             previous: None,
             index: 0,
         },
-    );
-    let mut output = format!("{prefix}{first_rendered}");
+    )?;
+    let mut output = ProjectionBuffer::new();
+    output.push_str(&prefix)?;
+    output.push_str(&first_rendered)?;
     for (index, child) in nested.iter().enumerate() {
         let child_rendered = render_node(
             child,
@@ -1008,33 +1452,45 @@ fn render_list_item(
                 },
                 index: index + 1,
             },
-        );
-        let indented = child_rendered
-            .split('\n')
-            .map(|line| format!("  {line}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        if element_tag(child) == Some("paragraph") {
-            output.push_str("\n\n");
-        } else {
-            output.push('\n');
+        )?;
+        let mut indented = ProjectionBuffer::new();
+        for (line_index, line) in child_rendered.split('\n').enumerate() {
+            if line_index != 0 {
+                indented.push('\n')?;
+            }
+            indented.push_str("  ")?;
+            indented.push_str(line)?;
         }
-        output.push_str(&indented);
+        if element_tag(child) == Some("paragraph") {
+            output.push_str("\n\n")?;
+        } else {
+            output.push('\n')?;
+        }
+        output.push_str(&indented.into_string())?;
     }
-    output
+    Ok(output.into_string())
 }
 
-fn render_code_block(attrs: &BTreeMap<String, Value>, children: &[MarkdownNode]) -> String {
+fn render_code_block(
+    attrs: &BTreeMap<String, Value>,
+    children: &[MarkdownNode],
+) -> ProjectionResult<String> {
     let language = attr_js_string(attrs, "language");
+    let mut output = ProjectionBuffer::new();
+    output.push_str("```")?;
+    output.push_str(&language)?;
     // Match TS: fixed triple-backtick fences can collide with code content.
     if children.is_empty() {
-        format!("```{language}\n\n```")
+        output.push_str("\n\n```")?;
     } else {
-        format!("```{language}\n{}\n```", render_inline(children, true))
+        output.push('\n')?;
+        output.push_str(&render_inline(children, true)?)?;
+        output.push_str("\n```")?;
     }
+    Ok(output.into_string())
 }
 
-fn render_image(attrs: &BTreeMap<String, Value>) -> String {
+fn render_image(attrs: &BTreeMap<String, Value>) -> ProjectionResult<String> {
     let alt = escape_markdown_line_breaks(
         &attr_js_string(attrs, "alt")
             .replace('\\', "\\\\")
@@ -1071,7 +1527,14 @@ fn render_image(attrs: &BTreeMap<String, Value>) -> String {
             )
         })
         .unwrap_or_default();
-    format!("![{alt}]({src}{title})")
+    let mut output = ProjectionBuffer::new();
+    output.push_str("![")?;
+    output.push_str(&alt)?;
+    output.push_str("](")?;
+    output.push_str(&src)?;
+    output.push_str(&title)?;
+    output.push(')')?;
+    Ok(output.into_string())
 }
 
 fn sanitize_image_src(src: &str) -> String {
@@ -1120,13 +1583,13 @@ fn image_protocol(src: &str) -> Option<String> {
     None
 }
 
-fn render_wikilink(attrs: &BTreeMap<String, Value>) -> String {
+fn render_wikilink(attrs: &BTreeMap<String, Value>) -> ProjectionResult<String> {
     let target = escape_wikilink_part(&attr_js_string(attrs, "target"));
     let label = attr_js_string(attrs, "label");
     if label.is_empty() {
-        format!("[[{target}]]")
+        ensure_projection_string(format!("[[{target}]]"))
     } else {
-        format!("[[{target}|{}]]", escape_wikilink_part(&label))
+        ensure_projection_string(format!("[[{target}|{}]]", escape_wikilink_part(&label)))
     }
 }
 
@@ -1137,16 +1600,19 @@ fn escape_wikilink_part(value: &str) -> String {
         .replace('|', "\\|")
 }
 
-fn render_inline_atom(attrs: &BTreeMap<String, Value>) -> String {
+fn render_inline_atom(attrs: &BTreeMap<String, Value>) -> ProjectionResult<String> {
     let source = attr_js_string(attrs, "source");
     if source.is_empty() {
-        format!("{{{{atom:{}}}}}", attr_js_string(attrs, "atomId"))
+        ensure_projection_string(format!("{{{{atom:{}}}}}", attr_js_string(attrs, "atomId")))
     } else {
-        format!("{{{{{source}}}}}")
+        ensure_projection_string(format!("{{{{{source}}}}}"))
     }
 }
 
-fn render_callout(attrs: &BTreeMap<String, Value>, children: &[MarkdownNode]) -> String {
+fn render_callout(
+    attrs: &BTreeMap<String, Value>,
+    children: &[MarkdownNode],
+) -> ProjectionResult<String> {
     let callout_type = attrs
         .get("calloutType")
         .and_then(Value::as_str)
@@ -1162,30 +1628,36 @@ fn render_callout(attrs: &BTreeMap<String, Value>, children: &[MarkdownNode]) ->
     } else {
         format!("[!{callout_type}]{fold} {title}")
     };
-    let rendered: Vec<String> = children
-        .iter()
-        .enumerate()
-        .map(|(index, child)| {
-            render_node(
-                child,
-                RenderContext {
-                    parent_tag: "callout",
-                    parent_attrs: attrs,
-                    previous: index.checked_sub(1).map(|previous| &children[previous]),
-                    index,
-                },
-            )
-        })
-        .collect();
-    if !rendered.iter().any(|block| !trim_js(block).is_empty()) {
-        return format!("> {header}");
+    let mut blocks = ProjectionBuffer::new();
+    let mut has_body = false;
+    for (index, child) in children.iter().enumerate() {
+        let rendered = render_node(
+            child,
+            RenderContext {
+                parent_tag: "callout",
+                parent_attrs: attrs,
+                previous: index.checked_sub(1).map(|previous| &children[previous]),
+                index,
+            },
+        )?;
+        has_body |= !trim_js(&rendered).is_empty();
+        if index != 0 {
+            blocks.push_str("\n>\n")?;
+        }
+        blocks.push_str(&prefix_lines(&rendered, ">")?)?;
     }
-    let blocks = rendered
-        .iter()
-        .map(|block| prefix_lines(block, ">"))
-        .collect::<Vec<_>>()
-        .join("\n>\n");
-    format!("> {header}\n{blocks}")
+    if !has_body {
+        let mut output = ProjectionBuffer::new();
+        output.push_str("> ")?;
+        output.push_str(&header)?;
+        return Ok(output.into_string());
+    }
+    let mut output = ProjectionBuffer::new();
+    output.push_str("> ")?;
+    output.push_str(&header)?;
+    output.push('\n')?;
+    output.push_str(&blocks.into_string())?;
+    Ok(output.into_string())
 }
 
 fn normalize_callout_title(value: &str) -> String {
@@ -1218,77 +1690,78 @@ struct TableCell {
     align: Option<TableAlign>,
 }
 
-fn render_table(children: &[MarkdownNode]) -> String {
-    let rows: Vec<Vec<TableCell>> = children
-        .iter()
-        .filter_map(|row| {
+fn render_table(children: &[MarkdownNode]) -> ProjectionResult<String> {
+    let mut rows = Vec::new();
+    let mut cell_text_bytes = 0usize;
+    for row in children {
+        let MarkdownNode::Element {
+            tag,
+            attrs: _,
+            children: cells,
+        } = row
+        else {
+            continue;
+        };
+        if tag != "tableRow" {
+            continue;
+        }
+        let mut rendered_cells = Vec::new();
+        for cell in cells {
             let MarkdownNode::Element {
                 tag,
-                attrs: _,
-                children: cells,
-            } = row
+                attrs,
+                children,
+            } = cell
             else {
-                return None;
+                continue;
             };
-            if tag != "tableRow" {
-                return None;
+            if tag != "tableCell" && tag != "tableHeader" {
+                continue;
             }
-            Some(
-                cells
-                    .iter()
-                    .filter_map(|cell| {
-                        let MarkdownNode::Element {
-                            tag,
-                            attrs,
-                            children,
-                        } = cell
-                        else {
-                            return None;
-                        };
-                        if tag != "tableCell" && tag != "tableHeader" {
-                            return None;
-                        }
-                        let raw = if children.len() > 1 {
-                            children
-                                .iter()
-                                .enumerate()
-                                .map(|(index, child)| {
-                                    render_node(
-                                        child,
-                                        RenderContext {
-                                            parent_tag: tag,
-                                            parent_attrs: attrs,
-                                            previous: index
-                                                .checked_sub(1)
-                                                .map(|previous| &children[previous]),
-                                            index,
-                                        },
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\u{001f}")
-                        } else {
-                            render_nodes(children, tag, attrs, "")
-                        };
-                        Some(TableCell {
-                            // Match TS: literal pipes are emitted unescaped in table cells.
-                            text: collapse_js_whitespace(&raw),
-                            header: tag == "tableHeader",
-                            align: match attrs.get("align").and_then(Value::as_str) {
-                                Some("left") => Some(TableAlign::Left),
-                                Some("right") => Some(TableAlign::Right),
-                                Some("center") => Some(TableAlign::Center),
-                                _ => None,
-                            },
-                        })
-                    })
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect();
+            let mut raw = ProjectionBuffer::new();
+            for (index, child) in children.iter().enumerate() {
+                if index != 0 {
+                    // Match the TS @tiptap/extension-table limitation: its
+                    // multi-block cell separator U+001F survives whitespace
+                    // collapse and reaches yDocToMarkdown output.
+                    raw.push('\u{001f}')?;
+                }
+                let rendered = render_node(
+                    child,
+                    RenderContext {
+                        parent_tag: tag,
+                        parent_attrs: attrs,
+                        previous: index.checked_sub(1).map(|previous| &children[previous]),
+                        index,
+                    },
+                )?;
+                raw.push_str(&rendered)?;
+            }
+            let text = collapse_js_whitespace(&raw.into_string())?;
+            cell_text_bytes = checked_projection_len(cell_text_bytes, text.len())?;
+            rendered_cells.push(TableCell {
+                // Match TS: literal pipes are emitted unescaped in table cells.
+                text,
+                header: tag == "tableHeader",
+                align: match attrs.get("align").and_then(Value::as_str) {
+                    Some("left") => Some(TableAlign::Left),
+                    Some("right") => Some(TableAlign::Right),
+                    Some("center") => Some(TableAlign::Center),
+                    _ => None,
+                },
+            });
+        }
+        rows.push(rendered_cells);
+    }
     let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
     if column_count == 0 {
-        return String::new();
+        return Ok(String::new());
+    }
+    let allocation_bytes = column_count
+        .checked_mul(std::mem::size_of::<usize>() + std::mem::size_of::<Option<TableAlign>>())
+        .ok_or_else(|| projection_too_large(usize::MAX))?;
+    if allocation_bytes > MAX_PROJECTION_BYTES {
+        return Err(projection_too_large(allocation_bytes));
     }
     let mut widths = vec![3usize; column_count];
     for row in &rows {
@@ -1306,83 +1779,85 @@ fn render_table(children: &[MarkdownNode]) -> String {
             }
         }
     }
-    let header_cells = (0..column_count)
-        .map(|index| {
-            if has_header {
-                pad_utf16(
-                    header_row
-                        .get(index)
-                        .map(|cell| cell.text.as_str())
-                        .unwrap_or(""),
-                    widths[index],
-                )
-            } else {
-                // Match TS: headerless tables gain a blank synthetic header.
-                pad_utf16("", widths[index])
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" | ");
-    let separators = widths
-        .iter()
-        .enumerate()
-        .map(|(index, width)| {
-            let dashes = "-".repeat(*width);
-            match alignments[index] {
-                Some(TableAlign::Left) => format!(":{dashes}"),
-                Some(TableAlign::Right) => format!("{dashes}:"),
-                Some(TableAlign::Center) => format!(":{dashes}:"),
-                None => dashes,
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" | ");
-    let mut output = format!("\n| {header_cells} |\n| {separators} |\n");
+    let mut output = ProjectionBuffer::new();
+    output.push_str("\n| ")?;
+    for (index, width) in widths.iter().enumerate() {
+        if index != 0 {
+            output.push_str(" | ")?;
+        }
+        let value = if has_header {
+            header_row
+                .get(index)
+                .map(|cell| cell.text.as_str())
+                .unwrap_or("")
+        } else {
+            // Match TS: headerless tables gain a blank synthetic header.
+            ""
+        };
+        pad_utf16_into(&mut output, value, *width)?;
+    }
+    output.push_str(" |\n| ")?;
+    for (index, width) in widths.iter().enumerate() {
+        if index != 0 {
+            output.push_str(" | ")?;
+        }
+        match alignments[index] {
+            Some(TableAlign::Left) | Some(TableAlign::Center) => output.push(':')?,
+            Some(TableAlign::Right) | None => {}
+        }
+        output.push_repeat('-', *width)?;
+        match alignments[index] {
+            Some(TableAlign::Right) | Some(TableAlign::Center) => output.push(':')?,
+            Some(TableAlign::Left) | None => {}
+        }
+    }
+    output.push_str(" |\n")?;
     let body = if has_header { &rows[1..] } else { &rows[..] };
     for row in body {
-        let cells = (0..column_count)
-            .map(|index| {
-                pad_utf16(
-                    row.get(index).map(|cell| cell.text.as_str()).unwrap_or(""),
-                    widths[index],
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(" | ");
-        output.push_str(&format!("| {cells} |\n"));
+        output.push_str("| ")?;
+        for (index, width) in widths.iter().enumerate() {
+            if index != 0 {
+                output.push_str(" | ")?;
+            }
+            let value = row.get(index).map(|cell| cell.text.as_str()).unwrap_or("");
+            pad_utf16_into(&mut output, value, *width)?;
+        }
+        output.push_str(" |\n")?;
     }
-    output
+    Ok(output.into_string())
 }
 
 fn utf16_len(value: &str) -> usize {
     value.encode_utf16().count()
 }
 
-fn pad_utf16(value: &str, width: usize) -> String {
-    format!(
-        "{value}{}",
-        " ".repeat(width.saturating_sub(utf16_len(value)))
-    )
+fn pad_utf16_into(
+    output: &mut ProjectionBuffer,
+    value: &str,
+    width: usize,
+) -> ProjectionResult<()> {
+    output.push_str(value)?;
+    output.push_repeat(' ', width.saturating_sub(utf16_len(value)))
 }
 
-fn collapse_js_whitespace(value: &str) -> String {
-    let mut collapsed = String::new();
+fn collapse_js_whitespace(value: &str) -> ProjectionResult<String> {
+    let mut collapsed = ProjectionBuffer::new();
     let mut in_whitespace = false;
     for character in value.chars() {
         if is_js_whitespace(character) {
             if !in_whitespace {
-                collapsed.push(' ');
+                collapsed.push(' ')?;
                 in_whitespace = true;
             }
         } else {
-            collapsed.push(character);
+            collapsed.push(character)?;
             in_whitespace = false;
         }
     }
-    trim_js(&collapsed).to_string()
+    Ok(trim_js(&collapsed.into_string()).to_string())
 }
 
-fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> String {
+fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> ProjectionResult<String> {
     enum InlinePart<'a> {
         Text(&'a TextRun),
         Node(&'a MarkdownNode),
@@ -1402,7 +1877,7 @@ fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> String {
 
     let mut parts = Vec::new();
     flatten(nodes, &mut parts);
-    let mut output = Vec::new();
+    let mut output = ProjectionBuffer::new();
     let mut active: Vec<MarkdownMark> = Vec::new();
     let mut modes: BTreeMap<MarkKind, OpeningMode> = BTreeMap::new();
     let mut reopen_html = BTreeSet::new();
@@ -1434,16 +1909,20 @@ fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> String {
                         previous: None,
                         index,
                     },
-                );
-                output.push(format!("{before}{rendered}"));
+                )?;
+                output.push_str(&before)?;
+                output.push_str(&rendered)?;
             }
             InlinePart::Text(run) => {
+                if run.text.len() > MAX_PROJECTION_BYTES {
+                    return Err(projection_too_large(run.text.len()));
+                }
                 let mut text = run.text.clone();
                 if has_mark(&run.marks, MarkKind::Highlight) {
-                    text = text.replace('=', "\\=");
+                    text = escape_highlight_equals(&text)?;
                 }
                 if !code_context && !has_mark(&run.marks, MarkKind::Code) {
-                    text = encode_html_entities(&text);
+                    text = encode_html_entities(&text)?;
                 }
                 let current = &run.marks;
                 let mut to_open: Vec<MarkdownMark> = current
@@ -1504,7 +1983,11 @@ fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> String {
                     } else {
                         OpeningMode::Markdown
                     };
-                    text = format!("{}{text}", mark_opening(mark, mode));
+                    let opening = mark_opening(mark, mode);
+                    let mut marked = ProjectionBuffer::with_capacity(opening.len() + text.len())?;
+                    marked.push_str(&opening)?;
+                    marked.push_str(&text)?;
+                    text = marked.into_string();
                     modes.insert(mark.kind, mode);
                 }
                 if !crossed {
@@ -1512,7 +1995,10 @@ fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> String {
                         set_active(&mut active, mark.clone());
                     }
                 }
-                text = format!("{leading}{text}");
+                let mut with_leading = ProjectionBuffer::with_capacity(leading.len() + text.len())?;
+                with_leading.push_str(&leading)?;
+                with_leading.push_str(&text)?;
+                text = with_leading.into_string();
                 let close_at_end: Vec<MarkKind> = if crossed {
                     for mark in &to_open {
                         if next_marks.is_some_and(|next| {
@@ -1556,11 +2042,11 @@ fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> String {
                 }
                 text.push_str(&trailing);
                 text.push_str(&middle_trailing);
-                output.push(text);
+                output.push_str(&text)?;
             }
         }
     }
-    output.concat()
+    Ok(output.into_string())
 }
 
 fn marks_to_close_at_end(
@@ -1669,11 +2155,29 @@ fn mark_closing(mark: &MarkdownMark, mode: OpeningMode) -> String {
     }
 }
 
-fn encode_html_entities(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+fn escape_highlight_equals(value: &str) -> ProjectionResult<String> {
+    let mut output = ProjectionBuffer::new();
+    for character in value.chars() {
+        if character == '=' {
+            output.push_str("\\=")?;
+        } else {
+            output.push(character)?;
+        }
+    }
+    Ok(output.into_string())
+}
+
+fn encode_html_entities(value: &str) -> ProjectionResult<String> {
+    let mut output = ProjectionBuffer::new();
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;")?,
+            '<' => output.push_str("&lt;")?,
+            '>' => output.push_str("&gt;")?,
+            _ => output.push(character)?,
+        }
+    }
+    Ok(output.into_string())
 }
 
 fn escape_markdown_line_breaks(value: &str) -> String {
@@ -1764,6 +2268,46 @@ fn is_js_whitespace(character: char) -> bool {
 #[cfg(test)]
 mod projection_tests {
     use super::*;
+    use crate::limits::MAX_PROJECTION_BYTES;
+    use yrs::types::xml::XmlIn;
+
+    fn xml_text(value: impl Into<String>) -> XmlIn {
+        XmlTextPrelim::new(value).into()
+    }
+
+    fn xml_element(
+        tag: &str,
+        attrs: &[(&str, &str)],
+        children: impl IntoIterator<Item = XmlIn>,
+    ) -> XmlIn {
+        let mut element = XmlElementPrelim::new(tag, children);
+        element.attributes.extend(
+            attrs
+                .iter()
+                .map(|(key, value)| ((*key).into(), (*value).to_string())),
+        );
+        element.into()
+    }
+
+    fn paragraph(value: impl Into<String>) -> XmlIn {
+        xml_element("paragraph", &[], [xml_text(value)])
+    }
+
+    fn remote_doc_with_body(children: impl IntoIterator<Item = XmlIn>) -> Ydoc {
+        let source = Ydoc::wire();
+        let body = source.doc.get_or_insert_xml_fragment(ROOT_BODY);
+        {
+            let mut txn = source.doc.transact_mut();
+            for child in children {
+                body.push_back(&mut txn, child);
+            }
+        }
+        let remote = Ydoc::wire();
+        remote
+            .apply(&source.encode_full_state())
+            .expect("test update is valid");
+        remote
+    }
 
     #[test]
     fn unknown_xml_elements_preserve_descendant_text() {
@@ -1776,6 +2320,126 @@ mod projection_tests {
             }])],
         }];
 
-        assert_eq!(markdown_document(&nodes), "content survives");
+        assert_eq!(
+            markdown_document(&nodes).expect("small projection"),
+            "content survives"
+        );
+    }
+
+    #[test]
+    fn hostile_remote_heading_level_is_clamped_before_allocation() {
+        let doc = remote_doc_with_body([xml_element(
+            "heading",
+            &[("level", "9223372036854775807")],
+            [xml_text("bounded")],
+        )]);
+
+        let projection = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            doc.project(ContentKind::Richdoc)
+        }));
+
+        assert!(projection.is_ok(), "hostile heading level must not panic");
+        assert_eq!(
+            projection
+                .expect("checked above")
+                .expect("clamped projection")
+                .markdown,
+            "###### bounded",
+            "out-of-schema heading levels clamp to level six"
+        );
+    }
+
+    #[test]
+    fn uneven_remote_table_refuses_padding_amplification_at_projection_cap() {
+        const WIDE_CELL_BYTES: usize = 1024 * 1024;
+        const SHORT_ROWS: usize = 18;
+
+        let mut rows = Vec::with_capacity(SHORT_ROWS + 1);
+        rows.push(xml_element(
+            "tableRow",
+            &[],
+            [xml_element(
+                "tableHeader",
+                &[("colspan", "1"), ("rowspan", "1")],
+                [paragraph("x".repeat(WIDE_CELL_BYTES))],
+            )],
+        ));
+        rows.extend((0..SHORT_ROWS).map(|_| {
+            xml_element(
+                "tableRow",
+                &[],
+                [xml_element(
+                    "tableCell",
+                    &[("colspan", "1"), ("rowspan", "1")],
+                    [paragraph("x")],
+                )],
+            )
+        }));
+        let doc = remote_doc_with_body([xml_element("table", &[], rows)]);
+
+        let error = doc
+            .project(ContentKind::Richdoc)
+            .expect_err("padding amplification must be refused");
+        assert!(matches!(
+            error,
+            CollabError::ProjectionTooLarge {
+                actual,
+                max: MAX_PROJECTION_BYTES
+            } if actual > MAX_PROJECTION_BYTES
+        ));
+    }
+
+    #[test]
+    fn multi_block_remote_table_cell_matches_typescript_separator_leak() {
+        let doc = remote_doc_with_body([xml_element(
+            "table",
+            &[],
+            [
+                xml_element(
+                    "tableRow",
+                    &[],
+                    [xml_element(
+                        "tableHeader",
+                        &[("colspan", "1"), ("rowspan", "1")],
+                        [paragraph("H")],
+                    )],
+                ),
+                xml_element(
+                    "tableRow",
+                    &[],
+                    [xml_element(
+                        "tableCell",
+                        &[("colspan", "1"), ("rowspan", "1")],
+                        [paragraph("first"), paragraph("second")],
+                    )],
+                ),
+            ],
+        )]);
+
+        let markdown = doc
+            .project(ContentKind::Richdoc)
+            .expect("small projection")
+            .markdown;
+        assert_eq!(
+            markdown,
+            "\n| H            |\n| ------------ |\n| first\u{001f}second |"
+        );
+    }
+
+    #[test]
+    fn hostile_remote_nesting_refuses_before_recursive_projection() {
+        let mut child = paragraph("deep");
+        for _ in 0..=MAX_PROJECTION_DEPTH {
+            child = xml_element("blockquote", &[], [child]);
+        }
+        let doc = remote_doc_with_body([child]);
+
+        assert!(matches!(
+            doc.project(ContentKind::Richdoc),
+            Err(CollabError::ProjectionTooComplex {
+                max_depth: MAX_PROJECTION_DEPTH,
+                max_nodes: MAX_PROJECTION_NODES
+            })
+        ));
     }
 }

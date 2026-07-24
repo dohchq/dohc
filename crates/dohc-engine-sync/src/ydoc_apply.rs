@@ -239,7 +239,11 @@ pub fn project_and_write_in_tx(
     origin_seq: i64,
     now_ms: i64,
 ) -> Result<(), SyncError> {
-    let projection = doc.project(content_kind);
+    let projection = doc
+        .project(content_kind)
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "ydoc projection exceeds materialization cap",
+        })?;
     let current = select_snapshot_by_path_in_tx(tx, &key.workspace_id, &key.version_id, path)
         .map_err(|_| SyncError::InvalidInput {
             reason: "ydoc.update head read failed",

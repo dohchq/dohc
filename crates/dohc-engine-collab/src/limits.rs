@@ -29,3 +29,13 @@ pub const MAX_REPLICATION_APPLY_BATCH: usize = 4096;
 /// bytes. Mirrors the storage blob cap posture: bounded, generous, never
 /// unbounded.
 pub const MAX_PROJECTION_BYTES: usize = 16 * 1024 * 1024;
+
+/// Maximum XML nesting accepted by rich-document projection. Remote Y.Doc
+/// updates are not ProseMirror-schema validated, so a peer can construct
+/// nesting the editor never emits; cap it before recursive tree construction.
+pub const MAX_PROJECTION_DEPTH: usize = 128;
+
+/// Maximum XML nodes visited by one rich-document projection. This bounds
+/// content-derived collection growth even when many individually valid remote
+/// updates accumulate into one pathological document.
+pub const MAX_PROJECTION_NODES: usize = 262_144;
