@@ -177,11 +177,12 @@ post-R15 (the reset wipes pre-existing rows).
   open. RESOLUTION REQUIRED at R15: either land the dirfd/openat2 + renameat closure
   before the cutover, OR confirm + enforce (in code/config, not prose) that no
   shared/ACL-partitioned secret path is reachable.
-  RESOLVED at R15-5: the closure landed (fd-pinned parents; see BEHAVIOR_DELTA).
-  The "per-user socket auth" clause that used to ride along here is WITHDRAWN, not
-  deferred: there is no socket. The daemon reads inherited stdio pipes, which
-  another OS user cannot open, so no socket ACL was ever the control protecting
-  this boundary — see the transport correction in RPC_GAP.md. Closure is REQUIRED before any
+  TRANSPORT CORRECTION (this PR): the "per-user socket auth" clause that used to
+  ride along with this item is WITHDRAWN, not deferred — there is no socket. The
+  daemon reads inherited stdio pipes, which another OS user cannot open, so a
+  socket ACL was never the control protecting this boundary (RPC_GAP.md). The
+  TOCTOU half of this item is UNCHANGED and STILL GATING here; R15-5 (#237) owns
+  its closure and owns flipping this entry when that lands. Closure is REQUIRED before any
   shared-secret model ships regardless.
 - **Secret re-materialization on mid-session version SWITCH — CUTOVER-GATING gap**
   (D2, RPC_GAP): the daemon lacks the oracle's switch-time secret rebuild
@@ -209,12 +210,12 @@ R15 go/no-go decides each:
 2. **Richdoc→markdown fidelity** — the paragraphs+bold/italic subset DROPS
    unsupported richdoc content (data loss on projection); land full-fidelity
    projection or disable richdoc editing at cutover.
-3. **Secret rename-TOCTOU assumption enforcement** — enforce owner-only/no-sharing
-   while the residual is open, OR land the dirfd/openat2 closure. NOT GATING as of
-   R15-5: the closure is landing, so the assumption no longer has to be enforced.
-   The former "per-user socket auth OFF" half of this item is withdrawn — the
-   transport is stdio, not a socket (RPC_GAP.md transport correction), so it was
-   never the control here.
+3. **Secret rename-TOCTOU assumption enforcement** — STILL GATING: enforce
+   owner-only/no-sharing while the residual is open, OR land the dirfd/openat2
+   closure. R15-5 (#237) owns that closure and owns flipping this entry once it
+   merges; nothing in THIS PR closes it. The former "per-user socket auth OFF"
+   half of this item is withdrawn — the transport is stdio, not a socket
+   (RPC_GAP.md transport correction), so it was never the control here.
 4. **Pre-R15 migration** (secret-ownership column + moments payload-provenance) —
    cheap before the reset, expensive after.
 Accepted flags (NOT gating): soak monitored-not-proven; the 3 marginal RPC-D2 P2

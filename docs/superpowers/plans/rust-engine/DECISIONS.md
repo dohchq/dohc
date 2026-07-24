@@ -150,6 +150,23 @@ deferred ONLY under it; they are now in-scope-or-revisit:
   daemon's DOP1 client IS the desktop main process; per-user socket auth is R15+
   scope") — if another OS user can reach the daemon socket, they can drive the
   engine as you. IN SCOPE with R15-6.
+
+  **FINDING while scoping R15-6 — the premise of this item is false.** There is
+  no socket. The daemon is a STDIO CHILD PROCESS: it reads fd 0 and writes fd 1,
+  both inherited pipes handed to it by the desktop at spawn. No listener, no
+  bind, no filesystem path, no namespace to connect to. Another OS user cannot
+  open a pipe they did not inherit, so the threat this decision was made against
+  is ALREADY structurally closed — and ADDING a unix socket or named pipe would
+  INCREASE that surface by creating a namespace entry needing peer-uid checks or
+  a DACL. Ice's INTENT (other OS users must not be able to drive the engine) is
+  therefore satisfied without the mechanism the decision named.
+
+  What R15-6 delivers instead: a constant-time token comparison (the handshake
+  used `==`, recoverable a byte at a time via timing) and a real per-launch
+  random token (today the desktop supplies whatever it likes; only tests
+  generate one) — the latter with R13b-rest, which owns the spawn. Ever
+  accepting MULTI-PRINCIPAL clients would be a new decision, not an
+  implementation detail of this one, and must be recorded here first.
 - **Shared-trust-boundary declines** (RPC_GAP): attachment identity + objectId
   control chars on replicated apply are bug-for-bug oracle parity accepted as
   "adversarial-only"; forgery hardening was assigned to the relay/RPC-E boundary,

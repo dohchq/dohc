@@ -630,11 +630,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Regression coverage for the two deferred R13 daemon-liveness items (R14
-/// hardening): halting admission when the response writer is broken (no
-/// silent black hole), and draining in-flight work before the daemon closes
-/// workspaces. Cancellable admission for `workspace.open` is covered in
-/// `dohc_workspace_engine::tests` (the `open_lock` seam lives in `lib.rs`).
 /// Compare the presented token against the expected one WITHOUT leaking how far
 /// they matched. A plain `==` returns as soon as two bytes differ, so a caller
 /// able to retry can recover the token a byte at a time from the timing.
@@ -646,6 +641,11 @@ fn constant_time_eq(candidate: &[u8], expected: &[u8]) -> bool {
     candidate.ct_eq(expected).into()
 }
 
+/// Regression coverage for the two deferred R13 daemon-liveness items (R14
+/// hardening): halting admission when the response writer is broken (no
+/// silent black hole), and draining in-flight work before the daemon closes
+/// workspaces. Cancellable admission for `workspace.open` is covered in
+/// `dohc_workspace_engine::tests` (the `open_lock` seam lives in `lib.rs`).
 #[cfg(test)]
 mod tests {
     use super::*;
