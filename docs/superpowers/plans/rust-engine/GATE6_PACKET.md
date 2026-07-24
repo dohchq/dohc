@@ -116,9 +116,16 @@ post-R15 (the reset wipes pre-existing rows).
    moments payload_before_*/payload_after_* provenance columns were never ported.
    Both are CHEAP before R15's reset, EXPENSIVE after. RECOMMEND one pre-R15
    migration PR for both.
-2. **macOS evidence path** — CI workflow (`rust-engine-macos-evidence.yml`,
-   dispatchable) vs Ice-run `macos-evidence.sh`. Both drafted; either produces a
-   macOS gate log + soak-evidence JSON. (This is the next work item after GATE6.)
+2. **macOS evidence path** — BOTH tools now EXIST and ship in this PR: the
+   dispatchable CI workflow `.github/workflows/rust-engine-macos-evidence.yml`
+   (macos-latest, quick|full input) and the local `tools/rust-engine-program/
+   macos-evidence.sh` (run on a Mac). Each reproduces the full-workspace gate +
+   the cutoverBlocking soak and emits the verdict logs + soak-evidence JSON.
+   EXECUTION requires a Mac (a macOS CI runner or Ice's machine) — the Windows dev
+   box cannot produce it. DECISION for Ice: dispatch the CI workflow, or run the
+   script locally, before the R15 go/no-go. (This is a green-path confidence
+   check, not expected to surface engine issues; the code is platform-portable
+   Rust and the unix materialize/symlink paths already have `#[cfg(unix)]` tests.)
 3. **RPC-E scope for cutover** (replication/relay; backend-modes.md). Interacts with
    RPC-C's sync-defer-while-open guard (fail-closed seam lands either way; live
    convergence is later).

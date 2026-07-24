@@ -1,0 +1,71 @@
+# macOS evidence for the Rust engine rewrite (GATE6 / R15 cutover).
+#
+# The program's gates and soak ran on native Windows + WSL Linux. macOS is a
+# shipping platform (apps/desktop), so this dispatchable workflow reproduces the
+# full-workspace gate AND the cutoverBlocking soak on a macOS runner and uploads
+# self-describing evidence artifacts (the run-rust-checks verdict log + the soak
+# evidence JSON). Never runs automatically — dispatch it when macOS evidence is
+# needed (GATE6 decision #2 / the R15 go/no-go).
+name: rust-engine-macos-evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "quick (short smoke soak, ~a minute) or full (30-60 min cutoverBlocking soak)"
+        type: choice
+        default: quick
+        options: [quick, full]
+
+concurrency:
+  group: rust-engine-macos-evidence
+  cancel-in-progress: false
+
+jobs:
+  macos-evidence:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain (rust-toolchain.toml)
+        # rustup honors rust-toolchain.toml (channel 1.96.1 + rustfmt/clippy).
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustc --version && cargo --version
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Full-workspace gate (fmt/clippy -D warnings/build/test/cargo-deny)
+        id: gate
+        run: |
+          set -o pipefail
+          node tools/rust-engine-program/run-rust-checks.mjs 2>&1 | tee macos-gate.log
+
+      - name: cutoverBlocking soak (self-describing evidence JSON)
+        id: soak
+        run: |
+          set -o pipefail
+          mkdir -p tools/rust-engine-program/soak-evidence
+          OUT="tools/rust-engine-program/soak-evidence/macos-$(date -u +%Y-%m-%dT%H-%M-%SZ)-cutoverBlocking.json"
+          if [ "${{ inputs.mode }}" = "full" ]; then
+            ARGS="--minutes 30 --cycles 1000"
+          else
+            ARGS="--quick"
+          fi
+          cargo run --release --features harness --bin dohc-soak-runner -- \
+            $ARGS --evidence "$OUT" 2>&1 | tee macos-soak.log
+          echo "evidence=$OUT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload macOS evidence artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-engine-macos-evidence-${{ inputs.mode }}
+          path: |
+            macos-gate.log
+            macos-soak.log
+            tools/rust-engine-program/soak-evidence/macos-*.json
+          if-no-files-found: warn
