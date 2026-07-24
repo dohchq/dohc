@@ -1236,8 +1236,17 @@ impl SecretParentGuard {
 
         #[cfg(unix)]
         {
-            rustix::fs::fsync(&self.parent_fd)
+            // Sync through `std`, not `rustix::fs::fsync`: on macOS `sync_all`
+            // issues F_FULLFSYNC, which flushes the drive write cache, and
+            // plain fsync does not. Duplicating the PINNED fd keeps durability
+            // identical to `sync_parent_dir` on the non-secret path without
+            // giving up the pin — the duplicate closes with `file`, the
+            // original stays open.
+            let duplicate = rustix::io::dup(&self.parent_fd)
                 .map_err(std::io::Error::from)
+                .map_err(|err| MaterializeError::io(&self.parent_path, &err))?;
+            std::fs::File::from(duplicate)
+                .sync_all()
                 .map_err(|err| MaterializeError::io(&self.parent_path, &err))
         }
 
@@ -1326,17 +1335,45 @@ fn walk_secret_parent_unix(
                     }
                 })?
             }
-            Err(err) if err == rustix::io::Errno::LOOP => {
-                return Err(MaterializeError::SymlinkTarget);
-            }
             Err(err) => {
-                let err = std::io::Error::from(err);
-                return Err(MaterializeError::io(display_parent, &err));
+                return Err(classify_nofollow_failure(
+                    &current,
+                    name,
+                    display_parent,
+                    err,
+                ));
             }
         };
         current = next;
     }
     Ok(current)
+}
+
+/// Classify a failed no-follow open of `name` under `parent_fd`.
+///
+/// `O_NOFOLLOW` does NOT report a symlink uniformly: with `O_DIRECTORY` Linux
+/// returns `ENOTDIR`, FreeBSD returns `EMLINK` and NetBSD `EFTYPE`, and only
+/// the non-directory case gives `ELOOP`. Asking the filesystem what the entry
+/// actually is turns every one of those into the same honest answer instead of
+/// a generic IO error — which matters because the two surface differently: a
+/// symlink target is a refusal, an IO error leaves the job pending and retrying.
+#[cfg(unix)]
+fn classify_nofollow_failure(
+    parent_fd: &rustix::fd::OwnedFd,
+    name: &OsStr,
+    display_path: &Path,
+    err: rustix::io::Errno,
+) -> MaterializeError {
+    let is_symlink = rustix::fs::statat(parent_fd, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+        .is_ok_and(|stat| {
+            (stat.st_mode & rustix::fs::FileType::Symlink.as_raw_mode())
+                == rustix::fs::FileType::Symlink.as_raw_mode()
+        });
+    if is_symlink {
+        return MaterializeError::SymlinkTarget;
+    }
+    let err = std::io::Error::from(err);
+    MaterializeError::io(display_path, &err)
 }
 
 #[cfg(windows)]
@@ -1841,6 +1878,42 @@ mod tests {
             }
             Err(err) => panic!("create file symlink: {err}"),
         }
+    }
+
+    /// The component walk is the ONLY fd-based parent resolution on macOS and
+    /// BSD — `openat2` is Linux-only — so its `O_NOFOLLOW` is what stops an
+    /// ancestor swap there. Every end-to-end test reaches the path-based
+    /// `ensure_secret_target_symlink_free` first and never exercises the walk,
+    /// so this calls it directly. Without `O_NOFOLLOW` on every component this
+    /// returns Ok and the swap succeeds.
+    #[cfg(unix)]
+    #[test]
+    fn secret_parent_walk_refuses_a_symlinked_component_directly() {
+        use std::os::fd::OwnedFd;
+
+        let scratch = Scratch::new("secret-walk-nofollow");
+        let root = scratch.root.as_path();
+        let real = root.join("real");
+        std::fs::create_dir_all(real.join("nested")).expect("real tree");
+        // `link` -> `real`, so walking `link/nested` must be refused at `link`.
+        if !symlink_dir_for_test(&real, &root.join("link")) {
+            return;
+        }
+
+        let root_fd: OwnedFd = std::fs::File::open(root).expect("open root").into();
+        let refused =
+            walk_secret_parent_unix(root_fd, Path::new("link/nested"), &root.join("link/nested"));
+        assert!(
+            matches!(refused, Err(MaterializeError::SymlinkTarget)),
+            "a symlinked component must be refused by the walk itself, got {:?}",
+            refused.map(|_| "Ok")
+        );
+
+        // Control: the same walk through the REAL directory succeeds, so the
+        // refusal above is the symlink and not a broken walk.
+        let root_fd: OwnedFd = std::fs::File::open(root).expect("open root").into();
+        walk_secret_parent_unix(root_fd, Path::new("real/nested"), &root.join("real/nested"))
+            .expect("the walk must traverse real directories");
     }
 
     #[test]
