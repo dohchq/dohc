@@ -2216,8 +2216,20 @@ next round caught. The compounding lesson became structure:
 
 ## 2026-07-24 — GATE6 PASSED: release-candidate gate declared
 
-- The Rust engine is FEATURE-COMPLETE and evidenced for the R15 cutover. Every
-  GATE6 dependency (R14, R10b, R15-REHEARSE, RPC-A/B/C/D/B2/D2) is done/gate-passed.
+- WHAT GATE6 ASSERTS: the Rust engine is FEATURE-COMPLETE (every implementation
+  shard done) and EVIDENCED (gate/soak/differential green) — a release CANDIDATE.
+  WHAT GATE6 DOES NOT ASSERT: cutover-READINESS. Several items are CUTOVER-GATING
+  and are resolved at the R15 go/no-go, NOT here: (a) mid-session version-switch
+  secret re-materialization — SetActiveVersion is DB-only, so disk secrets stay
+  STALE (potentially wrong) until the next open; a faithful switch UX must wire a
+  switch-time rebuild OR the stale-until-reopen behavior must be explicitly
+  accepted; (b) richdoc→markdown fidelity — the Rust projection is a
+  paragraphs+bold/italic subset that DROPS unsupported richdoc content, so
+  full-fidelity projection (or disabling richdoc editing) must land before cutover;
+  (c) the secret rename-TOCTOU single-user residual — its owner-only/no-sharing
+  assumption must be ENFORCED (sharing kept off) while the residual is open;
+  (d) the pre-R15 migration (secret-ownership + moments-provenance). Every GATE6
+  dependency (R14, R10b, R15-REHEARSE, RPC-A/B/C/D/B2/D2) is done/gate-passed.
 - Evidence packet: docs/superpowers/plans/rust-engine/GATE6_PACKET.md — every claim
   carries its evidence and limitations. Headlines:
   - Canonical full-workspace gate on main (19fc994b), clean-worktree rebuild:

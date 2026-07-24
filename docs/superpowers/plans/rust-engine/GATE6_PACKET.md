@@ -1,11 +1,18 @@
 # GATE 6 — release-candidate evidence packet
 
-**Status: ASSEMBLED 2026-07-24.** GATE6 is the release-candidate gate: it declares
-the Rust engine feature-complete and evidenced for the R15 cutover, with every
-claim carrying its evidence and its limitations. Every dependency
-(R14 robustness, R10b relay-epoch, R15-REHEARSE, and all RPC shards A/B/C/D/B2/D2)
-is `gate passed` / `done`. This packet is the evidence; the R15 go/no-go package
-(the ICE STOP) is separate and consumes the "open decisions" below.
+**Status: ASSEMBLED 2026-07-24.** GATE6 is the release-CANDIDATE gate.
+
+**WHAT GATE6 ASSERTS:** the Rust engine is FEATURE-COMPLETE (every implementation
+shard done) and EVIDENCED (gate/soak/differential green, every claim below carrying
+its evidence and limitations). Every dependency (R14 robustness, R10b relay-epoch,
+R15-REHEARSE, and all RPC shards A/B/C/D/B2/D2) is `gate passed` / `done`.
+
+**WHAT GATE6 DOES NOT ASSERT: cutover-READINESS.** The items in §6.CUTOVER-GATING
+below are real, not "non-blocking limitations," and MUST be resolved at the R15
+go/no-go (the ICE STOP) before the cutover flips — they are not closed here.
+
+This packet is the evidence + the decision inputs; the R15 go/no-go package consumes
+the CUTOVER-GATING items and the "open decisions" (§7).
 
 ---
 
@@ -95,19 +102,45 @@ post-R15 (the reset wipes pre-existing rows).
   oracle's per-file skip; decrypt/key failures are tolerated (skip, leave pending)
   — deliberately broader than the oracle (open-replay is crash-recovery, not a user
   action), while KEEPING fail-closed (no plaintext from unauthenticated bytes).
-- **Secret rename-TOCTOU — ACCEPTED RESIDUAL** (D2, BEHAVIOR_DELTA.md): path-based
-  ancestor checks are not fd-relative; a potential secret-disclosure/overwrite risk
-  accepted ONLY under the single-user/local-first/owner-only/no-sharing assumption;
-  **dirfd/openat2 + renameat closure REQUIRED before any shared-secret model.**
-- **Secret re-materialization on mid-session version SWITCH — GAP** (D2, RPC_GAP):
-  the daemon lacks the oracle's switch-time secret rebuild (SetActiveVersion is
-  DB-only; only open-replay materializes). Open-time projection is correct; a
-  mid-session switch does not refresh disk secrets until reopen. **R13/GATE6
-  daemon-composition scope, not the secret executor — must be wired for a faithful
-  desktop switch UX.** Non-secret files share the same switch-materialization
-  dependency on the composition layer.
+- **Secret rename-TOCTOU — ACCEPTED RESIDUAL, ENFORCEMENT CUTOVER-GATING** (D2,
+  BEHAVIOR_DELTA.md): path-based ancestor checks are not fd-relative; a potential
+  secret-disclosure/overwrite risk accepted ONLY under the single-user/local-first/
+  owner-only/no-sharing assumption. That assumption must be ENFORCED, not just
+  documented: sharing/multi-user secret access must stay OFF (and per-user socket
+  auth, currently deferred, is part of the same boundary) while the residual is
+  open. RESOLUTION REQUIRED at R15: either land the dirfd/openat2 + renameat closure
+  before the cutover, OR confirm + enforce (in code/config, not prose) that no
+  shared/ACL-partitioned secret path is reachable. Closure is REQUIRED before any
+  shared-secret model ships regardless.
+- **Secret re-materialization on mid-session version SWITCH — CUTOVER-GATING gap**
+  (D2, RPC_GAP): the daemon lacks the oracle's switch-time secret rebuild
+  (SetActiveVersion is DB-only; only open-replay materializes). Open-time projection
+  is correct, but a mid-session switch leaves the on-disk secrets STALE — i.e.
+  potentially the WRONG version's `.env` on disk — until the next open. This is a
+  real correctness defect for a faithful switch UX, NOT a non-blocking limitation.
+  RESOLUTION REQUIRED at R15 (composition-layer scope, not the executor): either
+  wire a switch-time (set-active-time) secret+file re-materialization pass, or
+  explicitly accept + surface the stale-until-reopen behavior. Non-secret files
+  share the same switch-materialization dependency on the desktop/daemon layer, so
+  this is a general version-switch-projection obligation, tracked cutover-gating.
 - **Identity posture** (recorded across shards): the daemon's DOP1 client IS the
   desktop main process; per-user socket auth is R15+ scope.
+
+### 6.CUTOVER-GATING — must be resolved at the R15 go/no-go (NOT closed by GATE6)
+These are correctness/security items, not accepted flags. GATE6 surfaces them; the
+R15 go/no-go decides each:
+1. **Version-switch secret+file re-materialization** — stale/wrong disk secrets
+   after a mid-session switch until reopen (wire it, or explicitly accept+surface).
+2. **Richdoc→markdown fidelity** — the paragraphs+bold/italic subset DROPS
+   unsupported richdoc content (data loss on projection); land full-fidelity
+   projection or disable richdoc editing at cutover.
+3. **Secret rename-TOCTOU assumption enforcement** — enforce owner-only/no-sharing
+   (sharing + per-user socket auth OFF) while the residual is open, OR land the
+   dirfd/openat2 closure.
+4. **Pre-R15 migration** (secret-ownership column + moments payload-provenance) —
+   cheap before the reset, expensive after.
+Accepted flags (NOT gating): soak monitored-not-proven; the 3 marginal RPC-D2 P2
+declines; BINHEAD (discharged). See §8.
 
 ## 7. Open decisions for Ice — these feed the R15 go/no-go (present, don't decide)
 1. **Pre-R15 migration PR (secret ownership column + moments payload-provenance).**
@@ -129,10 +162,12 @@ post-R15 (the reset wipes pre-existing rows).
 3. **RPC-E scope for cutover** (replication/relay; backend-modes.md). Interacts with
    RPC-C's sync-defer-while-open guard (fail-closed seam lands either way; live
    convergence is later).
-4. **Richdoc at cutover** — Rust's richdoc→markdown projection is a paragraphs+bold/
-   italic subset. Options: (a) port full-fidelity yDocToMarkdown to Rust as
-   cutover-gating work — RECOMMENDED; (b) disable richdoc editing at cutover;
-   (c) dual-engine — not recommended.
+4. **Richdoc at cutover (CUTOVER-GATING — data loss)** — Rust's richdoc→markdown
+   projection is a paragraphs+bold/italic subset that DROPS unsupported richdoc
+   content (headings/lists/links/code), so a cutover with richdoc editing live can
+   silently lose content. Options: (a) port full-fidelity yDocToMarkdown to Rust
+   before cutover — RECOMMENDED; (b) disable richdoc editing at cutover;
+   (c) dual-engine — not recommended. Not acceptable to ship as-is with richdoc live.
 5. **Secret rename-TOCTOU closure timing** — accepted as a documented residual for
    single-user; MUST close (dirfd/openat2) before any shared-secret model. Decide
    whether that lands pre-cutover or is explicitly deferred with the single-user
@@ -141,10 +176,16 @@ post-R15 (the reset wipes pre-existing rows).
    member-share-log-across-epoch-reset semantics, and wiring switch-time secret
    re-materialization (§6 gap) for a faithful desktop version-switch UX.
 
-## 8. Known limitations / flagged items (summary)
-- Soak memory: PASS with the monitored-not-proven flag (§1).
-- Secret rename-TOCTOU: accepted single-user residual, closure required for sharing (§6).
-- Mid-session switch secret re-materialization: gap, composition-layer scope (§6).
+## 8. Flagged items — ACCEPTED FLAGS only (the CUTOVER-GATING items are in §6.CUTOVER-GATING)
+These do NOT gate the cutover; they are honestly-recorded residuals/flags:
+- Soak memory: PASS with the monitored-not-proven flag (§1) — not an unconditional
+  leak-freedom proof.
 - BINHEAD discharged (#194); binary heads have real in-DB representation.
 - 3 marginal RPC-D2 P2 declines recorded in RPC_GAP (stale-plaintext-on-decrypt,
   single-client id-reservation, tests-only in-process egress).
+- Adversarial-only cross-engine deltas (§6): moot post-R15 (the reset wipes
+  pre-existing rows); differential/parity suites expect them.
+
+The CUTOVER-GATING items (switch-materialization stale secrets, richdoc fidelity,
+TOCTOU-assumption enforcement, pre-R15 migration) are NOT here — they are in
+§6.CUTOVER-GATING and MUST be resolved at the R15 go/no-go.
