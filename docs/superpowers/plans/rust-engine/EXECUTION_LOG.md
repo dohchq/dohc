@@ -2212,3 +2212,56 @@ next round caught. The compounding lesson became structure:
   release-candidate packet, macOS evidence, R15 rehearsal + go/no-go package
   with SIX decisions (ICE STOP — the one mandatory human stop), R16 legacy
   deletion (post-cutover).
+
+
+## 2026-07-24 — GATE6 packet ASSEMBLED — gate NOT closed (pending rehearsal evidence + Ice authorization)
+
+- GATE6's EVIDENCE PACKET is assembled (GATE6_PACKET.md); the GATE ITSELF IS NOT
+  CLOSED. Two plan-required criteria remain: (1) an end-to-end clone-reset REHEARSAL
+  on REAL dogfood workspace byte-clones (machinery built + gate-verified by its
+  rehearsal-on-clones suite, but NOT yet run against Ice's data), and (2) EXPLICIT
+  ICE AUTHORIZATION at the R15 go/no-go. Do not treat SHARDS.tsv as gate-closed.
+- WHAT THE PACKET ASSERTS: the engine is FEATURE-COMPLETE for GATE6's scope (no
+  GATE6-blocking implementation shard remains) and EVIDENCED (gate/soak/differential
+  green) — a release CANDIDATE. DEFERRED implementation still exists and is NOT
+  code-complete: R13b-rest (desktop-adapter remainder), RPC-E (relay/replication
+  cutover scope), switch-time re-materialization wiring, and richdoc full-fidelity
+  projection if that option is chosen.
+  WHAT GATE6 DOES NOT ASSERT: cutover-READINESS. Several items are CUTOVER-GATING
+  and are resolved at the R15 go/no-go, NOT here: (a) mid-session version-switch
+  secret re-materialization — SetActiveVersion is DB-only, so disk secrets stay
+  STALE (potentially wrong) until the next open; a faithful switch UX must wire a
+  switch-time rebuild OR the stale-until-reopen behavior must be explicitly
+  accepted; (b) richdoc→markdown fidelity — the Rust projection is a
+  paragraphs+bold/italic subset that DROPS unsupported richdoc content, so
+  full-fidelity projection (or disabling richdoc editing) must land before cutover;
+  (c) the secret rename-TOCTOU single-user residual — its owner-only/no-sharing
+  assumption must be ENFORCED (sharing kept off) while the residual is open;
+  (d) the pre-R15 migration (secret-ownership + moments-provenance). Every GATE6
+  dependency (R14, R10b, R15-REHEARSE, RPC-A/B/C/D/B2/D2) is done/gate-passed.
+- Evidence packet: docs/superpowers/plans/rust-engine/GATE6_PACKET.md — every claim
+  carries its evidence and limitations. Headlines:
+  - Canonical full-workspace gate on main (19fc994b), clean-worktree rebuild:
+    `2026-07-24T14:02:58Z | run-rust-checks | win32/x64 | PASS |
+    fmt/clippy -D warnings/build/test --workspace/cargo-deny all PASS`.
+  - Soak (cutoverBlocking tier) v3 = PASS (rssDisposition PASS, 5564 cycles, clean
+    shutdown), with the honest monitored-not-proven memory flag.
+  - Differential TS-vs-Rust capture: 10/10 green both engines, tamper-checked (#215).
+  - Migration ledger: 14 migrations, ordinals 0-13, monotone (12 =
+    v1-ydoc-deferred-updates, 13 = v1-engine-request-kind). NEXT ORDINAL = 14 —
+    the pre-R15 migration must not reuse 13.
+  - Gate discipline: full-workspace gate on EVERY pushed head program-wide; every
+    supervision-grade guard carries a named MUTATION test, criticals
+    orchestrator-mutation-verified per shard.
+- All cross-engine deltas and accepted residuals are recorded (RPC_GAP.md /
+  BEHAVIOR_DELTA.md): structural-timestamp bounds, linked-timestamp reject,
+  mention-handle/attachment/bookmark deltas, secret slash-spelling (RESOLVED by D2),
+  secret open-replay per-job tolerance, the secret rename-TOCTOU accepted
+  single-user residual (dirfd/openat2 closure REQUIRED before shared secrets), and
+  the mid-session switch-materialization gap (R13/composition scope).
+- SIX open decisions are handed to the R15 go/no-go package (GATE6_PACKET §7):
+  the pre-R15 migration PR (secret-ownership + moments-provenance), macOS evidence
+  path, RPC-E cutover scope, richdoc-at-cutover, TOCTOU-closure timing, and the
+  R15 go/no-go itself.
+- REMAINING to 100%: macOS evidence, R15 rehearsal + go/no-go (ICE STOP — the one
+  mandatory human stop, resets Ice's dogfood data), R16 legacy deletion (post-cutover).
