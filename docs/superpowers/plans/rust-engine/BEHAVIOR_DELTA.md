@@ -446,11 +446,16 @@ Windows still performs the final replace by name because safe `std` exposes no
 root-handle-relative rename. It opens the canonical root and every parent
 component with `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`,
 rejects `FILE_ATTRIBUTE_REPARSE_POINT`, and retains every handle without
-`FILE_SHARE_DELETE` through temp creation and replacement. The Windows kernel
-therefore rejects deletion or rename of any validated ancestor during the
-remaining name-based operations. This closes the ancestor-swap attack without
-claiming that the replace API itself is handle-relative. The preimage-content
-race described above remains on every platform.
+`FILE_SHARE_DELETE` through temp creation and replacement. Those handles pin the
+workspace root and every below-root parent directly. The Windows regression
+`secret_workspace_grandparent_rename_is_blocked_by_descendant_handles` also
+places the workspace under a separately renameable grandparent (with the
+database outside that tree) and proves that Windows refuses to rename that
+grandparent while the descendant guard handles are open. This closes the
+ancestor-swap attack without claiming that directories above the root are
+opened or validated by the engine, or that the replace API itself is
+handle-relative. The preimage-content race described above remains on every
+platform.
 
 ### 8.3 DECISION: preserve-both `.conflict` artifacts are floor-excluded
 
