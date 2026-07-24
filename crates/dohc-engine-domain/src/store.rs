@@ -2297,16 +2297,18 @@ pub fn capture_manifest_seed(
             };
             entries.push(CaptureManifestSeedEntry { path, size, sha256 });
         }
-        // Same capture-origin rule for the encrypted store: a tip written by
-        // the API or replication may legitimately have no plaintext on disk,
-        // and seeding it would make the baseline diff RETIRE it.
+        // Same capture-ownership rule for the encrypted store: a tip written
+        // by the API or replication may legitimately have no plaintext on
+        // disk, and seeding it would make the baseline diff RETIRE it. Keyed
+        // on the engine-stamped `capture_owned` column, never on the
+        // caller-supplied origin string.
         let mut secrets = conn
             .prepare(
                 "SELECT f.path, f.byte_length FROM secret_files f \
                  JOIN secret_moments m ON m.workspace_id = f.workspace_id \
                    AND m.moment_id = f.latest_moment_id \
                  WHERE f.workspace_id = ?1 AND f.version_id = ?2 \
-                   AND m.metadata_origin = 'local-file'",
+                   AND m.capture_owned = 1",
             )
             .map_err(DomainError::sql_corrupt)?;
         let rows = secrets

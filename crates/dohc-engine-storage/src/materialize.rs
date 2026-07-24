@@ -180,6 +180,30 @@ pub fn record_completed_job(
         ],
     )
     .map_err(StorageError::persist)?;
+    stamp_secret_capture_owned(tx, &spec.job_id)?;
+    Ok(())
+}
+
+/// Records that CAPTURE observed this secret's plaintext in the workspace file.
+/// Every caller of [`record_completed_job`] on a secret job reached it by
+/// reading that file — a capture write, a capture retire, or a capture dedupe
+/// that verified the bytes already match. That observation, not the
+/// caller-supplied `metadata_origin`, is what lets capture claim or retire the
+/// secret later; the origin string is chosen by RPC callers and replication
+/// peers and so cannot carry ownership.
+///
+/// `after_present = 1` selects write moments: a delete means the plaintext is
+/// GONE, which grants no ownership. Non-secret job ids and ids with no
+/// matching moment update nothing.
+fn stamp_secret_capture_owned(conn: &Connection, job_id: &str) -> Result<(), StorageError> {
+    let Some(moment_id) = job_id.strip_prefix("secret-mat_") else {
+        return Ok(());
+    };
+    conn.execute(
+        "UPDATE secret_moments SET capture_owned = 1          WHERE moment_id = ?1 AND after_present = 1",
+        rusqlite::params![moment_id],
+    )
+    .map_err(StorageError::persist)?;
     Ok(())
 }
 
@@ -295,6 +319,13 @@ fn set_status(
 }
 
 /// Mark a job complete (its content is durably on disk).
+///
+/// Deliberately does NOT stamp secret capture ownership. The materializer
+/// writing a secret's plaintext to disk is the engine projecting API state
+/// outward, not capture observing the user's file; treating it as ownership
+/// would let a disk delete retire an API-written secret. Ownership is stamped
+/// only where capture itself observed the file — see
+/// [`record_completed_job`].
 pub fn mark_complete(conn: &Connection, job_id: &str, now_ms: i64) -> Result<(), StorageError> {
     set_status(conn, job_id, JobStatus::Complete, now_ms)
 }

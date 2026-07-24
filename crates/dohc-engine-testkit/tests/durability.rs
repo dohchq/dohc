@@ -346,9 +346,10 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // migration (ordinal 6), the R06 conflicts migration (ordinal 7), the
     // shadow-clone migration (ordinal 8), binary conflict sides (ordinal 9),
     // binary heads (ordinal 10), the path-aliases reverse-alias index
-    // (ordinal 11), the deferred Y.Doc coordinates table (ordinal 12), and the
-    // request-ledger kind discriminator (ordinal 13).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 14);
+    // (ordinal 11), the deferred Y.Doc coordinates table (ordinal 12), the
+    // request-ledger kind discriminator (ordinal 13), and secret capture
+    // ownership (ordinal 14).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 15);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(

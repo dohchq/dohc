@@ -162,10 +162,12 @@ pub struct CaptureSecretRetire {
     pub path: String,
     pub metadata_origin: String,
     pub now_ms: i64,
-    /// Retire ONLY a tip whose latest moment carries `metadata_origin` — i.e.
-    /// one THIS writer produced. The capture sink sets it so a disk delete
-    /// can never destroy an API/replication-written tip whose plaintext may
-    /// legitimately have never been on disk. A foreign tip is a no-op.
+    /// Retire ONLY a tip the engine recorded as being on disk. The capture
+    /// sink sets it so a disk delete can never destroy a tip whose plaintext
+    /// legitimately never reached the workspace file — a replicated secret,
+    /// or one written to a non-active version. A tip capture does not own is
+    /// a no-op. Ownership rides the engine-stamped marker, NOT the origin
+    /// this call passes.
     pub only_if_own_origin: bool,
 }
 
@@ -338,7 +340,13 @@ impl<'a> SecretFileStore<'a> {
 
         let outcome = self.store.write_with(faults, |tx| {
             let moment_order = next_secret_moment_order(tx, ws)?;
-            insert_moment(tx, &moment, moment_order, Some(&sealed))?;
+            insert_moment(
+                tx,
+                &moment,
+                moment_order,
+                Some(&sealed),
+                matches!(input.disk_intent, SecretDiskIntent::AlreadyOnDisk),
+            )?;
             upsert_tip(tx, &moment, moment_order, &sealed)?;
             // Persist the ciphertext blob (never plaintext), then enqueue the
             // durable materialization intent referencing it. Blob before job so
@@ -404,19 +412,17 @@ impl<'a> SecretFileStore<'a> {
         non_empty(&input.version_id, "version_id")?;
         let path = validate_secret_path(&input.path)?;
         let ws = input.workspace_id.clone();
-        // OWNERSHIP: a tip written by another origin (API, replication) may
+        // OWNERSHIP: a tip written any other way (API, replication) may
         // legitimately have no plaintext on disk, so capture only claims it
         // when it OBSERVED the disk transition.
         if !input.claim_foreign_head {
             let version = input.version_id.clone();
             let path = path.clone();
             let owner_ws = ws.clone();
-            let foreign = self
-                .store
-                .read_with(move |conn| secret_tip_origin(conn, &owner_ws, &version, &path))?;
-            if let Some(origin) = foreign
-                && origin != input.metadata_origin
-            {
+            let owned = self.store.read_with(move |conn| {
+                secret_tip_capture_owned(conn, &owner_ws, &version, &path)
+            })?;
+            if owned == Some(false) {
                 return Err(DomainError::CaptureNotOwned);
             }
         }
@@ -456,19 +462,11 @@ impl<'a> SecretFileStore<'a> {
                 }
             }
             None => {
-                // Deduped: the tip's plaintext is VERIFIED on disk right now.
-                //
-                // NOTE — ownership is deliberately NOT transferred here, unlike
-                // the plaintext path (`capture_ingest_in_tx`). A secret tip's
-                // origin lives on its MOMENT, so transferring would mean either
-                // rewriting history or appending a moment for a no-op change;
-                // both are worse than the consequence of not transferring,
-                // which is that a claimed-but-deduped FOREIGN tip stays foreign
-                // and a later disk delete will not retire it. That errs toward
-                // PRESERVING another writer's secret — the safe direction, and
-                // consistent with how an api-written secret with no disk file
-                // is already treated. Resolved properly by the dedicated
-                // ownership-marker column tracked for GATE6.
+                // Deduped: the tip's plaintext is VERIFIED on disk right now,
+                // so recording the completed job also stamps disk ownership on
+                // the tip — a later disk delete can retire it. Ownership rides
+                // an engine-stamped column rather than the moment's origin, so
+                // this needs no history rewrite and no no-op moment.
                 //
                 // Mark the tip's generation materialized (upsert) so the
                 // staleness gate supersedes any older pending job — the same
@@ -1123,7 +1121,9 @@ pub fn apply_secret_file_from_version(
             metadata_summary: metadata_summary.clone(),
             metadata_correlation_id: metadata_correlation_id.clone(),
         };
-        insert_moment(tx, &moment, moment_order, source.as_ref())?;
+        // Cross-version apply always materializes: the plaintext has never
+        // been observed on disk here.
+        insert_moment(tx, &moment, moment_order, source.as_ref(), false)?;
         if let Some(source) = source.as_ref() {
             upsert_tip(tx, &moment, moment_order, source)?;
             let ciphertext_sha = put_binary_blob(tx, source.ciphertext())?;
@@ -1272,7 +1272,8 @@ pub fn restore_secret_file_verbatim(
             metadata_summary: None,
             metadata_correlation_id: None,
         };
-        insert_moment(tx, &record, moment_order, target.as_ref())?;
+        // Restore always materializes; capture never observed this state.
+        insert_moment(tx, &record, moment_order, target.as_ref(), false)?;
         if let Some(sealed) = target.as_ref() {
             upsert_tip(tx, &record, moment_order, sealed)?;
             let ciphertext_sha = put_binary_blob(tx, sealed.ciphertext())?;
@@ -1372,7 +1373,13 @@ fn delete_secret_file_inner(
     };
     let outcome = store.write_with(faults, |tx| {
         let moment_order = next_secret_moment_order(tx, ws)?;
-        insert_moment(tx, &record, moment_order, None)?;
+        insert_moment(
+            tx,
+            &record,
+            moment_order,
+            None,
+            matches!(disk_intent, SecretDeleteDiskIntent::AlreadyAbsent),
+        )?;
         {
             // Deletes are anchored to the outgoing tip's ciphertext blob
             // because they carry no bytes of their own. RPC deletes enqueue a
@@ -1439,18 +1446,16 @@ pub fn capture_secret_retire(
     non_empty(&input.version_id, "version_id")?;
     let path = validate_secret_path(&input.path)?;
     let ws = input.workspace_id.clone();
-    // OWNERSHIP: a disk-driven retire must never destroy a tip written by
-    // another origin (API, replication) — its plaintext may never have been
-    // on disk at all, so absence proves nothing about it.
+    // OWNERSHIP: a disk-driven retire must never destroy a tip written any
+    // other way (API, replication) — its plaintext may never have been on disk
+    // at all, so absence proves nothing about it.
     if input.only_if_own_origin {
         let version = input.version_id.clone();
         let path = path.clone();
         let owner_ws = ws.clone();
-        let origin =
-            store.read_with(move |conn| secret_tip_origin(conn, &owner_ws, &version, &path))?;
-        if let Some(origin) = origin
-            && origin != input.metadata_origin
-        {
+        let owned = store
+            .read_with(move |conn| secret_tip_capture_owned(conn, &owner_ws, &version, &path))?;
+        if owned == Some(false) {
             return Ok(None);
         }
     }
@@ -1551,16 +1556,20 @@ pub fn has_secret_state(store: &mut EngineStore, workspace_id: &str) -> Result<b
 /// The `metadata_origin` of the current secret tip, or `None` when no tip
 /// exists. ONE definition shared by the capture write and retire ownership
 /// checks — a schema change to the join must not need two edits.
-fn secret_tip_origin(
+/// Whether the tip for `path` is one capture put on disk itself. `None` means
+/// there is no tip. Reads the engine-stamped `capture_owned` column rather
+/// than `metadata_origin`: the origin string is caller-supplied over RPC and
+/// replication, so keying disk ownership on it lets a remote writer claim it.
+fn secret_tip_capture_owned(
     conn: &Connection,
     workspace_id: &str,
     version_id: &str,
     path: &str,
-) -> Result<Option<String>, DomainError> {
+) -> Result<Option<bool>, DomainError> {
     conn.query_row(
-        "SELECT m.metadata_origin FROM secret_files f          JOIN secret_moments m ON m.workspace_id = f.workspace_id            AND m.moment_id = f.latest_moment_id          WHERE f.workspace_id = ?1 AND f.version_id = ?2 AND f.path = ?3",
+        "SELECT m.capture_owned FROM secret_files f          JOIN secret_moments m ON m.workspace_id = f.workspace_id            AND m.moment_id = f.latest_moment_id          WHERE f.workspace_id = ?1 AND f.version_id = ?2 AND f.path = ?3",
         params![workspace_id, version_id, path],
-        |row| row.get(0),
+        |row| row.get::<_, i64>(0).map(|owned| owned != 0),
     )
     .optional()
     .map_err(DomainError::sql_corrupt)
@@ -1748,12 +1757,15 @@ fn next_secret_moment_order(conn: &Connection, workspace_id: &str) -> Result<i64
 }
 
 /// Insert a secret moment. `after` carries the sealed after-state for a write
-/// (base64 fields), or `None` for a delete.
+/// (base64 fields), or `None` for a delete. `capture_owned` records whether
+/// the plaintext for this moment lives on disk *because capture observed it
+/// there* — never inferred from the caller-supplied origin string.
 fn insert_moment(
     tx: &Transaction<'_>,
     moment: &SecretMomentRecord,
     moment_order: i64,
     after: Option<&SealedSecret>,
+    capture_owned: bool,
 ) -> Result<(), DomainError> {
     let (present, iv, tag, ct, len) = match after {
         Some(s) => (
@@ -1769,8 +1781,8 @@ fn insert_moment(
         "INSERT INTO secret_moments (workspace_id, moment_order, moment_id, version_id, path, \
          recorded_at_ms, operation, metadata_origin, metadata_summary, metadata_correlation_id, \
          after_present, after_iv_base64, after_auth_tag_base64, after_ciphertext_base64, \
-         after_byte_length) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+         after_byte_length, capture_owned) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             moment.workspace_id,
             moment_order,
@@ -1787,6 +1799,7 @@ fn insert_moment(
             tag,
             ct,
             len,
+            i64::from(capture_owned),
         ],
     )
     .map_err(DomainError::sql_persist)?;
