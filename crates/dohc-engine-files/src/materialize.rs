@@ -487,9 +487,13 @@ fn materialize_secret_delete_adopting_current(
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<JobOutcome, MaterializeError> {
-    if matches!(read_current_no_follow(target)?, CurrentTarget::Absent) {
-        store.mark_materialization_complete(&job.job_id, now_ms)?;
-        return Ok(JobOutcome::AlreadyMaterialized);
+    match read_current_no_follow(target)? {
+        CurrentTarget::Absent => {
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+            return Ok(JobOutcome::AlreadyMaterialized);
+        }
+        CurrentTarget::Present(_) => {}
+        CurrentTarget::Oversized => return Err(MaterializeError::BlockedTarget),
     }
     if should_crash(faults, FaultPoint::MaterializeBeforePreimageRevalidate) {
         return Ok(JobOutcome::Crashed(
@@ -500,9 +504,13 @@ fn materialize_secret_delete_adopting_current(
     // Any regular file currently at the active secret's own resolved path is
     // the disk projection being retired; no plaintext hash or conflict copy is
     // needed (or safe) for a secret delete.
-    if matches!(read_current_no_follow(target)?, CurrentTarget::Absent) {
-        store.mark_materialization_complete(&job.job_id, now_ms)?;
-        return Ok(JobOutcome::AlreadyMaterialized);
+    match read_current_no_follow(target)? {
+        CurrentTarget::Absent => {
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+            return Ok(JobOutcome::AlreadyMaterialized);
+        }
+        CurrentTarget::Present(_) => {}
+        CurrentTarget::Oversized => return Err(MaterializeError::BlockedTarget),
     }
     ensure_secret_target_symlink_free(root, target)?;
     std::fs::remove_file(target).map_err(|err| MaterializeError::io(target, &err))?;

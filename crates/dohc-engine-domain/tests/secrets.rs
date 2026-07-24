@@ -940,8 +940,9 @@ fn secret_restore_verbatim_copy_is_content_equality_no_op() {
 }
 
 #[test]
-fn secret_restore_to_absent_records_a_completed_generation_marker() {
-    // MUTATION: delete the restored-away tip without recording its completed generation -> fails.
+fn secret_restore_to_absent_enqueues_a_pending_delete() {
+    // MUTATION: restore record_completed_job for the absent target -> status
+    // and operation regress to complete/write instead of pending/delete.
     let scratch = ScratchDir::new().unwrap();
     let db = scratch.engine_db_path().unwrap();
     seed_version(&db, WS);
@@ -986,13 +987,21 @@ fn secret_restore_to_absent_records_a_completed_generation_marker() {
     .unwrap();
     assert_eq!(restored.restored, "deleted");
 
-    let marker: (String, String, i64, i64) = store
+    let marker: (String, String, String, i64, i64) = store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT status, content_sha256, preimage_present, target_generation \
+                "SELECT status, operation, content_sha256, preimage_present, target_generation \
                  FROM materialization_jobs WHERE job_id = 'secret-mat_restore-to-absent'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
         })
         .unwrap();
@@ -1005,10 +1014,11 @@ fn secret_restore_to_absent_records_a_completed_generation_marker() {
             )
         })
         .unwrap();
-    assert_eq!(marker.0, "complete");
-    assert_eq!(marker.1, outgoing_sha);
-    assert_eq!(marker.2, 0, "the restore marker uses an absent preimage");
-    assert_eq!(marker.3, restored_order);
+    assert_eq!(marker.0, "pending");
+    assert_eq!(marker.1, "delete");
+    assert_eq!(marker.2, outgoing_sha);
+    assert_eq!(marker.3, 0, "the restore delete uses an absent preimage");
+    assert_eq!(marker.4, restored_order);
 }
 
 #[test]

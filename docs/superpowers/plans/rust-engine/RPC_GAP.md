@@ -398,3 +398,27 @@ MID-SESSION version switch does not refresh the on-disk secrets until the next o
 a switch-time (or set-active-time) secret materialization pass is daemon-composition
 (R13)/desktop-adapter scope, not the secret executor; tracked for GATE6. Non-secret files
 share the same switch-materialization dependency on the desktop/daemon composition layer.
+
+## PR #227 codex-bot round-8 declines
+
+- **Clear stale plaintext when the active secret decrypt fails
+  (`actor.rs:~5165`) — DECLINE.** When the active tip is undecryptable because
+  the DB is tampered or corrupt, round 4 leaves the materialization job pending.
+  The previously materialized plaintext is the last decryptable value and was
+  legitimately written to disk. Clearing it on a decrypt failure would break a
+  working `.env` during a transient/corruption event without a confidentiality
+  gain: an attacker able to tamper with the DB can already read the disk
+  plaintext. The secret still exists (its tip is present but undecryptable), so
+  retaining its last-good value is defensible. This is not a deletion.
+- **Keep request ids reserved during blob egress
+  (`dohc-workspace-engine.rs:~437`) — DECLINE.** The stdio daemon is
+  single-client: the desktop main process, under the standing identity posture.
+  That trusted client issues unique request ids, so reuse during an in-flight
+  egress is not a real threat. Multi-client id-collision hardening belongs to
+  relay/RPC-E scope.
+- **Surface blob egress for in-process callers (`transport.rs:~129`) —
+  DECLINE.** Over-cap `readBlob` egress reaches an in-process caller only
+  through `ServiceResponse.blob_egress`. The only in-process `readBlob` callers
+  are tests; production in-process callers do not negotiate `blobs`, so there
+  is no production impact. If an in-process production consumer ever opts into
+  `blobs`, wire the in-process egress drain then.

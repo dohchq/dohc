@@ -1155,6 +1155,130 @@ async fn active_secret_delete_removes_materialized_plaintext_from_disk() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_restore_to_absent_removes_materialized_plaintext_on_reopen() {
+    // MUTATION: revert restore-to-absent to record_completed_job -> the
+    // restored-away plaintext survives because open has no pending delete.
+    let (scratch, transport, handle) = fixture("secret-restore-absent-removes-disk").await;
+    let workspace = "ws-rpcd-secret-restore-absent-removes-disk";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=restore-away\n",
+            "origin": "api",
+            "momentId": "restore-away-first-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+
+    let materialized = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("write replay materializes plaintext");
+    let materialized_handle: WorkspaceHandle =
+        serde_json::from_value(materialized.result["workspace"].clone()).expect("handle");
+    let target = scratch.path().join(".env");
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("materialized secret"),
+        "TOKEN=restore-away\n"
+    );
+
+    let restored = call(
+        &transport,
+        &materialized_handle,
+        5,
+        "secrets.restore",
+        json!({
+            "workspaceId": workspace,
+            "path": ".env",
+            "beforeMomentId": "restore-away-first-write",
+            "momentId": "restore-away-to-absent",
+        }),
+    )
+    .await;
+    assert_eq!(restored["restored"], "deleted");
+    assert!(
+        target.exists(),
+        "restore mutation only schedules disk cleanup"
+    );
+    call(
+        &transport,
+        &materialized_handle,
+        6,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                7,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("restore delete replay succeeds");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(
+        !target.exists(),
+        "restore-to-absent removes the previously materialized plaintext"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let job: (String, String) = connection
+        .query_row(
+            "SELECT status, operation FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_restore-away-to-absent'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("restore delete job");
+    assert_eq!(job, ("complete".to_owned(), "delete".to_owned()));
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        8,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_secret_delete_adopts_modified_disk_without_plaintext_conflict() {
     // MUTATION: preserve a preimage mismatch for secret deletes by writing a
     // plaintext `.conflict` sibling -> the leak-artifact assertion fails.
@@ -3004,6 +3128,137 @@ async fn secret_directory_at_path_does_not_brick_open() {
             |row| row.get(0),
         )
         .expect("directory job status");
+    assert_eq!(status, "pending");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        8,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_secret_delete_refuses_non_regular_target_and_leaves_job_pending() {
+    // MUTATION: remove the secret delete executor's non-regular guards -> on
+    // Unix the socket path is unlinked and the delete job completes.
+    let (scratch, transport, handle) = fixture("secret-delete-non-regular").await;
+    let workspace = "ws-rpcd-secret-delete-non-regular";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=replace-with-special\n",
+            "origin": "api",
+            "momentId": "non-regular-secret-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+    let materialized = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("materialize secret before scheduling delete");
+    let materialized_handle: WorkspaceHandle =
+        serde_json::from_value(materialized.result["workspace"].clone()).expect("handle");
+    call(
+        &transport,
+        &materialized_handle,
+        5,
+        "secrets.delete",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "origin": "api",
+            "momentId": "non-regular-secret-delete",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &materialized_handle,
+        6,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+
+    let target = scratch.path().join(".env");
+    std::fs::remove_file(&target).expect("remove prior plaintext");
+    #[cfg(unix)]
+    let socket =
+        std::os::unix::net::UnixListener::bind(&target).expect("socket at secret delete path");
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(&target).expect("directory at secret delete path");
+        std::fs::write(target.join("keep.txt"), "do not remove\n").expect("directory sentinel");
+    }
+
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                7,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("blocked special target does not brick open");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(
+        target.exists(),
+        "the non-regular target must remain untouched"
+    );
+    #[cfg(unix)]
+    drop(socket);
+    #[cfg(not(unix))]
+    assert_eq!(
+        std::fs::read_to_string(target.join("keep.txt")).expect("directory sentinel"),
+        "do not remove\n"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_non-regular-secret-delete'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("non-regular delete job status");
     assert_eq!(status, "pending");
     drop(connection);
     call(

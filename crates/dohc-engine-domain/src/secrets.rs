@@ -1293,7 +1293,7 @@ pub fn restore_secret_file_verbatim(
                 reason: "secret restore delete has no outgoing tip",
             })?;
             let content_sha256 = put_binary_blob(tx, outgoing.ciphertext())?;
-            dohc_engine_storage::record_completed_job(
+            enqueue_delete_job(
                 tx,
                 &MaterializationJobSpec {
                     job_id: format!("secret-mat_{moment_id}"),
