@@ -8156,6 +8156,7 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         | SyncError::FaultCrash => ErrorCode::Internal,
         SyncError::InvalidInput { .. }
         | SyncError::UnsupportedOperation
+        | SyncError::MomentAppendNotImplemented
         | SyncError::ShareBoundaryViolation
         | SyncError::BlobInvalid => ErrorCode::InvalidParams,
     }

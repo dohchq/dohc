@@ -17,8 +17,10 @@ mod journal;
 mod model;
 mod path_policy;
 mod relay;
+mod router;
 mod secret_apply;
 mod share;
+mod version_apply;
 mod ydoc_apply;
 
 pub use apply::{ApplyOutcome, apply_chat_envelope, apply_envelope_with};
@@ -43,8 +45,10 @@ pub use relay::{
     RecoverResponse, RelaySyncClient, RelayTransport, ShareViewRequest, ShareViewResponse,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
 };
+pub use router::apply_replication_envelope;
 pub use secret_apply::apply_secret_envelope;
 pub use share::{ShareBoundary, ShareSurface, apply_shared_envelope};
+pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
     LeaseProbe, NoLiveLeases, YdocApplyResult, apply_ydoc_envelope, drain_deferred_ydoc_for_key,
     project_and_write_in_tx,
