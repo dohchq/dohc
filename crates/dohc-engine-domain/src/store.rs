@@ -341,9 +341,12 @@ impl<'a> VersionedTextStore<'a> {
                   recorded_at_ms, operation, after_blob_sha256, before_present, \
                   before_blob_sha256, before_latest_moment_id, metadata_origin, author_json, \
                   sync_record_only, after_content_kind, after_binary_sha256, \
-                  before_content_kind, before_binary_sha256) \
+                  before_content_kind, before_binary_sha256, \
+                  payload_before_path, payload_before_content_kind, \
+                  payload_before_blob_sha256, payload_before_binary_sha256, \
+                  payload_after_path) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'rename', ?8, 2, ?8, ?9, ?10, ?11, \
-                         NULL, ?12, ?13, ?12, ?13)",
+                         NULL, ?12, ?13, ?12, ?13, ?14, ?12, ?8, ?13, ?6)",
                 params![
                     ws,
                     moment_order,
@@ -358,6 +361,9 @@ impl<'a> VersionedTextStore<'a> {
                     input.author_json,
                     before.content_kind,
                     before.binary_sha256,
+                    // The payload a rename carries moved FROM here; the row's
+                    // own path is where it landed.
+                    input.from_path,
                 ],
             )
             .map_err(DomainError::sql_persist)?;
@@ -2498,9 +2504,13 @@ fn write_text_in_tx_with_journal(
          (workspace_id, moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
            operation, after_blob_sha256, before_present, before_blob_sha256, \
            before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
-           after_content_kind, after_binary_sha256, before_content_kind, before_binary_sha256) \
+           after_content_kind, after_binary_sha256, before_content_kind, before_binary_sha256, \
+           payload_before_path, payload_before_content_kind, payload_before_blob_sha256, \
+           payload_before_binary_sha256, payload_after_path) \
           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'write', ?8, ?9, ?10, ?11, ?12, ?13, \
-                  NULL, 'text', NULL, ?14, ?15)",
+                  NULL, 'text', NULL, ?14, ?15, \
+                  CASE WHEN ?9 = 2 THEN ?6 END, CASE WHEN ?9 = 2 THEN ?14 END, \
+                  ?10, ?15, ?6)",
         params![
             ws,
             moment_order,
@@ -3092,9 +3102,11 @@ pub fn delete_text_in_tx(
          (workspace_id, moment_order, moment_id, version_id, object_id, path, recorded_at_ms, \
            operation, after_blob_sha256, before_present, before_blob_sha256, \
            before_latest_moment_id, metadata_origin, author_json, sync_record_only, \
-           after_content_kind, after_binary_sha256, before_content_kind, before_binary_sha256) \
+           after_content_kind, after_binary_sha256, before_content_kind, before_binary_sha256, \
+           payload_before_path, payload_before_content_kind, payload_before_blob_sha256, \
+           payload_before_binary_sha256, payload_after_path) \
           VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'delete', ?8, 2, ?8, ?9, ?10, ?11, \
-                  NULL, ?12, ?13, ?12, ?13)",
+                  NULL, ?12, ?13, ?12, ?13, ?6, ?12, ?8, ?13, ?6)",
         params![
             ws,
             moment_order,

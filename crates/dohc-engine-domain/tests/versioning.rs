@@ -1522,3 +1522,106 @@ fn binary_write_rejects_the_reserved_capture_origin_at_the_domain_door() {
         "a refused reserved-origin write must leave no rows behind"
     );
 }
+
+/// Moment PAYLOAD provenance is what the OPERATION carried; the `before_*`
+/// columns are what this store can roll back to. They coincide for every
+/// locally authored operation EXCEPT rename, where the payload moved from one
+/// path to another — so a writer that just mirrors the row's own path silently
+/// loses the source. Pins what each writer stores.
+#[test]
+fn every_moment_writer_records_payload_provenance() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    {
+        let mut vt = VersionedTextStore::new(&mut store);
+        vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+            .expect("first write");
+        vt.write_text(&write("main", "a.md", "two", "m2", "o1", 20), &NO_FAULTS)
+            .expect("overwrite");
+        vt.rename_text_file(&rename("main", "a.md", "b.md", "m3", 30), &NO_FAULTS)
+            .expect("rename");
+        vt.delete_text_file(&delete("main", "b.md", "m4", 40), &NO_FAULTS)
+            .expect("delete");
+    }
+
+    type Provenance = (Option<String>, Option<String>, Option<String>, String);
+    let provenance = |moment_id: &str| -> Provenance {
+        let id = moment_id.to_owned();
+        store
+            .read_with(move |conn| {
+                Ok::<Provenance, dohc_engine_domain::DomainError>(
+                    conn.query_row(
+                        "SELECT payload_before_path, payload_before_content_kind, \
+                         payload_before_blob_sha256, payload_after_path \
+                         FROM moments WHERE moment_id = ?1",
+                        rusqlite::params![id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .expect("provenance columns"),
+                )
+            })
+            .expect("read provenance")
+    };
+    let blob_of = |moment_id: &str| -> Option<String> {
+        let id = moment_id.to_owned();
+        store
+            .read_with(move |conn| {
+                Ok::<_, dohc_engine_domain::DomainError>(
+                    conn.query_row(
+                        "SELECT after_blob_sha256 FROM moments WHERE moment_id = ?1",
+                        rusqlite::params![id],
+                        |row| row.get::<_, Option<String>>(0),
+                    )
+                    .expect("after digest"),
+                )
+            })
+            .expect("read after digest")
+    };
+
+    // A FIRST write carries no before payload.
+    let first = provenance("m1");
+    assert_eq!(first.0, None, "a first write has no payload-before path");
+    assert_eq!(first.1, None, "a first write has no payload-before kind");
+    assert_eq!(first.2, None, "a first write has no payload-before digest");
+    assert_eq!(first.3, "a.md", "payload-after path is where it landed");
+
+    // An OVERWRITE carries the replaced content, at the same path.
+    let overwrite = provenance("m2");
+    assert_eq!(overwrite.0.as_deref(), Some("a.md"));
+    assert_eq!(overwrite.1.as_deref(), Some("text"));
+    assert_eq!(
+        overwrite.2,
+        blob_of("m1"),
+        "an overwrite's payload-before is the content it replaced"
+    );
+    assert_eq!(overwrite.3, "a.md");
+
+    // THE CASE THAT DIVERGES: the payload moved a.md -> b.md.
+    let renamed = provenance("m3");
+    assert_eq!(
+        renamed.0.as_deref(),
+        Some("a.md"),
+        "a rename's payload came FROM the source path"
+    );
+    assert_eq!(
+        renamed.3, "b.md",
+        "a rename's payload landed at the destination"
+    );
+    assert_eq!(
+        renamed.2,
+        blob_of("m2"),
+        "a rename carries unchanged content"
+    );
+
+    // A DELETE carries the removed content on BOTH sides (oracle parity).
+    let deleted = provenance("m4");
+    assert_eq!(deleted.0.as_deref(), Some("b.md"));
+    assert_eq!(deleted.3, "b.md");
+    assert_eq!(
+        deleted.2,
+        blob_of("m4"),
+        "a delete's payload-before is the content it removed"
+    );
+}
