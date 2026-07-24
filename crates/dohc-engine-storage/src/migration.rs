@@ -1438,6 +1438,56 @@ UPDATE secret_moments SET capture_owned = 1
 /// The `id` of the secret capture-ownership migration.
 pub(crate) const SECRET_CAPTURE_OWNERSHIP_MIGRATION_ID: &str = "v1-secret-capture-ownership";
 
+/// Ordinal 15. Ports the TS oracle's moment PAYLOAD provenance, which is a
+/// different thing from the rollback preimage Rust already stores. The oracle
+/// records what the OPERATION carried (`payload.before` / `payload.after`)
+/// alongside what this store can roll back to (`before_*`); the two coincide
+/// for every locally authored operation but diverge on a content-convergent
+/// replication adoption, where the oracle keeps the imported payload and
+/// localizes only the rollback preimage
+/// (`versionedTextStore.ts` `contentFastForward && !headFastForward`).
+///
+/// Rust has no inbound `moment.append` apply path yet — that is RPC-E — so no
+/// row can diverge today and the backfill below is exact. The columns land
+/// before the R15 reset because adding them afterwards means migrating live
+/// data instead of empty tables.
+///
+/// The two payload-AFTER content columns the oracle stores are deliberately
+/// NOT added: `payload_after_content_kind` is exactly `after_content_kind`,
+/// and `payload_after_blob_sha256` is exactly the after digest selected by
+/// that kind, which the table's CHECK constraints already guarantee is
+/// present and unambiguous. Storing them again would create a second copy
+/// that can disagree with the first.
+///
+/// `payload_after_path` IS added: it equals `path` for every locally authored
+/// operation, but the oracle accepts a replication envelope whose `path` and
+/// `payloadAfterPath` differ and preserves both, and nothing else in the
+/// schema can reconstruct that.
+const V1_MOMENT_PAYLOAD_PROVENANCE_DDL: &str =
+    "ALTER TABLE moments ADD COLUMN payload_before_path TEXT;
+ALTER TABLE moments ADD COLUMN payload_before_content_kind TEXT;
+ALTER TABLE moments ADD COLUMN payload_before_blob_sha256 TEXT;
+ALTER TABLE moments ADD COLUMN payload_before_binary_sha256 TEXT;
+ALTER TABLE moments ADD COLUMN payload_after_path TEXT;
+UPDATE moments SET payload_after_path = path;
+UPDATE moments SET
+    payload_before_path = CASE operation
+        WHEN 'rename' THEN (
+            SELECT producer.path FROM moments producer
+             WHERE producer.workspace_id = moments.workspace_id
+               AND producer.moment_id = moments.before_latest_moment_id
+        )
+        ELSE path
+    END,
+    payload_before_content_kind = before_content_kind,
+    payload_before_blob_sha256 = before_blob_sha256,
+    payload_before_binary_sha256 = before_binary_sha256
+ WHERE before_present = 2;
+";
+
+/// The `id` of the moment payload-provenance migration.
+pub(crate) const MOMENT_PAYLOAD_PROVENANCE_MIGRATION_ID: &str = "v1-moment-payload-provenance";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1544,6 +1594,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: SECRET_CAPTURE_OWNERSHIP_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_SECRET_CAPTURE_OWNERSHIP_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 15,
+        id: MOMENT_PAYLOAD_PROVENANCE_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_MOMENT_PAYLOAD_PROVENANCE_DDL,
         sets_user_version: None,
     },
 ];
@@ -1894,6 +1951,87 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM engine_ownership", [], |r| r.get(0))
             .expect("own");
         assert_eq!(owns, 1);
+    }
+
+    #[test]
+    fn payload_provenance_migration_backfills_from_existing_rows() {
+        let dir = tempdir();
+        let path = dir.join("provenance.db");
+        let ctx = MigrationContext::current(1_400);
+        let mut conn = open_bare(&path);
+        // Everything BEFORE the provenance migration, so the rows below are
+        // exactly what an existing store holds when it upgrades.
+        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..15], &ctx, &NoFaults)
+            .expect("pre-provenance migrations");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES ('ws', 'main');
+             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
+                 VALUES ('ws', 'main', 'main', 'main', 1);
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
+                 VALUES ('ws', 'obj', 1);
+             INSERT INTO blobs (sha256, byte_length, text) VALUES ('sha-one', 3, 'one');
+             INSERT INTO blobs (sha256, byte_length, text) VALUES ('sha-two', 3, 'two');
+             -- A first write: no preimage, so no payload-before.
+             INSERT INTO moments (workspace_id, moment_order, moment_id, version_id,
+                 object_id, path, recorded_at_ms, operation, after_blob_sha256,
+                 before_present, metadata_origin)
+                 VALUES ('ws', 1, 'm1', 'main', 'obj', 'a.md', 10, 'write', 'sha-one',
+                         1, 'user');
+             -- An overwrite: preimage at the SAME path.
+             INSERT INTO moments (workspace_id, moment_order, moment_id, version_id,
+                 object_id, path, recorded_at_ms, operation, after_blob_sha256,
+                 before_present, before_blob_sha256, before_latest_moment_id,
+                 metadata_origin)
+                 VALUES ('ws', 2, 'm2', 'main', 'obj', 'a.md', 20, 'write', 'sha-two',
+                         2, 'sha-one', 'm1', 'user');
+             -- A rename: the payload came from the PRODUCER's path, not this row's.
+             INSERT INTO moments (workspace_id, moment_order, moment_id, version_id,
+                 object_id, path, recorded_at_ms, operation, after_blob_sha256,
+                 before_present, before_blob_sha256, before_latest_moment_id,
+                 metadata_origin)
+                 VALUES ('ws', 3, 'm3', 'main', 'obj', 'b.md', 30, 'rename', 'sha-two',
+                         2, 'sha-two', 'm2', 'user');",
+        )
+        .expect("legacy moment rows");
+
+        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("provenance migration");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+
+        let row = |moment_id: &str| -> (Option<String>, Option<String>, Option<String>, String) {
+            conn.query_row(
+                "SELECT payload_before_path, payload_before_content_kind, \
+                 payload_before_blob_sha256, payload_after_path \
+                 FROM moments WHERE moment_id = ?1",
+                [moment_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("provenance row")
+        };
+
+        // MUTATION: drop the `before_present = 2` guard -> a first write gains a
+        // payload-before it never had.
+        assert_eq!(row("m1"), (None, None, None, "a.md".to_owned()));
+        assert_eq!(
+            row("m2"),
+            (
+                Some("a.md".to_owned()),
+                Some("text".to_owned()),
+                Some("sha-one".to_owned()),
+                "a.md".to_owned()
+            )
+        );
+        // MUTATION: backfill the rename's payload-before path from `path` -> the
+        // source path is lost and this reads "b.md".
+        assert_eq!(
+            row("m3"),
+            (
+                Some("a.md".to_owned()),
+                Some("text".to_owned()),
+                Some("sha-two".to_owned()),
+                "b.md".to_owned()
+            )
+        );
     }
 
     #[test]
