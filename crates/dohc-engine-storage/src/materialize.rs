@@ -180,28 +180,31 @@ pub fn record_completed_job(
         ],
     )
     .map_err(StorageError::persist)?;
-    stamp_secret_capture_owned(tx, &spec.job_id)?;
     Ok(())
 }
 
-/// Records that CAPTURE observed this secret's plaintext in the workspace file.
-/// Every caller of [`record_completed_job`] on a secret job reached it by
-/// reading that file — a capture write, a capture retire, or a capture dedupe
-/// that verified the bytes already match. That observation, not the
-/// caller-supplied `metadata_origin`, is what lets capture claim or retire the
-/// secret later; the origin string is chosen by RPC callers and replication
-/// peers and so cannot carry ownership.
+/// Record that CAPTURE observed this secret's plaintext in the workspace file.
 ///
-/// `after_present = 1` selects write moments: a delete means the plaintext is
-/// GONE, which grants no ownership. Non-secret job ids and ids with no
-/// matching moment update nothing.
-fn stamp_secret_capture_owned(conn: &Connection, job_id: &str) -> Result<(), StorageError> {
-    let Some(moment_id) = job_id.strip_prefix("secret-mat_") else {
-        return Ok(());
-    };
-    conn.execute(
-        "UPDATE secret_moments SET capture_owned = 1          WHERE moment_id = ?1 AND after_present = 1",
-        rusqlite::params![moment_id],
+/// That observation — a capture write, a capture retire, or a capture dedupe
+/// that verified the bytes already match — is what lets capture claim or retire
+/// the secret later. The caller-supplied `metadata_origin` cannot carry it:
+/// RPC callers and replication peers choose that string, including the value
+/// capture itself writes.
+///
+/// Scoped by workspace because `secret_moments` is keyed by
+/// `(workspace_id, moment_id)` and RPC callers choose their own moment ids, so
+/// a bare id can name a different workspace's moment. `after_present = 1`
+/// selects write moments: a delete means the plaintext is GONE, which grants
+/// no ownership.
+pub fn stamp_secret_capture_owned(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+) -> Result<(), StorageError> {
+    tx.execute(
+        "UPDATE secret_moments SET capture_owned = 1 \
+         WHERE workspace_id = ?1 AND moment_id = ?2 AND after_present = 1",
+        rusqlite::params![workspace_id, moment_id],
     )
     .map_err(StorageError::persist)?;
     Ok(())
@@ -325,7 +328,7 @@ fn set_status(
 /// outward, not capture observing the user's file; treating it as ownership
 /// would let a disk delete retire an API-written secret. Ownership is stamped
 /// only where capture itself observed the file — see
-/// [`record_completed_job`].
+/// [`stamp_secret_capture_owned`].
 pub fn mark_complete(conn: &Connection, job_id: &str, now_ms: i64) -> Result<(), StorageError> {
     set_status(conn, job_id, JobStatus::Complete, now_ms)
 }

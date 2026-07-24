@@ -494,6 +494,7 @@ impl<'a> SecretFileStore<'a> {
         faults: &dyn FaultInjector,
     ) -> Result<(), DomainError> {
         let ws = workspace_id.to_owned();
+        let owner_ws = workspace_id.to_owned();
         let version = version_id.to_owned();
         let secret_path = path.to_owned();
         let tip = self.store.read_with(move |conn| {
@@ -532,8 +533,9 @@ impl<'a> SecretFileStore<'a> {
                     target_generation: moment_order,
                     now_ms,
                 },
-            )
-            .map_err(DomainError::from)
+            )?;
+            dohc_engine_storage::stamp_secret_capture_owned(tx, &owner_ws, &latest_moment_id)
+                .map_err(DomainError::from)
         })?;
         committed(outcome)
     }

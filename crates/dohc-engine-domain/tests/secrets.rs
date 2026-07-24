@@ -1676,9 +1676,10 @@ fn materializing_an_api_secret_does_not_confer_capture_ownership() {
 }
 
 /// Cross-version apply and verbatim restore both MATERIALIZE — their plaintext
-/// has never been observed on disk — so neither may be seeded or claimed until
-/// its job completes. Pins the two `capture_owned = false` decisions the write
-/// path makes.
+/// has never been observed on disk — so neither may EVER be seeded or claimed
+/// on the strength of that materialization. Draining the job runs through
+/// `mark_complete`, which deliberately does not stamp ownership. Pins the two
+/// `capture_owned = false` decisions the write path makes.
 #[test]
 fn applied_and_restored_secrets_are_not_capture_owned_on_insert() {
     use dohc_engine_domain::capture_manifest_seed;
@@ -1714,7 +1715,7 @@ fn applied_and_restored_secrets_are_not_capture_owned_on_insert() {
         capture_manifest_seed(&store, WS, "feat")
             .expect("seed")
             .is_empty(),
-        "an applied secret must not be seeded before its job completes"
+        "an applied secret must not be seeded: capture never observed it"
     );
 
     restore_secret_file_verbatim(
@@ -1728,4 +1729,108 @@ fn applied_and_restored_secrets_are_not_capture_owned_on_insert() {
     )
     .expect("restore verbatim");
     assert_eq!(owned(&store, "sm-restored"), 0, "restore must not own disk");
+}
+
+/// `secret_moments` is keyed by `(workspace_id, moment_id)`, so a same-named
+/// moment can exist in another workspace — replication inserts secret moments
+/// with ids chosen elsewhere and enqueues no materialization job, so nothing
+/// makes those ids unique across workspaces. Stamping disk ownership by bare
+/// moment id would hand capture a foreign workspace's secret, and capture
+/// retires what it owns once the file disappears.
+#[test]
+fn capture_ownership_never_crosses_a_workspace_boundary() {
+    use dohc_engine_domain::CaptureSecret;
+
+    const OTHER_WS: &str = "ws-other";
+    const COLLIDE: &str = "shared-moment-id";
+
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_version(&db, WS);
+    seed_version(&db, OTHER_WS);
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    let key = key();
+
+    // THIS workspace's tip, written over RPC and materialized by the engine.
+    SecretFileStore::new(&mut store, &key)
+        .write_secret_file(
+            &SecretWrite {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: ".env".to_owned(),
+                text: "TOKEN=mine".to_owned(),
+                moment_id: COLLIDE.to_owned(),
+                metadata_origin: "api".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                now_ms: 10,
+                disk_intent: SecretDiskIntent::Materialize,
+            },
+            &NO_FAULTS,
+        )
+        .expect("own workspace write");
+
+    // A REPLICATED tip in another workspace carrying the same moment id: no
+    // materialization job, because its plaintext never reaches local disk.
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "INSERT INTO secret_moments (workspace_id, moment_order, moment_id, version_id, \
+                 path, recorded_at_ms, operation, metadata_origin, after_present, \
+                 after_iv_base64, after_auth_tag_base64, after_ciphertext_base64, \
+                 after_byte_length, capture_owned) \
+                 VALUES (?1, 0, ?2, 'main', '.env', 5, 'write', 'sync', 1, 'iv', 'tag', 'ct', 3, 0)",
+                params![OTHER_WS, COLLIDE],
+            )
+            .expect("replicated moment");
+            tx.execute(
+                "INSERT INTO secret_files (workspace_id, version_id, path, iv_base64, \
+                 auth_tag_base64, ciphertext_base64, byte_length, updated_at_ms, \
+                 latest_moment_id) \
+                 VALUES (?1, 'main', '.env', 'iv', 'tag', 'ct', 3, 5, ?2)",
+                params![OTHER_WS, COLLIDE],
+            )
+            .expect("replicated tip");
+            Ok::<_, dohc_engine_domain::DomainError>(())
+        })
+        .expect("seed the replicated tip");
+
+    // A capture dedupe here stamps ownership — on THIS workspace's tip only.
+    SecretFileStore::new(&mut store, &key)
+        .capture_secret(
+            &CaptureSecret {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                path: ".env".to_owned(),
+                text: "TOKEN=mine".to_owned(),
+                metadata_origin: "local-file".to_owned(),
+                now_ms: 20,
+                claim_foreign_head: true,
+            },
+            &NO_FAULTS,
+        )
+        .expect("verified dedupe");
+
+    let owned = |store: &EngineStore, workspace: &str| -> i64 {
+        let ws = workspace.to_owned();
+        store
+            .read_with(move |conn| {
+                Ok::<_, dohc_engine_domain::DomainError>(
+                    conn.query_row(
+                        "SELECT capture_owned FROM secret_moments \
+                         WHERE workspace_id = ?1 AND moment_id = ?2",
+                        params![ws, COLLIDE],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .expect("capture_owned"),
+                )
+            })
+            .expect("read capture_owned")
+    };
+    assert_eq!(owned(&store, WS), 1, "capture owns the tip it verified");
+    assert_eq!(
+        owned(&store, OTHER_WS),
+        0,
+        "another workspace's same-named moment must be untouched"
+    );
 }
