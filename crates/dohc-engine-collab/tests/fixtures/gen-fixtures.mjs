@@ -233,6 +233,74 @@ function makeRichdoc(seed) {
   };
 }
 
+function xmlText(value, marks) {
+  const text = new Y.XmlText();
+  if (value.length > 0) text.insert(0, value, marks);
+  return text;
+}
+
+function xmlRuns(runs) {
+  const text = new Y.XmlText();
+  let offset = 0;
+  for (const [value, marks] of runs) {
+    if (value.length > 0) {
+      text.insert(offset, value, marks ?? {});
+      offset += value.length;
+    }
+  }
+  return text;
+}
+
+function xmlElement(name, attrs = {}, children = []) {
+  const element = new Y.XmlElement(name);
+  for (const [key, value] of Object.entries(attrs)) {
+    element.setAttribute(key, value);
+  }
+  if (children.length > 0) element.insert(0, children);
+  return element;
+}
+
+function paragraph(children) {
+  return xmlElement(
+    "paragraph",
+    {},
+    typeof children === "string" ? [xmlText(children)] : children,
+  );
+}
+
+function tableCell(name, text, attrs = {}) {
+  return xmlElement(
+    name,
+    { colspan: 1, rowspan: 1, ...attrs },
+    [paragraph(text)],
+  );
+}
+
+function tableRow(cells) {
+  return xmlElement("tableRow", {}, cells);
+}
+
+function table(rows) {
+  return xmlElement("table", {}, rows);
+}
+
+function directRichdoc(blocks, frontmatter = {}) {
+  const doc = new Y.Doc();
+  if (blocks.length > 0) doc.getXmlFragment("body").insert(0, blocks);
+  for (const [key, value] of Object.entries(frontmatter)) {
+    doc.getMap("frontmatter").set(key, value);
+  }
+  return doc;
+}
+
+const linkAttrs = (href, title = null) => ({
+  href,
+  target: "_blank",
+  rel: "noopener noreferrer nofollow",
+  class: null,
+  title,
+});
+
 const RICHDOC_PROJECTION_CASES = [
   {
     name: "headings-marks",
@@ -362,10 +430,249 @@ const RICHDOC_PROJECTION_CASES = [
       "$$$$",
     ].join("\n"),
   },
+  {
+    name: "known-lossy-table-literal-pipe",
+    makeDoc: () =>
+      directRichdoc([
+        table([
+          tableRow([
+            tableCell("tableHeader", "Value"),
+            tableCell("tableHeader", "Other"),
+          ]),
+          tableRow([
+            tableCell("tableCell", "left | right"),
+            tableCell("tableCell", "stable"),
+          ]),
+        ]),
+      ]),
+  },
+  {
+    name: "known-lossy-code-fence-collision",
+    makeDoc: () =>
+      directRichdoc([
+        xmlElement(
+          "codeBlock",
+          { language: "js" },
+          [xmlText("before\n```\nafter")],
+        ),
+      ]),
+  },
+  {
+    name: "known-lossy-inline-code-backticks",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph([
+          xmlRuns([
+            ["a`b", { code: {} }],
+            [" / "],
+            ["`edge`", { code: {} }],
+            [" / "],
+            [" spaced ", { code: {} }],
+            [" / "],
+            ["   ", { code: {} }],
+          ]),
+        ]),
+      ]),
+  },
+  {
+    name: "known-lossy-headerless-table",
+    makeDoc: () =>
+      directRichdoc([
+        table([
+          tableRow([
+            tableCell("tableCell", "first"),
+            tableCell("tableCell", "row"),
+          ]),
+          tableRow([
+            tableCell("tableCell", "second"),
+            tableCell("tableCell", "row"),
+          ]),
+        ]),
+      ]),
+  },
+  {
+    name: "nested-marks-before-inline-nodes",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph([
+          xmlText("linked hard break", {
+            link: linkAttrs("https://example.com/hard-break"),
+            bold: {},
+          }),
+          xmlElement("hardBreak"),
+          xmlText("after break"),
+        ]),
+        paragraph([
+          xmlText("linked image", {
+            link: linkAttrs("https://example.com/image"),
+            bold: {},
+          }),
+          xmlElement("image", {
+            src: "assets/picture.png",
+            alt: "picture",
+            title: null,
+          }),
+        ]),
+      ]),
+  },
+  {
+    name: "frontmatter-table-first",
+    makeDoc: () =>
+      directRichdoc(
+        [
+          table([
+            tableRow([
+              tableCell("tableHeader", "First"),
+              tableCell("tableHeader", "Table"),
+            ]),
+            tableRow([
+              tableCell("tableCell", "body"),
+              tableCell("tableCell", "row"),
+            ]),
+          ]),
+        ],
+        { title: "Table first" },
+      ),
+  },
+  {
+    name: "link-delimiters",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph([
+          xmlRuns([
+            [
+              "label ] bracket",
+              { link: linkAttrs("https://example.com/a)b") },
+            ],
+            [" / "],
+            ["space href", { link: linkAttrs("docs/my page") }],
+            [" / "],
+            [
+              "quoted title",
+              { link: linkAttrs("docs/page", 'say "hello"') },
+            ],
+          ]),
+        ]),
+      ]),
+  },
+  {
+    name: "image-alt-delimiter",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph([
+          xmlElement("image", {
+            src: "assets/image.png",
+            alt: "left ] right",
+            title: null,
+          }),
+        ]),
+      ]),
+  },
+  {
+    name: "wikilink-delimiters",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph([
+          xmlElement("wikilink", {
+            target: "folder|name]]tail",
+            label: "label|with]]closer",
+          }),
+        ]),
+      ]),
+  },
+  {
+    name: "heading-leading-hash",
+    makeDoc: () =>
+      directRichdoc([
+        xmlElement("heading", { level: 2 }, [xmlText("# starts with hash")]),
+      ]),
+  },
+  {
+    name: "paragraph-block-prefixes",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph("> not a quote"),
+        paragraph("- not a list"),
+        paragraph("1. not an ordered list"),
+      ]),
+  },
+  {
+    name: "plain-text-mark-delimiters",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph("*stars* _underscores_ ~~tildes~~"),
+      ]),
+  },
+  {
+    name: "marked-text-delimiters",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph([
+          xmlRuns([
+            ["bold ** delimiter", { bold: {} }],
+            [" / "],
+            ["italic * delimiter", { italic: {} }],
+            [" / "],
+            ["strike ~~ delimiter", { strike: {} }],
+            [" / "],
+            ["underline ++ delimiter", { underline: {} }],
+            [" / "],
+            ["highlight == delimiter", { highlight: {} }],
+          ]),
+        ]),
+      ]),
+  },
+  {
+    name: "math-dollar-delimiters",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph([
+          xmlText("inline "),
+          xmlElement("mathInline", { tex: "price $5" }),
+        ]),
+        xmlElement("mathBlock", { tex: "left $$ right" }),
+      ]),
+  },
+  {
+    name: "callout-title-delimiter",
+    makeDoc: () =>
+      directRichdoc([
+        xmlElement(
+          "callout",
+          { calloutType: "note", fold: "", title: "title ] bracket" },
+          [paragraph("body")],
+        ),
+      ]),
+  },
+  {
+    name: "atom-and-callout-openers",
+    makeDoc: () =>
+      directRichdoc([
+        paragraph([
+          xmlElement("inlineAtom", {
+            atomId: "chart",
+            params: "",
+            source: "atom:chart value=left}}right",
+          }),
+        ]),
+        xmlElement(
+          "callout",
+          { calloutType: "note]spoof", fold: "", title: "title" },
+          [paragraph("body")],
+        ),
+      ]),
+  },
+  {
+    name: "code-language-backtick",
+    makeDoc: () =>
+      directRichdoc([
+        xmlElement("codeBlock", { language: "lang`tick" }, [xmlText("code")]),
+      ]),
+  },
 ];
 
 function makeRichdocProjection(index, fixture) {
-  const doc = markdownToYDoc(fixture.markdown);
+  const doc = fixture.makeDoc ? fixture.makeDoc() : markdownToYDoc(fixture.markdown);
   const base = b64(Y.encodeStateAsUpdate(doc));
   const followup = capture(doc, () => {
     doc.getMap("meta").set("projectionFixture", fixture.name);

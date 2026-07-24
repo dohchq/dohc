@@ -1,0 +1,22 @@
+{
+ "seed": -119,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-paragraph-block-prefixes",
+ "updates": [
+  "AQmM8efRBwAHAQRib2R5AwlwYXJhZ3JhcGgHAIzx59EHAAYEAIzx59EHAQ0+IG5vdCBhIHF1b3Rlh4zx59EHAAMJcGFyYWdyYXBoBwCM8efRBw8GBACM8efRBxAMLSBub3QgYSBsaXN0h4zx59EHDwMJcGFyYWdyYXBoBwCM8efRBx0GBACM8efRBx4WMS4gbm90IGFuIG9yZGVyZWQgbGlzdAA=",
+  "AQGM8efRBzUoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcYcGFyYWdyYXBoLWJsb2NrLXByZWZpeGVzAA=="
+ ],
+ "mergedUpdateB64": "AQqM8efRBwAHAQRib2R5AwlwYXJhZ3JhcGgHAIzx59EHAAYEAIzx59EHAQ0+IG5vdCBhIHF1b3Rlh4zx59EHAAMJcGFyYWdyYXBoBwCM8efRBw8GBACM8efRBxAMLSBub3QgYSBsaXN0h4zx59EHDwMJcGFyYWdyYXBoBwCM8efRBx0GBACM8efRBx4WMS4gbm90IGFuIG9yZGVyZWQgbGlzdCgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxhwYXJhZ3JhcGgtYmxvY2stcHJlZml4ZXMA",
+ "stateVectorB64": "AYzx59EHNg==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "paragraph",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "&gt; not a quote\n\n- not a list\n\n1. not an ordered list"
+ }
+}

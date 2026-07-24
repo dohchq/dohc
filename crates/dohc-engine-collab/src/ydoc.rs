@@ -343,7 +343,9 @@ impl Ydoc {
         let frontmatter = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
         let body = self.doc.get_or_insert_xml_fragment(ROOT_BODY);
         let txn = self.doc.transact();
+        let mut has_frontmatter = false;
         if frontmatter.len(&txn) > 0 {
+            has_frontmatter = true;
             let mut entries: BTreeMap<String, Value> = BTreeMap::new();
             for (k, v) in frontmatter.iter(&txn) {
                 entries.insert(k.to_string(), out_json(&txn, v));
@@ -352,13 +354,20 @@ impl Ydoc {
             for (k, v) in &entries {
                 out.push_str(&project_frontmatter(k, v));
             }
-            out.push_str("---\n\n");
+            out.push_str("---");
         }
         let children: Vec<MarkdownNode> = body
             .children(&txn)
             .map(|child| markdown_node(&txn, child))
             .collect();
         let body_markdown = markdown_document(&children);
+        if has_frontmatter {
+            out.push_str(if body_markdown.starts_with('\n') {
+                "\n"
+            } else {
+                "\n\n"
+            });
+        }
         out.push_str(&body_markdown);
         out
     }
@@ -1017,6 +1026,7 @@ fn render_list_item(
 
 fn render_code_block(attrs: &BTreeMap<String, Value>, children: &[MarkdownNode]) -> String {
     let language = attr_js_string(attrs, "language");
+    // Match TS: fixed triple-backtick fences can collide with code content.
     if children.is_empty() {
         format!("```{language}\n\n```")
     } else {
@@ -1261,6 +1271,7 @@ fn render_table(children: &[MarkdownNode]) -> String {
                             render_nodes(children, tag, attrs, "")
                         };
                         Some(TableCell {
+                            // Match TS: literal pipes are emitted unescaped in table cells.
                             text: collapse_js_whitespace(&raw),
                             header: tag == "tableHeader",
                             align: match attrs.get("align").and_then(Value::as_str) {
@@ -1306,6 +1317,7 @@ fn render_table(children: &[MarkdownNode]) -> String {
                     widths[index],
                 )
             } else {
+                // Match TS: headerless tables gain a blank synthetic header.
                 pad_utf16("", widths[index])
             }
         })
@@ -1404,14 +1416,13 @@ fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> String {
             InlinePart::Node(node) => {
                 let mut before = String::new();
                 for mark in active.iter().rev() {
-                    let closing = mark_closing(
+                    before.push_str(&mark_closing(
                         mark,
                         modes
                             .get(&mark.kind)
                             .copied()
                             .unwrap_or(OpeningMode::Markdown),
-                    );
-                    before = format!("{closing}{before}");
+                    ));
                 }
                 active.clear();
                 modes.clear();
@@ -1612,6 +1623,7 @@ fn mark_opening(mark: &MarkdownMark, mode: OpeningMode) -> String {
         MarkKind::Link => "[".to_string(),
         MarkKind::Highlight => "==".to_string(),
         MarkKind::Bold => "**".to_string(),
+        // Match TS: inline code always uses a single backtick delimiter.
         MarkKind::Code => "`".to_string(),
         MarkKind::Italic => "*".to_string(),
         MarkKind::Strike => "~~".to_string(),
@@ -1649,6 +1661,7 @@ fn mark_closing(mark: &MarkdownMark, mode: OpeningMode) -> String {
         }
         MarkKind::Highlight => "==".to_string(),
         MarkKind::Bold => "**".to_string(),
+        // Match TS: inline code always uses a single backtick delimiter.
         MarkKind::Code => "`".to_string(),
         MarkKind::Italic => "*".to_string(),
         MarkKind::Strike => "~~".to_string(),

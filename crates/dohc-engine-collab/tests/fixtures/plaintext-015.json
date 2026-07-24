@@ -2,15 +2,15 @@
  "seed": 15,
  "contentKind": "plaintext",
  "updates": [
-  "AQGbu+PfCQAEAQlwbGFpblRleHQI8J+YgPCfjokA",
-  "AQGbu+PfCQTEm7vj3wkBm7vj3wkCBWNhZsOpAA==",
-  "AQGbu+PfCQiEm7vj3wkDCeaXpeacrOiqngA=",
-  "AAGbu+PfCQEGAg==",
-  "AQGbu+PfCQtEm7vj3wkACWxpbmUKY29udAGbu+PfCQEGAg==",
-  "AAGbu+PfCQIGAg8B"
+  "AQH0+L7LDgAEAQlwbGFpblRleHQI8J+YgPCfjokA",
+  "AQH0+L7LDgTE9Pi+yw4B9Pi+yw4CBWNhZsOpAA==",
+  "AQH0+L7LDgiE9Pi+yw4DCeaXpeacrOiqngA=",
+  "AAH0+L7LDgEGAg==",
+  "AQH0+L7LDgtE9Pi+yw4ACWxpbmUKY29udAH0+L7LDgEGAg==",
+  "AAH0+L7LDgIGAg8B"
  ],
- "mergedUpdateB64": "AQSbu+PfCQAEAQlwbGFpblRleHQI8J+YgPCfjonEm7vj3wkBm7vj3wkCBWNhZsOphJu7498JAwnml6XmnKzoqp5Em7vj3wkACWxpbmUKY29udAGbu+PfCQIGAg8B",
- "stateVectorB64": "AZu7498JFA==",
+ "mergedUpdateB64": "AQT0+L7LDgAEAQlwbGFpblRleHQI8J+YgPCfjonE9Pi+yw4B9Pi+yw4CBWNhZsOphPT4vssOAwnml6XmnKzoqp5E9Pi+yw4ACWxpbmUKY29udAH0+L7LDgIGAg8B",
+ "stateVectorB64": "AfT4vssOFA==",
  "expected": {
   "text": "linecont😀ca🎉日本語"
  }

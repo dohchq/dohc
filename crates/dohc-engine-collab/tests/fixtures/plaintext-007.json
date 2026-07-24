@@ -2,13 +2,13 @@
  "seed": 7,
  "contentKind": "plaintext",
  "updates": [
-  "AQH1tMTaAQAEAQlwbGFpblRleHQM8J2UmPCdlKvwnZSmAA==",
-  "AQH1tMTaAQbE9bTE2gED9bTE2gEEA2HMgQA=",
-  "AQH1tMTaAQjE9bTE2gED9bTE2gEGBWNhZsOpAA==",
-  "AQH1tMTaAQzE9bTE2gEG9bTE2gEHCeaXpeacrOiqngA="
+  "AQGM14moBQAEAQlwbGFpblRleHQM8J2UmPCdlKvwnZSmAA==",
+  "AQGM14moBQbEjNeJqAUDjNeJqAUEA2HMgQA=",
+  "AQGM14moBQjEjNeJqAUDjNeJqAUGBWNhZsOpAA==",
+  "AQGM14moBQzEjNeJqAUGjNeJqAUHCeaXpeacrOiqngA="
  ],
- "mergedUpdateB64": "AQT1tMTaAQAEAQlwbGFpblRleHQM8J2UmPCdlKvwnZSmxPW0xNoBA/W0xNoBBANhzIHE9bTE2gED9bTE2gEGBWNhZsOpxPW0xNoBBvW0xNoBBwnml6XmnKzoqp4A",
- "stateVectorB64": "AfW0xNoBDw==",
+ "mergedUpdateB64": "AQSM14moBQAEAQlwbGFpblRleHQM8J2UmPCdlKvwnZSmxIzXiagFA4zXiagFBANhzIHEjNeJqAUDjNeJqAUGBWNhZsOpxIzXiagFBozXiagFBwnml6XmnKzoqp4A",
+ "stateVectorB64": "AYzXiagFDw==",
  "expected": {
   "text": "𝔘𝔫caféa日本語́𝔦"
  }

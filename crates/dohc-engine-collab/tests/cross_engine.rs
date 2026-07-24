@@ -197,7 +197,7 @@ fn richdoc_projection_matches_typescript_byte_for_byte() {
         cases += 1;
     }
     assert_eq!(
-        cases, 9,
+        cases, 26,
         "expected every curated richdoc projection fixture"
     );
 }

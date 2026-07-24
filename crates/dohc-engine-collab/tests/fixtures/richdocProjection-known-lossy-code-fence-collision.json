@@ -1,0 +1,22 @@
+{
+ "seed": -110,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-known-lossy-code-fence-collision",
+ "updates": [
+  "AQS0/6KMCAAHAQRib2R5Awljb2RlQmxvY2sHALT/oowIAAYEALT/oowIARBiZWZvcmUKYGBgCmFmdGVyKAC0/6KMCAAIbGFuZ3VhZ2UBdwJqcwA=",
+  "AQG0/6KMCBMoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcga25vd24tbG9zc3ktY29kZS1mZW5jZS1jb2xsaXNpb24A"
+ ],
+ "mergedUpdateB64": "AQW0/6KMCAAHAQRib2R5Awljb2RlQmxvY2sHALT/oowIAAYEALT/oowIARBiZWZvcmUKYGBgCmFmdGVyKAC0/6KMCAAIbGFuZ3VhZ2UBdwJqcygBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdyBrbm93bi1sb3NzeS1jb2RlLWZlbmNlLWNvbGxpc2lvbgA=",
+ "stateVectorB64": "AbT/oowIFA==",
+ "coverage": {
+  "nodes": [
+   "codeBlock",
+   "doc",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "```js\nbefore\n```\nafter\n```"
+ }
+}

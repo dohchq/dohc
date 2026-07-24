@@ -1,0 +1,23 @@
+{
+ "seed": -123,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-callout-title-delimiter",
+ "updates": [
+  "AQei+eSdDAAHAQRib2R5AwdjYWxsb3V0BwCi+eSdDAADCXBhcmFncmFwaAcAovnknQwBBgQAovnknQwCBGJvZHkoAKL55J0MAAtjYWxsb3V0VHlwZQF3BG5vdGUoAKL55J0MAARmb2xkAXcAKACi+eSdDAAFdGl0bGUBdw90aXRsZSBdIGJyYWNrZXQA",
+  "AQGi+eSdDAooAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcXY2FsbG91dC10aXRsZS1kZWxpbWl0ZXIA"
+ ],
+ "mergedUpdateB64": "AQii+eSdDAAHAQRib2R5AwdjYWxsb3V0BwCi+eSdDAADCXBhcmFncmFwaAcAovnknQwBBgQAovnknQwCBGJvZHkoAKL55J0MAAtjYWxsb3V0VHlwZQF3BG5vdGUoAKL55J0MAARmb2xkAXcAKACi+eSdDAAFdGl0bGUBdw90aXRsZSBdIGJyYWNrZXQoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcXY2FsbG91dC10aXRsZS1kZWxpbWl0ZXIA",
+ "stateVectorB64": "AaL55J0MCw==",
+ "coverage": {
+  "nodes": [
+   "callout",
+   "doc",
+   "paragraph",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "> [!note] title ] bracket\n> body"
+ }
+}

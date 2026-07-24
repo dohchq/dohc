@@ -2,14 +2,14 @@
  "seed": 1007,
  "contentKind": "richdoc",
  "updates": [
-  "AQGi7/GSBgAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDcA",
-  "AQGi7/GSBgEoAQtmcm9udG1hdHRlcgVjb3VudAF9lwEA",
-  "AQei7/GSBgIHAQRib2R5AwlwYXJhZ3JhcGgHAKLv8ZIGAgYGAKLv8ZIGAwRib2xkBHRydWWGou/xkgYEBml0YWxpYwR0cnVlhKLv8ZIGBQ93b3JsZNmF2LHYrdio2KeGou/xkgYPBGJvbGQEbnVsbIai7/GSBhAGaXRhbGljBG51bGwA",
-  "AQWi7/GSBhKHou/xkgYCAwlwYXJhZ3JhcGgHAKLv8ZIGEgYGAKLv8ZIGEwRib2xkBHRydWWEou/xkgYUCmhlbGxvIAl0YWKGou/xkgYeBGJvbGQEbnVsbAA=",
-  "AQGi7/GSBiDEou/xkgYEou/xkgYFAVgA"
+  "AQHi7rydCwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDcA",
+  "AQHi7rydCwEoAQtmcm9udG1hdHRlcgVjb3VudAF9lwEA",
+  "AQfi7rydCwIHAQRib2R5AwlwYXJhZ3JhcGgHAOLuvJ0LAgYGAOLuvJ0LAwRib2xkBHRydWWG4u68nQsEBml0YWxpYwR0cnVlhOLuvJ0LBQ93b3JsZNmF2LHYrdio2KeG4u68nQsPBGJvbGQEbnVsbIbi7rydCxAGaXRhbGljBG51bGwA",
+  "AQXi7rydCxKH4u68nQsCAwlwYXJhZ3JhcGgHAOLuvJ0LEgYGAOLuvJ0LEwRib2xkBHRydWWE4u68nQsUCmhlbGxvIAl0YWKG4u68nQseBGJvbGQEbnVsbAA=",
+  "AQHi7rydCyDE4u68nQsE4u68nQsFAVgA"
  ],
- "mergedUpdateB64": "AQ+i7/GSBgAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDcoAQtmcm9udG1hdHRlcgVjb3VudAF9lwEHAQRib2R5AwlwYXJhZ3JhcGgHAKLv8ZIGAgYGAKLv8ZIGAwRib2xkBHRydWWGou/xkgYEBml0YWxpYwR0cnVlhKLv8ZIGBQ93b3JsZNmF2LHYrdio2KeGou/xkgYPBGJvbGQEbnVsbIai7/GSBhAGaXRhbGljBG51bGyHou/xkgYCAwlwYXJhZ3JhcGgHAKLv8ZIGEgYGAKLv8ZIGEwRib2xkBHRydWWEou/xkgYUCmhlbGxvIAl0YWKGou/xkgYeBGJvbGQEbnVsbMSi7/GSBgSi7/GSBgUBWAA=",
- "stateVectorB64": "AaLv8ZIGIQ==",
+ "mergedUpdateB64": "AQ/i7rydCwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDcoAQtmcm9udG1hdHRlcgVjb3VudAF9lwEHAQRib2R5AwlwYXJhZ3JhcGgHAOLuvJ0LAgYGAOLuvJ0LAwRib2xkBHRydWWG4u68nQsEBml0YWxpYwR0cnVlhOLuvJ0LBQ93b3JsZNmF2LHYrdio2KeG4u68nQsPBGJvbGQEbnVsbIbi7rydCxAGaXRhbGljBG51bGyH4u68nQsCAwlwYXJhZ3JhcGgHAOLuvJ0LEgYGAOLuvJ0LEwRib2xkBHRydWWE4u68nQsUCmhlbGxvIAl0YWKG4u68nQseBGJvbGQEbnVsbMTi7rydCwTi7rydCwUBWAA=",
+ "stateVectorB64": "AeLuvJ0LIQ==",
  "expected": {
   "frontmatter": {
    "alpha": "value-1007",

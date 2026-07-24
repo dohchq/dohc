@@ -1,0 +1,27 @@
+{
+ "seed": -113,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-nested-marks-before-inline-nodes",
+ "updates": [
+  "ARXYmuL8BgAHAQRib2R5AwlwYXJhZ3JhcGgHANia4vwGAAYGANia4vwGAQRsaW5rensiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20vaGFyZC1icmVhayIsInRhcmdldCI6Il9ibGFuayIsInJlbCI6Im5vb3BlbmVyIG5vcmVmZXJyZXIgbm9mb2xsb3ciLCJjbGFzcyI6bnVsbCwidGl0bGUiOm51bGx9htia4vwGAgRib2xkAnt9hNia4vwGAxFsaW5rZWQgaGFyZCBicmVha4bYmuL8BhQEbGluawRudWxshtia4vwGFQRib2xkBG51bGyH2Jri/AYBAwloYXJkQnJlYWuH2Jri/AYXBgQA2Jri/AYYC2FmdGVyIGJyZWFrh9ia4vwGAAMJcGFyYWdyYXBoBwDYmuL8BiQGBgDYmuL8BiUEbGlua3V7ImhyZWYiOiJodHRwczovL2V4YW1wbGUuY29tL2ltYWdlIiwidGFyZ2V0IjoiX2JsYW5rIiwicmVsIjoibm9vcGVuZXIgbm9yZWZlcnJlciBub2ZvbGxvdyIsImNsYXNzIjpudWxsLCJ0aXRsZSI6bnVsbH2G2Jri/AYmBGJvbGQCe32E2Jri/AYnDGxpbmtlZCBpbWFnZYbYmuL8BjMEbGluawRudWxshtia4vwGNARib2xkBG51bGyH2Jri/AYlAwVpbWFnZSgA2Jri/AY2A3NyYwF3EmFzc2V0cy9waWN0dXJlLnBuZygA2Jri/AY2A2FsdAF3B3BpY3R1cmUoANia4vwGNgV0aXRsZQF+AA==",
+  "AQHYmuL8BjooAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcgbmVzdGVkLW1hcmtzLWJlZm9yZS1pbmxpbmUtbm9kZXMA"
+ ],
+ "mergedUpdateB64": "ARbYmuL8BgAHAQRib2R5AwlwYXJhZ3JhcGgHANia4vwGAAYGANia4vwGAQRsaW5rensiaHJlZiI6Imh0dHBzOi8vZXhhbXBsZS5jb20vaGFyZC1icmVhayIsInRhcmdldCI6Il9ibGFuayIsInJlbCI6Im5vb3BlbmVyIG5vcmVmZXJyZXIgbm9mb2xsb3ciLCJjbGFzcyI6bnVsbCwidGl0bGUiOm51bGx9htia4vwGAgRib2xkAnt9hNia4vwGAxFsaW5rZWQgaGFyZCBicmVha4bYmuL8BhQEbGluawRudWxshtia4vwGFQRib2xkBG51bGyH2Jri/AYBAwloYXJkQnJlYWuH2Jri/AYXBgQA2Jri/AYYC2FmdGVyIGJyZWFrh9ia4vwGAAMJcGFyYWdyYXBoBwDYmuL8BiQGBgDYmuL8BiUEbGlua3V7ImhyZWYiOiJodHRwczovL2V4YW1wbGUuY29tL2ltYWdlIiwidGFyZ2V0IjoiX2JsYW5rIiwicmVsIjoibm9vcGVuZXIgbm9yZWZlcnJlciBub2ZvbGxvdyIsImNsYXNzIjpudWxsLCJ0aXRsZSI6bnVsbH2G2Jri/AYmBGJvbGQCe32E2Jri/AYnDGxpbmtlZCBpbWFnZYbYmuL8BjMEbGluawRudWxshtia4vwGNARib2xkBG51bGyH2Jri/AYlAwVpbWFnZSgA2Jri/AY2A3NyYwF3EmFzc2V0cy9waWN0dXJlLnBuZygA2Jri/AY2A2FsdAF3B3BpY3R1cmUoANia4vwGNgV0aXRsZQF+KAEEbWV0YRFwcm9qZWN0aW9uRml4dHVyZQF3IG5lc3RlZC1tYXJrcy1iZWZvcmUtaW5saW5lLW5vZGVzAA==",
+ "stateVectorB64": "Adia4vwGOw==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "hardBreak",
+   "image",
+   "paragraph",
+   "text"
+  ],
+  "marks": [
+   "bold",
+   "link"
+  ]
+ },
+ "expected": {
+  "markdown": "[**linked hard break**](https://example.com/hard-break)  \nafter break\n\n[**linked image**](https://example.com/image)![picture](assets/picture.png)"
+ }
+}
