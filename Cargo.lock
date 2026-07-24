@@ -377,6 +377,7 @@ dependencies = [
  "base64",
  "dohc-engine-collab",
  "dohc-engine-domain",
+ "dohc-engine-files",
  "dohc-engine-storage",
  "dohc-engine-testkit",
  "rusqlite",

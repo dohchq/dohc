@@ -2787,19 +2787,28 @@ fn a_pulled_base_over_leftover_local_rows_projects_the_merged_lineage() {
 }
 
 fn seed_replication_version(engine: &mut EngineStore, version_id: &str, kind: &str) {
+    seed_replication_version_in_workspace(engine, "ws", version_id, kind);
+}
+
+fn seed_replication_version_in_workspace(
+    engine: &mut EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    kind: &str,
+) {
     engine
         .write_with(&NoFaults, |tx| {
             tx.execute(
                 "INSERT OR IGNORE INTO versioned_workspaces (workspace_id, main_version_id) \
-                 VALUES ('ws', 'main')",
-                [],
+                 VALUES (?1, 'main')",
+                [workspace_id],
             )
             .map_err(SyncError::persist)?;
             tx.execute(
                 "INSERT OR IGNORE INTO versions \
                  (workspace_id, version_id, kind, name, created_at_ms) \
-                 VALUES ('ws', ?1, ?2, ?1, 1)",
-                params![version_id, kind],
+                 VALUES (?1, ?2, ?3, ?2, 1)",
+                params![workspace_id, version_id, kind],
             )
             .map_err(SyncError::persist)?;
             Ok::<_, SyncError>(())
@@ -2810,8 +2819,13 @@ fn seed_replication_version(engine: &mut EngineStore, version_id: &str, kind: &s
 #[test]
 fn workspace_init_router_apply_is_idempotent_on_replay() {
     let (_scratch, _path, mut engine) = store();
-    let operation = envelope("workspace-peer", 0, "workspace.init", json!({}));
+    let seed = envelope("workspace-seed-peer", 0, "workspace.init", json!({}));
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &seed, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(()))
+    ));
 
+    let operation = envelope("workspace-replay-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(()))
@@ -2834,6 +2848,44 @@ fn workspace_init_router_apply_is_idempotent_on_replay() {
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Skipped)
     ));
+}
+
+#[test]
+fn workspace_init_repairs_a_workspace_row_missing_its_main_version() {
+    let (_scratch, _path, mut engine) = store();
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO versioned_workspaces (workspace_id,main_version_id) \
+                 VALUES ('ws','main')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed partial workspace");
+
+    let operation = envelope("partial-workspace-peer", 0, "workspace.init", json!({}));
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    let main: (String, String, String, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT version_id,kind,name,created_at_ms FROM versions \
+                 WHERE workspace_id='ws' AND version_id='main'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(SyncError::corrupt)
+        })
+        .expect("repaired main version");
+    assert_eq!(main, ("main".into(), "main".into(), "Main".into(), 2_000));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "partial-workspace-peer").expect("ack"),
+        0
+    );
 }
 
 #[test]
@@ -2984,22 +3036,204 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
         })
         .expect("fork row counts");
     assert_eq!(counts, (2, 2, 2));
+    let mut applier_replay = operation.clone();
+    applier_replay.origin_id = "version-applier-replay-peer".into();
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    let replay_counts: (i64, i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots \
+                     WHERE workspace_id='ws' AND version_id='feature'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM path_aliases \
+                     WHERE workspace_id='ws' AND version_id='feature'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM fork_base_snapshots \
+                     WHERE workspace_id='ws' AND version_id='feature'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("replayed fork row counts");
+    assert_eq!(replay_counts, (2, 2, 2));
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Skipped)
     ));
+}
+
+fn shipped_text_snapshot(object_id: &str, path: &str, blob_sha256: &str) -> serde_json::Value {
+    json!({
+        "objectId": object_id,
+        "objectCreatedAtMs": 1_100,
+        "path": path,
+        "blobSha256": blob_sha256,
+        "byteLength": 7,
+        "updatedAtMs": 1_200,
+        "latestMomentId": format!("{object_id}-moment"),
+        "metadata": {"origin": "sync"}
+    })
+}
+
+fn version_create_with_shipped_snapshots(
+    origin: &str,
+    version_id: &str,
+    snapshots: Vec<serde_json::Value>,
+) -> ReplicationEnvelope {
+    envelope(
+        origin,
+        0,
+        "version.create",
+        json!({
+            "versionId": version_id,
+            "name": version_id,
+            "kind": "named",
+            "forkVersionId": "main",
+            "forkMomentId": "fork-moment",
+            "createdAtMs": 1_500,
+            "forkSnapshots": snapshots
+        }),
+    )
+}
+
+#[test]
+fn version_create_shipped_snapshot_rejects_a_missing_blob_deliberately() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let missing_sha = dohc_engine_storage::hex_sha256(b"missing");
+    let operation = version_create_with_shipped_snapshots(
+        "missing-blob-peer",
+        "missing-blob-version",
+        vec![shipped_text_snapshot(
+            "missing-object",
+            "missing.md",
+            &missing_sha,
+        )],
+    );
+
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        Err(SyncError::BlobInvalid)
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "missing-blob-peer").expect("ack"),
+        -1
+    );
+    let version_exists: bool = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM versions \
+                 WHERE workspace_id='ws' AND version_id='missing-blob-version')",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("version absence");
+    assert!(!version_exists);
+}
+
+#[test]
+fn version_create_shipped_snapshot_rejects_duplicate_paths_deliberately() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let sha = dohc_engine_storage::hex_sha256(b"content");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,7,'content')",
+                [&sha],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed blob");
+    let operation = version_create_with_shipped_snapshots(
+        "duplicate-path-peer",
+        "duplicate-path-version",
+        vec![
+            shipped_text_snapshot("first-object", "same.md", &sha),
+            shipped_text_snapshot("second-object", "same.md", &sha),
+        ],
+    );
+
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        Err(SyncError::InvalidInput {
+            reason: "version.create shipped snapshot paths must be unique"
+        })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "duplicate-path-peer").expect("ack"),
+        -1
+    );
+}
+
+#[test]
+fn version_create_shipped_snapshot_rejects_unsafe_and_secret_paths() {
+    for (index, path) in ["../escape.md", "config/.env"].into_iter().enumerate() {
+        let (_scratch, _path, mut engine) = store();
+        seed_replication_version(&mut engine, "main", "main");
+        let sha = dohc_engine_storage::hex_sha256(b"content");
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,7,'content')",
+                    [&sha],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("seed blob");
+        let origin = format!("unsafe-path-peer-{index}");
+        let version_id = format!("unsafe-path-version-{index}");
+        let operation = version_create_with_shipped_snapshots(
+            &origin,
+            &version_id,
+            vec![shipped_text_snapshot("unsafe-object", path, &sha)],
+        );
+
+        assert!(matches!(
+            apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+            Err(SyncError::InvalidInput {
+                reason: "version.create shipped snapshot path must be tracked"
+            })
+        ));
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", &origin).expect("ack"),
+            -1,
+            "{path}"
+        );
+    }
 }
 
 #[test]
 fn version_create_legacy_payload_copies_workspace_scoped_source_tables() {
     let (_scratch, _path, mut engine) = store();
     seed_replication_version(&mut engine, "main", "main");
+    seed_replication_version_in_workspace(&mut engine, "foreign-ws", "main", "main");
     let source_sha = dohc_engine_storage::hex_sha256(b"legacy source");
+    let foreign_sha = dohc_engine_storage::hex_sha256(b"foreign source");
     engine
         .write_with(&NoFaults, |tx| {
             tx.execute(
                 "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,13,'legacy source')",
                 [&source_sha],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,14,'foreign source')",
+                [&foreign_sha],
             )
             .map_err(SyncError::persist)?;
             tx.execute(
@@ -3018,6 +3252,25 @@ fn version_create_legacy_payload_copies_workspace_scoped_source_tables() {
             tx.execute(
                 "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) \
                  VALUES ('ws','main','legacy.md','legacy-object')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO file_objects (workspace_id,object_id,created_at_ms) \
+                 VALUES ('foreign-ws','foreign-object',1)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO snapshots \
+                 (workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,latest_moment_id,metadata_origin,content_kind,binary_sha256) \
+                 VALUES ('foreign-ws','main','foreign-object','foreign.md',?1,2,'foreign-moment','sync','text',NULL)",
+                [&foreign_sha],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) \
+                 VALUES ('foreign-ws','main','foreign.md','foreign-object')",
                 [],
             )
             .map_err(SyncError::persist)?;
@@ -3070,6 +3323,71 @@ fn version_create_legacy_payload_copies_workspace_scoped_source_tables() {
         })
         .expect("legacy copied rows");
     assert_eq!(counts, (1, 1, 1));
+    let foreign_destination_rows: (i64, i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM snapshots \
+                     WHERE workspace_id='foreign-ws' AND version_id='legacy-feature'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM path_aliases \
+                     WHERE workspace_id='foreign-ws' AND version_id='legacy-feature'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM fork_base_snapshots \
+                     WHERE workspace_id='foreign-ws' AND version_id='legacy-feature'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("foreign destination rows");
+    assert_eq!(foreign_destination_rows, (0, 0, 0));
+}
+
+#[test]
+fn version_create_rejects_a_version_id_owned_by_another_workspace() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    seed_replication_version_in_workspace(&mut engine, "foreign-ws", "foreign-version", "named");
+    let operation = envelope(
+        "collision-peer",
+        0,
+        "version.create",
+        json!({
+            "versionId": "foreign-version",
+            "name": "Collision",
+            "kind": "named",
+            "createdAtMs": 1_500
+        }),
+    );
+
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        Err(SyncError::InvalidInput {
+            reason: "version id belongs to another workspace"
+        })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "collision-peer").expect("ack"),
+        -1
+    );
+    let local_collision: bool = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM versions \
+                 WHERE workspace_id='ws' AND version_id='foreign-version')",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("local collision");
+    assert!(!local_collision);
 }
 
 fn seed_secret_fork_state(engine: &mut EngineStore, ciphertext: &[u8]) -> (String, String, String) {
@@ -3096,6 +3414,13 @@ fn seed_secret_fork_state(engine: &mut EngineStore, ciphertext: &[u8]) -> (Strin
             tx.execute(
                 "INSERT INTO secret_files \
                  (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms,latest_moment_id) \
+                 VALUES ('ws','main','config/prod.env',?1,?2,?3,?4,101,'source-tip-2')",
+                params![iv, tag, ciphertext_base64, ciphertext.len() as i64],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO secret_files \
+                 (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms,latest_moment_id) \
                  VALUES ('ws','feature','stale.env',?1,?2,?3,?4,1,'stale-tip')",
                 params![iv, tag, ciphertext_base64, ciphertext.len() as i64],
             )
@@ -3114,7 +3439,7 @@ fn seed_secret_fork_state(engine: &mut EngineStore, ciphertext: &[u8]) -> (Strin
 }
 
 #[test]
-fn secret_version_fork_router_verifies_copies_and_replays_idempotently() {
+fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotently() {
     let (_scratch, _path, mut engine) = store();
     let ciphertext = b"sealed source bytes";
     let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
@@ -3133,6 +3458,14 @@ fn secret_version_fork_router_verifies_copies_and_replays_idempotently() {
                 "byteLength": ciphertext.len(),
                 "updatedAtMs": 100,
                 "latestMomentId": "source-tip"
+            }, {
+                "path": "config/prod.env",
+                "ivBase64": iv,
+                "authTagBase64": tag,
+                "ciphertextSha256": sha,
+                "byteLength": ciphertext.len(),
+                "updatedAtMs": 101,
+                "latestMomentId": "source-tip-2"
             }]
         }),
     );
@@ -3158,9 +3491,40 @@ fn secret_version_fork_router_verifies_copies_and_replays_idempotently() {
             Ok::<_, rusqlite::Error>((files, bases))
         })
         .expect("secret fork rows");
-    assert_eq!(rows, (vec!["app/.env".into()], vec!["app/.env".into()]));
+    assert_eq!(
+        rows,
+        (
+            vec!["app/.env".into(), "config/prod.env".into()],
+            vec!["app/.env".into(), "config/prod.env".into()]
+        )
+    );
+    let mut applier_replay = operation.clone();
+    applier_replay.origin_id = "secret-fork-applier-replay-peer".into();
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    let replayed_rows: (i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM secret_files \
+                     WHERE workspace_id='ws' AND version_id='feature'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM secret_fork_bases \
+                     WHERE workspace_id='ws' AND version_id='feature'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("replayed secret fork rows");
+    assert_eq!(replayed_rows, (2, 2));
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Skipped)
     ));
 }
@@ -3188,6 +3552,14 @@ fn secret_version_fork_rejects_nonmatching_sealed_source_without_wipe_or_ack() {
                 "byteLength": ciphertext.len(),
                 "updatedAtMs": 100,
                 "latestMomentId": "source-tip"
+            }, {
+                "path": "config/prod.env",
+                "ivBase64": iv,
+                "authTagBase64": tag,
+                "ciphertextSha256": dohc_engine_storage::hex_sha256(ciphertext),
+                "byteLength": ciphertext.len(),
+                "updatedAtMs": 101,
+                "latestMomentId": "source-tip-2"
             }]
         }),
     );
@@ -3213,25 +3585,81 @@ fn secret_version_fork_rejects_nonmatching_sealed_source_without_wipe_or_ack() {
 }
 
 #[test]
-fn central_router_recognizes_every_owned_kind_and_fails_unknown_closed() {
-    let routed_malformed = [
-        "chat.channel.create",
-        "chat.thread.create",
-        "chat.message.append",
-        "chat.decision.set",
-        "chat.attachment.add",
-        "chat.reaction.set",
-        "chat.follow.set",
-        "chat.feed.read.set",
-        "secret.file.put",
-        "secret.file.delete",
-        "secret.version.fork",
-        "ydoc.update",
-        "conflict.open",
-        "conflict.resolve",
-        "version.create",
+fn secret_version_fork_rejects_subset_superset_and_duplicate_path_payloads() {
+    let (_scratch, _path, mut engine) = store();
+    let ciphertext = b"sealed source bytes";
+    let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
+    let row = |path: &str, updated_at_ms: i64, latest_moment_id: &str| {
+        json!({
+            "path": path,
+            "ivBase64": iv,
+            "authTagBase64": tag,
+            "ciphertextSha256": sha,
+            "byteLength": ciphertext.len(),
+            "updatedAtMs": updated_at_ms,
+            "latestMomentId": latest_moment_id
+        })
+    };
+    let cases = [
+        ("subset-fork-peer", vec![row("app/.env", 100, "source-tip")]),
+        (
+            "superset-fork-peer",
+            vec![
+                row("app/.env", 100, "source-tip"),
+                row("config/prod.env", 101, "source-tip-2"),
+                row("extra.env", 102, "extra-tip"),
+            ],
+        ),
+        (
+            "duplicate-fork-peer",
+            vec![
+                row("app/.env", 100, "source-tip"),
+                row("app/.env", 100, "source-tip"),
+            ],
+        ),
     ];
-    for kind in routed_malformed {
+    for (origin, rows) in cases {
+        let operation = envelope(
+            origin,
+            0,
+            "secret.version.fork",
+            json!({
+                "fromVersionId": "main",
+                "toVersionId": "feature",
+                "rows": rows
+            }),
+        );
+        assert!(
+            matches!(
+                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+                Err(SyncError::InvalidInput {
+                    reason: "secret fork payload does not match the local sealed source state"
+                })
+            ),
+            "{origin}"
+        );
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", origin).expect("ack"),
+            -1,
+            "{origin}"
+        );
+        let destination: Vec<String> = engine
+            .read_with(|conn| {
+                conn.prepare(
+                    "SELECT path FROM secret_files \
+                     WHERE workspace_id='ws' AND version_id='feature' ORDER BY path",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()
+            })
+            .expect("destination remains");
+        assert_eq!(destination, vec!["stale.env"], "{origin}");
+    }
+}
+
+#[test]
+fn central_router_recognizes_every_owned_kind_and_fails_unknown_closed() {
+    for kind in crate::router::owned_op_kinds() {
         let (_scratch, _path, mut engine) = store();
         let operation = envelope("router-peer", 0, kind, json!({}));
         assert!(
@@ -3244,16 +3672,6 @@ fn central_router_recognizes_every_owned_kind_and_fails_unknown_closed() {
     }
 
     let (_scratch, _path, mut engine) = store();
-    let workspace = envelope("router-workspace", 0, "workspace.init", json!({}));
-    assert!(matches!(
-        apply_replication_envelope(&mut engine, &workspace, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(()))
-    ));
-    let moment = envelope("router-moment", 0, "moment.append", json!({}));
-    assert!(matches!(
-        apply_replication_envelope(&mut engine, &moment, &NoFaults, &NoLiveLeases),
-        Err(SyncError::MomentAppendNotImplemented)
-    ));
     let unknown = envelope("router-unknown", 0, "version.rename", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &unknown, &NoFaults, &NoLiveLeases),
