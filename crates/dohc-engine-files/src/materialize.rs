@@ -190,6 +190,10 @@ pub enum MaterializeError {
     /// (would follow the link out of the tree). `LANGUAGE_SEMANTICS_MATRIX` 8.1.
     #[error("job target is a symlink; refusing to overwrite through it")]
     SymlinkTarget,
+    /// A secret target exists but cannot safely be compared or replaced (for
+    /// example, it is a directory or special file). The job remains pending.
+    #[error("secret materialization target is not a bounded regular file")]
+    BlockedTarget,
     /// The atomic replace exhausted its bounded retry budget on transient
     /// sharing violations; the job is left pending for startup replay.
     #[error("atomic replace exhausted {MAX_REPLACE_ATTEMPTS} attempts (file locked)")]
@@ -215,6 +219,7 @@ impl MaterializeError {
             MaterializeError::MissingBlob { .. } => "missing-blob",
             MaterializeError::UnsafeTargetPath => "unsafe-target-path",
             MaterializeError::SymlinkTarget => "symlink-target",
+            MaterializeError::BlockedTarget => "blocked-target",
             MaterializeError::FileLocked => "file-locked",
             MaterializeError::TooLarge { .. } => "materialize-too-large",
         }
@@ -312,7 +317,7 @@ pub fn materialize_one(
         });
     }
     materialize_write_content(
-        store, &target, job, &content, policy, replacer, backoff, now_ms, faults, true,
+        store, &target, job, &content, policy, replacer, backoff, now_ms, faults, true, None,
     )
 }
 
@@ -336,6 +341,7 @@ pub fn materialize_secret_one(
     faults: &dyn FaultInjector,
 ) -> Result<JobOutcome, MaterializeError> {
     let target = resolve_target(root, &job.target_path)?;
+    ensure_secret_target_symlink_free(root, &target)?;
     if should_crash(faults, FaultPoint::MaterializeAfterJobCommit) {
         return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit));
     }
@@ -356,8 +362,7 @@ pub fn materialize_secret_one(
         CurrentTarget::Absent => Preimage::Absent,
         CurrentTarget::Present(bytes) => Preimage::Present(hex_sha256(&bytes)),
         CurrentTarget::Oversized => {
-            store.mark_materialization_conflict(&job.job_id, now_ms)?;
-            return Ok(JobOutcome::Conflict);
+            return Err(MaterializeError::BlockedTarget);
         }
     };
     let plaintext_job = MaterializationJob {
@@ -376,6 +381,7 @@ pub fn materialize_secret_one(
         now_ms,
         faults,
         false,
+        Some(root),
     )
 }
 
@@ -398,14 +404,16 @@ pub fn materialize_secret_delete_one(
     faults: &dyn FaultInjector,
 ) -> Result<JobOutcome, MaterializeError> {
     let target = resolve_target(root, &job.target_path)?;
+    ensure_secret_target_symlink_free(root, &target)?;
     if should_crash(faults, FaultPoint::MaterializeAfterJobCommit) {
         return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit));
     }
-    materialize_secret_delete_adopting_current(store, &target, job, policy, now_ms, faults)
+    materialize_secret_delete_adopting_current(store, root, &target, job, policy, now_ms, faults)
 }
 
 fn materialize_secret_delete_adopting_current(
     store: &EngineStore,
+    root: &Path,
     target: &Path,
     job: &MaterializationJob,
     policy: DurabilityPolicy,
@@ -429,6 +437,7 @@ fn materialize_secret_delete_adopting_current(
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
     }
+    ensure_secret_target_symlink_free(root, target)?;
     std::fs::remove_file(target).map_err(|err| MaterializeError::io(target, &err))?;
     sync_parent_dir(target.parent(), policy)?;
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
@@ -452,6 +461,10 @@ impl<'a> SecretPlaintextTempCleanup<'a> {
 
     fn disarm(&mut self) {
         self.armed = false;
+    }
+
+    fn arm(&mut self) {
+        self.armed = true;
     }
 }
 
@@ -478,9 +491,16 @@ fn materialize_write_content(
     now_ms: i64,
     faults: &dyn FaultInjector,
     preserve_conflict_artifact: bool,
+    secret_root: Option<&Path>,
 ) -> Result<JobOutcome, MaterializeError> {
+    if let Some(root) = secret_root {
+        ensure_secret_target_symlink_free(root, target)?;
+    }
     // Step 1 (idempotent replay): the target already equals the desired content.
     let current = read_current_no_follow(target)?;
+    if secret_root.is_some() && matches!(current, CurrentTarget::Oversized) {
+        return Err(MaterializeError::BlockedTarget);
+    }
     if let CurrentTarget::Present(bytes) = &current
         && hex_sha256(bytes) == job.content_sha256
     {
@@ -492,14 +512,22 @@ fn materialize_write_content(
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| MaterializeError::io(parent, &e))?;
     }
+    if let Some(root) = secret_root {
+        ensure_secret_target_symlink_free(root, target)?;
+    }
 
     // Step 2: sibling temp file, bounded, restrictive mode.
     let tmp = temp_sibling(target, &job.job_id);
     // Secret writes never preserve a plaintext temp on a returned error. The
     // ordinary materializer keeps its established crash/replay behavior.
-    let mut secret_temp_cleanup =
-        SecretPlaintextTempCleanup::new(&tmp, !preserve_conflict_artifact);
-    write_temp(&tmp, content)?;
+    let mut secret_temp_cleanup = SecretPlaintextTempCleanup::new(&tmp, false);
+    let temp_file = if preserve_conflict_artifact {
+        write_temp(&tmp, content)?
+    } else {
+        let file = write_secret_temp_no_follow(&tmp, content)?;
+        secret_temp_cleanup.arm();
+        file
+    };
     if should_crash(faults, FaultPoint::MaterializeAfterTempWrite) {
         // A crash here leaves an orphan temp; startup replay ignores it (temp is
         // never captured as user content — it lives under a `.dohc-write-` name
@@ -511,7 +539,8 @@ fn materialize_write_content(
     // Step 3: flush the temp FILE per the per-OS durability policy. The parent
     // directory is synced AFTER the rename (below), which is where the rename's
     // durability actually lives on POSIX.
-    flush_temp_file(&tmp, policy)?;
+    flush_temp_file(&temp_file, &tmp, policy)?;
+    drop(temp_file);
     if should_crash(faults, FaultPoint::MaterializeAfterFlushBeforeRename) {
         secret_temp_cleanup.disarm();
         return Ok(JobOutcome::Crashed(
@@ -532,7 +561,13 @@ fn materialize_write_content(
     // an external write in the gap is clobbered — the documented residual TOCTOU
     // (module docs + BEHAVIOR_DELTA). The common case (an editor that wrote
     // before the pipeline ran) IS caught here.
+    if let Some(root) = secret_root {
+        ensure_secret_target_symlink_free(root, target)?;
+    }
     let current_now = read_current_no_follow(target)?;
+    if secret_root.is_some() && matches!(current_now, CurrentTarget::Oversized) {
+        return Err(MaterializeError::BlockedTarget);
+    }
     if !preimage_matches(&job.preimage, &current_now) {
         // External newer content: preserve BOTH. Keep the on-disk target
         // untouched; persist our intended content to a `.conflict` sibling so it
@@ -554,6 +589,9 @@ fn materialize_write_content(
     // Step 5: atomic replace with bounded retry, then make the rename itself
     // durable by syncing the parent directory (POSIX), THEN mark complete — so a
     // crash can never leave the job marked complete over a non-durable rename.
+    if let Some(root) = secret_root {
+        ensure_secret_target_symlink_free(root, target)?;
+    }
     replace_with_bounded_retry(&tmp, target, replacer, backoff)?;
     sync_parent_dir(target.parent(), policy)?;
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
@@ -676,6 +714,47 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
     Ok(out)
 }
 
+/// Refuse every symlink/reparse point from the workspace root through the
+/// secret target. This is intentionally secret-scoped: ordinary materialized
+/// files retain their established symlink semantics, while plaintext secrets
+/// never traverse an aliased directory.
+fn ensure_secret_target_symlink_free(root: &Path, target: &Path) -> Result<(), MaterializeError> {
+    let relative = target
+        .strip_prefix(root)
+        .map_err(|_| MaterializeError::UnsafeTargetPath)?;
+    let mut current = root.to_path_buf();
+    reject_link_or_reparse(&current)?;
+    for component in relative.components() {
+        current.push(component);
+        reject_link_or_reparse(&current)?;
+    }
+    Ok(())
+}
+
+fn reject_link_or_reparse(path: &Path) -> Result<(), MaterializeError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(MaterializeError::io(path, &err)),
+    };
+    if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+        return Err(MaterializeError::SymlinkTarget);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
 fn temp_sibling(target: &Path, job_id: &str) -> PathBuf {
     sibling_with_name(target, &format!(".dohc-write-{}.tmp", sanitize(job_id)))
 }
@@ -703,7 +782,7 @@ fn sanitize(id: &str) -> String {
         .collect()
 }
 
-fn write_temp(tmp: &Path, content: &[u8]) -> Result<(), MaterializeError> {
+fn write_temp(tmp: &Path, content: &[u8]) -> Result<std::fs::File, MaterializeError> {
     use std::io::Write as _;
     // Restrictive mode where supported; truncate any stale temp.
     let mut opts = std::fs::OpenOptions::new();
@@ -716,18 +795,45 @@ fn write_temp(tmp: &Path, content: &[u8]) -> Result<(), MaterializeError> {
     let mut file = opts.open(tmp).map_err(|e| MaterializeError::io(tmp, &e))?;
     file.write_all(content)
         .map_err(|e| MaterializeError::io(tmp, &e))?;
-    Ok(())
+    Ok(file)
 }
 
-fn flush_temp_file(tmp: &Path, policy: DurabilityPolicy) -> Result<(), MaterializeError> {
+/// Create a secret plaintext temp as a brand-new, non-following filesystem
+/// entry. A planted file, symlink, junction, or other reparse point is refused
+/// without truncating or unlinking it.
+fn write_secret_temp_no_follow(
+    tmp: &Path,
+    content: &[u8],
+) -> Result<std::fs::File, MaterializeError> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = opts.open(tmp).map_err(|e| MaterializeError::io(tmp, &e))?;
+    if let Err(err) = file.write_all(content) {
+        drop(file);
+        let _ = std::fs::remove_file(tmp);
+        return Err(MaterializeError::io(tmp, &err));
+    }
+    Ok(file)
+}
+
+fn flush_temp_file(
+    file: &std::fs::File,
+    tmp: &Path,
+    policy: DurabilityPolicy,
+) -> Result<(), MaterializeError> {
     if policy.fsync_file {
-        // Open with WRITE access: on Windows `sync_all` maps to
-        // `FlushFileBuffers`, which requires a writable handle (a read-only
-        // handle fails ERROR_ACCESS_DENIED). `write(true)` does not truncate.
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(tmp)
-            .map_err(|e| MaterializeError::io(tmp, &e))?;
         file.sync_all().map_err(|e| MaterializeError::io(tmp, &e))?;
     }
     Ok(())

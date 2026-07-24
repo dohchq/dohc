@@ -428,7 +428,23 @@ async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
     match envelope {
         Envelope::Request(request) => {
             let id = request.id;
-            match supervisor.try_submit(request) {
+            let capabilities: Arc<[String]> = if blobs_negotiated {
+                Arc::from(["blobs".to_owned()])
+            } else {
+                Arc::from([])
+            };
+            let completion_egress = Arc::clone(active_egress);
+            match supervisor.try_submit_with(request, capabilities, move |outcome| {
+                // The handoff runs before the supervisor drops its cancel
+                // registration. Cancel therefore always reaches either the
+                // request signal, this egress signal, or both.
+                if blobs_negotiated
+                    && let Ok(service_response) = outcome
+                    && let Some(egress) = &service_response.blob_egress
+                {
+                    lock(&completion_egress).insert(id, egress.cancel.clone());
+                }
+            }) {
                 Ok(receiver) => {
                     let output = output.clone();
                     let writer_gone = writer_gone.clone();
@@ -441,7 +457,6 @@ async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
                                 match service_response.blob_egress.take() {
                                     Some(egress) => {
                                         if blobs_negotiated {
-                                            lock(&active_egress).insert(id, egress.cancel.clone());
                                             OutputItem::Blob {
                                                 response: service_response.response,
                                                 egress,

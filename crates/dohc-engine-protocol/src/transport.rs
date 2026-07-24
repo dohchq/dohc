@@ -56,6 +56,9 @@ pub struct RequestContext {
     /// Absolute deadline, when the request carries one. The supervisor also
     /// enforces it non-cooperatively.
     pub deadline: Option<Instant>,
+    /// Capabilities negotiated by the framed session. Direct in-process calls
+    /// default to none and may opt in explicitly.
+    pub capabilities: Arc<[String]>,
 }
 
 impl RequestContext {
@@ -63,7 +66,21 @@ impl RequestContext {
         RequestContext {
             cancel: CancelSignal::new(),
             deadline: None,
+            capabilities: Arc::from([]),
         }
+    }
+
+    pub fn with_capability(mut self, capability: impl Into<String>) -> Self {
+        let mut capabilities = self.capabilities.to_vec();
+        capabilities.push(capability.into());
+        self.capabilities = capabilities.into();
+        self
+    }
+
+    pub fn has_capability(&self, capability: &str) -> bool {
+        self.capabilities
+            .iter()
+            .any(|negotiated| negotiated == capability)
     }
 }
 

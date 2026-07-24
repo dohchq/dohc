@@ -2137,20 +2137,37 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let cancellation = OperationCancellation::new(ctx);
-        let read = Self::read_under_ctx(
-            &cancellation,
-            "versionedBinary.readBlob",
-            open.actor
-                .read_binary_blob_for_egress(open.workspace_id, sha256.clone()),
-        )
-        .await?
-        .ok_or_else(|| wire(ErrorCode::InvalidParams, "file-not-found"))?;
-        let bytes = read.bytes.ok_or_else(|| {
-            wire(
-                ErrorCode::Internal,
-                "binary blob egress hydration unexpectedly withheld bytes",
+        // MUTATION: always select read_binary_blob_for_egress -> clients that
+        // did not negotiate blobs hydrate and verify the entire over-cap value
+        // only to receive metadata.
+        let read = if ctx.has_capability("blobs") {
+            Self::read_under_ctx(
+                &cancellation,
+                "versionedBinary.readBlob",
+                open.actor
+                    .read_binary_blob_for_egress(open.workspace_id, sha256.clone()),
             )
-        })?;
+            .await?
+        } else {
+            Self::read_under_ctx(
+                &cancellation,
+                "versionedBinary.readBlob",
+                open.actor
+                    .read_binary_blob(open.workspace_id, sha256.clone()),
+            )
+            .await?
+        }
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "file-not-found"))?;
+        let Some(bytes) = read.bytes else {
+            return Ok((
+                json!({
+                    "bytesBase64": Value::Null,
+                    "byteLength": read.byte_length,
+                    "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+                }),
+                None,
+            ));
+        };
         if bytes.len() <= MAX_INBAND_CONTENT_BYTES {
             return Ok((
                 json!({
