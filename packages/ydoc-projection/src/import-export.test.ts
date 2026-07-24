@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { JSONContent } from '@tiptap/core'
-import { prosemirrorJSONToYXmlFragment } from 'y-prosemirror'
+import {
+  prosemirrorJSONToYXmlFragment,
+  yXmlFragmentToProseMirrorRootNode,
+} from 'y-prosemirror'
 import * as Y from 'yjs'
 import {
   getDohcProseMirrorSchema,
@@ -10,6 +13,7 @@ import {
   yDocToMarkdown,
   markdownToYDoc,
   plainTextToYDoc,
+  serializeRichdocBody,
 } from './import-export.js'
 
 type ExpectedMarkdownFragment = string | RegExp
@@ -22,6 +26,13 @@ function yDocFromBody(content: JSONContent[]): Y.Doc {
     getDohcYDocBodyFragment(doc),
   )
   return doc
+}
+
+function yDocBodyJSON(doc: Y.Doc): JSONContent {
+  return yXmlFragmentToProseMirrorRootNode(
+    getDohcYDocBodyFragment(doc),
+    getDohcProseMirrorSchema(),
+  ).toJSON() as JSONContent
 }
 
 function expectStableMarkdownRoundTrip(
@@ -464,6 +475,51 @@ describe('hocuspocus markdown import/export', () => {
     ].join('\n'))
   })
 
+  it('projects multi-block table cells with a GFM inline break and no controls', () => {
+    const output = yDocToMarkdown(yDocFromBody([
+      {
+        type: 'table',
+        content: [
+          {
+            type: 'tableRow',
+            content: [{
+              type: 'tableHeader',
+              content: [{
+                type: 'paragraph',
+                content: [{ type: 'text', text: 'H' }],
+              }],
+            }],
+          },
+          {
+            type: 'tableRow',
+            content: [{
+              type: 'tableCell',
+              content: [
+                {
+                  type: 'paragraph',
+                  content: [{ type: 'text', text: 'first' }],
+                },
+                {
+                  type: 'paragraph',
+                  content: [{ type: 'text', text: 'second' }],
+                },
+              ],
+            }],
+          },
+        ],
+      },
+    ]))
+
+    expect(output).toBe([
+      '',
+      '| H               |',
+      '| --------------- |',
+      '| first<br>second |',
+    ].join('\n'))
+    expect(output).not.toContain('\u001F')
+    expect(output).not.toMatch(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u)
+  })
+
   it('round-trips per-column GFM alignment (left/center/right) losslessly', () => {
     // Phase 1 assumed per-column alignment was inexpressible; it is not. The
     // `align` cell attr (set by tableControls' column grip menu) serializes to
@@ -561,6 +617,264 @@ describe('hocuspocus markdown import/export', () => {
     ].join('\n'))
   })
 
+  it('keeps HTML-special characters raw inside inline code', () => {
+    const markdown = 'Compare `<tag> && value > 1` without entity expansion.'
+    expect(yDocToMarkdown(markdownToYDoc(markdown))).toBe(markdown)
+  })
+
+  it.each([
+    {
+      context: 'the first block of a bullet item',
+      content: [{
+        type: 'bulletList',
+        content: [{
+          type: 'listItem',
+          content: [{
+            type: 'codeBlock',
+            attrs: { language: 'js' },
+            content: [{ type: 'text', text: 'const bullet = true' }],
+          }],
+        }],
+      }],
+      markdown: ['- ```js', '  const bullet = true', '  ```'].join('\n'),
+    },
+    {
+      context: 'the first block of an ordered item',
+      content: [{
+        type: 'orderedList',
+        attrs: { start: 1 },
+        content: [{
+          type: 'listItem',
+          content: [{
+            type: 'codeBlock',
+            attrs: { language: 'js' },
+            content: [{ type: 'text', text: 'const ordered = true' }],
+          }],
+        }],
+      }],
+      markdown: ['1. ```js', '   const ordered = true', '   ```'].join('\n'),
+    },
+    {
+      context: 'the first block of a nested list item',
+      content: [{
+        type: 'bulletList',
+        content: [{
+          type: 'listItem',
+          content: [
+            {
+              type: 'paragraph',
+              content: [{ type: 'text', text: 'parent' }],
+            },
+            {
+              type: 'bulletList',
+              content: [{
+                type: 'listItem',
+                content: [{
+                  type: 'codeBlock',
+                  attrs: { language: 'js' },
+                  content: [{ type: 'text', text: 'const nested = true' }],
+                }],
+              }],
+            },
+          ],
+        }],
+      }],
+      markdown: [
+        '- parent',
+        '  - ```js',
+        '    const nested = true',
+        '    ```',
+      ].join('\n'),
+    },
+    {
+      context: 'a blockquote',
+      content: [{
+        type: 'blockquote',
+        content: [{
+          type: 'codeBlock',
+          attrs: { language: 'js' },
+          content: [{ type: 'text', text: 'const quoted = true' }],
+        }],
+      }],
+      markdown: ['> ```js', '> const quoted = true', '> ```'].join('\n'),
+    },
+    {
+      context: 'a callout',
+      content: [{
+        type: 'callout',
+        attrs: { calloutType: 'note', fold: '', title: 'Code' },
+        content: [{
+          type: 'codeBlock',
+          attrs: { language: 'js' },
+          content: [{ type: 'text', text: 'const callout = true' }],
+        }],
+      }],
+      markdown: [
+        '> [!note] Code',
+        '> ```js',
+        '> const callout = true',
+        '> ```',
+      ].join('\n'),
+    },
+    {
+      context: 'the first block of a task item',
+      content: [{
+        type: 'taskList',
+        content: [{
+          type: 'taskItem',
+          attrs: { checked: false },
+          content: [{
+            type: 'codeBlock',
+            attrs: { language: 'js' },
+            content: [{ type: 'text', text: 'const task = true' }],
+          }],
+        }],
+      }],
+      markdown: ['- [ ] ```js', '  const task = true', '  ```'].join('\n'),
+    },
+    {
+      context: 'a later block of a list item',
+      content: [{
+        type: 'bulletList',
+        content: [{
+          type: 'listItem',
+          content: [
+            {
+              type: 'paragraph',
+              content: [{ type: 'text', text: 'introduction' }],
+            },
+            {
+              type: 'codeBlock',
+              attrs: { language: 'js' },
+              content: [{ type: 'text', text: 'const later = true' }],
+            },
+          ],
+        }],
+      }],
+      markdown: [
+        '- introduction',
+        '  ```js',
+        '  const later = true',
+        '  ```',
+      ].join('\n'),
+    },
+    {
+      context: 'a blockquote nested in a list item',
+      content: [{
+        type: 'bulletList',
+        content: [{
+          type: 'listItem',
+          content: [
+            {
+              type: 'paragraph',
+              content: [{ type: 'text', text: 'quote' }],
+            },
+            {
+              type: 'blockquote',
+              content: [{
+                type: 'codeBlock',
+                attrs: { language: 'js' },
+                content: [{ type: 'text', text: 'const nestedQuote = true' }],
+              }],
+            },
+          ],
+        }],
+      }],
+      markdown: [
+        '- quote',
+        '  > ```js',
+        '  > const nestedQuote = true',
+        '  > ```',
+      ].join('\n'),
+    },
+  ])('round-trips fenced code inside $context without leaking sentinels', ({ content, markdown }) => {
+    const once = serializeRichdocBody({ type: 'doc', content }).trimEnd()
+    expect(once).toBe(markdown)
+    expect(once).not.toContain('DOHC_CODE_BLOCK')
+  })
+
+  it.each([
+    {
+      value: 'left | right',
+      markdown: [
+        '| Value | Other |',
+        '| ----- | ----- |',
+        '| `left \\| right` | stable |',
+      ].join('\n'),
+    },
+    {
+      value: 'a`b | c',
+      markdown: [
+        '| Value | Other |',
+        '| ----- | ----- |',
+        '| ``a`b \\| c`` | stable |',
+      ].join('\n'),
+    },
+  ])('round-trips inline code containing table pipes: $value', ({ markdown }) => {
+    const once = yDocToMarkdown(markdownToYDoc(markdown))
+    expect(yDocToMarkdown(markdownToYDoc(once))).toBe(once)
+    expect(once).toContain(markdown.split('\n')[2])
+
+    const table = yDocBodyJSON(markdownToYDoc(once)).content?.[0]
+    expect(table?.content?.[1].content).toHaveLength(2)
+    expect(table?.content?.[1].content?.[0]).toMatchObject({
+      content: [{
+        content: [{
+          type: 'text',
+          text: markdown.includes('a`b') ? 'a`b | c' : 'left | right',
+          marks: [{ type: 'code' }],
+        }],
+      }],
+    })
+  })
+
+  it('projects many inline-code spans without leaking or corrupting reserved tokens', () => {
+    const markdown = Array.from(
+      { length: 500 },
+      (_, index) => `span-${index}: \`value-${index}\``,
+    ).join('\n\n')
+
+    const once = yDocToMarkdown(markdownToYDoc(markdown))
+    expect(once).toBe(markdown)
+    expect(once).not.toContain('DOHC_INLINE_CODE')
+    expect(yDocToMarkdown(markdownToYDoc(once))).toBe(once)
+  })
+
+  it.each([
+    {
+      context: 'a bullet item',
+      markdown: '- bullet ``a`b | c``',
+    },
+    {
+      context: 'an ordered item',
+      markdown: '1. ordered ``a`b | c``',
+    },
+    {
+      context: 'a nested list item',
+      markdown: ['- parent', '  - nested ``a`b | c``'].join('\n'),
+    },
+    {
+      context: 'a blockquote',
+      markdown: '> quote ``a`b | c``',
+    },
+    {
+      context: 'a callout',
+      markdown: ['> [!note] Inline', '> body ``a`b | c``'].join('\n'),
+    },
+    {
+      context: 'a task item',
+      markdown: '- [ ] task ``a`b | c``',
+    },
+    {
+      context: 'a heading',
+      markdown: '# heading ``a`b | c``',
+    },
+  ])('round-trips inline code inside $context without placeholder-sensitive output', ({ markdown }) => {
+    const once = yDocToMarkdown(markdownToYDoc(markdown))
+    expect(once).toBe(markdown)
+    expect(yDocToMarkdown(markdownToYDoc(once))).toBe(once)
+  })
+
   it('preserves user private-use codepoints when reserving serialization sentinels', () => {
     const tableSentinel0 = String.fromCodePoint(0xF0000)
     const tableSentinel1 = String.fromCodePoint(0xF0001)
@@ -568,6 +882,7 @@ describe('hocuspocus markdown import/export', () => {
     const blockToken1 = '\uE000DOHC_CODE_BLOCK_1\uE001'
     const inlineToken3 = '\uE000DOHC_INLINE_CODE_3\uE001'
     const inlineToken4 = '\uE000DOHC_INLINE_CODE_4\uE001'
+    const inlineEntitySentinels = '\uE002\uE003\uE004'
     const doc = yDocFromBody([
       {
         type: 'codeBlock',
@@ -607,7 +922,7 @@ describe('hocuspocus markdown import/export', () => {
         type: 'paragraph',
         content: [{
           type: 'text',
-          text: `${inlineToken3} ${inlineToken4}`,
+          text: `${inlineToken3} ${inlineToken4} ${inlineEntitySentinels} <&>`,
           marks: [{ type: 'code' }],
         }],
       },
@@ -616,7 +931,9 @@ describe('hocuspocus markdown import/export', () => {
     const markdown = yDocToMarkdown(doc)
     expect(markdown).toContain(`${blockToken0} ${blockToken1}`)
     expect(markdown).toContain(`${tableSentinel0} \\| ${tableSentinel1}`)
-    expect(markdown).toContain(`\`${inlineToken3} ${inlineToken4}\``)
+    expect(markdown).toContain(
+      `\`${inlineToken3} ${inlineToken4} ${inlineEntitySentinels} <&>\``,
+    )
     expect(markdown).not.toContain(String.fromCodePoint(0xF0002))
   })
 

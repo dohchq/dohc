@@ -2,7 +2,13 @@ import type { AnyExtension, JSONContent } from '@tiptap/core'
 import { getSchema } from '@tiptap/core'
 import { MarkdownManager } from '@tiptap/markdown'
 import { StarterKit } from '@tiptap/starter-kit'
-import { TableKit } from '@tiptap/extension-table'
+import {
+  renderTableToMarkdown,
+  Table,
+  TableCell,
+  TableHeader,
+  TableRow,
+} from '@tiptap/extension-table'
 import { TaskItem, TaskList } from '@tiptap/extension-list'
 import yaml from 'js-yaml'
 import {
@@ -23,13 +29,27 @@ const FRONTMATTER_PRIORITY_KEYS = ['id', 'title', 'icon'] as const
 const DOHC_V2_SCHEMA_VERSION = 1
 const FM_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?([\s\S]*)$/
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
+// GFM forbids block nodes inside table cells but permits inline raw HTML, so a
+// multi-block ProseMirror cell uses a visible hard break instead of U+001F.
+const GFM_TABLE_CELL_BLOCK_SEPARATOR = '<br>'
+
+const MarkdownTable = Table.extend({
+  renderMarkdown: (node, helpers) => renderTableToMarkdown(
+    node,
+    helpers,
+    { cellLineSeparator: GFM_TABLE_CELL_BLOCK_SEPARATOR },
+  ),
+})
 
 const extensions: AnyExtension[] = [
   ...dohcMarkdownExtensions,
   StarterKit,
   TaskList,
   TaskItem,
-  TableKit,
+  MarkdownTable,
+  TableCell,
+  TableHeader,
+  TableRow,
 ]
 const markdownManager = new MarkdownManager({
   extensions,
@@ -127,10 +147,10 @@ function yDocBodyToJSON(doc: Y.Doc): JSONContent {
   ).toJSON() as JSONContent
 }
 
-function serializeRichdocBody(root: JSONContent): string {
+export function serializeRichdocBody(root: JSONContent): string {
   const source = JSON.stringify(root)
   const tablePipeSentinel = unusedSupplementaryCodePoint(source)
-  const inlineCode = new Map<string, string>()
+  const inlineCodeEntitySentinels = new Map<string, string>()
   const codeBlocks = new Map<string, string>()
   const reservedTokens = new Set<string>()
   let tokenIndex = 0
@@ -163,11 +183,7 @@ function serializeRichdocBody(root: JSONContent): string {
         })),
       }))
     } else if (content?.length) {
-      content = replaceInlineCodeRuns(content, value => {
-        const token = reserveToken('INLINE_CODE')
-        inlineCode.set(token, renderInlineCode(value))
-        return token
-      })
+      content = renderInlineCodeRuns(content, inlineCodeEntitySentinels, source)
     }
 
     return content ? { ...node, content } : { ...node }
@@ -175,10 +191,13 @@ function serializeRichdocBody(root: JSONContent): string {
 
   const prepared = visit(root)
   let markdown = markdownManager.serialize(prepared)
-  markdown = markdown.replaceAll(tablePipeSentinel, '\\|')
-  for (const [token, rendered] of inlineCode) {
-    markdown = markdown.replace(`\`${token}\``, rendered)
-  }
+  markdown = restoreCharacterSentinels(markdown, new Map([
+    [tablePipeSentinel, '\\|'],
+    ...Array.from(
+      inlineCodeEntitySentinels,
+      ([character, sentinel]) => [sentinel, character] as const,
+    ),
+  ]))
   return rewriteCodeBlockFences(markdown, codeBlocks)
 }
 
@@ -202,9 +221,10 @@ function replaceText(
   }))
 }
 
-function replaceInlineCodeRuns(
+function renderInlineCodeRuns(
   content: JSONContent[],
-  tokenFor: (value: string) => string,
+  entitySentinels: Map<string, string>,
+  source: string,
 ): JSONContent[] {
   const output: JSONContent[] = []
   for (let index = 0; index < content.length;) {
@@ -221,10 +241,30 @@ function replaceInlineCodeRuns(
       value += content[end].text ?? ''
       end += 1
     }
-    output.push({ ...node, text: tokenFor(value) })
+    const marks = node.marks?.filter(mark => mark.type !== 'code')
+    output.push({
+      ...node,
+      text: renderInlineCode(replaceCharacters(value, entitySentinels, source)),
+      marks: marks?.length ? marks : undefined,
+    })
     index = end
   }
   return output
+}
+
+function replaceCharacters(
+  value: string,
+  replacements: Map<string, string>,
+  source: string,
+): string {
+  return value.replace(/[&<>]/g, character => {
+    const existing = replacements.get(character)
+    if (existing) return existing
+
+    const sentinel = reserveInlineCodeEntitySentinel(source, replacements)
+    replacements.set(character, sentinel)
+    return sentinel
+  })
 }
 
 function isInlineCodeText(node: JSONContent): boolean {
@@ -255,26 +295,61 @@ function rewriteCodeBlockFences(
   codeBlocks: Map<string, string>,
 ): string {
   const lines = markdown.split('\n')
-  for (const [token, content] of codeBlocks) {
-    const tokenLine = lines.findIndex(line => line.endsWith(token))
-    if (tokenLine <= 0 || tokenLine + 1 >= lines.length) continue
-    const prefix = lines[tokenLine].slice(0, -token.length)
-    const opening = lines[tokenLine - 1]
-    if (!opening.startsWith(`${prefix}\`\`\``)) continue
-    const language = opening.slice(prefix.length + 3)
+  const output: string[] = []
+  let restoredBlocks = 0
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    const tokenMatch = /(\uE000DOHC_CODE_BLOCK_\d+\uE001)$/.exec(line)
+    const token = tokenMatch?.[1]
+    const content = token ? codeBlocks.get(token) : undefined
+    if (content === undefined) {
+      output.push(line)
+      continue
+    }
+
+    const opening = output.pop()
+    const closing = lines[index + 1]
+    const openingFence = opening && /(`{3,})([^`]*)$/.exec(opening)
+    const closingFence = closing && /(`{3,})([ \t]*)$/.exec(closing)
+    if (!opening || !openingFence || !closing || !closingFence || !tokenMatch) {
+      throw new Error('could not restore a fenced code block serialization sentinel')
+    }
+
+    const openingPrefix = opening.slice(0, openingFence.index)
+    const serializedContentPrefix = line.slice(0, tokenMatch.index)
+    const serializedClosingPrefix = closing.slice(0, closingFence.index)
+    const listContinuationPrefix = continuationPrefixForListMarker(openingPrefix)
+    const contentPrefix = listContinuationPrefix ?? serializedContentPrefix
+    const closingPrefix = listContinuationPrefix ?? serializedClosingPrefix
+    const language = openingFence[2]
     const fence = backtickFence(content, 3)
     const contentLines = content.split('\n').map(line =>
-      line.length === 0 ? prefix.trimEnd() : `${prefix}${line}`,
+      line.length === 0 ? contentPrefix.trimEnd() : `${contentPrefix}${line}`,
     )
-    lines.splice(
-      tokenLine - 1,
-      3,
-      `${prefix}${fence}${language}`,
+    output.push(
+      `${openingPrefix}${fence}${language}`,
       ...contentLines,
-      `${prefix}${fence}`,
+      `${closingPrefix}${fence}${closingFence[2]}`,
     )
+    restoredBlocks += 1
+    index += 1
   }
-  return lines.join('\n')
+
+  if (restoredBlocks !== codeBlocks.size) {
+    throw new Error('could not find every fenced code block serialization sentinel')
+  }
+
+  return output.join('\n')
+}
+
+function continuationPrefixForListMarker(prefix: string): string | null {
+  const taskItem = /^(.*?)([-+*]) \[[ xX]\] $/.exec(prefix)
+  if (taskItem) return `${taskItem[1]}  `
+
+  const listItem = /^(.*?)([-+*]|\d+[.)]) $/.exec(prefix)
+  if (!listItem) return null
+  return `${listItem[1]}${' '.repeat(listItem[2].length + 1)}`
 }
 
 function backtickFence(value: string, minimum: number): string {
@@ -289,6 +364,34 @@ function unusedSupplementaryCodePoint(source: string): string {
     if (!source.includes(candidate)) return candidate
   }
   throw new Error('could not reserve a table-pipe serialization sentinel')
+}
+
+function reserveInlineCodeEntitySentinel(
+  source: string,
+  reserved: Map<string, string>,
+): string {
+  for (let codePoint = 0xE002; codePoint <= 0xF8FF; codePoint += 1) {
+    const candidate = String.fromCodePoint(codePoint)
+    if (!source.includes(candidate) && !Array.from(reserved.values()).includes(candidate)) {
+      return candidate
+    }
+  }
+  throw new Error('could not reserve an inline-code serialization sentinel')
+}
+
+function restoreCharacterSentinels(
+  markdown: string,
+  replacements: Map<string, string>,
+): string {
+  const matcher = new RegExp(
+    Array.from(replacements.keys(), escapeRegExp).join('|'),
+    'gu',
+  )
+  return markdown.replace(matcher, sentinel => replacements.get(sentinel) ?? sentinel)
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function parseFrontmatter(src: string): {
