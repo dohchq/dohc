@@ -711,10 +711,15 @@ async fn scenario_editor_cycle(daemon: &Daemon, root: &Path, n: u64) {
 #[tokio::main]
 async fn main() {
     let options = parse_options();
+    let tier = if options.quick {
+        "quick-smoke"
+    } else {
+        "cutoverBlocking"
+    };
     let started = Instant::now();
     let budget = Duration::from_secs(options.minutes * 60);
     eprintln!(
-        "soak: cutoverBlocking tier — {} cycles / {} min budget, daemon {}",
+        "soak: {tier} tier — {} cycles / {} min budget, daemon {}",
         options.cycles,
         options.minutes,
         options.daemon.display()
@@ -916,7 +921,7 @@ async fn main() {
         "PASS"
     };
     let evidence = json!({
-        "tier": "cutoverBlocking",
+        "tier": tier,
         "verdict": verdict,
         "cyclesRequested": options.cycles,
         // Phase-2 WORKLOAD cycles only — the phase-1 crash prelude reports
@@ -992,7 +997,7 @@ async fn main() {
     .expect("write evidence");
 
     println!(
-        "- {} | soak-cutoverBlocking | {}/{} | {} | cycles={} crashes={} durationSecs={} \
+        "- {} | soak-{tier} | {}/{} | {} | cycles={} crashes={} durationSecs={} \
          rssSlopeB/s={:.1} handles {}->{} threads {}->{}",
         chrono_like_now(),
         std::env::consts::OS,

@@ -2,25 +2,36 @@
 #
 # The program's gates and soak ran on native Windows + WSL Linux. macOS is a
 # shipping platform (apps/desktop), so this dispatchable workflow reproduces the
-# full-workspace gate AND the cutoverBlocking soak on a macOS runner and uploads
-# self-describing evidence artifacts (the run-rust-checks verdict log + the soak
-# evidence JSON). Never runs automatically — dispatch it when macOS evidence is
-# needed (GATE6 decision #2 / the R15 go/no-go).
+# full-workspace gate COMMAND on a macOS runner, where cfg-gated tests make the
+# actual test set platform-dependent. It records the macOS test inventory/count
+# and runs either the cutoverBlocking soak or a clearly labelled quick smoke.
+# Never runs automatically — dispatch it when macOS evidence is needed (GATE6
+# decision #2 / the R15 go/no-go).
 #
 # EVIDENCE INTEGRITY (why this file is fussy — a misleading artifact is worse than
 # none when it feeds a cutover decision):
 #   * `full` is the DEFAULT. The soak runner exits 0 for `--quick` with verdict
 #     PASS-SCENARIOS-ONLY(trend-not-evaluated) — a green quick run is NOT the
 #     cutoverBlocking evidence and must never be mistaken for it.
+#   * Artifact names contain the final job status. A failed run can upload
+#     diagnostics, but those diagnostics cannot share a green artifact's name.
 #   * cargo-deny is installed at a PINNED version and a `cargo-deny=SKIP` gate line
 #     FAILS the run — the canonical gate counts cargo-deny=PASS as evidence.
 #   * BOTH release binaries are built before the soak: the runner resolves the
 #     daemon as a SIBLING `dohc-workspace-engine` in its own directory, so
 #     `cargo run --bin dohc-soak-runner` alone would fail with a missing daemon.
-#   * The soak evidence JSON is MANDATORY — the upload fails if it is absent, so a
-#     green run can never be cited without the artifact behind it.
+#   * An always-run validation requires exactly one nonempty soak JSON. A green
+#     run therefore cannot exist without it; a failed diagnostics artifact may.
 #   * The runner is PINNED to a macOS version, never `-latest`: evidence has to
 #     name the OS it ran on.
+#   * WHAT A macOS PASS DOES *NOT* PROVE (uncalibrated): the soak's handle and
+#     thread tolerances (HANDLE_SLACK / THREAD_SLACK) were calibrated against
+#     WINDOWS handle jitter. On macOS the counts come from `lsof` rows and
+#     `ps -M` threads — materially different populations (mapped dylibs, sockets).
+#     So a macOS PASS shows these Windows-derived bounds were met; it does NOT
+#     establish that the bounds are meaningful here. The gate and scenario
+#     results are citable; the resource-leak verdict is NOT bankable until the
+#     tolerances are calibrated on representative Macs.
 name: rust-engine-macos-evidence
 
 on:
@@ -36,7 +47,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: rust-engine-macos-evidence
+  group: rust-engine-macos-evidence-${{ github.run_id }}
   cancel-in-progress: false
 
 env:
@@ -46,7 +57,7 @@ env:
 
 jobs:
   macos-evidence:
-    name: macOS gate + cutoverBlocking soak
+    name: macOS gate + ${{ inputs.mode == 'full' && 'cutoverBlocking soak' || 'quick smoke' }}
     # Blacksmith's macOS runner (R15 decision #2). Apple Silicon M4 / ARM64 —
     # the architecture apps/desktop actually ships on for Mac, so this is
     # closer to the shipping target than an Intel runner would be. Pinned to
@@ -61,6 +72,28 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Record source and runner provenance
+        env:
+          EVIDENCE_GITHUB_REF: ${{ github.ref }}
+          EVIDENCE_GITHUB_SHA: ${{ github.sha }}
+          EVIDENCE_RUNNER_NAME: ${{ runner.name }}
+          EVIDENCE_RUNNER_OS: ${{ runner.os }}
+        run: |
+          set -euo pipefail
+          MACHINE_ARCH="$(uname -m)"
+          if [ "$MACHINE_ARCH" != "arm64" ]; then
+            echo "::error::expected an arm64 macOS runner, got $MACHINE_ARCH"
+            exit 1
+          fi
+          {
+            printf 'github.sha=%s\n' "$EVIDENCE_GITHUB_SHA"
+            printf 'github.ref=%s\n' "$EVIDENCE_GITHUB_REF"
+            printf 'runner=%s os=%s\n' "$EVIDENCE_RUNNER_NAME" "$EVIDENCE_RUNNER_OS"
+            printf 'uname.machine=%s\n' "$MACHINE_ARCH"
+            sw_vers
+            uname -a
+          } | tee macos-toolversions.log
+
       - name: Install pinned Rust toolchain (rust-toolchain.toml)
         run: |
           # A third-party runner image need not ship rustup the way GitHub's
@@ -71,7 +104,8 @@ jobs:
             export PATH="$HOME/.cargo/bin:$PATH"
           fi
           rustup show active-toolchain || rustup toolchain install
-          rustc --version && cargo --version
+          rustc -vV | tee -a macos-toolversions.log
+          cargo --version | tee -a macos-toolversions.log
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -80,23 +114,32 @@ jobs:
 
       - name: Install pinned cargo-deny (the gate counts cargo-deny=PASS as evidence)
         run: |
-          cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
-          # Evidence has to name the machine it ran on — the whole point of a
-          # macOS run is the platform, so record it beside the tool versions.
-          {
-            echo "runner=${{ runner.name }} os=${{ runner.os }} arch=${{ runner.arch }}"
-            echo "runs-on=blacksmith-6vcpu-macos-15"
-            sw_vers
-            uname -a
-          } | tee -a macos-toolversions.log
-          cargo-deny --version | tee -a macos-toolversions.log
-          rustc --version | tee -a macos-toolversions.log
+          set -euo pipefail
+          cargo install cargo-deny --locked --force --version "$CARGO_DENY_VERSION"
+          RESOLVED_CARGO_DENY_VERSION="$(cargo-deny --version)"
+          if [ "$RESOLVED_CARGO_DENY_VERSION" != "cargo-deny $CARGO_DENY_VERSION" ]; then
+            echo "::error::expected cargo-deny $CARGO_DENY_VERSION, got $RESOLVED_CARGO_DENY_VERSION"
+            exit 1
+          fi
+          printf '%s\n' "$RESOLVED_CARGO_DENY_VERSION" | tee -a macos-toolversions.log
           node --version | tee -a macos-toolversions.log
 
       - name: Full-workspace gate (fmt/clippy -D warnings/build/test/cargo-deny)
         run: |
           set -o pipefail
           node tools/rust-engine-program/run-rust-checks.mjs 2>&1 | tee macos-gate.log
+
+      - name: Record the platform-dependent macOS test inventory
+        run: |
+          set -euo pipefail
+          cargo test --workspace -- --list --format terse 2>&1 | tee macos-test-list.log
+          TEST_COUNT="$(grep -Ec ': test$' macos-test-list.log || true)"
+          if [ "$TEST_COUNT" -eq 0 ]; then
+            echo "::error::cargo reported zero macOS workspace tests"
+            exit 1
+          fi
+          printf 'test --workspace count=%s (platform-dependent macOS set)\n' "$TEST_COUNT" \
+            | tee -a macos-gate.log
 
       - name: Require a canonical PASS verdict with cargo-deny actually run
         run: |
@@ -113,31 +156,51 @@ jobs:
           cargo build --release --features harness --bin dohc-soak-runner
           ls -l target/release/dohc-workspace-engine target/release/dohc-soak-runner
 
-      - name: cutoverBlocking soak (self-describing evidence JSON)
+      - name: Soak (${{ inputs.mode }} mode; self-describing evidence JSON)
+        env:
+          SOAK_MODE: ${{ inputs.mode }}
         run: |
           set -o pipefail
           mkdir -p tools/rust-engine-program/soak-evidence
-          OUT="tools/rust-engine-program/soak-evidence/macos-$(date -u +%Y-%m-%dT%H-%M-%SZ)-cutoverBlocking.json"
-          if [ "${{ inputs.mode }}" = "full" ]; then
+          if [ "$SOAK_MODE" = "full" ]; then
+            EVIDENCE_TIER="cutoverBlocking"
             ARGS="--minutes 30 --cycles 1000"
           else
+            EVIDENCE_TIER="quick-smoke"
             echo "::warning::quick mode is NON-GATING — it cannot satisfy the GATE6 cutoverBlocking evidence."
             ARGS="--quick"
           fi
+          OUT="tools/rust-engine-program/soak-evidence/macos-$(date -u +%Y-%m-%dT%H-%M-%SZ)-${EVIDENCE_TIER}.json"
           # Invoke the BUILT runner directly so its sibling-daemon resolution works.
           ./target/release/dohc-soak-runner $ARGS --evidence "$OUT" 2>&1 | tee macos-soak.log
-          echo "MODE=${{ inputs.mode }}" >> macos-soak.log
+          echo "MODE=$SOAK_MODE" >> macos-soak.log
           test -s "$OUT" || { echo "::error::soak produced no evidence JSON at $OUT"; exit 1; }
+
+      - name: Require exactly one nonempty soak evidence JSON
+        if: always()
+        run: |
+          shopt -s nullglob
+          EVIDENCE_FILES=(tools/rust-engine-program/soak-evidence/macos-*.json)
+          if [ "${#EVIDENCE_FILES[@]}" -ne 1 ]; then
+            echo "::error::expected exactly one soak evidence JSON, found ${#EVIDENCE_FILES[@]}"
+            exit 1
+          fi
+          if [ ! -s "${EVIDENCE_FILES[0]}" ]; then
+            echo "::error::soak evidence JSON is empty: ${EVIDENCE_FILES[0]}"
+            exit 1
+          fi
 
       - name: Upload macOS evidence artifacts
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: rust-engine-macos-evidence-${{ inputs.mode }}
+          name: rust-engine-macos-evidence-${{ inputs.mode }}-${{ job.status }}
           path: |
             macos-gate.log
             macos-soak.log
+            macos-test-list.log
             macos-toolversions.log
             tools/rust-engine-program/soak-evidence/macos-*.json
-          # Evidence must exist to be citable.
+          # The always-run validation above, not this multi-path option, makes
+          # the JSON mandatory for a green run.
           if-no-files-found: error

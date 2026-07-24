@@ -47,10 +47,20 @@ macOS is a shipping platform that the Windows + WSL-Linux evidence never covered
 Both tools now exist and are hardened: dispatchable
 `.github/workflows/rust-engine-macos-evidence.yml` and local
 `tools/rust-engine-program/macos-evidence.sh`. Both default to `full` (the bankable
-30-60min soak), pin cargo-deny, require a canonical PASS verdict, and fail unless the
-soak writes evidence JSON; the script refuses non-Darwin hosts. Execution needs a Mac.
+30-60min soak), pin cargo-deny, and require a canonical PASS verdict. The CI workflow
+also has an always-run check that makes a green run impossible unless exactly one
+nonempty soak evidence JSON exists, and its artifact name records the final job status;
+the script refuses non-Darwin hosts. Execution needs a Mac.
 **RECOMMEND: dispatch the CI workflow in `full` mode before the flip and treat a
 non-PASS as a no-go.** Expected to be a green-path confirmation.
+
+SCOPE OF WHAT A macOS PASS PROVES (recorded at R15-2, do not overread it): the
+soak's handle/thread tolerances were calibrated against WINDOWS jitter, while
+macOS counts `lsof` rows and `ps -M` threads — different populations. A macOS
+PASS therefore shows the gate passed and the scenarios ran clean; it does NOT
+make the RESOURCE-LEAK verdict bankable, because nobody calibrated those bounds
+for macOS. Treat gate+scenarios as evidence and the leak verdict as
+uncalibrated until it is measured on representative Macs.
 
 ### 3. Richdoc at cutover — CUTOVER-GATING (silent data loss)
 Rust's richdoc→markdown projection is a paragraphs + bold/italic subset; it DROPS
