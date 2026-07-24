@@ -1969,8 +1969,13 @@ impl EngineService {
         let version = open
             .actor
             .set_active_version(
-                open.workspace_id,
-                params.version_id,
+                dohc_engine_runtime::ActiveVersionSwitch {
+                    workspace_id: open.workspace_id.clone(),
+                    version_id: params.version_id,
+                    root_dir: open.root.clone(),
+                    self_writes: Arc::new(self.self_writes.scoped(&open.root)),
+                    now_ms: now_ms()?,
+                },
                 Arc::new(NoFaults),
                 cancellation.token(),
             )

@@ -30,7 +30,9 @@
 //! before the pipeline started is detected and preserved), not the sub-op race.
 //! Recorded in `BEHAVIOR_DELTA.md` (R04) so it is not mistaken for closed.
 
+use crate::bounds::{MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES};
 use crate::floor::is_excluded_file;
+use crate::media::{is_text_media_type, media_type_for_path};
 use dohc_engine_storage::{
     EngineStore, FaultInjector, FaultPoint, MaterializationJob, MaterializationOperation, Preimage,
     StorageError, hex_sha256,
@@ -174,6 +176,113 @@ pub enum JobOutcome {
     Crashed(FaultPoint),
 }
 
+/// The ownership-aware disk state used to plan an active-version projection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectionTargetState {
+    Absent,
+    Text { sha256: String },
+    Binary { sha256: String },
+    UntrackedContent,
+    Unreadable,
+}
+
+/// Whether a projection path follows the ordinary text/binary policy or the
+/// secret store's text-only policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectionTargetKind {
+    Plaintext,
+    Secret,
+}
+
+/// Read a prospective projection target without treating foreign or
+/// transiently unreadable content as an overwrite preimage.
+pub fn probe_projection_target(
+    root: &Path,
+    rel: &str,
+    kind: ProjectionTargetKind,
+) -> ProjectionTargetState {
+    let target = match resolve_target(root, rel) {
+        Ok(target) => target,
+        Err(_) => return ProjectionTargetState::UntrackedContent,
+    };
+    let metadata = match std::fs::symlink_metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return if existing_ancestor_is_contained(root, &target) {
+                ProjectionTargetState::Absent
+            } else {
+                ProjectionTargetState::UntrackedContent
+            };
+        }
+        Err(_) => return ProjectionTargetState::Unreadable,
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return ProjectionTargetState::UntrackedContent;
+    }
+    if !existing_ancestor_is_contained(root, &target) {
+        return ProjectionTargetState::UntrackedContent;
+    }
+    let cap = match kind {
+        ProjectionTargetKind::Plaintext => MAX_CAPTURE_BINARY_BYTES,
+        ProjectionTargetKind::Secret => MAX_CAPTURE_TEXT_BYTES,
+    };
+    if metadata.len() > cap {
+        return ProjectionTargetState::UntrackedContent;
+    }
+    let file = match std::fs::File::open(&target) {
+        Ok(file) => file,
+        Err(_) => return ProjectionTargetState::Unreadable,
+    };
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    if file
+        .take(cap.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return ProjectionTargetState::Unreadable;
+    }
+    if bytes.len() as u64 > cap {
+        return ProjectionTargetState::UntrackedContent;
+    }
+    let sha256 = hex_sha256(&bytes);
+    match kind {
+        ProjectionTargetKind::Secret => match String::from_utf8(bytes) {
+            Ok(_) => ProjectionTargetState::Text { sha256 },
+            Err(_) => ProjectionTargetState::UntrackedContent,
+        },
+        ProjectionTargetKind::Plaintext => {
+            let media_type = media_type_for_path(rel);
+            if !is_text_media_type(media_type, rel) {
+                return ProjectionTargetState::Binary { sha256 };
+            }
+            match String::from_utf8(bytes) {
+                Ok(text) if text.len() as u64 <= MAX_CAPTURE_TEXT_BYTES => {
+                    ProjectionTargetState::Text { sha256 }
+                }
+                Ok(_) => ProjectionTargetState::UntrackedContent,
+                Err(_) => ProjectionTargetState::Binary { sha256 },
+            }
+        }
+    }
+}
+
+fn existing_ancestor_is_contained(root: &Path, target: &Path) -> bool {
+    let Ok(canonical_root) = std::fs::canonicalize(root) else {
+        return false;
+    };
+    let mut candidate = Some(target);
+    while let Some(path) = candidate {
+        match std::fs::canonicalize(path) {
+            Ok(canonical) => return canonical.starts_with(&canonical_root),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                candidate = path.parent();
+            }
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
 /// The result of executing one job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobResult {
@@ -306,7 +415,8 @@ pub fn materialize_one(
     // Generation staleness gate: if a NEWER generation has already been
     // materialized at this path, this job is superseded — never regress the path
     // to older content (concurrent / out-of-order jobs). No-op; mark complete.
-    if let Some(done_gen) = store.max_completed_generation_for_path(&job.target_path)?
+    if !job.job_id.starts_with("version-switch-")
+        && let Some(done_gen) = store.max_completed_generation_for_path(&job.target_path)?
         && done_gen > job.target_generation
     {
         store.mark_materialization_complete(&job.job_id, now_ms)?;

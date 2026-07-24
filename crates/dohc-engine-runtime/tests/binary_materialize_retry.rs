@@ -1,7 +1,7 @@
 use dohc_engine_domain::{CreateNamedVersion, RollbackTextFileMutation, WriteBinary};
 use dohc_engine_runtime::{
-    CancellationToken, NoFaults, PostCommitMaterializeOutcome, SelfWriteRecorder,
-    WorkspaceSupervisor,
+    ActiveVersionSwitch, CancellationToken, NoFaults, PostCommitMaterializeOutcome,
+    SelfWriteRecorder, WorkspaceSupervisor,
 };
 use dohc_engine_storage::FaultPoint;
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -204,8 +204,13 @@ async fn inactive_binary_rollback_cancels_the_original_pending_job_before_reopen
 
     actor
         .set_active_version(
-            "ws-binary-materialize-retry".to_owned(),
-            "branch".to_owned(),
+            ActiveVersionSwitch {
+                workspace_id: "ws-binary-materialize-retry".to_owned(),
+                version_id: "branch".to_owned(),
+                root_dir: scratch.path().to_path_buf(),
+                self_writes: Arc::new(NoRecorder),
+                now_ms: 10,
+            },
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
