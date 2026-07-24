@@ -7,6 +7,9 @@ publish.workspace = true
 description = "R13 shadow-only workspace engine daemon composition and replay harness."
 
 [dependencies]
+# Constant-time token comparison on the daemon handshake. Already in the
+# lockfile transitively; this makes it a direct dependency.
+subtle = { version = "2.6", default-features = false }
 dohc-engine-storage = { path = "../dohc-engine-storage" }
 dohc-engine-domain = { path = "../dohc-engine-domain" }
 dohc-engine-files = { path = "../dohc-engine-files" }

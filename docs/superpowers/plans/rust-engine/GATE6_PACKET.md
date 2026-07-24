@@ -185,24 +185,12 @@ post-R15 (the reset wipes pre-existing rows).
   explicitly accept + surface the stale-until-reopen behavior. Non-secret files
   share the same switch-materialization dependency on the desktop/daemon layer, so
   this is a general version-switch-projection obligation, tracked cutover-gating.
-- **PR #239 upper-layer deferrals — R13b work, not closed by the materializer:**
-  (1) quiesce every live Y.Doc session before switching so an old-version session
-  cannot settle across the switch, and (2) reconcile unreconciled disk edits into
-  the version being left before changing the active version. `capture.flush` is
-  NOT sufficient for (2): Rust's `reconcile_if_dirty` returns `Converged` without
-  scanning when nothing is marked dirty, while the TypeScript oracle always scans
-  and hard-fails the switch on a degraded scan. The capture driver also resolves
-  the active version at apply time, so a reconcile apply can straddle the
-  set-active transaction and target the wrong side of the switch unless R13b
-  quiesces and sequences it.
-- **RPC-E review state — NOT LANDED:** the nine chat replicated-path validation
-  gaps (#244) and the refuse-and-ack disposition (#245) are both in review,
-  stacked on RPC-E-1. Neither may be described as merged behavior yet.
-- **Identity posture / daemon auth (#241 IN REVIEW):** the daemon's DOP1 client
-  is the desktop main process over inherited stdio pipes, not a listener socket.
-  #241 hardens the handshake token comparison; R13b-rest still owns generating a
-  real per-launch random token when it wires daemon lifecycle. Do not describe
-  #241 as merged yet.
+- **Identity posture** (recorded across shards): the daemon's DOP1 client IS the
+  desktop main process; per-user socket auth is R15+ scope. CORRECTED at
+  R15-6: the transport is STDIO (inherited pipes), not a socket — see the
+  transport correction in RPC_GAP.md. Another OS user cannot reach an
+  inherited pipe, so the honest hardening is a constant-time token compare
+  (landed) plus a real per-launch token, not a socket ACL.
 
 ### 6.CUTOVER-GATING — Ice decided the path; implementation still must land
 These are correctness/security items, not accepted flags:

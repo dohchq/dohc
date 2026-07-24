@@ -387,7 +387,7 @@ fn authenticate(envelope: Envelope, auth_token: &str) -> Result<HelloAck, WireEr
             "hello required before requests",
         ));
     };
-    if candidate != auth_token {
+    if !constant_time_eq(candidate.as_bytes(), auth_token.as_bytes()) {
         return Err(WireError::new(
             ErrorCode::AuthFailed,
             "authentication failed",
@@ -635,6 +635,17 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// silent black hole), and draining in-flight work before the daemon closes
 /// workspaces. Cancellable admission for `workspace.open` is covered in
 /// `dohc_workspace_engine::tests` (the `open_lock` seam lives in `lib.rs`).
+/// Compare the presented token against the expected one WITHOUT leaking how far
+/// they matched. A plain `==` returns as soon as two bytes differ, so a caller
+/// able to retry can recover the token a byte at a time from the timing.
+///
+/// Length is not hidden and does not need to be: the token is a fixed-width
+/// value chosen by the parent process, not a secret whose size carries meaning.
+fn constant_time_eq(candidate: &[u8], expected: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    candidate.ct_eq(expected).into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1377,5 +1388,29 @@ mod tests {
         let _ = tasks.join_next().await.expect("pending task completes");
         reap_completed(&mut tasks);
         assert_eq!(tasks.len(), 0, "the set is empty once all tasks are reaped");
+    }
+
+    /// Pins the FUNCTIONAL half of the contract: a correct prefix must not pass,
+    /// and a last-byte difference must be as rejected as a first-byte one.
+    ///
+    /// The timing half cannot be pinned by a unit test — swapping `ct_eq` back
+    /// for `==` keeps every assertion below green. Constant-time behavior comes
+    /// from `subtle`, not from this test; the test exists so a future edit
+    /// cannot quietly turn the comparison into a prefix match.
+    #[test]
+    fn token_comparison_rejects_prefixes_and_late_differences() {
+        let expected = "b7f3a1c0d9e2f4a6b8c1d3e5f7a9b2c4d6e8f0a1b3c5d7e9f1a3b5c7d9e1f3a5";
+        assert!(constant_time_eq(expected.as_bytes(), expected.as_bytes()));
+        assert!(!constant_time_eq(
+            &expected.as_bytes()[..63],
+            expected.as_bytes()
+        ));
+        assert!(!constant_time_eq(b"", expected.as_bytes()));
+        let mut last_differs = expected.as_bytes().to_vec();
+        *last_differs.last_mut().expect("non-empty") ^= 0x01;
+        assert!(!constant_time_eq(&last_differs, expected.as_bytes()));
+        let mut first_differs = expected.as_bytes().to_vec();
+        first_differs[0] ^= 0x01;
+        assert!(!constant_time_eq(&first_differs, expected.as_bytes()));
     }
 }
