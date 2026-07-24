@@ -1452,12 +1452,13 @@ pub(crate) const SECRET_CAPTURE_OWNERSHIP_MIGRATION_ID: &str = "v1-secret-captur
 /// before the R15 reset because adding them afterwards means migrating live
 /// data instead of empty tables.
 ///
-/// The two payload-AFTER content columns the oracle stores are deliberately
-/// NOT added: `payload_after_content_kind` is exactly `after_content_kind`,
-/// and `payload_after_blob_sha256` is exactly the after digest selected by
-/// that kind, which the table's CHECK constraints already guarantee is
-/// present and unambiguous. Storing them again would create a second copy
-/// that can disagree with the first.
+/// The payload-AFTER content columns are exactly derivable —
+/// `payload_after_content_kind` is `after_content_kind` and
+/// `payload_after_blob_sha256` is the after digest that kind selects — but they
+/// are stored anyway, because the shared `moment.append` contract requires
+/// `payloadAfterBlobSha256` and several TS readers join `moments` to `blobs`
+/// on the physical column. A derivable column that every consumer expects to
+/// exist is not worth deriving.
 ///
 /// `payload_after_path` IS added: it equals `path` for every locally authored
 /// operation, but the oracle accepts a replication envelope whose `path` and
@@ -1471,7 +1472,20 @@ ALTER TABLE moments ADD COLUMN payload_before_blob_sha256 TEXT
 ALTER TABLE moments ADD COLUMN payload_before_binary_sha256 TEXT
     REFERENCES binary_blobs(sha256);
 ALTER TABLE moments ADD COLUMN payload_after_path TEXT;
-UPDATE moments SET payload_after_path = path;
+ALTER TABLE moments ADD COLUMN payload_after_content_kind TEXT;
+-- No FK here, unlike the payload-BEFORE digests: for a binary moment this
+-- column carries the BINARY digest, which is not a row in `blobs`. The oracle
+-- reconciles that with empty-text anchor rows in `blobs`; Rust does not create
+-- those, so declaring the oracle's `REFERENCES blobs(sha256)` would reject
+-- every binary moment.
+ALTER TABLE moments ADD COLUMN payload_after_blob_sha256 TEXT;
+UPDATE moments SET
+    payload_after_path = path,
+    payload_after_content_kind = after_content_kind,
+    payload_after_blob_sha256 = CASE after_content_kind
+        WHEN 'binary' THEN after_binary_sha256
+        ELSE after_blob_sha256
+    END;
 UPDATE moments SET
     payload_before_path = CASE operation
         WHEN 'rename' THEN (
@@ -2088,6 +2102,23 @@ mod tests {
         // so the whole payload-before group stays unset rather than claiming a
         // digest with no path — the oracle keys presence on the path alone.
         assert_eq!(row("m5"), (None, None, None, None, some("d.md")));
+
+        // The payload-AFTER pair backfills to ONE digest selected by kind.
+        let after = |moment_id: &str| -> (Option<String>, Option<String>) {
+            conn.query_row(
+                "SELECT payload_after_content_kind, payload_after_blob_sha256 \
+                 FROM moments WHERE moment_id = ?1",
+                [moment_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("payload-after pair")
+        };
+        assert_eq!(after("m2"), (some("text"), some("sha-two")));
+        assert_eq!(
+            after("m4"),
+            (some("binary"), some("bin-one")),
+            "a binary moment backfills its BINARY digest, not the text one"
+        );
     }
 
     #[test]

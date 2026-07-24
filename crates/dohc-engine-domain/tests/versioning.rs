@@ -1751,4 +1751,33 @@ fn the_binary_head_writer_records_payload_provenance() {
         "a binary preimage's digest belongs in the BINARY column"
     );
     assert_eq!(over_binary.4, "img.bin");
+
+    // The payload-AFTER pair carries ONE digest, selected by kind — the oracle's
+    // single-column shape that the shared contract and the TS readers expect.
+    let after = |moment_id: &str| -> (Option<String>, Option<String>) {
+        let id = moment_id.to_owned();
+        store
+            .read_with(move |conn| {
+                Ok::<_, dohc_engine_domain::DomainError>(
+                    conn.query_row(
+                        "SELECT payload_after_content_kind, payload_after_blob_sha256 \
+                         FROM moments WHERE moment_id = ?1",
+                        rusqlite::params![id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .expect("payload-after pair"),
+                )
+            })
+            .expect("read payload-after")
+    };
+    assert_eq!(
+        after("b1"),
+        (Some("text".to_owned()), digests("b1").0),
+        "a text moment's payload-after digest is its TEXT blob"
+    );
+    assert_eq!(
+        after("b3"),
+        (Some("binary".to_owned()), digests("b3").1),
+        "a binary moment's payload-after digest is its BINARY digest"
+    );
 }
