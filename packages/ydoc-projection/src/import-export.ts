@@ -116,7 +116,7 @@ export function getDohcProseMirrorSchema() {
 function yDocBodyToMarkdown(doc: Y.Doc): string {
   const plainText = getDohcYDocPlainText(doc)
   if (plainText) return plainText.toString()
-  return markdownManager.serialize(escapeHighlightMarkdown(yDocBodyToJSON(doc)))
+  return serializeRichdocBody(escapeHighlightMarkdown(yDocBodyToJSON(doc)))
 }
 
 function yDocBodyToJSON(doc: Y.Doc): JSONContent {
@@ -125,6 +125,170 @@ function yDocBodyToJSON(doc: Y.Doc): JSONContent {
     bodyFragment,
     schema,
   ).toJSON() as JSONContent
+}
+
+function serializeRichdocBody(root: JSONContent): string {
+  const source = JSON.stringify(root)
+  const tablePipeSentinel = unusedSupplementaryCodePoint(source)
+  const inlineCode = new Map<string, string>()
+  const codeBlocks = new Map<string, string>()
+  const reservedTokens = new Set<string>()
+  let tokenIndex = 0
+  const reserveToken = (kind: string): string => {
+    let token: string
+    do {
+      token = `\uE000DOHC_${kind}_${tokenIndex}\uE001`
+      tokenIndex += 1
+    } while (source.includes(token) || reservedTokens.has(token))
+    reservedTokens.add(token)
+    return token
+  }
+
+  const visit = (node: JSONContent): JSONContent => {
+    if (node.type === 'codeBlock' && node.content?.length) {
+      const token = reserveToken('CODE_BLOCK')
+      codeBlocks.set(token, textContent(node.content))
+      return { ...node, content: [{ type: 'text', text: token }] }
+    }
+
+    let content = node.content?.map(visit)
+
+    if (node.type === 'table' && content?.length) {
+      content = content.map((row, rowIndex) => ({
+        ...row,
+        content: row.content?.map(cell => ({
+          ...cell,
+          type: rowIndex === 0 ? 'tableHeader' : cell.type,
+          content: replaceText(cell.content, '|', tablePipeSentinel),
+        })),
+      }))
+    } else if (content?.length) {
+      content = replaceInlineCodeRuns(content, value => {
+        const token = reserveToken('INLINE_CODE')
+        inlineCode.set(token, renderInlineCode(value))
+        return token
+      })
+    }
+
+    return content ? { ...node, content } : { ...node }
+  }
+
+  const prepared = visit(root)
+  let markdown = markdownManager.serialize(prepared)
+  markdown = markdown.replaceAll(tablePipeSentinel, '\\|')
+  for (const [token, rendered] of inlineCode) {
+    markdown = markdown.replace(`\`${token}\``, rendered)
+  }
+  return rewriteCodeBlockFences(markdown, codeBlocks)
+}
+
+function textContent(content: JSONContent[]): string {
+  return content.map(node =>
+    typeof node.text === 'string' ? node.text : textContent(node.content ?? []),
+  ).join('')
+}
+
+function replaceText(
+  content: JSONContent[] | undefined,
+  needle: string,
+  replacement: string,
+): JSONContent[] | undefined {
+  return content?.map(node => ({
+    ...node,
+    text: typeof node.text === 'string'
+      ? node.text.replaceAll(needle, replacement)
+      : node.text,
+    content: replaceText(node.content, needle, replacement),
+  }))
+}
+
+function replaceInlineCodeRuns(
+  content: JSONContent[],
+  tokenFor: (value: string) => string,
+): JSONContent[] {
+  const output: JSONContent[] = []
+  for (let index = 0; index < content.length;) {
+    const node = content[index]
+    if (!isInlineCodeText(node)) {
+      output.push(node)
+      index += 1
+      continue
+    }
+
+    let end = index + 1
+    let value = node.text ?? ''
+    while (end < content.length && sameInlineCodeMark(node, content[end])) {
+      value += content[end].text ?? ''
+      end += 1
+    }
+    output.push({ ...node, text: tokenFor(value) })
+    index = end
+  }
+  return output
+}
+
+function isInlineCodeText(node: JSONContent): boolean {
+  return node.type === 'text'
+    && typeof node.text === 'string'
+    && (node.marks ?? []).some(mark => mark.type === 'code')
+}
+
+function sameInlineCodeMark(left: JSONContent, right: JSONContent): boolean {
+  if (!isInlineCodeText(right)) return false
+  const leftCode = left.marks?.find(mark => mark.type === 'code')
+  const rightCode = right.marks?.find(mark => mark.type === 'code')
+  return JSON.stringify(leftCode?.attrs ?? {}) === JSON.stringify(rightCode?.attrs ?? {})
+}
+
+function renderInlineCode(value: string): string {
+  const fence = backtickFence(value, 1)
+  const hasEdgeBacktick = value.startsWith('`') || value.endsWith('`')
+  const hasEdgeSpace = value.startsWith(' ') || value.endsWith(' ')
+  const padding = hasEdgeBacktick || (hasEdgeSpace && !/^ *$/.test(value))
+    ? ' '
+    : ''
+  return `${fence}${padding}${value}${padding}${fence}`
+}
+
+function rewriteCodeBlockFences(
+  markdown: string,
+  codeBlocks: Map<string, string>,
+): string {
+  const lines = markdown.split('\n')
+  for (const [token, content] of codeBlocks) {
+    const tokenLine = lines.findIndex(line => line.endsWith(token))
+    if (tokenLine <= 0 || tokenLine + 1 >= lines.length) continue
+    const prefix = lines[tokenLine].slice(0, -token.length)
+    const opening = lines[tokenLine - 1]
+    if (!opening.startsWith(`${prefix}\`\`\``)) continue
+    const language = opening.slice(prefix.length + 3)
+    const fence = backtickFence(content, 3)
+    const contentLines = content.split('\n').map(line =>
+      line.length === 0 ? prefix.trimEnd() : `${prefix}${line}`,
+    )
+    lines.splice(
+      tokenLine - 1,
+      3,
+      `${prefix}${fence}${language}`,
+      ...contentLines,
+      `${prefix}${fence}`,
+    )
+  }
+  return lines.join('\n')
+}
+
+function backtickFence(value: string, minimum: number): string {
+  const longest = Array.from(value.matchAll(/`+/g))
+    .reduce((max, match) => Math.max(max, match[0].length), 0)
+  return '`'.repeat(Math.max(minimum, longest + 1))
+}
+
+function unusedSupplementaryCodePoint(source: string): string {
+  for (let codePoint = 0xF0000; codePoint <= 0xFFFFD; codePoint += 1) {
+    const candidate = String.fromCodePoint(codePoint)
+    if (!source.includes(candidate)) return candidate
+  }
+  throw new Error('could not reserve a table-pipe serialization sentinel')
 }
 
 function parseFrontmatter(src: string): {

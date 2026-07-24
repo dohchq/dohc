@@ -378,6 +378,92 @@ describe('hocuspocus markdown import/export', () => {
     )
   })
 
+  it('escapes literal table-cell pipes before computing column widths', () => {
+    const doc = yDocFromBody([
+      {
+        type: 'table',
+        content: [
+          {
+            type: 'tableRow',
+            content: [
+              {
+                type: 'tableHeader',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Value' }] }],
+              },
+              {
+                type: 'tableHeader',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Other' }] }],
+              },
+            ],
+          },
+          {
+            type: 'tableRow',
+            content: [
+              {
+                type: 'tableCell',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'left | right' }] }],
+              },
+              {
+                type: 'tableCell',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'stable' }] }],
+              },
+            ],
+          },
+        ],
+      },
+    ])
+
+    expect(yDocToMarkdown(doc)).toBe([
+      '',
+      '| Value         | Other  |',
+      '| ------------- | ------ |',
+      '| left \\| right | stable |',
+    ].join('\n'))
+  })
+
+  it('promotes a headerless table first row instead of inserting a blank row', () => {
+    const doc = yDocFromBody([
+      {
+        type: 'table',
+        content: [
+          {
+            type: 'tableRow',
+            content: [
+              {
+                type: 'tableCell',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'first' }] }],
+              },
+              {
+                type: 'tableCell',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'row' }] }],
+              },
+            ],
+          },
+          {
+            type: 'tableRow',
+            content: [
+              {
+                type: 'tableCell',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'second' }] }],
+              },
+              {
+                type: 'tableCell',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'row' }] }],
+              },
+            ],
+          },
+        ],
+      },
+    ])
+
+    expect(yDocToMarkdown(doc)).toBe([
+      '',
+      '| first  | row |',
+      '| ------ | --- |',
+      '| second | row |',
+    ].join('\n'))
+  })
+
   it('round-trips per-column GFM alignment (left/center/right) losslessly', () => {
     // Phase 1 assumed per-column alignment was inexpressible; it is not. The
     // `align` cell attr (set by tableControls' column grip menu) serializes to
@@ -441,6 +527,97 @@ describe('hocuspocus markdown import/export', () => {
       ['```js', 'const x = 1;', '```', '', '```', 'no language here', '```', ''].join('\n'),
       ['```js\nconst x = 1;\n```', 'no language here'],
     )
+  })
+
+  it('uses collision-free block and inline code delimiters', () => {
+    const doc = yDocFromBody([
+      {
+        type: 'codeBlock',
+        attrs: { language: 'js' },
+        content: [{ type: 'text', text: 'before\n```\nafter' }],
+      },
+      {
+        type: 'paragraph',
+        content: [
+          { type: 'text', text: 'a`b', marks: [{ type: 'code' }] },
+          { type: 'text', text: ' / ' },
+          { type: 'text', text: '`edge`', marks: [{ type: 'code' }] },
+          { type: 'text', text: ' / ' },
+          { type: 'text', text: ' spaced ', marks: [{ type: 'code' }] },
+          { type: 'text', text: ' / ' },
+          { type: 'text', text: '   ', marks: [{ type: 'code' }] },
+        ],
+      },
+    ])
+
+    expect(yDocToMarkdown(doc)).toBe([
+      '````js',
+      'before',
+      '```',
+      'after',
+      '````',
+      '',
+      '``a`b`` / `` `edge` `` / `  spaced  ` / `   `',
+    ].join('\n'))
+  })
+
+  it('preserves user private-use codepoints when reserving serialization sentinels', () => {
+    const tableSentinel0 = String.fromCodePoint(0xF0000)
+    const tableSentinel1 = String.fromCodePoint(0xF0001)
+    const blockToken0 = '\uE000DOHC_CODE_BLOCK_0\uE001'
+    const blockToken1 = '\uE000DOHC_CODE_BLOCK_1\uE001'
+    const inlineToken3 = '\uE000DOHC_INLINE_CODE_3\uE001'
+    const inlineToken4 = '\uE000DOHC_INLINE_CODE_4\uE001'
+    const doc = yDocFromBody([
+      {
+        type: 'codeBlock',
+        attrs: { language: 'txt' },
+        content: [{ type: 'text', text: `${blockToken0} ${blockToken1}` }],
+      },
+      {
+        type: 'table',
+        content: [
+          {
+            type: 'tableRow',
+            content: [
+              {
+                type: 'tableHeader',
+                content: [{ type: 'paragraph', content: [{ type: 'text', text: 'Value' }] }],
+              },
+            ],
+          },
+          {
+            type: 'tableRow',
+            content: [
+              {
+                type: 'tableCell',
+                content: [{
+                  type: 'paragraph',
+                  content: [{
+                    type: 'text',
+                    text: `${tableSentinel0} | ${tableSentinel1}`,
+                  }],
+                }],
+              },
+            ],
+          },
+        ],
+      },
+      {
+        type: 'paragraph',
+        content: [{
+          type: 'text',
+          text: `${inlineToken3} ${inlineToken4}`,
+          marks: [{ type: 'code' }],
+        }],
+      },
+    ])
+
+    const markdown = yDocToMarkdown(doc)
+    expect(markdown).toContain(`${blockToken0} ${blockToken1}`)
+    expect(markdown).toContain(`${tableSentinel0} \\| ${tableSentinel1}`)
+    expect(markdown).toContain(`\`${inlineToken3} ${inlineToken4}\``)
+    expect(markdown).not.toContain(String.fromCodePoint(0xF0002))
   })
 
   it('round-trips Obsidian callouts across every core type, fold flag, and title state', () => {
