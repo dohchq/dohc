@@ -1467,10 +1467,17 @@ pub(crate) const SECRET_CAPTURE_OWNERSHIP_MIGRATION_ID: &str = "v1-secret-captur
 const V1_MOMENT_PAYLOAD_PROVENANCE_DDL: &str =
     "ALTER TABLE moments ADD COLUMN payload_before_path TEXT;
 ALTER TABLE moments ADD COLUMN payload_before_content_kind TEXT;
-ALTER TABLE moments ADD COLUMN payload_before_blob_sha256 TEXT
-    REFERENCES blobs(sha256);
-ALTER TABLE moments ADD COLUMN payload_before_binary_sha256 TEXT
-    REFERENCES binary_blobs(sha256);
+-- ONE digest per side, selected by the sibling content-kind column — the
+-- oracle's shape, not Rust's usual text/binary split. `momentSelectSql` joins
+-- BOTH `blobs` and `binary_blobs` on this single column and discriminates by
+-- kind, and the shared `moment.append` contract carries one
+-- `payloadBeforeBlobSha256`. Splitting it would leave every binary payload
+-- reading as absent to those consumers.
+--
+-- No FK, for the same reason as the payload-after digest: a binary moment's
+-- value is a `binary_blobs` digest, so `REFERENCES blobs(sha256)` would reject
+-- it and the column cannot reference two tables.
+ALTER TABLE moments ADD COLUMN payload_before_blob_sha256 TEXT;
 ALTER TABLE moments ADD COLUMN payload_after_path TEXT;
 ALTER TABLE moments ADD COLUMN payload_after_content_kind TEXT;
 -- No FK here, unlike the payload-BEFORE digests: for a binary moment this
@@ -1496,8 +1503,10 @@ UPDATE moments SET
         ELSE path
     END,
     payload_before_content_kind = before_content_kind,
-    payload_before_blob_sha256 = before_blob_sha256,
-    payload_before_binary_sha256 = before_binary_sha256
+    payload_before_blob_sha256 = CASE before_content_kind
+        WHEN 'binary' THEN before_binary_sha256
+        ELSE before_blob_sha256
+    END
  WHERE before_present = 2
    -- A rename whose producer link never resolved cannot say where its payload
    -- came from. Ordinal 5's link backfill is best-effort and does leave NULLs,
@@ -2048,15 +2057,14 @@ mod tests {
             Option<String>,
             Option<String>,
             Option<String>,
-            Option<String>,
         );
         let row = |moment_id: &str| -> Row {
             conn.query_row(
                 "SELECT payload_before_path, payload_before_content_kind, \
-                 payload_before_blob_sha256, payload_before_binary_sha256, \
+                 payload_before_blob_sha256, \
                  payload_after_path FROM moments WHERE moment_id = ?1",
                 [moment_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .expect("provenance row")
         };
@@ -2064,36 +2072,25 @@ mod tests {
 
         // MUTATION: drop the `before_present = 2` guard -> a first write gains a
         // payload-before it never had.
-        assert_eq!(row("m1"), (None, None, None, None, some("a.md")));
+        assert_eq!(row("m1"), (None, None, None, some("a.md")));
         assert_eq!(
             row("m2"),
-            (
-                some("a.md"),
-                some("text"),
-                some("sha-one"),
-                None,
-                some("a.md")
-            )
+            (some("a.md"), some("text"), some("sha-one"), some("a.md"))
         );
         // MUTATION: backfill the rename's payload-before path from `path` -> the
         // source path is lost and this reads "b.md".
         assert_eq!(
             row("m3"),
-            (
-                some("a.md"),
-                some("text"),
-                some("sha-two"),
-                None,
-                some("b.md")
-            )
+            (some("a.md"), some("text"), some("sha-two"), some("b.md"))
         );
         // A binary preimage's digest belongs in the BINARY column.
         assert_eq!(
             row("m4"),
+            // The BINARY preimage digest lands in the SHARED column, tagged by
+            // kind — the oracle's shape.
             (
                 some("c.bin"),
                 some("binary"),
-                None,
                 some("bin-one"),
                 some("c.bin")
             )
@@ -2101,7 +2098,7 @@ mod tests {
         // An unresolvable rename link cannot say where the payload came from,
         // so the whole payload-before group stays unset rather than claiming a
         // digest with no path — the oracle keys presence on the path alone.
-        assert_eq!(row("m5"), (None, None, None, None, some("d.md")));
+        assert_eq!(row("m5"), (None, None, None, some("d.md")));
 
         // The payload-AFTER pair backfills to ONE digest selected by kind.
         let after = |moment_id: &str| -> (Option<String>, Option<String>) {

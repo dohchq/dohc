@@ -1546,13 +1546,7 @@ fn every_moment_writer_records_payload_provenance() {
             .expect("delete");
     }
 
-    type Provenance = (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-    );
+    type Provenance = (Option<String>, Option<String>, Option<String>, String);
     let provenance = |moment_id: &str| -> Provenance {
         let id = moment_id.to_owned();
         store
@@ -1560,18 +1554,10 @@ fn every_moment_writer_records_payload_provenance() {
                 Ok::<Provenance, dohc_engine_domain::DomainError>(
                     conn.query_row(
                         "SELECT payload_before_path, payload_before_content_kind, \
-                         payload_before_blob_sha256, payload_before_binary_sha256, \
+                         payload_before_blob_sha256, \
                          payload_after_path FROM moments WHERE moment_id = ?1",
                         rusqlite::params![id],
-                        |row| {
-                            Ok((
-                                row.get(0)?,
-                                row.get(1)?,
-                                row.get(2)?,
-                                row.get(3)?,
-                                row.get(4)?,
-                            ))
-                        },
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                     )
                     .expect("provenance columns"),
                 )
@@ -1599,11 +1585,7 @@ fn every_moment_writer_records_payload_provenance() {
     assert_eq!(first.0, None, "a first write has no payload-before path");
     assert_eq!(first.1, None, "a first write has no payload-before kind");
     assert_eq!(first.2, None, "a first write has no payload-before digest");
-    assert_eq!(
-        first.3, None,
-        "a first write has no payload-before binary ref"
-    );
-    assert_eq!(first.4, "a.md", "payload-after path is where it landed");
+    assert_eq!(first.3, "a.md", "payload-after path is where it landed");
 
     // An OVERWRITE carries the replaced content, at the same path.
     let overwrite = provenance("m2");
@@ -1614,8 +1596,7 @@ fn every_moment_writer_records_payload_provenance() {
         blob_of("m1"),
         "an overwrite's payload-before is the content it replaced"
     );
-    assert_eq!(overwrite.3, None, "a text preimage carries no binary ref");
-    assert_eq!(overwrite.4, "a.md");
+    assert_eq!(overwrite.3, "a.md");
 
     // THE CASE THAT DIVERGES: the payload moved a.md -> b.md.
     let renamed = provenance("m3");
@@ -1625,7 +1606,7 @@ fn every_moment_writer_records_payload_provenance() {
         "a rename's payload came FROM the source path"
     );
     assert_eq!(
-        renamed.4, "b.md",
+        renamed.3, "b.md",
         "a rename's payload landed at the destination"
     );
     assert_eq!(
@@ -1637,7 +1618,7 @@ fn every_moment_writer_records_payload_provenance() {
     // A DELETE carries the removed content on BOTH sides (oracle parity).
     let deleted = provenance("m4");
     assert_eq!(deleted.0.as_deref(), Some("b.md"));
-    assert_eq!(deleted.4, "b.md");
+    assert_eq!(deleted.3, "b.md");
     assert_eq!(
         deleted.2,
         blob_of("m4"),
@@ -1647,7 +1628,7 @@ fn every_moment_writer_records_payload_provenance() {
 
 /// The binary head writer (`persist_binary_head_in_tx`) is the fourth moment
 /// writer and the only one that can record a BINARY payload-before, so it is
-/// the only coverage for `payload_before_binary_sha256`. Without this, deleting
+/// the only coverage for a BINARY payload-before digest. Without this, deleting
 /// the payload columns from that INSERT — or swapping the text and binary
 /// digest parameters — leaves the whole suite green.
 #[test]
@@ -1686,23 +1667,17 @@ fn the_binary_head_writer_records_payload_provenance() {
             .expect("binary over binary");
     }
 
-    let row = |moment_id: &str| -> (
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        String,
-    ) {
+    let row = |moment_id: &str| -> (Option<String>, Option<String>, Option<String>, String) {
         let id = moment_id.to_owned();
         store
             .read_with(move |conn| {
                 Ok::<_, dohc_engine_domain::DomainError>(
                     conn.query_row(
                         "SELECT payload_before_path, payload_before_content_kind, \
-                         payload_before_blob_sha256, payload_before_binary_sha256, \
+                         payload_before_blob_sha256, \
                          payload_after_path FROM moments WHERE moment_id = ?1",
                         rusqlite::params![id],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                     )
                     .expect("provenance row"),
                 )
@@ -1734,23 +1709,21 @@ fn the_binary_head_writer_records_payload_provenance() {
     assert_eq!(
         over_text.2,
         digests("b1").0,
-        "a text preimage's digest belongs in the TEXT column"
+        "a TEXT preimage puts its text digest in the shared column"
     );
-    assert_eq!(over_text.3, None, "a text preimage carries no binary ref");
-    assert_eq!(over_text.4, "img.bin");
+    assert_eq!(over_text.3, "img.bin");
 
-    // Binary over BINARY: the payload-before digest must land in the BINARY
-    // column, never the text one — the columns are not interchangeable.
+    // Binary over BINARY: the payload-before digest goes in the SAME shared
+    // column, tagged by kind — not a separate binary column.
     let over_binary = row("b3");
     assert_eq!(over_binary.0.as_deref(), Some("img.bin"));
     assert_eq!(over_binary.1.as_deref(), Some("binary"));
-    assert_eq!(over_binary.2, None, "a binary preimage has no text blob");
     assert_eq!(
-        over_binary.3,
+        over_binary.2,
         digests("b2").1,
-        "a binary preimage's digest belongs in the BINARY column"
+        "a BINARY preimage puts its BINARY digest in the SAME shared column —          the oracle's shape, which its readers discriminate by content kind"
     );
-    assert_eq!(over_binary.4, "img.bin");
+    assert_eq!(over_binary.3, "img.bin");
 
     // The payload-AFTER pair carries ONE digest, selected by kind — the oracle's
     // single-column shape that the shared contract and the TS readers expect.
