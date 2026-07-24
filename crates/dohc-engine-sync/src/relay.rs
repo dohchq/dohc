@@ -2,7 +2,7 @@ use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome};
 
 use crate::cursor::{RelayCursor, commit_relay_cursor, read_pushed_seq, write_pushed_seq};
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
-use crate::{ApplyOutcome, RelayError, ReplicationEnvelope, SyncError, apply_chat_envelope};
+use crate::{ApplyOutcome, RelayError, ReplicationEnvelope, SyncError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushRequest {
@@ -242,7 +242,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         })
     }
 
-    /// Pull and apply replicated operations (chat.* AND ydoc.update),
+    /// Pull and apply replicated operations,
     /// returning a cursor token the caller must commit only after
     /// filesystem/materialization work succeeds. `leases` defers ydoc
     /// envelopes targeting live-leased docs.
@@ -285,25 +285,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             if op.workspace_id != workspace_id {
                 return Err(RelayError::InvalidResponse);
             }
-            // Dispatch by op kind: the stream carries chat.* AND ydoc.update
-            // once live replicated sessions journal deltas. Feeding a ydoc op
-            // to the chat applier errors UnsupportedOperation and wedges the
-            // cursor.
-            if op.op_kind == "ydoc.update" {
-                match crate::apply_ydoc_envelope(store, op, faults, leases).map_err(local)? {
-                    ApplyOutcome::Applied(_) => {
-                        applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?
-                    }
-                    ApplyOutcome::Skipped => {
-                        skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?
-                    }
-                    ApplyOutcome::Crashed { .. } => {
-                        return Err(RelayError::Local("injected-crash".to_owned()));
-                    }
-                }
-                continue;
-            }
-            match apply_chat_envelope(store, op, faults).map_err(local)? {
+            match crate::apply_replication_envelope(store, op, faults, leases).map_err(local)? {
                 ApplyOutcome::Applied(()) => {
                     applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?
                 }

@@ -3,6 +3,7 @@ use base64::engine::general_purpose::STANDARD;
 use dohc_engine_storage::{EngineStore, FaultInjector};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 
 use crate::{ApplyOutcome, PathClass, ReplicationEnvelope, SyncError};
 
@@ -34,6 +35,33 @@ struct SecretDelete {
     metadata: Metadata,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SecretFork {
+    to_version_id: String,
+    from_version_id: String,
+    rows: Vec<SecretForkRow>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SecretForkRow {
+    path: String,
+    iv_base64: String,
+    auth_tag_base64: String,
+    ciphertext_sha256: String,
+    byte_length: i64,
+    updated_at_ms: i64,
+    latest_moment_id: String,
+}
+
+struct SealedSourceRow {
+    iv_base64: String,
+    auth_tag_base64: String,
+    ciphertext_base64: String,
+    byte_length: i64,
+}
+
 pub fn apply_secret_envelope(
     store: &mut EngineStore,
     envelope: &ReplicationEnvelope,
@@ -41,7 +69,7 @@ pub fn apply_secret_envelope(
 ) -> Result<ApplyOutcome<()>, SyncError> {
     if !matches!(
         envelope.op_kind.as_str(),
-        "secret.file.put" | "secret.file.delete"
+        "secret.file.put" | "secret.file.delete" | "secret.version.fork"
     ) {
         return Err(SyncError::UnsupportedOperation);
     }
@@ -49,6 +77,7 @@ pub fn apply_secret_envelope(
         match op.op_kind.as_str() {
             "secret.file.put" => apply_put(tx, op, decode(&op.payload)?),
             "secret.file.delete" => apply_delete(tx, op, decode(&op.payload)?),
+            "secret.version.fork" => apply_fork(tx, op, decode(&op.payload)?),
             _ => Err(SyncError::UnsupportedOperation),
         }
     })
@@ -157,6 +186,214 @@ fn apply_delete(
 ) -> Result<(), SyncError> {
     validate_common(tx, op, &p.version_id, &p.path, &p.metadata)?;
     insert_moment(tx, op, &p.version_id, &p.path, &p.metadata, None)
+}
+
+fn apply_fork(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+    payload: SecretFork,
+) -> Result<(), SyncError> {
+    crate::model::bounded(
+        &payload.from_version_id,
+        "secret fork source version id must be non-empty and bounded",
+    )?;
+    crate::model::bounded(
+        &payload.to_version_id,
+        "secret fork destination version id must be non-empty and bounded",
+    )?;
+    if payload.from_version_id == payload.to_version_id {
+        return Err(SyncError::InvalidInput {
+            reason: "secret fork source and destination must differ",
+        });
+    }
+    require_version(tx, &op.workspace_id, &payload.from_version_id)?;
+    require_version(tx, &op.workspace_id, &payload.to_version_id)?;
+    for row in &payload.rows {
+        validate_fork_row(row)?;
+    }
+
+    let source_by_path = {
+        let mut statement = tx
+            .prepare(
+                "SELECT path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length \
+                 FROM secret_files WHERE workspace_id=?1 AND version_id=?2",
+            )
+            .map_err(SyncError::corrupt)?;
+        statement
+            .query_map(params![op.workspace_id, payload.from_version_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    SealedSourceRow {
+                        iv_base64: row.get(1)?,
+                        auth_tag_base64: row.get(2)?,
+                        ciphertext_base64: row.get(3)?,
+                        byte_length: row.get(4)?,
+                    },
+                ))
+            })
+            .map_err(SyncError::corrupt)?
+            .collect::<Result<HashMap<_, _>, _>>()
+            .map_err(SyncError::corrupt)?
+    };
+    if payload.rows.len() != source_by_path.len() {
+        return Err(secret_fork_mismatch());
+    }
+    let mut seen = HashSet::with_capacity(payload.rows.len());
+    for row in &payload.rows {
+        if !seen.insert(row.path.as_str()) {
+            return Err(secret_fork_mismatch());
+        }
+        let source = source_by_path
+            .get(&row.path)
+            .ok_or_else(secret_fork_mismatch)?;
+        let source_ciphertext =
+            STANDARD
+                .decode(&source.ciphertext_base64)
+                .map_err(|_| SyncError::InvalidInput {
+                    reason: "local sealed source state is invalid",
+                })?;
+        if source.iv_base64 != row.iv_base64
+            || source.auth_tag_base64 != row.auth_tag_base64
+            || dohc_engine_storage::hex_sha256(&source_ciphertext) != row.ciphertext_sha256
+            || source.byte_length != row.byte_length
+        {
+            return Err(secret_fork_mismatch());
+        }
+    }
+
+    tx.execute(
+        "DELETE FROM secret_files WHERE workspace_id=?1 AND version_id=?2",
+        params![op.workspace_id, payload.to_version_id],
+    )
+    .map_err(SyncError::persist)?;
+    tx.execute(
+        "DELETE FROM secret_fork_bases WHERE workspace_id=?1 AND version_id=?2",
+        params![op.workspace_id, payload.to_version_id],
+    )
+    .map_err(SyncError::persist)?;
+    for row in payload.rows {
+        let ciphertext = load_ciphertext(tx, &row.ciphertext_sha256, row.byte_length)?;
+        let ciphertext_base64 = STANDARD.encode(ciphertext);
+        tx.execute(
+            "INSERT INTO secret_files \
+             (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length,updated_at_ms,latest_moment_id) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                op.workspace_id,
+                payload.to_version_id,
+                row.path,
+                row.iv_base64,
+                row.auth_tag_base64,
+                ciphertext_base64,
+                row.byte_length,
+                row.updated_at_ms,
+                row.latest_moment_id
+            ],
+        )
+        .map_err(SyncError::persist)?;
+        tx.execute(
+            "INSERT INTO secret_fork_bases \
+             (workspace_id,version_id,path,iv_base64,auth_tag_base64,ciphertext_base64,byte_length) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                op.workspace_id,
+                payload.to_version_id,
+                row.path,
+                row.iv_base64,
+                row.auth_tag_base64,
+                ciphertext_base64,
+                row.byte_length
+            ],
+        )
+        .map_err(SyncError::persist)?;
+    }
+    Ok(())
+}
+
+fn require_version(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<(), SyncError> {
+    let exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM versions WHERE workspace_id=?1 AND version_id=?2)",
+            params![workspace_id, version_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if !exists {
+        return Err(SyncError::InvalidInput {
+            reason: "secret fork version is missing",
+        });
+    }
+    Ok(())
+}
+
+fn validate_fork_row(row: &SecretForkRow) -> Result<(), SyncError> {
+    if crate::classify_share_path(&row.path) != PathClass::Secret {
+        return Err(SyncError::InvalidInput {
+            reason: "secret fork path is not secret-classified",
+        });
+    }
+    validate_base64(&row.iv_base64, 12, "secret fork iv is invalid")?;
+    validate_base64(&row.auth_tag_base64, 16, "secret fork auth tag is invalid")?;
+    if row.ciphertext_sha256.len() != 64
+        || !row
+            .ciphertext_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !(0..=1024 * 1024).contains(&row.byte_length)
+        || row.latest_moment_id.is_empty()
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "secret fork row is malformed",
+        });
+    }
+    Ok(())
+}
+
+fn validate_base64(
+    encoded: &str,
+    expected_len: usize,
+    reason: &'static str,
+) -> Result<(), SyncError> {
+    let decoded = STANDARD
+        .decode(encoded)
+        .map_err(|_| SyncError::InvalidInput { reason })?;
+    if decoded.len() != expected_len || STANDARD.encode(decoded) != encoded {
+        return Err(SyncError::InvalidInput { reason });
+    }
+    Ok(())
+}
+
+fn load_ciphertext(
+    tx: &Transaction<'_>,
+    sha256: &str,
+    byte_length: i64,
+) -> Result<Vec<u8>, SyncError> {
+    let (stored_len, ciphertext): (i64, Vec<u8>) = tx
+        .query_row(
+            "SELECT byte_length,bytes FROM binary_blobs WHERE sha256=?1",
+            [sha256],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?
+        .ok_or(SyncError::BlobInvalid)?;
+    if stored_len != byte_length
+        || ciphertext.len() as i64 != byte_length
+        || dohc_engine_storage::hex_sha256(&ciphertext) != sha256
+    {
+        return Err(SyncError::BlobInvalid);
+    }
+    Ok(ciphertext)
+}
+
+const fn secret_fork_mismatch() -> SyncError {
+    SyncError::InvalidInput {
+        reason: "secret fork payload does not match the local sealed source state",
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
