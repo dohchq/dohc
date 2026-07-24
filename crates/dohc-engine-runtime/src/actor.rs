@@ -4157,7 +4157,7 @@ struct SecretJobCoordinates {
 fn secret_job_coordinates(
     store: &mut EngineStore,
     job: &MaterializationJob,
-) -> Result<SecretJobCoordinates, RuntimeError> {
+) -> Result<Option<SecretJobCoordinates>, RuntimeError> {
     let moment_id = job
         .job_id
         .strip_prefix("secret-mat_")
@@ -4183,10 +4183,11 @@ fn secret_job_coordinates(
         .map_err(StorageError::corrupt_public)
     })?;
     let Some((workspace_id, version_id, path, moment_order, operation)) = coordinates else {
-        return Err(DomainError::StateCorrupt {
-            reason: "secret materialization moment is missing",
-        }
-        .into());
+        // Version deletion cascades its secret moments but the generic
+        // materialization ledger has no FK back to those domain rows. Treat
+        // that pending job as an orphan the replay loop can retire, not as
+        // corruption that bricks every future workspace open.
+        return Ok(None);
     };
     let expected_operation = match job.operation {
         dohc_engine_storage::MaterializationOperation::Write => "write",
@@ -4201,11 +4202,11 @@ fn secret_job_coordinates(
         }
         .into());
     }
-    Ok(SecretJobCoordinates {
+    Ok(Some(SecretJobCoordinates {
         workspace_id,
         version_id,
         path,
-    })
+    }))
 }
 
 fn secret_tip_exists(
@@ -5093,14 +5094,19 @@ fn worker_main(
                     let mut secret_key: Option<SecretDataKey> = None;
                     for job in jobs {
                         if job.job_id.starts_with("secret-mat_") {
-                            let coordinates = secret_job_coordinates(&mut store, &job)?;
+                            let Some(coordinates) = secret_job_coordinates(&mut store, &job)?
+                            else {
+                                store.mark_materialization_complete(&job.job_id, now_ms)?;
+                                continue;
+                            };
                             let active_version_id = VersionedTextStore::new(&mut store)
                                 .get_active_version(&coordinates.workspace_id)?
                                 .version_id;
                             // Disk is the active-version projection. A mutation
-                            // in any other version is durable DB state only.
+                            // in any other version is durable DB state only,
+                            // but its pending intent must survive until that
+                            // version is activated and a later open replays it.
                             if coordinates.version_id != active_version_id {
-                                store.mark_materialization_complete(&job.job_id, now_ms)?;
                                 continue;
                             }
                             let tip_present = secret_tip_exists(&store, &coordinates)?;

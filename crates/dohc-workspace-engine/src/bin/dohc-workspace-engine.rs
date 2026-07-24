@@ -879,6 +879,7 @@ mod tests {
                     bytes,
                     cancel: CancelSignal::new(),
                     deadline: None,
+                    byte_permit: None,
                 }),
             })
         }
@@ -963,6 +964,7 @@ mod tests {
             bytes: bytes.clone(),
             cancel: CancelSignal::new(),
             deadline: None,
+            byte_permit: None,
         };
         let limits = WireLimits::default();
         let (mut output, mut input) = tokio::io::duplex(bytes.len() + 4096);
@@ -1038,6 +1040,7 @@ mod tests {
             bytes: vec![0x5c; 64 * 1024],
             cancel,
             deadline: None,
+            byte_permit: None,
         };
         let limits = WireLimits::default();
         let (mut output, mut input) = tokio::io::duplex(4096);

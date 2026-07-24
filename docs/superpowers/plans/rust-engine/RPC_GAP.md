@@ -384,3 +384,17 @@ provenance (payload_before_*/payload_after_*) and before-snapshot identity
 columns were never ported to the Rust moments table. Rust hydrates what
 its schema HAS (before/after text + byte lengths). Full parity = a
 migration — pre-R15 candidate, pairs with the secret ownership column.
+
+CROSS-ENGINE GAP (PR #227 codex-bot round-7) — secret re-materialization on version
+SWITCH is MISSING in the Rust daemon (R13/GATE6 obligation, NOT an RPC-D2 blocker).
+The ORACLE re-materializes the target version's secrets from the store on a version
+switch (planSecretMaterialization + switchVersion, workspaceEngineCapture.ts:1548-1584,
+1830-1891). The Rust daemon's `SetActiveVersion` is DB-ONLY (actor.rs) and workspace.open
+only replays PENDING materialization jobs — there is NO store-read "rebuild the active
+version's secret tips" pass, and `materialize_secret` (actor.rs:2233) has no Rust caller.
+RPC-D2 makes secrets survive to the next OPEN where their version is active (non-active
+secret jobs stay PENDING, not marked complete), so open-time projection is correct. But a
+MID-SESSION version switch does not refresh the on-disk secrets until the next open. Wiring
+a switch-time (or set-active-time) secret materialization pass is daemon-composition
+(R13)/desktop-adapter scope, not the secret executor; tracked for GATE6. Non-secret files
+share the same switch-materialization dependency on the desktop/daemon composition layer.

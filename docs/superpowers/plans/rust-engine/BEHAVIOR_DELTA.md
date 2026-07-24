@@ -433,6 +433,18 @@ that wrote *before* the pipeline ran — IS detected and preserved-both. The
 sub-op race is an inherent, narrow residual; it is documented in
 `dohc-engine-files::materialize` module docs and is NOT claimed closed.
 
+Secret materialization has a second accepted, narrowed rename-TOCTOU: its
+no-follow ancestor checks are path-based `symlink_metadata` checks, not
+fd-relative `openat2(RESOLVE_NO_SYMLINKS)` / `renameat` operations. A local
+attacker with workspace write access could swap a checked parent directory for
+a symlink before the final rename and redirect the plaintext write. The entry,
+post-`create_dir_all`, pre-revalidation, and pre-replace checks narrow that
+window but do not close it. This adds approximately no confidentiality loss for
+the single-user workspace because the required workspace write access already
+grants read access to the materialized plaintext `.env`; sharing is retired
+before R15. Full closure is tracked as future dirfd/openat2 + renameat
+hardening.
+
 ### 8.3 DECISION: preserve-both `.conflict` artifacts are floor-excluded
 
 When materialization finds newer external content, it preserves both: the

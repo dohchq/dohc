@@ -407,6 +407,7 @@ mod tests {
                     bytes: vec![1, 2, 3],
                     cancel: ctx.cancel,
                     deadline: ctx.deadline,
+                    byte_permit: None,
                 }),
             })
         }

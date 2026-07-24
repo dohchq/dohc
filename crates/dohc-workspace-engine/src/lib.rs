@@ -58,6 +58,12 @@ const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 /// leaves headroom under it. Larger binary blobs use raw blob-chunk egress.
 const MAX_INBAND_CONTENT_BYTES: usize = dohc_engine_domain::INBAND_CONTENT_CAP_BYTES;
 
+/// Aggregate hydrated blob bytes allowed to wait for or flow through framed
+/// egress. A single stored blob may be this large, so exact-byte reservations
+/// allow one maximum-sized response or multiple smaller responses up to the
+/// same fixed resident-memory ceiling.
+const BLOB_EGRESS_BYTE_BUDGET: usize = dohc_engine_storage::MAX_BLOB_BYTES;
+
 /// Largest raw Y.Doc full-state that still fits one wire string once
 /// base64-expanded (4/3): DOP1's 64 KiB `max_string_bytes` divided by 4,
 /// times 3. Refusing here surfaces a clean error instead of the framer
@@ -103,6 +109,40 @@ fn byte_budget_cut_serialized(rows: &[Value], budget: usize) -> usize {
         included += 1;
     }
     included
+}
+
+#[derive(Clone)]
+struct BlobEgressBudget {
+    permits: Arc<tokio::sync::Semaphore>,
+}
+
+impl BlobEgressBudget {
+    fn new(byte_budget: usize) -> Self {
+        BlobEgressBudget {
+            permits: Arc::new(tokio::sync::Semaphore::new(byte_budget)),
+        }
+    }
+
+    async fn reserve(
+        &self,
+        byte_length: i64,
+        cancellation: &OperationCancellation,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, WireError> {
+        let bytes = usize::try_from(byte_length)
+            .ok()
+            .filter(|bytes| *bytes <= BLOB_EGRESS_BYTE_BUDGET)
+            .and_then(|bytes| u32::try_from(bytes).ok())
+            .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+        tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                Err(cancellation.interruption("versionedBinary.readBlob (egress budget)"))
+            }
+            permit = Arc::clone(&self.permits).acquire_many_owned(bytes) => {
+                permit.map_err(|_| wire(ErrorCode::Internal, "blob egress budget unavailable"))
+            }
+        }
+    }
 }
 
 /// The most one serialized row may occupy: safely under the 1 MiB frame
@@ -292,6 +332,7 @@ pub struct EngineService {
     /// lifetime's ledger rows (hash-mismatch refusals or false dedupes).
     session_epoch: String,
     self_writes: SelfWriteSuppression,
+    blob_egress_budget: BlobEgressBudget,
 }
 
 impl Default for EngineService {
@@ -348,6 +389,7 @@ impl EngineService {
                     std::sync::LazyLock::new(SelfWriteSuppression::default);
                 GLOBAL_SELF_WRITES.clone()
             },
+            blob_egress_budget: BlobEgressBudget::new(BLOB_EGRESS_BYTE_BUDGET),
         }
     }
 
@@ -2137,58 +2179,68 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let cancellation = OperationCancellation::new(ctx);
-        // MUTATION: always select read_binary_blob_for_egress -> clients that
-        // did not negotiate blobs hydrate and verify the entire over-cap value
-        // only to receive metadata.
-        let read = if ctx.has_capability("blobs") {
-            Self::read_under_ctx(
+        // MUTATION: hydrate directly before reserving its recorded byte length
+        // -> concurrent over-cap reads can retain queue-capacity full blobs.
+        // Metadata/in-band first: over-cap bytes do not leave SQLite until the
+        // exact-byte egress reservation has been acquired.
+        let read = Self::read_under_ctx(
+            &cancellation,
+            "versionedBinary.readBlob",
+            open.actor
+                .read_binary_blob(open.workspace_id.clone(), sha256.clone()),
+        )
+        .await?
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "file-not-found"))?;
+        let Some(bytes) = read.bytes else {
+            if !ctx.has_capability("blobs") {
+                return Ok((
+                    json!({
+                        "bytesBase64": Value::Null,
+                        "byteLength": read.byte_length,
+                        "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+                    }),
+                    None,
+                ));
+            }
+            let byte_permit = self
+                .blob_egress_budget
+                .reserve(read.byte_length, &cancellation)
+                .await?;
+            let hydrated = Self::read_under_ctx(
                 &cancellation,
                 "versionedBinary.readBlob",
                 open.actor
                     .read_binary_blob_for_egress(open.workspace_id, sha256.clone()),
             )
             .await?
-        } else {
-            Self::read_under_ctx(
-                &cancellation,
-                "versionedBinary.readBlob",
-                open.actor
-                    .read_binary_blob(open.workspace_id, sha256.clone()),
-            )
-            .await?
-        }
-        .ok_or_else(|| wire(ErrorCode::InvalidParams, "file-not-found"))?;
-        let Some(bytes) = read.bytes else {
+            .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
+            if hydrated.byte_length != read.byte_length {
+                return Err(wire(ErrorCode::Internal, "state-corrupt"));
+            }
+            let bytes = hydrated
+                .bytes
+                .ok_or_else(|| wire(ErrorCode::Internal, "state-corrupt"))?;
             return Ok((
                 json!({
                     "bytesBase64": Value::Null,
                     "byteLength": read.byte_length,
                     "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
                 }),
-                None,
+                Some(BlobEgress {
+                    stream_id: request_id,
+                    sha256,
+                    bytes,
+                    cancel: ctx.cancel.clone(),
+                    deadline: ctx.deadline,
+                    byte_permit: Some(byte_permit),
+                }),
             ));
         };
-        if bytes.len() <= MAX_INBAND_CONTENT_BYTES {
-            return Ok((
-                json!({
-                    "bytesBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
-                }),
-                None,
-            ));
-        }
         Ok((
             json!({
-                "bytesBase64": Value::Null,
-                "byteLength": read.byte_length,
-                "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
+                "bytesBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
             }),
-            Some(BlobEgress {
-                stream_id: request_id,
-                sha256,
-                bytes,
-                cancel: ctx.cancel.clone(),
-                deadline: ctx.deadline,
-            }),
+            None,
         ))
     }
 
@@ -8156,6 +8208,43 @@ mod tests {
         // through the catch-all to Internal.
         let binary_head = map_runtime(RuntimeError::Domain(DomainError::BinaryHeadNotText));
         assert_eq!(binary_head.code, ErrorCode::InvalidParams);
+    }
+
+    #[tokio::test]
+    async fn blob_egress_budget_blocks_when_aggregate_bytes_are_exhausted() {
+        // MUTATION: remove the exact-byte reservation before blob hydration ->
+        // the second over-budget egress proceeds while the first is retained.
+        let budget = BlobEgressBudget::new(8);
+        let first_ctx = RequestContext::unbounded();
+        let first_cancellation = OperationCancellation::new(&first_ctx);
+        let first = budget
+            .reserve(5, &first_cancellation)
+            .await
+            .expect("reserve first five bytes");
+        assert_eq!(budget.permits.available_permits(), 3);
+
+        let waiting_budget = budget.clone();
+        let mut waiting = tokio::spawn(async move {
+            let ctx = RequestContext::unbounded();
+            let cancellation = OperationCancellation::new(&ctx);
+            waiting_budget.reserve(5, &cancellation).await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut waiting)
+                .await
+                .is_err(),
+            "an aggregate reservation beyond the byte budget must wait"
+        );
+
+        drop(first);
+        let second = tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("second reservation unblocked")
+            .expect("reservation task")
+            .expect("reserve second five bytes");
+        assert_eq!(budget.permits.available_permits(), 3);
+        drop(second);
+        assert_eq!(budget.permits.available_permits(), 8);
     }
 
     #[test]

@@ -28,6 +28,11 @@ pub struct BlobEgress {
     pub bytes: Vec<u8>,
     pub cancel: CancelSignal,
     pub deadline: Option<Instant>,
+    /// Owned reservation for these hydrated bytes. Framed transports keep it
+    /// alive until the egress item is written or dropped, bounding aggregate
+    /// queued blob memory by bytes rather than output-message count.
+    #[cfg(feature = "supervisor")]
+    pub byte_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 /// Transport-independent service output. In-process callers consume the
