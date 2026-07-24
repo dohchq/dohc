@@ -3252,7 +3252,7 @@ fn central_router_recognizes_every_owned_kind_and_fails_unknown_closed() {
     let moment = envelope("router-moment", 0, "moment.append", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &moment, &NoFaults, &NoLiveLeases),
-        Err(SyncError::MomentAppendNotImplemented)
+        Err(SyncError::InvalidInput { .. })
     ));
     let unknown = envelope("router-unknown", 0, "version.rename", json!({}));
     assert!(matches!(
@@ -3313,12 +3313,12 @@ fn relay_pull_routes_secret_and_conflict_ops_without_cursor_wedge() {
 }
 
 #[test]
-fn moment_append_router_error_is_distinct_and_never_acks() {
+fn malformed_moment_append_router_error_never_acks() {
     let (_scratch, _path, mut engine) = store();
     let operation = envelope("moment-peer", 0, "moment.append", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Err(SyncError::MomentAppendNotImplemented)
+        Err(SyncError::InvalidInput { .. })
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "moment-peer").expect("ack"),

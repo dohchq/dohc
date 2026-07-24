@@ -26,19 +26,9 @@ pub fn apply_replication_envelope(
         }
         "workspace.init" => crate::version_apply::apply_workspace_envelope(store, envelope, faults),
         "version.create" => crate::version_apply::apply_version_envelope(store, envelope, faults),
-        "moment.append" => apply_unimplemented_moment_envelope(store, envelope, faults),
+        "moment.append" => erase(crate::apply_moment_envelope(store, envelope, faults)),
         _ => Err(SyncError::UnsupportedOperation),
     }
-}
-
-fn apply_unimplemented_moment_envelope(
-    store: &mut EngineStore,
-    envelope: &ReplicationEnvelope,
-    faults: &dyn FaultInjector,
-) -> Result<ApplyOutcome<()>, SyncError> {
-    crate::apply_envelope_with(store, envelope, faults, |_tx, _op| {
-        Err(SyncError::MomentAppendNotImplemented)
-    })
 }
 
 fn erase<T>(result: Result<ApplyOutcome<T>, SyncError>) -> Result<ApplyOutcome<()>, SyncError> {
