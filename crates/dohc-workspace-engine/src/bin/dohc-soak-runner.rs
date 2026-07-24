@@ -1,4 +1,5 @@
-//! The cutoverBlocking SOAK RUNNER (GATE6 evidence).
+//! The cutoverBlocking SOAK RUNNER (GATE6 evidence), with an explicit
+//! `--quick` smoke mode that cannot produce cutoverBlocking evidence.
 //!
 //! Drives the REAL daemon binary over DOP1 stdio through the scenario mix
 //! `tools/rust-engine-program/soak-config.json` specifies for the
@@ -328,6 +329,61 @@ struct Sample {
     rss_bytes: u64,
     handles: u64,
     threads: u64,
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessSamplingMetadata {
+    os: &'static str,
+    arch: &'static str,
+    rss_bytes_method: &'static str,
+    handle_count_method: &'static str,
+    thread_count_method: &'static str,
+    handle_thread_slack_calibrated_for_platform: bool,
+    handle_thread_slack_calibration_note: &'static str,
+}
+
+fn process_sampling_metadata() -> ProcessSamplingMetadata {
+    #[cfg(windows)]
+    {
+        ProcessSamplingMetadata {
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            rss_bytes_method: "PowerShell Get-Process WorkingSet64",
+            handle_count_method: "PowerShell Get-Process HandleCount (Windows OS handle count)",
+            thread_count_method: "PowerShell Get-Process Threads.Count (Windows process thread count)",
+            handle_thread_slack_calibrated_for_platform: true,
+            handle_thread_slack_calibration_note: "handleSlack and threadSlack were calibrated against Windows runtime/OS jitter for these counters.",
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        ProcessSamplingMetadata {
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            rss_bytes_method: "/proc/<pid>/status VmRSS (KiB converted to bytes)",
+            handle_count_method: "/proc/<pid>/fd directory entry count (open file-descriptor count; not Windows OS handles)",
+            thread_count_method: "/proc/<pid>/status Threads",
+            handle_thread_slack_calibrated_for_platform: false,
+            handle_thread_slack_calibration_note: "handleSlack and threadSlack are Windows-calibrated and have not been calibrated for Linux /proc counters; within-bound results are observational, not a calibrated resource-leak conclusion.",
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        ProcessSamplingMetadata {
+            os: std::env::consts::OS,
+            arch: std::env::consts::ARCH,
+            rss_bytes_method: "ps -o rss= -p <pid> (KiB converted to bytes)",
+            handle_count_method: "lsof -p <pid> data-row count (open files, mapped resources, and sockets; not Windows OS handles)",
+            thread_count_method: "ps -M -p <pid> data-row count",
+            handle_thread_slack_calibrated_for_platform: false,
+            handle_thread_slack_calibration_note: "handleSlack and threadSlack are Windows-calibrated and have not been calibrated for macOS lsof/ps -M counters; within-bound results are observational, not a calibrated resource-leak conclusion.",
+        }
+    }
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        panic!("soak sampling metadata is not implemented for this platform");
+    }
 }
 
 fn sample_process(pid: u32) -> Option<(u64, u64, u64)> {
@@ -716,6 +772,7 @@ async fn main() {
     } else {
         "cutoverBlocking"
     };
+    let process_sampling = process_sampling_metadata();
     let started = Instant::now();
     let budget = Duration::from_secs(options.minutes * 60);
     eprintln!(
@@ -723,6 +780,16 @@ async fn main() {
         options.cycles,
         options.minutes,
         options.daemon.display()
+    );
+    eprintln!(
+        "soak: handle/thread slack calibration for {}: {} — {}",
+        process_sampling.os,
+        if process_sampling.handle_thread_slack_calibrated_for_platform {
+            "CALIBRATED"
+        } else {
+            "UNCALIBRATED"
+        },
+        process_sampling.handle_thread_slack_calibration_note
     );
 
     let mut daemon = Daemon::spawn(&options.daemon).await;
@@ -936,6 +1003,11 @@ async fn main() {
         "crashRestarts": crashes,
         "crashCyclesPlanned": crash_cycles,
         "durationSecs": started.elapsed().as_secs(),
+        // Platform-specific provenance for every numeric process metric. In
+        // particular, a within-slack macOS/Linux result must travel with the
+        // fact that the Windows-derived handle/thread bounds are uncalibrated
+        // for those different counter populations.
+        "processSampling": process_sampling,
         "baseline": { "rss": rss_base, "handles": handles_base, "threads": threads_base },
         "trendSamples": samples.len(),
         "minTrendSamples": MIN_TREND_SAMPLES,
@@ -967,6 +1039,10 @@ async fn main() {
             // never "exactly baseline", which no Windows run can hold.
             "handlesWithinRecordedSlack": handles_ok,
             "threadsWithinRecordedSlack": threads_ok,
+            // Deliberately adjacent to the booleans it qualifies: `true`
+            // means only "within the numeric bound" when this is false.
+            "handleThreadSlackCalibratedForPlatform":
+                process_sampling.handle_thread_slack_calibrated_for_platform,
             // Tri-state: null when the trend was not evaluated, so a
             // scenarios-only artifact can never read as leak evidence.
             "rssSlopeWithinThreshold": if trend_evaluated {
@@ -998,7 +1074,7 @@ async fn main() {
 
     println!(
         "- {} | soak-{tier} | {}/{} | {} | cycles={} crashes={} durationSecs={} \
-         rssSlopeB/s={:.1} handles {}->{} threads {}->{}",
+         rssSlopeB/s={:.1} handles {}->{} threads {}->{} handleThreadSlackCalibration={}",
         chrono_like_now(),
         std::env::consts::OS,
         std::env::consts::ARCH,
@@ -1014,6 +1090,11 @@ async fn main() {
         handles_end,
         thread_base,
         threads_end,
+        if process_sampling.handle_thread_slack_calibrated_for_platform {
+            "CALIBRATED"
+        } else {
+            "UNCALIBRATED"
+        },
     );
     // PASS exits 0. A REQUESTED smoke (--quick) legitimately reports
     // PASS-SCENARIOS-ONLY and also exits 0 — the caller asked for a run

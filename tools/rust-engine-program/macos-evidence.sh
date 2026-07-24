@@ -2,9 +2,10 @@
 # macOS evidence for the Rust engine rewrite (GATE6 / R15 cutover).
 #
 # Run this ON A MAC (from anywhere in the repo) to reproduce the full-workspace
-# gate AND the cutoverBlocking soak on macOS — a shipping platform the program's
-# Windows + WSL-Linux evidence did not cover. Produces the same self-describing
-# artifacts as the CI workflow (.github/workflows/rust-engine-macos-evidence.yml).
+# gate command and run either the cutoverBlocking soak or a clearly labelled
+# quick smoke on macOS — a shipping platform the program's Windows + WSL-Linux
+# evidence did not cover. Produces the same self-describing artifacts as the CI
+# workflow (.github/workflows/rust-engine-macos-evidence.yml).
 #
 #   tools/rust-engine-program/macos-evidence.sh [full|quick]
 #
@@ -77,15 +78,19 @@ echo "== building both release binaries (soak resolves the daemon as a sibling) 
 cargo build --release --bin dohc-workspace-engine
 cargo build --release --features harness --bin dohc-soak-runner
 
-echo "== cutoverBlocking soak ($MODE) =="
 mkdir -p tools/rust-engine-program/soak-evidence
-OUT="tools/rust-engine-program/soak-evidence/macos-$(date -u +%Y-%m-%dT%H-%M-%SZ)-cutoverBlocking.json"
 if [ "$MODE" = "full" ]; then
+  EVIDENCE_TIER="cutoverBlocking"
   SOAK_ARGS=(--minutes 30 --cycles 1000)
 else
-  echo "WARNING: quick mode is NON-GATING — it cannot satisfy GATE6 evidence." >&2
+  EVIDENCE_TIER="quick-smoke"
+  echo "WARNING: quick mode is NON-GATING — it cannot satisfy the GATE6 cutoverBlocking evidence." >&2
   SOAK_ARGS=(--quick)
 fi
+echo "== $EVIDENCE_TIER soak ($MODE mode) =="
+echo "WARNING: macOS handle/thread slack bounds are UNCALIBRATED for lsof/ps -M counters; see processSampling in the evidence JSON." >&2
+OUT="tools/rust-engine-program/soak-evidence/macos-$(date -u +%Y-%m-%dT%H-%M-%SZ)-${EVIDENCE_TIER}.json"
+[ ! -e "$OUT" ] || { echo "ERROR: refusing to overwrite existing evidence JSON at $OUT" >&2; exit 1; }
 # Invoke the BUILT runner directly so its sibling-daemon resolution works.
 ./target/release/dohc-soak-runner "${SOAK_ARGS[@]}" --evidence "$OUT" 2>&1 | tee macos-soak.log
 [ -s "$OUT" ] || { echo "ERROR: soak produced no evidence JSON at $OUT" >&2; exit 1; }
@@ -99,5 +104,10 @@ echo "  soak evidence: $OUT"
 if [ "$MODE" != "full" ]; then
   echo "  NOTE: quick mode — NOT bankable GATE6 evidence. Re-run with 'full'."
 fi
-echo "Paste the run-rust-checks verdict line + the soak verdict line into"
-echo "EXECUTION_LOG.md and commit the evidence JSON beside the Windows one."
+echo "  NOTE: macOS handle/thread slack bounds are UNCALIBRATED; the JSON records the counting methods and caveat."
+if [ "$MODE" = "full" ]; then
+  echo "Paste the run-rust-checks verdict line + the soak verdict line into"
+  echo "EXECUTION_LOG.md and commit the evidence JSON beside the Windows one."
+else
+  echo "Do not cite or commit this quick-smoke artifact as cutoverBlocking evidence."
+fi

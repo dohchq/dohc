@@ -20,8 +20,9 @@
 #   * BOTH release binaries are built before the soak: the runner resolves the
 #     daemon as a SIBLING `dohc-workspace-engine` in its own directory, so
 #     `cargo run --bin dohc-soak-runner` alone would fail with a missing daemon.
-#   * An always-run validation requires exactly one nonempty soak JSON. A green
-#     run therefore cannot exist without it; a failed diagnostics artifact may.
+#   * An always-run validation requires this run's exact output path to contain
+#     nonempty soak JSON. A green run therefore cannot exist without fresh
+#     evidence, while previously banked JSON may remain in the checkout.
 #   * The runner is PINNED to a macOS version, never `-latest`: evidence has to
 #     name the OS it ran on.
 #   * WHAT A macOS PASS DOES *NOT* PROVE (uncalibrated): the soak's handle and
@@ -171,22 +172,23 @@ jobs:
             ARGS="--quick"
           fi
           OUT="tools/rust-engine-program/soak-evidence/macos-$(date -u +%Y-%m-%dT%H-%M-%SZ)-${EVIDENCE_TIER}.json"
+          test ! -e "$OUT" || { echo "::error::refusing to overwrite existing evidence JSON at $OUT"; exit 1; }
+          printf 'SOAK_EVIDENCE_PATH=%s\n' "$OUT" >> "$GITHUB_ENV"
+          echo "::warning::macOS handle/thread slack bounds are UNCALIBRATED for lsof/ps -M counters; see processSampling in the evidence JSON."
           # Invoke the BUILT runner directly so its sibling-daemon resolution works.
           ./target/release/dohc-soak-runner $ARGS --evidence "$OUT" 2>&1 | tee macos-soak.log
           echo "MODE=$SOAK_MODE" >> macos-soak.log
           test -s "$OUT" || { echo "::error::soak produced no evidence JSON at $OUT"; exit 1; }
 
-      - name: Require exactly one nonempty soak evidence JSON
+      - name: Require this run's nonempty soak evidence JSON
         if: always()
         run: |
-          shopt -s nullglob
-          EVIDENCE_FILES=(tools/rust-engine-program/soak-evidence/macos-*.json)
-          if [ "${#EVIDENCE_FILES[@]}" -ne 1 ]; then
-            echo "::error::expected exactly one soak evidence JSON, found ${#EVIDENCE_FILES[@]}"
+          if [ -z "${SOAK_EVIDENCE_PATH:-}" ]; then
+            echo "::error::soak step did not record this run's evidence path"
             exit 1
           fi
-          if [ ! -s "${EVIDENCE_FILES[0]}" ]; then
-            echo "::error::soak evidence JSON is empty: ${EVIDENCE_FILES[0]}"
+          if [ ! -s "$SOAK_EVIDENCE_PATH" ]; then
+            echo "::error::this run's soak evidence JSON is missing or empty: $SOAK_EVIDENCE_PATH"
             exit 1
           fi
 
@@ -200,7 +202,7 @@ jobs:
             macos-soak.log
             macos-test-list.log
             macos-toolversions.log
-            tools/rust-engine-program/soak-evidence/macos-*.json
+            ${{ env.SOAK_EVIDENCE_PATH }}
           # The always-run validation above, not this multi-path option, makes
           # the JSON mandatory for a green run.
           if-no-files-found: error
