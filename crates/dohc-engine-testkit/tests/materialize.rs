@@ -555,6 +555,15 @@ impl AtomicReplacer for NonTransientFailingReplacer {
     fn try_replace(&self, _from: &Path, _to: &Path) -> std::io::Result<()> {
         Err(std::io::Error::other("injected non-transient failure"))
     }
+
+    fn try_replace_secret(
+        &self,
+        _from: &Path,
+        _to: &Path,
+        _pinned_replace: &mut dyn FnMut() -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        Err(std::io::Error::other("injected non-transient failure"))
+    }
 }
 
 #[test]

@@ -41,8 +41,9 @@ notify = "8"
 file-id = "0.2"
 
 [target.'cfg(unix)'.dependencies]
-# Kernel-enforced O_NOFOLLOW for secret plaintext temp creation.
-libc = "0.2"
+# Safe descriptor-relative filesystem operations. On Linux this also exposes
+# openat2; other Unix targets use the portable openat/renameat path.
+rustix = { version = "1.1", features = ["fs"] }
 
 [dev-dependencies]
 # The differential harness parses the shared workspace-kernel golden fixtures

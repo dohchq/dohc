@@ -29,6 +29,14 @@
 //! residual window — the pipeline closes the common case (an editor that wrote
 //! before the pipeline started is detected and preserved), not the sub-op race.
 //! Recorded in `BEHAVIOR_DELTA.md` (R04) so it is not mistaken for closed.
+//!
+//! Secret plaintext uses a stronger path-binding rule. Unix pins the workspace
+//! root and target parent with `openat2`/`openat`, then creates, reads, unlinks,
+//! renames, and syncs relative to that parent descriptor. Windows validates and
+//! retains non-delete-shared handles for the root and every ancestor until the
+//! name-based replace completes, so an ancestor cannot be swapped underneath
+//! it. The content preimage race above remains; the ancestor-redirection race
+//! does not.
 
 use crate::bounds::{MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES};
 use crate::floor::is_excluded_file;
@@ -37,6 +45,7 @@ use dohc_engine_storage::{
     EngineStore, FaultInjector, FaultPoint, MaterializationJob, MaterializationOperation, Preimage,
     StorageError, hex_sha256,
 };
+use std::ffi::OsStr;
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -89,6 +98,19 @@ pub trait AtomicReplacer: Send + Sync {
     /// Windows this is `ReplaceFile`/`MoveFileEx(REPLACE_EXISTING)` semantics
     /// (what `std::fs::rename` maps to); on POSIX it is `rename(2)`.
     fn try_replace(&self, from: &Path, to: &Path) -> std::io::Result<()>;
+
+    /// Secret writes supply the only replacement operation they may execute:
+    /// one bound to the pinned parent directory. Specialized test replacers
+    /// may return an injected error or wrap this operation.
+    #[doc(hidden)]
+    fn try_replace_secret(
+        &self,
+        _from: &Path,
+        _to: &Path,
+        pinned_replace: &mut dyn FnMut() -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        pinned_replace()
+    }
 }
 
 /// The production replacer: `std::fs::rename`, which on Windows performs an
@@ -145,6 +167,16 @@ impl ReplaceBackoff for NoBackoff {
 
 trait SecretTempRemover: Send + Sync {
     fn remove_file(&self, path: &Path) -> std::io::Result<()>;
+
+    fn remove_pinned(
+        &self,
+        parent: &SecretParentGuard,
+        name: &OsStr,
+        path: &Path,
+    ) -> std::io::Result<()> {
+        let _ = (parent, name);
+        self.remove_file(path)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -153,6 +185,15 @@ struct StdSecretTempRemover;
 impl SecretTempRemover for StdSecretTempRemover {
     fn remove_file(&self, path: &Path) -> std::io::Result<()> {
         std::fs::remove_file(path)
+    }
+
+    fn remove_pinned(
+        &self,
+        parent: &SecretParentGuard,
+        name: &OsStr,
+        path: &Path,
+    ) -> std::io::Result<()> {
+        parent.remove_file(name, path)
     }
 }
 
@@ -619,8 +660,16 @@ fn materialize_secret_delete(
             FaultPoint::MaterializeBeforePreimageRevalidate,
         ));
     }
+    let parent_path = target.parent().ok_or(MaterializeError::UnsafeTargetPath)?;
+    let target_name = target
+        .file_name()
+        .ok_or(MaterializeError::UnsafeTargetPath)?;
+    let parent = SecretParentGuard::open_or_create(root, target, parent_path)?;
     // Re-read immediately before unlinking to preserve no-follow semantics.
-    let current_now = read_current_no_follow(target)?;
+    // Any regular file currently at the active secret's own resolved path is
+    // the disk projection being retired; no plaintext hash or conflict copy is
+    // needed (or safe) for a secret delete.
+    let current_now = parent.read_current(target_name, target)?;
     match &current_now {
         CurrentTarget::Absent => {
             store.mark_materialization_complete(&job.job_id, now_ms)?;
@@ -633,9 +682,10 @@ fn materialize_secret_delete(
         store.mark_materialization_conflict(&job.job_id, now_ms)?;
         return Ok(JobOutcome::Conflict);
     }
-    ensure_target_symlink_free(root, target)?;
-    std::fs::remove_file(target).map_err(|err| MaterializeError::io(target, &err))?;
-    sync_parent_dir(target.parent(), policy)?;
+    parent
+        .remove_file(target_name, target)
+        .map_err(|err| MaterializeError::io(target, &err))?;
+    parent.sync(policy)?;
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterRenameBeforeComplete,
@@ -647,12 +697,24 @@ fn materialize_secret_delete(
 
 struct SecretPlaintextTempCleanup<'a> {
     path: &'a Path,
+    parent: Option<&'a SecretParentGuard>,
+    name: Option<&'a OsStr>,
     armed: bool,
 }
 
 impl<'a> SecretPlaintextTempCleanup<'a> {
-    fn new(path: &'a Path, armed: bool) -> Self {
-        SecretPlaintextTempCleanup { path, armed }
+    fn new(
+        path: &'a Path,
+        parent: Option<&'a SecretParentGuard>,
+        name: Option<&'a OsStr>,
+        armed: bool,
+    ) -> Self {
+        SecretPlaintextTempCleanup {
+            path,
+            parent,
+            name,
+            armed,
+        }
     }
 
     fn disarm(&mut self) {
@@ -667,7 +729,11 @@ impl<'a> SecretPlaintextTempCleanup<'a> {
 impl Drop for SecretPlaintextTempCleanup<'_> {
     fn drop(&mut self) {
         if self.armed {
-            let _ = std::fs::remove_file(self.path);
+            if let (Some(parent), Some(name)) = (self.parent, self.name) {
+                let _ = parent.remove_file(name, self.path);
+            } else {
+                let _ = std::fs::remove_file(self.path);
+            }
         }
     }
 }
@@ -705,23 +771,43 @@ fn materialize_write_content(
         return Ok(JobOutcome::AlreadyMaterialized);
     }
 
-    // Ensure the parent directory exists (a new file in a new subtree).
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| MaterializeError::io(parent, &e))?;
-    }
-    if let Some(root) = secret_root {
-        ensure_target_symlink_free(root, target)?;
-    }
+    // Ensure and pin the real parent directory. Secret writes use this same
+    // directory object for create, revalidation, cleanup, rename, and fsync.
+    let secret_parent = if let Some(root) = secret_root {
+        let parent = target.parent().ok_or(MaterializeError::UnsafeTargetPath)?;
+        Some(SecretParentGuard::open_or_create(root, target, parent)?)
+    } else {
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| MaterializeError::io(parent, &e))?;
+        }
+        None
+    };
 
     // Step 2: sibling temp file, bounded, restrictive mode.
     let tmp = temp_sibling(target, &job.job_id);
+    let tmp_name = tmp
+        .file_name()
+        .ok_or(MaterializeError::UnsafeTargetPath)?
+        .to_os_string();
+    let target_name = target
+        .file_name()
+        .ok_or(MaterializeError::UnsafeTargetPath)?
+        .to_os_string();
     // Secret writes never preserve a plaintext temp on a returned error. The
     // ordinary materializer keeps its established crash/replay behavior.
-    let mut secret_temp_cleanup = SecretPlaintextTempCleanup::new(&tmp, false);
+    let mut secret_temp_cleanup = SecretPlaintextTempCleanup::new(
+        &tmp,
+        secret_parent.as_ref(),
+        Some(tmp_name.as_os_str()),
+        false,
+    );
     let temp_file = if preserve_conflict_artifact {
         write_temp(&tmp, content)?
     } else {
-        let file = write_secret_temp_no_follow(&tmp, content)?;
+        let parent = secret_parent
+            .as_ref()
+            .ok_or(MaterializeError::UnsafeTargetPath)?;
+        let file = parent.write_temp(tmp_name.as_os_str(), &tmp, content)?;
         secret_temp_cleanup.arm();
         file
     };
@@ -758,10 +844,11 @@ fn materialize_write_content(
     // an external write in the gap is clobbered — the documented residual TOCTOU
     // (module docs + BEHAVIOR_DELTA). The common case (an editor that wrote
     // before the pipeline ran) IS caught here.
-    if let Some(root) = secret_root {
-        ensure_target_symlink_free(root, target)?;
-    }
-    let current_now = read_current_no_follow(target)?;
+    let current_now = if let Some(parent) = secret_parent.as_ref() {
+        parent.read_current(target_name.as_os_str(), target)?
+    } else {
+        read_current_no_follow(target)?
+    };
     if secret_root.is_some() && matches!(current_now, CurrentTarget::Oversized) {
         return Err(MaterializeError::BlockedTarget);
     }
@@ -775,7 +862,16 @@ fn materialize_write_content(
         if preserve_conflict_artifact {
             let conflict_path = conflict_sibling(target, &job.job_id);
             rename_no_follow(&tmp, &conflict_path, replacer)?;
-        } else if secret_temp_remover.remove_file(&tmp).is_ok() {
+        } else if secret_temp_remover
+            .remove_pinned(
+                secret_parent
+                    .as_ref()
+                    .ok_or(MaterializeError::UnsafeTargetPath)?,
+                tmp_name.as_os_str(),
+                &tmp,
+            )
+            .is_ok()
+        {
             // Keep the guard armed until removal actually succeeds. If this
             // best-effort attempt fails, Drop retries instead of leaking a
             // plaintext secret temp on the conflict return path.
@@ -788,14 +884,21 @@ fn materialize_write_content(
     // Step 5: atomic replace with bounded retry, then make the rename itself
     // durable by syncing the parent directory (POSIX), THEN mark complete — so a
     // crash can never leave the job marked complete over a non-durable rename.
-    if let Some(root) = secret_root {
-        ensure_target_symlink_free(root, target)?;
+    if let Some(parent) = secret_parent.as_ref() {
+        replace_secret_with_bounded_retry(
+            parent,
+            tmp_name.as_os_str(),
+            target_name.as_os_str(),
+            &tmp,
+            target,
+            replacer,
+            backoff,
+        )?;
+        parent.sync(policy)?;
+    } else {
+        replace_with_bounded_retry(&tmp, target, replacer, backoff)?;
+        sync_parent_dir(target.parent(), policy)?;
     }
-    // This final path-based check narrows but cannot close an ancestor
-    // rename-TOCTOU: a workspace writer can still swap a checked parent before
-    // `rename`. Full closure needs future dirfd/openat2 + renameat work.
-    replace_with_bounded_retry(&tmp, target, replacer, backoff)?;
-    sync_parent_dir(target.parent(), policy)?;
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
         // Renamed but not marked complete. Startup replay: the target now equals
         // the desired content, so step 1 short-circuits and marks complete —
@@ -856,26 +959,71 @@ enum CurrentTarget {
 }
 
 fn read_current_no_follow(target: &Path) -> Result<CurrentTarget, MaterializeError> {
-    let meta = match std::fs::symlink_metadata(target) {
-        Ok(meta) => meta,
+    #[cfg(unix)]
+    let file = {
+        use rustix::fs::{Mode, OFlags};
+        match rustix::fs::openat(
+            rustix::fs::CWD,
+            target,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => std::fs::File::from(fd),
+            Err(err) if err == rustix::io::Errno::NOENT => return Ok(CurrentTarget::Absent),
+            Err(err) if err == rustix::io::Errno::LOOP => {
+                return Err(MaterializeError::SymlinkTarget);
+            }
+            Err(err) => {
+                let err = std::io::Error::from(err);
+                return Err(MaterializeError::io(target, &err));
+            }
+        }
+    };
+
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        let mut options = std::fs::OpenOptions::new();
+        options
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+        match options.open(target) {
+            Ok(file) => file,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(CurrentTarget::Absent),
+            Err(err) => return Err(MaterializeError::io(target, &err)),
+        }
+    };
+
+    #[cfg(not(any(unix, windows)))]
+    let file = match std::fs::File::open(target) {
+        Ok(file) => file,
         Err(err) if err.kind() == ErrorKind::NotFound => return Ok(CurrentTarget::Absent),
         Err(err) => return Err(MaterializeError::io(target, &err)),
     };
-    let ft = meta.file_type();
-    if ft.is_symlink() {
+
+    read_current_file(file, target)
+}
+
+fn read_current_file(
+    file: std::fs::File,
+    display_path: &Path,
+) -> Result<CurrentTarget, MaterializeError> {
+    let metadata = file
+        .metadata()
+        .map_err(|err| MaterializeError::io(display_path, &err))?;
+    if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
         return Err(MaterializeError::SymlinkTarget);
     }
-    if !ft.is_file() {
-        // A directory (or other) at the target name is not our content.
+    if !metadata.is_file() {
         return Ok(CurrentTarget::Oversized);
     }
-    // Bounded read: at most cap+1 bytes; more ⇒ Oversized.
-    let file = std::fs::File::open(target).map_err(|e| MaterializeError::io(target, &e))?;
     let mut limited = file.take((MAX_MATERIALIZE_BYTES as u64) + 1);
     let mut buf = Vec::new();
     limited
         .read_to_end(&mut buf)
-        .map_err(|e| MaterializeError::io(target, &e))?;
+        .map_err(|err| MaterializeError::io(display_path, &err))?;
     if buf.len() > MAX_MATERIALIZE_BYTES {
         return Ok(CurrentTarget::Oversized);
     }
@@ -957,6 +1105,398 @@ fn metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
     false
 }
 
+/// Pins the real parent directory used by every secret temp operation.
+///
+/// Unix operations are descriptor-relative. Windows keeps validated handles to
+/// the root and every ancestor open without delete sharing, so the kernel
+/// rejects a concurrent rename/removal while the final name-based operations
+/// run.
+struct SecretParentGuard {
+    #[cfg(unix)]
+    parent_path: PathBuf,
+    #[cfg(unix)]
+    parent_fd: rustix::fd::OwnedFd,
+    #[cfg(windows)]
+    _locked_directories: Vec<std::fs::File>,
+}
+
+impl SecretParentGuard {
+    fn open_or_create(
+        root: &Path,
+        target: &Path,
+        parent_path: &Path,
+    ) -> Result<Self, MaterializeError> {
+        let _ = target;
+        let relative_parent = parent_path
+            .strip_prefix(root)
+            .map_err(|_| MaterializeError::UnsafeTargetPath)?;
+
+        #[cfg(unix)]
+        {
+            let parent_fd = open_secret_parent_unix(root, relative_parent, parent_path)?;
+            Ok(SecretParentGuard {
+                parent_path: parent_path.to_path_buf(),
+                parent_fd,
+            })
+        }
+
+        #[cfg(windows)]
+        {
+            let locked_directories =
+                open_secret_parent_windows(root, relative_parent, parent_path)?;
+            Ok(SecretParentGuard {
+                _locked_directories: locked_directories,
+            })
+        }
+
+        #[cfg(not(any(unix, windows)))]
+        {
+            std::fs::create_dir_all(parent_path)
+                .map_err(|err| MaterializeError::io(parent_path, &err))?;
+            ensure_secret_target_symlink_free(root, target)?;
+            Ok(SecretParentGuard {})
+        }
+    }
+
+    fn read_current(
+        &self,
+        name: &OsStr,
+        display_path: &Path,
+    ) -> Result<CurrentTarget, MaterializeError> {
+        #[cfg(unix)]
+        {
+            read_current_at_unix(&self.parent_fd, name, display_path)
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            read_current_no_follow(display_path)
+        }
+    }
+
+    fn write_temp(
+        &self,
+        name: &OsStr,
+        display_path: &Path,
+        content: &[u8],
+    ) -> Result<std::fs::File, MaterializeError> {
+        #[cfg(unix)]
+        {
+            write_secret_temp_at_unix(&self.parent_fd, name, display_path, content)
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            write_secret_temp_no_follow(display_path, content)
+        }
+    }
+
+    fn remove_file(&self, name: &OsStr, display_path: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            let _ = display_path;
+            rustix::fs::unlinkat(&self.parent_fd, name, rustix::fs::AtFlags::empty())
+                .map_err(std::io::Error::from)
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = name;
+            std::fs::remove_file(display_path)
+        }
+    }
+
+    fn rename(
+        &self,
+        from_name: &OsStr,
+        to_name: &OsStr,
+        from_path: &Path,
+        to_path: &Path,
+    ) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            let _ = (from_path, to_path);
+            rustix::fs::renameat(&self.parent_fd, from_name, &self.parent_fd, to_name)
+                .map_err(std::io::Error::from)
+        }
+
+        #[cfg(not(unix))]
+        {
+            let _ = (from_name, to_name);
+            std::fs::rename(from_path, to_path)
+        }
+    }
+
+    fn sync(&self, policy: DurabilityPolicy) -> Result<(), MaterializeError> {
+        if !policy.fsync_parent_dir {
+            return Ok(());
+        }
+
+        #[cfg(unix)]
+        {
+            rustix::fs::fsync(&self.parent_fd)
+                .map_err(std::io::Error::from)
+                .map_err(|err| MaterializeError::io(&self.parent_path, &err))
+        }
+
+        #[cfg(not(unix))]
+        {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(unix)]
+fn open_secret_parent_unix(
+    root: &Path,
+    relative_parent: &Path,
+    display_parent: &Path,
+) -> Result<rustix::fd::OwnedFd, MaterializeError> {
+    use rustix::fs::{Mode, OFlags};
+
+    let root_fd = rustix::fs::openat(
+        rustix::fs::CWD,
+        root,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)
+    .map_err(|err| MaterializeError::io(root, &err))?;
+
+    if relative_parent.as_os_str().is_empty() {
+        return Ok(root_fd);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::fs::ResolveFlags;
+        match rustix::fs::openat2(
+            &root_fd,
+            relative_parent,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+            ResolveFlags::NO_SYMLINKS | ResolveFlags::BENEATH,
+        ) {
+            Ok(parent_fd) => return Ok(parent_fd),
+            Err(err) if err == rustix::io::Errno::NOSYS || err == rustix::io::Errno::INVAL => {}
+            Err(err) if err == rustix::io::Errno::NOENT => {}
+            Err(err) if err == rustix::io::Errno::LOOP => {
+                return Err(MaterializeError::SymlinkTarget);
+            }
+            Err(err) => {
+                let err = std::io::Error::from(err);
+                return Err(MaterializeError::io(display_parent, &err));
+            }
+        }
+    }
+
+    walk_secret_parent_unix(root_fd, relative_parent, display_parent)
+}
+
+#[cfg(unix)]
+fn walk_secret_parent_unix(
+    mut current: rustix::fd::OwnedFd,
+    relative_parent: &Path,
+    display_parent: &Path,
+) -> Result<rustix::fd::OwnedFd, MaterializeError> {
+    use rustix::fs::{Mode, OFlags};
+
+    for component in relative_parent.components() {
+        let name = component.as_os_str();
+        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let next = match rustix::fs::openat(&current, name, flags, Mode::empty()) {
+            Ok(fd) => fd,
+            Err(err) if err == rustix::io::Errno::NOENT => {
+                match rustix::fs::mkdirat(&current, name, Mode::from_raw_mode(0o777)) {
+                    Ok(()) => {}
+                    Err(mkdir_err) if mkdir_err == rustix::io::Errno::EXIST => {}
+                    Err(mkdir_err) => {
+                        let mkdir_err = std::io::Error::from(mkdir_err);
+                        return Err(MaterializeError::io(display_parent, &mkdir_err));
+                    }
+                }
+                rustix::fs::openat(&current, name, flags, Mode::empty()).map_err(|open_err| {
+                    if open_err == rustix::io::Errno::LOOP {
+                        MaterializeError::SymlinkTarget
+                    } else {
+                        let open_err = std::io::Error::from(open_err);
+                        MaterializeError::io(display_parent, &open_err)
+                    }
+                })?
+            }
+            Err(err) if err == rustix::io::Errno::LOOP => {
+                return Err(MaterializeError::SymlinkTarget);
+            }
+            Err(err) => {
+                let err = std::io::Error::from(err);
+                return Err(MaterializeError::io(display_parent, &err));
+            }
+        };
+        current = next;
+    }
+    Ok(current)
+}
+
+#[cfg(windows)]
+fn open_secret_parent_windows(
+    root: &Path,
+    relative_parent: &Path,
+    display_parent: &Path,
+) -> Result<Vec<std::fs::File>, MaterializeError> {
+    let mut locked = Vec::new();
+    locked.push(open_locked_windows_directory(root)?);
+    let mut current = root.to_path_buf();
+
+    for component in relative_parent.components() {
+        current.push(component.as_os_str());
+        let directory = match open_locked_windows_directory(&current) {
+            Ok(directory) => directory,
+            Err(MaterializeError::Io {
+                kind: ErrorKind::NotFound,
+                ..
+            }) => {
+                match std::fs::create_dir(&current) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
+                    Err(err) => return Err(MaterializeError::io(&current, &err)),
+                }
+                open_locked_windows_directory(&current)?
+            }
+            Err(err) => return Err(err),
+        };
+        locked.push(directory);
+    }
+
+    let _ = display_parent;
+    Ok(locked)
+}
+
+#[cfg(windows)]
+fn open_locked_windows_directory(path: &Path) -> Result<std::fs::File, MaterializeError> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const FILE_SHARE_READ: u32 = 0x0000_0001;
+    const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    let mut options = std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    let directory = options
+        .open(path)
+        .map_err(|err| MaterializeError::io(path, &err))?;
+    let metadata = directory
+        .metadata()
+        .map_err(|err| MaterializeError::io(path, &err))?;
+    if metadata_is_reparse_point(&metadata) {
+        return Err(MaterializeError::SymlinkTarget);
+    }
+    if !metadata.is_dir() {
+        let err = std::io::Error::new(
+            ErrorKind::NotADirectory,
+            "secret ancestor is not a directory",
+        );
+        return Err(MaterializeError::io(path, &err));
+    }
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn read_current_at_unix(
+    parent_fd: &rustix::fd::OwnedFd,
+    name: &OsStr,
+    display_path: &Path,
+) -> Result<CurrentTarget, MaterializeError> {
+    use rustix::fs::{Mode, OFlags};
+
+    let fd = match rustix::fs::openat(
+        parent_fd,
+        name,
+        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(err) if err == rustix::io::Errno::NOENT => return Ok(CurrentTarget::Absent),
+        Err(err) if err == rustix::io::Errno::LOOP => {
+            return Err(MaterializeError::SymlinkTarget);
+        }
+        Err(err) => {
+            let err = std::io::Error::from(err);
+            return Err(MaterializeError::io(display_path, &err));
+        }
+    };
+    read_current_file(std::fs::File::from(fd), display_path)
+}
+
+#[cfg(unix)]
+fn write_secret_temp_at_unix(
+    parent_fd: &rustix::fd::OwnedFd,
+    name: &OsStr,
+    display_path: &Path,
+    content: &[u8],
+) -> Result<std::fs::File, MaterializeError> {
+    use rustix::fs::{Mode, OFlags};
+    use std::io::Write as _;
+
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let create = || {
+        rustix::fs::openat(parent_fd, name, flags, Mode::from_raw_mode(0o600))
+            .map(std::fs::File::from)
+    };
+    let mut file = match create() {
+        Ok(file) => file,
+        Err(err) if err == rustix::io::Errno::EXIST => {
+            let stale = match rustix::fs::openat(
+                parent_fd,
+                name,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            ) {
+                Ok(fd) => std::fs::File::from(fd),
+                Err(open_err) if open_err == rustix::io::Errno::LOOP => {
+                    return Err(MaterializeError::SymlinkTarget);
+                }
+                Err(open_err) => {
+                    let open_err = std::io::Error::from(open_err);
+                    return Err(MaterializeError::io(display_path, &open_err));
+                }
+            };
+            let metadata = stale
+                .metadata()
+                .map_err(|metadata_err| MaterializeError::io(display_path, &metadata_err))?;
+            if !metadata.is_file() {
+                let err = std::io::Error::from(ErrorKind::AlreadyExists);
+                return Err(MaterializeError::io(display_path, &err));
+            }
+            drop(stale);
+            rustix::fs::unlinkat(parent_fd, name, rustix::fs::AtFlags::empty())
+                .map_err(std::io::Error::from)
+                .map_err(|remove_err| MaterializeError::io(display_path, &remove_err))?;
+            create()
+                .map_err(std::io::Error::from)
+                .map_err(|retry_err| MaterializeError::io(display_path, &retry_err))?
+        }
+        Err(err) if err == rustix::io::Errno::LOOP => {
+            return Err(MaterializeError::SymlinkTarget);
+        }
+        Err(err) => {
+            let err = std::io::Error::from(err);
+            return Err(MaterializeError::io(display_path, &err));
+        }
+    };
+    if let Err(err) = file.write_all(content) {
+        drop(file);
+        let _ = rustix::fs::unlinkat(parent_fd, name, rustix::fs::AtFlags::empty());
+        return Err(MaterializeError::io(display_path, &err));
+    }
+    Ok(file)
+}
+
 fn temp_sibling(target: &Path, job_id: &str) -> PathBuf {
     sibling_with_name(target, &format!(".dohc-write-{}.tmp", sanitize(job_id)))
 }
@@ -1003,6 +1543,7 @@ fn write_temp(tmp: &Path, content: &[u8]) -> Result<std::fs::File, MaterializeEr
 /// Create a secret plaintext temp as a brand-new, non-following filesystem
 /// entry. A stale regular temp is unlinked and exclusive creation is retried
 /// once; a symlink, junction, or other reparse point is refused.
+#[cfg(not(unix))]
 fn write_secret_temp_no_follow(
     tmp: &Path,
     content: &[u8],
@@ -1010,11 +1551,6 @@ fn write_secret_temp_no_follow(
     use std::io::Write as _;
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -1134,6 +1670,36 @@ fn replace_with_bounded_retry(
     }
 }
 
+fn replace_secret_with_bounded_retry(
+    parent: &SecretParentGuard,
+    tmp_name: &OsStr,
+    target_name: &OsStr,
+    tmp: &Path,
+    target: &Path,
+    replacer: &dyn AtomicReplacer,
+    backoff: &dyn ReplaceBackoff,
+) -> Result<(), MaterializeError> {
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let mut pinned_replace = || parent.rename(tmp_name, target_name, tmp, target);
+        match replacer.try_replace_secret(tmp, target, &mut pinned_replace) {
+            Ok(()) => return Ok(()),
+            Err(err) if is_transient_lock(&err) => {
+                if attempt >= MAX_REPLACE_ATTEMPTS {
+                    let _ = parent.remove_file(tmp_name, tmp);
+                    return Err(MaterializeError::FileLocked);
+                }
+                backoff.wait_before_retry(attempt);
+            }
+            Err(err) => {
+                let _ = parent.remove_file(tmp_name, tmp);
+                return Err(MaterializeError::io(target, &err));
+            }
+        }
+    }
+}
+
 /// A single non-retried atomic rename (used for the conflict sibling, which has
 /// no contending handle).
 fn rename_no_follow(
@@ -1202,6 +1768,360 @@ mod tests {
                 "junction creation must succeed without elevation"
             );
         }
+    }
+
+    fn prepare_secret_job(
+        scratch: &Scratch,
+        job_id: &str,
+        target_path: &str,
+    ) -> (EngineStore, MaterializationJob) {
+        let mut store = EngineStore::open(&scratch.db(), 1).expect("open store");
+        let staged = b"encrypted-placeholder";
+        let staged_sha = store.put_binary_blob(staged).expect("stage placeholder");
+        store
+            .write_with(&NoFaults, |tx| {
+                enqueue_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: job_id.to_owned(),
+                        target_path: target_path.to_owned(),
+                        content_sha256: staged_sha.clone(),
+                        preimage: Preimage::Absent,
+                        target_generation: 1,
+                        now_ms: 1,
+                    },
+                )?;
+                Ok::<_, StorageError>(())
+            })
+            .expect("enqueue secret job");
+        let job = store
+            .load_materialization_job(job_id)
+            .expect("load job")
+            .expect("secret job");
+        (store, job)
+    }
+
+    #[cfg(unix)]
+    fn symlink_dir_for_test(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).expect("create directory symlink");
+        true
+    }
+
+    #[cfg(unix)]
+    fn symlink_file_for_test(target: &Path, link: &Path) -> bool {
+        std::os::unix::fs::symlink(target, link).expect("create file symlink");
+        true
+    }
+
+    #[cfg(windows)]
+    fn symlink_dir_for_test(target: &Path, link: &Path) -> bool {
+        match std::os::windows::fs::symlink_dir(target, link) {
+            Ok(()) => true,
+            Err(err)
+                if err.kind() == ErrorKind::PermissionDenied
+                    || err.raw_os_error() == Some(1314) =>
+            {
+                eprintln!("skipping: Windows directory symlink privilege is unavailable: {err}");
+                false
+            }
+            Err(err) => panic!("create directory symlink: {err}"),
+        }
+    }
+
+    #[cfg(windows)]
+    fn symlink_file_for_test(target: &Path, link: &Path) -> bool {
+        match std::os::windows::fs::symlink_file(target, link) {
+            Ok(()) => true,
+            Err(err)
+                if err.kind() == ErrorKind::PermissionDenied
+                    || err.raw_os_error() == Some(1314) =>
+            {
+                eprintln!("skipping: Windows file symlink privilege is unavailable: {err}");
+                false
+            }
+            Err(err) => panic!("create file symlink: {err}"),
+        }
+    }
+
+    #[test]
+    fn secret_symlinked_ancestor_is_refused_without_writing_plaintext() {
+        let scratch = Scratch::new("secret-symlink-ancestor");
+        let outside = scratch.root.join("outside");
+        std::fs::create_dir(&outside).expect("create outside directory");
+        let linked_parent = scratch.root.join("linked");
+        if !symlink_dir_for_test(&outside, &linked_parent) {
+            return;
+        }
+        let (store, job) = prepare_secret_job(&scratch, "ancestor-link", "linked/.env");
+
+        let err = materialize_secret_one(
+            &store,
+            &scratch.root,
+            &job,
+            b"SECRET=ancestor\n",
+            DurabilityPolicy::none(),
+            &StdReplacer,
+            &NoBackoff,
+            2,
+            &NoFaults,
+        )
+        .expect_err("symlinked ancestor must be refused");
+
+        assert!(matches!(err, MaterializeError::SymlinkTarget));
+        assert!(!outside.join(".env").exists());
+    }
+
+    #[test]
+    fn secret_symlinked_final_target_is_refused() {
+        let scratch = Scratch::new("secret-symlink-final");
+        let outside = scratch.root.join("outside-secret");
+        std::fs::write(&outside, b"OUTSIDE=unchanged\n").expect("write outside target");
+        let target = scratch.root.join(".env");
+        if !symlink_file_for_test(&outside, &target) {
+            return;
+        }
+        let (store, job) = prepare_secret_job(&scratch, "final-link", ".env");
+
+        let err = materialize_secret_one(
+            &store,
+            &scratch.root,
+            &job,
+            b"SECRET=final\n",
+            DurabilityPolicy::none(),
+            &StdReplacer,
+            &NoBackoff,
+            2,
+            &NoFaults,
+        )
+        .expect_err("symlinked final target must be refused");
+
+        assert!(matches!(err, MaterializeError::SymlinkTarget));
+        assert_eq!(
+            std::fs::read(&outside).expect("read outside target"),
+            b"OUTSIDE=unchanged\n"
+        );
+    }
+
+    #[test]
+    fn secret_regular_orphan_temp_is_unlinked_and_retried() {
+        let scratch = Scratch::new("secret-regular-orphan");
+        let (store, job) = prepare_secret_job(&scratch, "regular-orphan", ".env");
+        let target = scratch.root.join(".env");
+        let tmp = temp_sibling(&target, &job.job_id);
+        std::fs::write(&tmp, b"STALE=orphan\n").expect("write stale regular temp");
+
+        let outcome = materialize_secret_one(
+            &store,
+            &scratch.root,
+            &job,
+            b"SECRET=recovered\n",
+            DurabilityPolicy::none(),
+            &StdReplacer,
+            &NoBackoff,
+            2,
+            &NoFaults,
+        )
+        .expect("regular orphan must be recovered");
+
+        assert_eq!(outcome, JobOutcome::Completed);
+        assert_eq!(
+            std::fs::read(&target).expect("read materialized secret"),
+            b"SECRET=recovered\n"
+        );
+        assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn secret_symlink_orphan_temp_is_refused() {
+        let scratch = Scratch::new("secret-symlink-orphan");
+        let (store, job) = prepare_secret_job(&scratch, "symlink-orphan", ".env");
+        let target = scratch.root.join(".env");
+        let tmp = temp_sibling(&target, &job.job_id);
+        let outside = scratch.root.join("outside-temp");
+        std::fs::write(&outside, b"OUTSIDE=unchanged\n").expect("write outside temp target");
+        if !symlink_file_for_test(&outside, &tmp) {
+            return;
+        }
+
+        let err = materialize_secret_one(
+            &store,
+            &scratch.root,
+            &job,
+            b"SECRET=must-not-write\n",
+            DurabilityPolicy::none(),
+            &StdReplacer,
+            &NoBackoff,
+            2,
+            &NoFaults,
+        )
+        .expect_err("symlink orphan must be refused");
+
+        assert!(matches!(err, MaterializeError::SymlinkTarget));
+        assert!(!target.exists());
+        assert_eq!(
+            std::fs::read(&outside).expect("read outside temp target"),
+            b"OUTSIDE=unchanged\n"
+        );
+    }
+
+    #[test]
+    fn secret_happy_path_writes_exact_bytes() {
+        let scratch = Scratch::new("secret-happy");
+        let (store, job) = prepare_secret_job(&scratch, "happy", "nested/.env");
+        let target = scratch.root.join("nested").join(".env");
+        let plaintext = b"SECRET=correct-bytes\n";
+
+        let outcome = materialize_secret_one(
+            &store,
+            &scratch.root,
+            &job,
+            plaintext,
+            DurabilityPolicy::none(),
+            &StdReplacer,
+            &NoBackoff,
+            2,
+            &NoFaults,
+        )
+        .expect("materialize secret");
+
+        assert_eq!(outcome, JobOutcome::Completed);
+        assert_eq!(std::fs::read(&target).expect("read target"), plaintext);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&target)
+                    .expect("target metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    struct SwapAncestorBeforePinnedRename {
+        visible_parent: PathBuf,
+        parked_parent: PathBuf,
+        outside_parent: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl AtomicReplacer for SwapAncestorBeforePinnedRename {
+        fn try_replace(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            std::fs::rename(&self.visible_parent, &self.parked_parent)?;
+            std::os::unix::fs::symlink(&self.outside_parent, &self.visible_parent)?;
+            std::fs::rename(from, to)
+        }
+
+        fn try_replace_secret(
+            &self,
+            _from: &Path,
+            _to: &Path,
+            pinned_replace: &mut dyn FnMut() -> std::io::Result<()>,
+        ) -> std::io::Result<()> {
+            std::fs::rename(&self.visible_parent, &self.parked_parent)?;
+            std::os::unix::fs::symlink(&self.outside_parent, &self.visible_parent)?;
+            pinned_replace()
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secret_parent_swap_cannot_redirect_pinned_rename() {
+        let scratch = Scratch::new("secret-parent-swap");
+        let visible_parent = scratch.root.join("visible");
+        let parked_parent = scratch.root.join("parked");
+        let outside_parent = scratch.root.join("outside");
+        std::fs::create_dir(&visible_parent).expect("create visible parent");
+        std::fs::create_dir(&outside_parent).expect("create outside parent");
+        let (store, job) = prepare_secret_job(&scratch, "parent-swap", "visible/.env");
+
+        let outcome = materialize_secret_one(
+            &store,
+            &scratch.root,
+            &job,
+            b"SECRET=pinned\n",
+            DurabilityPolicy::none(),
+            &SwapAncestorBeforePinnedRename {
+                visible_parent,
+                parked_parent: parked_parent.clone(),
+                outside_parent: outside_parent.clone(),
+            },
+            &NoBackoff,
+            2,
+            &NoFaults,
+        )
+        .expect("pinned rename must survive ancestor swap");
+
+        assert_eq!(outcome, JobOutcome::Completed);
+        assert_eq!(
+            std::fs::read(parked_parent.join(".env")).expect("read pinned target"),
+            b"SECRET=pinned\n"
+        );
+        assert!(!outside_parent.join(".env").exists());
+    }
+
+    #[cfg(windows)]
+    struct AssertAncestorLockedBeforeRename {
+        visible_parent: PathBuf,
+        parked_parent: PathBuf,
+    }
+
+    #[cfg(windows)]
+    impl AtomicReplacer for AssertAncestorLockedBeforeRename {
+        fn try_replace(&self, from: &Path, to: &Path) -> std::io::Result<()> {
+            std::fs::rename(&self.visible_parent, &self.parked_parent)?;
+            std::fs::rename(from, to)
+        }
+
+        fn try_replace_secret(
+            &self,
+            _from: &Path,
+            _to: &Path,
+            pinned_replace: &mut dyn FnMut() -> std::io::Result<()>,
+        ) -> std::io::Result<()> {
+            let err = std::fs::rename(&self.visible_parent, &self.parked_parent)
+                .expect_err("pinned ancestor handle must deny rename");
+            assert!(
+                is_transient_lock(&err),
+                "unexpected ancestor-lock error: {err}"
+            );
+            pinned_replace()
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn secret_parent_swap_is_blocked_while_ancestor_handles_are_pinned() {
+        let scratch = Scratch::new("secret-parent-lock");
+        let visible_parent = scratch.root.join("visible");
+        let parked_parent = scratch.root.join("parked");
+        std::fs::create_dir(&visible_parent).expect("create visible parent");
+        let (store, job) = prepare_secret_job(&scratch, "parent-lock", "visible/.env");
+
+        let outcome = materialize_secret_one(
+            &store,
+            &scratch.root,
+            &job,
+            b"SECRET=locked\n",
+            DurabilityPolicy::none(),
+            &AssertAncestorLockedBeforeRename {
+                visible_parent: visible_parent.clone(),
+                parked_parent,
+            },
+            &NoBackoff,
+            2,
+            &NoFaults,
+        )
+        .expect("ancestor lock must keep replacement in place");
+
+        assert_eq!(outcome, JobOutcome::Completed);
+        assert_eq!(
+            std::fs::read(visible_parent.join(".env")).expect("read locked target"),
+            b"SECRET=locked\n"
+        );
     }
 
     struct ConflictFault {
