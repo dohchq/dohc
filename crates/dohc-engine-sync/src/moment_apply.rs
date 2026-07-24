@@ -1,0 +1,1227 @@
+use std::cmp::Ordering;
+
+use dohc_engine_storage::{EngineStore, FaultInjector, hex_sha256};
+use rusqlite::{OptionalExtension, Transaction, params};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::{ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with};
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MomentAppendPayload {
+    moment_id: String,
+    version_id: String,
+    object_id: String,
+    object_created_at_ms: Option<i64>,
+    path: String,
+    recorded_at_ms: i64,
+    operation: String,
+    payload_before_blob_sha256: Option<String>,
+    payload_before_path: Option<String>,
+    payload_after_blob_sha256: String,
+    payload_after_path: String,
+    payload_before_content_kind: Option<String>,
+    payload_before_byte_length: Option<i64>,
+    payload_after_content_kind: Option<String>,
+    payload_after_byte_length: Option<i64>,
+    metadata: Metadata,
+    author: Option<MomentAuthor>,
+    before_present: String,
+    before_object_id: Option<String>,
+    before_version_id: Option<String>,
+    before_path: Option<String>,
+    before_blob_sha256: Option<String>,
+    before_content_kind: Option<String>,
+    before_byte_length: Option<i64>,
+    before_updated_at_ms: Option<i64>,
+    before_latest_moment_id: Option<String>,
+    before_metadata: Option<Metadata>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Metadata {
+    origin: String,
+    summary: Option<String>,
+    correlation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MomentAuthor {
+    kind: String,
+    agent_id: String,
+    on_behalf_of: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_run_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentKind {
+    Text,
+    Binary,
+}
+
+impl ContentKind {
+    fn from_wire(value: Option<&str>) -> Self {
+        if value == Some("binary") {
+            Self::Binary
+        } else {
+            Self::Text
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Binary => "binary",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Snapshot {
+    object_id: String,
+    path: String,
+    kind: ContentKind,
+    digest: String,
+    text: String,
+    updated_at_ms: i64,
+    latest_moment_id: String,
+    metadata: Metadata,
+}
+
+#[derive(Debug, Clone)]
+enum MomentBefore {
+    Absent,
+    Null,
+    Present(Box<Snapshot>),
+}
+
+#[derive(Debug, Clone)]
+struct ConflictSide {
+    exists: bool,
+    path: String,
+    object_id: Option<String>,
+    kind: Option<ContentKind>,
+    digest: Option<String>,
+    updated_at_ms: Option<i64>,
+    latest_moment_id: Option<String>,
+    metadata: Option<Metadata>,
+}
+
+impl ConflictSide {
+    fn absent(path: impl Into<String>) -> Self {
+        Self {
+            exists: false,
+            path: path.into(),
+            object_id: None,
+            kind: None,
+            digest: None,
+            updated_at_ms: None,
+            latest_moment_id: None,
+            metadata: None,
+        }
+    }
+
+    fn text_digest(&self) -> Option<&str> {
+        (self.kind == Some(ContentKind::Text))
+            .then_some(self.digest.as_deref())
+            .flatten()
+    }
+
+    fn binary_digest(&self) -> Option<&str> {
+        (self.kind == Some(ContentKind::Binary))
+            .then_some(self.digest.as_deref())
+            .flatten()
+    }
+}
+
+enum CoalesceAnchor<'a> {
+    SameObject {
+        diverging_object_id: &'a str,
+        incoming_branch_base: Option<&'a str>,
+    },
+    Occupancy {
+        occupant_object_id: &'a str,
+        incoming_branch_base: Option<&'a str>,
+    },
+}
+
+struct OpenConflict<'a> {
+    version_id: &'a str,
+    anchor: CoalesceAnchor<'a>,
+    conflict_id: &'a str,
+    path: &'a str,
+    base: &'a ConflictSide,
+    current: &'a ConflictSide,
+    incoming: &'a ConflictSide,
+    recorded_at_ms: i64,
+}
+
+pub fn apply_moment_envelope(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+) -> Result<ApplyOutcome<i64>, SyncError> {
+    if envelope.op_kind != "moment.append" {
+        return Err(SyncError::UnsupportedOperation);
+    }
+    apply_envelope_with(store, envelope, faults, apply_moment_append)
+}
+
+fn apply_moment_append(
+    tx: &Transaction<'_>,
+    envelope: &ReplicationEnvelope,
+) -> Result<i64, SyncError> {
+    let payload: MomentAppendPayload =
+        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
+            reason: "moment.append payload is malformed",
+        })?;
+    validate_payload(&payload)?;
+    require_version(tx, &envelope.workspace_id, &payload.version_id)?;
+
+    let duplicate: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM moments WHERE workspace_id=?1 AND moment_id=?2)",
+            params![envelope.workspace_id, payload.moment_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if duplicate {
+        return Ok(0);
+    }
+
+    let local = select_snapshot_by_object(
+        tx,
+        &envelope.workspace_id,
+        &payload.version_id,
+        &payload.object_id,
+    )?;
+    let path_occupant = if payload.operation == "delete" {
+        None
+    } else {
+        select_snapshot_by_path(
+            tx,
+            &envelope.workspace_id,
+            &payload.version_id,
+            &payload.payload_after_path,
+        )?
+    };
+    let conflicting_occupant =
+        path_occupant.filter(|snapshot| snapshot.object_id != payload.object_id);
+
+    let origin_saw_absent = matches!(payload.before_present.as_str(), "absent" | "null");
+    let head_fast_forward = if origin_saw_absent {
+        local.is_none() && conflicting_occupant.is_none()
+    } else {
+        local.as_ref().is_some_and(|snapshot| {
+            Some(snapshot.latest_moment_id.as_str()) == payload.before_latest_moment_id.as_deref()
+        }) && conflicting_occupant.is_none()
+    };
+    let after_kind = ContentKind::from_wire(payload.payload_after_content_kind.as_deref());
+    let after_text = if after_kind == ContentKind::Text {
+        Some(require_blob_text(tx, &payload.payload_after_blob_sha256)?)
+    } else {
+        require_binary_blob(tx, &payload.payload_after_blob_sha256)?;
+        None
+    };
+    let content_fast_forward = !head_fast_forward
+        && if payload.operation == "delete" {
+            local.is_none() && conflicting_occupant.is_none()
+        } else {
+            local.as_ref().is_some_and(|snapshot| {
+                conflicting_occupant.is_none()
+                    && snapshot.path == payload.payload_after_path
+                    && snapshot.kind == after_kind
+                    && match after_kind {
+                        ContentKind::Text => Some(snapshot.text.as_str()) == after_text.as_deref(),
+                        ContentKind::Binary => snapshot.digest == payload.payload_after_blob_sha256,
+                    }
+            })
+        };
+
+    validate_payload_sides(tx, &payload)?;
+    let remote_before = moment_before_from_payload(tx, &payload)?;
+
+    if content_fast_forward && payload.operation == "delete" {
+        ensure_file_object(tx, &envelope.workspace_id, &payload)?;
+        insert_moment(tx, &envelope.workspace_id, &payload, &remote_before, true)?;
+        return Ok(0);
+    }
+
+    if head_fast_forward || content_fast_forward {
+        let adopted_before = if content_fast_forward && !head_fast_forward {
+            local.as_ref().map_or(remote_before.clone(), |snapshot| {
+                MomentBefore::Present(Box::new(snapshot.clone()))
+            })
+        } else {
+            remote_before
+        };
+        ensure_file_object(tx, &envelope.workspace_id, &payload)?;
+        insert_moment(tx, &envelope.workspace_id, &payload, &adopted_before, false)?;
+        if payload.operation == "delete" {
+            tx.execute(
+                "DELETE FROM path_aliases \
+                 WHERE workspace_id=?1 AND version_id=?2 AND path=?3 AND object_id=?4",
+                params![
+                    envelope.workspace_id,
+                    payload.version_id,
+                    payload.path,
+                    payload.object_id
+                ],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "DELETE FROM snapshots WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+                params![envelope.workspace_id, payload.version_id, payload.object_id],
+            )
+            .map_err(SyncError::persist)?;
+            delete_search_row(
+                tx,
+                &envelope.workspace_id,
+                &payload.version_id,
+                &payload.object_id,
+            )?;
+            return Ok(0);
+        }
+
+        if payload.operation == "rename"
+            && let Some(before_path) = payload.payload_before_path.as_deref()
+        {
+            tx.execute(
+                "DELETE FROM path_aliases \
+                 WHERE workspace_id=?1 AND version_id=?2 AND path=?3 AND object_id=?4",
+                params![
+                    envelope.workspace_id,
+                    payload.version_id,
+                    before_path,
+                    payload.object_id
+                ],
+            )
+            .map_err(SyncError::persist)?;
+        }
+        tx.execute(
+            "INSERT INTO path_aliases (workspace_id,version_id,path,object_id) \
+             VALUES (?1,?2,?3,?4) \
+             ON CONFLICT(workspace_id,version_id,path) DO UPDATE SET object_id=excluded.object_id",
+            params![
+                envelope.workspace_id,
+                payload.version_id,
+                payload.payload_after_path,
+                payload.object_id
+            ],
+        )
+        .map_err(SyncError::persist)?;
+        let byte_length = match after_kind {
+            ContentKind::Text => after_text
+                .as_ref()
+                .map(|text| text.len() as i64)
+                .ok_or(SyncError::BlobInvalid)?,
+            ContentKind::Binary => payload
+                .payload_after_byte_length
+                .unwrap_or(require_binary_blob(tx, &payload.payload_after_blob_sha256)?),
+        };
+        upsert_snapshot(
+            tx,
+            &envelope.workspace_id,
+            &payload,
+            after_kind,
+            byte_length,
+        )?;
+        upsert_search_row(
+            tx,
+            &envelope.workspace_id,
+            &payload,
+            after_kind,
+            after_text.as_deref().unwrap_or(""),
+        )?;
+        return Ok(0);
+    }
+
+    ensure_file_object(tx, &envelope.workspace_id, &payload)?;
+    insert_moment(tx, &envelope.workspace_id, &payload, &remote_before, true)?;
+    let current_snapshot = local.as_ref().or(conflicting_occupant.as_ref());
+    let current = current_snapshot.map_or_else(
+        || {
+            ConflictSide::absent(
+                payload
+                    .before_path
+                    .as_deref()
+                    .or(payload.payload_before_path.as_deref())
+                    .unwrap_or(&payload.path),
+            )
+        },
+        side_from_snapshot,
+    );
+    let incoming = incoming_side(&payload);
+    let base_moment_id = payload.before_latest_moment_id.as_deref();
+    let local_root = local_branch_root(
+        tx,
+        &envelope.workspace_id,
+        &payload.version_id,
+        &payload.object_id,
+        base_moment_id,
+    )?;
+    let conflict_id = sync_conflict_id(
+        &envelope.workspace_id,
+        &payload.version_id,
+        &payload.object_id,
+        base_moment_id,
+        Some((local_root.as_deref(), Some(payload.moment_id.as_str()))),
+    );
+    let base = before_conflict_side(&payload);
+    let mut opened = open_or_coalesce(
+        tx,
+        &envelope.workspace_id,
+        OpenConflict {
+            version_id: &payload.version_id,
+            anchor: CoalesceAnchor::SameObject {
+                diverging_object_id: &payload.object_id,
+                incoming_branch_base: base_moment_id,
+            },
+            conflict_id: &conflict_id,
+            path: &current.path,
+            base: &base,
+            current: &current,
+            incoming: &incoming,
+            recorded_at_ms: payload.recorded_at_ms,
+        },
+    )?;
+
+    if let (Some(_), Some(occupant)) = (local.as_ref(), conflicting_occupant.as_ref()) {
+        let occupancy_id = sync_conflict_id(
+            &envelope.workspace_id,
+            &payload.version_id,
+            &occupant.object_id,
+            Some(&occupant.latest_moment_id),
+            Some((
+                Some(occupant.latest_moment_id.as_str()),
+                Some(payload.moment_id.as_str()),
+            )),
+        );
+        let occupancy_base = ConflictSide::absent(&occupant.path);
+        let occupancy_current = side_from_snapshot(occupant);
+        opened += open_or_coalesce(
+            tx,
+            &envelope.workspace_id,
+            OpenConflict {
+                version_id: &payload.version_id,
+                anchor: CoalesceAnchor::Occupancy {
+                    occupant_object_id: &occupant.object_id,
+                    incoming_branch_base: base_moment_id,
+                },
+                conflict_id: &occupancy_id,
+                path: &occupant.path,
+                base: &occupancy_base,
+                current: &occupancy_current,
+                incoming: &incoming,
+                recorded_at_ms: payload.recorded_at_ms,
+            },
+        )?;
+    }
+    Ok(opened)
+}
+
+fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
+    if !matches!(payload.operation.as_str(), "write" | "rename" | "delete")
+        || !matches!(
+            payload.before_present.as_str(),
+            "absent" | "null" | "present"
+        )
+        || payload.moment_id.is_empty()
+        || payload.version_id.is_empty()
+        || payload.object_id.is_empty()
+        || payload.path.is_empty()
+        || payload.payload_after_path.is_empty()
+        || payload.metadata.origin.is_empty()
+        || payload.author.as_ref().is_some_and(|author| {
+            author.kind != "agent"
+                || author.agent_id.is_empty()
+                || author.on_behalf_of.is_empty()
+                || author.agent_run_id.as_ref().is_some_and(String::is_empty)
+        })
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "moment.append payload is invalid",
+        });
+    }
+    Ok(())
+}
+
+fn require_version(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+) -> Result<(), SyncError> {
+    let exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM versions WHERE workspace_id=?1 AND version_id=?2)",
+            params![workspace_id, version_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if exists {
+        return Ok(());
+    }
+    Err(SyncError::InvalidInput {
+        reason: "moment.append target version is missing",
+    })
+}
+
+fn validate_payload_sides(
+    tx: &Transaction<'_>,
+    payload: &MomentAppendPayload,
+) -> Result<(), SyncError> {
+    if let (Some(sha), Some(path)) = (
+        payload.payload_before_blob_sha256.as_deref(),
+        payload.payload_before_path.as_deref(),
+    ) && !sha.is_empty()
+        && !path.is_empty()
+    {
+        hydrate_wire_side(
+            tx,
+            sha,
+            ContentKind::from_wire(payload.payload_before_content_kind.as_deref()),
+            payload.payload_before_byte_length,
+        )?;
+    }
+    hydrate_wire_side(
+        tx,
+        &payload.payload_after_blob_sha256,
+        ContentKind::from_wire(payload.payload_after_content_kind.as_deref()),
+        payload.payload_after_byte_length,
+    )?;
+    Ok(())
+}
+
+fn hydrate_wire_side(
+    tx: &Transaction<'_>,
+    sha: &str,
+    kind: ContentKind,
+    _byte_length: Option<i64>,
+) -> Result<(), SyncError> {
+    if kind == ContentKind::Binary {
+        require_binary_blob(tx, sha)?;
+    } else {
+        require_blob_text(tx, sha)?;
+    }
+    Ok(())
+}
+
+fn moment_before_from_payload(
+    tx: &Transaction<'_>,
+    payload: &MomentAppendPayload,
+) -> Result<MomentBefore, SyncError> {
+    match payload.before_present.as_str() {
+        "absent" => Ok(MomentBefore::Absent),
+        "null" => Ok(MomentBefore::Null),
+        "present" => {
+            let kind = ContentKind::from_wire(payload.before_content_kind.as_deref());
+            let digest = payload.before_blob_sha256.clone().unwrap_or_default();
+            let (text, byte_length) = match kind {
+                ContentKind::Text => {
+                    let text = require_blob_text(tx, &digest)?;
+                    let length = text.len() as i64;
+                    (text, length)
+                }
+                ContentKind::Binary => {
+                    let length = match payload.before_byte_length {
+                        Some(length) => length,
+                        None => require_binary_blob(tx, &digest)?,
+                    };
+                    (String::new(), length)
+                }
+            };
+            payload
+                .before_version_id
+                .as_ref()
+                .ok_or(SyncError::InvalidInput {
+                    reason: "moment.append before version is missing",
+                })?;
+            let _ = byte_length;
+            Ok(MomentBefore::Present(Box::new(Snapshot {
+                object_id: payload
+                    .before_object_id
+                    .clone()
+                    .ok_or(SyncError::InvalidInput {
+                        reason: "moment.append before object is missing",
+                    })?,
+                path: payload.before_path.clone().ok_or(SyncError::InvalidInput {
+                    reason: "moment.append before path is missing",
+                })?,
+                kind,
+                digest,
+                text,
+                updated_at_ms: payload
+                    .before_updated_at_ms
+                    .ok_or(SyncError::InvalidInput {
+                        reason: "moment.append before timestamp is missing",
+                    })?,
+                latest_moment_id: payload.before_latest_moment_id.clone().ok_or(
+                    SyncError::InvalidInput {
+                        reason: "moment.append before head is missing",
+                    },
+                )?,
+                metadata: payload.before_metadata.clone().unwrap_or(Metadata {
+                    origin: "unknown".to_owned(),
+                    summary: None,
+                    correlation_id: None,
+                }),
+            })))
+        }
+        _ => Err(SyncError::InvalidInput {
+            reason: "moment.append before presence is invalid",
+        }),
+    }
+}
+
+fn require_blob_text(tx: &Transaction<'_>, sha: &str) -> Result<String, SyncError> {
+    let text: Option<String> = tx
+        .query_row("SELECT text FROM blobs WHERE sha256=?1", [sha], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let text = text.ok_or(SyncError::BlobInvalid)?;
+    if hex_sha256(text.as_bytes()) != sha {
+        return Err(SyncError::BlobInvalid);
+    }
+    Ok(text)
+}
+
+fn require_binary_blob(tx: &Transaction<'_>, sha: &str) -> Result<i64, SyncError> {
+    let bytes: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT bytes FROM binary_blobs WHERE sha256=?1",
+            [sha],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    bytes
+        .map(|bytes| bytes.len() as i64)
+        .ok_or(SyncError::BlobInvalid)
+}
+
+fn select_snapshot_by_object(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<Option<Snapshot>, SyncError> {
+    tx.query_row(
+        "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
+                s.blob_sha256,s.binary_sha256,b.text,COALESCE(b.byte_length,bb.byte_length), \
+                s.updated_at_ms,s.latest_moment_id,s.metadata_origin \
+         FROM snapshots s \
+         LEFT JOIN blobs b ON b.sha256=s.blob_sha256 AND COALESCE(s.content_kind,'text')='text' \
+         LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 AND COALESCE(s.content_kind,'text')='binary' \
+         WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.object_id=?3",
+        params![workspace_id, version_id, object_id],
+        snapshot_from_row,
+    )
+    .optional()
+    .map_err(SyncError::corrupt)?
+    .transpose()
+}
+
+fn select_snapshot_by_path(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<Option<Snapshot>, SyncError> {
+    let aliased = tx
+        .query_row(
+            "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
+                    s.blob_sha256,s.binary_sha256,b.text,COALESCE(b.byte_length,bb.byte_length), \
+                    s.updated_at_ms,s.latest_moment_id,s.metadata_origin \
+             FROM path_aliases a \
+             JOIN snapshots s ON s.workspace_id=a.workspace_id AND s.version_id=a.version_id AND s.object_id=a.object_id \
+             LEFT JOIN blobs b ON b.sha256=s.blob_sha256 AND COALESCE(s.content_kind,'text')='text' \
+             LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 AND COALESCE(s.content_kind,'text')='binary' \
+             WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
+            params![workspace_id, version_id, path],
+            snapshot_from_row,
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?
+        .transpose()?;
+    if let Some(snapshot) = aliased {
+        if snapshot.path != path {
+            return Err(SyncError::CoordinateDiverged);
+        }
+        return Ok(Some(snapshot));
+    }
+    let mut statement = tx
+        .prepare(
+            "SELECT s.object_id,s.version_id,s.path,COALESCE(s.content_kind,'text'), \
+                    s.blob_sha256,s.binary_sha256,b.text,COALESCE(b.byte_length,bb.byte_length), \
+                    s.updated_at_ms,s.latest_moment_id,s.metadata_origin \
+             FROM snapshots s \
+             LEFT JOIN blobs b ON b.sha256=s.blob_sha256 AND COALESCE(s.content_kind,'text')='text' \
+             LEFT JOIN binary_blobs bb ON bb.sha256=s.binary_sha256 AND COALESCE(s.content_kind,'text')='binary' \
+             WHERE s.workspace_id=?1 AND s.version_id=?2 AND s.path=?3 LIMIT 2",
+        )
+        .map_err(SyncError::corrupt)?;
+    let rows = statement
+        .query_map(params![workspace_id, version_id, path], snapshot_from_row)
+        .map_err(SyncError::corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(SyncError::corrupt)?;
+    if rows.len() > 1 {
+        return Err(SyncError::CoordinateDiverged);
+    }
+    rows.into_iter().next().transpose()
+}
+
+fn snapshot_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<Snapshot, SyncError>> {
+    let kind: String = row.get(3)?;
+    let kind = match kind.as_str() {
+        "text" => ContentKind::Text,
+        "binary" => ContentKind::Binary,
+        _ => {
+            return Ok(Err(SyncError::CoordinateDiverged));
+        }
+    };
+    let text: Option<String> = row.get(6)?;
+    let digest = match kind {
+        ContentKind::Text => row.get::<_, Option<String>>(4)?,
+        ContentKind::Binary => row.get::<_, Option<String>>(5)?,
+    };
+    let Some(digest) = digest else {
+        return Ok(Err(SyncError::CoordinateDiverged));
+    };
+    let text = match (kind, text) {
+        (ContentKind::Text, Some(text)) => text,
+        (ContentKind::Binary, _) => String::new(),
+        _ => return Ok(Err(SyncError::CoordinateDiverged)),
+    };
+    let byte_length: Option<i64> = row.get(7)?;
+    if byte_length.is_none() {
+        return Ok(Err(SyncError::CoordinateDiverged));
+    }
+    let _version_id: String = row.get(1)?;
+    Ok(Ok(Snapshot {
+        object_id: row.get(0)?,
+        path: row.get(2)?,
+        kind,
+        digest,
+        text,
+        updated_at_ms: row.get(8)?,
+        latest_moment_id: row.get(9)?,
+        metadata: Metadata {
+            origin: row.get(10)?,
+            summary: None,
+            correlation_id: None,
+        },
+    }))
+}
+
+fn ensure_file_object(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    payload: &MomentAppendPayload,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO file_objects (workspace_id,object_id,created_at_ms) \
+         VALUES (?1,?2,?3)",
+        params![
+            workspace_id,
+            payload.object_id,
+            payload
+                .object_created_at_ms
+                .unwrap_or(payload.recorded_at_ms)
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+fn insert_moment(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    payload: &MomentAppendPayload,
+    before: &MomentBefore,
+    record_only: bool,
+) -> Result<(), SyncError> {
+    let order: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(moment_order),-1)+1 FROM moments WHERE workspace_id=?1",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    let after_kind = ContentKind::from_wire(payload.payload_after_content_kind.as_deref());
+    let (after_text_sha, after_binary_sha) = match after_kind {
+        ContentKind::Text => (Some(payload.payload_after_blob_sha256.as_str()), None),
+        ContentKind::Binary if payload.payload_after_blob_sha256.is_empty() => {
+            return Err(SyncError::BlobInvalid);
+        }
+        ContentKind::Binary => (None, Some(payload.payload_after_blob_sha256.as_str())),
+    };
+    let (before_present, before_kind, before_text_sha, before_binary_sha, before_latest) =
+        match before {
+            MomentBefore::Absent => (0_i64, ContentKind::Text, None, None, None),
+            MomentBefore::Null => (1_i64, ContentKind::Text, None, None, None),
+            MomentBefore::Present(snapshot) => match snapshot.kind {
+                ContentKind::Text => (
+                    2,
+                    snapshot.kind,
+                    Some(snapshot.digest.as_str()),
+                    None,
+                    Some(snapshot.latest_moment_id.as_str()),
+                ),
+                ContentKind::Binary if snapshot.digest.is_empty() => {
+                    return Err(SyncError::BlobInvalid);
+                }
+                ContentKind::Binary => (
+                    2,
+                    snapshot.kind,
+                    None,
+                    Some(snapshot.digest.as_str()),
+                    Some(snapshot.latest_moment_id.as_str()),
+                ),
+            },
+        };
+    let author_json = payload
+        .author
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|_| SyncError::InvalidInput {
+            reason: "moment.append author is invalid",
+        })?;
+    tx.execute(
+        "INSERT INTO moments (
+           workspace_id,moment_order,moment_id,version_id,object_id,path,recorded_at_ms,
+           operation,after_blob_sha256,before_present,before_blob_sha256,
+           before_latest_moment_id,metadata_origin,author_json,sync_record_only,
+           after_content_kind,after_binary_sha256,before_content_kind,before_binary_sha256
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
+        params![
+            workspace_id,
+            order,
+            payload.moment_id,
+            payload.version_id,
+            payload.object_id,
+            payload.path,
+            payload.recorded_at_ms,
+            payload.operation,
+            after_text_sha,
+            before_present,
+            before_text_sha,
+            before_latest,
+            payload.metadata.origin,
+            author_json,
+            record_only.then_some(1_i64),
+            after_kind.as_str(),
+            after_binary_sha,
+            before_kind.as_str(),
+            before_binary_sha,
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+fn upsert_snapshot(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    payload: &MomentAppendPayload,
+    kind: ContentKind,
+    _byte_length: i64,
+) -> Result<(), SyncError> {
+    let (text_sha, binary_sha) = match kind {
+        ContentKind::Text => (Some(payload.payload_after_blob_sha256.as_str()), None),
+        ContentKind::Binary => (None, Some(payload.payload_after_blob_sha256.as_str())),
+    };
+    tx.execute(
+        "INSERT INTO snapshots (
+           workspace_id,version_id,object_id,path,blob_sha256,updated_at_ms,
+           latest_moment_id,metadata_origin,content_kind,binary_sha256
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+         ON CONFLICT(workspace_id,version_id,object_id) DO UPDATE SET
+           path=excluded.path,blob_sha256=excluded.blob_sha256,
+           updated_at_ms=excluded.updated_at_ms,latest_moment_id=excluded.latest_moment_id,
+           metadata_origin=excluded.metadata_origin,content_kind=excluded.content_kind,
+           binary_sha256=excluded.binary_sha256",
+        params![
+            workspace_id,
+            payload.version_id,
+            payload.object_id,
+            payload.payload_after_path,
+            text_sha,
+            payload.recorded_at_ms,
+            payload.moment_id,
+            payload.metadata.origin,
+            kind.as_str(),
+            binary_sha
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+fn delete_search_row(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "DELETE FROM engine_search_files_fts \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3",
+        params![workspace_id, version_id, object_id],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+fn upsert_search_row(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    payload: &MomentAppendPayload,
+    kind: ContentKind,
+    text: &str,
+) -> Result<(), SyncError> {
+    delete_search_row(tx, workspace_id, &payload.version_id, &payload.object_id)?;
+    if kind == ContentKind::Text {
+        tx.execute(
+            "INSERT INTO engine_search_files_fts (workspace_id,version_id,object_id,path,text) \
+             VALUES (?1,?2,?3,?4,?5)",
+            params![
+                workspace_id,
+                payload.version_id,
+                payload.object_id,
+                payload.payload_after_path,
+                text
+            ],
+        )
+        .map_err(SyncError::persist)?;
+    }
+    Ok(())
+}
+
+fn side_from_snapshot(snapshot: &Snapshot) -> ConflictSide {
+    ConflictSide {
+        exists: true,
+        path: snapshot.path.clone(),
+        object_id: Some(snapshot.object_id.clone()),
+        kind: Some(snapshot.kind),
+        digest: Some(snapshot.digest.clone()),
+        updated_at_ms: Some(snapshot.updated_at_ms),
+        latest_moment_id: Some(snapshot.latest_moment_id.clone()),
+        metadata: Some(snapshot.metadata.clone()),
+    }
+}
+
+fn before_conflict_side(payload: &MomentAppendPayload) -> ConflictSide {
+    if payload.before_present != "present" {
+        return ConflictSide::absent(
+            payload
+                .payload_before_path
+                .as_deref()
+                .unwrap_or(&payload.path),
+        );
+    }
+    ConflictSide {
+        exists: true,
+        path: payload
+            .before_path
+            .clone()
+            .unwrap_or_else(|| payload.path.clone()),
+        object_id: payload.before_object_id.clone(),
+        kind: Some(ContentKind::from_wire(
+            payload.before_content_kind.as_deref(),
+        )),
+        digest: Some(payload.before_blob_sha256.clone().unwrap_or_default()),
+        updated_at_ms: payload.before_updated_at_ms,
+        latest_moment_id: payload.before_latest_moment_id.clone(),
+        metadata: Some(payload.before_metadata.clone().unwrap_or(Metadata {
+            origin: "unknown".to_owned(),
+            summary: None,
+            correlation_id: None,
+        })),
+    }
+}
+
+fn incoming_side(payload: &MomentAppendPayload) -> ConflictSide {
+    if payload.operation == "delete" {
+        return ConflictSide::absent(&payload.payload_after_path);
+    }
+    ConflictSide {
+        exists: true,
+        path: payload.payload_after_path.clone(),
+        object_id: Some(payload.object_id.clone()),
+        kind: Some(ContentKind::from_wire(
+            payload.payload_after_content_kind.as_deref(),
+        )),
+        digest: Some(payload.payload_after_blob_sha256.clone()),
+        updated_at_ms: Some(payload.recorded_at_ms),
+        latest_moment_id: Some(payload.moment_id.clone()),
+        metadata: Some(payload.metadata.clone()),
+    }
+}
+
+fn local_branch_root(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    base_moment_id: Option<&str>,
+) -> Result<Option<String>, SyncError> {
+    tx.query_row(
+        "SELECT moment_id FROM moments \
+         WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
+           AND before_latest_moment_id IS ?4 \
+           AND (sync_record_only IS NULL OR sync_record_only=0) \
+         ORDER BY moment_order LIMIT 1",
+        params![workspace_id, version_id, object_id, base_moment_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(SyncError::corrupt)
+}
+
+fn sync_conflict_id(
+    workspace_id: &str,
+    version_id: &str,
+    object_id: &str,
+    base_moment_id: Option<&str>,
+    roots: Option<(Option<&str>, Option<&str>)>,
+) -> String {
+    let mut input = format!(
+        "{workspace_id}\0{version_id}\0{object_id}\0{}",
+        base_moment_id.unwrap_or("\0absent-base")
+    );
+    if let Some((local, incoming)) = roots {
+        let local = local.unwrap_or("\0absent-local-root");
+        let incoming = incoming.unwrap_or("\0absent-incoming-root");
+        let (low, high) = if js_string_cmp(local, incoming) != Ordering::Greater {
+            (local, incoming)
+        } else {
+            (incoming, local)
+        };
+        input.push('\0');
+        input.push_str(low);
+        input.push('\0');
+        input.push_str(high);
+    }
+    let digest = Sha256::digest(input.as_bytes());
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    format!("conflict_sync_{}", &hex[..32])
+}
+
+fn js_string_cmp(left: &str, right: &str) -> Ordering {
+    left.encode_utf16().cmp(right.encode_utf16())
+}
+
+fn open_or_coalesce(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    conflict: OpenConflict<'_>,
+) -> Result<i64, SyncError> {
+    let existing = match conflict.anchor {
+        CoalesceAnchor::SameObject {
+            diverging_object_id,
+            incoming_branch_base,
+        } => tx
+            .query_row(
+                "SELECT conflict_id FROM conflicts \
+                 WHERE workspace_id=?1 AND status='open' AND metadata_origin='sync' \
+                   AND target_version_id=?2 AND incoming_object_id IS ?3 \
+                   AND incoming_latest_moment_id IS ?4 \
+                 ORDER BY (current_object_id IS ?3) DESC,created_at_ms,conflict_id LIMIT 1",
+                params![
+                    workspace_id,
+                    conflict.version_id,
+                    diverging_object_id,
+                    incoming_branch_base
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?,
+        CoalesceAnchor::Occupancy {
+            occupant_object_id,
+            incoming_branch_base,
+        } => tx
+            .query_row(
+                "SELECT conflict_id FROM conflicts \
+                 WHERE workspace_id=?1 AND status='open' AND metadata_origin='sync' \
+                   AND target_version_id=?2 AND current_object_id IS ?3 \
+                   AND incoming_latest_moment_id IS ?4 \
+                 ORDER BY created_at_ms,conflict_id LIMIT 1",
+                params![
+                    workspace_id,
+                    conflict.version_id,
+                    occupant_object_id,
+                    incoming_branch_base
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(SyncError::corrupt)?,
+    };
+    if let Some(conflict_id) = existing {
+        coalesce_conflict_sides(
+            tx,
+            workspace_id,
+            &conflict_id,
+            conflict.incoming,
+            conflict.recorded_at_ms,
+        )?;
+        return Ok(0);
+    }
+
+    let duplicate: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM conflicts WHERE workspace_id=?1 AND conflict_id=?2)",
+            params![workspace_id, conflict.conflict_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if duplicate {
+        return Ok(0);
+    }
+    insert_conflict(tx, workspace_id, &conflict)?;
+    Ok(1)
+}
+
+fn coalesce_conflict_sides(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    conflict_id: &str,
+    incoming: &ConflictSide,
+    updated_at_ms: i64,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "UPDATE conflicts SET updated_at_ms=?3,
+           incoming_exists=?4,incoming_path=?5,incoming_object_id=?6,
+           incoming_content_kind=?7,incoming_blob_sha256=?8,incoming_binary_sha256=?9,
+           incoming_updated_at_ms=?10,incoming_latest_moment_id=?11,
+           incoming_metadata_origin=?12,incoming_metadata_summary=?13,
+           incoming_metadata_correlation_id=?14
+         WHERE workspace_id=?1 AND conflict_id=?2",
+        params![
+            workspace_id,
+            conflict_id,
+            updated_at_ms,
+            i64::from(incoming.exists),
+            incoming.path,
+            incoming.object_id,
+            incoming.kind.map(ContentKind::as_str),
+            incoming.text_digest(),
+            incoming.binary_digest(),
+            incoming.updated_at_ms,
+            incoming.latest_moment_id,
+            incoming
+                .metadata
+                .as_ref()
+                .map(|value| value.origin.as_str()),
+            incoming
+                .metadata
+                .as_ref()
+                .and_then(|value| value.summary.as_deref()),
+            incoming
+                .metadata
+                .as_ref()
+                .and_then(|value| value.correlation_id.as_deref()),
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+fn insert_conflict(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    conflict: &OpenConflict<'_>,
+) -> Result<(), SyncError> {
+    let b = conflict.base;
+    let c = conflict.current;
+    let i = conflict.incoming;
+    tx.execute(
+        "INSERT INTO conflicts (
+          workspace_id,conflict_id,path,target_version_id,source_version_id,
+          created_at_ms,updated_at_ms,status,chosen_from,resolution,
+          metadata_origin,metadata_summary,metadata_correlation_id,
+          base_exists,base_path,base_object_id,base_content_kind,base_blob_sha256,
+          base_updated_at_ms,base_latest_moment_id,base_metadata_origin,
+          base_metadata_summary,base_metadata_correlation_id,
+          current_exists,current_path,current_object_id,current_content_kind,current_blob_sha256,
+          current_updated_at_ms,current_latest_moment_id,current_metadata_origin,
+          current_metadata_summary,current_metadata_correlation_id,
+          incoming_exists,incoming_path,incoming_object_id,incoming_content_kind,incoming_blob_sha256,
+          incoming_updated_at_ms,incoming_latest_moment_id,incoming_metadata_origin,
+          incoming_metadata_summary,incoming_metadata_correlation_id,
+          base_binary_sha256,current_binary_sha256,incoming_binary_sha256
+        ) VALUES (
+          ?1,?2,?3,?4,?4,?5,?5,'open','current',NULL,'sync',NULL,NULL,
+          ?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,
+          ?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,
+          ?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,
+          ?36,?37,?38)",
+        params![
+            workspace_id,
+            conflict.conflict_id,
+            conflict.path,
+            conflict.version_id,
+            conflict.recorded_at_ms,
+            i64::from(b.exists),
+            b.path,
+            b.object_id,
+            b.kind.map(ContentKind::as_str),
+            b.text_digest(),
+            b.updated_at_ms,
+            b.latest_moment_id,
+            b.metadata.as_ref().map(|value| value.origin.as_str()),
+            b.metadata
+                .as_ref()
+                .and_then(|value| value.summary.as_deref()),
+            b.metadata
+                .as_ref()
+                .and_then(|value| value.correlation_id.as_deref()),
+            i64::from(c.exists),
+            c.path,
+            c.object_id,
+            c.kind.map(ContentKind::as_str),
+            c.text_digest(),
+            c.updated_at_ms,
+            c.latest_moment_id,
+            c.metadata.as_ref().map(|value| value.origin.as_str()),
+            c.metadata
+                .as_ref()
+                .and_then(|value| value.summary.as_deref()),
+            c.metadata
+                .as_ref()
+                .and_then(|value| value.correlation_id.as_deref()),
+            i64::from(i.exists),
+            i.path,
+            i.object_id,
+            i.kind.map(ContentKind::as_str),
+            i.text_digest(),
+            i.updated_at_ms,
+            i.latest_moment_id,
+            i.metadata.as_ref().map(|value| value.origin.as_str()),
+            i.metadata
+                .as_ref()
+                .and_then(|value| value.summary.as_deref()),
+            i.metadata
+                .as_ref()
+                .and_then(|value| value.correlation_id.as_deref()),
+            b.binary_digest(),
+            c.binary_digest(),
+            i.binary_digest(),
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}

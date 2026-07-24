@@ -6210,6 +6210,19 @@ fn central_router_recognizes_every_owned_kind_and_fails_unknown_closed() {
     }
 
     let (_scratch, _path, mut engine) = store();
+    let workspace = envelope("router-workspace", 0, "workspace.init", json!({}));
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &workspace, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(_))
+    ));
+    // moment.append is no longer the not-implemented stub: it routes to the real
+    // applier, so a malformed payload is rejected by that applier rather than by
+    // the router.
+    let moment = envelope("router-moment", 0, "moment.append", json!({}));
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &moment, &NoFaults, &NoLiveLeases),
+        Err(SyncError::InvalidInput { .. })
+    ));
     let unknown = envelope("router-unknown", 0, "version.rename", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &unknown, &NoFaults, &NoLiveLeases),
@@ -6540,12 +6553,12 @@ fn router_preserves_a_deferred_conflict_resolve_instead_of_flattening_it() {
 }
 
 #[test]
-fn moment_append_router_error_is_distinct_and_never_acks() {
+fn malformed_moment_append_router_error_never_acks() {
     let (_scratch, _path, mut engine) = store();
     let operation = envelope("moment-peer", 0, "moment.append", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Err(SyncError::MomentAppendNotImplemented)
+        Err(SyncError::InvalidInput { .. })
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "moment-peer").expect("ack"),

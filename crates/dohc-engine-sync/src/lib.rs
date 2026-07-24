@@ -15,6 +15,7 @@ mod error;
 mod hydration;
 mod journal;
 mod model;
+mod moment_apply;
 mod path_policy;
 mod relay;
 mod router;
@@ -38,6 +39,7 @@ pub use journal::{
     list_replication_ops, read_replication_acked_seq, read_sync_identity,
 };
 pub use model::{MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH, MAX_WIRE_INTEGER, ReplicationEnvelope};
+pub use moment_apply::apply_moment_envelope;
 pub use path_policy::{PathClass, classify_share_path};
 pub use relay::{
     ClaimRequest, ClaimResponse, KeyEnvelopeRequest, KeyEnvelopeResponse, ProbeRequest,
@@ -56,5 +58,7 @@ pub use ydoc_apply::{
 
 pub use dohc_engine_storage::{FaultInjector, FaultPoint, NoFaults};
 
+#[cfg(test)]
+mod moment_apply_tests;
 #[cfg(test)]
 mod tests;
