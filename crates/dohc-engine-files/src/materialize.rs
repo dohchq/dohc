@@ -141,6 +141,19 @@ impl ReplaceBackoff for NoBackoff {
     fn wait_before_retry(&self, _failed_attempt: u32) {}
 }
 
+trait SecretTempRemover: Send + Sync {
+    fn remove_file(&self, path: &Path) -> std::io::Result<()>;
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct StdSecretTempRemover;
+
+impl SecretTempRemover for StdSecretTempRemover {
+    fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::remove_file(path)
+    }
+}
+
 /// The terminal outcome of one job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobOutcome {
@@ -190,6 +203,10 @@ pub enum MaterializeError {
     /// (would follow the link out of the tree). `LANGUAGE_SEMANTICS_MATRIX` 8.1.
     #[error("job target is a symlink; refusing to overwrite through it")]
     SymlinkTarget,
+    /// A secret target exists but cannot safely be compared or replaced (for
+    /// example, it is a directory or special file). The job remains pending.
+    #[error("secret materialization target is not a bounded regular file")]
+    BlockedTarget,
     /// The atomic replace exhausted its bounded retry budget on transient
     /// sharing violations; the job is left pending for startup replay.
     #[error("atomic replace exhausted {MAX_REPLACE_ATTEMPTS} attempts (file locked)")]
@@ -215,6 +232,7 @@ impl MaterializeError {
             MaterializeError::MissingBlob { .. } => "missing-blob",
             MaterializeError::UnsafeTargetPath => "unsafe-target-path",
             MaterializeError::SymlinkTarget => "symlink-target",
+            MaterializeError::BlockedTarget => "blocked-target",
             MaterializeError::FileLocked => "file-locked",
             MaterializeError::TooLarge { .. } => "materialize-too-large",
         }
@@ -311,9 +329,254 @@ pub fn materialize_one(
             actual: content.len(),
         });
     }
+    materialize_write_content(
+        store,
+        &target,
+        job,
+        &content,
+        policy,
+        replacer,
+        backoff,
+        now_ms,
+        faults,
+        true,
+        None,
+        &StdSecretTempRemover,
+    )
+}
 
-    // Step 1 (idempotent replay): the target already equals the desired content.
+/// Execute a secret write through the same atomic-replace pipeline without
+/// ever persisting plaintext in the content-blob table. The current disk state
+/// is adopted as the immediate preimage, and conflict handling never writes a
+/// plaintext `.conflict` sibling.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each seam is injected for testability"
+)]
+pub fn materialize_secret_one(
+    store: &EngineStore,
+    root: &Path,
+    job: &MaterializationJob,
+    plaintext: &[u8],
+    policy: DurabilityPolicy,
+    replacer: &dyn AtomicReplacer,
+    backoff: &dyn ReplaceBackoff,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<JobOutcome, MaterializeError> {
+    materialize_secret_one_with_remover(
+        store,
+        root,
+        job,
+        plaintext,
+        policy,
+        replacer,
+        backoff,
+        now_ms,
+        faults,
+        &StdSecretTempRemover,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each seam is injected for testability"
+)]
+fn materialize_secret_one_with_remover(
+    store: &EngineStore,
+    root: &Path,
+    job: &MaterializationJob,
+    plaintext: &[u8],
+    policy: DurabilityPolicy,
+    replacer: &dyn AtomicReplacer,
+    backoff: &dyn ReplaceBackoff,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    secret_temp_remover: &dyn SecretTempRemover,
+) -> Result<JobOutcome, MaterializeError> {
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+    let target = resolve_target(&canonical_root, &job.target_path)?;
+    ensure_secret_target_symlink_free(&canonical_root, &target)?;
+    if should_crash(faults, FaultPoint::MaterializeAfterJobCommit) {
+        return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit));
+    }
+    if plaintext.len() > MAX_MATERIALIZE_BYTES {
+        return Err(MaterializeError::TooLarge {
+            actual: plaintext.len(),
+        });
+    }
+    let desired_sha = hex_sha256(plaintext);
     let current = read_current_no_follow(&target)?;
+    if let CurrentTarget::Present(bytes) = &current
+        && hex_sha256(bytes) == desired_sha
+    {
+        store.mark_materialization_complete(&job.job_id, now_ms)?;
+        return Ok(JobOutcome::AlreadyMaterialized);
+    }
+    let preimage = match current {
+        CurrentTarget::Absent => Preimage::Absent,
+        CurrentTarget::Present(bytes) => Preimage::Present(hex_sha256(&bytes)),
+        CurrentTarget::Oversized => {
+            return Err(MaterializeError::BlockedTarget);
+        }
+    };
+    let plaintext_job = MaterializationJob {
+        content_sha256: desired_sha,
+        preimage,
+        ..job.clone()
+    };
+    materialize_write_content(
+        store,
+        &target,
+        &plaintext_job,
+        plaintext,
+        policy,
+        replacer,
+        backoff,
+        now_ms,
+        faults,
+        false,
+        Some(&canonical_root),
+        secret_temp_remover,
+    )
+}
+
+/// Execute an active-version secret delete after the runtime has resolved the
+/// versioned current tip. Unlike the generic pipeline, this deliberately has no
+/// workspace-wide generation fence: generations from another version cannot
+/// suppress deletion of the active disk projection. The keyless delete cannot
+/// name a plaintext preimage, so it adopts and removes the current regular file
+/// without ever creating a plaintext conflict artifact.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each seam is injected for testability"
+)]
+pub fn materialize_secret_delete_one(
+    store: &EngineStore,
+    root: &Path,
+    job: &MaterializationJob,
+    policy: DurabilityPolicy,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<JobOutcome, MaterializeError> {
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
+    let target = resolve_target(&canonical_root, &job.target_path)?;
+    ensure_secret_target_symlink_free(&canonical_root, &target)?;
+    if should_crash(faults, FaultPoint::MaterializeAfterJobCommit) {
+        return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit));
+    }
+    materialize_secret_delete_adopting_current(
+        store,
+        &canonical_root,
+        &target,
+        job,
+        policy,
+        now_ms,
+        faults,
+    )
+}
+
+fn materialize_secret_delete_adopting_current(
+    store: &EngineStore,
+    root: &Path,
+    target: &Path,
+    job: &MaterializationJob,
+    policy: DurabilityPolicy,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<JobOutcome, MaterializeError> {
+    match read_current_no_follow(target)? {
+        CurrentTarget::Absent => {
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+            return Ok(JobOutcome::AlreadyMaterialized);
+        }
+        CurrentTarget::Present(_) => {}
+        CurrentTarget::Oversized => return Err(MaterializeError::BlockedTarget),
+    }
+    if should_crash(faults, FaultPoint::MaterializeBeforePreimageRevalidate) {
+        return Ok(JobOutcome::Crashed(
+            FaultPoint::MaterializeBeforePreimageRevalidate,
+        ));
+    }
+    // Re-read immediately before unlinking to preserve no-follow semantics.
+    // Any regular file currently at the active secret's own resolved path is
+    // the disk projection being retired; no plaintext hash or conflict copy is
+    // needed (or safe) for a secret delete.
+    match read_current_no_follow(target)? {
+        CurrentTarget::Absent => {
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+            return Ok(JobOutcome::AlreadyMaterialized);
+        }
+        CurrentTarget::Present(_) => {}
+        CurrentTarget::Oversized => return Err(MaterializeError::BlockedTarget),
+    }
+    ensure_secret_target_symlink_free(root, target)?;
+    std::fs::remove_file(target).map_err(|err| MaterializeError::io(target, &err))?;
+    sync_parent_dir(target.parent(), policy)?;
+    if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
+        return Ok(JobOutcome::Crashed(
+            FaultPoint::MaterializeAfterRenameBeforeComplete,
+        ));
+    }
+    store.mark_materialization_complete(&job.job_id, now_ms)?;
+    Ok(JobOutcome::Completed)
+}
+
+struct SecretPlaintextTempCleanup<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+impl<'a> SecretPlaintextTempCleanup<'a> {
+    fn new(path: &'a Path, armed: bool) -> Self {
+        SecretPlaintextTempCleanup { path, armed }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    fn arm(&mut self) {
+        self.armed = true;
+    }
+}
+
+impl Drop for SecretPlaintextTempCleanup<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(self.path);
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each seam is injected for testability"
+)]
+fn materialize_write_content(
+    store: &EngineStore,
+    target: &Path,
+    job: &MaterializationJob,
+    content: &[u8],
+    policy: DurabilityPolicy,
+    replacer: &dyn AtomicReplacer,
+    backoff: &dyn ReplaceBackoff,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    preserve_conflict_artifact: bool,
+    secret_root: Option<&Path>,
+    secret_temp_remover: &dyn SecretTempRemover,
+) -> Result<JobOutcome, MaterializeError> {
+    if let Some(root) = secret_root {
+        ensure_secret_target_symlink_free(root, target)?;
+    }
+    // Step 1 (idempotent replay): the target already equals the desired content.
+    let current = read_current_no_follow(target)?;
+    if secret_root.is_some() && matches!(current, CurrentTarget::Oversized) {
+        return Err(MaterializeError::BlockedTarget);
+    }
     if let CurrentTarget::Present(bytes) = &current
         && hex_sha256(bytes) == job.content_sha256
     {
@@ -325,22 +588,37 @@ pub fn materialize_one(
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| MaterializeError::io(parent, &e))?;
     }
+    if let Some(root) = secret_root {
+        ensure_secret_target_symlink_free(root, target)?;
+    }
 
     // Step 2: sibling temp file, bounded, restrictive mode.
-    let tmp = temp_sibling(&target, &job.job_id);
-    write_temp(&tmp, &content)?;
+    let tmp = temp_sibling(target, &job.job_id);
+    // Secret writes never preserve a plaintext temp on a returned error. The
+    // ordinary materializer keeps its established crash/replay behavior.
+    let mut secret_temp_cleanup = SecretPlaintextTempCleanup::new(&tmp, false);
+    let temp_file = if preserve_conflict_artifact {
+        write_temp(&tmp, content)?
+    } else {
+        let file = write_secret_temp_no_follow(&tmp, content)?;
+        secret_temp_cleanup.arm();
+        file
+    };
     if should_crash(faults, FaultPoint::MaterializeAfterTempWrite) {
         // A crash here leaves an orphan temp; startup replay ignores it (temp is
         // never captured as user content — it lives under a `.dohc-write-` name
         // the path floor excludes) and re-runs the job.
+        secret_temp_cleanup.disarm();
         return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterTempWrite));
     }
 
     // Step 3: flush the temp FILE per the per-OS durability policy. The parent
     // directory is synced AFTER the rename (below), which is where the rename's
     // durability actually lives on POSIX.
-    flush_temp_file(&tmp, policy)?;
+    flush_temp_file(&temp_file, &tmp, policy)?;
+    drop(temp_file);
     if should_crash(faults, FaultPoint::MaterializeAfterFlushBeforeRename) {
+        secret_temp_cleanup.disarm();
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterFlushBeforeRename,
         ));
@@ -350,6 +628,7 @@ pub fn materialize_one(
     // point fires FIRST so a trace can mutate the target and prove we observe
     // the newer external content rather than clobbering it.
     if should_crash(faults, FaultPoint::MaterializeBeforePreimageRevalidate) {
+        secret_temp_cleanup.disarm();
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeBeforePreimageRevalidate,
         ));
@@ -358,7 +637,13 @@ pub fn materialize_one(
     // an external write in the gap is clobbered — the documented residual TOCTOU
     // (module docs + BEHAVIOR_DELTA). The common case (an editor that wrote
     // before the pipeline ran) IS caught here.
-    let current_now = read_current_no_follow(&target)?;
+    if let Some(root) = secret_root {
+        ensure_secret_target_symlink_free(root, target)?;
+    }
+    let current_now = read_current_no_follow(target)?;
+    if secret_root.is_some() && matches!(current_now, CurrentTarget::Oversized) {
+        return Err(MaterializeError::BlockedTarget);
+    }
     if !preimage_matches(&job.preimage, &current_now) {
         // External newer content: preserve BOTH. Keep the on-disk target
         // untouched; persist our intended content to a `.conflict` sibling so it
@@ -366,8 +651,15 @@ pub fn materialize_one(
         // `.conflict` artifact is on the path floor, so the scanner does NOT
         // auto-capture it as a new tracked document — the user/agent inspects
         // and resolves it manually.
-        let conflict_path = conflict_sibling(&target, &job.job_id);
-        rename_no_follow(&tmp, &conflict_path, replacer)?;
+        if preserve_conflict_artifact {
+            let conflict_path = conflict_sibling(target, &job.job_id);
+            rename_no_follow(&tmp, &conflict_path, replacer)?;
+        } else if secret_temp_remover.remove_file(&tmp).is_ok() {
+            // Keep the guard armed until removal actually succeeds. If this
+            // best-effort attempt fails, Drop retries instead of leaking a
+            // plaintext secret temp on the conflict return path.
+            secret_temp_cleanup.disarm();
+        }
         store.mark_materialization_conflict(&job.job_id, now_ms)?;
         return Ok(JobOutcome::Conflict);
     }
@@ -375,17 +667,25 @@ pub fn materialize_one(
     // Step 5: atomic replace with bounded retry, then make the rename itself
     // durable by syncing the parent directory (POSIX), THEN mark complete — so a
     // crash can never leave the job marked complete over a non-durable rename.
-    replace_with_bounded_retry(&tmp, &target, replacer, backoff)?;
+    if let Some(root) = secret_root {
+        ensure_secret_target_symlink_free(root, target)?;
+    }
+    // This final path-based check narrows but cannot close an ancestor
+    // rename-TOCTOU: a workspace writer can still swap a checked parent before
+    // `rename`. Full closure needs future dirfd/openat2 + renameat work.
+    replace_with_bounded_retry(&tmp, target, replacer, backoff)?;
     sync_parent_dir(target.parent(), policy)?;
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
         // Renamed but not marked complete. Startup replay: the target now equals
         // the desired content, so step 1 short-circuits and marks complete —
         // exactly-once, no second write.
+        secret_temp_cleanup.disarm();
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterRenameBeforeComplete,
         ));
     }
     store.mark_materialization_complete(&job.job_id, now_ms)?;
+    secret_temp_cleanup.disarm();
     Ok(JobOutcome::Completed)
 }
 
@@ -495,6 +795,46 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
     Ok(out)
 }
 
+/// Refuse every symlink/reparse point strictly below the already-canonicalized
+/// workspace root through the secret target. This is intentionally
+/// secret-scoped: ordinary materialized files retain their established symlink
+/// semantics, while plaintext secrets never traverse an aliased child.
+fn ensure_secret_target_symlink_free(root: &Path, target: &Path) -> Result<(), MaterializeError> {
+    let relative = target
+        .strip_prefix(root)
+        .map_err(|_| MaterializeError::UnsafeTargetPath)?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        reject_link_or_reparse(&current)?;
+    }
+    Ok(())
+}
+
+fn reject_link_or_reparse(path: &Path) -> Result<(), MaterializeError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(MaterializeError::io(path, &err)),
+    };
+    if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+        return Err(MaterializeError::SymlinkTarget);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
 fn temp_sibling(target: &Path, job_id: &str) -> PathBuf {
     sibling_with_name(target, &format!(".dohc-write-{}.tmp", sanitize(job_id)))
 }
@@ -522,7 +862,7 @@ fn sanitize(id: &str) -> String {
         .collect()
 }
 
-fn write_temp(tmp: &Path, content: &[u8]) -> Result<(), MaterializeError> {
+fn write_temp(tmp: &Path, content: &[u8]) -> Result<std::fs::File, MaterializeError> {
     use std::io::Write as _;
     // Restrictive mode where supported; truncate any stale temp.
     let mut opts = std::fs::OpenOptions::new();
@@ -535,18 +875,62 @@ fn write_temp(tmp: &Path, content: &[u8]) -> Result<(), MaterializeError> {
     let mut file = opts.open(tmp).map_err(|e| MaterializeError::io(tmp, &e))?;
     file.write_all(content)
         .map_err(|e| MaterializeError::io(tmp, &e))?;
-    Ok(())
+    Ok(file)
 }
 
-fn flush_temp_file(tmp: &Path, policy: DurabilityPolicy) -> Result<(), MaterializeError> {
+/// Create a secret plaintext temp as a brand-new, non-following filesystem
+/// entry. A stale regular temp is unlinked and exclusive creation is retried
+/// once; a symlink, junction, or other reparse point is refused.
+fn write_secret_temp_no_follow(
+    tmp: &Path,
+    content: &[u8],
+) -> Result<std::fs::File, MaterializeError> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let mut file = match opts.open(tmp) {
+        Ok(file) => file,
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+            let metadata = std::fs::symlink_metadata(tmp)
+                .map_err(|metadata_err| MaterializeError::io(tmp, &metadata_err))?;
+            if metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata) {
+                return Err(MaterializeError::SymlinkTarget);
+            }
+            if !metadata.file_type().is_file() {
+                return Err(MaterializeError::io(tmp, &err));
+            }
+            std::fs::remove_file(tmp)
+                .map_err(|remove_err| MaterializeError::io(tmp, &remove_err))?;
+            opts.open(tmp)
+                .map_err(|retry_err| MaterializeError::io(tmp, &retry_err))?
+        }
+        Err(err) => return Err(MaterializeError::io(tmp, &err)),
+    };
+    if let Err(err) = file.write_all(content) {
+        drop(file);
+        let _ = std::fs::remove_file(tmp);
+        return Err(MaterializeError::io(tmp, &err));
+    }
+    Ok(file)
+}
+
+fn flush_temp_file(
+    file: &std::fs::File,
+    tmp: &Path,
+    policy: DurabilityPolicy,
+) -> Result<(), MaterializeError> {
     if policy.fsync_file {
-        // Open with WRITE access: on Windows `sync_all` maps to
-        // `FlushFileBuffers`, which requires a writable handle (a read-only
-        // handle fails ERROR_ACCESS_DENIED). `write(true)` does not truncate.
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(tmp)
-            .map_err(|e| MaterializeError::io(tmp, &e))?;
         file.sync_all().map_err(|e| MaterializeError::io(tmp, &e))?;
     }
     Ok(())
@@ -638,4 +1022,138 @@ fn rename_no_follow(
     replacer
         .try_replace(from, to)
         .map_err(|e| MaterializeError::io(to, &e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dohc_engine_storage::{
+        FaultAction, MaterializationJobSpec, NoFaults, StorageError, enqueue_job,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static SCRATCH_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+    struct Scratch {
+        root: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "dohc-materialize-unit-{tag}-{}-{}",
+                std::process::id(),
+                SCRATCH_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(root.join(".dohc").join("engine"))
+                .expect("create scratch engine directory");
+            Scratch { root }
+        }
+
+        fn db(&self) -> PathBuf {
+            self.root.join(".dohc").join("engine").join("engine.db")
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    struct ConflictFault {
+        target: PathBuf,
+    }
+
+    impl FaultInjector for ConflictFault {
+        fn poll(&self, point: FaultPoint) -> FaultAction {
+            if point == FaultPoint::MaterializeBeforePreimageRevalidate {
+                std::fs::write(&self.target, b"EXTERNAL=newer\n")
+                    .expect("inject newer external content");
+            }
+            FaultAction::Continue
+        }
+    }
+
+    struct FailFirstRemove {
+        calls: AtomicUsize,
+    }
+
+    impl SecretTempRemover for FailFirstRemove {
+        fn remove_file(&self, _path: &Path) -> std::io::Result<()> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Err(std::io::Error::new(
+                ErrorKind::PermissionDenied,
+                "injected transient sharing violation",
+            ))
+        }
+    }
+
+    #[test]
+    fn secret_conflict_failed_best_effort_remove_keeps_cleanup_guard_armed() {
+        // MUTATION: disarm the plaintext-temp guard before/after the failed
+        // best-effort conflict remove -> the secret temp survives this return.
+        let scratch = Scratch::new("secret-conflict-remove");
+        let target = scratch.root.join(".env");
+        std::fs::write(&target, b"ORIGINAL=preimage\n").expect("write initial target");
+        let mut store = EngineStore::open(&scratch.db(), 1).expect("open store");
+        let staged = b"encrypted-placeholder";
+        let staged_sha = store.put_binary_blob(staged).expect("stage placeholder");
+        store
+            .write_with(&NoFaults, |tx| {
+                enqueue_job(
+                    tx,
+                    &MaterializationJobSpec {
+                        job_id: "secret-mat_conflict-remove".to_owned(),
+                        target_path: ".env".to_owned(),
+                        content_sha256: staged_sha.clone(),
+                        preimage: Preimage::Absent,
+                        target_generation: 1,
+                        now_ms: 1,
+                    },
+                )?;
+                Ok::<_, StorageError>(())
+            })
+            .expect("enqueue secret job");
+        let job = store
+            .load_materialization_job("secret-mat_conflict-remove")
+            .expect("load job")
+            .expect("secret job");
+        let remover = FailFirstRemove {
+            calls: AtomicUsize::new(0),
+        };
+
+        let outcome = materialize_secret_one_with_remover(
+            &store,
+            &scratch.root,
+            &job,
+            b"SECRET=plaintext\n",
+            DurabilityPolicy::none(),
+            &StdReplacer,
+            &NoBackoff,
+            2,
+            &ConflictFault {
+                target: target.clone(),
+            },
+            &remover,
+        )
+        .expect("conflict is a terminal outcome");
+
+        assert_eq!(outcome, JobOutcome::Conflict);
+        assert_eq!(remover.calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            std::fs::read(&target).expect("read external target"),
+            b"EXTERNAL=newer\n"
+        );
+        let leaked = std::fs::read_dir(&scratch.root)
+            .expect("list workspace")
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".dohc-write-secret-mat-"))
+            .collect::<Vec<_>>();
+        assert!(
+            leaked.is_empty(),
+            "plaintext secret temps leaked: {leaked:?}"
+        );
+    }
 }

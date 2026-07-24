@@ -291,7 +291,7 @@ impl<'a> SecretFileStore<'a> {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.version_id, "version_id")?;
         non_empty(&input.moment_id, "moment_id")?;
-        validate_secret_path(&input.path)?;
+        let path = validate_secret_path(&input.path)?;
         validate_text(&input.text)?;
         validate_origin(&input.metadata_origin)?;
 
@@ -304,8 +304,8 @@ impl<'a> SecretFileStore<'a> {
         // misreported as `DuplicateMomentId`.
         let no_op = self.store.read_with(|conn| {
             require_version(conn, ws, &input.version_id)?;
-            if let Some(tip) = select_tip(conn, ws, &input.version_id, &input.path)? {
-                let current = aead::open(self.key, ws, &input.path, &tip)?;
+            if let Some(tip) = select_tip(conn, ws, &input.version_id, &path)? {
+                let current = aead::open(self.key, ws, &path, &tip)?;
                 if current.as_bytes() == input.text.as_bytes() {
                     return Ok(true);
                 }
@@ -322,13 +322,13 @@ impl<'a> SecretFileStore<'a> {
             });
         }
 
-        let sealed = seal(self.key, ws, &input.path, input.text.as_bytes())?;
+        let sealed = seal(self.key, ws, &path, input.text.as_bytes())?;
         let moment = SecretMomentRecord {
             moment_order: 0, // filled in-txn
             moment_id: input.moment_id.clone(),
             workspace_id: ws.clone(),
             version_id: input.version_id.clone(),
-            path: input.path.clone(),
+            path: path.clone(),
             recorded_at_ms: input.now_ms,
             operation: SecretOp::Write,
             metadata_origin: input.metadata_origin.clone(),
@@ -346,7 +346,7 @@ impl<'a> SecretFileStore<'a> {
             let ciphertext_sha = put_binary_blob(tx, sealed.ciphertext())?;
             let spec = MaterializationJobSpec {
                 job_id: format!("secret-mat_{}", input.moment_id),
-                target_path: input.path.clone(),
+                target_path: path.clone(),
                 content_sha256: ciphertext_sha,
                 // The secret-aware executor decrypts the tip and writes
                 // plaintext; preimage revalidation is its concern (it knows
@@ -362,7 +362,7 @@ impl<'a> SecretFileStore<'a> {
                     dohc_engine_storage::record_completed_job(tx, &spec)?;
                 }
             }
-            journal(tx, &input.path, "secret.file.put", input.now_ms)?;
+            journal(tx, &path, "secret.file.put", input.now_ms)?;
             Ok::<SecretMomentRecord, DomainError>(SecretMomentRecord {
                 moment_order,
                 ..moment.clone()
@@ -402,14 +402,14 @@ impl<'a> SecretFileStore<'a> {
     ) -> Result<SecretWriteResult, DomainError> {
         non_empty(&input.workspace_id, "workspace_id")?;
         non_empty(&input.version_id, "version_id")?;
-        validate_secret_path(&input.path)?;
+        let path = validate_secret_path(&input.path)?;
         let ws = input.workspace_id.clone();
         // OWNERSHIP: a tip written by another origin (API, replication) may
         // legitimately have no plaintext on disk, so capture only claims it
         // when it OBSERVED the disk transition.
         if !input.claim_foreign_head {
             let version = input.version_id.clone();
-            let path = input.path.clone();
+            let path = path.clone();
             let owner_ws = ws.clone();
             let foreign = self
                 .store
@@ -428,20 +428,15 @@ impl<'a> SecretFileStore<'a> {
         let moment_id = derive_capture_secret_moment_id(
             &input.workspace_id,
             &input.version_id,
-            &input.path,
+            &path,
             reserved,
         );
-        let basename = input
-            .path
-            .rsplit('/')
-            .next()
-            .unwrap_or(input.path.as_str())
-            .to_owned();
+        let basename = path.rsplit('/').next().unwrap_or(path.as_str()).to_owned();
         let result = self.write_secret_file(
             &SecretWrite {
                 workspace_id: input.workspace_id.clone(),
                 version_id: input.version_id.clone(),
-                path: input.path.clone(),
+                path: path.clone(),
                 text: input.text.clone(),
                 moment_id,
                 metadata_origin: input.metadata_origin.clone(),
@@ -481,7 +476,7 @@ impl<'a> SecretFileStore<'a> {
                 self.mark_tip_materialized(
                     &input.workspace_id,
                     &input.version_id,
-                    &input.path,
+                    &path,
                     input.now_ms,
                     faults,
                 )?;
@@ -563,11 +558,11 @@ impl<'a> SecretFileStore<'a> {
         path: &str,
         cap: usize,
     ) -> Result<Option<InbandSecret>, DomainError> {
-        validate_secret_path(path)?;
+        let path = validate_secret_path(path)?;
         let key = self.key;
         self.store.read_with(|conn| {
             require_version(conn, workspace_id, version_id)?;
-            let Some(tip) = select_tip(conn, workspace_id, version_id, path)? else {
+            let Some(tip) = select_tip(conn, workspace_id, version_id, &path)? else {
                 return Ok(None);
             };
             let byte_length = tip.byte_length() as i64;
@@ -578,13 +573,13 @@ impl<'a> SecretFileStore<'a> {
                 // plaintext is decrypted into a zeroizing buffer and
                 // dropped immediately — bounded by the 1 MiB domain cap,
                 // never converted to an ordinary String.
-                let _verified = aead::open(key, workspace_id, path, &tip)?;
+                let _verified = aead::open(key, workspace_id, &path, &tip)?;
                 return Ok(Some(InbandSecret {
                     text: None,
                     byte_length,
                 }));
             }
-            let plaintext = aead::open(key, workspace_id, path, &tip)?;
+            let plaintext = aead::open(key, workspace_id, &path, &tip)?;
             let text = plaintext
                 .into_utf8()
                 .map_err(|_| DomainError::StateCorrupt {
@@ -603,14 +598,14 @@ impl<'a> SecretFileStore<'a> {
         version_id: &str,
         path: &str,
     ) -> Result<Option<SecretPlaintext>, DomainError> {
-        validate_secret_path(path)?;
+        let path = validate_secret_path(path)?;
         let key = self.key;
         self.store.read_with(|conn| {
             require_version(conn, workspace_id, version_id)?;
-            let Some(tip) = select_tip(conn, workspace_id, version_id, path)? else {
+            let Some(tip) = select_tip(conn, workspace_id, version_id, &path)? else {
                 return Ok(None);
             };
-            let plaintext = aead::open(key, workspace_id, path, &tip)?;
+            let plaintext = aead::open(key, workspace_id, &path, &tip)?;
             Ok(Some(plaintext))
         })
     }
@@ -788,7 +783,7 @@ pub fn delete_secret_file_keyless(
     input: &SecretDelete,
     faults: &dyn FaultInjector,
 ) -> Result<Option<SecretMomentRecord>, DomainError> {
-    delete_secret_file_inner(store, input, faults)
+    delete_secret_file_inner(store, input, SecretDeleteDiskIntent::Materialize, faults)
 }
 
 /// Keyless secret-moment listing, newest first, optionally scoped to a
@@ -799,9 +794,7 @@ pub fn list_secret_moments_keyless(
     version_id: Option<&str>,
     path: Option<&str>,
 ) -> Result<Vec<SecretMomentRecord>, DomainError> {
-    if let Some(path) = path {
-        validate_secret_path(path)?;
-    }
+    let path = path.map(validate_secret_path).transpose()?;
     store.read_with(|conn| {
         let mut sql = String::from(
             "SELECT moment_order, moment_id, workspace_id, version_id, path, recorded_at_ms, \
@@ -814,7 +807,7 @@ pub fn list_secret_moments_keyless(
             sql.push_str(&format!(" AND version_id = ?{}", binds.len() + 1));
             binds.push(Box::new(version_id.to_owned()));
         }
-        if let Some(path) = path {
+        if let Some(path) = path.as_deref() {
             sql.push_str(&format!(" AND path = ?{}", binds.len() + 1));
             binds.push(Box::new(path.to_owned()));
         }
@@ -842,9 +835,7 @@ pub fn list_secret_moments_page_keyless(
     before_moment_order: Option<i64>,
     limit: usize,
 ) -> Result<SecretMomentPage, DomainError> {
-    if let Some(path) = path {
-        validate_secret_path(path)?;
-    }
+    let path = path.map(validate_secret_path).transpose()?;
     if limit == 0 {
         return Err(DomainError::InvalidInput {
             reason: "secret moment page limit must be positive",
@@ -862,7 +853,7 @@ pub fn list_secret_moments_page_keyless(
             sql.push_str(&format!(" AND version_id = ?{}", binds.len() + 1));
             binds.push(Box::new(version_id.to_owned()));
         }
-        if let Some(path) = path {
+        if let Some(path) = path.as_deref() {
             sql.push_str(&format!(" AND path = ?{}", binds.len() + 1));
             binds.push(Box::new(path.to_owned()));
         }
@@ -1073,13 +1064,13 @@ pub fn apply_secret_file_from_version(
     non_empty(to_version_id, "version_id")?;
     non_empty(moment_id, "moment_id")?;
     validate_origin(metadata_origin)?;
-    validate_secret_path(path)?;
+    let path = validate_secret_path(path)?;
     let outcome = store.write_with(faults, |tx| {
         require_version(tx, workspace_id, from_version_id)?;
         require_version(tx, workspace_id, to_version_id)?;
-        let source = select_tip(tx, workspace_id, from_version_id, path)?;
-        let target = select_tip(tx, workspace_id, to_version_id, path)?;
-        let base = select_fork_base(tx, workspace_id, from_version_id, path)?;
+        let source = select_tip(tx, workspace_id, from_version_id, &path)?;
+        let target = select_tip(tx, workspace_id, to_version_id, &path)?;
+        let base = select_fork_base(tx, workspace_id, from_version_id, &path)?;
         if source.is_none() && target.is_none() {
             return Ok(SecretWriteResult {
                 changed: false,
@@ -1094,15 +1085,15 @@ pub fn apply_secret_file_from_version(
         }
         let source_text = source
             .as_ref()
-            .map(|sealed| aead::open(key, workspace_id, path, sealed))
+            .map(|sealed| aead::open(key, workspace_id, &path, sealed))
             .transpose()?;
         let target_text = target
             .as_ref()
-            .map(|sealed| aead::open(key, workspace_id, path, sealed))
+            .map(|sealed| aead::open(key, workspace_id, &path, sealed))
             .transpose()?;
         let base_text = base
             .as_ref()
-            .map(|sealed| aead::open(key, workspace_id, path, sealed))
+            .map(|sealed| aead::open(key, workspace_id, &path, sealed))
             .transpose()?;
         if secret_plaintexts_equal(source_text.as_ref(), target_text.as_ref())
             || secret_plaintexts_equal(source_text.as_ref(), base_text.as_ref())
@@ -1121,7 +1112,7 @@ pub fn apply_secret_file_from_version(
             moment_id: moment_id.to_owned(),
             workspace_id: workspace_id.to_owned(),
             version_id: to_version_id.to_owned(),
-            path: path.to_owned(),
+            path: path.clone(),
             recorded_at_ms: now_ms,
             operation: if source.is_some() {
                 SecretOp::Write
@@ -1140,14 +1131,14 @@ pub fn apply_secret_file_from_version(
                 tx,
                 &MaterializationJobSpec {
                     job_id: format!("secret-mat_{moment_id}"),
-                    target_path: path.to_owned(),
+                    target_path: path.clone(),
                     content_sha256: ciphertext_sha,
                     preimage: Preimage::Absent,
                     target_generation: moment_order,
                     now_ms,
                 },
             )?;
-            journal(tx, path, "secret.file.put", now_ms)?;
+            journal(tx, &path, "secret.file.put", now_ms)?;
         } else {
             let target = target.ok_or(DomainError::StateCorrupt {
                 reason: "secret delete apply has no target preimage",
@@ -1160,7 +1151,7 @@ pub fn apply_secret_file_from_version(
                 tx,
                 &MaterializationJobSpec {
                     job_id: format!("secret-mat_{moment_id}"),
-                    target_path: path.to_owned(),
+                    target_path: path.clone(),
                     content_sha256: ciphertext_sha,
                     preimage: Preimage::Present(dohc_engine_storage::hex_sha256(
                         target_text.as_bytes(),
@@ -1174,7 +1165,7 @@ pub fn apply_secret_file_from_version(
                 params![workspace_id, to_version_id, path],
             )
             .map_err(DomainError::sql_persist)?;
-            journal(tx, path, "secret.file.delete", now_ms)?;
+            journal(tx, &path, "secret.file.delete", now_ms)?;
         }
         Ok(SecretWriteResult {
             changed: true,
@@ -1209,7 +1200,7 @@ pub fn restore_secret_file_verbatim(
     non_empty(workspace_id, "workspace_id")?;
     non_empty(before_moment_id, "moment_id")?;
     non_empty(moment_id, "moment_id")?;
-    validate_secret_path(path)?;
+    let path = validate_secret_path(path)?;
     let outcome = store.write_with(faults, |tx| {
         let before = tx
             .query_row(
@@ -1302,7 +1293,7 @@ pub fn restore_secret_file_verbatim(
                 reason: "secret restore delete has no outgoing tip",
             })?;
             let content_sha256 = put_binary_blob(tx, outgoing.ciphertext())?;
-            dohc_engine_storage::record_completed_job(
+            enqueue_delete_job(
                 tx,
                 &MaterializationJobSpec {
                     job_id: format!("secret-mat_{moment_id}"),
@@ -1329,15 +1320,22 @@ pub fn restore_secret_file_verbatim(
     committed(outcome)
 }
 
+#[derive(Debug, Clone, Copy)]
+enum SecretDeleteDiskIntent {
+    Materialize,
+    AlreadyAbsent,
+}
+
 fn delete_secret_file_inner(
     store: &mut EngineStore,
     input: &SecretDelete,
+    disk_intent: SecretDeleteDiskIntent,
     faults: &dyn FaultInjector,
 ) -> Result<Option<SecretMomentRecord>, DomainError> {
     non_empty(&input.workspace_id, "workspace_id")?;
     non_empty(&input.version_id, "version_id")?;
     non_empty(&input.moment_id, "moment_id")?;
-    validate_secret_path(&input.path)?;
+    let path = validate_secret_path(&input.path)?;
     validate_origin(&input.metadata_origin)?;
 
     let ws = &input.workspace_id;
@@ -1348,7 +1346,7 @@ fn delete_secret_file_inner(
     // reaches the duplicate-moment-id guard.
     let has_tip = store.read_with(|conn| {
         require_version(conn, ws, &input.version_id)?;
-        if select_tip(conn, ws, &input.version_id, &input.path)?.is_none() {
+        if select_tip(conn, ws, &input.version_id, &path)?.is_none() {
             return Ok(false);
         }
         if secret_moment_exists(conn, ws, &input.moment_id)? {
@@ -1365,7 +1363,7 @@ fn delete_secret_file_inner(
         moment_id: input.moment_id.clone(),
         workspace_id: ws.clone(),
         version_id: input.version_id.clone(),
-        path: input.path.clone(),
+        path: path.clone(),
         recorded_at_ms: input.now_ms,
         operation: SecretOp::Delete,
         metadata_origin: input.metadata_origin.clone(),
@@ -1376,17 +1374,15 @@ fn delete_secret_file_inner(
         let moment_order = next_secret_moment_order(tx, ws)?;
         insert_moment(tx, &record, moment_order, None)?;
         {
-            // EVERY delete flavor records the delete's generation as a
-            // completed marker (anchored to the outgoing tip's ciphertext
-            // blob — deletes carry no bytes of their own). Without it, an
-            // older still-pending secret job for this path could later
-            // re-write the deleted plaintext to disk. For capture retire the
-            // on-disk plaintext is already gone; for the RPC delete the
-            // materialized plaintext's disk cleanup is an RPC-D2 obligation.
+            // Deletes are anchored to the outgoing tip's ciphertext blob
+            // because they carry no bytes of their own. RPC deletes enqueue a
+            // pending delete so open replay removes the active disk
+            // projection. Capture retire records a completed marker because
+            // its triggering filesystem removal already satisfied that work.
             let tip_sha: Option<String> = tx
                 .query_row(
                     "SELECT ciphertext_base64 FROM secret_files                      WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
-                    params![ws, input.version_id, input.path],
+                    params![ws, input.version_id, path],
                     |row| row.get::<_, String>(0),
                 )
                 .optional()
@@ -1397,25 +1393,31 @@ fn delete_secret_file_inner(
                     ))
                 });
             if let Some(content_sha256) = tip_sha {
-                dohc_engine_storage::record_completed_job(
-                    tx,
-                    &MaterializationJobSpec {
-                        job_id: format!("secret-mat_{}", input.moment_id),
-                        target_path: input.path.clone(),
-                        content_sha256,
-                        preimage: Preimage::Absent,
-                        target_generation: moment_order,
-                        now_ms: input.now_ms,
-                    },
-                )?;
+                let spec = MaterializationJobSpec {
+                    job_id: format!("secret-mat_{}", input.moment_id),
+                    target_path: path.clone(),
+                    content_sha256,
+                    // The keyless RPC delete cannot derive a plaintext hash.
+                    // The secret-only executor adopts the current disk file
+                    // and never emits a plaintext conflict artifact.
+                    preimage: Preimage::Absent,
+                    target_generation: moment_order,
+                    now_ms: input.now_ms,
+                };
+                match disk_intent {
+                    SecretDeleteDiskIntent::Materialize => enqueue_delete_job(tx, &spec)?,
+                    SecretDeleteDiskIntent::AlreadyAbsent => {
+                        dohc_engine_storage::record_completed_job(tx, &spec)?;
+                    }
+                }
             }
         }
         tx.execute(
             "DELETE FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
-            params![ws, input.version_id, input.path],
+            params![ws, input.version_id, path],
         )
         .map_err(DomainError::sql_persist)?;
-        journal(tx, &input.path, "secret.file.delete", input.now_ms)?;
+        journal(tx, &path, "secret.file.delete", input.now_ms)?;
         Ok::<SecretMomentRecord, DomainError>(SecretMomentRecord {
             moment_order,
             ..record.clone()
@@ -1435,14 +1437,14 @@ pub fn capture_secret_retire(
 ) -> Result<Option<SecretMomentRecord>, DomainError> {
     non_empty(&input.workspace_id, "workspace_id")?;
     non_empty(&input.version_id, "version_id")?;
-    validate_secret_path(&input.path)?;
+    let path = validate_secret_path(&input.path)?;
     let ws = input.workspace_id.clone();
     // OWNERSHIP: a disk-driven retire must never destroy a tip written by
     // another origin (API, replication) — its plaintext may never have been
     // on disk at all, so absence proves nothing about it.
     if input.only_if_own_origin {
         let version = input.version_id.clone();
-        let path = input.path.clone();
+        let path = path.clone();
         let owner_ws = ws.clone();
         let origin =
             store.read_with(move |conn| secret_tip_origin(conn, &owner_ws, &version, &path))?;
@@ -1458,26 +1460,22 @@ pub fn capture_secret_retire(
     let moment_id = derive_capture_secret_retire_moment_id(
         &input.workspace_id,
         &input.version_id,
-        &input.path,
+        &path,
         reserved,
     );
-    let basename = input
-        .path
-        .rsplit('/')
-        .next()
-        .unwrap_or(input.path.as_str())
-        .to_owned();
+    let basename = path.rsplit('/').next().unwrap_or(path.as_str()).to_owned();
     let result = delete_secret_file_inner(
         store,
         &SecretDelete {
             workspace_id: input.workspace_id.clone(),
             version_id: input.version_id.clone(),
-            path: input.path.clone(),
+            path,
             moment_id,
             metadata_origin: input.metadata_origin.clone(),
             metadata_summary: Some(format!("Deleted {basename}")),
             now_ms: input.now_ms,
         },
+        SecretDeleteDiskIntent::AlreadyAbsent,
         faults,
     )?;
     if let Some(moment) = &result
@@ -1662,14 +1660,18 @@ fn non_empty(value: &str, field: &'static str) -> Result<(), DomainError> {
 /// Structural validation runs first; a safe path that is not classified
 /// secret gets the dedicated compatibility error rather than being hidden in
 /// encrypted storage where normal history/search would no longer see it.
-fn validate_secret_path(path: &str) -> Result<(), DomainError> {
+///
+/// No in-place legacy-row rewrite is attempted: pre-R15 cutover destroys the
+/// pre-release Rust/TS secret rows, and ciphertext AAD is path-bound, so a
+/// keyless schema migration could not safely rename an old non-canonical key.
+fn validate_secret_path(path: &str) -> Result<String, DomainError> {
     validate_path(path)?;
-    if dohc_engine_files::policy::classify_engine_file_path(path)
-        != dohc_engine_files::policy::PathClassification::Secret
-    {
+    let (classification, normalized) =
+        dohc_engine_files::policy::classify_engine_file_path_normalized(path);
+    if classification != dohc_engine_files::policy::PathClassification::Secret {
         return Err(DomainError::NotSecretPath);
     }
-    Ok(())
+    normalized.ok_or(DomainError::NotSecretPath)
 }
 
 fn validate_text(text: &str) -> Result<(), DomainError> {
@@ -1877,7 +1879,7 @@ pub fn secret_file_len_keyless(
     version_id: &str,
     path: &str,
 ) -> Result<Option<i64>, DomainError> {
-    validate_secret_path(path)?;
+    let path = validate_secret_path(path)?;
     store.read_with(|conn| {
         require_version(conn, workspace_id, version_id)?;
         conn.query_row(

@@ -156,13 +156,41 @@ two Rust secret rows where the oracle collapses to one, and both
 materialize onto the same disk file. Self-consistent within Rust
 (write/read/list all verbatim); owed a ruling alongside the RPC-D2
 secret disk executor — GATE6-BLOCKING (two secret rows materializing
-onto one disk file is a plaintext clobber/mask hazard). ALSO recorded
+onto one disk file is a plaintext clobber/mask hazard).
+**RESOLVED by RPC-D2 SF3 (PR #227):** validate_secret_path now adopts the
+oracle's canonical slash-collapsed key (classify_engine_file_path_normalized),
+matching normalizeSecretPath and the Rust text store — "a//b.env" collapses to
+one row, dissolving the clobber hazard at the key level. No migration (pre-R15
+destructive cutover + secret AAD is path-bound, so a keyless rename can't
+re-authenticate). ALSO recorded
 (same review): the daemon rollback's engine_requests purge filtered by
 bare result_seq in a table shared with the collab durable ledger and
 the storage compound-write ledger. DISCHARGED in-PR (codex r7): the
 engine_requests table gained a kind column (migration 13, every writer
 stamped — versioned/merge/ydoc/compound/chat) and the purge is scoped
 to kind='versioned'; legacy NULL-kind rows are never swept.
+
+CROSS-ENGINE DELTA (PR #227 claude round-3 focused review) — secret open-replay
+PER-JOB failure tolerance. RPC-D2's open-replay secret executor TOLERATES per-job
+operational failures (disk-op errors from the secret write/delete executors,
+key-load failures, and DECRYPT/authentication failures) by leaving that one job
+PENDING and CONTINUING workspace.open — one bad secret never bricks the whole
+open. For DISK anomalies (symlink/directory/permission at a secret path) this
+MATCHES the oracle, which skips a secret per-file (readDiskSecretState
+"unreadable"/"untracked-content" -> continue, workspaceEngineCapture.ts:1562).
+For DECRYPT/key failures the Rust behavior is DELIBERATELY BROADER than the
+oracle: the oracle awaits materializeSecretFile / planSecretMaterialization
+directly (workspaceEngineCapture.ts:1564/1865) so a decrypt rejection propagates
+out of version-switch planning, whereas Rust open-replay (crash-recovery, not a
+user action) tolerates it. The security invariant is PRESERVED on both: no
+plaintext is ever written from unauthenticated bytes (plaintext reaches the disk
+executor only after secret_plaintext_for_job returns Ok(Some)). Rationale: a
+single tampered/undecryptable secret must not DoS the entire workspace open; the
+job stays pending and retries. Structural corruption (secret_job_coordinates
+path/gen/operation mismatch vs its own moment) stays FATAL — a broken durable
+invariant, not an operational skip. Regression tests: tampered ->
+open-succeeds-no-plaintext-job-pending; symlink/directory-at-path ->
+open-succeeds-no-wrong-file (dohc-workspace-engine rpc_write_surface).
 
 CROSS-ENGINE DELTA (PR #225 claude r3): mention-handle READ validation
 — the Rust read validator shares the scanner's exact alphabet (dots,
@@ -356,3 +384,41 @@ provenance (payload_before_*/payload_after_*) and before-snapshot identity
 columns were never ported to the Rust moments table. Rust hydrates what
 its schema HAS (before/after text + byte lengths). Full parity = a
 migration — pre-R15 candidate, pairs with the secret ownership column.
+
+CROSS-ENGINE GAP (PR #227 codex-bot round-7) — secret re-materialization on version
+SWITCH is MISSING in the Rust daemon (R13/GATE6 obligation, NOT an RPC-D2 blocker).
+The ORACLE re-materializes the target version's secrets from the store on a version
+switch (planSecretMaterialization + switchVersion, workspaceEngineCapture.ts:1548-1584,
+1830-1891). The Rust daemon's `SetActiveVersion` is DB-ONLY (actor.rs) and workspace.open
+only replays PENDING materialization jobs — there is NO store-read "rebuild the active
+version's secret tips" pass, and `materialize_secret` (actor.rs:2233) has no Rust caller.
+RPC-D2 makes secrets survive to the next OPEN where their version is active (non-active
+secret jobs stay PENDING, not marked complete), so open-time projection is correct. But a
+MID-SESSION version switch does not refresh the on-disk secrets until the next open. Wiring
+a switch-time (or set-active-time) secret materialization pass is daemon-composition
+(R13)/desktop-adapter scope, not the secret executor; tracked for GATE6. Non-secret files
+share the same switch-materialization dependency on the desktop/daemon composition layer.
+
+## PR #227 codex-bot round-8 declines
+
+- **Clear stale plaintext when the active secret decrypt fails
+  (`actor.rs:~5165`) — DECLINE.** When the active tip is undecryptable because
+  the DB is tampered or corrupt, round 4 leaves the materialization job pending.
+  The previously materialized plaintext is the last decryptable value and was
+  legitimately written to disk. Clearing it on a decrypt failure would break a
+  working `.env` during a transient/corruption event without a confidentiality
+  gain: an attacker able to tamper with the DB can already read the disk
+  plaintext. The secret still exists (its tip is present but undecryptable), so
+  retaining its last-good value is defensible. This is not a deletion.
+- **Keep request ids reserved during blob egress
+  (`dohc-workspace-engine.rs:~437`) — DECLINE.** The stdio daemon is
+  single-client: the desktop main process, under the standing identity posture.
+  That trusted client issues unique request ids, so reuse during an in-flight
+  egress is not a real threat. Multi-client id-collision hardening belongs to
+  relay/RPC-E scope.
+- **Surface blob egress for in-process callers (`transport.rs:~129`) —
+  DECLINE.** Over-cap `readBlob` egress reaches an in-process caller only
+  through `ServiceResponse.blob_egress`. The only in-process `readBlob` callers
+  are tests; production in-process callers do not negotiate `blobs`, so there
+  is no production impact. If an in-process production consumer ever opts into
+  `blobs`, wire the in-process egress drain then.

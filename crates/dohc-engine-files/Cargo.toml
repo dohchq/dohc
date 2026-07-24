@@ -40,6 +40,10 @@ notify = "8"
 # runtime's EngineDbIdentity uses, so this crate keeps forbid(unsafe_code).
 file-id = "0.2"
 
+[target.'cfg(unix)'.dependencies]
+# Kernel-enforced O_NOFOLLOW for secret plaintext temp creation.
+libc = "0.2"
+
 [dev-dependencies]
 # The differential harness parses the shared workspace-kernel golden fixtures
 # (independently-computed hashes) and the crate's extended goldens.

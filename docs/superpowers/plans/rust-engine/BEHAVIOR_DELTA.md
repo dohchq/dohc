@@ -433,6 +433,32 @@ that wrote *before* the pipeline ran — IS detected and preserved-both. The
 sub-op race is an inherent, narrow residual; it is documented in
 `dohc-engine-files::materialize` module docs and is NOT claimed closed.
 
+Secret materialization has a second accepted, narrowed rename-TOCTOU: its
+no-follow ancestor checks are path-based `symlink_metadata` checks, not
+fd-relative `openat2(RESOLVE_NO_SYMLINKS)` / `renameat` operations. A local
+attacker with workspace-directory WRITE access could swap a checked parent
+directory for a symlink in the microsecond between the final path check and the
+`rename`. The entry, post-`create_dir_all`, pre-revalidation, and pre-replace
+checks narrow that window but do not close it.
+CLASSIFICATION — this is a POTENTIAL SECRET-DISCLOSURE and UNAUTHORIZED-OVERWRITE
+risk, NOT a no-op. Winning the race can redirect the 0600 plaintext `.env` write
+through the swapped-parent symlink to an attacker-chosen path — disclosing the
+secret to a location the attacker can read EVEN WHEN they could not read the
+owner-only 0600 file — or overwrite an unrelated target. It is accepted for the
+current release under an EXPLICIT assumption, not a general filesystem-ACL
+guarantee: the MVP is SINGLE-USER, local-first, one owner, owner-only 0600
+secrets, with NO shared or ACL-partitioned workspaces (the sharing/members
+surface is retired pre-R15), and exploiting it additionally requires
+workspace-dir write access plus winning a microsecond check→rename race. In a
+SHARED or ACL-PARTITIONED workspace — an attacker with directory-write but not
+file-read access — this residual WOULD escalate confidentiality/integrity and
+MUST be closed before any such multi-user/shared-secret model ships. Concrete
+closure path (tracked, REQUIRED before shared secrets): fd-relative resolution —
+`openat2(RESOLVE_NO_SYMLINKS)` or per-component `openat(O_NOFOLLOW)` to a pinned
+parent dirfd + `renameat` on unix, and the handle-relative equivalent on Windows
+— so the temp create and rename bind the real parent inode regardless of a
+concurrent swap.
+
 ### 8.3 DECISION: preserve-both `.conflict` artifacts are floor-excluded
 
 When materialization finds newer external content, it preserves both: the

@@ -3,8 +3,12 @@
 
 use dohc_engine_protocol::{
     ErrorCode,
-    transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    frame::{Frame, FrameDecoder, blob_chunks, encode_blob_chunk_frame},
+    limits::WireLimits,
+    transport::{
+        EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
+    },
+    wire::{BlobStart, Envelope, Request, WorkspaceHandle, decode_control, encode_control},
 };
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
@@ -51,6 +55,37 @@ async fn fixture(
         .expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     (scratch, transport, handle)
+}
+
+async fn fixture_with_service(
+    name: &str,
+) -> (
+    ScratchDir,
+    Arc<EngineService>,
+    InProcessTransport<EngineService>,
+    WorkspaceHandle,
+) {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": format!("ws-rpcd-{name}"),
+                }),
+            ),
+        )
+        .await
+        .expect("open");
+    let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    (scratch, service, transport, handle)
 }
 
 async fn call(
@@ -863,8 +898,9 @@ async fn secrets_apply_fresh_workspace_returns_invalid_version() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rpc_secret_delete_records_a_completed_generation_marker() {
-    // MUTATION: gate the delete marker on capture-retire only -> this row is absent.
+async fn rpc_secret_delete_enqueues_pending_disk_removal() {
+    // MUTATION: restore the completed-marker-only RPC delete -> this job is
+    // complete instead of pending, so open replay cannot remove disk plaintext.
     let (scratch, transport, handle) = fixture("secret-delete-marker").await;
     let workspace_id = "ws-rpcd-secret-delete-marker";
     call(
@@ -907,14 +943,14 @@ async fn rpc_secret_delete_records_a_completed_generation_marker() {
 
     let connection =
         rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
-    let marker: (String, i64) = connection
+    let job: (String, String, i64) = connection
         .query_row(
-            "SELECT status, target_generation FROM materialization_jobs \
+            "SELECT status, operation, target_generation FROM materialization_jobs \
              WHERE job_id = 'secret-mat_rpc-secret-delete'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .expect("completed secret delete marker");
+        .expect("pending secret delete job");
     let moment_order: i64 = connection
         .query_row(
             "SELECT moment_order FROM secret_moments WHERE moment_id = 'rpc-secret-delete'",
@@ -922,8 +958,2317 @@ async fn rpc_secret_delete_records_a_completed_generation_marker() {
             |row| row.get(0),
         )
         .expect("delete moment");
-    assert_eq!(marker.0, "complete");
-    assert_eq!(marker.1, moment_order);
+    assert_eq!(job.0, "pending");
+    assert_eq!(job.1, "delete");
+    assert_eq!(job.2, moment_order);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_open_replay_writes_decrypted_plaintext_and_completes_once() {
+    // MUTATION: keep skipping secret-mat_ jobs, write the ciphertext blob, or
+    // omit the completion transition -> disk/status assertions fail.
+    let (scratch, transport, handle) = fixture("secret-open-replay").await;
+    let workspace = "ws-rpcd-secret-open-replay";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": "config/.env",
+            "text": "TOKEN=plaintext-only\n",
+            "origin": "api",
+            "momentId": "secret-replay-write",
+        }),
+    )
+    .await;
+    assert!(!scratch.path().join("config/.env").exists());
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("open replay succeeds");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("config/.env")).expect("plaintext file"),
+        "TOKEN=plaintext-only\n"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_secret-replay-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("job status");
+    assert_eq!(status, "complete");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        5,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("config/.env")).expect("stable plaintext"),
+        "TOKEN=plaintext-only\n"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_secret_delete_removes_materialized_plaintext_from_disk() {
+    // MUTATION: revert the RPC delete to a completed-marker-only job -> the
+    // previously materialized plaintext survives the second open replay.
+    let (scratch, transport, handle) = fixture("secret-active-delete-removes-disk").await;
+    let workspace = "ws-rpcd-secret-active-delete-removes-disk";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=remove-me\n",
+            "origin": "api",
+            "momentId": "active-delete-materialized-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+
+    let materialized = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("write replay materializes plaintext");
+    let materialized_handle: WorkspaceHandle =
+        serde_json::from_value(materialized.result["workspace"].clone()).expect("handle");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(".env")).expect("materialized secret"),
+        "TOKEN=remove-me\n"
+    );
+    std::fs::write(scratch.path().join("unrelated.txt"), "keep me\n").expect("unrelated file");
+    call(
+        &transport,
+        &materialized_handle,
+        5,
+        "secrets.delete",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "origin": "api",
+            "momentId": "active-delete-materialized-delete",
+        }),
+    )
+    .await;
+    assert!(
+        scratch.path().join(".env").exists(),
+        "RPC mutation only schedules disk cleanup"
+    );
+    call(
+        &transport,
+        &materialized_handle,
+        6,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                7,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("delete replay succeeds");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(!scratch.path().join(".env").exists());
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("unrelated.txt")).expect("unrelated file"),
+        "keep me\n",
+        "delete is scoped to the secret's own path"
+    );
+    call(
+        &transport,
+        &reopened_handle,
+        8,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_restore_to_absent_removes_materialized_plaintext_on_reopen() {
+    // MUTATION: revert restore-to-absent to record_completed_job -> the
+    // restored-away plaintext survives because open has no pending delete.
+    let (scratch, transport, handle) = fixture("secret-restore-absent-removes-disk").await;
+    let workspace = "ws-rpcd-secret-restore-absent-removes-disk";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=restore-away\n",
+            "origin": "api",
+            "momentId": "restore-away-first-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+
+    let materialized = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("write replay materializes plaintext");
+    let materialized_handle: WorkspaceHandle =
+        serde_json::from_value(materialized.result["workspace"].clone()).expect("handle");
+    let target = scratch.path().join(".env");
+    assert_eq!(
+        std::fs::read_to_string(&target).expect("materialized secret"),
+        "TOKEN=restore-away\n"
+    );
+
+    let restored = call(
+        &transport,
+        &materialized_handle,
+        5,
+        "secrets.restore",
+        json!({
+            "workspaceId": workspace,
+            "path": ".env",
+            "beforeMomentId": "restore-away-first-write",
+            "momentId": "restore-away-to-absent",
+        }),
+    )
+    .await;
+    assert_eq!(restored["restored"], "deleted");
+    assert!(
+        target.exists(),
+        "restore mutation only schedules disk cleanup"
+    );
+    call(
+        &transport,
+        &materialized_handle,
+        6,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                7,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("restore delete replay succeeds");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(
+        !target.exists(),
+        "restore-to-absent removes the previously materialized plaintext"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let job: (String, String) = connection
+        .query_row(
+            "SELECT status, operation FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_restore-away-to-absent'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("restore delete job");
+    assert_eq!(job, ("complete".to_owned(), "delete".to_owned()));
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        8,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_secret_delete_adopts_modified_disk_without_plaintext_conflict() {
+    // MUTATION: preserve a preimage mismatch for secret deletes by writing a
+    // plaintext `.conflict` sibling -> the leak-artifact assertion fails.
+    let (scratch, transport, handle) = fixture("secret-delete-adopts-disk").await;
+    let workspace = "ws-rpcd-secret-delete-adopts-disk";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=original\n",
+            "origin": "api",
+            "momentId": "adopt-delete-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+    let materialized = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("write replay");
+    let materialized_handle: WorkspaceHandle =
+        serde_json::from_value(materialized.result["workspace"].clone()).expect("handle");
+    std::fs::write(scratch.path().join(".env"), "TOKEN=externally-modified\n")
+        .expect("external modification");
+    call(
+        &transport,
+        &materialized_handle,
+        5,
+        "secrets.delete",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "origin": "api",
+            "momentId": "adopt-delete-active",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &materialized_handle,
+        6,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                7,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("adopt-current delete replay");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(!scratch.path().join(".env").exists());
+    assert!(
+        std::fs::read_dir(scratch.path())
+            .expect("workspace root")
+            .all(|entry| !entry
+                .expect("workspace entry")
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".conflict")),
+        "secret delete must never preserve plaintext in a conflict artifact"
+    );
+    call(
+        &transport,
+        &reopened_handle,
+        8,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_active_secret_delete_does_not_remove_active_disk_secret() {
+    // MUTATION: let a non-active-version delete drive the disk executor -> the
+    // active Main secret is removed instead of surviving as the disk projection.
+    let (scratch, transport, handle) = fixture("secret-cross-version-order").await;
+    let workspace = "ws-rpcd-secret-cross-version-order";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "MAIN=must-survive\n",
+            "origin": "api",
+            "momentId": "stale-main-write",
+        }),
+    )
+    .await;
+    let named = call(
+        &transport,
+        &handle,
+        3,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace,
+            "name": "other",
+            "fromVersionId": "main",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "secrets.fork",
+        json!({
+            "workspaceId": workspace,
+            "fromVersionId": "main",
+            "toVersionId": named["id"],
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        5,
+        "secrets.delete",
+        json!({
+            "workspaceId": workspace,
+            "versionId": named["id"],
+            "path": ".env",
+            "origin": "api",
+            "momentId": "newer-other-delete",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 6, "workspace.close", json!({})).await;
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                7,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("open replay");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(".env")).expect("active secret"),
+        "MAIN=must-survive\n",
+        "a non-active delete is DB-only"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_stale-main-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("stale job status");
+    assert_eq!(status, "complete");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        8,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_active_secret_write_survives_until_activation_and_reopen() {
+    // MUTATION: mark the non-active secret job complete during the first open
+    // -> activation plus the second open loses the inactive version's secret.
+    let (scratch, transport, handle) = fixture("secret-non-active-write").await;
+    let workspace = "ws-rpcd-secret-non-active-write";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "ACTIVE=main\n",
+            "origin": "api",
+            "momentId": "active-main-write",
+        }),
+    )
+    .await;
+    let named = call(
+        &transport,
+        &handle,
+        3,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace,
+            "name": "other",
+            "fromVersionId": "main",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "secrets.fork",
+        json!({
+            "workspaceId": workspace,
+            "fromVersionId": "main",
+            "toVersionId": named["id"],
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        5,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": named["id"],
+            "path": ".env",
+            "text": "INACTIVE=other\n",
+            "origin": "api",
+            "momentId": "non-active-newer-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 6, "workspace.close", json!({})).await;
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                7,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("open replay");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(".env")).expect("active secret"),
+        "ACTIVE=main\n"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_non-active-newer-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("inactive secret job");
+    assert_eq!(
+        status, "pending",
+        "inactive disk intent must survive for future activation"
+    );
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        8,
+        "versions.setActive",
+        json!({
+            "workspaceId": workspace,
+            "versionId": named["id"],
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &reopened_handle,
+        9,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+    let activated = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("active version replays its pending secret");
+    let activated_handle: WorkspaceHandle =
+        serde_json::from_value(activated.result["workspace"].clone()).expect("handle");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(".env")).expect("activated secret"),
+        "INACTIVE=other\n"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_non-active-newer-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("activated secret job");
+    assert_eq!(status, "complete");
+    drop(connection);
+    call(
+        &transport,
+        &activated_handle,
+        11,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn orphan_pending_secret_job_from_deleted_version_does_not_brick_open() {
+    // MUTATION: treat a missing secret moment as StateCorrupt -> workspace.open
+    // fails after the deleted version leaves its pending materialization job.
+    let (scratch, transport, handle) = fixture("secret-deleted-version-orphan").await;
+    let workspace = "ws-rpcd-secret-deleted-version-orphan";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    let named = call(
+        &transport,
+        &handle,
+        2,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace,
+            "name": "doomed",
+            "fromVersionId": "main",
+        }),
+    )
+    .await;
+    let named_id = named["id"].as_str().expect("named id").to_owned();
+    call(
+        &transport,
+        &handle,
+        3,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": named_id,
+            "path": ".env",
+            "text": "ORPHAN=never-project\n",
+            "origin": "api",
+            "momentId": "deleted-version-secret-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 4, "workspace.close", json!({})).await;
+
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    connection
+        .execute("PRAGMA foreign_keys = ON", [])
+        .expect("enable foreign keys");
+    connection
+        .execute(
+            "DELETE FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
+            rusqlite::params![workspace, named_id],
+        )
+        .expect("delete version and cascade secret moment");
+    let orphan_status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_deleted-version-secret-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("orphan job remains");
+    assert_eq!(orphan_status, "pending");
+    drop(connection);
+
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                5,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("orphan secret job is skipped");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(
+        !scratch.path().join(".env").exists(),
+        "deleted version's orphan must never reach disk"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let orphan_status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_deleted-version-secret-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("retired orphan job");
+    assert_eq!(orphan_status, "complete");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        6,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_secret_write_then_delete_reopens_without_materializing_stale_plaintext() {
+    // MUTATION: restore StateCorrupt-on-missing-tip -> the pending write sees
+    // the later active-version delete, and workspace.open bricks.
+    let (scratch, transport, handle) = fixture("secret-active-write-delete").await;
+    let workspace = "ws-rpcd-secret-active-write-delete";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TRANSIENT=gone\n",
+            "origin": "api",
+            "momentId": "active-write-before-delete",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "secrets.delete",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "origin": "api",
+            "momentId": "active-delete-after-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 4, "workspace.close", json!({})).await;
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                5,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("superseded write does not brick open");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(!scratch.path().join(".env").exists());
+    call(
+        &transport,
+        &reopened_handle,
+        6,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_apply_pending_secret_delete_reopens_without_bricking() {
+    // MUTATION: treat the superseded pending write's absent active tip as
+    // StateCorrupt -> replay aborts before the replicated pending delete runs.
+    let (scratch, transport, handle) = fixture("secret-apply-pending-delete").await;
+    let workspace = "ws-rpcd-secret-apply-pending-delete";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "REPLICATED=delete-me\n",
+            "origin": "api",
+            "momentId": "replicated-delete-target-write",
+        }),
+    )
+    .await;
+    let deleting = call(
+        &transport,
+        &handle,
+        3,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace,
+            "name": "deleting",
+            "fromVersionId": "main",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "secrets.fork",
+        json!({
+            "workspaceId": workspace,
+            "fromVersionId": "main",
+            "toVersionId": deleting["id"],
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        5,
+        "secrets.delete",
+        json!({
+            "workspaceId": workspace,
+            "versionId": deleting["id"],
+            "path": ".env",
+            "origin": "api",
+            "momentId": "replicated-source-delete",
+        }),
+    )
+    .await;
+    let applied = call(
+        &transport,
+        &handle,
+        6,
+        "secrets.apply",
+        json!({
+            "workspaceId": workspace,
+            "path": ".env",
+            "sourceVersionId": deleting["id"],
+            "targetVersionId": "main",
+            "momentId": "replicated-pending-delete",
+            "origin": "sync",
+        }),
+    )
+    .await;
+    assert_eq!(applied["changed"], true);
+    call(&transport, &handle, 7, "workspace.close", json!({})).await;
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_replicated-pending-delete'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("replicated delete job");
+    assert_eq!(status, "pending", "apply exercises the pending-delete path");
+    drop(connection);
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                8,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("replicated pending delete replays");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(!scratch.path().join(".env").exists());
+    call(
+        &transport,
+        &reopened_handle,
+        9,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn newer_non_active_marker_does_not_suppress_active_secret_delete() {
+    // MUTATION: route the active secret delete through the workspace-wide
+    // generation fence -> the newer non-active marker suppresses disk removal.
+    let (scratch, transport, handle) = fixture("secret-active-delete-fence").await;
+    let workspace = "ws-rpcd-secret-active-delete-fence";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "ACTIVE=delete-me\n",
+            "origin": "api",
+            "momentId": "active-delete-base",
+        }),
+    )
+    .await;
+    let other = call(
+        &transport,
+        &handle,
+        3,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace,
+            "name": "other",
+            "fromVersionId": "main",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        4,
+        "secrets.fork",
+        json!({
+            "workspaceId": workspace,
+            "fromVersionId": "main",
+            "toVersionId": other["id"],
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        5,
+        "secrets.delete",
+        json!({
+            "workspaceId": workspace,
+            "versionId": other["id"],
+            "path": ".env",
+            "origin": "api",
+            "momentId": "source-delete-for-active",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        6,
+        "secrets.apply",
+        json!({
+            "workspaceId": workspace,
+            "path": ".env",
+            "sourceVersionId": other["id"],
+            "targetVersionId": "main",
+            "momentId": "pending-active-delete",
+            "origin": "sync",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        7,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": other["id"],
+            "path": ".env",
+            "text": "OTHER=temporary\n",
+            "origin": "api",
+            "momentId": "newer-non-active-write",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        8,
+        "secrets.delete",
+        json!({
+            "workspaceId": workspace,
+            "versionId": other["id"],
+            "path": ".env",
+            "origin": "api",
+            "momentId": "newer-non-active-marker",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 9, "workspace.close", json!({})).await;
+    std::fs::write(scratch.path().join(".env"), "ACTIVE=delete-me\n").expect("seed active disk");
+
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                10,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("active delete replay");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(!scratch.path().join(".env").exists());
+    call(
+        &transport,
+        &reopened_handle,
+        11,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn newer_marker_lets_a_superseded_tampered_secret_open_without_bricking() {
+    // MUTATION: restore StateCorrupt-on-missing-tip or decrypt a superseded
+    // same-version write -> the tampered historical ciphertext bricks open.
+    let (scratch, transport, handle) = fixture("secret-superseded-tampered").await;
+    let workspace = "ws-rpcd-secret-superseded-tampered";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "STALE=must-not-land\n",
+            "origin": "api",
+            "momentId": "stale-main-write",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "secrets.delete",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "origin": "api",
+            "momentId": "newer-main-delete",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 4, "workspace.close", json!({})).await;
+    // Tamper the now-historical write row. The active tip is absent, so replay
+    // must skip it without attempting authenticated decryption.
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    connection
+        .execute(
+            "UPDATE secret_moments SET after_auth_tag_base64 = ?1 \
+             WHERE workspace_id = ?2 AND moment_id = 'stale-main-write'",
+            rusqlite::params!["AAAAAAAAAAAAAAAAAAAAAA==", workspace],
+        )
+        .expect("tamper auth tag");
+    drop(connection);
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                5,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("a superseded tampered secret must not brick open");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(
+        !scratch.path().join(".env").exists(),
+        "same-version superseded secret was not materialized"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_stale-main-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("stale job status");
+    assert_eq!(status, "complete");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        6,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tampered_secret_open_replay_fails_closed_without_writing_plaintext() {
+    // MUTATION: `?`-propagate decrypt-failed or write plaintext from
+    // unauthenticated bytes -> open fails or the target/status assertions fail.
+    let (scratch, transport, handle) = fixture("secret-replay-tamper").await;
+    let workspace = "ws-rpcd-secret-replay-tamper";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=auth-required\n",
+            "origin": "api",
+            "momentId": "tampered-secret-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    connection
+        .execute(
+            "UPDATE secret_files SET auth_tag_base64 = ?1 \
+             WHERE workspace_id = ?2 AND version_id = 'main' AND path = '.env'",
+            rusqlite::params!["AAAAAAAAAAAAAAAAAAAAAA==", workspace],
+        )
+        .expect("tamper auth tag");
+    drop(connection);
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("tampered replay is skipped without bricking open");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(
+        !scratch.path().join(".env").exists(),
+        "failed authenticated decryption must not produce plaintext"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_tampered-secret-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("tampered job status");
+    assert_eq!(status, "pending");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        5,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_disk_symlink_at_path_does_not_brick_open() {
+    // MUTATION: `?`-propagate the secret write executor's symlink error ->
+    // workspace.open fails instead of leaving this one job pending.
+    let (scratch, transport, handle) = fixture("secret-replay-symlink").await;
+    let workspace = "ws-rpcd-secret-replay-symlink";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=must-not-follow\n",
+            "origin": "api",
+            "momentId": "symlink-secret-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+
+    let outside = scratch.path().join("outside-secret.txt");
+    std::fs::write(&outside, "outside stays intact\n").expect("outside file");
+    std::os::unix::fs::symlink(&outside, scratch.path().join(".env")).expect("secret symlink");
+
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("secret symlink only skips its replay job");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(
+        std::fs::symlink_metadata(scratch.path().join(".env"))
+            .expect("symlink metadata")
+            .file_type()
+            .is_symlink(),
+        "the secret symlink is untouched"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&outside).expect("outside content"),
+        "outside stays intact\n",
+        "replay must never follow and overwrite the symlink target"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_symlink-secret-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("symlink job status");
+    assert_eq!(status, "pending");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        5,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_symlinked_parent_never_writes_outside_workspace() {
+    // MUTATION: drop the secret ancestor walk -> replay follows `config` and
+    // writes the decrypted .env into the external directory.
+    let (scratch, transport, handle) = fixture("secret-replay-parent-symlink").await;
+    let workspace = "ws-rpcd-secret-replay-parent-symlink";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": "config/.env",
+            "text": "TOKEN=must-stay-in-workspace\n",
+            "origin": "api",
+            "momentId": "parent-symlink-secret-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+
+    let outside = ScratchDir::new().expect("external directory");
+    std::os::unix::fs::symlink(outside.path(), scratch.path().join("config"))
+        .expect("secret parent symlink");
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("ancestor refusal only skips the secret replay job");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(
+        !outside.path().join(".env").exists(),
+        "plaintext must not escape through the symlinked parent"
+    );
+    assert!(
+        std::fs::symlink_metadata(scratch.path().join("config"))
+            .expect("parent symlink metadata")
+            .file_type()
+            .is_symlink(),
+        "the refused parent symlink remains untouched"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_parent-symlink-secret-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("parent-symlink job status");
+    assert_eq!(status, "pending");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        5,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn planted_secret_temp_symlink_is_never_followed() {
+    // MUTATION: restore create+truncate for the secret temp -> replay follows
+    // the predictable temp symlink and writes plaintext into the external file.
+    let (scratch, transport, handle) = fixture("secret-replay-temp-symlink").await;
+    let workspace = "ws-rpcd-secret-replay-temp-symlink";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=must-not-follow-temp\n",
+            "origin": "api",
+            "momentId": "temp-symlink-secret-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+
+    let outside = ScratchDir::new().expect("external directory");
+    let outside_file = outside.path().join("outside.txt");
+    std::fs::write(&outside_file, "outside stays intact\n").expect("outside sentinel");
+    let temp = scratch
+        .path()
+        .join(".dohc-write-secret-mat-temp-symlink-secret-write.tmp");
+    std::os::unix::fs::symlink(&outside_file, &temp).expect("planted temp symlink");
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("temp refusal only skips the secret replay job");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert_eq!(
+        std::fs::read_to_string(&outside_file).expect("outside content"),
+        "outside stays intact\n",
+        "secret plaintext must not be written through the planted temp symlink"
+    );
+    assert!(!scratch.path().join(".env").exists());
+    assert!(
+        std::fs::symlink_metadata(&temp)
+            .expect("temp symlink metadata")
+            .file_type()
+            .is_symlink(),
+        "exclusive-create refusal must not clobber the planted entry"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_temp-symlink-secret-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("temp-symlink job status");
+    assert_eq!(status, "pending");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        5,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+// Cross-platform coverage for crash recovery at the predictable secret temp
+// path while preserving exclusive-create on the replacement entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn planted_secret_temp_regular_file_is_unlinked_for_recovery() {
+    // MUTATION: remove the AlreadyExists classify+unlink+retry branch -> the
+    // planted regular temp leaves the job pending and .env absent.
+    let (scratch, transport, handle) = fixture("secret-replay-temp-regular").await;
+    let workspace = "ws-rpcd-secret-replay-temp-regular";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=recovered-from-planted-temp\n",
+            "origin": "api",
+            "momentId": "temp-regular-secret-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+
+    let temp = scratch
+        .path()
+        .join(".dohc-write-secret-mat-temp-regular-secret-write.tmp");
+    std::fs::write(&temp, "PLANTED\n").expect("plant a regular file at the predictable temp path");
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("regular temp collision is recovered");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(".env")).expect("materialized secret"),
+        "TOKEN=recovered-from-planted-temp\n"
+    );
+    assert!(
+        !temp.exists(),
+        "the planted regular temp must be unlinked before exclusive-create retry"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_temp-regular-secret-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("temp-regular job status");
+    assert_eq!(status, "complete");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        5,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn crashed_secret_write_recovers_after_reopen() {
+    // MUTATION: revert write_secret_temp_no_follow to bare create_new -> reopen
+    // cannot replace the durable crashed temp, so .env stays absent and pending.
+    let (scratch, transport, handle) = fixture("secret-replay-crashed-temp").await;
+    let workspace = "ws-rpcd-secret-replay-crashed-temp";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=recovered-after-crash\n",
+            "origin": "api",
+            "momentId": "crashed-temp-secret-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+
+    let temp = scratch
+        .path()
+        .join(".dohc-write-secret-mat-crashed-temp-secret-write.tmp");
+    std::fs::write(&temp, "TOKEN=recovered-after-crash\n")
+        .expect("model durable temp left after flush-before-rename crash");
+
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("reopen recovers the durable crashed temp");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(".env")).expect("materialized secret"),
+        "TOKEN=recovered-after-crash\n"
+    );
+    assert!(!temp.exists(), "crashed temp must be consumed by recovery");
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_crashed-temp-secret-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("crashed-temp job status");
+    assert_eq!(status, "complete");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        5,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[cfg(any(unix, windows))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_write_beneath_symlinked_workspace_root_succeeds() {
+    // MUTATION: reject_link_or_reparse the workspace root itself -> replay
+    // refuses this benign root alias, leaving .env absent and the job pending.
+    let scratch = ScratchDir::new().expect("real workspace");
+    let alias_parent = ScratchDir::new().expect("workspace alias parent");
+    let aliased_root = alias_parent.path().join("workspace-link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(scratch.path(), &aliased_root).expect("workspace root symlink");
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&aliased_root)
+            .arg(scratch.path())
+            .status()
+            .expect("spawn workspace-root mklink /J");
+        assert!(
+            status.success(),
+            "workspace-root junction creation must succeed"
+        );
+    }
+
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let workspace = "ws-rpcd-secret-symlinked-root";
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": aliased_root.to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("open through workspace root alias");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=symlinked-root-works\n",
+            "origin": "api",
+            "momentId": "symlinked-root-secret-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": aliased_root.to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("reopen through workspace root alias");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join(".env")).expect("materialized secret"),
+        "TOKEN=symlinked-root-works\n"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_symlinked-root-secret-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("symlinked-root job status");
+    assert_eq!(status, "complete");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        5,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+// Windows runtime coverage for the ancestor-reparse rejection (the #[cfg(unix)]
+// symlink test can't run on Windows). A junction (`mklink /J`) is a reparse point
+// creatable WITHOUT elevation, so it exercises FILE_ATTRIBUTE_REPARSE_POINT.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_junctioned_parent_never_writes_outside_workspace() {
+    // MUTATION: drop the secret ancestor walk / the reparse check -> replay
+    // traverses the `config` junction and writes the decrypted .env outside.
+    let (scratch, transport, handle) = fixture("secret-replay-parent-junction").await;
+    let workspace = "ws-rpcd-secret-replay-parent-junction";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": "config/.env",
+            "text": "TOKEN=must-stay-in-workspace\n",
+            "origin": "api",
+            "momentId": "parent-junction-secret-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+
+    let outside = ScratchDir::new().expect("external directory");
+    let link = scratch.path().join("config");
+    let status = std::process::Command::new("cmd")
+        .arg("/C")
+        .arg("mklink")
+        .arg("/J")
+        .arg(&link)
+        .arg(outside.path())
+        .status()
+        .expect("spawn mklink /J");
+    assert!(
+        status.success(),
+        "junction creation must succeed without elevation"
+    );
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("ancestor reparse refusal only skips the secret replay job");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(
+        !outside.path().join(".env").exists(),
+        "plaintext must not escape through the junctioned parent"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_parent-junction-secret-write'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("parent-junction job status");
+    assert_eq!(status, "pending");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        5,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_secret_write_blocked_by_directory_stays_pending() {
+    // MUTATION: restore Oversized -> mark_materialization_conflict -> the
+    // active write becomes terminal instead of remaining retryable.
+    let (scratch, transport, handle) = fixture("secret-write-directory").await;
+    let workspace = "ws-rpcd-secret-write-directory";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=blocked-by-directory\n",
+            "origin": "api",
+            "momentId": "directory-secret-write-active",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+
+    let target = scratch.path().join(".env");
+    std::fs::create_dir(&target).expect("directory at active secret write path");
+    std::fs::write(target.join("keep.txt"), "do not replace\n").expect("sentinel");
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("blocked active secret write does not brick open");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(target.is_dir());
+    assert_eq!(
+        std::fs::read_to_string(target.join("keep.txt")).expect("sentinel"),
+        "do not replace\n"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_directory-secret-write-active'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("directory write job status");
+    assert_eq!(status, "pending");
+    let conflict_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_directory-secret-write-active' AND status = 'conflict'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("conflict count");
+    assert_eq!(conflict_count, 0);
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        5,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn secret_directory_at_path_does_not_brick_open() {
+    // MUTATION: `?`-propagate the secret delete executor's directory error ->
+    // workspace.open fails instead of leaving the directory and job pending.
+    let (scratch, transport, handle) = fixture("secret-replay-directory").await;
+    let workspace = "ws-rpcd-secret-replay-directory";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=replace-with-directory\n",
+            "origin": "api",
+            "momentId": "directory-secret-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+    let materialized = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("materialize secret before scheduling delete");
+    let materialized_handle: WorkspaceHandle =
+        serde_json::from_value(materialized.result["workspace"].clone()).expect("handle");
+    call(
+        &transport,
+        &materialized_handle,
+        5,
+        "secrets.delete",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "origin": "api",
+            "momentId": "directory-secret-delete",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &materialized_handle,
+        6,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+
+    let target = scratch.path().join(".env");
+    std::fs::remove_file(&target).expect("remove prior plaintext");
+    std::fs::create_dir(&target).expect("directory at secret path");
+    std::fs::write(target.join("keep.txt"), "do not recurse\n").expect("directory sentinel");
+
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                7,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("secret directory only skips its replay job");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(
+        target.is_dir(),
+        "the directory at the secret path is untouched"
+    );
+    assert_eq!(
+        std::fs::read_to_string(target.join("keep.txt")).expect("directory sentinel"),
+        "do not recurse\n",
+        "secret delete must never recurse into a directory"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_directory-secret-delete'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("directory job status");
+    assert_eq!(status, "pending");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        8,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn active_secret_delete_refuses_non_regular_target_and_leaves_job_pending() {
+    // MUTATION: remove the secret delete executor's non-regular guards -> on
+    // Unix the socket path is unlinked and the delete job completes.
+    let (scratch, transport, handle) = fixture("secret-delete-non-regular").await;
+    let workspace = "ws-rpcd-secret-delete-non-regular";
+    call(
+        &transport,
+        &handle,
+        20,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "text": "TOKEN=replace-with-special\n",
+            "origin": "api",
+            "momentId": "non-regular-secret-write",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 3, "workspace.close", json!({})).await;
+    let materialized = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                4,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("materialize secret before scheduling delete");
+    let materialized_handle: WorkspaceHandle =
+        serde_json::from_value(materialized.result["workspace"].clone()).expect("handle");
+    call(
+        &transport,
+        &materialized_handle,
+        5,
+        "secrets.delete",
+        json!({
+            "workspaceId": workspace,
+            "versionId": "main",
+            "path": ".env",
+            "origin": "api",
+            "momentId": "non-regular-secret-delete",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &materialized_handle,
+        6,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+
+    let target = scratch.path().join(".env");
+    std::fs::remove_file(&target).expect("remove prior plaintext");
+    #[cfg(unix)]
+    let socket =
+        std::os::unix::net::UnixListener::bind(&target).expect("socket at secret delete path");
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir(&target).expect("directory at secret delete path");
+        std::fs::write(target.join("keep.txt"), "do not remove\n").expect("directory sentinel");
+    }
+
+    let reopened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                7,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace,
+                }),
+            ),
+        )
+        .await
+        .expect("blocked special target does not brick open");
+    let reopened_handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
+    assert!(
+        target.exists(),
+        "the non-regular target must remain untouched"
+    );
+    #[cfg(unix)]
+    drop(socket);
+    #[cfg(not(unix))]
+    assert_eq!(
+        std::fs::read_to_string(target.join("keep.txt")).expect("directory sentinel"),
+        "do not remove\n"
+    );
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let status: String = connection
+        .query_row(
+            "SELECT status FROM materialization_jobs \
+             WHERE job_id = 'secret-mat_non-regular-secret-delete'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("non-regular delete job status");
+    assert_eq!(status, "pending");
+    drop(connection);
+    call(
+        &transport,
+        &reopened_handle,
+        8,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2904,6 +5249,267 @@ async fn text_read_returns_binary_head_and_read_blob_reads_by_sha() {
     // Base64 in-band, matching versionedBinary.read's encoding (one payload
     // convention for binary bytes across adjacent RPCs).
     assert_eq!(blob["bytesBase64"], json!("AQIDBA=="));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn over_cap_blob_egress_announces_chunks_fin_and_reassembles_exactly() {
+    // MUTATION: drop FIN, use the 64 KiB socket read size, omit raw egress, or
+    // reorder/truncate a chunk -> the frame and exact-byte assertions fail.
+    let (_scratch, service, transport, handle) = fixture_with_service("blob-egress").await;
+    let workspace = "ws-rpcd-blob-egress";
+    let bytes: Vec<u8> = (0..(600 * 1024 + 17))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    let written = call(
+        &transport,
+        &handle,
+        3,
+        "versionedBinary.write",
+        json!({
+            "versionId": "main",
+            "path": "large.bin",
+            "bytes": [0],
+            "origin": "api",
+        }),
+    )
+    .await;
+    let connection =
+        rusqlite::Connection::open(_scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let sha256 = dohc_engine_storage::put_binary_blob(&connection, &bytes).expect("large blob");
+    connection
+        .execute(
+            "UPDATE snapshots SET binary_sha256 = ?1 \
+             WHERE workspace_id = ?2 AND version_id = 'main' AND path = 'large.bin'",
+            rusqlite::params![sha256, workspace],
+        )
+        .expect("point snapshot at large blob");
+    drop(connection);
+    assert!(written["snapshot"]["sha256"].is_string());
+    let output = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            4,
+            "versionedBinary.readBlob",
+            Some(handle.clone()),
+            json!({ "workspaceId": workspace, "sha256": sha256 }),
+        ),
+    )
+    .await
+    .expect("egress read");
+    assert_eq!(output.response.result["bytesBase64"], Value::Null);
+    let egress = output.blob_egress.expect("over-cap raw egress");
+    assert_eq!(egress.stream_id, 4);
+    assert_eq!(egress.sha256, sha256);
+    assert_eq!(egress.bytes, bytes);
+
+    let limits = WireLimits::default();
+    let mut encoded = encode_control(
+        &Envelope::BlobStart(BlobStart {
+            request_id: output.response.id,
+            stream_id: egress.stream_id,
+            total_bytes: Some(egress.bytes.len() as u64),
+            sha256: Some(egress.sha256.clone()),
+        }),
+        &limits,
+    )
+    .expect("blob start");
+    for (fin, chunk) in blob_chunks(&egress.bytes, limits.max_blob_chunk_bytes as usize) {
+        assert!(chunk.len() <= 256 * 1024);
+        encoded.extend(
+            encode_blob_chunk_frame(egress.stream_id, fin, chunk, &limits).expect("chunk frame"),
+        );
+    }
+    let mut decoder = FrameDecoder::new(limits.clone());
+    decoder.push(&encoded);
+    let Frame::Control(start) = decoder
+        .next_frame()
+        .expect("valid frame")
+        .expect("blob start")
+    else {
+        panic!("egress starts with BlobStart");
+    };
+    assert_eq!(
+        decode_control(&start, &limits).expect("blob start envelope"),
+        Envelope::BlobStart(BlobStart {
+            request_id: 4,
+            stream_id: 4,
+            total_bytes: Some(bytes.len() as u64),
+            sha256: Some(sha256.clone()),
+        })
+    );
+    let mut rebuilt = Vec::new();
+    let mut fins = Vec::new();
+    while let Some(frame) = decoder.next_frame().expect("valid frame") {
+        let Frame::BlobChunk {
+            stream_id,
+            fin,
+            bytes,
+        } = frame
+        else {
+            panic!("raw egress contains only blob chunks");
+        };
+        assert_eq!(stream_id, 4);
+        fins.push(fin);
+        rebuilt.extend(bytes);
+    }
+    assert_eq!(rebuilt, bytes);
+    assert_eq!(fins, vec![false, false, true]);
+
+    let small = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded(),
+        request(
+            5,
+            "versionedBinary.readBlob",
+            Some(handle.clone()),
+            json!({
+                "workspaceId": workspace,
+                "sha256": dohc_engine_storage::hex_sha256(&[1_u8, 2, 3]),
+            }),
+        ),
+    )
+    .await
+    .expect_err("unreferenced blob refuses");
+    assert_eq!(small.message, "file-not-found");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn blob_capability_gate_prevents_unnegotiated_over_cap_hydration() {
+    // MUTATION: always call read_binary_blob_for_egress before checking the
+    // negotiated set -> the non-negotiating metadata request detects the
+    // deliberately corrupt bytes instead of returning without hydration.
+    let (scratch, service, transport, handle) =
+        fixture_with_service("blob-capability-hydration").await;
+    let workspace = "ws-rpcd-blob-capability-hydration";
+    let bytes = vec![0x31_u8; 49_153];
+    call(
+        &transport,
+        &handle,
+        2,
+        "versionedBinary.write",
+        json!({
+            "versionId": "main",
+            "path": "large.bin",
+            "bytes": [0],
+            "origin": "api",
+        }),
+    )
+    .await;
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let sha256 = dohc_engine_storage::put_binary_blob(&connection, &bytes).expect("large blob");
+    connection
+        .execute(
+            "UPDATE snapshots SET binary_sha256 = ?1 \
+             WHERE workspace_id = ?2 AND version_id = 'main' AND path = 'large.bin'",
+            rusqlite::params![sha256, workspace],
+        )
+        .expect("point snapshot at large blob");
+    connection
+        .execute(
+            "UPDATE binary_blobs SET bytes = ?1 WHERE sha256 = ?2",
+            rusqlite::params![vec![0x32_u8; bytes.len()], sha256],
+        )
+        .expect("plant same-length hash corruption");
+    drop(connection);
+
+    let metadata = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded(),
+        request(
+            3,
+            "versionedBinary.readBlob",
+            Some(handle.clone()),
+            json!({ "workspaceId": workspace, "sha256": sha256 }),
+        ),
+    )
+    .await
+    .expect("non-negotiating client receives metadata");
+    assert_eq!(metadata.response.result["bytesBase64"], Value::Null);
+    assert_eq!(metadata.response.result["byteLength"], 49_153);
+    assert!(metadata.blob_egress.is_none());
+
+    let error = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded().with_capability("blobs"),
+        request(
+            4,
+            "versionedBinary.readBlob",
+            Some(handle),
+            json!({ "workspaceId": workspace, "sha256": sha256 }),
+        ),
+    )
+    .await
+    .expect_err("negotiating client hydrates and verifies before streaming");
+    assert_eq!(error.message, "persist-failed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_blob_egress_never_produces_a_service_payload() {
+    // MUTATION: ignore OperationCancellation on the blob read -> a successful
+    // response (and possible egress payload) is produced after cancellation.
+    let (_scratch, service, transport, handle) = fixture_with_service("blob-egress-cancel").await;
+    let workspace = "ws-rpcd-blob-egress-cancel";
+    let bytes = vec![9_u8; 64 * 1024];
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "versionedBinary.write",
+        json!({
+            "versionId": "main",
+            "path": "cancel.bin",
+            "bytes": [0],
+            "origin": "api",
+        }),
+    )
+    .await;
+    let connection =
+        rusqlite::Connection::open(_scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let sha256 = dohc_engine_storage::put_binary_blob(&connection, &bytes).expect("large blob");
+    connection
+        .execute(
+            "UPDATE snapshots SET binary_sha256 = ?1 \
+             WHERE workspace_id = ?2 AND version_id = 'main' AND path = 'cancel.bin'",
+            rusqlite::params![sha256, workspace],
+        )
+        .expect("point snapshot at large blob");
+    drop(connection);
+    let ctx = RequestContext::unbounded();
+    ctx.cancel.cancel();
+    let error = ProtocolEngineService::call(
+        service.as_ref(),
+        ctx,
+        request(
+            4,
+            "versionedBinary.readBlob",
+            Some(handle),
+            json!({
+                "workspaceId": workspace,
+                "sha256": sha256,
+            }),
+        ),
+    )
+    .await
+    .expect_err("cancelled egress");
+    assert_eq!(error.code, ErrorCode::Cancelled);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

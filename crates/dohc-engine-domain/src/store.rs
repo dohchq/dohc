@@ -819,6 +819,26 @@ impl<'a> VersionedTextStore<'a> {
         workspace_id: &str,
         sha256: &str,
     ) -> Result<Option<BinaryBlobRead>, DomainError> {
+        self.read_binary_blob_with_hydration(workspace_id, sha256, false)
+    }
+
+    /// Read a workspace-referenced blob with bytes hydrated even above the
+    /// in-band cap. The framed daemon uses this only for bounded chunk egress;
+    /// workspace reference checks remain identical to `read_binary_blob`.
+    pub fn read_binary_blob_for_egress(
+        &self,
+        workspace_id: &str,
+        sha256: &str,
+    ) -> Result<Option<BinaryBlobRead>, DomainError> {
+        self.read_binary_blob_with_hydration(workspace_id, sha256, true)
+    }
+
+    fn read_binary_blob_with_hydration(
+        &self,
+        workspace_id: &str,
+        sha256: &str,
+        hydrate_over_cap: bool,
+    ) -> Result<Option<BinaryBlobRead>, DomainError> {
         non_empty(workspace_id, "workspace_id")?;
         self.store.read_with(|conn| {
             let referenced: bool = conn
@@ -871,7 +891,7 @@ impl<'a> VersionedTextStore<'a> {
                     reason: "binary blob length does not match its bytes",
                 });
             }
-            if byte_length as usize > INBAND_CONTENT_CAP_BYTES {
+            if byte_length as usize > INBAND_CONTENT_CAP_BYTES && !hydrate_over_cap {
                 return Ok(Some(BinaryBlobRead {
                     byte_length,
                     bytes: None,

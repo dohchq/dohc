@@ -35,7 +35,7 @@ use crate::search::{
 use dohc_engine_collab::{
     AppendOutcome, CloseOutcome, ContentKind, DocKey, Projection, Regime, Ydoc,
 };
-use dohc_engine_crypto::SecretDataKey;
+use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
     AgentRunRecord, AgentUnreadThreadRow, BinaryHead, BinaryHeadMeta, BinaryWriteResult,
     CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureManifestSeedEntry,
@@ -64,7 +64,10 @@ use dohc_engine_domain::{
     select_snapshot_by_path_in_tx, validate_addressable_plaintext_path, write_binary_in_tx,
     write_projected_text_in_tx, write_text_in_tx,
 };
-use dohc_engine_files::{DurabilityPolicy, JobOutcome, StdBackoff, StdReplacer, materialize_one};
+use dohc_engine_files::{
+    DurabilityPolicy, JobOutcome, StdBackoff, StdReplacer, materialize_one,
+    materialize_secret_delete_one, materialize_secret_one,
+};
 use dohc_engine_storage::{
     CompoundWrite, Document, EngineStore, FaultInjector, JobStatus, MaterializationJob, NoFaults,
     Preimage, StorageError, TxnOutcome, WriteOutcome,
@@ -389,6 +392,11 @@ enum Command {
         reply: oneshot::Sender<Result<Option<BinaryHeadMeta>, RuntimeError>>,
     },
     ReadBinaryBlob {
+        workspace_id: String,
+        sha256: String,
+        reply: oneshot::Sender<Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError>>,
+    },
+    ReadBinaryBlobForEgress {
         workspace_id: String,
         sha256: String,
         reply: oneshot::Sender<Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError>>,
@@ -1869,6 +1877,23 @@ impl ActorHandle {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ReadBinaryBlob {
+                workspace_id,
+                sha256,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn read_binary_blob_for_egress(
+        &self,
+        workspace_id: String,
+        sha256: String,
+    ) -> Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::ReadBinaryBlobForEgress {
                 workspace_id,
                 sha256,
                 reply,
@@ -4123,6 +4148,104 @@ fn debug_assert_sync_context() {
     );
 }
 
+struct SecretJobCoordinates {
+    workspace_id: String,
+    version_id: String,
+    path: String,
+}
+
+fn secret_job_coordinates(
+    store: &mut EngineStore,
+    job: &MaterializationJob,
+) -> Result<Option<SecretJobCoordinates>, RuntimeError> {
+    let moment_id = job
+        .job_id
+        .strip_prefix("secret-mat_")
+        .ok_or(DomainError::StateCorrupt {
+            reason: "secret materialization job id is malformed",
+        })?;
+    let coordinates: Option<(String, String, String, i64, String)> = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT workspace_id, version_id, path, moment_order, operation \
+                 FROM secret_moments WHERE moment_id = ?1",
+            [moment_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StorageError::corrupt_public)
+    })?;
+    let Some((workspace_id, version_id, path, moment_order, operation)) = coordinates else {
+        // Version deletion cascades its secret moments but the generic
+        // materialization ledger has no FK back to those domain rows. Treat
+        // that pending job as an orphan the replay loop can retire, not as
+        // corruption that bricks every future workspace open.
+        return Ok(None);
+    };
+    let expected_operation = match job.operation {
+        dohc_engine_storage::MaterializationOperation::Write => "write",
+        dohc_engine_storage::MaterializationOperation::Delete => "delete",
+    };
+    if path != job.target_path
+        || moment_order != job.target_generation
+        || operation != expected_operation
+    {
+        return Err(DomainError::StateCorrupt {
+            reason: "secret materialization job does not match its moment",
+        }
+        .into());
+    }
+    Ok(Some(SecretJobCoordinates {
+        workspace_id,
+        version_id,
+        path,
+    }))
+}
+
+fn secret_tip_exists(
+    store: &EngineStore,
+    coordinates: &SecretJobCoordinates,
+) -> Result<bool, RuntimeError> {
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT 1 FROM secret_files \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+                params![
+                    coordinates.workspace_id,
+                    coordinates.version_id,
+                    coordinates.path
+                ],
+                |_| Ok(()),
+            )
+            .optional()
+            .map(|row| row.is_some())
+            .map_err(StorageError::corrupt_public)
+        })
+        .map_err(RuntimeError::from)
+}
+
+fn secret_plaintext_for_job(
+    store: &mut EngineStore,
+    key: &SecretDataKey,
+    coordinates: &SecretJobCoordinates,
+) -> Result<Option<SecretPlaintext>, RuntimeError> {
+    SecretFileStore::new(store, key)
+        .materialize_secret_file(
+            &coordinates.workspace_id,
+            &coordinates.version_id,
+            &coordinates.path,
+        )
+        .map_err(RuntimeError::from)
+}
+
 fn worker_main(
     db_path: PathBuf,
     now_ms: i64,
@@ -4450,6 +4573,16 @@ fn worker_main(
             } => {
                 let outcome = VersionedTextStore::new(&mut store)
                     .read_binary_blob(&workspace_id, &sha256)
+                    .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::ReadBinaryBlobForEgress {
+                workspace_id,
+                sha256,
+                reply,
+            } => {
+                let outcome = VersionedTextStore::new(&mut store)
+                    .read_binary_blob_for_egress(&workspace_id, &sha256)
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
@@ -4956,14 +5089,102 @@ fn worker_main(
                 let outcome = (|| {
                     let jobs = store.list_pending_materialization_jobs()?;
                     let mut completed = 0_usize;
+                    // Per-call key custody: this local is dropped when the
+                    // replay command ends and is never retained by the actor.
+                    let mut secret_key: Option<SecretDataKey> = None;
                     for job in jobs {
-                        // Secret jobs carry CIPHERTEXT as their content blob;
-                        // only the secret-aware materializer may produce the
-                        // plaintext. Feeding one to the generic replayer
-                        // would write ciphertext bytes to the user path and
-                        // mark the job complete. Leave them for the secret
-                        // pipeline.
                         if job.job_id.starts_with("secret-mat_") {
+                            let Some(coordinates) = secret_job_coordinates(&mut store, &job)?
+                            else {
+                                store.mark_materialization_complete(&job.job_id, now_ms)?;
+                                continue;
+                            };
+                            let active_version_id = VersionedTextStore::new(&mut store)
+                                .get_active_version(&coordinates.workspace_id)?
+                                .version_id;
+                            // Disk is the active-version projection. A mutation
+                            // in any other version is durable DB state only,
+                            // but its pending intent must survive until that
+                            // version is activated and a later open replays it.
+                            if coordinates.version_id != active_version_id {
+                                continue;
+                            }
+                            let tip_present = secret_tip_exists(&store, &coordinates)?;
+                            match (job.operation, tip_present) {
+                                (dohc_engine_storage::MaterializationOperation::Write, false)
+                                | (dohc_engine_storage::MaterializationOperation::Delete, true) => {
+                                    // A later mutation in this active version
+                                    // superseded the pending job. In particular,
+                                    // a gone write tip is not corrupt state.
+                                    store.mark_materialization_complete(&job.job_id, now_ms)?;
+                                    continue;
+                                }
+                                (dohc_engine_storage::MaterializationOperation::Delete, false) => {}
+                                (dohc_engine_storage::MaterializationOperation::Write, true) => {}
+                            }
+                            if matches!(
+                                job.operation,
+                                dohc_engine_storage::MaterializationOperation::Delete
+                            ) {
+                                match materialize_secret_delete_one(
+                                    &store,
+                                    &root_dir,
+                                    &job,
+                                    DurabilityPolicy::per_os(),
+                                    now_ms,
+                                    &NoFaults,
+                                ) {
+                                    Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
+                                        completed += 1;
+                                    }
+                                    Ok(
+                                        JobOutcome::Conflict
+                                        | JobOutcome::Superseded
+                                        | JobOutcome::Crashed(_),
+                                    )
+                                    | Err(_) => {}
+                                }
+                                continue;
+                            }
+                            if secret_key.is_none() {
+                                let Ok(Some(key)) = load_key_file(&root_dir) else {
+                                    continue;
+                                };
+                                secret_key = Some(key);
+                            }
+                            let plaintext = match secret_plaintext_for_job(
+                                &mut store,
+                                secret_key.as_ref().expect("secret key loaded"),
+                                &coordinates,
+                            ) {
+                                Ok(Some(plaintext)) => plaintext,
+                                Ok(None) => {
+                                    store.mark_materialization_complete(&job.job_id, now_ms)?;
+                                    continue;
+                                }
+                                Err(_) => continue,
+                            };
+                            match materialize_secret_one(
+                                &store,
+                                &root_dir,
+                                &job,
+                                plaintext.as_bytes(),
+                                DurabilityPolicy::per_os(),
+                                &StdReplacer,
+                                &StdBackoff,
+                                now_ms,
+                                &NoFaults,
+                            ) {
+                                Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
+                                    completed += 1;
+                                }
+                                Ok(
+                                    JobOutcome::Conflict
+                                    | JobOutcome::Superseded
+                                    | JobOutcome::Crashed(_),
+                                )
+                                | Err(_) => {}
+                            }
                             continue;
                         }
                         if let Some(moment_id) =

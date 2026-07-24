@@ -28,8 +28,10 @@
 
 use crate::cancel::CancelSignal;
 use crate::error::{ErrorCode, WireError};
-use crate::transport::{EngineService, RequestContext};
-use crate::wire::{Request, RequestId, Response};
+use crate::transport::{EngineService, RequestContext, ServiceResponse};
+#[cfg(test)]
+use crate::wire::Response;
+use crate::wire::{Request, RequestId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -58,7 +60,7 @@ impl Default for SupervisorConfig {
 }
 
 /// Terminal outcome of a submitted request.
-pub type RequestOutcome = Result<Response, WireError>;
+pub type RequestOutcome = Result<ServiceResponse, WireError>;
 
 type CancelRegistry = Arc<Mutex<HashMap<RequestId, CancelSignal>>>;
 
@@ -101,6 +103,22 @@ impl<S: EngineService + 'static> Supervisor<S> {
         &self,
         request: Request,
     ) -> Result<oneshot::Receiver<RequestOutcome>, WireError> {
+        self.try_submit_with(request, Arc::from([]), |_| {})
+    }
+
+    /// Submit with connection capabilities and a synchronous completion hook.
+    /// The hook runs while the request remains in the supervisor cancellation
+    /// registry, allowing a transport to hand cancellation ownership to a
+    /// response stream without a gap.
+    pub fn try_submit_with<F>(
+        &self,
+        request: Request,
+        capabilities: Arc<[String]>,
+        before_cancel_release: F,
+    ) -> Result<oneshot::Receiver<RequestOutcome>, WireError>
+    where
+        F: FnOnce(&RequestOutcome) + Send + 'static,
+    {
         let cancel = CancelSignal::new();
         {
             let mut cancels = lock(&self.cancels);
@@ -140,8 +158,16 @@ impl<S: EngineService + 'static> Supervisor<S> {
         let cancels = self.cancels.clone();
         let admitted = self.admitted.clone();
         self.runtime.spawn(async move {
-            let outcome =
-                acquire_and_run(semaphore, service.as_ref(), &request, &cancel, deadline).await;
+            let outcome = acquire_and_run(
+                semaphore,
+                service.as_ref(),
+                &request,
+                &cancel,
+                deadline,
+                capabilities,
+            )
+            .await;
+            before_cancel_release(&outcome);
             admitted.fetch_sub(1, Ordering::SeqCst);
             lock(&cancels).remove(&request.id);
             let _ = respond.send(outcome);
@@ -170,6 +196,7 @@ async fn acquire_and_run(
     request: &Request,
     cancel: &CancelSignal,
     deadline: Instant,
+    capabilities: Arc<[String]>,
 ) -> RequestOutcome {
     let _permit = tokio::select! {
         biased;
@@ -187,7 +214,7 @@ async fn acquire_and_run(
             Err(_) => return Err(WireError::new(ErrorCode::Internal, "supervisor is shut down")),
         },
     };
-    run_job(service, request, cancel, deadline).await
+    run_job(service, request, cancel, deadline, capabilities).await
 }
 
 async fn run_job(
@@ -195,6 +222,7 @@ async fn run_job(
     request: &Request,
     cancel: &CancelSignal,
     deadline: Instant,
+    capabilities: Arc<[String]>,
 ) -> RequestOutcome {
     if cancel.is_cancelled() {
         return Err(WireError::new(
@@ -205,6 +233,7 @@ async fn run_job(
     let ctx = RequestContext {
         cancel: cancel.clone(),
         deadline: Some(deadline.into_std()),
+        capabilities,
     };
     tokio::select! {
         () = cancel.cancelled() => Err(WireError::new(ErrorCode::Cancelled, "request cancelled")),
@@ -226,6 +255,7 @@ fn lock(registry: &CancelRegistry) -> std::sync::MutexGuard<'_, HashMap<RequestI
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::BlobEgress;
     use serde_json::{Value, json};
     use tokio::sync::Notify;
 
@@ -261,10 +291,10 @@ mod tests {
             self.peak.fetch_max(now, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(20)).await;
             self.current.fetch_sub(1, Ordering::SeqCst);
-            Ok(Response {
+            Ok(ServiceResponse::response(Response {
                 id: request.id,
                 result: json!("done"),
-            })
+            }))
         }
     }
 
@@ -299,7 +329,7 @@ mod tests {
         async fn call(&self, ctx: RequestContext, request: Request) -> RequestOutcome {
             self.started.notify_one();
             tokio::select! {
-                () = self.release.notified() => Ok(Response { id: request.id, result: Value::Null }),
+                () = self.release.notified() => Ok(ServiceResponse::response(Response { id: request.id, result: Value::Null })),
                 () = ctx.cancel.cancelled() => Err(WireError::new(ErrorCode::Cancelled, "handler observed cancellation")),
             }
         }
@@ -362,6 +392,71 @@ mod tests {
         assert!(receiver.await.expect("responded").is_ok());
     }
 
+    struct BlobCompletion;
+
+    impl EngineService for BlobCompletion {
+        async fn call(&self, ctx: RequestContext, request: Request) -> RequestOutcome {
+            Ok(ServiceResponse {
+                response: Response {
+                    id: request.id,
+                    result: Value::Null,
+                },
+                blob_egress: Some(BlobEgress {
+                    stream_id: request.id,
+                    sha256: "completion-handoff".to_owned(),
+                    bytes: vec![1, 2, 3],
+                    cancel: ctx.cancel,
+                    deadline: ctx.deadline,
+                    byte_permit: None,
+                }),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_handoff_precedes_cancel_registry_release() {
+        // MUTATION: invoke before_cancel_release after removing the supervisor
+        // cancel entry -> cancel(77) returns false and the egress stays live.
+        let supervisor = Arc::new(Supervisor::new(config(1, 1), Arc::new(BlobCompletion)));
+        let hook_supervisor = Arc::clone(&supervisor);
+        let handed_off = Arc::new(Mutex::new(None::<CancelSignal>));
+        let hook_handed_off = Arc::clone(&handed_off);
+        let receiver = supervisor
+            .try_submit_with(
+                request(77),
+                Arc::from(["blobs".to_owned()]),
+                move |outcome| {
+                    let egress = outcome
+                        .as_ref()
+                        .expect("successful blob response")
+                        .blob_egress
+                        .as_ref()
+                        .expect("blob egress");
+                    *hook_handed_off
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                        Some(egress.cancel.clone());
+                    assert!(
+                        hook_supervisor.cancel(77),
+                        "supervisor cancellation remains registered during handoff"
+                    );
+                },
+            )
+            .expect("accepted");
+        let outcome = receiver.await.expect("responded").expect("successful");
+        assert!(outcome.blob_egress.is_some());
+        let signal = handed_off
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .expect("handoff signal");
+        assert!(
+            signal.is_cancelled(),
+            "cancel reaches the handed-off egress"
+        );
+        assert!(!supervisor.cancel(77), "terminal request is deregistered");
+    }
+
     #[tokio::test]
     async fn cancel_resolves_queued_request_behind_hung_handler() {
         let service = Arc::new(Gate {
@@ -401,10 +496,10 @@ mod tests {
     impl EngineService for Sleeper {
         async fn call(&self, _ctx: RequestContext, request: Request) -> RequestOutcome {
             tokio::time::sleep(Duration::from_secs(3600)).await;
-            Ok(Response {
+            Ok(ServiceResponse::response(Response {
                 id: request.id,
                 result: Value::Null,
-            })
+            }))
         }
     }
 
