@@ -4292,6 +4292,7 @@ fn projection_matches(
 }
 
 fn switch_projection_job_id(
+    workspace_id: &str,
     version_id: &str,
     path: &str,
     operation: MaterializationOperation,
@@ -4303,7 +4304,7 @@ fn switch_projection_job_id(
         MaterializationOperation::Delete => "delete",
     };
     let identity = format!(
-        "{version_id}\0{path}\0{operation}\0{content_sha256}\0{}",
+        "{workspace_id}\0{version_id}\0{path}\0{operation}\0{content_sha256}\0{}",
         if secret { "secret" } else { "plain" }
     );
     let prefix = if secret {
@@ -4319,6 +4320,7 @@ fn switch_projection_job_id(
     reason = "durable projection fields remain explicit at each planner branch"
 )]
 fn planned_projection(
+    workspace_id: &str,
     version_id: &str,
     path: String,
     operation: MaterializationOperation,
@@ -4331,7 +4333,14 @@ fn planned_projection(
 ) -> SwitchProjection {
     SwitchProjection {
         spec: MaterializationJobSpec {
-            job_id: switch_projection_job_id(version_id, &path, operation, &content_sha256, secret),
+            job_id: switch_projection_job_id(
+                workspace_id,
+                version_id,
+                &path,
+                operation,
+                &content_sha256,
+                secret,
+            ),
             target_path: path,
             content_sha256,
             preimage,
@@ -4396,6 +4405,7 @@ fn plan_plaintext_switch(
                 continue;
             }
             projections.push(planned_projection(
+                workspace_id,
                 target_version_id,
                 snapshot.path.clone(),
                 MaterializationOperation::Write,
@@ -4433,6 +4443,7 @@ fn plan_plaintext_switch(
                 continue;
             };
             projections.push(planned_projection(
+                workspace_id,
                 target_version_id,
                 snapshot.path,
                 MaterializationOperation::Delete,
@@ -4450,16 +4461,26 @@ fn plan_plaintext_switch(
 
 fn secret_ciphertext_sha(
     store: &EngineStore,
-    latest_moment_id: &str,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
 ) -> Result<String, RuntimeError> {
-    store
-        .load_materialization_job(&format!("secret-mat_{latest_moment_id}"))?
-        .map(|job| job.content_sha256)
-        .ok_or_else(|| {
-            RuntimeError::from(DomainError::StateCorrupt {
-                reason: "secret tip has no materialization identity",
-            })
-        })
+    let ciphertext_base64: Option<String> = store.read_with(|connection| {
+        connection
+            .query_row(
+                "SELECT ciphertext_base64 FROM secret_files \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+                params![workspace_id, version_id, path],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::corrupt_public)
+    })?;
+    let ciphertext_base64 = ciphertext_base64.ok_or(DomainError::StateCorrupt {
+        reason: "secret tip has no ciphertext identity",
+    })?;
+    let ciphertext = dohc_engine_crypto::base64::forgiving_decode(&ciphertext_base64);
+    Ok(hex_sha256(&ciphertext))
 }
 
 fn load_projection_secret_key(root_dir: &std::path::Path) -> Result<SecretDataKey, RuntimeError> {
@@ -4494,9 +4515,9 @@ fn plan_secret_switch(
             return Err(RuntimeError::Cancelled);
         }
         let state = probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret);
-        if projection_preimage(&state).is_none() {
+        let Some(preimage) = projection_preimage(&state) else {
             continue;
-        }
+        };
         if secret_key.is_none() {
             *secret_key = Some(load_projection_secret_key(root_dir)?);
         }
@@ -4515,13 +4536,15 @@ fn plan_secret_switch(
         if already_equal {
             continue;
         }
-        let ciphertext_sha = secret_ciphertext_sha(store, &stat.latest_moment_id)?;
+        let ciphertext_sha =
+            secret_ciphertext_sha(store, workspace_id, target_version_id, &stat.path)?;
         projections.push(planned_projection(
+            workspace_id,
             target_version_id,
             stat.path.clone(),
             MaterializationOperation::Write,
             ciphertext_sha,
-            Preimage::Absent,
+            preimage,
             stat.updated_at_ms,
             now_ms,
             true,
@@ -4538,15 +4561,16 @@ fn plan_secret_switch(
             continue;
         }
         let state = probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret);
-        let Some(Preimage::Present(_)) = projection_preimage(&state) else {
+        let Some(preimage @ Preimage::Present(_)) = projection_preimage(&state) else {
             continue;
         };
         projections.push(planned_projection(
+            workspace_id,
             target_version_id,
             stat.path,
             MaterializationOperation::Delete,
             empty_sha.clone(),
-            Preimage::Absent,
+            preimage,
             stat.updated_at_ms,
             now_ms,
             true,
@@ -4558,17 +4582,18 @@ fn plan_secret_switch(
 
 fn active_projection_coordinates(
     store: &EngineStore,
-) -> Result<Option<(String, String)>, RuntimeError> {
+) -> Result<Vec<(String, String)>, RuntimeError> {
     store
         .read_with(|connection| {
-            connection
-                .query_row(
-                    "SELECT workspace_id, version_id FROM active_versions \
-                     ORDER BY workspace_id LIMIT 1",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
+            let mut statement = connection
+                .prepare(
+                    "SELECT workspace_id, version_id FROM active_versions ORDER BY workspace_id",
                 )
-                .optional()
+                .map_err(StorageError::corrupt_public)?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(StorageError::corrupt_public)?;
+            rows.collect::<Result<Vec<_>, _>>()
                 .map_err(StorageError::corrupt_public)
         })
         .map_err(RuntimeError::from)
@@ -4579,51 +4604,65 @@ fn switch_projection_matches_active(
     job: &MaterializationJob,
     secret: bool,
 ) -> Result<Option<SecretJobCoordinates>, RuntimeError> {
-    let Some((workspace_id, version_id)) = active_projection_coordinates(store)? else {
+    for (workspace_id, version_id) in active_projection_coordinates(store)? {
+        let expected_job_id = switch_projection_job_id(
+            &workspace_id,
+            &version_id,
+            &job.target_path,
+            job.operation,
+            &job.content_sha256,
+            secret,
+        );
+        if job.job_id != expected_job_id {
+            continue;
+        }
+        let matches = if secret {
+            let ciphertext_base64: Option<String> = store.read_with(|connection| {
+                connection
+                    .query_row(
+                        "SELECT ciphertext_base64 FROM secret_files \
+                         WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+                        params![workspace_id, version_id, job.target_path],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(StorageError::corrupt_public)
+            })?;
+            let tip_sha = ciphertext_base64
+                .map(|encoded| hex_sha256(&dohc_engine_crypto::base64::forgiving_decode(&encoded)));
+            match job.operation {
+                MaterializationOperation::Write => tip_sha.as_deref() == Some(&job.content_sha256),
+                MaterializationOperation::Delete => tip_sha.is_none(),
+            }
+        } else {
+            let tip_sha: Option<String> = store.read_with(|connection| {
+                connection
+                    .query_row(
+                        "SELECT CASE COALESCE(content_kind, 'text') \
+                                  WHEN 'binary' THEN binary_sha256 ELSE blob_sha256 END \
+                         FROM snapshots \
+                         WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+                        params![workspace_id, version_id, job.target_path],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(StorageError::corrupt_public)
+            })?;
+            match job.operation {
+                MaterializationOperation::Write => tip_sha.as_deref() == Some(&job.content_sha256),
+                MaterializationOperation::Delete => tip_sha.is_none(),
+            }
+        };
+        if matches {
+            return Ok(Some(SecretJobCoordinates {
+                workspace_id,
+                version_id,
+                path: job.target_path.clone(),
+            }));
+        }
         return Ok(None);
-    };
-    let matches = if secret {
-        let tip_sha: Option<String> = store.read_with(|connection| {
-            connection
-                .query_row(
-                    "SELECT j.content_sha256 FROM secret_files f \
-                     JOIN materialization_jobs j \
-                       ON j.job_id = 'secret-mat_' || f.latest_moment_id \
-                     WHERE f.workspace_id = ?1 AND f.version_id = ?2 AND f.path = ?3",
-                    params![workspace_id, version_id, job.target_path],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(StorageError::corrupt_public)
-        })?;
-        match job.operation {
-            MaterializationOperation::Write => tip_sha.as_deref() == Some(&job.content_sha256),
-            MaterializationOperation::Delete => tip_sha.is_none(),
-        }
-    } else {
-        let tip_sha: Option<String> = store.read_with(|connection| {
-            connection
-                .query_row(
-                    "SELECT CASE COALESCE(content_kind, 'text') \
-                              WHEN 'binary' THEN binary_sha256 ELSE blob_sha256 END \
-                     FROM snapshots \
-                     WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
-                    params![workspace_id, version_id, job.target_path],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(StorageError::corrupt_public)
-        })?;
-        match job.operation {
-            MaterializationOperation::Write => tip_sha.as_deref() == Some(&job.content_sha256),
-            MaterializationOperation::Delete => tip_sha.is_none(),
-        }
-    };
-    Ok(matches.then_some(SecretJobCoordinates {
-        workspace_id,
-        version_id,
-        path: job.target_path.clone(),
-    }))
+    }
+    Ok(None)
 }
 
 struct MaterializationReplaySummary {

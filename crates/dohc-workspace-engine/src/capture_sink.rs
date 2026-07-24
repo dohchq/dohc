@@ -503,11 +503,17 @@ impl StoreCaptureSink {
         &mut self,
         path: &str,
         claim_foreign_head: bool,
+        suppress_self_write: bool,
     ) -> Result<IngestOutcome, CaptureError> {
         match self.read_current_secret(path)? {
             SecretContent::Text(text) => {
                 let size = text.len() as u64;
                 let sha256 = sha256_hex(text.as_bytes());
+                if suppress_self_write
+                    && self.self_writes.consume(&self.workspace_id, path, &sha256)
+                {
+                    return Ok(IngestOutcome::Captured { size, sha256 });
+                }
                 self.ensure_secret_key()?;
                 let key = self.secret_key.clone().expect("key ensured just above");
                 match self.actor.capture_secret_blocking(
@@ -536,6 +542,9 @@ impl StoreCaptureSink {
                 }
             }
             SecretContent::Untracked => {
+                if suppress_self_write {
+                    self.self_writes.clear_path(&self.workspace_id, path);
+                }
                 // No longer capturable secret text (absent, symlink, binary in
                 // disguise, over cap): retire the encrypted tip so protected
                 // state never goes stale-but-authoritative (TS parity), and
@@ -692,7 +701,11 @@ impl CaptureSink for StoreCaptureSink {
                 if normalized.as_deref() != Some(path) {
                     return Ok(IngestOutcome::NotOwned);
                 }
-                return self.ingest_secret(path, claim_foreign_head);
+                // Secret switch writes use the same suppression registry as
+                // ordinary projections. Consume it before entering the
+                // encrypted capture path, where an equal-content dedupe would
+                // otherwise stamp the API tip as capture-owned.
+                return self.ingest_secret(path, claim_foreign_head, claim_foreign_head);
             }
             (PathClassification::Tracked, normalized) => normalized.ok_or(INGEST_FAILED)?,
         };
@@ -1000,7 +1013,7 @@ fn open_no_follow(absolute: &Path) -> NoFollowOpen {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dohc_engine_domain::VersionedTextStore;
+    use dohc_engine_domain::{SecretDiskIntent, SecretFileStore, SecretWrite, VersionedTextStore};
     use dohc_engine_files::{CaptureOp, ReconcilePlan, ScanGeneration, apply_reconcile_plan};
     use dohc_engine_runtime::WorkspaceSupervisor;
     use dohc_engine_storage::{EngineStore, NoFaults as FilesNoFaults};
@@ -1084,6 +1097,24 @@ mod tests {
                 .optional()
             })
             .expect("secret tip query")
+    }
+
+    fn secret_tip_capture_owned(db: &Path, path: &str) -> Option<bool> {
+        use rusqlite::OptionalExtension;
+        let store = EngineStore::open(db, 100).expect("reopen store");
+        store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT m.capture_owned FROM secret_files f \
+                     JOIN secret_moments m ON m.workspace_id = f.workspace_id \
+                       AND m.moment_id = f.latest_moment_id \
+                     WHERE f.workspace_id = ?1 AND f.version_id = ?2 AND f.path = ?3",
+                    [WORKSPACE_ID, VERSION_ID, path],
+                    |row| row.get::<_, bool>(0),
+                )
+                .optional()
+            })
+            .expect("secret ownership query")
     }
 
     fn moment_count(db: &Path, path: &str) -> i64 {
@@ -1719,6 +1750,72 @@ mod tests {
         supervisor.close(&db).expect("close actor");
         assert_eq!(secret_tip_len(&db, ".env"), None, "tip retired");
         assert_eq!(moment_count(&db, ".env"), 0, "plaintext tables untouched");
+    }
+
+    #[test]
+    fn secret_changed_ingest_consumes_an_engine_self_write() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = scratch.engine_db_path().expect("engine db path");
+        let key = create_key_file(scratch.path()).expect("secret key");
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        VersionedTextStore::new(&mut store)
+            .ensure_main_version(WORKSPACE_ID, VERSION_ID, 1, &FilesNoFaults)
+            .expect("main");
+        SecretFileStore::new(&mut store, &key)
+            .write_secret_file(
+                &SecretWrite {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: ".env".to_owned(),
+                    text: "MODE=feature\n".to_owned(),
+                    moment_id: "switch-owned-by-api".to_owned(),
+                    metadata_origin: "api".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 2,
+                    disk_intent: SecretDiskIntent::Materialize,
+                },
+                &FilesNoFaults,
+            )
+            .expect("API secret");
+        drop(store);
+        write_file(scratch.path(), ".env", b"MODE=feature\n");
+
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 3).expect("actor").actor;
+        let self_writes = SelfWriteSuppression::default();
+        self_writes.record(WORKSPACE_ID, ".env", &sha256_hex(b"MODE=feature\n"));
+        let mut sink = StoreCaptureSink::new_with_self_writes(
+            actor,
+            WORKSPACE_ID,
+            VERSION_ID,
+            scratch.path(),
+            4,
+            None,
+            self_writes,
+        );
+        let observed_sha = match sink.read_current_secret(".env").expect("read secret") {
+            SecretContent::Text(text) => sha256_hex(text.as_bytes()),
+            SecretContent::Untracked => panic!("fixture secret must be tracked"),
+        };
+        assert!(
+            sink.self_writes
+                .has_pending(WORKSPACE_ID, ".env", &observed_sha),
+            "fixture must arm the exact identity capture will observe"
+        );
+
+        assert!(matches!(
+            ingest(&mut sink, ".env").expect("suppressed switch observation"),
+            IngestOutcome::Captured { .. }
+        ));
+
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(
+            secret_tip_capture_owned(&db, ".env"),
+            Some(false),
+            "observing the engine's own switch write must not grant capture ownership"
+        );
     }
 
     #[test]

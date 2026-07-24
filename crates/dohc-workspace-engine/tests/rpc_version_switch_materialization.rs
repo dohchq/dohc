@@ -151,6 +151,37 @@ async fn switching_versions_rewrites_different_plaintext() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ordinary_binary_write_after_switch_is_not_superseded_by_switch_timestamp() {
+    let (scratch, transport, handle, workspace_id) = fixture("post-switch-write").await;
+    write_text(&transport, &handle, 2, "main", "notes.md", "main").await;
+    std::fs::write(scratch.path().join("notes.md"), "main").expect("seed disk");
+    let feature = create_feature(&transport, &handle, 3, &workspace_id).await;
+    write_text(&transport, &handle, 4, &feature, "notes.md", "feature").await;
+    switch_to(&transport, &handle, 5, &workspace_id, &feature).await;
+
+    call(
+        &transport,
+        &handle,
+        6,
+        "versionedBinary.write",
+        json!({
+            "versionId": feature,
+            "path": "notes.md",
+            "bytes": [0, 1, 2, 3, 255],
+            "origin": "api",
+            "requestId": "ordinary-binary-after-switch",
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        std::fs::read(scratch.path().join("notes.md")).expect("post-write disk"),
+        [0, 1, 2, 3, 255],
+        "a switch job's epoch timestamp must not supersede later moment-order writes"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn switching_versions_rewrites_different_secret() {
     // MUTATION: restore the database-only versions.setActive handler and .env
     // remains the main version's plaintext.
@@ -200,6 +231,71 @@ async fn switching_versions_rewrites_different_secret() {
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(".env")).expect("switched secret"),
         "MODE=feature\n"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn capture_suppresses_a_secret_write_materialized_by_version_switch() {
+    let (scratch, transport, handle, workspace_id) = fixture("secret-suppression").await;
+    call(
+        &transport,
+        &handle,
+        2,
+        "versions.ensureMain",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        3,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace_id,
+            "versionId": "main",
+            "path": ".env",
+            "text": "MODE=main\n",
+            "origin": "api",
+            "momentId": "suppression-secret-main",
+        }),
+    )
+    .await;
+    call(&transport, &handle, 4, "capture.flush", json!({})).await;
+    let feature = create_feature(&transport, &handle, 5, &workspace_id).await;
+    call(
+        &transport,
+        &handle,
+        6,
+        "secrets.write",
+        json!({
+            "workspaceId": workspace_id,
+            "versionId": feature,
+            "path": ".env",
+            "text": "MODE=feature\n",
+            "origin": "api",
+            "momentId": "suppression-secret-feature",
+        }),
+    )
+    .await;
+
+    switch_to(&transport, &handle, 7, &workspace_id, &feature).await;
+    call(&transport, &handle, 8, "capture.flush", json!({})).await;
+
+    let connection =
+        rusqlite::Connection::open(scratch.path().join(".dohc/engine/engine.db")).expect("sqlite");
+    let capture_owned: i64 = connection
+        .query_row(
+            "SELECT m.capture_owned FROM secret_files f \
+             JOIN secret_moments m ON m.workspace_id = f.workspace_id \
+               AND m.moment_id = f.latest_moment_id \
+             WHERE f.workspace_id = ?1 AND f.version_id = ?2 AND f.path = '.env'",
+            rusqlite::params![workspace_id, feature],
+            |row| row.get(0),
+        )
+        .expect("secret ownership");
+    assert_eq!(
+        capture_owned, 0,
+        "capture must not claim an API tip from the engine's own switch write"
     );
 }
 

@@ -390,11 +390,13 @@ pub fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> {
     .map_err(StorageError::corrupt)
 }
 
-/// The highest `target_generation` among COMPLETE jobs for `path`, or `None` if
-/// nothing has been materialized there yet. The materialization pipeline uses
-/// this to skip a pending job whose generation is superseded by an already-
-/// materialized newer generation for the same path (concurrent/out-of-order
-/// jobs must never regress a path to older content).
+/// The highest ordinary moment-order `target_generation` among COMPLETE jobs
+/// for `path`, or `None` if nothing has been materialized there yet. Active
+/// version projections use snapshot timestamps, which are a different
+/// namespace and therefore cannot participate in this ordering fence. The
+/// materialization pipeline uses this to skip a pending ordinary job whose
+/// generation is superseded by an already-materialized newer generation for
+/// the same path (concurrent/out-of-order jobs must never regress a path).
 pub fn max_completed_generation_for_path(
     conn: &Connection,
     path: &str,
@@ -402,7 +404,8 @@ pub fn max_completed_generation_for_path(
     // MAX over an empty set yields a single NULL row → `None`.
     conn.query_row(
         "SELECT MAX(target_generation) FROM materialization_jobs \
-         WHERE target_path = ?1 AND status = 'complete'",
+         WHERE target_path = ?1 AND status = 'complete' \
+           AND job_id NOT LIKE 'version-switch-%'",
         [path],
         |r| r.get::<_, Option<i64>>(0),
     )

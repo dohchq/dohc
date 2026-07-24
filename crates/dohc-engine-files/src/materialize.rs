@@ -201,14 +201,21 @@ pub fn probe_projection_target(
     rel: &str,
     kind: ProjectionTargetKind,
 ) -> ProjectionTargetState {
-    let target = match resolve_target(root, rel) {
+    let canonical_root = match std::fs::canonicalize(root) {
+        Ok(root) => root,
+        Err(_) => return ProjectionTargetState::UntrackedContent,
+    };
+    let target = match resolve_target(&canonical_root, rel) {
         Ok(target) => target,
         Err(_) => return ProjectionTargetState::UntrackedContent,
     };
+    if ensure_target_symlink_free(&canonical_root, &target).is_err() {
+        return ProjectionTargetState::UntrackedContent;
+    }
     let metadata = match std::fs::symlink_metadata(&target) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => {
-            return if existing_ancestor_is_contained(root, &target) {
+            return if existing_ancestor_is_contained(&canonical_root, &target) {
                 ProjectionTargetState::Absent
             } else {
                 ProjectionTargetState::UntrackedContent
@@ -219,7 +226,7 @@ pub fn probe_projection_target(
     if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
         return ProjectionTargetState::UntrackedContent;
     }
-    if !existing_ancestor_is_contained(root, &target) {
+    if !existing_ancestor_is_contained(&canonical_root, &target) {
         return ProjectionTargetState::UntrackedContent;
     }
     let cap = match kind {
@@ -456,9 +463,10 @@ pub fn materialize_one(
 }
 
 /// Execute a secret write through the same atomic-replace pipeline without
-/// ever persisting plaintext in the content-blob table. The current disk state
-/// is adopted as the immediate preimage, and conflict handling never writes a
-/// plaintext `.conflict` sibling.
+/// ever persisting plaintext in the content-blob table. Ordinary secret jobs
+/// adopt the current disk state as their immediate preimage; version-switch
+/// jobs retain the preimage probed during phase 1 so an intervening edit
+/// conflicts. Conflict handling never writes a plaintext `.conflict` sibling.
 #[allow(
     clippy::too_many_arguments,
     reason = "each seam is injected for testability"
@@ -507,7 +515,7 @@ fn materialize_secret_one_with_remover(
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let target = resolve_target(&canonical_root, &job.target_path)?;
-    ensure_secret_target_symlink_free(&canonical_root, &target)?;
+    ensure_target_symlink_free(&canonical_root, &target)?;
     if should_crash(faults, FaultPoint::MaterializeAfterJobCommit) {
         return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit));
     }
@@ -524,11 +532,15 @@ fn materialize_secret_one_with_remover(
         store.mark_materialization_complete(&job.job_id, now_ms)?;
         return Ok(JobOutcome::AlreadyMaterialized);
     }
-    let preimage = match current {
-        CurrentTarget::Absent => Preimage::Absent,
-        CurrentTarget::Present(bytes) => Preimage::Present(hex_sha256(&bytes)),
-        CurrentTarget::Oversized => {
-            return Err(MaterializeError::BlockedTarget);
+    let preimage = if job.job_id.starts_with("version-switch-secret-mat_") {
+        job.preimage.clone()
+    } else {
+        match current {
+            CurrentTarget::Absent => Preimage::Absent,
+            CurrentTarget::Present(bytes) => Preimage::Present(hex_sha256(&bytes)),
+            CurrentTarget::Oversized => {
+                return Err(MaterializeError::BlockedTarget);
+            }
         }
     };
     let plaintext_job = MaterializationJob {
@@ -555,9 +567,10 @@ fn materialize_secret_one_with_remover(
 /// Execute an active-version secret delete after the runtime has resolved the
 /// versioned current tip. Unlike the generic pipeline, this deliberately has no
 /// workspace-wide generation fence: generations from another version cannot
-/// suppress deletion of the active disk projection. The keyless delete cannot
-/// name a plaintext preimage, so it adopts and removes the current regular file
-/// without ever creating a plaintext conflict artifact.
+/// suppress deletion of the active disk projection. Ordinary keyless deletes
+/// adopt the current regular file; version-switch deletes retain their
+/// phase-1 plaintext hash so an intervening edit conflicts. Neither path emits
+/// a plaintext conflict artifact.
 #[allow(
     clippy::too_many_arguments,
     reason = "each seam is injected for testability"
@@ -573,22 +586,14 @@ pub fn materialize_secret_delete_one(
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let target = resolve_target(&canonical_root, &job.target_path)?;
-    ensure_secret_target_symlink_free(&canonical_root, &target)?;
+    ensure_target_symlink_free(&canonical_root, &target)?;
     if should_crash(faults, FaultPoint::MaterializeAfterJobCommit) {
         return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit));
     }
-    materialize_secret_delete_adopting_current(
-        store,
-        &canonical_root,
-        &target,
-        job,
-        policy,
-        now_ms,
-        faults,
-    )
+    materialize_secret_delete(store, &canonical_root, &target, job, policy, now_ms, faults)
 }
 
-fn materialize_secret_delete_adopting_current(
+fn materialize_secret_delete(
     store: &EngineStore,
     root: &Path,
     target: &Path,
@@ -597,24 +602,26 @@ fn materialize_secret_delete_adopting_current(
     now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<JobOutcome, MaterializeError> {
-    match read_current_no_follow(target)? {
+    let current = read_current_no_follow(target)?;
+    let preimage = match current {
         CurrentTarget::Absent => {
             store.mark_materialization_complete(&job.job_id, now_ms)?;
             return Ok(JobOutcome::AlreadyMaterialized);
         }
-        CurrentTarget::Present(_) => {}
+        CurrentTarget::Present(_) if job.job_id.starts_with("version-switch-secret-mat_") => {
+            job.preimage.clone()
+        }
+        CurrentTarget::Present(bytes) => Preimage::Present(hex_sha256(&bytes)),
         CurrentTarget::Oversized => return Err(MaterializeError::BlockedTarget),
-    }
+    };
     if should_crash(faults, FaultPoint::MaterializeBeforePreimageRevalidate) {
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeBeforePreimageRevalidate,
         ));
     }
     // Re-read immediately before unlinking to preserve no-follow semantics.
-    // Any regular file currently at the active secret's own resolved path is
-    // the disk projection being retired; no plaintext hash or conflict copy is
-    // needed (or safe) for a secret delete.
-    match read_current_no_follow(target)? {
+    let current_now = read_current_no_follow(target)?;
+    match &current_now {
         CurrentTarget::Absent => {
             store.mark_materialization_complete(&job.job_id, now_ms)?;
             return Ok(JobOutcome::AlreadyMaterialized);
@@ -622,7 +629,11 @@ fn materialize_secret_delete_adopting_current(
         CurrentTarget::Present(_) => {}
         CurrentTarget::Oversized => return Err(MaterializeError::BlockedTarget),
     }
-    ensure_secret_target_symlink_free(root, target)?;
+    if !preimage_matches(&preimage, &current_now) {
+        store.mark_materialization_conflict(&job.job_id, now_ms)?;
+        return Ok(JobOutcome::Conflict);
+    }
+    ensure_target_symlink_free(root, target)?;
     std::fs::remove_file(target).map_err(|err| MaterializeError::io(target, &err))?;
     sync_parent_dir(target.parent(), policy)?;
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
@@ -680,7 +691,7 @@ fn materialize_write_content(
     secret_temp_remover: &dyn SecretTempRemover,
 ) -> Result<JobOutcome, MaterializeError> {
     if let Some(root) = secret_root {
-        ensure_secret_target_symlink_free(root, target)?;
+        ensure_target_symlink_free(root, target)?;
     }
     // Step 1 (idempotent replay): the target already equals the desired content.
     let current = read_current_no_follow(target)?;
@@ -699,7 +710,7 @@ fn materialize_write_content(
         std::fs::create_dir_all(parent).map_err(|e| MaterializeError::io(parent, &e))?;
     }
     if let Some(root) = secret_root {
-        ensure_secret_target_symlink_free(root, target)?;
+        ensure_target_symlink_free(root, target)?;
     }
 
     // Step 2: sibling temp file, bounded, restrictive mode.
@@ -748,7 +759,7 @@ fn materialize_write_content(
     // (module docs + BEHAVIOR_DELTA). The common case (an editor that wrote
     // before the pipeline ran) IS caught here.
     if let Some(root) = secret_root {
-        ensure_secret_target_symlink_free(root, target)?;
+        ensure_target_symlink_free(root, target)?;
     }
     let current_now = read_current_no_follow(target)?;
     if secret_root.is_some() && matches!(current_now, CurrentTarget::Oversized) {
@@ -778,7 +789,7 @@ fn materialize_write_content(
     // durable by syncing the parent directory (POSIX), THEN mark complete — so a
     // crash can never leave the job marked complete over a non-durable rename.
     if let Some(root) = secret_root {
-        ensure_secret_target_symlink_free(root, target)?;
+        ensure_target_symlink_free(root, target)?;
     }
     // This final path-based check narrows but cannot close an ancestor
     // rename-TOCTOU: a workspace writer can still swap a checked parent before
@@ -906,10 +917,11 @@ fn resolve_target(root: &Path, rel: &str) -> Result<PathBuf, MaterializeError> {
 }
 
 /// Refuse every symlink/reparse point strictly below the already-canonicalized
-/// workspace root through the secret target. This is intentionally
-/// secret-scoped: ordinary materialized files retain their established symlink
-/// semantics, while plaintext secrets never traverse an aliased child.
-fn ensure_secret_target_symlink_free(root: &Path, target: &Path) -> Result<(), MaterializeError> {
+/// workspace root through a target. Capture never owns paths reached through
+/// aliased directories, even when the alias resolves elsewhere inside the
+/// workspace, so both projection probes and secret materialization use this
+/// component walk.
+fn ensure_target_symlink_free(root: &Path, target: &Path) -> Result<(), MaterializeError> {
     let relative = target
         .strip_prefix(root)
         .map_err(|_| MaterializeError::UnsafeTargetPath)?;
@@ -1171,6 +1183,27 @@ mod tests {
         }
     }
 
+    fn create_directory_alias(link: &Path, target: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).expect("create directory symlink");
+
+        #[cfg(windows)]
+        {
+            let status = std::process::Command::new("cmd")
+                .arg("/C")
+                .arg("mklink")
+                .arg("/J")
+                .arg(link)
+                .arg(target)
+                .status()
+                .expect("spawn mklink /J");
+            assert!(
+                status.success(),
+                "junction creation must succeed without elevation"
+            );
+        }
+    }
+
     struct ConflictFault {
         target: PathBuf,
     }
@@ -1197,6 +1230,38 @@ mod tests {
                 "injected transient sharing violation",
             ))
         }
+    }
+
+    #[test]
+    fn projection_probe_rejects_an_in_workspace_symlinked_ancestor() {
+        let scratch = Scratch::new("projection-ancestor-alias");
+        let real = scratch.root.join("real");
+        std::fs::create_dir_all(&real).expect("create real directory");
+        std::fs::write(real.join("owned.md"), b"real content").expect("write aliased target");
+        let alias = scratch.root.join("alias");
+        create_directory_alias(&alias, &real);
+
+        assert_eq!(
+            probe_projection_target(
+                &scratch.root,
+                "alias/owned.md",
+                ProjectionTargetKind::Plaintext,
+            ),
+            ProjectionTargetState::UntrackedContent,
+            "capture never owns a file reached through an aliased directory"
+        );
+        assert_eq!(
+            probe_projection_target(
+                &scratch.root,
+                "alias/missing.md",
+                ProjectionTargetKind::Plaintext,
+            ),
+            ProjectionTargetState::UntrackedContent,
+            "an absent leaf beneath an aliased directory is not an owned create target"
+        );
+
+        #[cfg(windows)]
+        std::fs::remove_dir(&alias).expect("remove test junction");
     }
 
     #[test]
