@@ -19,6 +19,34 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// Raw blob bytes attached to a successful service response for framed
+/// transports to emit as `BlobStart` + `BlobChunk` frames.
+#[derive(Debug)]
+pub struct BlobEgress {
+    pub stream_id: u64,
+    pub sha256: String,
+    pub bytes: Vec<u8>,
+    pub cancel: CancelSignal,
+    pub deadline: Option<Instant>,
+}
+
+/// Transport-independent service output. In-process callers consume the
+/// response directly; framed hosts additionally drain `blob_egress`.
+#[derive(Debug)]
+pub struct ServiceResponse {
+    pub response: Response,
+    pub blob_egress: Option<BlobEgress>,
+}
+
+impl ServiceResponse {
+    pub fn response(response: Response) -> Self {
+        ServiceResponse {
+            response,
+            blob_egress: None,
+        }
+    }
+}
+
 /// Per-request context handed to service implementations.
 #[derive(Debug, Clone)]
 pub struct RequestContext {
@@ -45,7 +73,7 @@ pub trait EngineService: Send + Sync {
         &self,
         ctx: RequestContext,
         request: Request,
-    ) -> impl Future<Output = Result<Response, WireError>> + Send;
+    ) -> impl Future<Output = Result<ServiceResponse, WireError>> + Send;
 }
 
 /// A client-side transport: something a generated client can issue typed
@@ -72,11 +100,10 @@ impl<S: EngineService> InProcessTransport<S> {
 }
 
 impl<S: EngineService> EngineTransport for InProcessTransport<S> {
-    fn call(
-        &self,
-        ctx: RequestContext,
-        request: Request,
-    ) -> impl Future<Output = Result<Response, WireError>> + Send {
-        self.service.call(ctx, request)
+    async fn call(&self, ctx: RequestContext, request: Request) -> Result<Response, WireError> {
+        self.service
+            .call(ctx, request)
+            .await
+            .map(|output| output.response)
     }
 }

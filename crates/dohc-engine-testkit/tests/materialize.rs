@@ -7,7 +7,7 @@
 
 use dohc_engine_files::{
     AtomicReplacer, DurabilityPolicy, JobOutcome, NoBackoff, ReplaceBackoff, StdReplacer,
-    backoff_delay, run_pending_jobs,
+    backoff_delay, materialize_secret_one, run_pending_jobs,
 };
 use dohc_engine_storage::{
     EngineStore, FaultPoint, JobStatus, MaterializationJobSpec, NoFaults, Preimage, StorageError,
@@ -547,6 +547,68 @@ impl AtomicReplacer for FlakyReplacer {
         }
         std::fs::rename(from, to)
     }
+}
+
+struct NonTransientFailingReplacer;
+
+impl AtomicReplacer for NonTransientFailingReplacer {
+    fn try_replace(&self, _from: &Path, _to: &Path) -> std::io::Result<()> {
+        Err(std::io::Error::other("injected non-transient failure"))
+    }
+}
+
+#[test]
+fn secret_non_transient_replace_error_removes_plaintext_temp() {
+    // MUTATION: propagate the secret replace error before temp cleanup -> a
+    // `.dohc-write-*.tmp` sibling containing SECRET=plaintext survives.
+    let sc = Scratch::new("secret-temp-cleanup");
+    let mut store = EngineStore::open(&sc.db(), 1).expect("open");
+    let staged = b"encrypted-placeholder";
+    let spec = spec(
+        "secret-temp-cleanup",
+        ".env",
+        &hex_sha256(staged),
+        Preimage::Absent,
+        1,
+        10,
+    );
+    stage_job(&mut store, staged, &spec);
+    let job = store
+        .load_materialization_job("secret-temp-cleanup")
+        .expect("load")
+        .expect("job");
+
+    materialize_secret_one(
+        &store,
+        sc.workspace(),
+        &job,
+        b"SECRET=plaintext",
+        DurabilityPolicy::none(),
+        &NonTransientFailingReplacer,
+        &NoBackoff,
+        20,
+        &NoFaults,
+    )
+    .expect_err("replace must fail");
+
+    let leftovers = std::fs::read_dir(sc.workspace())
+        .expect("workspace entries")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".dohc-write-"))
+        .collect::<Vec<_>>();
+    assert!(
+        leftovers.is_empty(),
+        "plaintext temps remain: {leftovers:?}"
+    );
+    assert_eq!(
+        store
+            .load_materialization_job("secret-temp-cleanup")
+            .expect("load")
+            .expect("job")
+            .status,
+        JobStatus::Pending
+    );
 }
 
 /// Records which failed-attempt numbers the pipeline asked us to back off on, so

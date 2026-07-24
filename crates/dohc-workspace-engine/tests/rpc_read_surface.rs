@@ -390,10 +390,9 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     )
     .await;
     assert_eq!(plaintext["text"], json!("TOKEN=rpc-read"));
-    // A percent-disguised spelling CLASSIFIES as secret (the gate
-    // stable-decodes) but resolves VERBATIM: the store keeps the spelling
-    // the write carried, so %2eenv is a DIFFERENT (absent) secret than
-    // .env — never an orphaned rewrite, never a bypass of the gate.
+    // A percent-disguised spelling classifies and resolves through the same
+    // canonical path. Secret identity cannot retain an alias that disk
+    // materialization would collapse onto the same plaintext file.
     id += 1;
     let disguised = call(
         &transport,
@@ -403,10 +402,9 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         json!({ "versionId": "main", "path": "%2eenv" }),
     )
     .await;
-    assert!(
-        disguised.is_null(),
-        "a distinct spelling is a distinct secret"
-    );
+    // MUTATION: classify normalized but key by the verbatim spelling -> this
+    // becomes null and recreates the alias/clobber split.
+    assert_eq!(disguised["text"], json!("TOKEN=rpc-read"));
     id += 1;
     let absent = call(
         &transport,

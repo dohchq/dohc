@@ -148,6 +148,89 @@ fn secret_write_and_delete_refuse_non_secret_paths() {
 }
 
 #[test]
+fn secret_slash_spellings_share_one_canonical_row() {
+    // MUTATION: return the validated input spelling instead of the normalized
+    // classifier key -> these writes split into two rows and the read misses.
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    write(
+        &mut store,
+        &key,
+        "a//b.env",
+        "TOKEN=first",
+        "slash-spelling-first",
+        10,
+    );
+    let first = SecretFileStore::new(&mut store, &key)
+        .materialize_secret_file(WS, "main", "a/b.env")
+        .unwrap()
+        .expect("collapsed spelling reads the row");
+    assert_eq!(first.as_bytes(), b"TOKEN=first");
+    drop(first);
+    write(
+        &mut store,
+        &key,
+        "a/b.env",
+        "TOKEN=second",
+        "slash-spelling-second",
+        11,
+    );
+    let rows: Vec<String> = store
+        .read_with(|conn| {
+            let mut statement = conn
+                .prepare(
+                    "SELECT path FROM secret_files \
+                 WHERE workspace_id = ?1 AND version_id = 'main'",
+                )
+                .unwrap();
+            statement
+                .query_map([WS], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .unwrap();
+    assert_eq!(rows, vec!["a/b.env"]);
+    let second = SecretFileStore::new(&mut store, &key)
+        .materialize_secret_file(WS, "main", "a//b.env")
+        .unwrap()
+        .expect("expanded spelling reads the same row");
+    assert_eq!(second.as_bytes(), b"TOKEN=second");
+}
+
+#[test]
+fn slash_disguised_secret_path_stays_secret_after_normalization() {
+    // MUTATION: classify the verbatim spelling or discard the normalized
+    // classification -> the slash-disguised .env can bypass secret routing.
+    let (classification, normalized) =
+        dohc_engine_files::classify_engine_file_path_normalized("config//.env");
+    assert_eq!(
+        classification,
+        dohc_engine_files::PathClassification::Secret
+    );
+    assert_eq!(normalized.as_deref(), Some("config/.env"));
+
+    let scratch = ScratchDir::new().unwrap();
+    let db = scratch.engine_db_path().unwrap();
+    seed_version(&db, WS);
+    let key = key();
+    let mut store = EngineStore::open(&db, 2).unwrap();
+    write(
+        &mut store,
+        &key,
+        "config//.env",
+        "TOKEN=classified",
+        "slash-disguised-secret",
+        10,
+    );
+    let paths = SecretFileStore::new(&mut store, &key)
+        .list_secret_files(WS, "main")
+        .unwrap();
+    assert_eq!(paths[0].path, "config/.env");
+}
+
+#[test]
 fn secret_write_debug_redacts_cleartext() {
     // The one secret-bearing input type must never spill plaintext through
     // Debug (tracing, format!, panic messages, error context).

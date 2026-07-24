@@ -3,20 +3,22 @@
 #![forbid(unsafe_code)]
 
 use dohc_engine_protocol::{
+    cancel::CancelSignal,
     error::{ErrorCode, WireError},
-    frame::{Frame, FrameDecoder},
+    frame::{Frame, FrameDecoder, blob_chunks, encode_blob_chunk_frame},
     limits::WireLimits,
     supervisor::{Supervisor, SupervisorConfig},
-    transport::EngineService as ProtocolEngineService,
+    transport::{BlobEgress, EngineService as ProtocolEngineService},
     wire::{
-        Envelope, ErrorEnvelope, Hello, HelloAck, PROTOCOL_VERSION, decode_control, encode_control,
+        BlobStart, Envelope, ErrorEnvelope, Hello, HelloAck, PROTOCOL_VERSION, Response,
+        decode_control, encode_control,
     },
 };
 use dohc_engine_runtime::{RuntimeError, WorkspaceSupervisor};
 use dohc_workspace_engine::EngineService;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     error::Error,
     io,
     sync::{Arc, Mutex, MutexGuard},
@@ -28,6 +30,20 @@ const AUTH_TOKEN_ENV: &str = "DOHC_ENGINE_AUTH_TOKEN";
 const OUTPUT_QUEUE_CAPACITY: usize = 64;
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 static NEXT_SESSION_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+enum OutputItem {
+    Envelope(Envelope),
+    Blob {
+        response: Response,
+        egress: BlobEgress,
+    },
+}
+
+impl From<Envelope> for OutputItem {
+    fn from(envelope: Envelope) -> Self {
+        OutputItem::Envelope(envelope)
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -76,12 +92,16 @@ where
     C: FnOnce() -> Result<(), RuntimeError> + Send + 'static,
 {
     let limits = WireLimits::default();
-    let (output_tx, mut output_rx) = tokio::sync::mpsc::channel(OUTPUT_QUEUE_CAPACITY);
+    let (output_tx, mut output_rx) =
+        tokio::sync::mpsc::channel::<OutputItem>(OUTPUT_QUEUE_CAPACITY);
+    let active_egress = Arc::new(Mutex::new(HashMap::<u64, CancelSignal>::new()));
     let (writer_gone_tx, mut writer_gone_rx) = tokio::sync::watch::channel(false);
     let writer_limits = limits.clone();
     let writer_signal = writer_gone_tx.clone();
+    let writer_active_egress = Arc::clone(&active_egress);
     let writer = tokio::spawn(async move {
-        let result = write_output(output, &mut output_rx, &writer_limits).await;
+        let result =
+            write_output(output, &mut output_rx, &writer_limits, writer_active_egress).await;
         let _ = writer_signal.send(true);
         result
     });
@@ -89,6 +109,7 @@ where
     let mut decoder = FrameDecoder::new(limits);
     let mut read_buf = vec![0_u8; READ_CHUNK_BYTES];
     let mut authenticated = false;
+    let mut negotiated_capabilities = HashSet::new();
     let mut keep_running = true;
     let mut read_error: Option<io::Error> = None;
     let active_requests = Arc::new(Mutex::new(HashSet::new()));
@@ -177,13 +198,18 @@ where
                 match authenticate(envelope, &auth_token) {
                     Ok(ack) => {
                         authenticated = true;
-                        if output_tx.send(Envelope::HelloAck(ack)).await.is_err() {
+                        negotiated_capabilities.extend(ack.capabilities.iter().cloned());
+                        if output_tx
+                            .send(Envelope::HelloAck(ack).into())
+                            .await
+                            .is_err()
+                        {
                             keep_running = false;
                         }
                     }
                     Err(error) => {
                         if output_tx
-                            .send(Envelope::Error(ErrorEnvelope { id: None, error }))
+                            .send(Envelope::Error(ErrorEnvelope { id: None, error }).into())
                             .await
                             .is_err()
                         {
@@ -205,7 +231,9 @@ where
                     &output_tx,
                     &writer_gone_tx,
                     &active_requests,
+                    &active_egress,
                     &mut request_tasks,
+                    negotiated_capabilities.contains("blobs"),
                 )
                 .await
                 {
@@ -244,16 +272,106 @@ fn reap_completed(tasks: &mut JoinSet<()>) {
 
 async fn write_output<W: AsyncWrite + Unpin>(
     mut output: W,
-    output_rx: &mut tokio::sync::mpsc::Receiver<Envelope>,
+    output_rx: &mut tokio::sync::mpsc::Receiver<OutputItem>,
     limits: &WireLimits,
+    active_egress: Arc<Mutex<HashMap<u64, CancelSignal>>>,
 ) -> Result<(), io::Error> {
-    while let Some(envelope) = output_rx.recv().await {
-        let bytes = encode_control(&envelope, limits)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "response too large"))?;
-        output.write_all(&bytes).await?;
-        output.flush().await?;
+    while let Some(item) = output_rx.recv().await {
+        match item {
+            OutputItem::Envelope(envelope) => {
+                write_envelope(&mut output, &envelope, limits).await?;
+            }
+            OutputItem::Blob { response, egress } => {
+                let request_id = response.id;
+                let outcome = write_blob_egress(&mut output, response, egress, limits).await;
+                lock(&active_egress).remove(&request_id);
+                outcome?;
+            }
+        }
     }
     Ok(())
+}
+
+async fn write_envelope<W: AsyncWrite + Unpin>(
+    output: &mut W,
+    envelope: &Envelope,
+    limits: &WireLimits,
+) -> Result<(), io::Error> {
+    let bytes = encode_control(envelope, limits)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "response too large"))?;
+    output.write_all(&bytes).await?;
+    output.flush().await
+}
+
+async fn write_blob_egress<W: AsyncWrite + Unpin>(
+    output: &mut W,
+    response: Response,
+    egress: BlobEgress,
+    limits: &WireLimits,
+) -> Result<(), io::Error> {
+    let interruption = |deadline: Option<std::time::Instant>| {
+        if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+            WireError::new(
+                ErrorCode::DeadlineExceeded,
+                "versionedBinary.readBlob egress deadline elapsed",
+            )
+        } else {
+            WireError::new(
+                ErrorCode::Cancelled,
+                "versionedBinary.readBlob egress cancelled",
+            )
+        }
+    };
+    if egress.cancel.is_cancelled()
+        || egress
+            .deadline
+            .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+    {
+        return write_envelope(
+            output,
+            &Envelope::Error(ErrorEnvelope {
+                id: Some(response.id),
+                error: interruption(egress.deadline),
+            }),
+            limits,
+        )
+        .await;
+    }
+    write_envelope(
+        output,
+        &Envelope::BlobStart(BlobStart {
+            request_id: response.id,
+            stream_id: egress.stream_id,
+            total_bytes: Some(egress.bytes.len() as u64),
+            sha256: Some(egress.sha256),
+        }),
+        limits,
+    )
+    .await?;
+
+    let chunk_bytes = limits.max_blob_chunk_bytes as usize;
+    for (fin, chunk) in blob_chunks(&egress.bytes, chunk_bytes) {
+        if egress.cancel.is_cancelled()
+            || egress
+                .deadline
+                .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        {
+            return write_envelope(
+                output,
+                &Envelope::Error(ErrorEnvelope {
+                    id: Some(response.id),
+                    error: interruption(egress.deadline),
+                }),
+                limits,
+            )
+            .await;
+        }
+        let frame = encode_blob_chunk_frame(egress.stream_id, fin, chunk, limits)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "blob chunk too large"))?;
+        output.write_all(&frame).await?;
+        output.flush().await?;
+    }
+    write_envelope(output, &Envelope::Response(response), limits).await
 }
 
 fn authenticate(envelope: Envelope, auth_token: &str) -> Result<HelloAck, WireError> {
@@ -283,7 +401,7 @@ fn authenticate(envelope: Envelope, auth_token: &str) -> Result<HelloAck, WireEr
     }
     let negotiated = capabilities
         .into_iter()
-        .filter(|capability| capability == "shadow-r13")
+        .filter(|capability| capability == "shadow-r13" || capability == "blobs")
         .collect();
     Ok(HelloAck {
         protocol_version: PROTOCOL_VERSION,
@@ -297,10 +415,12 @@ fn authenticate(envelope: Envelope, auth_token: &str) -> Result<HelloAck, WireEr
 async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
     envelope: Envelope,
     supervisor: &Arc<Supervisor<S>>,
-    output: &tokio::sync::mpsc::Sender<Envelope>,
+    output: &tokio::sync::mpsc::Sender<OutputItem>,
     writer_gone: &tokio::sync::watch::Sender<bool>,
     active_requests: &Arc<Mutex<HashSet<u64>>>,
+    active_egress: &Arc<Mutex<HashMap<u64, CancelSignal>>>,
     request_tasks: &mut JoinSet<()>,
+    blobs_negotiated: bool,
 ) -> bool {
     if *writer_gone.borrow() {
         return false;
@@ -313,23 +433,51 @@ async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
                     let output = output.clone();
                     let writer_gone = writer_gone.clone();
                     let active_requests = Arc::clone(active_requests);
+                    let active_egress = Arc::clone(active_egress);
                     lock(&active_requests).insert(id);
                     request_tasks.spawn(async move {
-                        let envelope = match receiver.await {
-                            Ok(Ok(response)) => Envelope::Response(response),
-                            Ok(Err(error)) => Envelope::Error(ErrorEnvelope {
-                                id: Some(id),
-                                error,
-                            }),
-                            Err(_) => Envelope::Error(ErrorEnvelope {
+                        let item = match receiver.await {
+                            Ok(Ok(mut service_response)) => {
+                                match service_response.blob_egress.take() {
+                                    Some(egress) => {
+                                        if blobs_negotiated {
+                                            lock(&active_egress).insert(id, egress.cancel.clone());
+                                            OutputItem::Blob {
+                                                response: service_response.response,
+                                                egress,
+                                            }
+                                        } else {
+                                            // The service response already is
+                                            // the metadata-only in-band shape.
+                                            // A client that did not negotiate
+                                            // blobs must never receive frames
+                                            // it cannot parse.
+                                            OutputItem::Envelope(Envelope::Response(
+                                                service_response.response,
+                                            ))
+                                        }
+                                    }
+                                    None => OutputItem::Envelope(Envelope::Response(
+                                        service_response.response,
+                                    )),
+                                }
+                            }
+                            Ok(Err(error)) => {
+                                OutputItem::Envelope(Envelope::Error(ErrorEnvelope {
+                                    id: Some(id),
+                                    error,
+                                }))
+                            }
+                            Err(_) => OutputItem::Envelope(Envelope::Error(ErrorEnvelope {
                                 id: Some(id),
                                 error: WireError::new(
                                     ErrorCode::Internal,
                                     "request supervisor unavailable",
                                 ),
-                            }),
+                            })),
                         };
-                        if output.send(envelope).await.is_err() {
+                        if output.send(item).await.is_err() {
+                            lock(&active_egress).remove(&id);
                             let _ = writer_gone.send(true);
                         }
                         lock(&active_requests).remove(&id);
@@ -337,10 +485,13 @@ async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
                 }
                 Err(error) => {
                     if output
-                        .send(Envelope::Error(ErrorEnvelope {
-                            id: Some(id),
-                            error,
-                        }))
+                        .send(
+                            Envelope::Error(ErrorEnvelope {
+                                id: Some(id),
+                                error,
+                            })
+                            .into(),
+                        )
                         .await
                         .is_err()
                     {
@@ -353,6 +504,9 @@ async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
         }
         Envelope::Cancel(cancel) => {
             let _ = supervisor.cancel(cancel.id);
+            if let Some(signal) = lock(active_egress).get(&cancel.id) {
+                signal.cancel();
+            }
             true
         }
         Envelope::Hello(_) | Envelope::HelloAck(_) | Envelope::Batch(_) => {
@@ -398,16 +552,19 @@ async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
 }
 
 async fn send_error(
-    output: &tokio::sync::mpsc::Sender<Envelope>,
+    output: &tokio::sync::mpsc::Sender<OutputItem>,
     id: Option<u64>,
     code: ErrorCode,
     message: &'static str,
 ) -> bool {
     output
-        .send(Envelope::Error(ErrorEnvelope {
-            id,
-            error: WireError::new(code, message),
-        }))
+        .send(
+            Envelope::Error(ErrorEnvelope {
+                id,
+                error: WireError::new(code, message),
+            })
+            .into(),
+        )
         .await
         .is_ok()
 }
@@ -466,7 +623,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dohc_engine_protocol::transport::RequestContext;
+    use dohc_engine_protocol::transport::{RequestContext, ServiceResponse};
     use dohc_engine_protocol::wire::{BlobStart, Request as WireRequest, Response as WireResponse};
     use std::pin::Pin;
     use std::sync::atomic::{AtomicBool, AtomicUsize};
@@ -674,11 +831,40 @@ mod tests {
             &self,
             _ctx: RequestContext,
             request: WireRequest,
-        ) -> Result<WireResponse, WireError> {
+        ) -> Result<ServiceResponse, WireError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(WireResponse {
+            Ok(ServiceResponse::response(WireResponse {
                 id: request.id,
                 result: serde_json::Value::Null,
+            }))
+        }
+    }
+
+    struct BlobService;
+
+    impl ProtocolEngineService for BlobService {
+        async fn call(
+            &self,
+            _ctx: RequestContext,
+            request: WireRequest,
+        ) -> Result<ServiceResponse, WireError> {
+            let bytes = vec![0x7a; 64 * 1024];
+            Ok(ServiceResponse {
+                response: WireResponse {
+                    id: request.id,
+                    result: serde_json::json!({
+                        "bytesBase64": null,
+                        "byteLength": bytes.len(),
+                        "inbandLimitBytes": 48 * 1024,
+                    }),
+                },
+                blob_egress: Some(BlobEgress {
+                    stream_id: request.id,
+                    sha256: "blob-capability-test".to_owned(),
+                    bytes,
+                    cancel: CancelSignal::new(),
+                    deadline: None,
+                }),
             })
         }
     }
@@ -695,13 +881,13 @@ mod tests {
             &self,
             _ctx: RequestContext,
             request: WireRequest,
-        ) -> Result<WireResponse, WireError> {
+        ) -> Result<ServiceResponse, WireError> {
             self.started.notify_one();
             self.release.notified().await;
-            Ok(WireResponse {
+            Ok(ServiceResponse::response(WireResponse {
                 id: request.id,
                 result: serde_json::Value::Null,
-            })
+            }))
         }
     }
 
@@ -715,6 +901,7 @@ mod tests {
         let (output, mut received) = tokio::sync::mpsc::channel(1);
         let (writer_gone, _) = tokio::sync::watch::channel(false);
         let active_requests = Arc::new(Mutex::new(HashSet::new()));
+        let active_egress = Arc::new(Mutex::new(HashMap::new()));
         let mut request_tasks = JoinSet::new();
         let keep_running = dispatch_authenticated(
             Envelope::BlobStart(BlobStart {
@@ -727,15 +914,282 @@ mod tests {
             &output,
             &writer_gone,
             &active_requests,
+            &active_egress,
             &mut request_tasks,
+            false,
         )
         .await;
         assert!(!keep_running);
-        let Envelope::Error(error) = received.recv().await.expect("error envelope") else {
+        let OutputItem::Envelope(Envelope::Error(error)) =
+            received.recv().await.expect("error envelope")
+        else {
             panic!("BlobStart must produce an error envelope");
         };
         assert_eq!(error.error.code, ErrorCode::InvalidParams);
         assert_eq!(error.error.message, "blob-ingest-unsupported");
+    }
+
+    #[tokio::test]
+    async fn daemon_blob_writer_emits_start_bounded_chunks_fin_then_response() {
+        // MUTATION: drop FIN, use READ_CHUNK_BYTES, emit the response before
+        // the stream, or bypass write_blob_egress -> transcript assertions fail.
+        let bytes = vec![0xa5; 2 * 256 * 1024 + 17];
+        let response = WireResponse {
+            id: 71,
+            result: serde_json::json!({
+                "bytesBase64": null,
+                "byteLength": bytes.len(),
+                "inbandLimitBytes": 48 * 1024,
+            }),
+        };
+        let egress = BlobEgress {
+            stream_id: 71,
+            sha256: "abc123".to_owned(),
+            bytes: bytes.clone(),
+            cancel: CancelSignal::new(),
+            deadline: None,
+        };
+        let limits = WireLimits::default();
+        let (mut output, mut input) = tokio::io::duplex(bytes.len() + 4096);
+        write_blob_egress(&mut output, response.clone(), egress, &limits)
+            .await
+            .expect("write blob egress");
+        output.shutdown().await.expect("close transcript");
+        let mut transcript = Vec::new();
+        input
+            .read_to_end(&mut transcript)
+            .await
+            .expect("read transcript");
+
+        let mut decoder = FrameDecoder::new(limits.clone());
+        decoder.push(&transcript);
+        let Frame::Control(start) = decoder.next_frame().expect("frame").expect("start") else {
+            panic!("first frame must be BlobStart");
+        };
+        assert_eq!(
+            decode_control(&start, &limits).expect("decode start"),
+            Envelope::BlobStart(BlobStart {
+                request_id: 71,
+                stream_id: 71,
+                total_bytes: Some(bytes.len() as u64),
+                sha256: Some("abc123".to_owned()),
+            })
+        );
+
+        let mut rebuilt = Vec::new();
+        let mut fins = Vec::new();
+        for _ in 0..3 {
+            let Frame::BlobChunk {
+                stream_id,
+                fin,
+                bytes,
+            } = decoder.next_frame().expect("frame").expect("chunk")
+            else {
+                panic!("middle frames must be BlobChunk");
+            };
+            assert_eq!(stream_id, 71);
+            assert!(bytes.len() <= 256 * 1024);
+            fins.push(fin);
+            rebuilt.extend(bytes);
+        }
+        assert_eq!(rebuilt, bytes);
+        assert_eq!(fins, vec![false, false, true]);
+
+        let Frame::Control(response_frame) =
+            decoder.next_frame().expect("frame").expect("response")
+        else {
+            panic!("last frame must be Response");
+        };
+        assert_eq!(
+            decode_control(&response_frame, &limits).expect("decode response"),
+            Envelope::Response(response)
+        );
+        assert!(decoder.next_frame().expect("frame").is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_daemon_blob_writer_emits_no_blob_bytes() {
+        // MUTATION: remove the pre-egress cancellation guard -> BlobStart and
+        // plaintext blob bytes appear instead of the request-scoped error.
+        let cancel = CancelSignal::new();
+        cancel.cancel();
+        let response = WireResponse {
+            id: 72,
+            result: serde_json::Value::Null,
+        };
+        let egress = BlobEgress {
+            stream_id: 72,
+            sha256: "cancelled".to_owned(),
+            bytes: vec![0x5c; 64 * 1024],
+            cancel,
+            deadline: None,
+        };
+        let limits = WireLimits::default();
+        let (mut output, mut input) = tokio::io::duplex(4096);
+        write_blob_egress(&mut output, response, egress, &limits)
+            .await
+            .expect("write cancellation");
+        output.shutdown().await.expect("close transcript");
+        let mut transcript = Vec::new();
+        input
+            .read_to_end(&mut transcript)
+            .await
+            .expect("read transcript");
+
+        let mut decoder = FrameDecoder::new(limits.clone());
+        decoder.push(&transcript);
+        let Frame::Control(error_frame) = decoder.next_frame().expect("frame").expect("error")
+        else {
+            panic!("cancelled egress must emit only an Error envelope");
+        };
+        let Envelope::Error(error) =
+            decode_control(&error_frame, &limits).expect("decode cancellation")
+        else {
+            panic!("cancelled egress must emit an Error envelope");
+        };
+        assert_eq!(error.id, Some(72));
+        assert_eq!(error.error.code, ErrorCode::Cancelled);
+        assert!(decoder.next_frame().expect("frame").is_none());
+    }
+
+    #[tokio::test]
+    async fn blob_egress_requires_negotiated_blobs_capability() {
+        // MUTATION: fail to retain/pass the connection's negotiated set, or
+        // ignore it at dispatch -> the non-negotiating transcript contains raw
+        // blob frames, or the negotiating transcript loses its stream.
+        for (id, blobs_negotiated) in [(81, false), (82, true)] {
+            let mut input_bytes = encode_envelope(&Envelope::Hello(Hello {
+                protocol_version: PROTOCOL_VERSION,
+                auth_token: TEST_AUTH_TOKEN.to_owned(),
+                capabilities: if blobs_negotiated {
+                    vec!["blobs".to_owned()]
+                } else {
+                    Vec::new()
+                },
+                last_session_generation: None,
+            }));
+            input_bytes.extend_from_slice(&encode_envelope(&Envelope::Request(WireRequest {
+                id,
+                method: "test.blob".to_owned(),
+                workspace: None,
+                deadline_ms: None,
+                idempotency_key: None,
+                params: serde_json::Value::Null,
+            })));
+            let (client, server) = tokio::io::duplex(256 * 1024);
+            let (server_input, server_output) = tokio::io::split(server);
+            let (mut client_input, mut client_output) = tokio::io::split(client);
+            let service = Arc::new(BlobService);
+            let supervisor = Arc::new(Supervisor::new(SupervisorConfig::default(), service));
+            let run = tokio::spawn(run_transport(
+                TEST_AUTH_TOKEN.to_owned(),
+                server_input,
+                server_output,
+                supervisor,
+                || Ok(()),
+            ));
+            client_output
+                .write_all(&input_bytes)
+                .await
+                .expect("write client transcript");
+            client_output.shutdown().await.expect("close client input");
+            let mut transcript = Vec::new();
+            client_input
+                .read_to_end(&mut transcript)
+                .await
+                .expect("read daemon transcript");
+            run.await
+                .expect("transport task")
+                .expect("transport succeeds");
+
+            let limits = WireLimits::default();
+            let mut decoder = FrameDecoder::new(limits.clone());
+            decoder.push(&transcript);
+            let Frame::Control(ack_frame) = decoder.next_frame().expect("frame").expect("ack")
+            else {
+                panic!("first frame must be HelloAck");
+            };
+            let Envelope::HelloAck(ack) = decode_control(&ack_frame, &limits).expect("decode ack")
+            else {
+                panic!("first envelope must be HelloAck");
+            };
+            assert_eq!(
+                ack.capabilities,
+                if blobs_negotiated {
+                    vec!["blobs"]
+                } else {
+                    Vec::<&str>::new()
+                }
+            );
+            if blobs_negotiated {
+                let Frame::Control(start_frame) =
+                    decoder.next_frame().expect("frame").expect("blob start")
+                else {
+                    panic!("negotiated client must receive BlobStart");
+                };
+                assert!(matches!(
+                    decode_control(&start_frame, &limits).expect("decode start"),
+                    Envelope::BlobStart(BlobStart { request_id, .. }) if request_id == id
+                ));
+                let Frame::BlobChunk {
+                    stream_id,
+                    fin,
+                    bytes,
+                } = decoder.next_frame().expect("frame").expect("blob chunk")
+                else {
+                    panic!("negotiated client must receive BlobChunk");
+                };
+                assert_eq!(stream_id, id);
+                assert!(fin);
+                assert_eq!(bytes, vec![0x7a; 64 * 1024]);
+            } else {
+                let Frame::Control(response_frame) =
+                    decoder.next_frame().expect("frame").expect("response")
+                else {
+                    panic!("non-negotiating client must receive metadata response");
+                };
+                let Envelope::Response(response) =
+                    decode_control(&response_frame, &limits).expect("decode response")
+                else {
+                    panic!("non-negotiating client received a non-response envelope");
+                };
+                assert_eq!(response.id, id);
+                assert_eq!(response.result["bytesBase64"], serde_json::Value::Null);
+                assert_eq!(response.result["byteLength"], 64 * 1024);
+                assert!(decoder.next_frame().expect("frame").is_none());
+                continue;
+            }
+            let Frame::Control(response_frame) =
+                decoder.next_frame().expect("frame").expect("response")
+            else {
+                panic!("last frame must be Response");
+            };
+            let Envelope::Response(response) =
+                decode_control(&response_frame, &limits).expect("decode response")
+            else {
+                panic!("last envelope must be Response");
+            };
+            assert_eq!(response.id, id);
+            assert_eq!(response.result["bytesBase64"], serde_json::Value::Null);
+            assert!(decoder.next_frame().expect("frame").is_none());
+        }
+    }
+
+    #[test]
+    fn blob_capability_is_negotiated_only_when_requested() {
+        // MUTATION: omit "blobs" from the daemon's supported capabilities or
+        // advertise it unconditionally -> the exact intersection fails.
+        let ack = authenticate(
+            Envelope::Hello(Hello {
+                protocol_version: PROTOCOL_VERSION,
+                auth_token: TEST_AUTH_TOKEN.to_owned(),
+                capabilities: vec!["unknown".to_owned(), "blobs".to_owned()],
+                last_session_generation: None,
+            }),
+            TEST_AUTH_TOKEN,
+        )
+        .expect("authenticated hello");
+        assert_eq!(ack.capabilities, vec!["blobs"]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

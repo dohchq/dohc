@@ -28,8 +28,10 @@
 
 use crate::cancel::CancelSignal;
 use crate::error::{ErrorCode, WireError};
-use crate::transport::{EngineService, RequestContext};
-use crate::wire::{Request, RequestId, Response};
+use crate::transport::{EngineService, RequestContext, ServiceResponse};
+#[cfg(test)]
+use crate::wire::Response;
+use crate::wire::{Request, RequestId};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -58,7 +60,7 @@ impl Default for SupervisorConfig {
 }
 
 /// Terminal outcome of a submitted request.
-pub type RequestOutcome = Result<Response, WireError>;
+pub type RequestOutcome = Result<ServiceResponse, WireError>;
 
 type CancelRegistry = Arc<Mutex<HashMap<RequestId, CancelSignal>>>;
 
@@ -261,10 +263,10 @@ mod tests {
             self.peak.fetch_max(now, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_millis(20)).await;
             self.current.fetch_sub(1, Ordering::SeqCst);
-            Ok(Response {
+            Ok(ServiceResponse::response(Response {
                 id: request.id,
                 result: json!("done"),
-            })
+            }))
         }
     }
 
@@ -299,7 +301,7 @@ mod tests {
         async fn call(&self, ctx: RequestContext, request: Request) -> RequestOutcome {
             self.started.notify_one();
             tokio::select! {
-                () = self.release.notified() => Ok(Response { id: request.id, result: Value::Null }),
+                () = self.release.notified() => Ok(ServiceResponse::response(Response { id: request.id, result: Value::Null })),
                 () = ctx.cancel.cancelled() => Err(WireError::new(ErrorCode::Cancelled, "handler observed cancellation")),
             }
         }
@@ -401,10 +403,10 @@ mod tests {
     impl EngineService for Sleeper {
         async fn call(&self, _ctx: RequestContext, request: Request) -> RequestOutcome {
             tokio::time::sleep(Duration::from_secs(3600)).await;
-            Ok(Response {
+            Ok(ServiceResponse::response(Response {
                 id: request.id,
                 result: Value::Null,
-            })
+            }))
         }
     }
 

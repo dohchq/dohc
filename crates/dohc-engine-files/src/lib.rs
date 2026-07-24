@@ -57,7 +57,8 @@ pub use error::FilesError;
 pub use hash::{HashOutcome, HashPool, PoolGauge};
 pub use materialize::{
     AtomicReplacer, DurabilityPolicy, JobOutcome, JobResult, MaterializeError, NoBackoff,
-    ReplaceBackoff, StdBackoff, StdReplacer, backoff_delay, materialize_one, run_pending_jobs,
+    ReplaceBackoff, StdBackoff, StdReplacer, backoff_delay, materialize_one,
+    materialize_secret_delete_one, materialize_secret_one, run_pending_jobs,
 };
 pub use policy::{
     PathClassification, classify_engine_file_path, classify_engine_file_path_for_read,

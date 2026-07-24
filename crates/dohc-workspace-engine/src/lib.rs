@@ -30,7 +30,9 @@ use dohc_engine_domain::{
 };
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
-    transport::{EngineService as ProtocolEngineService, RequestContext},
+    transport::{
+        BlobEgress, EngineService as ProtocolEngineService, RequestContext, ServiceResponse,
+    },
     wire::{Request, Response, WorkspaceHandle},
 };
 use dohc_engine_runtime::{
@@ -53,10 +55,7 @@ const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 
 /// In-band CONTENT (binary bytes, secret plaintext) is bounded by the DOP1
 /// string limit (64 KiB per string): base64 expands 4/3, so this raw cap
-/// leaves headroom under it. Larger content needs the protocol's blob-chunk
-/// streaming (BlobStart exists in the wire contract; no daemon producer
-/// yet) — tracked in docs/superpowers/plans/rust-engine/RPC_GAP.md, which
-/// is maintained on the integrator branch (PR #216) until it merges.
+/// leaves headroom under it. Larger binary blobs use raw blob-chunk egress.
 const MAX_INBAND_CONTENT_BYTES: usize = dohc_engine_domain::INBAND_CONTENT_CAP_BYTES;
 
 /// Largest raw Y.Doc full-state that still fits one wire string once
@@ -352,8 +351,21 @@ impl EngineService {
         }
     }
 
-    async fn dispatch(&self, ctx: RequestContext, request: Request) -> Result<Response, WireError> {
+    async fn dispatch(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+    ) -> Result<ServiceResponse, WireError> {
         let id = request.id;
+        if request.method == "versionedBinary.readBlob" {
+            let (result, blob_egress) = self
+                .versioned_binary_read_blob(&ctx, request.workspace, request.params, id)
+                .await?;
+            return Ok(ServiceResponse {
+                response: Response { id, result },
+                blob_egress,
+            });
+        }
         let result = match request.method.as_str() {
             "workspace.open" => self.workspace_open(&ctx, request.params).await?,
             "workspace.close" => self.workspace_close(request.workspace).await?,
@@ -479,10 +491,6 @@ impl EngineService {
             }
             "versionedBinary.read" => {
                 self.versioned_binary_read(&ctx, request.workspace, request.params)
-                    .await?
-            }
-            "versionedBinary.readBlob" => {
-                self.versioned_binary_read_blob(&ctx, request.workspace, request.params)
                     .await?
             }
             "moments.list" => {
@@ -825,7 +833,7 @@ impl EngineService {
             }
             _ => return Err(wire(ErrorCode::MethodNotFound, "unknown method")),
         };
-        Ok(Response { id, result })
+        Ok(ServiceResponse::response(Response { id, result }))
     }
 
     /// Tear down every open workspace's capture driver (watcher joined,
@@ -2116,7 +2124,8 @@ impl EngineService {
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
-    ) -> Result<Value, WireError> {
+        request_id: u64,
+    ) -> Result<(Value, Option<BlobEgress>), WireError> {
         let params: VersionedBinaryReadBlobParams = parse(params)?;
         if params.sha256.len() != 64 || !params.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
@@ -2131,20 +2140,39 @@ impl EngineService {
         let read = Self::read_under_ctx(
             &cancellation,
             "versionedBinary.readBlob",
-            open.actor.read_binary_blob(open.workspace_id, sha256),
+            open.actor
+                .read_binary_blob_for_egress(open.workspace_id, sha256.clone()),
         )
         .await?
         .ok_or_else(|| wire(ErrorCode::InvalidParams, "file-not-found"))?;
-        Ok(match read.bytes {
-            Some(bytes) => json!({
-                "bytesBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
-            }),
-            None => json!({
+        let bytes = read.bytes.ok_or_else(|| {
+            wire(
+                ErrorCode::Internal,
+                "binary blob egress hydration unexpectedly withheld bytes",
+            )
+        })?;
+        if bytes.len() <= MAX_INBAND_CONTENT_BYTES {
+            return Ok((
+                json!({
+                    "bytesBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                }),
+                None,
+            ));
+        }
+        Ok((
+            json!({
                 "bytesBase64": Value::Null,
                 "byteLength": read.byte_length,
                 "inbandLimitBytes": MAX_INBAND_CONTENT_BYTES,
             }),
-        })
+            Some(BlobEgress {
+                stream_id: request_id,
+                sha256,
+                bytes,
+                cancel: ctx.cancel.clone(),
+                deadline: ctx.deadline,
+            }),
+        ))
     }
 
     async fn moments_list(
@@ -5716,7 +5744,11 @@ impl EngineService {
 }
 
 impl ProtocolEngineService for EngineService {
-    async fn call(&self, ctx: RequestContext, request: Request) -> Result<Response, WireError> {
+    async fn call(
+        &self,
+        ctx: RequestContext,
+        request: Request,
+    ) -> Result<ServiceResponse, WireError> {
         self.dispatch(ctx, request).await
     }
 }

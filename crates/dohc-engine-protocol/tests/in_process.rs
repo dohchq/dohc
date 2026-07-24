@@ -3,7 +3,7 @@
 
 use dohc_engine_protocol::error::WireError;
 use dohc_engine_protocol::transport::{
-    EngineService, EngineTransport, InProcessTransport, RequestContext,
+    EngineService, EngineTransport, InProcessTransport, RequestContext, ServiceResponse,
 };
 use dohc_engine_protocol::wire::{Request, Response};
 use serde_json::{Value, json};
@@ -15,12 +15,16 @@ struct EchoService {
 }
 
 impl EngineService for EchoService {
-    async fn call(&self, _ctx: RequestContext, request: Request) -> Result<Response, WireError> {
+    async fn call(
+        &self,
+        _ctx: RequestContext,
+        request: Request,
+    ) -> Result<ServiceResponse, WireError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(Response {
+        Ok(ServiceResponse::response(Response {
             id: request.id,
             result: json!({ "echo": request.params, "method": request.method }),
-        })
+        }))
     }
 }
 

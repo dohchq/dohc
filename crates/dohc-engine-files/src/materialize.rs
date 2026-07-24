@@ -311,9 +311,176 @@ pub fn materialize_one(
             actual: content.len(),
         });
     }
+    materialize_write_content(
+        store, &target, job, &content, policy, replacer, backoff, now_ms, faults, true,
+    )
+}
 
-    // Step 1 (idempotent replay): the target already equals the desired content.
+/// Execute a secret write through the same atomic-replace pipeline without
+/// ever persisting plaintext in the content-blob table. The current disk state
+/// is adopted as the immediate preimage, and conflict handling never writes a
+/// plaintext `.conflict` sibling.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each seam is injected for testability"
+)]
+pub fn materialize_secret_one(
+    store: &EngineStore,
+    root: &Path,
+    job: &MaterializationJob,
+    plaintext: &[u8],
+    policy: DurabilityPolicy,
+    replacer: &dyn AtomicReplacer,
+    backoff: &dyn ReplaceBackoff,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<JobOutcome, MaterializeError> {
+    let target = resolve_target(root, &job.target_path)?;
+    if should_crash(faults, FaultPoint::MaterializeAfterJobCommit) {
+        return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit));
+    }
+    if plaintext.len() > MAX_MATERIALIZE_BYTES {
+        return Err(MaterializeError::TooLarge {
+            actual: plaintext.len(),
+        });
+    }
+    let desired_sha = hex_sha256(plaintext);
     let current = read_current_no_follow(&target)?;
+    if let CurrentTarget::Present(bytes) = &current
+        && hex_sha256(bytes) == desired_sha
+    {
+        store.mark_materialization_complete(&job.job_id, now_ms)?;
+        return Ok(JobOutcome::AlreadyMaterialized);
+    }
+    let preimage = match current {
+        CurrentTarget::Absent => Preimage::Absent,
+        CurrentTarget::Present(bytes) => Preimage::Present(hex_sha256(&bytes)),
+        CurrentTarget::Oversized => {
+            store.mark_materialization_conflict(&job.job_id, now_ms)?;
+            return Ok(JobOutcome::Conflict);
+        }
+    };
+    let plaintext_job = MaterializationJob {
+        content_sha256: desired_sha,
+        preimage,
+        ..job.clone()
+    };
+    materialize_write_content(
+        store,
+        &target,
+        &plaintext_job,
+        plaintext,
+        policy,
+        replacer,
+        backoff,
+        now_ms,
+        faults,
+        false,
+    )
+}
+
+/// Execute an active-version secret delete after the runtime has resolved the
+/// versioned current tip. Unlike the generic pipeline, this deliberately has no
+/// workspace-wide generation fence: generations from another version cannot
+/// suppress deletion of the active disk projection. The keyless delete cannot
+/// name a plaintext preimage, so it adopts and removes the current regular file
+/// without ever creating a plaintext conflict artifact.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each seam is injected for testability"
+)]
+pub fn materialize_secret_delete_one(
+    store: &EngineStore,
+    root: &Path,
+    job: &MaterializationJob,
+    policy: DurabilityPolicy,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<JobOutcome, MaterializeError> {
+    let target = resolve_target(root, &job.target_path)?;
+    if should_crash(faults, FaultPoint::MaterializeAfterJobCommit) {
+        return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit));
+    }
+    materialize_secret_delete_adopting_current(store, &target, job, policy, now_ms, faults)
+}
+
+fn materialize_secret_delete_adopting_current(
+    store: &EngineStore,
+    target: &Path,
+    job: &MaterializationJob,
+    policy: DurabilityPolicy,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+) -> Result<JobOutcome, MaterializeError> {
+    if matches!(read_current_no_follow(target)?, CurrentTarget::Absent) {
+        store.mark_materialization_complete(&job.job_id, now_ms)?;
+        return Ok(JobOutcome::AlreadyMaterialized);
+    }
+    if should_crash(faults, FaultPoint::MaterializeBeforePreimageRevalidate) {
+        return Ok(JobOutcome::Crashed(
+            FaultPoint::MaterializeBeforePreimageRevalidate,
+        ));
+    }
+    // Re-read immediately before unlinking to preserve no-follow semantics.
+    // Any regular file currently at the active secret's own resolved path is
+    // the disk projection being retired; no plaintext hash or conflict copy is
+    // needed (or safe) for a secret delete.
+    if matches!(read_current_no_follow(target)?, CurrentTarget::Absent) {
+        store.mark_materialization_complete(&job.job_id, now_ms)?;
+        return Ok(JobOutcome::AlreadyMaterialized);
+    }
+    std::fs::remove_file(target).map_err(|err| MaterializeError::io(target, &err))?;
+    sync_parent_dir(target.parent(), policy)?;
+    if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
+        return Ok(JobOutcome::Crashed(
+            FaultPoint::MaterializeAfterRenameBeforeComplete,
+        ));
+    }
+    store.mark_materialization_complete(&job.job_id, now_ms)?;
+    Ok(JobOutcome::Completed)
+}
+
+struct SecretPlaintextTempCleanup<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+impl<'a> SecretPlaintextTempCleanup<'a> {
+    fn new(path: &'a Path, armed: bool) -> Self {
+        SecretPlaintextTempCleanup { path, armed }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for SecretPlaintextTempCleanup<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(self.path);
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "each seam is injected for testability"
+)]
+fn materialize_write_content(
+    store: &EngineStore,
+    target: &Path,
+    job: &MaterializationJob,
+    content: &[u8],
+    policy: DurabilityPolicy,
+    replacer: &dyn AtomicReplacer,
+    backoff: &dyn ReplaceBackoff,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    preserve_conflict_artifact: bool,
+) -> Result<JobOutcome, MaterializeError> {
+    // Step 1 (idempotent replay): the target already equals the desired content.
+    let current = read_current_no_follow(target)?;
     if let CurrentTarget::Present(bytes) = &current
         && hex_sha256(bytes) == job.content_sha256
     {
@@ -327,12 +494,17 @@ pub fn materialize_one(
     }
 
     // Step 2: sibling temp file, bounded, restrictive mode.
-    let tmp = temp_sibling(&target, &job.job_id);
-    write_temp(&tmp, &content)?;
+    let tmp = temp_sibling(target, &job.job_id);
+    // Secret writes never preserve a plaintext temp on a returned error. The
+    // ordinary materializer keeps its established crash/replay behavior.
+    let mut secret_temp_cleanup =
+        SecretPlaintextTempCleanup::new(&tmp, !preserve_conflict_artifact);
+    write_temp(&tmp, content)?;
     if should_crash(faults, FaultPoint::MaterializeAfterTempWrite) {
         // A crash here leaves an orphan temp; startup replay ignores it (temp is
         // never captured as user content — it lives under a `.dohc-write-` name
         // the path floor excludes) and re-runs the job.
+        secret_temp_cleanup.disarm();
         return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterTempWrite));
     }
 
@@ -341,6 +513,7 @@ pub fn materialize_one(
     // durability actually lives on POSIX.
     flush_temp_file(&tmp, policy)?;
     if should_crash(faults, FaultPoint::MaterializeAfterFlushBeforeRename) {
+        secret_temp_cleanup.disarm();
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterFlushBeforeRename,
         ));
@@ -350,6 +523,7 @@ pub fn materialize_one(
     // point fires FIRST so a trace can mutate the target and prove we observe
     // the newer external content rather than clobbering it.
     if should_crash(faults, FaultPoint::MaterializeBeforePreimageRevalidate) {
+        secret_temp_cleanup.disarm();
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeBeforePreimageRevalidate,
         ));
@@ -358,7 +532,7 @@ pub fn materialize_one(
     // an external write in the gap is clobbered — the documented residual TOCTOU
     // (module docs + BEHAVIOR_DELTA). The common case (an editor that wrote
     // before the pipeline ran) IS caught here.
-    let current_now = read_current_no_follow(&target)?;
+    let current_now = read_current_no_follow(target)?;
     if !preimage_matches(&job.preimage, &current_now) {
         // External newer content: preserve BOTH. Keep the on-disk target
         // untouched; persist our intended content to a `.conflict` sibling so it
@@ -366,26 +540,33 @@ pub fn materialize_one(
         // `.conflict` artifact is on the path floor, so the scanner does NOT
         // auto-capture it as a new tracked document — the user/agent inspects
         // and resolves it manually.
-        let conflict_path = conflict_sibling(&target, &job.job_id);
-        rename_no_follow(&tmp, &conflict_path, replacer)?;
+        if preserve_conflict_artifact {
+            let conflict_path = conflict_sibling(target, &job.job_id);
+            rename_no_follow(&tmp, &conflict_path, replacer)?;
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+        }
         store.mark_materialization_conflict(&job.job_id, now_ms)?;
+        secret_temp_cleanup.disarm();
         return Ok(JobOutcome::Conflict);
     }
 
     // Step 5: atomic replace with bounded retry, then make the rename itself
     // durable by syncing the parent directory (POSIX), THEN mark complete — so a
     // crash can never leave the job marked complete over a non-durable rename.
-    replace_with_bounded_retry(&tmp, &target, replacer, backoff)?;
+    replace_with_bounded_retry(&tmp, target, replacer, backoff)?;
     sync_parent_dir(target.parent(), policy)?;
     if should_crash(faults, FaultPoint::MaterializeAfterRenameBeforeComplete) {
         // Renamed but not marked complete. Startup replay: the target now equals
         // the desired content, so step 1 short-circuits and marks complete —
         // exactly-once, no second write.
+        secret_temp_cleanup.disarm();
         return Ok(JobOutcome::Crashed(
             FaultPoint::MaterializeAfterRenameBeforeComplete,
         ));
     }
     store.mark_materialization_complete(&job.job_id, now_ms)?;
+    secret_temp_cleanup.disarm();
     Ok(JobOutcome::Completed)
 }
 
