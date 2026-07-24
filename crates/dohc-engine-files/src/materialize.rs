@@ -1316,7 +1316,7 @@ impl SecretParentGuard {
             // identical to `sync_parent_dir` on the non-secret path without
             // giving up the pin — the duplicate closes with `file`, the
             // original stays open.
-            let duplicate = rustix::io::dup(&self.parent_fd)
+            let duplicate = rustix::io::fcntl_dupfd_cloexec(&self.parent_fd, 0)
                 .map_err(std::io::Error::from)
                 .map_err(|err| MaterializeError::io(&self.parent_path, &err))?;
             std::fs::File::from(duplicate)
@@ -1520,8 +1520,7 @@ fn classify_nofollow_failure(
 ) -> MaterializeError {
     let is_symlink = rustix::fs::statat(parent_fd, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
         .is_ok_and(|stat| {
-            (stat.st_mode & rustix::fs::FileType::Symlink.as_raw_mode())
-                == rustix::fs::FileType::Symlink.as_raw_mode()
+            rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::Symlink
         });
     if is_symlink {
         return MaterializeError::SymlinkTarget;
