@@ -7,15 +7,18 @@
 # evidence JSON). Never runs automatically — dispatch it when macOS evidence is
 # needed (GATE6 decision #2 / the R15 go/no-go).
 #
-# EVIDENCE INTEGRITY (why this file is fussy):
+# EVIDENCE INTEGRITY (why this file is fussy — a misleading artifact is worse than
+# none when it feeds a cutover decision):
 #   * `full` is the DEFAULT. The soak runner exits 0 for `--quick` with verdict
 #     PASS-SCENARIOS-ONLY(trend-not-evaluated) — a green quick run is NOT the
 #     cutoverBlocking evidence and must never be mistaken for it.
-#   * cargo-deny is INSTALLED and a `cargo-deny=SKIP` gate line FAILS the run —
-#     the canonical gate counts cargo-deny=PASS as part of the evidence.
+#   * cargo-deny is installed at a PINNED version and a `cargo-deny=SKIP` gate line
+#     FAILS the run — the canonical gate counts cargo-deny=PASS as evidence.
 #   * BOTH release binaries are built before the soak: the runner resolves the
 #     daemon as a SIBLING `dohc-workspace-engine` in its own directory, so
 #     `cargo run --bin dohc-soak-runner` alone would fail with a missing daemon.
+#   * The soak evidence JSON is MANDATORY — the upload fails if it is absent, so a
+#     green run can never be cited without the artifact behind it.
 name: rust-engine-macos-evidence
 
 on:
@@ -27,41 +30,60 @@ on:
         default: full
         options: [full, quick]
 
+permissions:
+  contents: read
+
 concurrency:
   group: rust-engine-macos-evidence
   cancel-in-progress: false
 
+env:
+  # Pinned so gate results cannot drift between runs; matches the version behind
+  # the canonical Windows gate cited in GATE6_PACKET.md.
+  CARGO_DENY_VERSION: "0.20.2"
+
 jobs:
   macos-evidence:
+    name: macOS gate + cutoverBlocking soak
     runs-on: macos-latest
     timeout-minutes: 150
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
 
       - name: Install pinned Rust toolchain (rust-toolchain.toml)
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustc --version && cargo --version
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "20"
+          # package.json engines: ^20.19.0 || ^22.13.0 || >=24.0.0
+          node-version: "24"
 
-      - name: Install cargo-deny (the gate counts cargo-deny=PASS as evidence)
-        run: cargo install cargo-deny --locked
+      - name: Install pinned cargo-deny (the gate counts cargo-deny=PASS as evidence)
+        run: |
+          cargo install cargo-deny --locked --version "$CARGO_DENY_VERSION"
+          cargo-deny --version | tee -a macos-toolversions.log
+          rustc --version | tee -a macos-toolversions.log
+          node --version | tee -a macos-toolversions.log
 
       - name: Full-workspace gate (fmt/clippy -D warnings/build/test/cargo-deny)
         run: |
           set -o pipefail
           node tools/rust-engine-program/run-rust-checks.mjs 2>&1 | tee macos-gate.log
 
-      - name: Refuse a gate log that skipped cargo-deny
+      - name: Require a canonical PASS verdict with cargo-deny actually run
         run: |
           if grep -q "cargo-deny=SKIP" macos-gate.log; then
             echo "::error::macOS gate log has cargo-deny=SKIP — not valid GATE6 evidence."
             exit 1
           fi
-          grep -E "run-rust-checks \| .* \| PASS \|" macos-gate.log
+          grep -E "run-rust-checks \| .* \| PASS \|" macos-gate.log \
+            || { echo "::error::no PASS verdict line in the macOS gate log."; exit 1; }
 
       - name: Build BOTH release binaries (soak resolves the daemon as a sibling)
         run: |
@@ -83,14 +105,17 @@ jobs:
           # Invoke the BUILT runner directly so its sibling-daemon resolution works.
           ./target/release/dohc-soak-runner $ARGS --evidence "$OUT" 2>&1 | tee macos-soak.log
           echo "MODE=${{ inputs.mode }}" >> macos-soak.log
+          test -s "$OUT" || { echo "::error::soak produced no evidence JSON at $OUT"; exit 1; }
 
       - name: Upload macOS evidence artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rust-engine-macos-evidence-${{ inputs.mode }}
           path: |
             macos-gate.log
             macos-soak.log
+            macos-toolversions.log
             tools/rust-engine-program/soak-evidence/macos-*.json
-          if-no-files-found: warn
+          # Evidence must exist to be citable.
+          if-no-files-found: error

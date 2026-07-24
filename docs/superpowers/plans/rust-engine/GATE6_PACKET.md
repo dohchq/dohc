@@ -78,15 +78,35 @@ R16 (legacy deletion) is POST-cutover by design.
   `cargo test --workspace`; the canonical main gate above is the freshest citation.
 
 ## 4. Migration ledger — 14 migrations, ordinals 0-13, monotone; **NEXT ORDINAL = 14**
-baseline(0), v1-secrets(1), v1-ydoc(2), v1-chats(3), v1-search(4),
-v1-moment-before-link(5), v1-sync(6), v1-conflicts(7), v1-shadow-clone(8),
-v1-binary-conflict-sides(9), v1-binary-head(10), v1-path-aliases-object-index(11),
-**v1-ydoc-deferred-updates(12)**, **v1-engine-request-kind(13** — RPC-D's
-kind-scoped ledger purge; every writer stamped**)**.
+| ordinal | id |
+|---|---|
+| 0 | baseline |
+| 1 | v1-secrets |
+| 2 | v1-ydoc |
+| 3 | v1-chats |
+| 4 | v1-search |
+| 5 | v1-moment-before-link |
+| 6 | v1-sync |
+| 7 | v1-conflicts |
+| 8 | v1-shadow-clone |
+| 9 | v1-binary-conflict-sides |
+| 10 | v1-binary-head |
+| 11 | v1-path-aliases-object-index |
+| 12 | v1-ydoc-deferred-updates |
+| 13 | v1-engine-request-kind (RPC-D; kind-scoped ledger purge, every writer stamped) |
+
 RPC-B2 and RPC-D2 added NO new migrations (domain/logic only).
-**The pre-R15 migration decision (§7.1) must use ordinal 14** — treating 13 as free
-would collide with `v1-engine-request-kind`. Verify against
-`crates/dohc-engine-storage/src/migration.rs` `BASELINE_MIGRATIONS` before authoring.
+
+**The pre-R15 migration decision (§7.1) MUST use ordinal 14** — treating 13 as free
+would collide with `v1-engine-request-kind`.
+
+REPRODUCE THIS CLAIM (do it before authoring the migration; do not trust this table
+alone — it is a snapshot):
+```
+rg -n 'MIGRATION_ID: &str|BASELINE_MIGRATIONS' crates/dohc-engine-storage/src/migration.rs
+cargo test -p dohc-engine-storage migration   # the ledger's own ordinal/monotonicity tests
+```
+`BASELINE_MIGRATIONS` is the frozen ordered list; its length is the next ordinal.
 
 ## 5. Review rigor
 - ~50 merged PRs across the program; the RPC shards alone drew a very high review
