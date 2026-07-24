@@ -2212,3 +2212,33 @@ next round caught. The compounding lesson became structure:
   release-candidate packet, macOS evidence, R15 rehearsal + go/no-go package
   with SIX decisions (ICE STOP — the one mandatory human stop), R16 legacy
   deletion (post-cutover).
+
+
+## 2026-07-24 — GATE6 PASSED: release-candidate gate declared
+
+- The Rust engine is FEATURE-COMPLETE and evidenced for the R15 cutover. Every
+  GATE6 dependency (R14, R10b, R15-REHEARSE, RPC-A/B/C/D/B2/D2) is done/gate-passed.
+- Evidence packet: docs/superpowers/plans/rust-engine/GATE6_PACKET.md — every claim
+  carries its evidence and limitations. Headlines:
+  - Canonical full-workspace gate on main (19fc994b), clean-worktree rebuild:
+    `2026-07-24T14:02:58Z | run-rust-checks | win32/x64 | PASS |
+    fmt/clippy -D warnings/build/test --workspace/cargo-deny all PASS`.
+  - Soak (cutoverBlocking tier) v3 = PASS (rssDisposition PASS, 5564 cycles, clean
+    shutdown), with the honest monitored-not-proven memory flag.
+  - Differential TS-vs-Rust capture: 10/10 green both engines, tamper-checked (#215).
+  - Migration ledger: 13 migrations, ordinals 0-12, monotone.
+  - Gate discipline: full-workspace gate on EVERY pushed head program-wide; every
+    supervision-grade guard carries a named MUTATION test, criticals
+    orchestrator-mutation-verified per shard.
+- All cross-engine deltas and accepted residuals are recorded (RPC_GAP.md /
+  BEHAVIOR_DELTA.md): structural-timestamp bounds, linked-timestamp reject,
+  mention-handle/attachment/bookmark deltas, secret slash-spelling (RESOLVED by D2),
+  secret open-replay per-job tolerance, the secret rename-TOCTOU accepted
+  single-user residual (dirfd/openat2 closure REQUIRED before shared secrets), and
+  the mid-session switch-materialization gap (R13/composition scope).
+- SIX open decisions are handed to the R15 go/no-go package (GATE6_PACKET §7):
+  the pre-R15 migration PR (secret-ownership + moments-provenance), macOS evidence
+  path, RPC-E cutover scope, richdoc-at-cutover, TOCTOU-closure timing, and the
+  R15 go/no-go itself.
+- REMAINING to 100%: macOS evidence, R15 rehearsal + go/no-go (ICE STOP — the one
+  mandatory human stop, resets Ice's dogfood data), R16 legacy deletion (post-cutover).
