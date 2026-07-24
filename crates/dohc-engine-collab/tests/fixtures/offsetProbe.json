@@ -2,10 +2,10 @@
  "seed": -1,
  "contentKind": "plaintext",
  "kind": "offsetProbe",
- "baseUpdateB64": "AQGo7KiKAQAEAQlwbGFpblRleHQH8J+YgFhZWgA=",
+ "baseUpdateB64": "AQGp7+6gDwAEAQlwbGFpblRleHQH8J+YgFhZWgA=",
  "updates": [
-  "AQGo7KiKAQAEAQlwbGFpblRleHQH8J+YgFhZWgA=",
-  "AQGo7KiKAQXEqOyoigEDqOyoigEEASEA"
+  "AQGp7+6gDwAEAQlwbGFpblRleHQH8J+YgFhZWgA=",
+  "AQGp7+6gDwXEqe/uoA8Dqe/uoA8EASEA"
  ],
  "expected": {
   "textAfterInsertAt4": "😀XY!Z",

@@ -2,53 +2,69 @@
  "seed": 1016,
  "contentKind": "richdoc",
  "updates": [
-  "AQHmwaCYBQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3DPCdlJjwnZSr8J2UpgA=",
-  "AQHmwaCYBQEoAQtmcm9udG1hdHRlcgVjb3VudAF9owEA",
-  "AQPmwaCYBQIHAQRib2R5AwlwYXJhZ3JhcGgHAObBoJgFAgYEAObBoJgFAxLml6XmnKzoqp7ml6XmnKzoqp4A",
-  "AQXmwaCYBQqH5sGgmAUCAwlwYXJhZ3JhcGgHAObBoJgFCgYGAObBoJgFCwRib2xkBHRydWWE5sGgmAUMEPCdlJjwnZSr8J2Upgl0YWKG5sGgmAUWBGJvbGQEbnVsbAA=",
-  "AQXmwaCYBRiH5sGgmAUKAwlwYXJhZ3JhcGgHAObBoJgFGAYGAObBoJgFGQRib2xkBHRydWWE5sGgmAUaD2NhZsOp2YXYsdit2KjYp4bmwaCYBSMEYm9sZARudWxsAA==",
-  "AQPmwaCYBSVG5sGgmAUEBGJvbGQEdHJ1ZcTmwaCYBSXmwaCYBQQBWMbmwaCYBSbmwaCYBQQEYm9sZARudWxsAA=="
+  "AQGB6Z/wAwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTYA",
+  "AQGB6Z/wAwEoAQtmcm9udG1hdHRlcgVjb3VudAF9ogEA",
+  "AQWB6Z/wAwIHAQRib2R5AwlwYXJhZ3JhcGgHAIHpn/ADAgYGAIHpn/ADAwRib2xkBHRydWWEgemf8AMEEuaXpeacrOiqnuaXpeacrOiqnoaB6Z/wAwoEYm9sZARudWxsAA==",
+  "AQWB6Z/wAwyHgemf8AMCAwlwYXJhZ3JhcGgHAIHpn/ADDAYGAIHpn/ADDQZpdGFsaWMEdHJ1ZYSB6Z/wAw4VbGluZQpjb2508J2UmPCdlKvwnZSmhoHpn/ADHQZpdGFsaWMEbnVsbAA=",
+  "AQWB6Z/wAx+Hgemf8AMMAwlwYXJhZ3JhcGgHAIHpn/ADHwYGAIHpn/ADIAZpdGFsaWMEdHJ1ZYSB6Z/wAyEJCXRhYmNhZsOphoHpn/ADKQZpdGFsaWMEbnVsbAA=",
+  "AQWB6Z/wAyuHgemf8AMfAwlwYXJhZ3JhcGgHAIHpn/ADKwYGAIHpn/ADLARib2xkBHRydWWEgemf8AMtDGHMgWxpbmUKY29udIaB6Z/wAzgEYm9sZARudWxsAA==",
+  "AQOB6Z/wAzqHgemf8AMrAwlwYXJhZ3JhcGgHAIHpn/ADOgYEAIHpn/ADOxFsaW5lCmNvbnTwn5iA8J+OiQA=",
+  "AQGB6Z/wA0nEgemf8AMEgemf8AMFAVgA"
  ],
- "mergedUpdateB64": "ARLmwaCYBQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3DPCdlJjwnZSr8J2UpigBC2Zyb250bWF0dGVyBWNvdW50AX2jAQcBBGJvZHkDCXBhcmFncmFwaAcA5sGgmAUCBgQA5sGgmAUDEuaXpeacrOiqnuaXpeacrOiqnofmwaCYBQIDCXBhcmFncmFwaAcA5sGgmAUKBgYA5sGgmAULBGJvbGQEdHJ1ZYTmwaCYBQwQ8J2UmPCdlKvwnZSmCXRhYobmwaCYBRYEYm9sZARudWxsh+bBoJgFCgMJcGFyYWdyYXBoBwDmwaCYBRgGBgDmwaCYBRkEYm9sZAR0cnVlhObBoJgFGg9jYWbDqdmF2LHYrdio2KeG5sGgmAUjBGJvbGQEbnVsbEbmwaCYBQQEYm9sZAR0cnVlxObBoJgFJebBoJgFBAFYxubBoJgFJubBoJgFBARib2xkBG51bGwA",
- "stateVectorB64": "AebBoJgFKA==",
+ "mergedUpdateB64": "ARqB6Z/wAwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTYoAQtmcm9udG1hdHRlcgVjb3VudAF9ogEHAQRib2R5AwlwYXJhZ3JhcGgHAIHpn/ADAgYGAIHpn/ADAwRib2xkBHRydWWEgemf8AMEEuaXpeacrOiqnuaXpeacrOiqnoaB6Z/wAwoEYm9sZARudWxsh4Hpn/ADAgMJcGFyYWdyYXBoBwCB6Z/wAwwGBgCB6Z/wAw0GaXRhbGljBHRydWWEgemf8AMOFWxpbmUKY29udPCdlJjwnZSr8J2UpoaB6Z/wAx0GaXRhbGljBG51bGyHgemf8AMMAwlwYXJhZ3JhcGgHAIHpn/ADHwYGAIHpn/ADIAZpdGFsaWMEdHJ1ZYSB6Z/wAyEJCXRhYmNhZsOphoHpn/ADKQZpdGFsaWMEbnVsbIeB6Z/wAx8DCXBhcmFncmFwaAcAgemf8AMrBgYAgemf8AMsBGJvbGQEdHJ1ZYSB6Z/wAy0MYcyBbGluZQpjb250hoHpn/ADOARib2xkBG51bGyHgemf8AMrAwlwYXJhZ3JhcGgHAIHpn/ADOgYEAIHpn/ADOxFsaW5lCmNvbnTwn5iA8J+OicSB6Z/wAwSB6Z/wAwUBWAA=",
+ "stateVectorB64": "AYHpn/ADSg==",
  "expected": {
   "frontmatter": {
-   "title": "𝔘𝔫𝔦",
-   "count": 99
+   "alpha": "value-1016",
+   "count": 98
   },
   "paragraphs": [
    {
     "runs": [
      {
-      "text": "X",
+      "text": "X日本語日本語",
       "bold": true,
       "italic": false
-     },
+     }
+    ]
+   },
+   {
+    "runs": [
      {
-      "text": "日本語日本語",
+      "text": "line\ncont𝔘𝔫𝔦",
+      "bold": false,
+      "italic": true
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "\ttabcafé",
+      "bold": false,
+      "italic": true
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "áline\ncont",
+      "bold": true,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "line\ncont😀🎉",
       "bold": false,
       "italic": false
      }
     ]
-   },
-   {
-    "runs": [
-     {
-      "text": "𝔘𝔫𝔦\ttab",
-      "bold": true,
-      "italic": false
-     }
-    ]
-   },
-   {
-    "runs": [
-     {
-      "text": "caféمرحبا",
-      "bold": true,
-      "italic": false
-     }
-    ]
    }
-  ]
+  ],
+  "markdown": "---\nalpha: value-1016\ncount: 98\n---\n\n**X日本語日本語**\n\n*line\ncont𝔘𝔫𝔦*\n\n\t*tabcafé*\n\n**áline\ncont**\n\nline\ncont😀🎉"
  }
 }

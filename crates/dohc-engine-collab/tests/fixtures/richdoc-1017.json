@@ -2,18 +2,18 @@
  "seed": 1017,
  "contentKind": "richdoc",
  "updates": [
-  "AQHcxdjTAQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BWNhZsOpAA==",
-  "AQHcxdjTAQEoAQtmcm9udG1hdHRlcgVjb3VudAF9EgA=",
-  "AQPcxdjTAQIHAQRib2R5AwlwYXJhZ3JhcGgHANzF2NMBAgYEANzF2NMBAxbwnZSY8J2Uq/CdlKbZhdix2K3YqNinAA==",
-  "AQXcxdjTAQ+H3MXY0wECAwlwYXJhZ3JhcGgHANzF2NMBDwYGANzF2NMBEAZpdGFsaWMEdHJ1ZYTcxdjTAREPbmHDr3Zl5pel5pys6KqehtzF2NMBGQZpdGFsaWMEbnVsbAA=",
-  "AQPcxdjTARtG3MXY0wEEBGJvbGQEdHJ1ZcTcxdjTARvcxdjTAQQBWMbcxdjTARzcxdjTAQQEYm9sZARudWxsAA=="
+  "AQHonuf8AgAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTcA",
+  "AQHonuf8AgEoAQtmcm9udG1hdHRlcgVjb3VudAF9FgA=",
+  "AQPonuf8AgIHAQRib2R5AwlwYXJhZ3JhcGgHAOie5/wCAgYEAOie5/wCAxJoZWxsbyDwnZSY8J2Uq/CdlKYA",
+  "AQXonuf8AhCH6J7n/AICAwlwYXJhZ3JhcGgHAOie5/wCEAYGAOie5/wCEQRib2xkBHRydWWE6J7n/AISENmF2LHYrdio2KduYcOvdmWG6J7n/AIcBGJvbGQEbnVsbAA=",
+  "AQPonuf8Ah5G6J7n/AIEBGJvbGQEdHJ1ZcTonuf8Ah7onuf8AgQBWMbonuf8Ah/onuf8AgQEYm9sZARudWxsAA=="
  ],
- "mergedUpdateB64": "AQ3cxdjTAQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BWNhZsOpKAELZnJvbnRtYXR0ZXIFY291bnQBfRIHAQRib2R5AwlwYXJhZ3JhcGgHANzF2NMBAgYEANzF2NMBAxbwnZSY8J2Uq/CdlKbZhdix2K3YqNinh9zF2NMBAgMJcGFyYWdyYXBoBwDcxdjTAQ8GBgDcxdjTARAGaXRhbGljBHRydWWE3MXY0wERD25hw692ZeaXpeacrOiqnobcxdjTARkGaXRhbGljBG51bGxG3MXY0wEEBGJvbGQEdHJ1ZcTcxdjTARvcxdjTAQQBWMbcxdjTARzcxdjTAQQEYm9sZARudWxsAA==",
- "stateVectorB64": "AdzF2NMBHg==",
+ "mergedUpdateB64": "AQ3onuf8AgAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTcoAQtmcm9udG1hdHRlcgVjb3VudAF9FgcBBGJvZHkDCXBhcmFncmFwaAcA6J7n/AICBgQA6J7n/AIDEmhlbGxvIPCdlJjwnZSr8J2Upofonuf8AgIDCXBhcmFncmFwaAcA6J7n/AIQBgYA6J7n/AIRBGJvbGQEdHJ1ZYTonuf8AhIQ2YXYsdit2KjYp25hw692ZYbonuf8AhwEYm9sZARudWxsRuie5/wCBARib2xkBHRydWXE6J7n/AIe6J7n/AIEAVjG6J7n/AIf6J7n/AIEBGJvbGQEbnVsbAA=",
+ "stateVectorB64": "Aeie5/wCIQ==",
  "expected": {
   "frontmatter": {
-   "title": "café",
-   "count": 18
+   "alpha": "value-1017",
+   "count": 22
   },
   "paragraphs": [
    {
@@ -24,7 +24,7 @@
       "italic": false
      },
      {
-      "text": "𝔘𝔫𝔦مرحبا",
+      "text": "hello 𝔘𝔫𝔦",
       "bold": false,
       "italic": false
      }
@@ -33,12 +33,13 @@
    {
     "runs": [
      {
-      "text": "naïve日本語",
-      "bold": false,
-      "italic": true
+      "text": "مرحباnaïve",
+      "bold": true,
+      "italic": false
      }
     ]
    }
-  ]
+  ],
+  "markdown": "---\nalpha: value-1017\ncount: 22\n---\n\n**X**hello 𝔘𝔫𝔦\n\n**مرحباnaïve**"
  }
 }

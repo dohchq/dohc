@@ -29,7 +29,7 @@
 //!    the whole update before applying (a truncated update is rejected on decode,
 //!    state-unchanged), and the caller only persists bytes an apply accepted.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{json, Value};
 use yrs::types::text::YChange;
@@ -354,12 +354,12 @@ impl Ydoc {
             }
             out.push_str("---\n\n");
         }
-        // Body paragraphs (root already acquired above the txn).
-        let mut paragraphs: Vec<String> = Vec::new();
-        for child in body.children(&txn) {
-            paragraphs.push(project_xml_node(&txn, child));
-        }
-        out.push_str(&paragraphs.join("\n\n"));
+        let children: Vec<MarkdownNode> = body
+            .children(&txn)
+            .map(|child| markdown_node(&txn, child))
+            .collect();
+        let body_markdown = markdown_document(&children);
+        out.push_str(&body_markdown);
         out
     }
 
@@ -665,48 +665,1104 @@ fn scalar_line(key: &str, value: &Value) -> String {
     }
 }
 
-fn project_xml_node<T: ReadTxn>(txn: &T, node: XmlOut) -> String {
-    match node {
-        XmlOut::Text(t) => xml_text_markdown(&t.diff(txn, YChange::identity)),
-        XmlOut::Element(el) => {
-            let mut inner = String::new();
-            for child in el.children(txn) {
-                inner.push_str(&project_xml_node(txn, child));
-            }
-            inner
+#[derive(Debug)]
+enum MarkdownNode {
+    Text(Vec<TextRun>),
+    Element {
+        tag: String,
+        attrs: BTreeMap<String, Value>,
+        children: Vec<MarkdownNode>,
+    },
+    Fragment(Vec<MarkdownNode>),
+}
+
+#[derive(Debug)]
+struct TextRun {
+    text: String,
+    marks: Vec<MarkdownMark>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MarkdownMark {
+    kind: MarkKind,
+    attrs: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MarkKind {
+    Link,
+    Highlight,
+    Bold,
+    Code,
+    Italic,
+    Strike,
+    Underline,
+}
+
+impl MarkKind {
+    fn rank(self) -> usize {
+        match self {
+            Self::Link => 0,
+            Self::Highlight => 1,
+            Self::Bold => 2,
+            Self::Code => 3,
+            Self::Italic => 4,
+            Self::Strike => 5,
+            Self::Underline => 6,
         }
-        XmlOut::Fragment(f) => {
-            let mut inner = String::new();
-            for child in f.children(txn) {
-                inner.push_str(&project_xml_node(txn, child));
-            }
-            inner
+    }
+
+    fn html_tags(self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Bold => Some(("<strong>", "</strong>")),
+            Self::Italic => Some(("<em>", "</em>")),
+            _ => None,
         }
     }
 }
 
-fn xml_text_markdown<D>(diffs: &[yrs::types::text::Diff<D>]) -> String {
-    let mut out = String::new();
-    for d in diffs {
-        let s = match &d.insert {
-            Out::Any(Any::String(s)) => s.to_string(),
-            _ => continue,
-        };
-        let (bold, italic) = match &d.attributes {
-            Some(attrs) => (
-                attrs.contains_key("bold") || attrs.contains_key("strong"),
-                attrs.contains_key("italic") || attrs.contains_key("em"),
-            ),
-            None => (false, false),
-        };
-        let mut piece = s;
-        if italic {
-            piece = format!("*{piece}*");
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpeningMode {
+    Markdown,
+    Html,
+}
+
+struct RenderContext<'a> {
+    parent_tag: &'a str,
+    parent_attrs: &'a BTreeMap<String, Value>,
+    previous: Option<&'a MarkdownNode>,
+    index: usize,
+}
+
+fn markdown_node<T: ReadTxn>(txn: &T, node: XmlOut) -> MarkdownNode {
+    match node {
+        XmlOut::Text(text) => MarkdownNode::Text(
+            text.diff(txn, YChange::identity)
+                .into_iter()
+                .filter_map(|diff| {
+                    let text = match diff.insert {
+                        Out::Any(Any::String(text)) => text.to_string(),
+                        _ => return None,
+                    };
+                    let mut marks = Vec::new();
+                    if let Some(attrs) = diff.attributes {
+                        push_mark(&mut marks, MarkKind::Link, attrs.get("link"));
+                        push_mark(&mut marks, MarkKind::Highlight, attrs.get("highlight"));
+                        push_mark(
+                            &mut marks,
+                            MarkKind::Bold,
+                            attrs.get("bold").or_else(|| attrs.get("strong")),
+                        );
+                        push_mark(&mut marks, MarkKind::Code, attrs.get("code"));
+                        push_mark(
+                            &mut marks,
+                            MarkKind::Italic,
+                            attrs.get("italic").or_else(|| attrs.get("em")),
+                        );
+                        push_mark(
+                            &mut marks,
+                            MarkKind::Strike,
+                            attrs.get("strike").or_else(|| attrs.get("strikethrough")),
+                        );
+                        push_mark(&mut marks, MarkKind::Underline, attrs.get("underline"));
+                    }
+                    Some(TextRun { text, marks })
+                })
+                .collect(),
+        ),
+        XmlOut::Element(element) => {
+            let attrs = element
+                .attributes(txn)
+                .map(|(key, value)| (key.to_string(), out_json_attr(txn, value)))
+                .collect();
+            let children = element
+                .children(txn)
+                .map(|child| markdown_node(txn, child))
+                .collect();
+            MarkdownNode::Element {
+                tag: element.tag().to_string(),
+                attrs,
+                children,
+            }
         }
-        if bold {
-            piece = format!("**{piece}**");
-        }
-        out.push_str(&piece);
+        XmlOut::Fragment(fragment) => MarkdownNode::Fragment(
+            fragment
+                .children(txn)
+                .map(|child| markdown_node(txn, child))
+                .collect(),
+        ),
     }
-    out
+}
+
+fn push_mark(marks: &mut Vec<MarkdownMark>, kind: MarkKind, attrs: Option<&Any>) {
+    if let Some(attrs) = attrs {
+        marks.push(MarkdownMark {
+            kind,
+            attrs: any_to_json(attrs),
+        });
+    }
+}
+
+fn markdown_document(children: &[MarkdownNode]) -> String {
+    let attrs = BTreeMap::new();
+    let rendered = render_nodes(children, "doc", &attrs, "\n\n");
+    if markdown_output_is_empty(&rendered) {
+        String::new()
+    } else {
+        trim_js_end(&rendered).to_string()
+    }
+}
+
+fn markdown_output_is_empty(markdown: &str) -> bool {
+    let without_entities = markdown.replace("&nbsp;", "").replace('\u{00a0}', "");
+    trim_js(&without_entities).is_empty()
+}
+
+fn render_nodes(
+    nodes: &[MarkdownNode],
+    parent_tag: &str,
+    parent_attrs: &BTreeMap<String, Value>,
+    separator: &str,
+) -> String {
+    nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            render_node(
+                node,
+                RenderContext {
+                    parent_tag,
+                    parent_attrs,
+                    previous: index.checked_sub(1).map(|previous| &nodes[previous]),
+                    index,
+                },
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+fn render_node(node: &MarkdownNode, context: RenderContext<'_>) -> String {
+    match node {
+        MarkdownNode::Text(_) => render_inline(std::slice::from_ref(node), false),
+        MarkdownNode::Fragment(children) => {
+            render_nodes(children, context.parent_tag, context.parent_attrs, "")
+        }
+        MarkdownNode::Element {
+            tag,
+            attrs,
+            children,
+        } => match tag.as_str() {
+            "doc" => render_nodes(children, tag, attrs, "\n\n"),
+            "paragraph" => {
+                if children.is_empty() {
+                    if context.previous.is_some_and(is_empty_paragraph) {
+                        "&nbsp;".to_string()
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    render_inline(children, false)
+                }
+            }
+            "heading" => {
+                if children.is_empty() {
+                    String::new()
+                } else {
+                    let level = attr_i64(attrs, "level").unwrap_or(1).max(0) as usize;
+                    format!("{} {}", "#".repeat(level), render_inline(children, false))
+                }
+            }
+            "blockquote" => render_prefixed_blocks(children, tag, attrs, ">", None),
+            "bulletList" | "orderedList" | "taskList" => render_nodes(children, tag, attrs, "\n"),
+            "listItem" => render_list_item(children, &context, None),
+            "taskItem" => {
+                let checked = attr_bool(attrs, "checked").unwrap_or(false);
+                let prefix = if checked { "- [x] " } else { "- [ ] " };
+                render_list_item(children, &context, Some(prefix))
+            }
+            "codeBlock" => render_code_block(attrs, children),
+            "horizontalRule" => "---".to_string(),
+            "hardBreak" => "  \n".to_string(),
+            "image" => render_image(attrs),
+            "escapedPunctuation" => {
+                format!(
+                    "\\{}",
+                    escape_markdown_line_breaks(&attr_js_string(attrs, "value"))
+                )
+            }
+            "wikilink" => render_wikilink(attrs),
+            "inlineAtom" => render_inline_atom(attrs),
+            "callout" => render_callout(attrs, children),
+            "mathInline" => format!("${}$", attr_js_string(attrs, "tex")),
+            "mathBlock" => format!("$${}$$", attr_js_string(attrs, "tex")),
+            "table" => render_table(children),
+            "tableRow" | "tableCell" | "tableHeader" => render_nodes(children, tag, attrs, ""),
+            _ => render_nodes(children, tag, attrs, ""),
+        },
+    }
+}
+
+fn is_empty_paragraph(node: &MarkdownNode) -> bool {
+    matches!(
+        node,
+        MarkdownNode::Element { tag, children, .. }
+            if tag == "paragraph" && children.is_empty()
+    )
+}
+
+fn render_prefixed_blocks(
+    children: &[MarkdownNode],
+    parent_tag: &str,
+    parent_attrs: &BTreeMap<String, Value>,
+    prefix: &str,
+    header: Option<&str>,
+) -> String {
+    let blocks: Vec<String> = children
+        .iter()
+        .enumerate()
+        .map(|(index, child)| {
+            let rendered = render_node(
+                child,
+                RenderContext {
+                    parent_tag,
+                    parent_attrs,
+                    previous: index.checked_sub(1).map(|previous| &children[previous]),
+                    index,
+                },
+            );
+            prefix_lines(&rendered, prefix)
+        })
+        .collect();
+    let body = blocks.join(&format!("\n{prefix}\n"));
+    match header {
+        Some(header) if body.is_empty() => format!("{prefix} {header}"),
+        Some(header) => format!("{prefix} {header}\n{body}"),
+        None => body,
+    }
+}
+
+fn prefix_lines(block: &str, prefix: &str) -> String {
+    block
+        .split('\n')
+        .map(|line| {
+            if trim_js(line).is_empty() {
+                prefix.to_string()
+            } else {
+                format!("{prefix} {line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_list_item(
+    children: &[MarkdownNode],
+    context: &RenderContext<'_>,
+    task_prefix: Option<&str>,
+) -> String {
+    let Some((first, nested)) = children.split_first() else {
+        return String::new();
+    };
+    let prefix = task_prefix.map_or_else(
+        || match context.parent_tag {
+            "orderedList" => {
+                let start = attr_i64(context.parent_attrs, "start")
+                    .filter(|start| *start != 0)
+                    .unwrap_or(1);
+                format!("{}. ", start + context.index as i64)
+            }
+            _ => "- ".to_string(),
+        },
+        str::to_string,
+    );
+    let first_rendered = render_node(
+        first,
+        RenderContext {
+            parent_tag: "listItem",
+            parent_attrs: &BTreeMap::new(),
+            previous: None,
+            index: 0,
+        },
+    );
+    let mut output = format!("{prefix}{first_rendered}");
+    for (index, child) in nested.iter().enumerate() {
+        let child_rendered = render_node(
+            child,
+            RenderContext {
+                parent_tag: "listItem",
+                parent_attrs: &BTreeMap::new(),
+                previous: if index == 0 {
+                    Some(first)
+                } else {
+                    Some(&nested[index - 1])
+                },
+                index: index + 1,
+            },
+        );
+        let indented = child_rendered
+            .split('\n')
+            .map(|line| format!("  {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if element_tag(child) == Some("paragraph") {
+            output.push_str("\n\n");
+        } else {
+            output.push('\n');
+        }
+        output.push_str(&indented);
+    }
+    output
+}
+
+fn render_code_block(attrs: &BTreeMap<String, Value>, children: &[MarkdownNode]) -> String {
+    let language = attr_js_string(attrs, "language");
+    if children.is_empty() {
+        format!("```{language}\n\n```")
+    } else {
+        format!("```{language}\n{}\n```", render_inline(children, true))
+    }
+}
+
+fn render_image(attrs: &BTreeMap<String, Value>) -> String {
+    let alt = escape_markdown_line_breaks(
+        &attr_js_string(attrs, "alt")
+            .replace('\\', "\\\\")
+            .replace('[', "\\[")
+            .replace(']', "\\]"),
+    );
+    let sanitized = sanitize_image_src(&attr_js_string(attrs, "src"));
+    let src = if sanitized.contains([' ', '\t']) {
+        format!(
+            "<{}>",
+            escape_markdown_line_breaks(
+                &sanitized
+                    .replace('\\', "\\\\")
+                    .replace('<', "\\<")
+                    .replace('>', "\\>")
+            )
+        )
+    } else {
+        escape_markdown_line_breaks(
+            &sanitized
+                .replace('\\', "\\\\")
+                .replace('(', "\\(")
+                .replace(')', "\\)"),
+        )
+    };
+    let title = attrs
+        .get("title")
+        .and_then(Value::as_str)
+        .filter(|title| !title.is_empty())
+        .map(|title| {
+            format!(
+                " \"{}\"",
+                escape_markdown_line_breaks(&title.replace('\\', "\\\\").replace('"', "\\\""))
+            )
+        })
+        .unwrap_or_default();
+    format!("![{alt}]({src}{title})")
+}
+
+fn sanitize_image_src(src: &str) -> String {
+    let trimmed = trim_js(src);
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let compact: String = trimmed
+        .chars()
+        .filter(|character| {
+            !matches!(*character, '\0'..='\u{001f}' | '\u{007f}') && !is_js_whitespace(*character)
+        })
+        .collect();
+    if let Some(protocol) = image_protocol(&compact) {
+        if protocol != "http" && protocol != "https" {
+            return String::new();
+        }
+        return trimmed.to_string();
+    }
+    let for_check = compact.replace('\\', "/");
+    if for_check.starts_with('/') {
+        return String::new();
+    }
+    if compact.contains('\\') && for_check.split('/').any(|segment| segment == "..") {
+        return String::new();
+    }
+    trimmed.to_string()
+}
+
+fn image_protocol(src: &str) -> Option<String> {
+    let mut chars = src.chars();
+    let first = chars.next()?;
+    if !first.is_ascii_alphabetic() {
+        return None;
+    }
+    let mut protocol = String::from(first);
+    for character in chars {
+        if character == ':' {
+            return Some(protocol.to_ascii_lowercase());
+        }
+        if !character.is_ascii_alphanumeric() && !matches!(character, '+' | '.' | '-') {
+            return None;
+        }
+        protocol.push(character);
+    }
+    None
+}
+
+fn render_wikilink(attrs: &BTreeMap<String, Value>) -> String {
+    let target = escape_wikilink_part(&attr_js_string(attrs, "target"));
+    let label = attr_js_string(attrs, "label");
+    if label.is_empty() {
+        format!("[[{target}]]")
+    } else {
+        format!("[[{target}|{}]]", escape_wikilink_part(&label))
+    }
+}
+
+fn escape_wikilink_part(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace(']', "\\]")
+        .replace('|', "\\|")
+}
+
+fn render_inline_atom(attrs: &BTreeMap<String, Value>) -> String {
+    let source = attr_js_string(attrs, "source");
+    if source.is_empty() {
+        format!("{{{{atom:{}}}}}", attr_js_string(attrs, "atomId"))
+    } else {
+        format!("{{{{{source}}}}}")
+    }
+}
+
+fn render_callout(attrs: &BTreeMap<String, Value>, children: &[MarkdownNode]) -> String {
+    let callout_type = attrs
+        .get("calloutType")
+        .and_then(Value::as_str)
+        .unwrap_or("note");
+    let fold = match attrs.get("fold").and_then(Value::as_str) {
+        Some("-") => "-",
+        Some("+") => "+",
+        _ => "",
+    };
+    let title = normalize_callout_title(&attr_js_string(attrs, "title"));
+    let header = if title.is_empty() {
+        format!("[!{callout_type}]{fold}")
+    } else {
+        format!("[!{callout_type}]{fold} {title}")
+    };
+    let rendered: Vec<String> = children
+        .iter()
+        .enumerate()
+        .map(|(index, child)| {
+            render_node(
+                child,
+                RenderContext {
+                    parent_tag: "callout",
+                    parent_attrs: attrs,
+                    previous: index.checked_sub(1).map(|previous| &children[previous]),
+                    index,
+                },
+            )
+        })
+        .collect();
+    if !rendered.iter().any(|block| !trim_js(block).is_empty()) {
+        return format!("> {header}");
+    }
+    let blocks = rendered
+        .iter()
+        .map(|block| prefix_lines(block, ">"))
+        .collect::<Vec<_>>()
+        .join("\n>\n");
+    format!("> {header}\n{blocks}")
+}
+
+fn normalize_callout_title(value: &str) -> String {
+    let mut normalized = String::new();
+    let mut in_line_break = false;
+    for character in value.chars() {
+        if matches!(character, '\r' | '\n') {
+            if !in_line_break {
+                normalized.push(' ');
+                in_line_break = true;
+            }
+        } else {
+            normalized.push(character);
+            in_line_break = false;
+        }
+    }
+    trim_js(&normalized).to_string()
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TableAlign {
+    Left,
+    Right,
+    Center,
+}
+
+struct TableCell {
+    text: String,
+    header: bool,
+    align: Option<TableAlign>,
+}
+
+fn render_table(children: &[MarkdownNode]) -> String {
+    let rows: Vec<Vec<TableCell>> = children
+        .iter()
+        .filter_map(|row| {
+            let MarkdownNode::Element {
+                tag,
+                attrs: _,
+                children: cells,
+            } = row
+            else {
+                return None;
+            };
+            if tag != "tableRow" {
+                return None;
+            }
+            Some(
+                cells
+                    .iter()
+                    .filter_map(|cell| {
+                        let MarkdownNode::Element {
+                            tag,
+                            attrs,
+                            children,
+                        } = cell
+                        else {
+                            return None;
+                        };
+                        if tag != "tableCell" && tag != "tableHeader" {
+                            return None;
+                        }
+                        let raw = if children.len() > 1 {
+                            children
+                                .iter()
+                                .enumerate()
+                                .map(|(index, child)| {
+                                    render_node(
+                                        child,
+                                        RenderContext {
+                                            parent_tag: tag,
+                                            parent_attrs: attrs,
+                                            previous: index
+                                                .checked_sub(1)
+                                                .map(|previous| &children[previous]),
+                                            index,
+                                        },
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\u{001f}")
+                        } else {
+                            render_nodes(children, tag, attrs, "")
+                        };
+                        Some(TableCell {
+                            text: collapse_js_whitespace(&raw),
+                            header: tag == "tableHeader",
+                            align: match attrs.get("align").and_then(Value::as_str) {
+                                Some("left") => Some(TableAlign::Left),
+                                Some("right") => Some(TableAlign::Right),
+                                Some("center") => Some(TableAlign::Center),
+                                _ => None,
+                            },
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
+    if column_count == 0 {
+        return String::new();
+    }
+    let mut widths = vec![3usize; column_count];
+    for row in &rows {
+        for (index, cell) in row.iter().enumerate() {
+            widths[index] = widths[index].max(utf16_len(&cell.text));
+        }
+    }
+    let header_row = &rows[0];
+    let has_header = header_row.iter().any(|cell| cell.header);
+    let mut alignments = vec![None; column_count];
+    for row in &rows {
+        for (index, cell) in row.iter().enumerate() {
+            if alignments[index].is_none() {
+                alignments[index] = cell.align;
+            }
+        }
+    }
+    let header_cells = (0..column_count)
+        .map(|index| {
+            if has_header {
+                pad_utf16(
+                    header_row
+                        .get(index)
+                        .map(|cell| cell.text.as_str())
+                        .unwrap_or(""),
+                    widths[index],
+                )
+            } else {
+                pad_utf16("", widths[index])
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let separators = widths
+        .iter()
+        .enumerate()
+        .map(|(index, width)| {
+            let dashes = "-".repeat(*width);
+            match alignments[index] {
+                Some(TableAlign::Left) => format!(":{dashes}"),
+                Some(TableAlign::Right) => format!("{dashes}:"),
+                Some(TableAlign::Center) => format!(":{dashes}:"),
+                None => dashes,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let mut output = format!("\n| {header_cells} |\n| {separators} |\n");
+    let body = if has_header { &rows[1..] } else { &rows[..] };
+    for row in body {
+        let cells = (0..column_count)
+            .map(|index| {
+                pad_utf16(
+                    row.get(index).map(|cell| cell.text.as_str()).unwrap_or(""),
+                    widths[index],
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        output.push_str(&format!("| {cells} |\n"));
+    }
+    output
+}
+
+fn utf16_len(value: &str) -> usize {
+    value.encode_utf16().count()
+}
+
+fn pad_utf16(value: &str, width: usize) -> String {
+    format!(
+        "{value}{}",
+        " ".repeat(width.saturating_sub(utf16_len(value)))
+    )
+}
+
+fn collapse_js_whitespace(value: &str) -> String {
+    let mut collapsed = String::new();
+    let mut in_whitespace = false;
+    for character in value.chars() {
+        if is_js_whitespace(character) {
+            if !in_whitespace {
+                collapsed.push(' ');
+                in_whitespace = true;
+            }
+        } else {
+            collapsed.push(character);
+            in_whitespace = false;
+        }
+    }
+    trim_js(&collapsed).to_string()
+}
+
+fn render_inline(nodes: &[MarkdownNode], code_context: bool) -> String {
+    enum InlinePart<'a> {
+        Text(&'a TextRun),
+        Node(&'a MarkdownNode),
+    }
+
+    fn flatten<'a>(nodes: &'a [MarkdownNode], parts: &mut Vec<InlinePart<'a>>) {
+        for node in nodes {
+            match node {
+                MarkdownNode::Text(runs) => {
+                    parts.extend(runs.iter().map(InlinePart::Text));
+                }
+                MarkdownNode::Fragment(children) => flatten(children, parts),
+                MarkdownNode::Element { .. } => parts.push(InlinePart::Node(node)),
+            }
+        }
+    }
+
+    let mut parts = Vec::new();
+    flatten(nodes, &mut parts);
+    let mut output = Vec::new();
+    let mut active: Vec<MarkdownMark> = Vec::new();
+    let mut modes: BTreeMap<MarkKind, OpeningMode> = BTreeMap::new();
+    let mut reopen_html = BTreeSet::new();
+
+    for (index, part) in parts.iter().enumerate() {
+        let next_marks = parts.get(index + 1).and_then(|next| match next {
+            InlinePart::Text(run) => Some(run.marks.as_slice()),
+            InlinePart::Node(_) => None,
+        });
+        match part {
+            InlinePart::Node(node) => {
+                let mut before = String::new();
+                for mark in active.iter().rev() {
+                    let closing = mark_closing(
+                        mark,
+                        modes
+                            .get(&mark.kind)
+                            .copied()
+                            .unwrap_or(OpeningMode::Markdown),
+                    );
+                    before = format!("{closing}{before}");
+                }
+                active.clear();
+                modes.clear();
+                let rendered = render_node(
+                    node,
+                    RenderContext {
+                        parent_tag: "paragraph",
+                        parent_attrs: &BTreeMap::new(),
+                        previous: None,
+                        index,
+                    },
+                );
+                output.push(format!("{before}{rendered}"));
+            }
+            InlinePart::Text(run) => {
+                let mut text = run.text.clone();
+                if has_mark(&run.marks, MarkKind::Highlight) {
+                    text = text.replace('=', "\\=");
+                }
+                if !code_context && !has_mark(&run.marks, MarkKind::Code) {
+                    text = encode_html_entities(&text);
+                }
+                let current = &run.marks;
+                let mut to_open: Vec<MarkdownMark> = current
+                    .iter()
+                    .filter(|mark| !contains_same_mark(&active, mark))
+                    .cloned()
+                    .collect();
+                if to_open.len() > 1 {
+                    to_open.sort_by(|left, right| {
+                        let left_continues =
+                            next_marks.is_some_and(|next| contains_same_mark(next, left));
+                        let right_continues =
+                            next_marks.is_some_and(|next| contains_same_mark(next, right));
+                        left_continues
+                            .cmp(&right_continues)
+                            .then_with(|| right.kind.rank().cmp(&left.kind.rank()))
+                    });
+                }
+                let to_close: Vec<MarkKind> = current
+                    .iter()
+                    .filter(|mark| next_marks.is_none_or(|next| !contains_same_mark(next, mark)))
+                    .map(|mark| mark.kind)
+                    .collect();
+                let active_closing: Vec<MarkKind> = to_close
+                    .iter()
+                    .copied()
+                    .filter(|kind| active.iter().any(|mark| mark.kind == *kind))
+                    .collect();
+                let crossed = !active_closing.is_empty() && !to_open.is_empty();
+                let mut middle_trailing = String::new();
+                if !to_close.is_empty() && !crossed {
+                    let (body, trailing) = split_trailing_js_whitespace(&text);
+                    let body = body.to_string();
+                    middle_trailing = trailing.to_string();
+                    text = body;
+                }
+                if !crossed {
+                    for kind in to_close.iter().rev() {
+                        if let Some(mark) = active_mark(&active, *kind).cloned() {
+                            text.push_str(&mark_closing(
+                                &mark,
+                                modes.get(kind).copied().unwrap_or(OpeningMode::Markdown),
+                            ));
+                            remove_active(&mut active, *kind);
+                            modes.remove(kind);
+                        }
+                    }
+                }
+                let mut leading = String::new();
+                if !to_open.is_empty() {
+                    let (whitespace, body) = split_leading_js_whitespace(&text);
+                    leading = whitespace.to_string();
+                    text = body.to_string();
+                }
+                for mark in &to_open {
+                    let mode = if reopen_html.remove(&mark.kind) {
+                        OpeningMode::Html
+                    } else {
+                        OpeningMode::Markdown
+                    };
+                    text = format!("{}{text}", mark_opening(mark, mode));
+                    modes.insert(mark.kind, mode);
+                }
+                if !crossed {
+                    for mark in to_open.iter().rev() {
+                        set_active(&mut active, mark.clone());
+                    }
+                }
+                text = format!("{leading}{text}");
+                let close_at_end: Vec<MarkKind> = if crossed {
+                    for mark in &to_open {
+                        if next_marks.is_some_and(|next| {
+                            next.iter().any(|next_mark| next_mark.kind == mark.kind)
+                        }) && mark.kind.html_tags().is_some()
+                        {
+                            reopen_html.insert(mark.kind);
+                        }
+                    }
+                    let mut old = active_closing;
+                    old.sort_by_key(|kind| {
+                        std::cmp::Reverse(
+                            active
+                                .iter()
+                                .position(|mark| mark.kind == *kind)
+                                .unwrap_or(0),
+                        )
+                    });
+                    to_open.iter().map(|mark| mark.kind).chain(old).collect()
+                } else {
+                    marks_to_close_at_end(&active, current, next_marks)
+                };
+                let mut trailing = String::new();
+                if !close_at_end.is_empty() {
+                    let (body, whitespace) = split_trailing_js_whitespace(&text);
+                    let body = body.to_string();
+                    trailing = whitespace.to_string();
+                    text = body;
+                }
+                for kind in close_at_end {
+                    let mark = active_mark(&active, kind)
+                        .or_else(|| current.iter().find(|mark| mark.kind == kind));
+                    if let Some(mark) = mark {
+                        text.push_str(&mark_closing(
+                            mark,
+                            modes.get(&kind).copied().unwrap_or(OpeningMode::Markdown),
+                        ));
+                    }
+                    remove_active(&mut active, kind);
+                    modes.remove(&kind);
+                }
+                text.push_str(&trailing);
+                text.push_str(&middle_trailing);
+                output.push(text);
+            }
+        }
+    }
+    output.concat()
+}
+
+fn marks_to_close_at_end(
+    active: &[MarkdownMark],
+    current: &[MarkdownMark],
+    next: Option<&[MarkdownMark]>,
+) -> Vec<MarkKind> {
+    let is_last = next.is_none();
+    let next_has_no_marks = next.is_some_and(<[MarkdownMark]>::is_empty);
+    let next_differs = next.is_some_and(|marks| marks != current);
+    if !(is_last || next_has_no_marks || next_differs) {
+        return Vec::new();
+    }
+    match next {
+        Some(next) if !next.is_empty() => active
+            .iter()
+            .rev()
+            .filter(|mark| !contains_same_mark(next, mark))
+            .map(|mark| mark.kind)
+            .collect(),
+        _ => active.iter().rev().map(|mark| mark.kind).collect(),
+    }
+}
+
+fn has_mark(marks: &[MarkdownMark], kind: MarkKind) -> bool {
+    marks.iter().any(|mark| mark.kind == kind)
+}
+
+fn contains_same_mark(marks: &[MarkdownMark], expected: &MarkdownMark) -> bool {
+    marks
+        .iter()
+        .any(|mark| mark.kind == expected.kind && mark.attrs == expected.attrs)
+}
+
+fn active_mark(marks: &[MarkdownMark], kind: MarkKind) -> Option<&MarkdownMark> {
+    marks.iter().find(|mark| mark.kind == kind)
+}
+
+fn set_active(active: &mut Vec<MarkdownMark>, mark: MarkdownMark) {
+    if let Some(existing) = active.iter_mut().find(|active| active.kind == mark.kind) {
+        *existing = mark;
+    } else {
+        active.push(mark);
+    }
+}
+
+fn remove_active(active: &mut Vec<MarkdownMark>, kind: MarkKind) {
+    active.retain(|mark| mark.kind != kind);
+}
+
+fn mark_opening(mark: &MarkdownMark, mode: OpeningMode) -> String {
+    if mode == OpeningMode::Html {
+        return mark
+            .kind
+            .html_tags()
+            .map(|(opening, _)| opening.to_string())
+            .unwrap_or_default();
+    }
+    match mark.kind {
+        MarkKind::Link => "[".to_string(),
+        MarkKind::Highlight => "==".to_string(),
+        MarkKind::Bold => "**".to_string(),
+        MarkKind::Code => "`".to_string(),
+        MarkKind::Italic => "*".to_string(),
+        MarkKind::Strike => "~~".to_string(),
+        MarkKind::Underline => "++".to_string(),
+    }
+}
+
+fn mark_closing(mark: &MarkdownMark, mode: OpeningMode) -> String {
+    if mode == OpeningMode::Html {
+        return mark
+            .kind
+            .html_tags()
+            .map(|(_, closing)| closing.to_string())
+            .unwrap_or_default();
+    }
+    match mark.kind {
+        MarkKind::Link => {
+            let href = mark
+                .attrs
+                .as_object()
+                .and_then(|attrs| attrs.get("href"))
+                .map(js_value_string)
+                .unwrap_or_default();
+            let title = mark
+                .attrs
+                .as_object()
+                .and_then(|attrs| attrs.get("title"))
+                .map(js_value_string)
+                .unwrap_or_default();
+            if title.is_empty() {
+                format!("]({href})")
+            } else {
+                format!("]({href} \"{title}\")")
+            }
+        }
+        MarkKind::Highlight => "==".to_string(),
+        MarkKind::Bold => "**".to_string(),
+        MarkKind::Code => "`".to_string(),
+        MarkKind::Italic => "*".to_string(),
+        MarkKind::Strike => "~~".to_string(),
+        MarkKind::Underline => "++".to_string(),
+    }
+}
+
+fn encode_html_entities(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn escape_markdown_line_breaks(value: &str) -> String {
+    value.replace('\n', "\\n").replace('\r', "\\r")
+}
+
+fn element_tag(node: &MarkdownNode) -> Option<&str> {
+    match node {
+        MarkdownNode::Element { tag, .. } => Some(tag),
+        _ => None,
+    }
+}
+
+fn attr_i64(attrs: &BTreeMap<String, Value>, key: &str) -> Option<i64> {
+    attrs.get(key).and_then(|value| {
+        value.as_i64().or_else(|| {
+            value
+                .as_str()
+                .and_then(|string| string.trim().parse::<i64>().ok())
+        })
+    })
+}
+
+fn attr_bool(attrs: &BTreeMap<String, Value>, key: &str) -> Option<bool> {
+    attrs.get(key).and_then(Value::as_bool)
+}
+
+fn attr_js_string(attrs: &BTreeMap<String, Value>, key: &str) -> String {
+    attrs.get(key).map(js_value_string).unwrap_or_default()
+}
+
+fn js_value_string(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::Bool(boolean) => boolean.to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::String(string) => string.clone(),
+        Value::Array(_) | Value::Object(_) => value.to_string(),
+    }
+}
+
+fn split_leading_js_whitespace(value: &str) -> (&str, &str) {
+    let split = value
+        .char_indices()
+        .find_map(|(index, character)| (!is_js_whitespace(character)).then_some(index))
+        .unwrap_or(value.len());
+    value.split_at(split)
+}
+
+fn split_trailing_js_whitespace(value: &str) -> (&str, &str) {
+    let split = value
+        .char_indices()
+        .rev()
+        .find_map(|(index, character)| {
+            (!is_js_whitespace(character)).then_some(index + character.len_utf8())
+        })
+        .unwrap_or(0);
+    value.split_at(split)
+}
+
+fn trim_js(value: &str) -> &str {
+    let (_, without_leading) = split_leading_js_whitespace(value);
+    let (trimmed, _) = split_trailing_js_whitespace(without_leading);
+    trimmed
+}
+
+fn trim_js_end(value: &str) -> &str {
+    split_trailing_js_whitespace(value).0
+}
+
+fn is_js_whitespace(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0009}'..='\u{000d}'
+            | '\u{0020}'
+            | '\u{00a0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200a}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202f}'
+            | '\u{205f}'
+            | '\u{3000}'
+            | '\u{feff}'
+    )
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_xml_elements_preserve_descendant_text() {
+        let nodes = vec![MarkdownNode::Element {
+            tag: "futureNode".to_string(),
+            attrs: BTreeMap::new(),
+            children: vec![MarkdownNode::Text(vec![TextRun {
+                text: "content survives".to_string(),
+                marks: Vec::new(),
+            }])],
+        }];
+
+        assert_eq!(markdown_document(&nodes), "content survives");
+    }
 }

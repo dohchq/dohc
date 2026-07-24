@@ -2,18 +2,19 @@
  "seed": 1001,
  "contentKind": "richdoc",
  "updates": [
-  "AQHIzrzWDAAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BXdvcmxkAA==",
-  "AQHIzrzWDAEoAQtmcm9udG1hdHRlcgVjb3VudAF9GgA=",
-  "AQPIzrzWDAIHAQRib2R5AwlwYXJhZ3JhcGgHAMjOvNYMAgYEAMjOvNYMAw3ml6XmnKzoqp4JdGFiAA==",
-  "AQfIzrzWDAuHyM681gwCAwlwYXJhZ3JhcGgHAMjOvNYMCwYGAMjOvNYMDARib2xkBHRydWWGyM681gwNBml0YWxpYwR0cnVlhMjOvNYMDg9uYcOvdmVsaW5lCmNvbnSGyM681gwcBGJvbGQEbnVsbIbIzrzWDB0GaXRhbGljBG51bGwA",
-  "AQPIzrzWDB9GyM681gwEBGJvbGQEdHJ1ZcTIzrzWDB/IzrzWDAQBWMbIzrzWDCDIzrzWDAQEYm9sZARudWxsAA=="
+  "AQGwqqKfAwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDEA",
+  "AQGwqqKfAwEoAQtmcm9udG1hdHRlcgVjb3VudAF9DgA=",
+  "AQOwqqKfAwIHAQRib2R5AwlwYXJhZ3JhcGgHALCqop8DAgYEALCqop8DAw53b3JsZOaXpeacrOiqngA=",
+  "AQWwqqKfAwyHsKqinwMCAwlwYXJhZ3JhcGgHALCqop8DDAYGALCqop8DDQZpdGFsaWMEdHJ1ZYSwqqKfAw4KCXRhYm5hw692ZYawqqKfAxcGaXRhbGljBG51bGwA",
+  "AQOwqqKfAxmHsKqinwMMAwlwYXJhZ3JhcGgHALCqop8DGQYEALCqop8DGgp3b3JsZHdvcmxkAA==",
+  "AQOwqqKfAyVGsKqinwMEBGJvbGQEdHJ1ZcSwqqKfAyWwqqKfAwQBWMawqqKfAyawqqKfAwQEYm9sZARudWxsAA=="
  ],
- "mergedUpdateB64": "AQ/IzrzWDAAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BXdvcmxkKAELZnJvbnRtYXR0ZXIFY291bnQBfRoHAQRib2R5AwlwYXJhZ3JhcGgHAMjOvNYMAgYEAMjOvNYMAw3ml6XmnKzoqp4JdGFih8jOvNYMAgMJcGFyYWdyYXBoBwDIzrzWDAsGBgDIzrzWDAwEYm9sZAR0cnVlhsjOvNYMDQZpdGFsaWMEdHJ1ZYTIzrzWDA4PbmHDr3ZlbGluZQpjb250hsjOvNYMHARib2xkBG51bGyGyM681gwdBml0YWxpYwRudWxsRsjOvNYMBARib2xkBHRydWXEyM681gwfyM681gwEAVjGyM681gwgyM681gwEBGJvbGQEbnVsbAA=",
- "stateVectorB64": "AcjOvNYMIg==",
+ "mergedUpdateB64": "ARCwqqKfAwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDEoAQtmcm9udG1hdHRlcgVjb3VudAF9DgcBBGJvZHkDCXBhcmFncmFwaAcAsKqinwMCBgQAsKqinwMDDndvcmxk5pel5pys6Kqeh7Cqop8DAgMJcGFyYWdyYXBoBwCwqqKfAwwGBgCwqqKfAw0GaXRhbGljBHRydWWEsKqinwMOCgl0YWJuYcOvdmWGsKqinwMXBml0YWxpYwRudWxsh7Cqop8DDAMJcGFyYWdyYXBoBwCwqqKfAxkGBACwqqKfAxoKd29ybGR3b3JsZEawqqKfAwQEYm9sZAR0cnVlxLCqop8DJbCqop8DBAFYxrCqop8DJrCqop8DBARib2xkBG51bGwA",
+ "stateVectorB64": "AbCqop8DKA==",
  "expected": {
   "frontmatter": {
-   "title": "world",
-   "count": 26
+   "alpha": "value-1001",
+   "count": 14
   },
   "paragraphs": [
    {
@@ -24,7 +25,7 @@
       "italic": false
      },
      {
-      "text": "日本語\ttab",
+      "text": "world日本語",
       "bold": false,
       "italic": false
      }
@@ -33,12 +34,22 @@
    {
     "runs": [
      {
-      "text": "naïveline\ncont",
-      "bold": true,
+      "text": "\ttabnaïve",
+      "bold": false,
       "italic": true
      }
     ]
+   },
+   {
+    "runs": [
+     {
+      "text": "worldworld",
+      "bold": false,
+      "italic": false
+     }
+    ]
    }
-  ]
+  ],
+  "markdown": "---\nalpha: value-1001\ncount: 14\n---\n\n**X**world日本語\n\n\t*tabnaïve*\n\nworldworld"
  }
 }

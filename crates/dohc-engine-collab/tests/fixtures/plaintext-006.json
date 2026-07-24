@@ -2,18 +2,18 @@
  "seed": 6,
  "contentKind": "plaintext",
  "updates": [
-  "AQH5qJn5BgAEAQlwbGFpblRleHQECXRhYgA=",
-  "AAH5qJn5BgEBAQ==",
-  "AQH5qJn5BgRE+aiZ+QYADPCdlJjwnZSr8J2UpgH5qJn5BgEBAQ==",
-  "AQH5qJn5BgrE+aiZ+QYF+aiZ+QYGDPCdlJjwnZSr8J2UpgH5qJn5BgEBAQ==",
-  "AQH5qJn5BhBE+aiZ+QYEBmhlbGxvIAH5qJn5BgEBAQ==",
-  "AQH5qJn5BhbE+aiZ+QYJ+aiZ+QYABAl0YWIB+aiZ+QYBAQE=",
-  "AQH5qJn5BhrE+aiZ+QYL+aiZ+QYMBWNhZsOpAfmomfkGAQEB",
-  "AQH5qJn5Bh7E+aiZ+QYC+aiZ+QYDCeaXpeacrOiqngH5qJn5BgEBAQ==",
-  "AQH5qJn5BiHE+aiZ+QYe+aiZ+QYfDPCdlJjwnZSr8J2UpgH5qJn5BgEBAQ=="
+  "AQHM0fr/DQAEAQlwbGFpblRleHQECXRhYgA=",
+  "AAHM0fr/DQEBAQ==",
+  "AQHM0fr/DQREzNH6/w0ADPCdlJjwnZSr8J2UpgHM0fr/DQEBAQ==",
+  "AQHM0fr/DQrEzNH6/w0FzNH6/w0GDPCdlJjwnZSr8J2UpgHM0fr/DQEBAQ==",
+  "AQHM0fr/DRBEzNH6/w0EBmhlbGxvIAHM0fr/DQEBAQ==",
+  "AQHM0fr/DRbEzNH6/w0JzNH6/w0ABAl0YWIBzNH6/w0BAQE=",
+  "AQHM0fr/DRrEzNH6/w0LzNH6/w0MBWNhZsOpAczR+v8NAQEB",
+  "AQHM0fr/DR7EzNH6/w0CzNH6/w0DCeaXpeacrOiqngHM0fr/DQEBAQ==",
+  "AQHM0fr/DSHEzNH6/w0ezNH6/w0fDPCdlJjwnZSr8J2UpgHM0fr/DQEBAQ=="
  ],
- "mergedUpdateB64": "AQj5qJn5BgAEAQlwbGFpblRleHQECXRhYkT5qJn5BgAM8J2UmPCdlKvwnZSmxPmomfkGBfmomfkGBgzwnZSY8J2Uq/CdlKZE+aiZ+QYEBmhlbGxvIMT5qJn5Bgn5qJn5BgAECXRhYsT5qJn5Bgv5qJn5BgwFY2Fmw6nE+aiZ+QYC+aiZ+QYDCeaXpeacrOiqnsT5qJn5Bh75qJn5Bh8M8J2UmPCdlKvwnZSmAfmomfkGAQEB",
- "stateVectorB64": "AfmomfkGJw==",
+ "mergedUpdateB64": "AQjM0fr/DQAEAQlwbGFpblRleHQECXRhYkTM0fr/DQAM8J2UmPCdlKvwnZSmxMzR+v8NBczR+v8NBgzwnZSY8J2Uq/CdlKZEzNH6/w0EBmhlbGxvIMTM0fr/DQnM0fr/DQAECXRhYsTM0fr/DQvM0fr/DQwFY2Fmw6nEzNH6/w0CzNH6/w0DCeaXpeacrOiqnsTM0fr/DR7M0fr/DR8M8J2UmPCdlKvwnZSmAczR+v8NAQEB",
+ "stateVectorB64": "AczR+v8NJw==",
  "expected": {
   "text": "hello 𝔘𝔘café𝔫𝔦𝔫𝔦\ttab\ta日𝔘𝔫𝔦本語b"
  }

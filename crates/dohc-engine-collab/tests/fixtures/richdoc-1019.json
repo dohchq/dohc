@@ -2,41 +2,36 @@
  "seed": 1019,
  "contentKind": "richdoc",
  "updates": [
-  "AQG1zMeXDQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BWhlbGxvAA==",
-  "AQG1zMeXDQEoAQtmcm9udG1hdHRlcgVjb3VudAF9oQEA",
-  "AQW1zMeXDQIHAQRib2R5AwlwYXJhZ3JhcGgHALXMx5cNAgYGALXMx5cNAwZpdGFsaWMEdHJ1ZYS1zMeXDQQO5pel5pys6Kqed29ybGSGtczHlw0MBml0YWxpYwRudWxsAA==",
-  "AQO1zMeXDQ6HtczHlw0CAwlwYXJhZ3JhcGgHALXMx5cNDgYEALXMx5cNDwcJdGFiYcyBAA==",
-  "AQe1zMeXDRaHtczHlw0OAwlwYXJhZ3JhcGgHALXMx5cNFgYGALXMx5cNFwRib2xkBHRydWWGtczHlw0YBml0YWxpYwR0cnVlhLXMx5cNGQ7wn5iA8J+OiWhlbGxvIIa1zMeXDSMEYm9sZARudWxshrXMx5cNJAZpdGFsaWMEbnVsbAA=",
-  "AQW1zMeXDSaHtczHlw0WAwlwYXJhZ3JhcGgHALXMx5cNJgYGALXMx5cNJwRib2xkBHRydWWEtczHlw0oDFrDvHJpY2h3b3JsZIa1zMeXDTMEYm9sZARudWxsAA==",
-  "AQW1zMeXDTWHtczHlw0mAwlwYXJhZ3JhcGgHALXMx5cNNQYGALXMx5cNNgRib2xkBHRydWWEtczHlw03DXdvcmxk8J+YgPCfjomGtczHlw1ABGJvbGQEbnVsbAA=",
-  "AQO1zMeXDUJGtczHlw0EBGJvbGQEdHJ1ZcS1zMeXDUK1zMeXDQQBWMa1zMeXDUO1zMeXDQQEYm9sZARudWxsAA=="
+  "AQHYvvrfCAAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTkA",
+  "AQHYvvrfCAEoAQtmcm9udG1hdHRlcgVjb3VudAF9BQA=",
+  "AQXYvvrfCAIHAQRib2R5AwlwYXJhZ3JhcGgHANi++t8IAgYGANi++t8IAwRib2xkBHRydWWE2L763wgEEFrDvHJpY2jml6XmnKzoqp6G2L763wgNBGJvbGQEbnVsbAA=",
+  "AQPYvvrfCA+H2L763wgCAwlwYXJhZ3JhcGgHANi++t8IDwYEANi++t8IEAljYWbDqQl0YWIA",
+  "AQfYvvrfCBmH2L763wgPAwlwYXJhZ3JhcGgHANi++t8IGQYGANi++t8IGgRib2xkBHRydWWG2L763wgbBml0YWxpYwR0cnVlhNi++t8IHBFsaW5lCmNvbnTwn5iA8J+OiYbYvvrfCCkEYm9sZARudWxshti++t8IKgZpdGFsaWMEbnVsbAA=",
+  "AQfYvvrfCCyH2L763wgZAwlwYXJhZ3JhcGgHANi++t8ILAYGANi++t8ILQRib2xkBHRydWWG2L763wguBml0YWxpYwR0cnVlhNi++t8ILw1oZWxsbyBaw7xyaWNohti++t8IOwRib2xkBG51bGyG2L763wg8Bml0YWxpYwRudWxsAA==",
+  "AQfYvvrfCD6H2L763wgsAwlwYXJhZ3JhcGgHANi++t8IPgYGANi++t8IPwRib2xkBHRydWWG2L763whABml0YWxpYwR0cnVlhNi++t8IQRHwnZSY8J2Uq/CdlKZ3b3JsZIbYvvrfCEwEYm9sZARudWxshti++t8ITQZpdGFsaWMEbnVsbAA=",
+  "AQHYvvrfCE/E2L763wgE2L763wgFAVgA"
  ],
- "mergedUpdateB64": "AR61zMeXDQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BWhlbGxvKAELZnJvbnRtYXR0ZXIFY291bnQBfaEBBwEEYm9keQMJcGFyYWdyYXBoBwC1zMeXDQIGBgC1zMeXDQMGaXRhbGljBHRydWWEtczHlw0EDuaXpeacrOiqnndvcmxkhrXMx5cNDAZpdGFsaWMEbnVsbIe1zMeXDQIDCXBhcmFncmFwaAcAtczHlw0OBgQAtczHlw0PBwl0YWJhzIGHtczHlw0OAwlwYXJhZ3JhcGgHALXMx5cNFgYGALXMx5cNFwRib2xkBHRydWWGtczHlw0YBml0YWxpYwR0cnVlhLXMx5cNGQ7wn5iA8J+OiWhlbGxvIIa1zMeXDSMEYm9sZARudWxshrXMx5cNJAZpdGFsaWMEbnVsbIe1zMeXDRYDCXBhcmFncmFwaAcAtczHlw0mBgYAtczHlw0nBGJvbGQEdHJ1ZYS1zMeXDSgMWsO8cmljaHdvcmxkhrXMx5cNMwRib2xkBG51bGyHtczHlw0mAwlwYXJhZ3JhcGgHALXMx5cNNQYGALXMx5cNNgRib2xkBHRydWWEtczHlw03DXdvcmxk8J+YgPCfjomGtczHlw1ABGJvbGQEbnVsbEa1zMeXDQQEYm9sZAR0cnVlxLXMx5cNQrXMx5cNBAFYxrXMx5cNQ7XMx5cNBARib2xkBG51bGwA",
- "stateVectorB64": "AbXMx5cNRQ==",
+ "mergedUpdateB64": "ASDYvvrfCAAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTkoAQtmcm9udG1hdHRlcgVjb3VudAF9BQcBBGJvZHkDCXBhcmFncmFwaAcA2L763wgCBgYA2L763wgDBGJvbGQEdHJ1ZYTYvvrfCAQQWsO8cmljaOaXpeacrOiqnobYvvrfCA0EYm9sZARudWxsh9i++t8IAgMJcGFyYWdyYXBoBwDYvvrfCA8GBADYvvrfCBAJY2Fmw6kJdGFih9i++t8IDwMJcGFyYWdyYXBoBwDYvvrfCBkGBgDYvvrfCBoEYm9sZAR0cnVlhti++t8IGwZpdGFsaWMEdHJ1ZYTYvvrfCBwRbGluZQpjb2508J+YgPCfjomG2L763wgpBGJvbGQEbnVsbIbYvvrfCCoGaXRhbGljBG51bGyH2L763wgZAwlwYXJhZ3JhcGgHANi++t8ILAYGANi++t8ILQRib2xkBHRydWWG2L763wguBml0YWxpYwR0cnVlhNi++t8ILw1oZWxsbyBaw7xyaWNohti++t8IOwRib2xkBG51bGyG2L763wg8Bml0YWxpYwRudWxsh9i++t8ILAMJcGFyYWdyYXBoBwDYvvrfCD4GBgDYvvrfCD8EYm9sZAR0cnVlhti++t8IQAZpdGFsaWMEdHJ1ZYTYvvrfCEER8J2UmPCdlKvwnZSmd29ybGSG2L763whMBGJvbGQEbnVsbIbYvvrfCE0GaXRhbGljBG51bGzE2L763wgE2L763wgFAVgA",
+ "stateVectorB64": "Adi++t8IUA==",
  "expected": {
   "frontmatter": {
-   "title": "hello",
-   "count": 97
+   "alpha": "value-1019",
+   "count": 5
   },
   "paragraphs": [
    {
     "runs": [
      {
-      "text": "X",
+      "text": "XZürich日本語",
       "bold": true,
       "italic": false
-     },
-     {
-      "text": "日本語world",
-      "bold": false,
-      "italic": true
      }
     ]
    },
    {
     "runs": [
      {
-      "text": "\ttabá",
+      "text": "café\ttab",
       "bold": false,
       "italic": false
      }
@@ -45,7 +40,7 @@
    {
     "runs": [
      {
-      "text": "😀🎉hello ",
+      "text": "line\ncont😀🎉",
       "bold": true,
       "italic": true
      }
@@ -54,21 +49,22 @@
    {
     "runs": [
      {
-      "text": "Zürichworld",
+      "text": "hello Zürich",
       "bold": true,
-      "italic": false
+      "italic": true
      }
     ]
    },
    {
     "runs": [
      {
-      "text": "world😀🎉",
+      "text": "𝔘𝔫𝔦world",
       "bold": true,
-      "italic": false
+      "italic": true
      }
     ]
    }
-  ]
+  ],
+  "markdown": "---\nalpha: value-1019\ncount: 5\n---\n\n**XZürich日本語**\n\ncafé\ttab\n\n***line\ncont😀🎉***\n\n***hello Zürich***\n\n***𝔘𝔫𝔦world***"
  }
 }

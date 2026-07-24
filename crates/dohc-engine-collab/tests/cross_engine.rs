@@ -129,6 +129,14 @@ fn assert_matches_expectation(fx: &Fixture, doc: &Ydoc) {
                     assert_eq!(run.2, er["italic"].as_bool().unwrap_or(false), "run italic");
                 }
             }
+            if let Some(expected_markdown) = fx.expected["markdown"].as_str() {
+                assert_eq!(
+                    doc.project(ContentKind::Richdoc).markdown,
+                    expected_markdown,
+                    "richdoc markdown projection seed {}",
+                    fx.seed
+                );
+            }
         }
     }
 }
@@ -160,6 +168,38 @@ fn every_fixture_converges_on_yjs_expectation() {
     );
     assert!(richdoc >= 20, "expected the richdoc corpus, got {richdoc}");
     eprintln!("cross-engine converged: {plaintext} plaintext + {richdoc} richdoc fixtures");
+}
+
+#[test]
+fn richdoc_projection_matches_typescript_byte_for_byte() {
+    let fixtures = load_all_fixtures();
+    let mut cases = 0;
+    for fx in &fixtures {
+        let Some(kind) = fx.kind.as_deref() else {
+            continue;
+        };
+        if !kind.starts_with("richdocProjection-") {
+            continue;
+        }
+        let (ts, key, _) = ingest(fx);
+        let doc = load_persisted(&ts.store, &key)
+            .expect("load")
+            .expect("marker present")
+            .doc;
+        let expected = fx.expected["markdown"]
+            .as_str()
+            .expect("TypeScript markdown expectation");
+        assert_eq!(
+            doc.project(ContentKind::Richdoc).markdown,
+            expected,
+            "projection fixture {kind}"
+        );
+        cases += 1;
+    }
+    assert_eq!(
+        cases, 9,
+        "expected every curated richdoc projection fixture"
+    );
 }
 
 #[test]

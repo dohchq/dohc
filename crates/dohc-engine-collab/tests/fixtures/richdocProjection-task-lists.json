@@ -1,0 +1,26 @@
+{
+ "seed": -103,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-task-lists",
+ "updates": [
+  "AQ/g85aCBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA4POWggYBAwh0YXNrSXRlbQcA4POWggYCAwlwYXJhZ3JhcGgHAODzloIGAwYEAODzloIGBAVvcGVuIIbg85aCBgkEYm9sZAJ7fYTg85aCBgoEdGFza4bg85aCBg4EYm9sZARudWxsKADg85aCBgIHY2hlY2tlZAF5h+DzloIGAgMIdGFza0l0ZW0HAODzloIGEQMJcGFyYWdyYXBoBwDg85aCBhIGBADg85aCBhMOY29tcGxldGVkIHRhc2soAODzloIGEQdjaGVja2VkAXgA",
+  "AQHg85aCBiMoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcKdGFzay1saXN0cwA="
+ ],
+ "mergedUpdateB64": "ARDg85aCBgAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awh0YXNrTGlzdAcA4POWggYBAwh0YXNrSXRlbQcA4POWggYCAwlwYXJhZ3JhcGgHAODzloIGAwYEAODzloIGBAVvcGVuIIbg85aCBgkEYm9sZAJ7fYTg85aCBgoEdGFza4bg85aCBg4EYm9sZARudWxsKADg85aCBgIHY2hlY2tlZAF5h+DzloIGAgMIdGFza0l0ZW0HAODzloIGEQMJcGFyYWdyYXBoBwDg85aCBhIGBADg85aCBhMOY29tcGxldGVkIHRhc2soAODzloIGEQdjaGVja2VkAXgoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcKdGFzay1saXN0cwA=",
+ "stateVectorB64": "AeDzloIGJA==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "paragraph",
+   "taskItem",
+   "taskList",
+   "text"
+  ],
+  "marks": [
+   "bold"
+  ]
+ },
+ "expected": {
+  "markdown": "- [ ] open **task**\n- [x] completed task"
+ }
+}

@@ -1,0 +1,27 @@
+{
+ "seed": -101,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-blocks",
+ "updates": [
+  "ARrfso8MACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCXBhcmFncmFwaAcA37KPDAEGBADfso8MAh1wYXJhZ3JhcGggd2l0aCA8dGFnPiAmIGVudGl0eYffso8MAgMJaGFyZEJyZWFrh9+yjwwgBgQA37KPDCEKaGFyZCBicmVha4ffso8MAQMOaG9yaXpvbnRhbFJ1bGWH37KPDCwDCmJsb2NrcXVvdGUHAN+yjwwtAwlwYXJhZ3JhcGgHAN+yjwwuBgQA37KPDC8VZmlyc3QgcGFyYWdyYXBoIHdpdGgght+yjwxEBGJvbGQCe32E37KPDEUEYm9sZIbfso8MSQRib2xkBG51bGyH37KPDC4DCXBhcmFncmFwaAcA37KPDEsGBADfso8MTCJzZWNvbmQgcGFyYWdyYXBoCndpdGggYW5vdGhlciBsaW5lh9+yjwwtAwpibG9ja3F1b3RlBwDfso8MbwMJcGFyYWdyYXBoBwDfso8McAYEAN+yjwxxBW91dGVyh9+yjwxwAwpibG9ja3F1b3RlBwDfso8MdwMJcGFyYWdyYXBoBwDfso8MeAYEAN+yjwx5DG5lc3RlZCBxdW90ZQA=",
+  "AQHfso8MhgEoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcGYmxvY2tzAA=="
+ ],
+ "mergedUpdateB64": "ARvfso8MACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDCXBhcmFncmFwaAcA37KPDAEGBADfso8MAh1wYXJhZ3JhcGggd2l0aCA8dGFnPiAmIGVudGl0eYffso8MAgMJaGFyZEJyZWFrh9+yjwwgBgQA37KPDCEKaGFyZCBicmVha4ffso8MAQMOaG9yaXpvbnRhbFJ1bGWH37KPDCwDCmJsb2NrcXVvdGUHAN+yjwwtAwlwYXJhZ3JhcGgHAN+yjwwuBgQA37KPDC8VZmlyc3QgcGFyYWdyYXBoIHdpdGgght+yjwxEBGJvbGQCe32E37KPDEUEYm9sZIbfso8MSQRib2xkBG51bGyH37KPDC4DCXBhcmFncmFwaAcA37KPDEsGBADfso8MTCJzZWNvbmQgcGFyYWdyYXBoCndpdGggYW5vdGhlciBsaW5lh9+yjwwtAwpibG9ja3F1b3RlBwDfso8MbwMJcGFyYWdyYXBoBwDfso8McAYEAN+yjwxxBW91dGVyh9+yjwxwAwpibG9ja3F1b3RlBwDfso8MdwMJcGFyYWdyYXBoBwDfso8MeAYEAN+yjwx5DG5lc3RlZCBxdW90ZSgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdwZibG9ja3MA",
+ "stateVectorB64": "Ad+yjwyHAQ==",
+ "coverage": {
+  "nodes": [
+   "blockquote",
+   "doc",
+   "hardBreak",
+   "horizontalRule",
+   "paragraph",
+   "text"
+  ],
+  "marks": [
+   "bold"
+  ]
+ },
+ "expected": {
+  "markdown": "paragraph with &lt;tag&gt; &amp; entity  \nhard break\n\n---\n\n> first paragraph with **bold**\n>\n> second paragraph\n> with another line\n\n> outer\n>\n> > nested quote"
+ }
+}

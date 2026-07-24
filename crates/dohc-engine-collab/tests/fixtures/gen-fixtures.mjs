@@ -12,7 +12,7 @@
 // pair). Fixtures are committed so the Rust test is self-contained.
 
 import { createRequire } from "node:module";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { writeFileSync, readdirSync, unlinkSync } from "node:fs";
 
@@ -30,9 +30,11 @@ const bases = [
 ].filter(Boolean);
 const require = createRequire(join(repoRoot, "package.json"));
 let yjsPath = null;
+let yjsBase = null;
 for (const base of bases) {
   try {
     yjsPath = require.resolve("yjs", { paths: [base] });
+    yjsBase = base;
     break;
   } catch {
     /* try next base */
@@ -43,7 +45,38 @@ if (!yjsPath) {
     `could not resolve yjs from any base:\n${bases.join("\n")}\nrun 'pnpm install --filter @dohc/yrs-spike-scripts...' or set DOHC_YJS_BASE`,
   );
 }
-const Y = require(yjsPath);
+
+const tsxBases = [
+  repoRoot,
+  join(repoRoot, "node_modules/.pnpm"),
+  yjsBase,
+].filter(Boolean);
+let tsxApiPath = null;
+for (const base of tsxBases) {
+  try {
+    tsxApiPath = require.resolve("tsx/esm/api", { paths: [base] });
+    break;
+  } catch {
+    /* try next base */
+  }
+}
+if (!tsxApiPath) {
+  throw new Error(
+    `could not resolve tsx/esm/api from any base:\n${tsxBases.join("\n")}\nrun 'pnpm install --offline --frozen-lockfile' before regenerating projection fixtures`,
+  );
+}
+const { register } = await import(pathToFileURL(tsxApiPath).href);
+const projectionUrl = pathToFileURL(
+  join(repoRoot, "packages/ydoc-projection/src/index.ts"),
+).href;
+const unregisterTsx = register();
+const {
+  getDohcProseMirrorSchema,
+  markdownToYDoc,
+  yDocToMarkdown,
+} = await import(projectionUrl);
+const Y = await import(pathToFileURL(join(dirname(yjsPath), "yjs.mjs")).href);
+await unregisterTsx();
 
 const b64 = (u8) => Buffer.from(u8).toString("base64");
 
@@ -144,8 +177,10 @@ function makeRichdoc(seed) {
   const fm = doc.getMap("frontmatter");
   const updates = [];
 
-  // Frontmatter: a couple of scalars.
-  updates.push(capture(doc, () => fm.set("title", POOL[Math.floor(r() * POOL.length)].trim() || "t")));
+  // Frontmatter: simple scalars whose YAML spelling is shared by both engines.
+  // Rich formatting fidelity is tested independently of the already-pinned
+  // sorted-frontmatter projection.
+  updates.push(capture(doc, () => fm.set("alpha", `value-${seed}`)));
   updates.push(capture(doc, () => fm.set("count", Math.floor(r() * 100))));
 
   const paras = 2 + Math.floor(r() * 4);
@@ -190,7 +225,184 @@ function makeRichdoc(seed) {
     updates,
     mergedUpdateB64: b64(Y.mergeUpdates(updates.map((u) => Buffer.from(u, "base64")))),
     stateVectorB64: b64(Y.encodeStateVector(doc)),
-    expected: { frontmatter, paragraphs },
+    expected: {
+      frontmatter,
+      paragraphs,
+      markdown: yDocToMarkdown(doc),
+    },
+  };
+}
+
+const RICHDOC_PROJECTION_CASES = [
+  {
+    name: "headings-marks",
+    markdown: [
+      "# **bold** *italic* ~~strike~~ `inline` ++underline++ ==highlight==",
+      "",
+      "## [linked **heading**](https://example.com/docs \"Docs\")",
+      "",
+      "### level three",
+      "",
+      "#### level four",
+      "",
+      "##### level five",
+      "",
+      "###### level six",
+      "",
+      "Combined **bold and *italic* and ~~strike~~**.",
+    ].join("\n"),
+  },
+  {
+    name: "blocks",
+    markdown: [
+      "paragraph with <tag> & entity  ",
+      "hard break",
+      "",
+      "---",
+      "",
+      "> first paragraph with **bold**",
+      ">",
+      "> second paragraph",
+      "> with another line",
+      "",
+      "> outer",
+      "> > nested quote",
+    ].join("\n"),
+  },
+  {
+    name: "nested-lists",
+    markdown: [
+      "- first",
+      "  - nested [link](notes/item)",
+      "    3. deep ordered",
+      "    4. next deep",
+      "  - nested sibling",
+      "- second",
+      "",
+      "3. ordered start",
+      "4. ordered next",
+      "   - bullet inside ordered",
+      "",
+      "- loose item",
+      "",
+      "  second paragraph in item",
+    ].join("\n"),
+  },
+  {
+    name: "task-lists",
+    markdown: [
+      "- [ ] open **task**",
+      "- [x] completed task",
+    ].join("\n"),
+  },
+  {
+    name: "code-blocks",
+    markdown: [
+      "```ts",
+      "const x = 1 < 2 && 3 > 2",
+      "```",
+      "",
+      "```",
+      "no language here",
+      "```",
+      "",
+      "```rust",
+      "",
+      "```",
+    ].join("\n"),
+  },
+  {
+    name: "inline-atoms",
+    markdown: [
+      "A \\* literal, [[notes/plan|Plan]], {{atom:chart range=today}}, and $x^2 + y^2$.",
+      "",
+      "![alt \\[text\\]](<assets/my image.png> \"image title\")",
+      "",
+      "![remote](https://example.com/a(b).png)",
+    ].join("\n"),
+  },
+  {
+    name: "callouts",
+    markdown: [
+      "> [!info]+ Blocks inside",
+      "> First **paragraph**.",
+      ">",
+      "> Second paragraph.",
+      ">",
+      "> - first",
+      "> - second with [link](target)",
+      ">",
+      "> ```ts",
+      "> const x = 1",
+      "> ```",
+      "",
+      "> [!custom-thing]- Custom title",
+      "> custom body",
+    ].join("\n"),
+  },
+  {
+    name: "tables",
+    markdown: [
+      "| Left | Center | Right | Default |",
+      "| :--- | :---: | ---: | --- |",
+      "| **bold** | 😀 | 123 | plain |",
+      "| a | longer | z | last |",
+    ].join("\n"),
+  },
+  {
+    name: "math-blocks",
+    markdown: [
+      "$$E = mc^2$$",
+      "",
+      "$$",
+      "\\sum_{i=0}^n i = \\frac{n(n+1)}{2}",
+      "E = mc^2",
+      "$$",
+      "",
+      "$$$$",
+    ].join("\n"),
+  },
+];
+
+function makeRichdocProjection(index, fixture) {
+  const doc = markdownToYDoc(fixture.markdown);
+  const base = b64(Y.encodeStateAsUpdate(doc));
+  const followup = capture(doc, () => {
+    doc.getMap("meta").set("projectionFixture", fixture.name);
+  });
+  const updates = [base, followup];
+  return {
+    seed: -100 - index,
+    contentKind: "richdoc",
+    kind: `richdocProjection-${fixture.name}`,
+    updates,
+    mergedUpdateB64: b64(
+      Y.mergeUpdates(updates.map((update) => Buffer.from(update, "base64"))),
+    ),
+    stateVectorB64: b64(Y.encodeStateVector(doc)),
+    coverage: richdocCoverage(doc),
+    expected: { markdown: yDocToMarkdown(doc) },
+  };
+}
+
+function richdocCoverage(doc) {
+  const nodes = new Set(["doc"]);
+  const marks = new Set();
+  const visit = (node) => {
+    if (typeof node.toDelta === "function") {
+      nodes.add("text");
+      for (const op of node.toDelta()) {
+        for (const mark of Object.keys(op.attributes ?? {})) marks.add(mark);
+      }
+      return;
+    }
+    if (typeof node.nodeName === "string") nodes.add(node.nodeName);
+    for (const child of node.toArray()) visit(child);
+  };
+  visit(doc.getXmlFragment("body"));
+  return {
+    nodes: [...nodes].sort(),
+    marks: [...marks].sort(),
   };
 }
 
@@ -292,9 +504,33 @@ function emit(fx) {
 const SEEDS = 24;
 for (let s = 1; s <= SEEDS; s++) emit(makePlaintext(s));
 for (let s = 1; s <= SEEDS; s++) emit(makeRichdoc(1000 + s));
+const projectionFixtures = RICHDOC_PROJECTION_CASES.map((fixture, index) =>
+  makeRichdocProjection(index, fixture),
+);
+const coveredNodes = new Set(
+  projectionFixtures.flatMap((fixture) => fixture.coverage.nodes),
+);
+const coveredMarks = new Set(
+  projectionFixtures.flatMap((fixture) => fixture.coverage.marks),
+);
+const schema = getDohcProseMirrorSchema();
+const missingNodes = Object.keys(schema.nodes).filter(
+  (node) => !coveredNodes.has(node),
+);
+const missingMarks = Object.keys(schema.marks).filter(
+  (mark) => !coveredMarks.has(mark),
+);
+if (missingNodes.length > 0 || missingMarks.length > 0) {
+  throw new Error(
+    `richdoc projection fixtures do not cover the TS schema:\nmissing nodes: ${missingNodes.join(", ") || "(none)"}\nmissing marks: ${missingMarks.join(", ") || "(none)"}`,
+  );
+}
+projectionFixtures.forEach(emit);
 emit(makeOffsetProbe());
 emit(makeSurrogateProbe());
 emit(makeNestedFrontmatter());
 
 writeFileSync(join(here, "_manifest.json"), JSON.stringify({ fixtures: manifest }, null, 1));
-console.log(`generated ${manifest.length} fixtures (${SEEDS} plaintext + ${SEEDS} richdoc + 3 probes)`);
+console.log(
+  `generated ${manifest.length} fixtures (${SEEDS} plaintext + ${SEEDS} random richdoc + ${RICHDOC_PROJECTION_CASES.length} richdoc projection + 3 probes)`,
+);

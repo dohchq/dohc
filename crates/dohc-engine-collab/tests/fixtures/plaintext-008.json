@@ -2,14 +2,14 @@
  "seed": 8,
  "contentKind": "plaintext",
  "updates": [
-  "AQH9ouyBAQAEAQlwbGFpblRleHQJ5pel5pys6KqeAA==",
-  "AQH9ouyBAQPE/aLsgQEB/aLsgQECBAl0YWIA",
-  "AQH9ouyBAQfE/aLsgQEG/aLsgQECBWNhZsOpAA==",
-  "AQH9ouyBAQtE/aLsgQEAA2HMgQA=",
-  "AAH9ouyBAQEFAQ=="
+  "AQG55ojRCAAEAQlwbGFpblRleHQJ5pel5pys6KqeAA==",
+  "AQG55ojRCAPEueaI0QgBueaI0QgCBAl0YWIA",
+  "AQG55ojRCAfEueaI0QgGueaI0QgCBWNhZsOpAA==",
+  "AQG55ojRCAtEueaI0QgAA2HMgQA=",
+  "AAG55ojRCAEFAQ=="
  ],
- "mergedUpdateB64": "AQT9ouyBAQAEAQlwbGFpblRleHQJ5pel5pys6KqexP2i7IEBAf2i7IEBAgQJdGFixP2i7IEBBv2i7IEBAgVjYWbDqUT9ouyBAQADYcyBAf2i7IEBAQUB",
- "stateVectorB64": "Af2i7IEBDQ==",
+ "mergedUpdateB64": "AQS55ojRCAAEAQlwbGFpblRleHQJ5pel5pys6KqexLnmiNEIAbnmiNEIAgQJdGFixLnmiNEIBrnmiNEIAgVjYWbDqUS55ojRCAADYcyBAbnmiNEIAQUB",
+ "stateVectorB64": "AbnmiNEIDQ==",
  "expected": {
   "text": "á日本\ttbcafé語"
  }

@@ -1,0 +1,22 @@
+{
+ "seed": -104,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-code-blocks",
+ "updates": [
+  "AQrXgZH1BAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awljb2RlQmxvY2sHANeBkfUEAQYEANeBkfUEAhhjb25zdCB4ID0gMSA8IDIgJiYgMyA+IDIoANeBkfUEAQhsYW5ndWFnZQF3AnRzh9eBkfUEAQMJY29kZUJsb2NrBwDXgZH1BBwGBADXgZH1BB0Qbm8gbGFuZ3VhZ2UgaGVyZYfXgZH1BBwDCWNvZGVCbG9jaygA14GR9QQuCGxhbmd1YWdlAXcEcnVzdAA=",
+  "AQHXgZH1BDAoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcLY29kZS1ibG9ja3MA"
+ ],
+ "mergedUpdateB64": "AQvXgZH1BAAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5Awljb2RlQmxvY2sHANeBkfUEAQYEANeBkfUEAhhjb25zdCB4ID0gMSA8IDIgJiYgMyA+IDIoANeBkfUEAQhsYW5ndWFnZQF3AnRzh9eBkfUEAQMJY29kZUJsb2NrBwDXgZH1BBwGBADXgZH1BB0Qbm8gbGFuZ3VhZ2UgaGVyZYfXgZH1BBwDCWNvZGVCbG9jaygA14GR9QQuCGxhbmd1YWdlAXcEcnVzdCgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdwtjb2RlLWJsb2NrcwA=",
+ "stateVectorB64": "AdeBkfUEMQ==",
+ "coverage": {
+  "nodes": [
+   "codeBlock",
+   "doc",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "```ts\nconst x = 1 < 2 && 3 > 2\n```\n\n```\nno language here\n```\n\n```rust\n\n```"
+ }
+}

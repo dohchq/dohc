@@ -2,18 +2,18 @@
  "seed": 1007,
  "contentKind": "richdoc",
  "updates": [
-  "AQHdvZ7lBwAoAQtmcm9udG1hdHRlcgV0aXRsZQF3Bm5hw692ZQA=",
-  "AQHdvZ7lBwEoAQtmcm9udG1hdHRlcgVjb3VudAF9GAA=",
-  "AQfdvZ7lBwIHAQRib2R5AwlwYXJhZ3JhcGgHAN29nuUHAgYGAN29nuUHAwRib2xkBHRydWWG3b2e5QcEBml0YWxpYwR0cnVlhN29nuUHBQ/Zhdix2K3YqNind29ybGSG3b2e5QcPBGJvbGQEbnVsbIbdvZ7lBxAGaXRhbGljBG51bGwA",
-  "AQXdvZ7lBxKH3b2e5QcCAwlwYXJhZ3JhcGgHAN29nuUHEgYGAN29nuUHEwZpdGFsaWMEdHJ1ZYTdvZ7lBxQKCXRhYmhlbGxvIIbdvZ7lBx4GaXRhbGljBG51bGwA",
-  "AQHdvZ7lByDE3b2e5QcE3b2e5QcFAVgA"
+  "AQGi7/GSBgAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDcA",
+  "AQGi7/GSBgEoAQtmcm9udG1hdHRlcgVjb3VudAF9lwEA",
+  "AQei7/GSBgIHAQRib2R5AwlwYXJhZ3JhcGgHAKLv8ZIGAgYGAKLv8ZIGAwRib2xkBHRydWWGou/xkgYEBml0YWxpYwR0cnVlhKLv8ZIGBQ93b3JsZNmF2LHYrdio2KeGou/xkgYPBGJvbGQEbnVsbIai7/GSBhAGaXRhbGljBG51bGwA",
+  "AQWi7/GSBhKHou/xkgYCAwlwYXJhZ3JhcGgHAKLv8ZIGEgYGAKLv8ZIGEwRib2xkBHRydWWEou/xkgYUCmhlbGxvIAl0YWKGou/xkgYeBGJvbGQEbnVsbAA=",
+  "AQGi7/GSBiDEou/xkgYEou/xkgYFAVgA"
  ],
- "mergedUpdateB64": "AQ/dvZ7lBwAoAQtmcm9udG1hdHRlcgV0aXRsZQF3Bm5hw692ZSgBC2Zyb250bWF0dGVyBWNvdW50AX0YBwEEYm9keQMJcGFyYWdyYXBoBwDdvZ7lBwIGBgDdvZ7lBwMEYm9sZAR0cnVlht29nuUHBAZpdGFsaWMEdHJ1ZYTdvZ7lBwUP2YXYsdit2KjYp3dvcmxkht29nuUHDwRib2xkBG51bGyG3b2e5QcQBml0YWxpYwRudWxsh929nuUHAgMJcGFyYWdyYXBoBwDdvZ7lBxIGBgDdvZ7lBxMGaXRhbGljBHRydWWE3b2e5QcUCgl0YWJoZWxsbyCG3b2e5QceBml0YWxpYwRudWxsxN29nuUHBN29nuUHBQFYAA==",
- "stateVectorB64": "Ad29nuUHIQ==",
+ "mergedUpdateB64": "AQ+i7/GSBgAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDcoAQtmcm9udG1hdHRlcgVjb3VudAF9lwEHAQRib2R5AwlwYXJhZ3JhcGgHAKLv8ZIGAgYGAKLv8ZIGAwRib2xkBHRydWWGou/xkgYEBml0YWxpYwR0cnVlhKLv8ZIGBQ93b3JsZNmF2LHYrdio2KeGou/xkgYPBGJvbGQEbnVsbIai7/GSBhAGaXRhbGljBG51bGyHou/xkgYCAwlwYXJhZ3JhcGgHAKLv8ZIGEgYGAKLv8ZIGEwRib2xkBHRydWWEou/xkgYUCmhlbGxvIAl0YWKGou/xkgYeBGJvbGQEbnVsbMSi7/GSBgSi7/GSBgUBWAA=",
+ "stateVectorB64": "AaLv8ZIGIQ==",
  "expected": {
   "frontmatter": {
-   "title": "naïve",
-   "count": 24
+   "alpha": "value-1007",
+   "count": 87
   },
   "paragraphs": [
    {
@@ -24,7 +24,7 @@
       "italic": false
      },
      {
-      "text": "مرحباworld",
+      "text": "worldمرحبا",
       "bold": true,
       "italic": true
      }
@@ -33,12 +33,13 @@
    {
     "runs": [
      {
-      "text": "\ttabhello ",
-      "bold": false,
-      "italic": true
+      "text": "hello \ttab",
+      "bold": true,
+      "italic": false
      }
     ]
    }
-  ]
+  ],
+  "markdown": "---\nalpha: value-1007\ncount: 87\n---\n\n**X*worldمرحبا***\n\n**hello \ttab**"
  }
 }

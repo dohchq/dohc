@@ -2,21 +2,18 @@
  "seed": 1006,
  "contentKind": "richdoc",
  "updates": [
-  "AQGmkrT0AgAoAQtmcm9udG1hdHRlcgV0aXRsZQF3CPCfmIDwn46JAA==",
-  "AQGmkrT0AgEoAQtmcm9udG1hdHRlcgVjb3VudAF9FgA=",
-  "AQWmkrT0AgIHAQRib2R5AwlwYXJhZ3JhcGgHAKaStPQCAgYGAKaStPQCAwZpdGFsaWMEdHJ1ZYSmkrT0AgQS8J2UmPCdlKvwnZSmbmHDr3ZlhqaStPQCDwZpdGFsaWMEbnVsbAA=",
-  "AQemkrT0AhGHppK09AICAwlwYXJhZ3JhcGgHAKaStPQCEQYGAKaStPQCEgRib2xkBHRydWWGppK09AITBml0YWxpYwR0cnVlhKaStPQCFBLwn5iA8J+OidmF2LHYrdio2KeGppK09AIdBGJvbGQEbnVsbIamkrT0Ah4GaXRhbGljBG51bGwA",
-  "AQOmkrT0AiCHppK09AIRAwlwYXJhZ3JhcGgHAKaStPQCIAYEAKaStPQCIQtuYcOvdmV3b3JsZAA=",
-  "AQWmkrT0AiyHppK09AIgAwlwYXJhZ3JhcGgHAKaStPQCLAYGAKaStPQCLQZpdGFsaWMEdHJ1ZYSmkrT0Ai4JCXRhYndvcmxkhqaStPQCNwZpdGFsaWMEbnVsbAA=",
-  "AQOmkrT0AjmHppK09AIsAwlwYXJhZ3JhcGgHAKaStPQCOQYEAKaStPQCOg/wnZSY8J2Uq/CdlKZhzIEA",
-  "AQOmkrT0AkNGppK09AIEBGJvbGQEdHJ1ZcSmkrT0AkOmkrT0AgQBWMamkrT0AkSmkrT0AgQEYm9sZARudWxsAA=="
+  "AQHUuY/xDQAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDYA",
+  "AQHUuY/xDQEoAQtmcm9udG1hdHRlcgVjb3VudAF9IwA=",
+  "AQPUuY/xDQIHAQRib2R5AwlwYXJhZ3JhcGgHANS5j/ENAgYEANS5j/ENAxjwnZSY8J2Uq/CdlKbwnZSY8J2Uq/CdlKYA",
+  "AQXUuY/xDRCH1LmP8Q0CAwlwYXJhZ3JhcGgHANS5j/ENEAYGANS5j/ENEQZpdGFsaWMEdHJ1ZYTUuY/xDRINY2Fmw6nwn5iA8J+OiYbUuY/xDRoGaXRhbGljBG51bGwA",
+  "AQPUuY/xDRxG1LmP8Q0EBGJvbGQEdHJ1ZcTUuY/xDRzUuY/xDQQBWMbUuY/xDR3UuY/xDQQEYm9sZARudWxsAA=="
  ],
- "mergedUpdateB64": "ARymkrT0AgAoAQtmcm9udG1hdHRlcgV0aXRsZQF3CPCfmIDwn46JKAELZnJvbnRtYXR0ZXIFY291bnQBfRYHAQRib2R5AwlwYXJhZ3JhcGgHAKaStPQCAgYGAKaStPQCAwZpdGFsaWMEdHJ1ZYSmkrT0AgQS8J2UmPCdlKvwnZSmbmHDr3ZlhqaStPQCDwZpdGFsaWMEbnVsbIemkrT0AgIDCXBhcmFncmFwaAcAppK09AIRBgYAppK09AISBGJvbGQEdHJ1ZYamkrT0AhMGaXRhbGljBHRydWWEppK09AIUEvCfmIDwn46J2YXYsdit2KjYp4amkrT0Ah0EYm9sZARudWxshqaStPQCHgZpdGFsaWMEbnVsbIemkrT0AhEDCXBhcmFncmFwaAcAppK09AIgBgQAppK09AIhC25hw692ZXdvcmxkh6aStPQCIAMJcGFyYWdyYXBoBwCmkrT0AiwGBgCmkrT0Ai0GaXRhbGljBHRydWWEppK09AIuCQl0YWJ3b3JsZIamkrT0AjcGaXRhbGljBG51bGyHppK09AIsAwlwYXJhZ3JhcGgHAKaStPQCOQYEAKaStPQCOg/wnZSY8J2Uq/CdlKZhzIFGppK09AIEBGJvbGQEdHJ1ZcSmkrT0AkOmkrT0AgQBWMamkrT0AkSmkrT0AgQEYm9sZARudWxsAA==",
- "stateVectorB64": "AaaStPQCRg==",
+ "mergedUpdateB64": "AQ3UuY/xDQAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDYoAQtmcm9udG1hdHRlcgVjb3VudAF9IwcBBGJvZHkDCXBhcmFncmFwaAcA1LmP8Q0CBgQA1LmP8Q0DGPCdlJjwnZSr8J2UpvCdlJjwnZSr8J2UpofUuY/xDQIDCXBhcmFncmFwaAcA1LmP8Q0QBgYA1LmP8Q0RBml0YWxpYwR0cnVlhNS5j/ENEg1jYWbDqfCfmIDwn46JhtS5j/ENGgZpdGFsaWMEbnVsbEbUuY/xDQQEYm9sZAR0cnVlxNS5j/ENHNS5j/ENBAFYxtS5j/ENHdS5j/ENBARib2xkBG51bGwA",
+ "stateVectorB64": "AdS5j/ENHw==",
  "expected": {
   "frontmatter": {
-   "title": "😀🎉",
-   "count": 22
+   "alpha": "value-1006",
+   "count": 35
   },
   "paragraphs": [
    {
@@ -27,25 +24,7 @@
       "italic": false
      },
      {
-      "text": "𝔘𝔫𝔦naïve",
-      "bold": false,
-      "italic": true
-     }
-    ]
-   },
-   {
-    "runs": [
-     {
-      "text": "😀🎉مرحبا",
-      "bold": true,
-      "italic": true
-     }
-    ]
-   },
-   {
-    "runs": [
-     {
-      "text": "naïveworld",
+      "text": "𝔘𝔫𝔦𝔘𝔫𝔦",
       "bold": false,
       "italic": false
      }
@@ -54,21 +33,13 @@
    {
     "runs": [
      {
-      "text": "\ttabworld",
+      "text": "café😀🎉",
       "bold": false,
       "italic": true
-     }
-    ]
-   },
-   {
-    "runs": [
-     {
-      "text": "𝔘𝔫𝔦á",
-      "bold": false,
-      "italic": false
      }
     ]
    }
-  ]
+  ],
+  "markdown": "---\nalpha: value-1006\ncount: 35\n---\n\n**X**𝔘𝔫𝔦𝔘𝔫𝔦\n\n*café😀🎉*"
  }
 }
