@@ -45,7 +45,7 @@ env:
 jobs:
   macos-evidence:
     name: macOS gate + cutoverBlocking soak
-    runs-on: macos-latest
+    runs-on: blacksmith-6vcpu-macos-15
     timeout-minutes: 150
     permissions:
       contents: read
