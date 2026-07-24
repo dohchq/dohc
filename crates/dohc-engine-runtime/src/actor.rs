@@ -5127,33 +5127,36 @@ fn worker_main(
                                     DurabilityPolicy::per_os(),
                                     now_ms,
                                     &NoFaults,
-                                )? {
-                                    JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {
+                                ) {
+                                    Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                                         completed += 1;
                                     }
-                                    JobOutcome::Conflict
-                                    | JobOutcome::Superseded
-                                    | JobOutcome::Crashed(_) => {}
+                                    Ok(
+                                        JobOutcome::Conflict
+                                        | JobOutcome::Superseded
+                                        | JobOutcome::Crashed(_),
+                                    )
+                                    | Err(_) => {}
                                 }
                                 continue;
                             }
                             if secret_key.is_none() {
-                                secret_key = Some(
-                                    load_key_file(&root_dir).map_err(DomainError::from)?.ok_or(
-                                        DomainError::StateCorrupt {
-                                            reason: "secret materialization key is missing",
-                                        },
-                                    )?,
-                                );
+                                let Ok(Some(key)) = load_key_file(&root_dir) else {
+                                    continue;
+                                };
+                                secret_key = Some(key);
                             }
-                            let Some(plaintext) = secret_plaintext_for_job(
+                            let plaintext = match secret_plaintext_for_job(
                                 &mut store,
                                 secret_key.as_ref().expect("secret key loaded"),
                                 &coordinates,
-                            )?
-                            else {
-                                store.mark_materialization_complete(&job.job_id, now_ms)?;
-                                continue;
+                            ) {
+                                Ok(Some(plaintext)) => plaintext,
+                                Ok(None) => {
+                                    store.mark_materialization_complete(&job.job_id, now_ms)?;
+                                    continue;
+                                }
+                                Err(_) => continue,
                             };
                             match materialize_secret_one(
                                 &store,
@@ -5165,13 +5168,16 @@ fn worker_main(
                                 &StdBackoff,
                                 now_ms,
                                 &NoFaults,
-                            )? {
-                                JobOutcome::Completed | JobOutcome::AlreadyMaterialized => {
+                            ) {
+                                Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
                                     completed += 1;
                                 }
-                                JobOutcome::Conflict
-                                | JobOutcome::Superseded
-                                | JobOutcome::Crashed(_) => {}
+                                Ok(
+                                    JobOutcome::Conflict
+                                    | JobOutcome::Superseded
+                                    | JobOutcome::Crashed(_),
+                                )
+                                | Err(_) => {}
                             }
                             continue;
                         }
