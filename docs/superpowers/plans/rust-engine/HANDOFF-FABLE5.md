@@ -230,9 +230,19 @@ each before starting the next; do NOT stack a 5-deep PR chain).
   remote ref is gone. After merge, flip the shard to `gate passed` in SHARDS.tsv
   and append EXECUTION_LOG (integrator PR — docs-only, mergeable past the
   CodeRabbit rate-limit status).
-- **Every shard is DORMANT / shadow-only. No shard may change live TypeScript
-  behavior.** `workspaceEngineCapture.ts` and other `apps/desktop` files are
-  READ-ONLY oracles — flag any PR that edits a live-TS file.
+- **The dormant / shadow-only rule remains the default, with two explicit,
+  reviewed exceptions.** R13b-rest is the cutover adapter shard and MAY change
+  live TypeScript behavior, but only in its owned live surfaces:
+  `apps/desktop/src/main.ts`, `apps/desktop/src/cli/**`, `packages/mcp/**`,
+  `apps/desktop/src/workspaces/{sharedView,sharedChannels,shareMounts,workspaceFiles,workspaceSearch,workspaceGraph}*`,
+  and
+  `apps/desktop/src/workspaces/{workspaceEngineCapture,workspaceActivity,relaySyncEngine}*`.
+  PR #240 (`YDOC-SERIALIZER-DELIMITERS`) is the other deliberate exception and
+  MAY edit only `packages/ydoc-projection/src/import-export.ts` plus its
+  `import-export.test.ts` regression coverage. The read-only-oracle rule still
+  binds every other shard: `workspaceEngineCapture.ts` and all other live
+  TypeScript files outside those exact allocations must not be edited; flag any
+  such PR.
 - End every commit with:
   `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` (adjust to your
   model), and the Claude-Session line if present. End PR bodies with the
@@ -284,8 +294,11 @@ Fix these, re-gate (full workspace), push, re-trigger bots, merge.
 - codex-wrapper agents idle-return (launch codex in background then return); poll
   the codex log / process yourself, or run `codex exec` directly via Bash
   (preferred — with `< /dev/null`).
-- Migration ordinals: append-only, checksum-gated; the NEXT free ordinal is **12**
-  (BINHEAD=10, path-aliases-index=11). Any new migration must also update the
+- Migration ordinals: append-only, checksum-gated; ordinal 14 is consumed by
+  R15-1a / #233 (merged), and ordinal 15 is consumed by R15-1b / #236 (in
+  review). The NEXT free ordinal is **16**. Schema-touching shards serialize
+  through the migration append one at a time — do not develop or merge two
+  ordinal appends concurrently. Every new migration must also update the
   ledger-length assertions in BOTH `crates/dohc-engine-storage/src/migration.rs`
   AND `crates/dohc-engine-testkit/tests/durability.rs`.
 - "Green ×2" can still miss rustfmt nondeterminism + seed-dependent fuzz OOM;
