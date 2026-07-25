@@ -141,12 +141,17 @@ pub enum SyncPassOutcome {
         applied: usize,
         skipped: usize,
         pending_cursor: Option<RelayCursor>,
+        /// Replicated resolutions acked in this pass that the receiver
+        /// deliberately did not apply. The cursor advances past them, so they
+        /// only exist here — a caller that drops this loses them.
+        pending_resolves: Vec<crate::PendingResolve>,
     },
     CrashedAfterRemoteCommit,
     CrashedAfterApply {
         applied: usize,
         skipped: usize,
         pending_cursor: RelayCursor,
+        pending_resolves: Vec<crate::PendingResolve>,
     },
 }
 
@@ -239,6 +244,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             applied: 0,
             skipped: 0,
             pending_cursor: None,
+            pending_resolves: Vec::new(),
         })
     }
 
@@ -277,6 +283,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let fetched = response.ops.len();
         let mut applied = 0_usize;
         let mut skipped = 0_usize;
+        let mut pending_resolves = Vec::new();
         for op in &response.ops {
             // Workspace scoping: a buggy/compromised transport must never make a
             // pull for workspace A apply an op targeting workspace B (which would
@@ -286,7 +293,10 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 return Err(RelayError::InvalidResponse);
             }
             match crate::apply_replication_envelope(store, op, faults, leases).map_err(local)? {
-                ApplyOutcome::Applied(()) => {
+                ApplyOutcome::Applied(routed) => {
+                    if let Some(pending) = routed.pending_resolve() {
+                        pending_resolves.push(pending.clone());
+                    }
                     applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?
                 }
                 ApplyOutcome::Skipped => {
@@ -307,6 +317,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 applied,
                 skipped,
                 pending_cursor,
+                pending_resolves,
             });
         }
         Ok(SyncPassOutcome::Complete {
@@ -315,6 +326,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             applied,
             skipped,
             pending_cursor: Some(pending_cursor),
+            pending_resolves,
         })
     }
 

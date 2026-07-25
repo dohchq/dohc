@@ -45,7 +45,7 @@ pub use relay::{
     RecoverResponse, RelaySyncClient, RelayTransport, ShareViewRequest, ShareViewResponse,
     SharedChannelRequest, SharedChannelResponse, SyncPassOutcome,
 };
-pub use router::apply_replication_envelope;
+pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;
 pub use share::{ShareBoundary, ShareSurface, apply_shared_envelope};
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};

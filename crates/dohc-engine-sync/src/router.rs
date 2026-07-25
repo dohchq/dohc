@@ -1,6 +1,28 @@
 use dohc_engine_storage::{EngineStore, FaultInjector};
 
-use crate::{ApplyOutcome, LeaseProbe, ReplicationEnvelope, SyncError};
+use crate::{
+    ApplyOutcome, ConflictApplyResult, LeaseProbe, ReplicationEnvelope, SyncError, YdocApplyResult,
+};
+
+/// What one routed envelope produced beyond "it applied". Appliers that fail
+/// closed into a structured deferral — a conflict resolve the receiver could
+/// not safely apply, a ydoc update parked behind a live lease — must reach the
+/// caller intact: the envelope is acked and the relay cursor advances, so a
+/// count-only result would drop the deferral permanently.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RoutedApply {
+    pub conflict: Option<ConflictApplyResult>,
+    pub ydoc: Option<YdocApplyResult>,
+}
+
+impl RoutedApply {
+    /// The pending resolution this envelope surfaced, if any.
+    pub fn pending_resolve(&self) -> Option<&crate::PendingResolve> {
+        self.conflict
+            .as_ref()
+            .and_then(|result| result.pending_resolve.as_ref())
+    }
+}
 
 #[derive(Clone, Copy)]
 enum OwnedRoute {
@@ -43,23 +65,35 @@ pub fn apply_replication_envelope(
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
-) -> Result<ApplyOutcome<()>, SyncError> {
+) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
     let route = OWNED_OP_ROUTES
         .iter()
         .find_map(|(kind, route)| (*kind == envelope.op_kind).then_some(*route))
         .ok_or(SyncError::UnsupportedOperation)?;
     match route {
-        OwnedRoute::Chat => crate::apply_chat_envelope(store, envelope, faults),
-        OwnedRoute::Secret => crate::apply_secret_envelope(store, envelope, faults),
-        OwnedRoute::Ydoc => erase(crate::apply_ydoc_envelope(store, envelope, faults, leases)),
-        OwnedRoute::Conflict => erase(crate::apply_conflict_envelope(store, envelope, faults)),
-        OwnedRoute::Workspace => {
-            crate::version_apply::apply_workspace_envelope(store, envelope, faults)
-        }
-        OwnedRoute::Version => {
-            crate::version_apply::apply_version_envelope(store, envelope, faults)
-        }
-        OwnedRoute::Moment => apply_unimplemented_moment_envelope(store, envelope, faults),
+        OwnedRoute::Chat => plain(crate::apply_chat_envelope(store, envelope, faults)),
+        OwnedRoute::Secret => plain(crate::apply_secret_envelope(store, envelope, faults)),
+        OwnedRoute::Ydoc => map_applied(
+            crate::apply_ydoc_envelope(store, envelope, faults, leases),
+            |ydoc| RoutedApply {
+                conflict: None,
+                ydoc: Some(ydoc),
+            },
+        ),
+        OwnedRoute::Conflict => map_applied(
+            crate::apply_conflict_envelope(store, envelope, faults),
+            |conflict| RoutedApply {
+                conflict: Some(conflict),
+                ydoc: None,
+            },
+        ),
+        OwnedRoute::Workspace => plain(crate::version_apply::apply_workspace_envelope(
+            store, envelope, faults,
+        )),
+        OwnedRoute::Version => plain(crate::version_apply::apply_version_envelope(
+            store, envelope, faults,
+        )),
+        OwnedRoute::Moment => plain(apply_unimplemented_moment_envelope(store, envelope, faults)),
     }
 }
 
@@ -73,9 +107,18 @@ fn apply_unimplemented_moment_envelope(
     })
 }
 
-fn erase<T>(result: Result<ApplyOutcome<T>, SyncError>) -> Result<ApplyOutcome<()>, SyncError> {
+fn plain(
+    result: Result<ApplyOutcome<()>, SyncError>,
+) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
+    map_applied(result, |()| RoutedApply::default())
+}
+
+fn map_applied<T>(
+    result: Result<ApplyOutcome<T>, SyncError>,
+    wrap: impl FnOnce(T) -> RoutedApply,
+) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
     result.map(|outcome| match outcome {
-        ApplyOutcome::Applied(_) => ApplyOutcome::Applied(()),
+        ApplyOutcome::Applied(value) => ApplyOutcome::Applied(wrap(value)),
         ApplyOutcome::Skipped => ApplyOutcome::Skipped,
         ApplyOutcome::Crashed { committed } => ApplyOutcome::Crashed { committed },
     })

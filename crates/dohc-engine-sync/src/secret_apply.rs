@@ -1,5 +1,6 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
+use dohc_engine_domain::MAX_SECRET_FILE_BYTES;
 use dohc_engine_storage::{EngineStore, FaultInjector};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Deserialize;
@@ -144,25 +145,12 @@ fn apply_put(
         .map_err(|_| SyncError::InvalidInput {
             reason: "secret auth tag is invalid",
         })?;
-    if iv.len() != 12 || tag.len() != 16 || p.byte_length < 0 {
+    if iv.len() != 12 || tag.len() != 16 || !is_secret_byte_length(p.byte_length) {
         return Err(SyncError::InvalidInput {
             reason: "secret ciphertext metadata is invalid",
         });
     }
-    let (stored_len, ciphertext): (i64, Vec<u8>) = tx
-        .query_row(
-            "SELECT byte_length,bytes FROM binary_blobs WHERE sha256=?1",
-            [&p.ciphertext_sha256],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()
-        .map_err(SyncError::corrupt)?
-        .ok_or(SyncError::BlobInvalid)?;
-    if stored_len != p.byte_length
-        || dohc_engine_storage::hex_sha256(&ciphertext) != p.ciphertext_sha256
-    {
-        return Err(SyncError::BlobInvalid);
-    }
+    let ciphertext = load_ciphertext(tx, &p.ciphertext_sha256, p.byte_length)?;
     let ciphertext_base64 = STANDARD.encode(ciphertext);
     insert_moment(
         tx,
@@ -204,6 +192,15 @@ fn apply_fork(
     if payload.from_version_id == payload.to_version_id {
         return Err(SyncError::InvalidInput {
             reason: "secret fork source and destination must differ",
+        });
+    }
+    // An honest fork with an empty source journals NO op (`fork_version_in_tx`
+    // only journals when it copied a row), so an empty wire fork has no valid
+    // producer — while the unconditional destination wipe below would erase
+    // every secret tip and fork base the destination already holds.
+    if payload.rows.is_empty() {
+        return Err(SyncError::InvalidInput {
+            reason: "secret fork must carry at least one row",
         });
     }
     require_version(tx, &op.workspace_id, &payload.from_version_id)?;
@@ -343,7 +340,7 @@ fn validate_fork_row(row: &SecretForkRow) -> Result<(), SyncError> {
             .ciphertext_sha256
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        || !(0..=1024 * 1024).contains(&row.byte_length)
+        || !is_secret_byte_length(row.byte_length)
         || row.latest_moment_id.is_empty()
     {
         return Err(SyncError::InvalidInput {
@@ -351,6 +348,15 @@ fn validate_fork_row(row: &SecretForkRow) -> Result<(), SyncError> {
         });
     }
     Ok(())
+}
+
+/// The secret domain's own size cap, applied to every replicated byte length.
+/// Secret ciphertext rides the shared binary-blob transport, whose 5 MiB limit
+/// is far above this one; AES-GCM here is length-preserving (IV and tag travel
+/// in their own fields), so the honest ciphertext length equals the plaintext
+/// length and the domain cap applies unchanged.
+fn is_secret_byte_length(byte_length: i64) -> bool {
+    i64::try_from(MAX_SECRET_FILE_BYTES).is_ok_and(|max| (0..=max).contains(&byte_length))
 }
 
 fn validate_base64(

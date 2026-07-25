@@ -2,8 +2,9 @@ use std::sync::Mutex;
 
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
-    ChatReactionState, FollowState, FollowTargetKind, LinkedChatStore, ResolveDecision,
-    SaveBookmark, SetFollow, SetReaction, attachment_id_for, channel_slug_for_name,
+    ChatReactionState, FollowState, FollowTargetKind, LinkedChatStore, MAX_SECRET_FILE_BYTES,
+    ResolveDecision, SaveBookmark, SetFollow, SetReaction, VersionedTextStore, attachment_id_for,
+    channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -2822,13 +2823,19 @@ fn workspace_init_router_apply_is_idempotent_on_replay() {
     let seed = envelope("workspace-seed-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &seed, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome::Applied(RoutedApply {
+            conflict: None,
+            ydoc: None
+        }))
     ));
 
     let operation = envelope("workspace-replay-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome::Applied(RoutedApply {
+            conflict: None,
+            ydoc: None
+        }))
     ));
     let main: (String, String, String, i64) = engine
         .read_with(|conn| {
@@ -2868,7 +2875,10 @@ fn workspace_init_repairs_a_workspace_row_missing_its_main_version() {
     let operation = envelope("partial-workspace-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome::Applied(RoutedApply {
+            conflict: None,
+            ydoc: None
+        }))
     ));
     let main: (String, String, String, i64) = engine
         .read_with(|conn| {
@@ -2973,7 +2983,10 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
 
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome::Applied(RoutedApply {
+            conflict: None,
+            ydoc: None
+        }))
     ));
     type CopiedSnapshot = (String, String, String, Option<String>, Option<String>);
     let copied: Vec<CopiedSnapshot> = engine
@@ -3040,7 +3053,10 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
     applier_replay.origin_id = "version-applier-replay-peer".into();
     assert!(matches!(
         apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome::Applied(RoutedApply {
+            conflict: None,
+            ydoc: None
+        }))
     ));
     let replay_counts: (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -3217,6 +3233,149 @@ fn version_create_shipped_snapshot_rejects_unsafe_and_secret_paths() {
     }
 }
 
+/// A `version.create` shipping a TEXT fork snapshot at a secret-classified path
+/// is a DISCLOSURE op: `blobs`/`snapshots`/`path_aliases` are the ordinary
+/// plaintext surface, and `read_text` deliberately admits secret paths so an
+/// absence check answers honestly — so a persisted `.env` alias hands the
+/// plaintext straight back through the normal read surface. Asserting the error
+/// is not enough; this asserts the plaintext is NOT READABLE afterwards.
+#[test]
+fn version_create_secret_fork_snapshot_never_becomes_readable_plaintext() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let plaintext = "AWS_SECRET_ACCESS_KEY=hunter2";
+    let sha = dohc_engine_storage::hex_sha256(plaintext.as_bytes());
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+                params![sha, plaintext.len() as i64, plaintext],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("seed secret plaintext blob");
+
+    let disclosure = version_create_with_shipped_snapshots(
+        "secret-snapshot-peer",
+        "feature",
+        vec![shipped_text_snapshot("secret-object", "app/.env", &sha)],
+    );
+    let refusal = apply_replication_envelope(&mut engine, &disclosure, &NoFaults, &NoLiveLeases);
+
+    // Create `feature` honestly. If the disclosure op had persisted anything,
+    // this becomes a no-op over the already-created version and the secret
+    // alias below is live.
+    let honest = envelope(
+        "honest-version-peer",
+        0,
+        "version.create",
+        json!({
+            "versionId": "feature",
+            "name": "Feature",
+            "kind": "named",
+            "forkVersionId": "main",
+            "createdAtMs": 1_500
+        }),
+    );
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &honest, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(RoutedApply {
+            conflict: None,
+            ydoc: None
+        }))
+    ));
+
+    assert_eq!(
+        VersionedTextStore::new(&mut engine)
+            .read_text("ws", "feature", "app/.env")
+            .expect("secret path read is answerable"),
+        None,
+        "a replicated fork snapshot must never make secret plaintext readable"
+    );
+    let alias_rows: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM path_aliases WHERE path='app/.env') \
+                 + (SELECT COUNT(*) FROM snapshots WHERE path='app/.env') \
+                 + (SELECT COUNT(*) FROM fork_base_snapshots WHERE path='app/.env') \
+                 + (SELECT COUNT(*) FROM file_objects WHERE object_id='secret-object')",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("secret alias rows");
+    assert_eq!(alias_rows, 0, "nothing from the disclosure op may persist");
+    assert!(matches!(
+        refusal,
+        Err(SyncError::InvalidInput {
+            reason: "version.create shipped snapshot path must be tracked"
+        })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "secret-snapshot-peer").expect("ack"),
+        -1
+    );
+}
+
+/// The local plaintext write path stores the CANONICAL path
+/// (`validate_plaintext_storable_path` returns the normalized form). A
+/// replicated fork snapshot persists its wire path verbatim, so a
+/// non-canonical spelling of a tracked path would mint a second, shadow alias
+/// for the same logical file that the canonical read surface cannot see.
+#[test]
+fn version_create_fork_snapshot_refuses_a_non_canonical_tracked_path() {
+    for (index, path) in ["notes/./plan.md", "notes//plan.md", "notes\\plan.md"]
+        .into_iter()
+        .enumerate()
+    {
+        let (_scratch, _path, mut engine) = store();
+        seed_replication_version(&mut engine, "main", "main");
+        let sha = dohc_engine_storage::hex_sha256(b"content");
+        engine
+            .write_with(&NoFaults, |tx| {
+                tx.execute(
+                    "INSERT INTO blobs (sha256,byte_length,text) VALUES (?1,7,'content')",
+                    [&sha],
+                )
+                .map_err(SyncError::persist)?;
+                Ok::<_, SyncError>(())
+            })
+            .expect("seed blob");
+        let origin = format!("shadow-alias-peer-{index}");
+        let operation = version_create_with_shipped_snapshots(
+            &origin,
+            &format!("shadow-alias-version-{index}"),
+            vec![shipped_text_snapshot("shadow-object", path, &sha)],
+        );
+
+        assert!(
+            matches!(
+                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+                Err(SyncError::InvalidInput {
+                    reason: "version.create shipped snapshot path must be canonical"
+                })
+            ),
+            "{path}"
+        );
+        let persisted: i64 = engine
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT (SELECT COUNT(*) FROM path_aliases) + (SELECT COUNT(*) FROM snapshots)",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("alias rows");
+        assert_eq!(persisted, 0, "{path}");
+        assert_eq!(
+            read_replication_acked_seq(&engine, "ws", &origin).expect("ack"),
+            -1,
+            "{path}"
+        );
+    }
+}
+
 #[test]
 fn version_create_legacy_payload_copies_workspace_scoped_source_tables() {
     let (_scratch, _path, mut engine) = store();
@@ -3293,7 +3452,10 @@ fn version_create_legacy_payload_copies_workspace_scoped_source_tables() {
 
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome::Applied(RoutedApply {
+            conflict: None,
+            ydoc: None
+        }))
     ));
     let counts: (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -3472,7 +3634,10 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
 
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome::Applied(RoutedApply {
+            conflict: None,
+            ydoc: None
+        }))
     ));
     let rows: (Vec<String>, Vec<String>) = engine
         .read_with(|conn| {
@@ -3502,7 +3667,10 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
     applier_replay.origin_id = "secret-fork-applier-replay-peer".into();
     assert!(matches!(
         apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome::Applied(RoutedApply {
+            conflict: None,
+            ydoc: None
+        }))
     ));
     let replayed_rows: (i64, i64) = engine
         .read_with(|conn| {
@@ -3657,6 +3825,149 @@ fn secret_version_fork_rejects_subset_superset_and_duplicate_path_payloads() {
     }
 }
 
+/// An empty replicated fork satisfies the `rows.len() == source.len()`
+/// bijection whenever the named SOURCE is empty, then falls through to the
+/// UNCONDITIONAL destination wipe — erasing every secret tip and fork base the
+/// destination already holds. An honest local fork with an empty source
+/// journals no op at all (`fork_version_in_tx` only journals when it copied a
+/// row), so an empty wire fork has no valid producer.
+#[test]
+fn secret_version_fork_with_no_rows_cannot_erase_the_destination_secrets() {
+    let (_scratch, _path, mut engine) = store();
+    let ciphertext = b"sealed source bytes";
+    seed_secret_fork_state(&mut engine, ciphertext);
+    seed_replication_version(&mut engine, "empty-source", "named");
+
+    let operation = envelope(
+        "empty-fork-peer",
+        0,
+        "secret.version.fork",
+        json!({
+            "fromVersionId": "empty-source",
+            "toVersionId": "feature",
+            "rows": []
+        }),
+    );
+
+    let refusal = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases);
+    let destination: (Vec<String>, Vec<String>) = engine
+        .read_with(|conn| {
+            let files = conn
+                .prepare(
+                    "SELECT path FROM secret_files \
+                     WHERE workspace_id='ws' AND version_id='feature' ORDER BY path",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let bases = conn
+                .prepare(
+                    "SELECT path FROM secret_fork_bases \
+                     WHERE workspace_id='ws' AND version_id='feature' ORDER BY path",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, rusqlite::Error>((files, bases))
+        })
+        .expect("destination secrets");
+    assert_eq!(
+        destination,
+        (vec!["stale.env".to_owned()], vec!["stale.env".to_owned()]),
+        "an empty wire fork must not wipe the destination"
+    );
+    assert!(matches!(
+        refusal,
+        Err(SyncError::InvalidInput {
+            reason: "secret fork must carry at least one row"
+        })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "empty-fork-peer").expect("ack"),
+        -1
+    );
+}
+
+/// Secret ciphertext refs ride the shared binary-blob transport (5 MiB cap),
+/// which is far above the secret domain's own 1 MiB cap. AES-GCM here is
+/// length-preserving — IV and tag travel in their own payload fields — so a
+/// remote put referencing an oversized hydrated blob would park plaintext-sized
+/// ciphertext the local secret write path would have refused.
+#[test]
+fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let oversized = vec![7_u8; MAX_SECRET_FILE_BYTES + 1];
+    let sha = engine
+        .put_binary_blob(&oversized)
+        .expect("oversized ciphertext blob");
+
+    let operation = envelope(
+        "oversized-secret-peer",
+        0,
+        "secret.file.put",
+        json!({
+            "versionId": "main",
+            "path": "app/.env",
+            "metadata": {"origin": "sync"},
+            "ivBase64": STANDARD.encode([1_u8; 12]),
+            "authTagBase64": STANDARD.encode([2_u8; 16]),
+            "ciphertextSha256": sha,
+            "byteLength": oversized.len()
+        }),
+    );
+
+    let refusal = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases);
+    let stored: (i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row("SELECT COUNT(*) FROM secret_files", [], |row| row.get(0))?,
+                conn.query_row("SELECT COUNT(*) FROM secret_moments", [], |row| row.get(0))?,
+            ))
+        })
+        .expect("secret rows");
+    assert_eq!(stored, (0, 0), "an over-cap put must persist nothing");
+    assert!(matches!(
+        refusal,
+        Err(SyncError::InvalidInput {
+            reason: "secret ciphertext metadata is invalid"
+        })
+    ));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "oversized-secret-peer").expect("ack"),
+        -1
+    );
+
+    // The same put at exactly the cap is admitted, so the guard is a CAP and
+    // not a blanket refusal of large secrets.
+    let at_cap = vec![7_u8; MAX_SECRET_FILE_BYTES];
+    let at_cap_sha = engine
+        .put_binary_blob(&at_cap)
+        .expect("at-cap ciphertext blob");
+    let admitted = envelope(
+        "at-cap-secret-peer",
+        0,
+        "secret.file.put",
+        json!({
+            "versionId": "main",
+            "path": "app/.env",
+            "metadata": {"origin": "sync"},
+            "ivBase64": STANDARD.encode([1_u8; 12]),
+            "authTagBase64": STANDARD.encode([2_u8; 16]),
+            "ciphertextSha256": at_cap_sha,
+            "byteLength": at_cap.len()
+        }),
+    );
+    assert!(matches!(
+        apply_replication_envelope(&mut engine, &admitted, &NoFaults, &NoLiveLeases),
+        Ok(ApplyOutcome::Applied(RoutedApply {
+            conflict: None,
+            ydoc: None
+        }))
+    ));
+}
+
 #[test]
 fn central_router_recognizes_every_owned_kind_and_fails_unknown_closed() {
     for kind in crate::router::owned_op_kinds() {
@@ -3711,15 +4022,33 @@ fn relay_pull_routes_secret_and_conflict_ops_without_cursor_wedge() {
         })),
     });
 
-    assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases),
-        Ok(SyncPassOutcome::Complete {
-            applied: 2,
-            skipped: 0,
-            pending_cursor: Some(_),
-            ..
-        })
-    ));
+    let outcome = client
+        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases)
+        .expect("pull");
+    let SyncPassOutcome::Complete {
+        applied,
+        skipped,
+        pending_cursor,
+        pending_resolves,
+        ..
+    } = outcome
+    else {
+        panic!("pull must complete: {outcome:?}");
+    };
+    assert_eq!((applied, skipped), (2, 0));
+    assert!(pending_cursor.is_some());
+    // The unmatched resolve is ACKED — the cursor moves past it — so the only
+    // place the peer's decision survives is this structured surface. Flattening
+    // it into the applied count would lose it permanently.
+    assert_eq!(
+        pending_resolves,
+        vec![PendingResolve {
+            remote_conflict_id: "missing-conflict".to_owned(),
+            local_conflict_id: None,
+            path: Some("notes/missing.md".to_owned()),
+            reason: PendingResolveReason::UnmatchedTarget,
+        }]
+    );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "relay-secret-peer").expect("secret ack"),
         0
@@ -3727,6 +4056,53 @@ fn relay_pull_routes_secret_and_conflict_ops_without_cursor_wedge() {
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "relay-conflict-peer").expect("conflict ack"),
         0
+    );
+}
+
+/// The router must hand back the applier's STRUCTURED result. A deferred
+/// mirrored resolve is acked (the relay cursor advances past it), so a router
+/// that flattens it into a plain applied count destroys the only record that
+/// the peer's decision still needs handling.
+#[test]
+fn router_preserves_a_deferred_conflict_resolve_instead_of_flattening_it() {
+    let (_scratch, _path, mut engine) = store();
+    seed_replication_version(&mut engine, "main", "main");
+    let resolve = envelope(
+        "router-pending-peer",
+        0,
+        "conflict.resolve",
+        json!({
+            "conflictId": "no-such-conflict",
+            "status": "resolved",
+            "chosenFrom": "incoming",
+            "resolution": "applied-incoming",
+            "updatedAtMs": 3_000,
+            "path": "notes/vanished.md"
+        }),
+    );
+
+    let outcome = apply_replication_envelope(&mut engine, &resolve, &NoFaults, &NoLiveLeases)
+        .expect("routed resolve");
+    let ApplyOutcome::Applied(routed) = outcome else {
+        panic!("resolve must apply: {outcome:?}");
+    };
+    assert_eq!(
+        routed.pending_resolve(),
+        Some(&PendingResolve {
+            remote_conflict_id: "no-such-conflict".to_owned(),
+            local_conflict_id: None,
+            path: Some("notes/vanished.md".to_owned()),
+            reason: PendingResolveReason::UnmatchedTarget,
+        })
+    );
+    assert_eq!(
+        routed.conflict.as_ref().map(ConflictApplyResult::deferred),
+        Some(true)
+    );
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "router-pending-peer").expect("ack"),
+        0,
+        "the envelope is acked, so the pending resolve exists only in the result"
     );
 }
 

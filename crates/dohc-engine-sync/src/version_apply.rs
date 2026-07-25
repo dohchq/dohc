@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use dohc_engine_files::{PathClassification, classify_engine_file_path};
+use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_storage::{EngineStore, FaultInjector};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Deserialize;
@@ -201,12 +201,23 @@ fn apply_version_create(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Resul
     Ok(())
 }
 
+/// Gate shipped fork snapshots through the SAME floor the local plaintext
+/// write path uses (`validate_plaintext_storable_path`): tracked classification
+/// only — secret-classified paths never enter the ordinary blob/snapshot/alias
+/// surface — and the wire path must already BE its own canonical form, because
+/// these rows are persisted verbatim as durable keys.
 fn validate_shipped_snapshots(snapshots: &[ForkSnapshot]) -> Result<(), SyncError> {
     let mut paths = HashSet::with_capacity(snapshots.len());
     for snapshot in snapshots {
-        if classify_engine_file_path(&snapshot.path) != PathClassification::Tracked {
+        let (classification, normalized) = classify_engine_file_path_normalized(&snapshot.path);
+        if classification != PathClassification::Tracked {
             return Err(SyncError::InvalidInput {
                 reason: "version.create shipped snapshot path must be tracked",
+            });
+        }
+        if normalized.as_deref() != Some(snapshot.path.as_str()) {
+            return Err(SyncError::InvalidInput {
+                reason: "version.create shipped snapshot path must be canonical",
             });
         }
         if !paths.insert(snapshot.path.as_str()) {
