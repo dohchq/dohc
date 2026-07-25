@@ -24,6 +24,9 @@ directories:
 files:
   - dist/**
 asar: true
+# A direct electron-builder invocation must not be able to silently omit the
+# engine sidecar. The hook throws before packaging if staging did not happen.
+beforePack: scripts/require-workspace-engine.mjs
 extraResources:
   # Sites receive an offline, version-matched SDK through dohc_add_sdk. The
   # MCP tool vendors these browser files into the site, so npm publication or
@@ -56,6 +59,13 @@ extraResources:
     to: workspace-kernel
     filter:
       - "**/*"
+  # The opt-in Rust engine is staged by build-workspace-engine.mjs and kept
+  # outside app.asar so the main process can execute it directly.
+  - from: resources/workspace-engine
+    to: workspace-engine
+    filter:
+      - "dohc-workspace-engine"
+      - "dohc-workspace-engine.exe"
 artifactName: "${productName}-${version}-${os}-${arch}.${ext}"
 # Workspace deps are raw TS bundled into dist by electron-vite; nothing needs
 # a native rebuild against Electron headers.

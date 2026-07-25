@@ -369,6 +369,12 @@ import {
 import { createWorkspaceActivity } from "./workspaces/workspaceActivity";
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
 import {
+  createRustEngineDaemonIfEnabled,
+  defaultEngineBinaryPath,
+  type EngineDaemonLifecycle,
+} from "./workspaces/engineDaemonLifecycle";
+import { isRustEngineAdapterEnabled } from "./workspaces/engineClientFlag";
+import {
   captureForFlaggedWorkspace,
   configureWorkspaceKernelRuntime,
 } from "./workspaces/engineCaptureGate";
@@ -2358,6 +2364,7 @@ async function refreshDispatchTray(): Promise<boolean> {
 // be durably written — otherwise a save right before quit is silently lost.
 // Bounded so a wedged disk can't make the app unquittable.
 let quitting = false;
+let rustEngineDaemon: EngineDaemonLifecycle | null = null;
 app.on("will-quit", (event) => {
   if (quitting) return;
   quitting = true;
@@ -2393,6 +2400,7 @@ app.on("will-quit", (event) => {
   // Close live engine Y.Doc sessions (settle + release reservations) before the
   // engine stores stop — a session must never settle onto a closed store.
   const engineYDocStop = closeAllEngineYDocSessions();
+  const rustEngineStop = rustEngineDaemon?.stop() ?? Promise.resolve();
   void Promise.race([
     Promise.all([
       agentSessionStop,
@@ -2402,6 +2410,7 @@ app.on("will-quit", (event) => {
       chatStoreStop,
       dispatchStoreStop,
       searchStoreStop,
+      rustEngineStop,
     ]).then(() => undefined),
     new Promise<void>((resolve) => setTimeout(resolve, 3000)),
   ]).finally(() => app.exit(0));
@@ -6956,6 +6965,47 @@ function registerIpcHandlers(
 if (process.platform === "win32") app.setAppUserModelId("app.dohc.desktop");
 if (process.platform === "linux") app.setDesktopName("dohc.desktop");
 
+async function startRustEngineDaemon(): Promise<boolean> {
+  // TEMPORARY migration scaffolding: R15 is an atomic authority cutover.
+  // Delete this dual-engine flag and its branch when that cutover lands.
+  const enabled = isRustEngineAdapterEnabled();
+  if (!enabled) return true;
+  rustEngineDaemon = createRustEngineDaemonIfEnabled(true, {
+    command: defaultEngineBinaryPath({
+      isPackaged: app.isPackaged,
+      appPath: app.getAppPath(),
+      resourcesPath: process.resourcesPath,
+    }),
+    onFailure: (error, terminal) => {
+      console.error("[desktop] Rust engine daemon:", error);
+      if (terminal && !quitting) {
+        dialog.showErrorBox(
+          "Rust engine stopped",
+          `${error.message}\n\nRestart dohc or unset DOHC_RUST_ENGINE_ADAPTER to use the current engine.`,
+        );
+      }
+    },
+  });
+  if (!rustEngineDaemon) return true;
+  try {
+    await rustEngineDaemon.start();
+    console.info("[desktop] Rust engine daemon startup smoke passed.");
+    return true;
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Unknown Rust engine startup error.";
+    console.error("[desktop] Rust engine daemon failed to start:", error);
+    dialog.showErrorBox(
+      "Rust engine failed to start",
+      `${message}\n\nThe opt-in Rust engine will not fall back to the TypeScript engine.`,
+    );
+    await rustEngineDaemon.stop();
+    rustEngineDaemon = null;
+    app.quit();
+    return false;
+  }
+}
+
 // Single-instance lock gates the entire bootstrap, not just a quit() call.
 if (!app.requestSingleInstanceLock()) {
   app.quit();
@@ -6999,6 +7049,7 @@ if (!app.requestSingleInstanceLock()) {
   });
 
   void app.whenReady().then(async () => {
+    if (!(await startRustEngineDaemon())) return;
     // BrowserWindow and Dock APIs are only safe after Electron is ready.
     nativeTheme.on("updated", refreshSystemThemeDesktopIcons);
     launchMarks.appReady();

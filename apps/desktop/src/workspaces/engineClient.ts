@@ -1,6 +1,6 @@
-// Dormant R13b transport for the future Rust workspace-engine sidecar.
-// No shipping desktop entry point imports this module; process creation happens
-// only through createEngineClient, and the later cutover owns that wiring.
+// R13b transport for the opt-in Rust workspace-engine sidecar. The shipping
+// desktop launches it only behind the temporary migration flag; real workspace
+// consumers remain on the TypeScript engine until the atomic cutover.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -484,7 +484,9 @@ export interface EngineClientSpawnOptions {
   maxFrameBytes?: number;
   maxBlobChunkBytes?: number;
   maxBlobBytes?: number;
+  signal?: AbortSignal;
   onStderr?: (text: string) => void;
+  onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
 }
 
 export interface EngineClientConnectOptions {
@@ -551,6 +553,7 @@ export class EngineClient implements EngineTransport {
     private readonly connection: EngineClientConnection,
     private readonly connectOptions: EngineClientConnectOptions,
     private readonly terminate: () => void = () => connection.close(),
+    private readonly termination: Promise<void> = Promise.resolve(),
   ) {
     this.maxFrameBytes =
       connectOptions.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
@@ -681,6 +684,10 @@ export class EngineClient implements EngineTransport {
 
   dispose(): void {
     this.close();
+  }
+
+  waitForExit(): Promise<void> {
+    return this.termination;
   }
 
   notifyProcessExit(code: number | null, signal: NodeJS.Signals | null): void {
@@ -1244,14 +1251,28 @@ export async function createEngineClient(
     readable: child.stdout,
     writable: child.stdin,
   });
+  const termination = new Promise<void>((resolve) => {
+    // "close" follows both a normal exit and a spawn failure, and proves the
+    // process plus its stdio handles are gone before lifecycle shutdown settles.
+    child.once("close", () => resolve());
+  });
   const clientConnection = new DuplexEngineClientConnection(connection);
   const client = new EngineClient(
     clientConnection,
     options,
     () => {
-      connection.destroy();
-      if (child.exitCode === null && child.signalCode === null) child.kill();
+      // Closing stdin lets the Rust host observe EOF, drain its workspace
+      // actors, and exit normally. Keep a bounded kill fallback for a wedged
+      // child so desktop shutdown cannot leak the sidecar.
+      connection.end();
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const killTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill();
+      }, 2_000);
+      killTimer.unref();
+      child.once("exit", () => clearTimeout(killTimer));
     },
+    termination,
   );
 
   child.stderr.on("data", (chunk: Buffer) => {
@@ -1269,13 +1290,25 @@ export async function createEngineClient(
   child.on("error", (cause) => {
     connection.destroy(cause);
   });
-  child.on("exit", (code, signal) => client.notifyProcessExit(code, signal));
+  child.on("exit", (code, signal) => {
+    client.notifyProcessExit(code, signal);
+    options.onExit?.(code, signal);
+  });
 
+  const abortLaunch = (): void => client.close();
+  if (options.signal?.aborted) {
+    abortLaunch();
+  } else {
+    options.signal?.addEventListener("abort", abortLaunch, { once: true });
+  }
   try {
     await client.ready();
     return client;
   } catch (error) {
     client.close();
+    await client.waitForExit();
     throw error;
+  } finally {
+    options.signal?.removeEventListener("abort", abortLaunch);
   }
 }
