@@ -24,6 +24,9 @@ directories:
 files:
   - dist/**
 asar: true
+# A direct electron-builder invocation must not be able to silently omit the
+# engine sidecar. The hook throws before packaging if staging did not happen.
+beforePack: scripts/require-workspace-engine.mjs
 extraResources:
   # Sites receive an offline, version-matched SDK through dohc_add_sdk. The
   # MCP tool vendors these browser files into the site, so npm publication or

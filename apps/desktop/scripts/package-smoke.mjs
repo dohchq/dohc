@@ -26,6 +26,11 @@ check(
   existsSync(join(desktopDir, "resources/cli-bin/dohc")),
   "bundled dohc chat CLI exists",
 );
+const engineBinary = `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`;
+check(
+  existsSync(join(desktopDir, "resources/workspace-engine", engineBinary)),
+  "bundled Rust workspace engine exists",
+);
 
 // --- package metadata ------------------------------------------------------
 const pkg = JSON.parse(readFileSync(join(desktopDir, "package.json"), "utf8"));
@@ -59,6 +64,10 @@ if (config) {
     "Linux launcher filename and StartupWMClass sync to desktopName",
   );
   check(config.asar === true, "asar is enabled");
+  check(
+    config.beforePack === "scripts/require-workspace-engine.mjs",
+    "packaging refuses a missing Rust workspace engine",
+  );
   check(Array.isArray(config.files) && config.files.includes("dist/**"), "files ship the built dist tree");
   const extraResources = Array.isArray(config.extraResources) ? config.extraResources : [];
   check(

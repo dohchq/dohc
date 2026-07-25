@@ -1,6 +1,8 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, posix, win32 } from "node:path";
+import { dirname, join, posix, resolve, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Request, Response } from "@dohc/workspace-engine-client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EngineClientSpawnOptions } from "./engineClient";
@@ -18,7 +20,9 @@ class FakeClient implements EngineDaemonClient {
   waitForExit?: () => Promise<void>;
 
   constructor(
-    private readonly respond: (request: Request) => Response = (request) => ({
+    private readonly respond: (
+      request: Request,
+    ) => Response | Promise<Response> = (request) => ({
       id: request.id,
       result: {},
     }),
@@ -26,7 +30,7 @@ class FakeClient implements EngineDaemonClient {
 
   async sendRequest(request: Request): Promise<Response> {
     this.requests.push(request);
-    return this.respond(request);
+    return await this.respond(request);
   }
 
   close(): void {
@@ -35,6 +39,7 @@ class FakeClient implements EngineDaemonClient {
 }
 
 const scratchPaths: string[] = [];
+const desktopDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 
 function fakeBinary(): string {
   const directory = mkdtempSync(join(tmpdir(), "dohc-engine-lifecycle-test-"));
@@ -52,6 +57,36 @@ afterEach(() => {
 });
 
 describe("Rust engine daemon lifecycle", () => {
+  it("fails the packaging gate when the staged engine binary is missing", () => {
+    const emptyResourceDir = mkdtempSync(
+      join(tmpdir(), "dohc-missing-engine-resource-"),
+    );
+    scratchPaths.push(emptyResourceDir);
+
+    const gate = spawnSync(
+      process.execPath,
+      [
+        join(desktopDir, "scripts", "require-workspace-engine.mjs"),
+        emptyResourceDir,
+      ],
+      { encoding: "utf8" },
+    );
+
+    expect(gate.status).not.toBe(0);
+    expect(gate.stderr).toContain(
+      "Refusing to package without the Rust workspace engine binary",
+    );
+    expect(
+      readFileSync(join(desktopDir, "electron-builder.yml"), "utf8"),
+    ).toMatch(/^beforePack: scripts\/require-workspace-engine\.mjs$/m);
+    expect(
+      readFileSync(
+        resolve(desktopDir, "../..", ".github/workflows/desktop-release.yml"),
+        "utf8",
+      ),
+    ).toContain("pnpm --filter @dohc/desktop run build:engine");
+  });
+
   it("generates a distinct auth token for every launch", async () => {
     const tokens: string[] = [];
     const exits: EngineClientSpawnOptions["onExit"][] = [];
@@ -122,6 +157,74 @@ describe("Rust engine daemon lifecycle", () => {
     await lifecycle.stop();
   });
 
+  it("carries the restart budget across handshaking daemon generations", async () => {
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const terminalFailures: Error[] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: 3,
+      initialBackoffMs: 0,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        return new FakeClient();
+      },
+      onFailure: (error, terminal) => {
+        if (terminal) terminalFailures.push(error);
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      for (let generation = 0; generation < 4; generation += 1) {
+        exits[generation]?.(1, null);
+        if (generation < 3) {
+          await vi.waitFor(() =>
+            expect(exits).toHaveLength(generation + 2),
+          );
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+      }
+
+      await vi.waitFor(
+        () => {
+          expect(terminalFailures).toHaveLength(1);
+        },
+        { timeout: 100 },
+      );
+      expect(exits).toHaveLength(4);
+      expect(terminalFailures[0]?.message).toMatch(
+        /restart limit exceeded after 3 attempts/,
+      );
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("resets the restart budget after a sustained healthy generation", async () => {
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: 1,
+      initialBackoffMs: 0,
+      healthyResetMs: 20,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        return new FakeClient();
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      exits[0]?.(1, null);
+      await vi.waitFor(() => expect(exits).toHaveLength(2));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      exits[1]?.(1, null);
+      await vi.waitFor(() => expect(exits).toHaveLength(3));
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
   it("waits for the daemon to exit during clean shutdown", async () => {
     let resolveExit!: () => void;
     const exited = new Promise<void>((resolve) => {
@@ -183,6 +286,29 @@ describe("Rust engine daemon lifecycle", () => {
       "workspace.close",
     ]);
     expect(client.requests[1]?.workspace).toBe("opaque-handle");
+    await lifecycle.stop();
+  });
+
+  it("fails startup smoke within the request bound when the daemon hangs after helloAck", async () => {
+    const client = new FakeClient(
+      () =>
+        new Promise<Response>(() => {
+          // Deliberately never settles: the daemon completed helloAck but
+          // stopped processing requests.
+        }),
+    );
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      requestTimeoutMs: 20,
+      launch: async () => client,
+    });
+    await lifecycle.start();
+
+    const startedAt = Date.now();
+    await expect(
+      lifecycle.smokeWorkspace("C:\\shadow-workspace", "hung-smoke"),
+    ).rejects.toThrow(/workspace\.open timed out after 20ms/);
+    expect(Date.now() - startedAt).toBeLessThan(500);
     await lifecycle.stop();
   });
 

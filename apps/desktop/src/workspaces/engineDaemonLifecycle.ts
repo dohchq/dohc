@@ -20,6 +20,8 @@ const ENGINE_PROTOCOL_VERSION = 1;
 const DEFAULT_MAX_RESTARTS = 3;
 const DEFAULT_INITIAL_BACKOFF_MS = 100;
 const DEFAULT_MAX_BACKOFF_MS = 2_000;
+const DEFAULT_HEALTHY_RESET_MS = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 
 export interface EngineDaemonClient {
   sendRequest(request: Request): Promise<Response>;
@@ -36,6 +38,8 @@ export interface EngineDaemonLifecycleOptions {
   maxRestarts?: number;
   initialBackoffMs?: number;
   maxBackoffMs?: number;
+  healthyResetMs?: number;
+  requestTimeoutMs?: number;
   onFailure?: (error: Error, terminal: boolean) => void;
 }
 
@@ -121,8 +125,10 @@ export class EngineDaemonLifecycle {
   private launchGeneration = 0;
   private activeGeneration = 0;
   private nextRequestId = 1;
+  private restartAttempts = 0;
   private running = false;
   private stopping = false;
+  private healthyResetTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly exitedGenerations = new Set<number>();
 
   constructor(options: EngineDaemonLifecycleOptions) {
@@ -161,11 +167,15 @@ export class EngineDaemonLifecycle {
   ): Promise<JsonValue> {
     const client = this.requireClient();
     const opened = resultObject(
-      await client.sendRequest({
-        id: this.requestId(),
-        method: "workspace.open",
-        params: { rootDir, workspaceId },
-      }),
+      await this.sendSmokeRequest(
+        client,
+        {
+          id: this.requestId(),
+          method: "workspace.open",
+          params: { rootDir, workspaceId },
+        },
+        "workspace.open",
+      ),
       "workspace.open",
     );
     if (typeof opened.workspace !== "string" || opened.workspace.length === 0) {
@@ -175,20 +185,28 @@ export class EngineDaemonLifecycle {
     }
     const workspace = opened.workspace as WorkspaceHandle;
     try {
-      const active = await client.sendRequest({
-        id: this.requestId(),
-        method: "versions.active",
-        workspace,
-        params: {},
-      });
+      const active = await this.sendSmokeRequest(
+        client,
+        {
+          id: this.requestId(),
+          method: "versions.active",
+          workspace,
+          params: {},
+        },
+        "versions.active",
+      );
       return active.result;
     } finally {
-      await client.sendRequest({
-        id: this.requestId(),
-        method: "workspace.close",
-        workspace,
-        params: {},
-      });
+      await this.sendSmokeRequest(
+        client,
+        {
+          id: this.requestId(),
+          method: "workspace.close",
+          workspace,
+          params: {},
+        },
+        "workspace.close",
+      );
     }
   }
 
@@ -196,6 +214,7 @@ export class EngineDaemonLifecycle {
     if (this.stopping) return;
     this.stopping = true;
     this.running = false;
+    this.clearHealthyResetTimer();
     const client = this.client;
     this.client = null;
     client?.close();
@@ -216,6 +235,31 @@ export class EngineDaemonLifecycle {
       );
     }
     return this.client;
+  }
+
+  private async sendSmokeRequest(
+    client: EngineDaemonClient,
+    request: Request,
+    method: string,
+  ): Promise<Response> {
+    const timeoutMs =
+      this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        reject(
+          new EngineDaemonUnavailableError(
+            `Rust engine ${method} timed out after ${timeoutMs}ms.`,
+          ),
+        );
+      }, timeoutMs);
+      timeout.unref();
+    });
+    try {
+      return await Promise.race([client.sendRequest(request), deadline]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 
   private assertBinaryPresent(): void {
@@ -259,6 +303,7 @@ export class EngineDaemonLifecycle {
     }
     this.client = client;
     this.running = true;
+    this.scheduleHealthyReset(generation);
   }
 
   private handleUnexpectedExit(
@@ -274,6 +319,7 @@ export class EngineDaemonLifecycle {
     ) {
       return;
     }
+    this.clearHealthyResetTimer();
     this.running = false;
     this.client = null;
     const detail = signal ? `signal ${signal}` : `code ${code ?? "unknown"}`;
@@ -296,7 +342,8 @@ export class EngineDaemonLifecycle {
     let lastError: Error = new EngineDaemonUnavailableError(
       "Rust engine daemon exited unexpectedly.",
     );
-    for (let attempt = 1; attempt <= maxRestarts; attempt += 1) {
+    while (this.restartAttempts < maxRestarts) {
+      const attempt = ++this.restartAttempts;
       const delay = Math.min(
         (this.options.initialBackoffMs ?? DEFAULT_INITIAL_BACKOFF_MS) *
           2 ** (attempt - 1),
@@ -318,6 +365,29 @@ export class EngineDaemonLifecycle {
     );
     this.reportFailure(terminal, true);
     throw terminal;
+  }
+
+  private scheduleHealthyReset(generation: number): void {
+    this.clearHealthyResetTimer();
+    const healthyResetMs =
+      this.options.healthyResetMs ?? DEFAULT_HEALTHY_RESET_MS;
+    this.healthyResetTimer = setTimeout(() => {
+      this.healthyResetTimer = null;
+      if (
+        this.running &&
+        !this.stopping &&
+        generation === this.activeGeneration
+      ) {
+        this.restartAttempts = 0;
+      }
+    }, healthyResetMs);
+    this.healthyResetTimer.unref();
+  }
+
+  private clearHealthyResetTimer(): void {
+    if (!this.healthyResetTimer) return;
+    clearTimeout(this.healthyResetTimer);
+    this.healthyResetTimer = null;
   }
 
   private reportFailure(error: Error, terminal: boolean): void {

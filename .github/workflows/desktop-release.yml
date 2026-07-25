@@ -210,6 +210,9 @@ jobs:
       - name: Build desktop
         run: pnpm build:desktop
 
+      - name: Build workspace engine
+        run: pnpm --filter @dohc/desktop run build:engine
+
       - id: signing
         name: Resolve signing mode
         shell: bash
