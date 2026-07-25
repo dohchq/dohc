@@ -1,6 +1,6 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
-use dohc_engine_domain::MAX_SECRET_FILE_BYTES;
+use dohc_engine_domain::{MAX_SECRET_FILE_BYTES, SECRET_IV_BYTES, SECRET_TAG_BYTES};
 use dohc_engine_storage::{EngineStore, FaultInjector};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Deserialize;
@@ -145,7 +145,10 @@ fn apply_put(
         .map_err(|_| SyncError::InvalidInput {
             reason: "secret auth tag is invalid",
         })?;
-    if iv.len() != 12 || tag.len() != 16 || !is_secret_byte_length(p.byte_length) {
+    if iv.len() != SECRET_IV_BYTES
+        || tag.len() != SECRET_TAG_BYTES
+        || !is_secret_byte_length(p.byte_length)
+    {
         return Err(SyncError::InvalidInput {
             reason: "secret ciphertext metadata is invalid",
         });
@@ -333,8 +336,12 @@ fn validate_fork_row(row: &SecretForkRow) -> Result<(), SyncError> {
             reason: "secret fork path is not secret-classified",
         });
     }
-    validate_base64(&row.iv_base64, 12, "secret fork iv is invalid")?;
-    validate_base64(&row.auth_tag_base64, 16, "secret fork auth tag is invalid")?;
+    validate_base64(&row.iv_base64, SECRET_IV_BYTES, "secret fork iv is invalid")?;
+    validate_base64(
+        &row.auth_tag_base64,
+        SECRET_TAG_BYTES,
+        "secret fork auth tag is invalid",
+    )?;
     if row.ciphertext_sha256.len() != 64
         || !row
             .ciphertext_sha256

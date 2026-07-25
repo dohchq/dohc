@@ -48,6 +48,10 @@ impl LeaseProbe for dohc_engine_collab::LeaseRegistry {
     }
 }
 
+/// Direct-applier diagnostic result. A deferred update needs no caller action:
+/// its coordinate is durably parked with the ack and is replayed by
+/// [`drain_deferred_ydoc_for_key`] on lease teardown/open or before the next
+/// non-leased update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YdocApplyResult {
     pub deferred: bool,

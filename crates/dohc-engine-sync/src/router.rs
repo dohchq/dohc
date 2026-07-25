@@ -1,18 +1,20 @@
 use dohc_engine_storage::{EngineStore, FaultInjector};
 
-use crate::{
-    ApplyOutcome, ConflictApplyResult, LeaseProbe, ReplicationEnvelope, SyncError, YdocApplyResult,
-};
+use crate::{ApplyOutcome, ConflictApplyResult, LeaseProbe, ReplicationEnvelope, SyncError};
 
 /// What one routed envelope produced beyond "it applied". Appliers that fail
-/// closed into a structured deferral — a conflict resolve the receiver could
-/// not safely apply, a ydoc update parked behind a live lease — must reach the
-/// caller intact: the envelope is acked and the relay cursor advances, so a
-/// count-only result would drop the deferral permanently.
+/// closed into a pending decision must reach the caller intact: a conflict
+/// resolve the receiver could not safely apply is acked and the relay cursor
+/// advances, so a count-only result would drop that decision permanently.
+///
+/// A Y.Doc update parked behind a live lease is different: its exact
+/// coordinate is committed to `ydoc_deferred_updates` with the ack, and lease
+/// teardown/open (or the next non-leased update) replays it through
+/// `drain_deferred_ydoc_for_key`. It requires no caller action, so the router
+/// deliberately does not carry its transient `YdocApplyResult`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RoutedApply {
     pub conflict: Option<ConflictApplyResult>,
-    pub ydoc: Option<YdocApplyResult>,
 }
 
 impl RoutedApply {
@@ -75,16 +77,12 @@ pub fn apply_replication_envelope(
         OwnedRoute::Secret => plain(crate::apply_secret_envelope(store, envelope, faults)),
         OwnedRoute::Ydoc => map_applied(
             crate::apply_ydoc_envelope(store, envelope, faults, leases),
-            |ydoc| RoutedApply {
-                conflict: None,
-                ydoc: Some(ydoc),
-            },
+            |_ydoc| RoutedApply::default(),
         ),
         OwnedRoute::Conflict => map_applied(
             crate::apply_conflict_envelope(store, envelope, faults),
             |conflict| RoutedApply {
                 conflict: Some(conflict),
-                ydoc: None,
             },
         ),
         OwnedRoute::Workspace => plain(crate::version_apply::apply_workspace_envelope(

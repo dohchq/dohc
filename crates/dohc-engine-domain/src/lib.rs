@@ -102,7 +102,7 @@ pub use store::{
 // Re-export the storage surface a domain caller needs on the common path.
 pub use dohc_engine_storage::{EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome};
 
-/// The secret domain's own plaintext/ciphertext size cap. Re-exported so the
-/// replication appliers bind to the SAME number the local secret write path
-/// uses (`secrets::validate_text`) instead of restating it.
-pub use dohc_engine_crypto::aead::MAX_SECRET_FILE_BYTES;
+/// The secret domain's ciphertext shape and plaintext/ciphertext size cap.
+/// Re-exported so replication appliers bind to the SAME values the local
+/// seal/open and secret write paths use instead of restating them.
+pub use dohc_engine_crypto::aead::{MAX_SECRET_FILE_BYTES, SECRET_IV_BYTES, SECRET_TAG_BYTES};

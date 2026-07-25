@@ -3,8 +3,8 @@ use std::sync::Mutex;
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
     ChatReactionState, FollowState, FollowTargetKind, LinkedChatStore, MAX_SECRET_FILE_BYTES,
-    ResolveDecision, SaveBookmark, SetFollow, SetReaction, VersionedTextStore, attachment_id_for,
-    channel_slug_for_name,
+    ResolveDecision, SECRET_IV_BYTES, SECRET_TAG_BYTES, SaveBookmark, SetFollow, SetReaction,
+    VersionedTextStore, attachment_id_for, channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -438,14 +438,23 @@ fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
             "isBaseState": false
         }),
     );
-    let outcome =
-        apply_ydoc_envelope(&mut engine, &op, &NoFaults, &AlwaysLive).expect("live lineage defers");
+    let outcome = apply_replication_envelope(&mut engine, &op, &NoFaults, &AlwaysLive)
+        .expect("live lineage defers");
     assert_eq!(
         outcome,
-        ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            reason: Some("ydoc-session-live"),
+        ApplyOutcome::Applied(RoutedApply { conflict: None })
+    );
+    let deferred_rows: i64 = engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                row.get(0)
+            })
+            .map_err(SyncError::corrupt)
         })
+        .expect("count deferred Y.Doc coordinates");
+    assert_eq!(
+        deferred_rows, 1,
+        "the durable replay marker replaces any routed caller action"
     );
     let update_rows: i64 = engine
         .read_with(|conn| {
@@ -2363,8 +2372,8 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
         .expect("seed secret prereqs");
     assert_eq!(seeded, TxnOutcome::Committed(()));
 
-    let iv = STANDARD.encode([0u8; 12]);
-    let tag = STANDARD.encode([0u8; 16]);
+    let iv = STANDARD.encode([0u8; SECRET_IV_BYTES]);
+    let tag = STANDARD.encode([0u8; SECRET_TAG_BYTES]);
     let put = |seq: i64, at: i64, sha: &str, len: i64| ReplicationEnvelope {
         workspace_id: "ws".to_owned(),
         origin_id: "peer".to_owned(),
@@ -2823,19 +2832,13 @@ fn workspace_init_router_apply_is_idempotent_on_replay() {
     let seed = envelope("workspace-seed-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &seed, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply {
-            conflict: None,
-            ydoc: None
-        }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
     ));
 
     let operation = envelope("workspace-replay-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply {
-            conflict: None,
-            ydoc: None
-        }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
     ));
     let main: (String, String, String, i64) = engine
         .read_with(|conn| {
@@ -2875,10 +2878,7 @@ fn workspace_init_repairs_a_workspace_row_missing_its_main_version() {
     let operation = envelope("partial-workspace-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply {
-            conflict: None,
-            ydoc: None
-        }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
     ));
     let main: (String, String, String, i64) = engine
         .read_with(|conn| {
@@ -2983,10 +2983,7 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
 
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply {
-            conflict: None,
-            ydoc: None
-        }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
     ));
     type CopiedSnapshot = (String, String, String, Option<String>, Option<String>);
     let copied: Vec<CopiedSnapshot> = engine
@@ -3053,10 +3050,7 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
     applier_replay.origin_id = "version-applier-replay-peer".into();
     assert!(matches!(
         apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply {
-            conflict: None,
-            ydoc: None
-        }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
     ));
     let replay_counts: (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -3280,10 +3274,7 @@ fn version_create_secret_fork_snapshot_never_becomes_readable_plaintext() {
     );
     assert!(matches!(
         apply_replication_envelope(&mut engine, &honest, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply {
-            conflict: None,
-            ydoc: None
-        }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
     ));
 
     assert_eq!(
@@ -3452,10 +3443,7 @@ fn version_create_legacy_payload_copies_workspace_scoped_source_tables() {
 
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply {
-            conflict: None,
-            ydoc: None
-        }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
     ));
     let counts: (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -3561,8 +3549,8 @@ fn seed_secret_fork_state(engine: &mut EngineStore, ciphertext: &[u8]) -> (Strin
     let sha = engine
         .put_binary_blob(ciphertext)
         .expect("secret ciphertext blob");
-    let iv = STANDARD.encode([7_u8; 12]);
-    let tag = STANDARD.encode([9_u8; 16]);
+    let iv = STANDARD.encode([7_u8; SECRET_IV_BYTES]);
+    let tag = STANDARD.encode([9_u8; SECRET_TAG_BYTES]);
     let ciphertext_base64 = STANDARD.encode(ciphertext);
     engine
         .write_with(&NoFaults, |tx| {
@@ -3634,10 +3622,7 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
 
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply {
-            conflict: None,
-            ydoc: None
-        }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
     ));
     let rows: (Vec<String>, Vec<String>) = engine
         .read_with(|conn| {
@@ -3667,10 +3652,7 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
     applier_replay.origin_id = "secret-fork-applier-replay-peer".into();
     assert!(matches!(
         apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply {
-            conflict: None,
-            ydoc: None
-        }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
     ));
     let replayed_rows: (i64, i64) = engine
         .read_with(|conn| {
@@ -3911,8 +3893,8 @@ fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
             "versionId": "main",
             "path": "app/.env",
             "metadata": {"origin": "sync"},
-            "ivBase64": STANDARD.encode([1_u8; 12]),
-            "authTagBase64": STANDARD.encode([2_u8; 16]),
+            "ivBase64": STANDARD.encode([1_u8; SECRET_IV_BYTES]),
+            "authTagBase64": STANDARD.encode([2_u8; SECRET_TAG_BYTES]),
             "ciphertextSha256": sha,
             "byteLength": oversized.len()
         }),
@@ -3953,18 +3935,15 @@ fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
             "versionId": "main",
             "path": "app/.env",
             "metadata": {"origin": "sync"},
-            "ivBase64": STANDARD.encode([1_u8; 12]),
-            "authTagBase64": STANDARD.encode([2_u8; 16]),
+            "ivBase64": STANDARD.encode([1_u8; SECRET_IV_BYTES]),
+            "authTagBase64": STANDARD.encode([2_u8; SECRET_TAG_BYTES]),
             "ciphertextSha256": at_cap_sha,
             "byteLength": at_cap.len()
         }),
     );
     assert!(matches!(
         apply_replication_envelope(&mut engine, &admitted, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply {
-            conflict: None,
-            ydoc: None
-        }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
     ));
 }
 
