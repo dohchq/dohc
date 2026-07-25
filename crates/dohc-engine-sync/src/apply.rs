@@ -4,12 +4,13 @@ use serde::{Deserialize, Deserializer};
 
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, CHAT_THREAD_HEADER_MESSAGE_ID, DomainError,
-    FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, attachment_id_for, channel_slug_for_name,
-    feed_coordinate_visible, has_projection_control_char, is_js_trim_ws,
-    is_reaction_emoji_verbatim, normalize_author_user_id, normalize_body, normalize_channel_name,
-    normalize_display_name, normalize_feed_identity, normalize_reaction_author_id,
-    normalize_replicated_chat_id, parse_mention_handles, thread_has_message,
-    validate_addressable_plaintext_path, validate_follow_target,
+    FeedCoordinateResolution, FollowTargetKind, FollowTargetResolution, GENERAL_CHANNEL_WIRE_ID,
+    ThreadMessageResolution, attachment_id_for, channel_slug_for_name, has_projection_control_char,
+    is_js_trim_ws, is_reaction_emoji_verbatim, normalize_author_user_id, normalize_body,
+    normalize_channel_name, normalize_display_name, normalize_feed_identity,
+    normalize_reaction_author_id, normalize_replicated_chat_id, parse_mention_handles,
+    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
+    validate_addressable_plaintext_path,
 };
 
 use crate::journal::{ack_tx, crashes, read_ack_tx};
@@ -274,6 +275,11 @@ pub(crate) fn apply_chat_tx(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
 ) -> Result<(), SyncError> {
+    apply_chat_mutation(tx, op)?;
+    drain_pending_chat_coordinates(tx, &op.workspace_id)
+}
+
+fn apply_chat_mutation(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Result<(), SyncError> {
     match op.op_kind.as_str() {
         "chat.channel.create" => apply_channel(tx, op, decode(&op.payload)?),
         "chat.thread.create" => apply_thread(tx, op, decode(&op.payload)?),
@@ -285,6 +291,89 @@ pub(crate) fn apply_chat_tx(
         "chat.attachment.add" => apply_attachment(tx, op, decode(&op.payload)?),
         _ => Err(SyncError::UnsupportedOperation),
     }
+}
+
+fn park_chat_coordinate(
+    tx: &Transaction<'_>,
+    op: &ReplicationEnvelope,
+    dependency_kind: &'static str,
+    dependency_id: &str,
+) -> Result<(), SyncError> {
+    tx.execute(
+        "INSERT OR IGNORE INTO chat_pending_replication \
+         (workspace_id,origin_id,origin_seq,dependency_kind,dependency_id) \
+         VALUES (?1,?2,?3,?4,?5)",
+        params![
+            op.workspace_id,
+            op.origin_id,
+            op.origin_seq,
+            dependency_kind,
+            dependency_id
+        ],
+    )
+    .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+fn drain_pending_chat_coordinates(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+) -> Result<(), SyncError> {
+    let pending: Vec<ReplicationEnvelope> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT log.origin_id,log.origin_seq,log.op_kind,log.payload_json,log.recorded_at_ms \
+                 FROM chat_pending_replication pending \
+                 JOIN replication_log log \
+                   ON log.workspace_id = pending.workspace_id \
+                  AND log.origin_id = pending.origin_id \
+                  AND log.origin_seq = pending.origin_seq \
+                 WHERE pending.workspace_id = ?1 \
+                 ORDER BY log.recorded_at_ms,log.origin_id,log.origin_seq",
+            )
+            .map_err(SyncError::corrupt)?;
+        let rows = stmt
+            .query_map([workspace_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(SyncError::corrupt)?;
+        let mut pending = Vec::new();
+        for row in rows {
+            let (origin_id, origin_seq, op_kind, payload_json, recorded_at_ms) =
+                row.map_err(SyncError::corrupt)?;
+            let payload =
+                serde_json::from_str(&payload_json).map_err(|_| SyncError::CoordinateDiverged)?;
+            pending.push(ReplicationEnvelope {
+                workspace_id: workspace_id.to_owned(),
+                origin_id,
+                origin_seq,
+                op_kind,
+                payload,
+                recorded_at_ms,
+            });
+        }
+        pending
+    };
+
+    for op in pending {
+        tx.execute(
+            "DELETE FROM chat_pending_replication \
+             WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
+            params![op.workspace_id, op.origin_id, op.origin_seq],
+        )
+        .map_err(SyncError::persist)?;
+        match apply_chat_mutation(tx, &op) {
+            Ok(()) | Err(SyncError::InvalidInput { .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 fn apply_channel(
@@ -920,8 +1009,19 @@ fn apply_follow(
             reason: "chat follow identity is invalid",
         });
     }
-    validate_follow_target(tx, &op.workspace_id, target_kind, &target_id)
-        .map_err(|error| map_chat_rule(error, "chat follow target is not followable"))?;
+    match resolve_follow_target(tx, &op.workspace_id, target_kind, &target_id)
+        .map_err(|error| map_chat_rule(error, "chat follow target is not followable"))?
+    {
+        FollowTargetResolution::Followable => {}
+        FollowTargetResolution::Missing => {
+            return park_chat_coordinate(tx, op, "follow-target", &target_id);
+        }
+        FollowTargetResolution::Disallowed => {
+            return Err(SyncError::InvalidInput {
+                reason: "chat follow target is not followable",
+            });
+        }
+    }
     tx.execute(
         "INSERT INTO chat_follows \
          (workspace_id,owner_user_id,target_kind,target_id,state,updated_at_ms,origin_id,origin_seq) \
@@ -957,7 +1057,7 @@ fn apply_feed_read(
             reason: "chat feed read owner is invalid",
         });
     }
-    let visible = feed_coordinate_visible(
+    let resolution = resolve_feed_coordinate(
         tx,
         &op.workspace_id,
         &owner_user_id,
@@ -965,10 +1065,16 @@ fn apply_feed_read(
         &p.last_seen_message_id,
     )
     .map_err(|error| map_chat_rule(error, "chat feed read coordinate is invalid"))?;
-    if !visible {
-        return Err(SyncError::InvalidInput {
-            reason: "chat feed read coordinate is not visible",
-        });
+    match resolution {
+        FeedCoordinateResolution::Visible => {}
+        FeedCoordinateResolution::Missing => {
+            return park_chat_coordinate(tx, op, "feed-message", &p.last_seen_message_id);
+        }
+        FeedCoordinateResolution::Disallowed => {
+            return Err(SyncError::InvalidInput {
+                reason: "chat feed read coordinate is not visible",
+            });
+        }
     }
     tx.execute(
         "INSERT INTO chat_feed_read_state \
@@ -1039,12 +1145,18 @@ fn apply_attachment(
             reason: "chat attachment payload is invalid",
         });
     }
-    let message_exists = thread_has_message(tx, &op.workspace_id, &p.thread_id, &p.message_id)
+    let target = resolve_thread_message(tx, &op.workspace_id, &p.thread_id, &p.message_id)
         .map_err(|error| map_chat_rule(error, "chat attachment target is invalid"))?;
-    if !message_exists {
-        return Err(SyncError::InvalidInput {
-            reason: "chat attachment target message is missing",
-        });
+    match target {
+        ThreadMessageResolution::Present => {}
+        ThreadMessageResolution::Missing => {
+            return park_chat_coordinate(tx, op, "attachment-message", &p.message_id);
+        }
+        ThreadMessageResolution::DifferentThread => {
+            return Err(SyncError::InvalidInput {
+                reason: "chat attachment target message belongs to another thread",
+            });
+        }
     }
     tx.execute(
         "INSERT OR IGNORE INTO chat_attachments \

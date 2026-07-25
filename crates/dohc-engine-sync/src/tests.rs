@@ -983,6 +983,325 @@ fn imported_chat_fixture(engine: &mut EngineStore, origin: &str) {
     }
 }
 
+fn pending_chat_coordinate_count(engine: &EngineStore) -> i64 {
+    engine
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM chat_pending_replication", [], |row| {
+                row.get(0)
+            })
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("pending chat coordinate count")
+}
+
+#[test]
+fn imported_follow_parks_until_its_cross_origin_thread_arrives() {
+    let (_scratch, _path, mut engine) = store();
+    let follow = envelope(
+        "late-follow",
+        0,
+        "chat.follow.set",
+        json!({
+            "ownerUserId": "owner",
+            "targetKind": "thread",
+            "targetId": "late-thread",
+            "state": "following",
+            "atMs": 30
+        }),
+    );
+
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park follow"),
+        ApplyOutcome::Applied(())
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "late-follow").expect("follow ack"),
+        0
+    );
+
+    let target = envelope(
+        "late-thread-origin",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "late-thread",
+            "title": "Late thread",
+            "createdAtMs": 20,
+            "linkedObjectId": "late-thread-object",
+            "linkedAtMs": 20
+        }),
+    );
+    apply_chat_envelope(&mut engine, &target, &NoFaults).expect("apply target thread");
+
+    let state: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state FROM chat_follows \
+                 WHERE workspace_id='ws' AND owner_user_id='owner' \
+                   AND target_kind='thread' AND target_id='late-thread'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("replayed follow");
+    assert_eq!(state, "following");
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+}
+
+#[test]
+fn imported_feed_read_parks_until_its_cross_origin_message_arrives() {
+    let (_scratch, _path, mut engine) = store();
+    let thread = envelope(
+        "feed-thread-origin",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "feed-thread",
+            "title": "Feed thread",
+            "createdAtMs": 10,
+            "linkedObjectId": "feed-thread-object",
+            "linkedAtMs": 10
+        }),
+    );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("feed thread");
+    let follow = envelope(
+        "feed-follow-origin",
+        0,
+        "chat.follow.set",
+        json!({
+            "ownerUserId": "owner",
+            "targetKind": "thread",
+            "targetId": "feed-thread",
+            "state": "following",
+            "atMs": 15
+        }),
+    );
+    apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("feed thread follow");
+    let feed_read = envelope(
+        "late-feed-read",
+        0,
+        "chat.feed.read.set",
+        json!({
+            "ownerUserId": "owner",
+            "lastSeenCreatedAtMs": 20,
+            "lastSeenMessageId": "late-feed-message",
+            "atMs": 30
+        }),
+    );
+
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &feed_read, &NoFaults).expect("park feed read"),
+        ApplyOutcome::Applied(())
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+
+    let message = envelope(
+        "feed-message-origin",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "late-feed-message",
+            "threadId": "feed-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Arrived later",
+            "createdAtMs": 20
+        }),
+    );
+    apply_chat_envelope(&mut engine, &message, &NoFaults).expect("feed message");
+
+    let coordinate: (i64, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT last_seen_created_at_ms,last_seen_message_id \
+                 FROM chat_feed_read_state \
+                 WHERE workspace_id='ws' AND owner_user_id='owner'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("replayed feed coordinate");
+    assert_eq!(coordinate, (20, "late-feed-message".to_owned()));
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+}
+
+#[test]
+fn imported_attachment_parks_until_its_cross_origin_message_arrives() {
+    let (_scratch, _path, mut engine) = store();
+    let thread = envelope(
+        "attachment-thread-origin",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "attachment-thread",
+            "title": "Attachment thread",
+            "createdAtMs": 10,
+            "linkedObjectId": "attachment-thread-object",
+            "linkedAtMs": 10
+        }),
+    );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("attachment thread");
+    let attachment_id = attachment_id_for("late-attachment-message", "object", None, None);
+    let attachment = envelope(
+        "late-attachment",
+        0,
+        "chat.attachment.add",
+        json!({
+            "attachmentId": attachment_id,
+            "threadId": "attachment-thread",
+            "messageId": "late-attachment-message",
+            "targetKind": "file",
+            "objectId": "object",
+            "createdAtMs": 30
+        }),
+    );
+
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &attachment, &NoFaults).expect("park attachment"),
+        ApplyOutcome::Applied(())
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+
+    let message = envelope(
+        "attachment-message-origin",
+        0,
+        "chat.message.append",
+        json!({
+            "messageId": "late-attachment-message",
+            "threadId": "attachment-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Arrived later",
+            "createdAtMs": 20
+        }),
+    );
+    apply_chat_envelope(&mut engine, &message, &NoFaults).expect("attachment message");
+
+    let attachment_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_attachments \
+                 WHERE workspace_id='ws' AND attachment_id=?1",
+                [&attachment_id],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("replayed attachment");
+    assert_eq!(attachment_count, 1);
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+}
+
+#[test]
+fn imported_follow_refuses_a_resolved_dm_without_parking() {
+    let (_scratch, _path, mut engine) = store();
+    let channel = envelope(
+        "dm-target-origin",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "dm-target-channel",
+            "name": "Private",
+            "slug": "private",
+            "kind": "dm",
+            "createdAtMs": 10,
+            "wireId": "dm-target-wire"
+        }),
+    );
+    let thread = envelope(
+        "dm-target-origin",
+        1,
+        "chat.thread.create",
+        json!({
+            "threadId": "dm-target-thread",
+            "title": "Private thread",
+            "createdAtMs": 20,
+            "channelSlug": "private",
+            "channelWireId": "dm-target-wire"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &channel, &NoFaults).expect("DM channel");
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("DM thread");
+    let follow = envelope(
+        "dm-follow-origin",
+        0,
+        "chat.follow.set",
+        json!({
+            "ownerUserId": "owner",
+            "targetKind": "thread",
+            "targetId": "dm-target-thread",
+            "state": "following",
+            "atMs": 30
+        }),
+    );
+
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &follow, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "dm-follow-origin").expect("DM follow ack"),
+        -1
+    );
+}
+
+#[test]
+fn parked_chat_coordinate_survives_store_reopen() {
+    let (_scratch, path, mut engine) = store();
+    let follow = envelope(
+        "reopen-follow-origin",
+        0,
+        "chat.follow.set",
+        json!({
+            "ownerUserId": "owner",
+            "targetKind": "thread",
+            "targetId": "reopen-thread",
+            "state": "following",
+            "atMs": 30
+        }),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park before reopen"),
+        ApplyOutcome::Applied(())
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    drop(engine);
+
+    let mut reopened = EngineStore::open(&path, 1_001).expect("reopen");
+    assert_eq!(pending_chat_coordinate_count(&reopened), 1);
+    let thread = envelope(
+        "reopen-thread-origin",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "reopen-thread",
+            "title": "Reopen target",
+            "createdAtMs": 20,
+            "linkedObjectId": "reopen-thread-object",
+            "linkedAtMs": 20
+        }),
+    );
+    apply_chat_envelope(&mut reopened, &thread, &NoFaults).expect("target after reopen");
+
+    let follow_count: i64 = reopened
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_follows \
+                 WHERE workspace_id='ws' AND target_kind='thread' AND target_id='reopen-thread'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("replayed follow after reopen");
+    assert_eq!(follow_count, 1);
+    assert_eq!(pending_chat_coordinate_count(&reopened), 0);
+}
+
 #[test]
 fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
     let (_scratch, _path, mut engine) = store();
@@ -1494,6 +1813,8 @@ fn imported_thread_header_message_id_cannot_replace_the_search_header() {
             .optional()
         })
         .expect("collision message lookup");
+    // MUTATION: without the reserved-id refusal this re-indexes the imported
+    // collision, making the header-text assertion exercise the regression.
     if let Some((display_name, body)) = imported_collision {
         engine
             .write_with(&NoFaults, |tx| {
@@ -1715,7 +2036,72 @@ fn imported_attachment_requires_its_workspace_thread_message_without_fabricating
         attachment_count, 0,
         "no fabricated attachment row may survive"
     );
-    assert!(matches!(result, Err(SyncError::InvalidInput { .. })));
+    assert_eq!(
+        result.expect("park missing attachment"),
+        ApplyOutcome::Applied(())
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "attachment-owner").expect("attachment ack"),
+        3
+    );
+}
+
+#[test]
+fn imported_attachment_refuses_a_message_resolved_in_another_thread_without_parking() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "attachment-cross-thread-owner");
+    let other_thread = envelope(
+        "attachment-cross-thread-target",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "attachment-other-thread",
+            "title": "Other thread",
+            "createdAtMs": 30,
+            "linkedObjectId": "attachment-other-object",
+            "linkedAtMs": 30
+        }),
+    );
+    let other_message = envelope(
+        "attachment-cross-thread-target",
+        1,
+        "chat.message.append",
+        json!({
+            "messageId": "attachment-other-message",
+            "threadId": "attachment-other-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Other",
+            "createdAtMs": 31
+        }),
+    );
+    apply_chat_envelope(&mut engine, &other_thread, &NoFaults).expect("other thread");
+    apply_chat_envelope(&mut engine, &other_message, &NoFaults).expect("other message");
+    let attachment = envelope(
+        "attachment-cross-thread",
+        0,
+        "chat.attachment.add",
+        json!({
+            "attachmentId": attachment_id_for(
+                "attachment-other-message",
+                "object",
+                None,
+                None
+            ),
+            "threadId": "thread-imported",
+            "messageId": "attachment-other-message",
+            "targetKind": "file",
+            "objectId": "object",
+            "createdAtMs": 32
+        }),
+    );
+
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &attachment, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
 }
 
 #[test]
@@ -1759,7 +2145,6 @@ fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() 
         ("follow-dm-channel", "channel", "dm-wire"),
         ("follow-dm-thread", "thread", "dm-thread"),
         ("follow-dm-person", "person", "dm-only-user"),
-        ("follow-fabricated-channel", "channel", "fabricated-dm-wire"),
     ] {
         let operation = envelope(
             origin,
@@ -1778,6 +2163,23 @@ fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() 
             Err(SyncError::InvalidInput { .. })
         ));
     }
+    let unresolved = envelope(
+        "follow-fabricated-channel",
+        0,
+        "chat.follow.set",
+        json!({
+            "ownerUserId": "owner",
+            "targetKind": "channel",
+            "targetId": "fabricated-dm-wire",
+            "state": "following",
+            "atMs": 40
+        }),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &unresolved, &NoFaults).expect("park unresolved follow"),
+        ApplyOutcome::Applied(())
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
     let leaked = LinkedChatStore::new(&mut engine)
         .list_follows("ws", "owner", None)
         .expect("list follows");

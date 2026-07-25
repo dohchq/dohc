@@ -331,10 +331,11 @@ already produce the canonical forms, so these differences affect only malformed
 or hostile hand-fed envelopes. Differential suites must expect Rust to refuse
 or normalize them before journaling/acking:
 
-- `chat.feed.read.set` requires the cursor coordinate to satisfy the exact
-  personal-feed visibility predicate. The oracle replicated arm upserts any
-  structurally valid coordinate; Rust refuses future, DM, unfollowed, missing,
-  and cross-workspace coordinates without changing existing unread state.
+- `chat.feed.read.set` parks an absent message coordinate for replay. Once the
+  message exists, the coordinate must satisfy the exact personal-feed
+  visibility predicate; Rust refuses a mismatched timestamp, DM, or unfollowed
+  coordinate without changing existing unread state. The oracle replicated arm
+  upserts any structurally valid coordinate.
 - `chat.message.append` runs the shared local `normalize_body` first
   (CRLF/CR→LF, ECMAScript `trimEnd`) and then enforces the 64 KiB UTF-8 cap. The
   oracle replicated arm stores any non-empty body verbatim.
@@ -349,21 +350,35 @@ or normalize them before journaling/acking:
   grammar, but the persisted slug is always derived from the normalized name
   and then collision-suffixed locally; the caller-supplied slug is never the
   persisted source of truth. The oracle persists both fields verbatim.
-- `chat.attachment.add` requires its exact
-  `(workspace_id, thread_id, message_id)` owner to exist before inserting. The
-  oracle replicated arm can persist an orphan attachment and its attachment
-  reads have no compensating message join.
+- `chat.attachment.add` parks an absent workspace-scoped message for replay and
+  inserts only after its exact `(workspace_id, thread_id, message_id)` owner
+  resolves. A message that resolves in another thread is refused. The oracle
+  replicated arm can persist an orphan attachment and its attachment reads have
+  no compensating message join.
 - `chat.follow.set` calls the same local target validator: channel wires and
-  threads must exist and cannot be DMs; person/agent targets must have a
-  non-DM authored message. The oracle replicated arm accepts fabricated and DM
-  target ids, which can then surface verbatim through `listFollows`.
+  threads cannot be DMs; person/agent targets must have a non-DM authored
+  message. An unresolved target is parked for replay, while a resolved DM
+  target is refused. The oracle replicated arm accepts fabricated and DM target
+  ids, which can then surface verbatim through `listFollows`.
 - Replicated message/reaction display names use the local trimmed
   1..=200-UTF-16-unit rule. Message `authorUserId` and reaction `authorId` use
   their local 1..=200-unit rules and must already be canonical on the wire.
   They remain relay-verified opaque wire identities: Rust does not derive,
   replace, or map authorship.
 
+Refusal-semantics caveat: feed-read visibility, follow targets, and attachment
+owners depend on local mutable rows, so they are not pure payload validation.
+Absent targets park durably; resolved-and-disallowed targets take the refusal
+path. The follow-on work in `codex/rust-engine-replication-refusal` converts
+that path from an unacked `InvalidInput` into a journaled, acked `Refused`
+disposition and must preserve this absent-versus-disallowed split.
+
 Named fail-then-pass coverage lives in `dohc-engine-sync/src/tests.rs`:
+`imported_follow_parks_until_its_cross_origin_thread_arrives`,
+`imported_feed_read_parks_until_its_cross_origin_message_arrives`,
+`imported_attachment_parks_until_its_cross_origin_message_arrives`,
+`imported_follow_refuses_a_resolved_dm_without_parking`,
+`parked_chat_coordinate_survives_store_reopen`,
 `imported_feed_read_rejects_an_invisible_coordinate_without_changing_unread_state`,
 `imported_message_normalizes_before_enforcing_the_local_body_cap`,
 `imported_thread_header_message_id_cannot_replace_the_search_header`,

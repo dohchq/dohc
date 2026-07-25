@@ -6582,17 +6582,36 @@ fn hydrate_message_attachments(
     Ok(())
 }
 
-/// Whether a `(created_at_ms, message_id)` coordinate names a message currently
-/// visible to `owner_user_id` under the personal-feed predicate. Used to gate
-/// `mark_feed_seen` and replicated read state so receiver-private state cannot
-/// skip past unseen items.
-pub fn feed_coordinate_visible(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedCoordinateResolution {
+    Visible,
+    Missing,
+    Disallowed,
+}
+
+/// Resolve a feed coordinate separately from its receiver-private visibility.
+pub fn resolve_feed_coordinate(
     conn: &Connection,
     workspace_id: &str,
     owner_user_id: &str,
     created_at_ms: i64,
     message_id: &str,
-) -> Result<bool, DomainError> {
+) -> Result<FeedCoordinateResolution, DomainError> {
+    let stored_created_at_ms: Option<i64> = conn
+        .query_row(
+            "SELECT created_at_ms FROM chat_messages \
+             WHERE workspace_id = ?1 AND message_id = ?2",
+            params![workspace_id, message_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    let Some(stored_created_at_ms) = stored_created_at_ms else {
+        return Ok(FeedCoordinateResolution::Missing);
+    };
+    if stored_created_at_ms != created_at_ms {
+        return Ok(FeedCoordinateResolution::Disallowed);
+    }
     let found: Option<i64> = conn
         .query_row(
             FEED_COORDINATE_VISIBLE_SQL,
@@ -6601,7 +6620,130 @@ pub fn feed_coordinate_visible(
         )
         .optional()
         .map_err(DomainError::sql_corrupt)?;
-    Ok(found.is_some())
+    Ok(if found.is_some() {
+        FeedCoordinateResolution::Visible
+    } else {
+        FeedCoordinateResolution::Disallowed
+    })
+}
+
+/// Whether a `(created_at_ms, message_id)` coordinate names a message currently
+/// visible to `owner_user_id` under the personal-feed predicate. Used to gate
+/// `mark_feed_seen` so receiver-private state cannot skip past unseen items.
+pub fn feed_coordinate_visible(
+    conn: &Connection,
+    workspace_id: &str,
+    owner_user_id: &str,
+    created_at_ms: i64,
+    message_id: &str,
+) -> Result<bool, DomainError> {
+    Ok(
+        resolve_feed_coordinate(conn, workspace_id, owner_user_id, created_at_ms, message_id)?
+            == FeedCoordinateResolution::Visible,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FollowTargetResolution {
+    Followable,
+    Missing,
+    Disallowed,
+}
+
+/// Resolve a follow target separately from the local DM-visibility rule.
+pub fn resolve_follow_target(
+    conn: &Connection,
+    workspace_id: &str,
+    target_kind: FollowTargetKind,
+    target_id: &str,
+) -> Result<FollowTargetResolution, DomainError> {
+    match target_kind {
+        FollowTargetKind::Channel => {
+            let target: Option<(String, bool)> = conn
+                .query_row(
+                    "SELECT c.kind, EXISTS( \
+                       SELECT 1 FROM chat_channel_placeholders p \
+                       WHERE p.workspace_id = c.workspace_id AND p.channel_id = c.channel_id) \
+                     FROM chat_channel_wire_ids w \
+                     JOIN chat_channels c \
+                       ON c.workspace_id = w.workspace_id AND c.channel_id = w.channel_id \
+                     WHERE w.workspace_id = ?1 AND w.wire_id = ?2",
+                    params![workspace_id, target_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            match target {
+                None | Some((_, true)) => return Ok(FollowTargetResolution::Missing),
+                Some((kind, false)) if kind == "dm" => {
+                    return Ok(FollowTargetResolution::Disallowed);
+                }
+                Some(_) => {}
+            }
+        }
+        FollowTargetKind::Thread => {
+            let target: Option<(Option<String>, Option<String>, bool)> = conn
+                .query_row(
+                    "SELECT t.channel_id, c.kind, EXISTS( \
+                       SELECT 1 FROM chat_channel_placeholders p \
+                       WHERE p.workspace_id = t.workspace_id AND p.channel_id = t.channel_id) \
+                     FROM chat_threads t \
+                     LEFT JOIN chat_channels c \
+                       ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
+                     WHERE t.workspace_id = ?1 AND t.thread_id = ?2",
+                    params![workspace_id, target_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            match target {
+                None => return Ok(FollowTargetResolution::Missing),
+                Some((Some(_), None, _)) | Some((Some(_), Some(_), true)) => {
+                    return Ok(FollowTargetResolution::Missing);
+                }
+                Some((Some(_), Some(kind), false)) if kind == "dm" => {
+                    return Ok(FollowTargetResolution::Disallowed);
+                }
+                Some(_) => {}
+            }
+        }
+        FollowTargetKind::Person | FollowTargetKind::Agent => {
+            let author_kind = match target_kind {
+                FollowTargetKind::Agent => "agent",
+                FollowTargetKind::Person => "human",
+                _ => unreachable!(),
+            };
+            let (followable, unresolved, total): (i64, i64, i64) = conn
+                .query_row(
+                    "SELECT \
+                       COALESCE(SUM(t.channel_id IS NULL OR \
+                         (c.kind <> 'dm' AND p.channel_id IS NULL)), 0), \
+                       COALESCE(SUM(t.channel_id IS NOT NULL AND \
+                         (c.channel_id IS NULL OR p.channel_id IS NOT NULL)), 0), \
+                       COUNT(*) \
+                     FROM chat_messages m \
+                     JOIN chat_threads t \
+                       ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id \
+                     LEFT JOIN chat_channels c \
+                       ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
+                     LEFT JOIN chat_channel_placeholders p \
+                       ON p.workspace_id = t.workspace_id AND p.channel_id = t.channel_id \
+                     WHERE m.workspace_id = ?1 AND m.author_user_id = ?2 \
+                       AND m.author_kind = ?3",
+                    params![workspace_id, target_id, author_kind],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(DomainError::sql_corrupt)?;
+            if followable > 0 {
+                return Ok(FollowTargetResolution::Followable);
+            }
+            if unresolved > 0 || total == 0 {
+                return Ok(FollowTargetResolution::Missing);
+            }
+            return Ok(FollowTargetResolution::Disallowed);
+        }
+    }
+    Ok(FollowTargetResolution::Followable)
 }
 
 /// Apply the local follow-target existence and DM-visibility rule.
@@ -6611,73 +6753,13 @@ pub fn validate_follow_target(
     target_kind: FollowTargetKind,
     target_id: &str,
 ) -> Result<(), DomainError> {
-    match target_kind {
-        FollowTargetKind::Channel => {
-            let kind: Option<String> = conn
-                .query_row(
-                    "SELECT c.kind FROM chat_channel_wire_ids w \
-                     JOIN chat_channels c \
-                       ON c.workspace_id = w.workspace_id AND c.channel_id = w.channel_id \
-                     WHERE w.workspace_id = ?1 AND w.wire_id = ?2",
-                    params![workspace_id, target_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(DomainError::sql_corrupt)?;
-            if kind.as_deref().is_none_or(|kind| kind == "dm") {
-                return Err(DomainError::chat(
-                    "invalid-follow-target",
-                    "Channel is not followable.",
-                ));
-            }
-        }
-        FollowTargetKind::Thread => {
-            let thread =
-                require_thread(conn, workspace_id, target_id).map_err(|error| match error {
-                    DomainError::Chat { .. } => {
-                        DomainError::chat("invalid-follow-target", "Chat thread is not followable.")
-                    }
-                    other => other,
-                })?;
-            if let Some(channel_id) = thread.channel_id {
-                let channel = require_channel(conn, workspace_id, &channel_id)?;
-                if channel.kind == ChatChannelKind::Dm {
-                    return Err(DomainError::chat(
-                        "invalid-follow-target",
-                        "DM threads are not followable.",
-                    ));
-                }
-            }
-        }
-        FollowTargetKind::Person | FollowTargetKind::Agent => {
-            let author_kind = match target_kind {
-                FollowTargetKind::Agent => "agent",
-                FollowTargetKind::Person => "human",
-                _ => unreachable!(),
-            };
-            let found: Option<i64> = conn
-                .query_row(
-                    "SELECT 1 FROM chat_messages m \
-                     JOIN chat_threads t \
-                       ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id \
-                     LEFT JOIN chat_channels c \
-                       ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
-                     WHERE m.workspace_id = ?1 AND m.author_user_id = ?2 \
-                       AND m.author_kind = ?3 \
-                       AND (t.channel_id IS NULL OR c.kind <> 'dm') \
-                     LIMIT 1",
-                    params![workspace_id, target_id, author_kind],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(DomainError::sql_corrupt)?;
-            if found.is_none() {
-                return Err(DomainError::chat(
-                    "invalid-follow-target",
-                    "Chat author is not followable.",
-                ));
-            }
-        }
+    if resolve_follow_target(conn, workspace_id, target_kind, target_id)?
+        != FollowTargetResolution::Followable
+    {
+        return Err(DomainError::chat(
+            "invalid-follow-target",
+            "Follow target is not followable.",
+        ));
     }
     Ok(())
 }
@@ -6803,6 +6885,36 @@ fn require_thread(
     .ok_or_else(|| DomainError::chat("thread-not-found", "Chat thread was not found."))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadMessageResolution {
+    Present,
+    Missing,
+    DifferentThread,
+}
+
+/// Resolve a workspace-scoped message separately from its thread ownership.
+pub fn resolve_thread_message(
+    conn: &Connection,
+    workspace_id: &str,
+    thread_id: &str,
+    message_id: &str,
+) -> Result<ThreadMessageResolution, DomainError> {
+    let found_thread_id: Option<String> = conn
+        .query_row(
+            "SELECT thread_id FROM chat_messages \
+             WHERE workspace_id = ?1 AND message_id = ?2",
+            params![workspace_id, message_id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(match found_thread_id {
+        None => ThreadMessageResolution::Missing,
+        Some(found_thread_id) if found_thread_id == thread_id => ThreadMessageResolution::Present,
+        Some(_) => ThreadMessageResolution::DifferentThread,
+    })
+}
+
 /// Whether a message belongs to the named workspace-scoped chat thread.
 pub fn thread_has_message(
     conn: &Connection,
@@ -6810,15 +6922,10 @@ pub fn thread_has_message(
     thread_id: &str,
     message_id: &str,
 ) -> Result<bool, DomainError> {
-    let found: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM chat_messages WHERE workspace_id = ?1 AND thread_id = ?2 AND message_id = ?3",
-            params![workspace_id, thread_id, message_id],
-            |r| r.get(0),
-        )
-        .optional()
-        .map_err(DomainError::sql_corrupt)?;
-    Ok(found.is_some())
+    Ok(
+        resolve_thread_message(conn, workspace_id, thread_id, message_id)?
+            == ThreadMessageResolution::Present,
+    )
 }
 
 fn next_message_order(

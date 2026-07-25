@@ -1438,6 +1438,7 @@ UPDATE secret_moments SET capture_owned = 1
 /// The `id` of the secret capture-ownership migration.
 pub(crate) const SECRET_CAPTURE_OWNERSHIP_MIGRATION_ID: &str = "v1-secret-capture-ownership";
 
+<<<<<<< HEAD
 /// Ordinal 15. Ports the TS oracle's moment PAYLOAD provenance, which is a
 /// different thing from the rollback preimage Rust already stores. The oracle
 /// records what the OPERATION carried (`payload.before` / `payload.after`)
@@ -1563,6 +1564,25 @@ CREATE TABLE replication_pending_resolves (
 pub(crate) const REPLICATION_PENDING_RESOLVES_MIGRATION_ID: &str =
     "v1-replication-pending-resolves";
 
+/// Durable coordinates whose chat target has not replicated yet.
+const V1_CHAT_PENDING_REPLICATION_DDL: &str = "\
+CREATE TABLE chat_pending_replication (
+    workspace_id   TEXT NOT NULL,
+    origin_id      TEXT NOT NULL,
+    origin_seq     INTEGER NOT NULL,
+    dependency_kind TEXT NOT NULL CHECK (
+      dependency_kind IN ('follow-target', 'feed-message', 'attachment-message')
+    ),
+    dependency_id  TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, origin_id, origin_seq)
+) STRICT;
+CREATE INDEX chat_pending_replication_by_dependency
+    ON chat_pending_replication (workspace_id, dependency_kind, dependency_id);
+";
+
+/// The `id` of the deferred chat-coordinate migration.
+pub(crate) const CHAT_PENDING_REPLICATION_MIGRATION_ID: &str = "v1-chat-pending-replication";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1683,6 +1703,15 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: REPLICATION_PENDING_RESOLVES_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_REPLICATION_PENDING_RESOLVES_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        // Ordinal 16 is taken by v1-replication-pending-resolves (#242).
+        // Schema shards serialize through this list; this one appends at 17.
+        ordinal: 17,
+        id: CHAT_PENDING_REPLICATION_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_CHAT_PENDING_REPLICATION_DDL,
         sets_user_version: None,
     },
 ];
@@ -1995,7 +2024,7 @@ mod tests {
         // A synthetic probe always appends immediately after the frozen list.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: BASELINE_COUNT,
+            ordinal: NEXT_FREE_ORDINAL,
             id: "r04-probe",
             kind: MigrationKind::Transactional,
             sql: M2_SQL,
@@ -2006,6 +2035,13 @@ mod tests {
 
     /// Count of frozen baseline migrations.
     const BASELINE_COUNT: u32 = BASELINE_MIGRATIONS.len() as u32;
+
+    /// One past the LAST ordinal, which is what a synthetic test migration must
+    /// use. Ordinals only have to strictly increase — they are not required to
+    /// be contiguous — so `BASELINE_COUNT` stops equalling "next free ordinal"
+    /// the moment a shard lands a gap (as one did, appending at 16 because 15
+    /// was already claimed by another in-flight shard).
+    const NEXT_FREE_ORDINAL: u32 = BASELINE_MIGRATIONS[BASELINE_MIGRATIONS.len() - 1].ordinal + 1;
 
     #[test]
     fn baseline_applies_once_and_is_idempotent() {
@@ -2714,7 +2750,7 @@ mod tests {
                 row.get(0)
             })
             .expect("latest migration ordinal");
-        assert_eq!(max_ordinal, i64::from(BASELINE_COUNT - 1));
+        assert_eq!(max_ordinal, i64::from(NEXT_FREE_ORDINAL - 1));
         let index_present: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' \
@@ -2766,7 +2802,7 @@ mod tests {
                 row.get(0)
             })
             .expect("latest migration ordinal");
-        assert_eq!(max_ordinal, i64::from(BASELINE_COUNT - 1));
+        assert_eq!(max_ordinal, i64::from(NEXT_FREE_ORDINAL - 1));
     }
 
     #[test]
@@ -3482,7 +3518,7 @@ mod tests {
         }
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: BASELINE_COUNT,
+            ordinal: NEXT_FREE_ORDINAL,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
@@ -3500,7 +3536,7 @@ mod tests {
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();
         changed.push(Migration {
-            ordinal: BASELINE_COUNT,
+            ordinal: NEXT_FREE_ORDINAL,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
@@ -3520,7 +3556,7 @@ mod tests {
         // baseline first (transactional), then a non-transactional idempotent step.
         let mut migrations = BASELINE_MIGRATIONS.to_vec();
         migrations.push(Migration {
-            ordinal: BASELINE_COUNT,
+            ordinal: NEXT_FREE_ORDINAL,
             id: "r04-nontx",
             kind: MigrationKind::NonTransactional,
             sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
