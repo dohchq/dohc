@@ -37,9 +37,13 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_runtime::{
     ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, LifecycleState, NoFaults,
-    PostCommitMaterializeOutcome, RuntimeError, SearchError, SearchSurface, WorkspaceSupervisor,
+    PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
+    RuntimeError, SearchError, SearchSurface, WorkspaceSupervisor,
 };
-use dohc_engine_sync::{ReplicationEnvelope, SyncError};
+use dohc_engine_sync::{
+    CursorKind, RelayCursor, RelayError, ReplicationEnvelope, ReplicationRefusal, ShareCursor,
+    SyncError, SyncPassOutcome,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -262,6 +266,7 @@ struct OpenWorkspace {
     db_path: PathBuf,
     workspace_id: String,
     actor: ActorHandle,
+    relay: Option<RelayConfiguration>,
     /// The autonomous capture driver (files actor + watcher + reconcile
     /// loop), spawned only after the shadow binding succeeded. Shared so the
     /// teardown paths can take it exactly once.
@@ -418,6 +423,50 @@ impl EngineService {
         let result = match request.method.as_str() {
             "workspace.open" => self.workspace_open(&ctx, request.params).await?,
             "workspace.close" => self.workspace_close(request.workspace).await?,
+            "sync.push" => {
+                self.sync_push(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "sync.pull" => {
+                self.sync_pull(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "sync.commitCursor" => {
+                self.sync_commit_cursor(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "sync.probe" => {
+                self.sync_probe(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "sync.claim" => {
+                self.sync_claim(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "sync.recoverOrigin" => {
+                self.sync_recover_origin(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "keys.upload" => {
+                self.keys_upload(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "keys.download" => {
+                self.keys_download(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "share.channel.pull" => {
+                self.share_channel_pull(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "share.channel.push" => {
+                self.share_channel_push(&ctx, request.workspace, request.params)
+                    .await?
+            }
+            "share.view.pull" => {
+                self.share_view_pull(&ctx, request.workspace, request.params)
+                    .await?
+            }
             "versionedText.write" => {
                 self.versioned_text_write(&ctx, &request, request.params.clone())
                     .await?
@@ -932,6 +981,12 @@ impl EngineService {
                     "workspace root is already bound to another workspace",
                 ));
             }
+            if open.relay != params.relay.as_ref().map(RelayOpenParams::configuration) {
+                return Err(wire(
+                    ErrorCode::InvalidParams,
+                    "workspace relay configuration mismatch",
+                ));
+            }
             // Same workspace: short-circuit only on a LIVE binding. A bound-but-
             // closed actor (its worker died) is stale — drop it and reopen fresh.
             if open.actor.lifecycle() != LifecycleState::Closed {
@@ -1048,6 +1103,9 @@ impl EngineService {
                 db_path,
                 workspace_id: params.workspace_id,
                 actor,
+                relay: params
+                    .relay
+                    .map(|configuration| configuration.configuration()),
                 capture: Arc::new(Mutex::new(Some(capture))),
             },
         );
@@ -1127,6 +1185,313 @@ impl EngineService {
             .map_err(|_| wire(ErrorCode::Internal, "workspace close task failed"))?
             .map_err(map_runtime)?;
         Ok(json!({ "closed": closed }))
+    }
+
+    fn relay_open(
+        &self,
+        handle: Option<&WorkspaceHandle>,
+        workspace_id: &str,
+    ) -> Result<(OpenWorkspace, RelayConfiguration), WireError> {
+        let open = self.open(handle)?;
+        validate_workspace_param(Some(workspace_id), &open.workspace_id)?;
+        let configuration = open
+            .relay
+            .clone()
+            .ok_or_else(|| wire(ErrorCode::InvalidParams, "relay-not-configured"))?;
+        Ok((open, configuration))
+    }
+
+    async fn relay_execute(
+        &self,
+        ctx: &RequestContext,
+        open: &OpenWorkspace,
+        configuration: RelayConfiguration,
+        operation: RelayOperation,
+        label: &str,
+    ) -> Result<RelayOperationOutcome, WireError> {
+        let cancellation = OperationCancellation::new(ctx);
+        Self::read_under_ctx(
+            &cancellation,
+            label,
+            open.actor.relay(
+                configuration,
+                operation,
+                self.leases.scoped(&open.root),
+                cancellation.token(),
+            ),
+        )
+        .await
+    }
+
+    async fn sync_push(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RelayWorkspaceParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::Push {
+                    workspace_id: open.workspace_id.clone(),
+                },
+                "sync.push",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn sync_pull(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RelayWorkspaceParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::Pull {
+                    workspace_id: open.workspace_id.clone(),
+                },
+                "sync.pull",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn sync_commit_cursor(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: CommitCursorParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let operation = match params.pending_cursor {
+            PendingCursorParams::Relay {
+                cursor,
+                replication_epoch,
+                stream_identity,
+            } => RelayOperation::CommitCursor {
+                workspace_id: open.workspace_id.clone(),
+                cursor: RelayCursor {
+                    cursor,
+                    replication_epoch,
+                    stream_identity,
+                },
+            },
+            PendingCursorParams::ShareView { share_id, cursor } => {
+                RelayOperation::CommitShareViewCursor {
+                    workspace_id: open.workspace_id.clone(),
+                    cursor: ShareCursor {
+                        kind: CursorKind::ShareView,
+                        share_id,
+                        cursor,
+                    },
+                }
+            }
+        };
+        let outcome = self
+            .relay_execute(ctx, &open, configuration, operation, "sync.commitCursor")
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn sync_probe(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RelayWorkspaceParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::Probe {
+                    workspace_id: open.workspace_id.clone(),
+                },
+                "sync.probe",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn sync_claim(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RelayWorkspaceParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::Claim {
+                    workspace_id: open.workspace_id.clone(),
+                },
+                "sync.claim",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn sync_recover_origin(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RelayWorkspaceParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let sequence = self
+            .next_session
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let new_origin_id = format!("origin-recovered-{}-{sequence:016x}", self.session_epoch);
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::RecoverOrigin {
+                    workspace_id: open.workspace_id.clone(),
+                    new_origin_id,
+                },
+                "sync.recoverOrigin",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn keys_upload(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: KeyEnvelopeUploadParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::UploadKeyEnvelope {
+                    workspace_id: open.workspace_id.clone(),
+                    envelope_json: params.envelope_json,
+                    if_match: params.if_match,
+                },
+                "keys.upload",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn keys_download(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: RelayWorkspaceParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::DownloadKeyEnvelope {
+                    workspace_id: open.workspace_id.clone(),
+                },
+                "keys.download",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn share_channel_pull(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SharedChannelParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::PullSharedChannel {
+                    workspace_id: open.workspace_id.clone(),
+                    share_id: params.share_id,
+                    channel_wire_id: params.channel_wire_id,
+                },
+                "share.channel.pull",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn share_channel_push(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: SharedChannelParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::PushSharedChannel {
+                    workspace_id: open.workspace_id.clone(),
+                    share_id: params.share_id,
+                    channel_wire_id: params.channel_wire_id,
+                },
+                "share.channel.push",
+            )
+            .await?;
+        relay_outcome_json(outcome)
+    }
+
+    async fn share_view_pull(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+        params: Value,
+    ) -> Result<Value, WireError> {
+        let params: ShareViewParams = parse(params)?;
+        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
+        let outcome = self
+            .relay_execute(
+                ctx,
+                &open,
+                configuration,
+                RelayOperation::PullShareView {
+                    workspace_id: open.workspace_id.clone(),
+                    share_id: params.share_id,
+                    path_prefix: params.path_prefix,
+                },
+                "share.view.pull",
+            )
+            .await?;
+        relay_outcome_json(outcome)
     }
 
     fn generated_rpc_id(
@@ -5931,6 +6296,81 @@ impl Drop for OperationCancellation {
 struct WorkspaceOpenParams {
     root_dir: String,
     workspace_id: String,
+    #[serde(default)]
+    relay: Option<RelayOpenParams>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RelayOpenParams {
+    base_url: String,
+    bearer_token: String,
+}
+
+impl RelayOpenParams {
+    fn configuration(&self) -> RelayConfiguration {
+        RelayConfiguration {
+            base_url: self.base_url.clone(),
+            bearer_token: self.bearer_token.clone(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RelayWorkspaceParams {
+    workspace_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CommitCursorParams {
+    workspace_id: String,
+    pending_cursor: PendingCursorParams,
+}
+
+#[derive(Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum PendingCursorParams {
+    Relay {
+        cursor: i64,
+        replication_epoch: String,
+        stream_identity: String,
+    },
+    ShareView {
+        share_id: String,
+        cursor: i64,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct KeyEnvelopeUploadParams {
+    workspace_id: String,
+    envelope_json: String,
+    #[serde(default)]
+    if_match: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SharedChannelParams {
+    workspace_id: String,
+    share_id: String,
+    channel_wire_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ShareViewParams {
+    workspace_id: String,
+    share_id: String,
+    path_prefix: String,
 }
 
 #[derive(Deserialize)]
@@ -7833,6 +8273,16 @@ fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value
                 "pendingResolve": result.pending_resolve
             })
         }
+        ApplyOutcome::Refused(refusal) => json!({
+            "replicated": true,
+            "status": "refused",
+            "workspaceId": refusal.workspace_id,
+            "originId": refusal.origin_id,
+            "originSeq": refusal.origin_seq,
+            "opKind": refusal.op_kind,
+            "code": refusal.reason.code(),
+            "reason": refusal.reason.message()
+        }),
         ApplyOutcome::Skipped => json!({ "replicated": true, "status": "skipped" }),
         ApplyOutcome::Crashed { committed } => json!({
             "replicated": true,
@@ -7882,6 +8332,119 @@ fn materialize_outcome_name(outcome: PostCommitMaterializeOutcome) -> &'static s
         PostCommitMaterializeOutcome::Superseded => "superseded",
         PostCommitMaterializeOutcome::Error => "error",
     }
+}
+
+fn relay_cursor_json(cursor: &RelayCursor) -> Value {
+    json!({
+        "kind": "relay",
+        "cursor": cursor.cursor,
+        "replicationEpoch": cursor.replication_epoch,
+        "streamIdentity": cursor.stream_identity,
+    })
+}
+
+fn refusal_json(refusal: &ReplicationRefusal) -> Value {
+    json!({
+        "workspaceId": refusal.workspace_id,
+        "originId": refusal.origin_id,
+        "originSeq": refusal.origin_seq,
+        "opKind": refusal.op_kind,
+        "reason": {
+            "code": refusal.reason.code(),
+            "message": refusal.reason.message(),
+        },
+    })
+}
+
+fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
+    match outcome {
+        SyncPassOutcome::Complete {
+            pushed,
+            fetched,
+            applied,
+            refused,
+            skipped,
+            pending_cursor,
+            pending_resolves,
+            refusals,
+        } => json!({
+            "status": "complete",
+            "pushed": pushed,
+            "fetched": fetched,
+            "applied": applied,
+            "refused": refused,
+            "skipped": skipped,
+            "pendingCursor": pending_cursor.as_ref().map(relay_cursor_json),
+            "pendingResolves": pending_resolves,
+            "refusals": refusals.iter().map(refusal_json).collect::<Vec<_>>(),
+        }),
+        SyncPassOutcome::CrashedAfterRemoteCommit => {
+            json!({ "status": "crashedAfterRemoteCommit" })
+        }
+        SyncPassOutcome::CrashedAfterApply {
+            applied,
+            refused,
+            skipped,
+            pending_cursor,
+            pending_resolves,
+            refusals,
+        } => json!({
+            "status": "crashedAfterApply",
+            "applied": applied,
+            "refused": refused,
+            "skipped": skipped,
+            "pendingCursor": relay_cursor_json(&pending_cursor),
+            "pendingResolves": pending_resolves,
+            "refusals": refusals.iter().map(refusal_json).collect::<Vec<_>>(),
+        }),
+    }
+}
+
+fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError> {
+    Ok(match outcome {
+        RelayOperationOutcome::Sync(outcome) => sync_outcome_json(outcome),
+        RelayOperationOutcome::CursorCommitted => json!({ "committed": true }),
+        RelayOperationOutcome::Probe(has_content) => json!({ "hasContent": has_content }),
+        RelayOperationOutcome::Claimed => json!({ "claimed": true }),
+        RelayOperationOutcome::Recovered(outcome) => json!({
+            "oldOriginId": outcome.old_origin_id,
+            "newOriginId": outcome.new_origin_id,
+            "sharedPrefixLength": outcome.shared_prefix_length,
+            "preservedOps": outcome.preserved_ops,
+        }),
+        RelayOperationOutcome::KeyEnvelopeUploaded { etag } => json!({ "etag": etag }),
+        RelayOperationOutcome::KeyEnvelopeDownloaded {
+            envelope_json,
+            etag,
+        } => json!({
+            "envelopeJson": envelope_json,
+            "etag": etag,
+        }),
+        RelayOperationOutcome::SharedChannelPulled(outcome) => json!({
+            "fetched": outcome.fetched,
+            "applied": outcome.applied,
+            "refused": outcome.refused,
+            "skipped": outcome.skipped,
+            "nextCursor": outcome.next_cursor,
+        }),
+        RelayOperationOutcome::SharedChannelPushed(outcome) => {
+            json!({ "pushed": outcome.pushed })
+        }
+        RelayOperationOutcome::ShareViewPulled(outcome) => json!({
+            "fetched": outcome.fetched,
+            "applied": outcome.applied,
+            "changedPaths": outcome.changed_paths.into_iter().map(|change| json!({
+                "path": change.path,
+                "operation": change.operation,
+                "contentKind": change.content_kind,
+            })).collect::<Vec<_>>(),
+            "pendingCursor": {
+                "kind": "shareView",
+                "shareId": outcome.pending_cursor.share_id,
+                "cursor": outcome.pending_cursor.cursor,
+            },
+        }),
+    })
 }
 
 fn validate_workspace_param(candidate: Option<&str>, resolved: &str) -> Result<(), WireError> {
@@ -8070,10 +8633,26 @@ fn map_runtime(error: RuntimeError) -> WireError {
         RuntimeError::Domain(error) => map_domain_code(error),
         RuntimeError::Collab(error) => map_collab_code(error),
         RuntimeError::Sync(error) => map_sync_code(error),
+        RuntimeError::Relay(error) => map_relay_code(error),
         RuntimeError::Search(error) => map_search_code(error),
         _ => ErrorCode::Internal,
     };
     wire(code, "workspace operation failed")
+}
+
+fn map_relay_code(error: RelayError) -> ErrorCode {
+    match error {
+        RelayError::Unauthorized => ErrorCode::AuthFailed,
+        RelayError::WorkspaceUnavailable
+        | RelayError::ShareUnavailable
+        | RelayError::KeyEnvelopeMissing
+        | RelayError::Partitioned => ErrorCode::WorkspaceUnavailable,
+        RelayError::ServerInternal
+        | RelayError::UnknownServerCode(_)
+        | RelayError::HttpStatus(_)
+        | RelayError::Local(_) => ErrorCode::Internal,
+        _ => ErrorCode::InvalidParams,
+    }
 }
 
 fn map_domain_code(error: DomainError) -> ErrorCode {
@@ -8276,6 +8855,35 @@ mod tests {
                 "localConflictId": "local-c",
                 "path": "doc.md",
                 "reason": "binary-unhydrated"
+            })
+        );
+    }
+
+    #[test]
+    fn replicated_conflict_json_surfaces_an_acked_refusal() {
+        let value = replicated_conflict_json(ApplyOutcome::Refused(
+            dohc_engine_sync::ReplicationRefusal {
+                workspace_id: "ws".to_owned(),
+                origin_id: "peer".to_owned(),
+                origin_seq: 7,
+                op_kind: "conflict.open".to_owned(),
+                reason: dohc_engine_sync::RefusalReason::InvalidInput {
+                    reason: "conflict.open must describe an unresolved conflict",
+                },
+            },
+        ));
+
+        assert_eq!(
+            value,
+            json!({
+                "replicated": true,
+                "status": "refused",
+                "workspaceId": "ws",
+                "originId": "peer",
+                "originSeq": 7,
+                "opKind": "conflict.open",
+                "code": "invalid-input",
+                "reason": "conflict.open must describe an unresolved conflict"
             })
         );
     }

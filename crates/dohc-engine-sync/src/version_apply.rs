@@ -1,3 +1,6 @@
+use std::collections::HashSet;
+
+use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_storage::{EngineStore, FaultInjector};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Deserialize;
@@ -73,7 +76,8 @@ fn apply_workspace_init(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Resul
         return Ok(());
     }
     tx.execute(
-        "INSERT INTO versioned_workspaces (workspace_id,main_version_id) VALUES (?1,'main')",
+        "INSERT OR IGNORE INTO versioned_workspaces (workspace_id,main_version_id) \
+         VALUES (?1,'main')",
         [&op.workspace_id],
     )
     .map_err(SyncError::persist)?;
@@ -164,6 +168,7 @@ fn apply_version_create(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Resul
     };
 
     if let Some(snapshots) = payload.fork_snapshots {
+        validate_shipped_snapshots(&snapshots)?;
         for snapshot in snapshots {
             insert_shipped_snapshot(tx, op, &payload.version_id, payload.created_at_ms, snapshot)?;
         }
@@ -193,6 +198,34 @@ fn apply_version_create(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Resul
         params![op.workspace_id, payload.version_id, source],
     )
     .map_err(SyncError::persist)?;
+    Ok(())
+}
+
+/// Gate shipped fork snapshots through the SAME floor the local plaintext
+/// write path uses (`validate_plaintext_storable_path`): tracked classification
+/// only — secret-classified paths never enter the ordinary blob/snapshot/alias
+/// surface — and the wire path must already BE its own canonical form, because
+/// these rows are persisted verbatim as durable keys.
+fn validate_shipped_snapshots(snapshots: &[ForkSnapshot]) -> Result<(), SyncError> {
+    let mut paths = HashSet::with_capacity(snapshots.len());
+    for snapshot in snapshots {
+        let (classification, normalized) = classify_engine_file_path_normalized(&snapshot.path);
+        if classification != PathClassification::Tracked {
+            return Err(SyncError::InvalidInput {
+                reason: "version.create shipped snapshot path must be tracked",
+            });
+        }
+        if normalized.as_deref() != Some(snapshot.path.as_str()) {
+            return Err(SyncError::InvalidInput {
+                reason: "version.create shipped snapshot path must be canonical",
+            });
+        }
+        if !paths.insert(snapshot.path.as_str()) {
+            return Err(SyncError::InvalidInput {
+                reason: "version.create shipped snapshot paths must be unique",
+            });
+        }
+    }
     Ok(())
 }
 

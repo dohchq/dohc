@@ -168,6 +168,25 @@ pub fn apply_moment_envelope(
     if envelope.op_kind != "moment.append" {
         return Err(SyncError::UnsupportedOperation);
     }
+    if let Some(version_id) = envelope
+        .payload
+        .get("versionId")
+        .and_then(serde_json::Value::as_str)
+    {
+        let exists = store.read_with(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM versions WHERE workspace_id=?1 AND version_id=?2)",
+                params![envelope.workspace_id, version_id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(SyncError::corrupt)
+        })?;
+        if !exists {
+            return Err(SyncError::InvalidInput {
+                reason: "moment.append target version is missing",
+            });
+        }
+    }
     apply_envelope_with(store, envelope, faults, apply_moment_append)
 }
 

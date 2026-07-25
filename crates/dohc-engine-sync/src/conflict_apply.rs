@@ -1532,7 +1532,7 @@ mod tests {
     }
 
     #[test]
-    fn conflict_open_rejects_terminal_status_or_resolution_before_log_and_ack() {
+    fn conflict_open_refuses_terminal_status_or_resolution_and_acks() {
         for (case, status, resolution) in [
             ("resolved-status", "resolved", None),
             ("premature-resolution", "open", Some("kept-current")),
@@ -1543,14 +1543,17 @@ mod tests {
             if let Some(resolution) = resolution {
                 payload["resolution"] = json!(resolution);
             }
-            let error = apply_conflict_envelope(
+            let outcome = apply_conflict_envelope(
                 &mut store,
                 &envelope("peer", 0, "conflict.open", payload),
                 &NoFaults,
             )
-            .expect_err("terminal conflict.open must fail");
-            assert!(matches!(error, SyncError::InvalidInput { .. }), "{case}");
-            assert_eq!(replication_counts(&store), (0, 0, 0), "{case}");
+            .expect("terminal conflict.open must be refused");
+            assert!(
+                matches!(outcome, ApplyOutcome::Refused(_)),
+                "{case}: {outcome:?}"
+            );
+            assert_eq!(replication_counts(&store), (0, 1, 1), "{case}");
         }
     }
 
@@ -1567,14 +1570,14 @@ mod tests {
             "latestMomentId": "moment-1",
             "metadata": { "origin": "sync" }
         });
-        let error = apply_conflict_envelope(
+        let outcome = apply_conflict_envelope(
             &mut store,
             &envelope("peer", 0, "conflict.open", payload),
             &NoFaults,
         )
-        .expect_err("missing text must fail");
-        assert!(matches!(error, SyncError::InvalidInput { .. }));
-        assert_eq!(replication_counts(&store), (0, 0, 0));
+        .expect("missing text must be refused");
+        assert!(matches!(outcome, ApplyOutcome::Refused(_)));
+        assert_eq!(replication_counts(&store), (0, 1, 1));
     }
 
     #[test]
@@ -1693,7 +1696,7 @@ mod tests {
     }
 
     #[test]
-    fn conflict_open_with_binary_side_is_rejected_before_log_or_ack() {
+    fn conflict_open_with_binary_side_is_refused_and_acked() {
         let (_scratch, mut store) = store();
         let binary = envelope(
             "peer",
@@ -1701,17 +1704,17 @@ mod tests {
             "conflict.open",
             open_payload("binary-c", "sync", true),
         );
-        let error = apply_conflict_envelope(&mut store, &binary, &NoFaults)
-            .expect_err("binary side must fail closed");
-        assert!(matches!(error, SyncError::InvalidInput { .. }));
-        assert_eq!(replication_counts(&store), (0, 0, 0));
+        let outcome = apply_conflict_envelope(&mut store, &binary, &NoFaults)
+            .expect("binary side must be refused");
+        assert!(matches!(outcome, ApplyOutcome::Refused(_)));
+        assert_eq!(replication_counts(&store), (0, 1, 1));
     }
 
     /// An invalid binary open that REUSES an already-open conflict id must not
-    /// slip through the duplicate-id shortcut: it is rejected fail-closed
-    /// before log/ack, not absorbed as an idempotent duplicate.
+    /// slip through the duplicate-id shortcut: it is refused without applying
+    /// the binary side, then recorded and acked.
     #[test]
-    fn duplicate_conflict_open_with_binary_side_is_rejected_before_log_or_ack() {
+    fn duplicate_conflict_open_with_binary_side_is_refused_and_acked() {
         let (_scratch, mut store) = store();
         apply_conflict_envelope(
             &mut store,
@@ -1726,7 +1729,7 @@ mod tests {
         .expect("valid text open applies");
         assert_eq!(replication_counts(&store), (1, 1, 1));
 
-        let error = apply_conflict_envelope(
+        let outcome = apply_conflict_envelope(
             &mut store,
             &envelope(
                 "peer",
@@ -1736,12 +1739,12 @@ mod tests {
             ),
             &NoFaults,
         )
-        .expect_err("invalid binary side on a duplicate id must fail closed");
-        assert!(matches!(error, SyncError::InvalidInput { .. }));
+        .expect("invalid binary side on a duplicate id must be refused");
+        assert!(matches!(outcome, ApplyOutcome::Refused(_)));
         assert_eq!(
             replication_counts(&store),
-            (1, 1, 1),
-            "the rejected duplicate must not be logged or acked"
+            (1, 2, 1),
+            "the refused duplicate must not mutate the conflict"
         );
     }
 
@@ -2293,7 +2296,7 @@ mod tests {
     /// (BINCONFLICT adds local persist capability only, not replicated binary
     /// ingestion).
     #[test]
-    fn replicated_open_with_existing_binary_side_rejected_before_ack() {
+    fn replicated_open_with_existing_binary_side_is_refused_and_acked() {
         let (_scratch, mut store) = store();
         let payload = json!({
             "id": "bin-exists",
@@ -2320,13 +2323,13 @@ mod tests {
             "chosenFrom": "current",
             "metadata": { "origin": "sync" }
         });
-        let error = apply_conflict_envelope(
+        let outcome = apply_conflict_envelope(
             &mut store,
             &envelope("peer", 0, "conflict.open", payload),
             &NoFaults,
         )
-        .expect_err("existing binary side must fail closed");
-        assert!(matches!(error, SyncError::InvalidInput { .. }));
+        .expect("existing binary side must be refused");
+        assert!(matches!(outcome, ApplyOutcome::Refused(_)));
         let counts: (i64, i64, i64) = store
             .read_with(|conn| {
                 Ok::<_, rusqlite::Error>((
@@ -2336,7 +2339,7 @@ mod tests {
                 ))
             })
             .expect("counts");
-        assert_eq!(counts, (0, 0, 0), "nothing may persist, log, or hydrate");
+        assert_eq!(counts, (0, 1, 0), "only the refusal envelope may persist");
     }
 
     /// M3 (rev2 PROBE A, INVERTED). An incoming binary DELETE (exists=0,

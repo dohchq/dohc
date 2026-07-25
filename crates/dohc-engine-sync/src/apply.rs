@@ -14,18 +14,48 @@ use crate::{ReplicationEnvelope, SyncError};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyOutcome<T> {
     Applied(T),
+    Refused(ReplicationRefusal),
     Skipped,
     Crashed { committed: bool },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplicationRefusal {
+    pub workspace_id: String,
+    pub origin_id: String,
+    pub origin_seq: i64,
+    pub op_kind: String,
+    pub reason: RefusalReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalReason {
+    InvalidInput { reason: &'static str },
+}
+
+impl RefusalReason {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidInput { .. } => "invalid-input",
+        }
+    }
+
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::InvalidInput { reason } => reason,
+        }
+    }
+}
+
 enum Admission<T> {
     Applied(T),
+    Refused(ReplicationRefusal),
     Skipped,
 }
 
-/// Validate and atomically apply one imported coordinate. `mutation` must make
-/// the domain change using the supplied transaction; the imported log row and
-/// monotonic peer ack are committed in that same transaction.
+/// Validate and atomically handle one imported coordinate. Mutation-level
+/// invalid input is rolled back to a savepoint, then journaled and acked as a
+/// refusal. Structural, ordering, storage, and hydration failures abort.
 pub fn apply_envelope_with<T>(
     store: &mut EngineStore,
     envelope: &ReplicationEnvelope,
@@ -78,7 +108,32 @@ pub fn apply_envelope_with<T>(
             ack_tx(tx, &envelope.workspace_id, &envelope.origin_id, envelope.origin_seq)?;
             return Ok(Admission::Skipped);
         }
-        let value = mutation(tx, envelope)?;
+        tx.execute_batch("SAVEPOINT dohc_replication_mutation")
+            .map_err(SyncError::persist)?;
+        let admission = match mutation(tx, envelope) {
+            Ok(value) => {
+                tx.execute_batch("RELEASE dohc_replication_mutation")
+                    .map_err(SyncError::persist)?;
+                Admission::Applied(value)
+            }
+            Err(error) => {
+                let Some(reason) = refusal_reason(&error) else {
+                    return Err(error);
+                };
+                tx.execute_batch(
+                    "ROLLBACK TO dohc_replication_mutation; \
+                     RELEASE dohc_replication_mutation",
+                )
+                .map_err(SyncError::persist)?;
+                Admission::Refused(ReplicationRefusal {
+                    workspace_id: envelope.workspace_id.clone(),
+                    origin_id: envelope.origin_id.clone(),
+                    origin_seq: envelope.origin_seq,
+                    op_kind: envelope.op_kind.clone(),
+                    reason,
+                })
+            }
+        };
         tx.execute(
             "INSERT INTO replication_log \
              (workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, imported) \
@@ -97,14 +152,24 @@ pub fn apply_envelope_with<T>(
         if crashes(faults, FaultPoint::SyncBeforeApplyCommit) {
             return Err(SyncError::FaultCrash);
         }
-        Ok(Admission::Applied(value))
+        Ok(admission)
     });
     match result {
         Ok(TxnOutcome::Committed(Admission::Applied(value))) => Ok(ApplyOutcome::Applied(value)),
+        Ok(TxnOutcome::Committed(Admission::Refused(refusal))) => {
+            Ok(ApplyOutcome::Refused(refusal))
+        }
         Ok(TxnOutcome::Committed(Admission::Skipped)) => Ok(ApplyOutcome::Skipped),
         Ok(TxnOutcome::Crashed { committed }) => Ok(ApplyOutcome::Crashed { committed }),
         Err(SyncError::FaultCrash) => Ok(ApplyOutcome::Crashed { committed: false }),
         Err(err) => Err(err),
+    }
+}
+
+const fn refusal_reason(error: &SyncError) -> Option<RefusalReason> {
+    match error {
+        SyncError::InvalidInput { reason } => Some(RefusalReason::InvalidInput { reason }),
+        _ => None,
     }
 }
 
@@ -947,7 +1012,7 @@ fn apply_attachment(
                     && !has_projection_control_char(value)
             })
             && p.heading_occurrence
-                .is_some_and(|value| (0..=9_007_199_254_740_991).contains(&value)));
+                .is_some_and(|value| (0..=crate::MAX_WIRE_INTEGER).contains(&value)));
     if p.attachment_id.is_empty()
         || p.thread_id.is_empty()
         || p.message_id.is_empty()

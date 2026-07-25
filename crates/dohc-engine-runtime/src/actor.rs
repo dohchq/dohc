@@ -33,7 +33,7 @@ use crate::search::{
     upsert_file_search_index,
 };
 use dohc_engine_collab::{
-    AppendOutcome, CloseOutcome, ContentKind, DocKey, Projection, Regime, Ydoc,
+    AppendOutcome, CloseOutcome, ContentKind, DocKey, LeaseRegistry, Projection, Regime, Ydoc,
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -73,8 +73,12 @@ use dohc_engine_storage::{
     Preimage, StorageError, TxnOutcome, WriteOutcome,
 };
 use dohc_engine_sync::{
-    ApplyOutcome, ConflictApplyResult, ReplicationEnvelope, apply_conflict_envelope,
+    ApplyOutcome, ClaimRequest, ConflictApplyResult, KeyEnvelopeDownloadRequest,
+    KeyEnvelopeRequest, ProbeRequest, RecoverResponse, RelayCursor, RelaySyncClient,
+    ReplicationEnvelope, ShareCursor, ShareViewPullOutcome, SharedChannelPullOutcome,
+    SharedChannelPushOutcome, SyncPassOutcome, apply_conflict_envelope, read_sync_identity,
 };
+use dohc_engine_sync_http::HttpRelayTransport;
 use rusqlite::{OptionalExtension, params};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -207,6 +211,87 @@ pub struct YdocSettlement {
     pub markdown: String,
     pub sha256: String,
     pub projection: Projection,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct RelayConfiguration {
+    pub base_url: String,
+    pub bearer_token: String,
+}
+
+impl std::fmt::Debug for RelayConfiguration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RelayConfiguration")
+            .field("base_url", &self.base_url)
+            .field("bearer_token", &"[redacted]")
+            .finish()
+    }
+}
+
+#[derive(Debug)]
+pub enum RelayOperation {
+    Push {
+        workspace_id: String,
+    },
+    Pull {
+        workspace_id: String,
+    },
+    CommitCursor {
+        workspace_id: String,
+        cursor: RelayCursor,
+    },
+    Probe {
+        workspace_id: String,
+    },
+    Claim {
+        workspace_id: String,
+    },
+    RecoverOrigin {
+        workspace_id: String,
+        new_origin_id: String,
+    },
+    UploadKeyEnvelope {
+        workspace_id: String,
+        envelope_json: String,
+        if_match: Option<String>,
+    },
+    DownloadKeyEnvelope {
+        workspace_id: String,
+    },
+    PullSharedChannel {
+        workspace_id: String,
+        share_id: String,
+        channel_wire_id: String,
+    },
+    PushSharedChannel {
+        workspace_id: String,
+        share_id: String,
+        channel_wire_id: String,
+    },
+    PullShareView {
+        workspace_id: String,
+        share_id: String,
+        path_prefix: String,
+    },
+    CommitShareViewCursor {
+        workspace_id: String,
+        cursor: ShareCursor,
+    },
+}
+
+#[derive(Debug)]
+pub enum RelayOperationOutcome {
+    Sync(SyncPassOutcome),
+    CursorCommitted,
+    Probe(bool),
+    Claimed,
+    Recovered(RecoverResponse),
+    KeyEnvelopeUploaded { etag: String },
+    KeyEnvelopeDownloaded { envelope_json: String, etag: String },
+    SharedChannelPulled(SharedChannelPullOutcome),
+    SharedChannelPushed(SharedChannelPushOutcome),
+    ShareViewPulled(ShareViewPullOutcome),
 }
 
 /// Daemon-owned sink for identities written by settlement. Recording before
@@ -1075,6 +1160,13 @@ enum Command {
         max_attempts: i64,
         now_ms: i64,
         reply: oneshot::Sender<Result<Vec<String>, RuntimeError>>,
+    },
+    Relay {
+        configuration: RelayConfiguration,
+        operation: RelayOperation,
+        leases: LeaseRegistry,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<RelayOperationOutcome, RuntimeError>>,
     },
     /// Break the loop and release the connection. Carries no reply: the caller
     /// joins the worker, and the join is the completion signal (so `close`
@@ -4057,6 +4149,27 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    pub async fn relay(
+        &self,
+        configuration: RelayConfiguration,
+        operation: RelayOperation,
+        leases: LeaseRegistry,
+        token: CancellationToken,
+    ) -> Result<RelayOperationOutcome, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::Relay {
+                configuration,
+                operation,
+                leases,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
     /// Run a long operation as a sequence of bounded units, cancellable at each
     /// between-unit boundary via `token`. Returns how many units committed.
     ///
@@ -4244,6 +4357,128 @@ fn secret_plaintext_for_job(
             &coordinates.path,
         )
         .map_err(RuntimeError::from)
+}
+
+fn execute_relay_operation(
+    store: &mut EngineStore,
+    configuration: RelayConfiguration,
+    operation: RelayOperation,
+    leases: &LeaseRegistry,
+) -> Result<RelayOperationOutcome, RuntimeError> {
+    let transport = HttpRelayTransport::new(configuration.base_url, configuration.bearer_token)?;
+    let client = RelaySyncClient::new(transport);
+    match operation {
+        RelayOperation::Push { workspace_id } => client
+            .push_workspace(store, &workspace_id, &NoFaults)
+            .map(RelayOperationOutcome::Sync)
+            .map_err(RuntimeError::from),
+        RelayOperation::Pull { workspace_id } => client
+            .pull_chat_workspace(store, &workspace_id, &NoFaults, leases)
+            .map(RelayOperationOutcome::Sync)
+            .map_err(RuntimeError::from),
+        RelayOperation::CommitCursor {
+            workspace_id,
+            cursor,
+        } => match client.commit_pull_cursor(store, &workspace_id, &cursor, &NoFaults)? {
+            TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted),
+            TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+        },
+        RelayOperation::Probe { workspace_id } => {
+            let identity = read_sync_identity(store, &workspace_id)?
+                .ok_or(dohc_engine_sync::RelayError::InvalidResponse)?;
+            client
+                .probe(ProbeRequest {
+                    workspace_id,
+                    replication_epoch: identity.replication_epoch,
+                    stream_identity: identity.stream_identity,
+                })
+                .map(|response| RelayOperationOutcome::Probe(response.has_content))
+                .map_err(RuntimeError::from)
+        }
+        RelayOperation::Claim { workspace_id } => {
+            let identity = read_sync_identity(store, &workspace_id)?
+                .ok_or(dohc_engine_sync::RelayError::InvalidResponse)?;
+            client.claim_workspace(ClaimRequest {
+                workspace_id,
+                replication_epoch: identity.replication_epoch,
+                stream_identity: identity.stream_identity,
+            })?;
+            Ok(RelayOperationOutcome::Claimed)
+        }
+        RelayOperation::RecoverOrigin {
+            workspace_id,
+            new_origin_id,
+        } => client
+            .recover_origin(store, &workspace_id, &new_origin_id, &NoFaults)
+            .map(RelayOperationOutcome::Recovered)
+            .map_err(RuntimeError::from),
+        RelayOperation::UploadKeyEnvelope {
+            workspace_id,
+            envelope_json,
+            if_match,
+        } => {
+            let identity = read_sync_identity(store, &workspace_id)?
+                .ok_or(dohc_engine_sync::RelayError::InvalidResponse)?;
+            client
+                .upload_key_envelope(KeyEnvelopeRequest {
+                    workspace_id,
+                    replication_epoch: identity.replication_epoch,
+                    stream_identity: identity.stream_identity,
+                    envelope_json,
+                    if_match,
+                })
+                .map(|response| RelayOperationOutcome::KeyEnvelopeUploaded {
+                    etag: response.etag,
+                })
+                .map_err(RuntimeError::from)
+        }
+        RelayOperation::DownloadKeyEnvelope { workspace_id } => {
+            let identity = read_sync_identity(store, &workspace_id)?
+                .ok_or(dohc_engine_sync::RelayError::InvalidResponse)?;
+            client
+                .download_key_envelope(KeyEnvelopeDownloadRequest {
+                    workspace_id,
+                    replication_epoch: identity.replication_epoch,
+                    stream_identity: identity.stream_identity,
+                })
+                .map(|response| RelayOperationOutcome::KeyEnvelopeDownloaded {
+                    envelope_json: response.envelope_json,
+                    etag: response.etag,
+                })
+                .map_err(RuntimeError::from)
+        }
+        RelayOperation::PullSharedChannel {
+            workspace_id,
+            share_id,
+            channel_wire_id,
+        } => client
+            .pull_shared_channel(store, &workspace_id, &share_id, &channel_wire_id, &NoFaults)
+            .map(RelayOperationOutcome::SharedChannelPulled)
+            .map_err(RuntimeError::from),
+        RelayOperation::PushSharedChannel {
+            workspace_id,
+            share_id,
+            channel_wire_id,
+        } => client
+            .push_shared_channel(store, &workspace_id, &share_id, &channel_wire_id, &NoFaults)
+            .map(RelayOperationOutcome::SharedChannelPushed)
+            .map_err(RuntimeError::from),
+        RelayOperation::PullShareView {
+            workspace_id,
+            share_id,
+            path_prefix,
+        } => client
+            .pull_share_view(store, &workspace_id, &share_id, &path_prefix, &NoFaults)
+            .map(RelayOperationOutcome::ShareViewPulled)
+            .map_err(RuntimeError::from),
+        RelayOperation::CommitShareViewCursor {
+            workspace_id,
+            cursor,
+        } => match client.commit_share_view_cursor(store, &workspace_id, &cursor, &NoFaults)? {
+            TxnOutcome::Committed(()) => Ok(RelayOperationOutcome::CursorCommitted),
+            TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+        },
+    }
 }
 
 fn worker_main(
@@ -6317,6 +6552,20 @@ fn worker_main(
                             )
                         })
                         .map_err(RuntimeError::from)
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::Relay {
+                configuration,
+                operation,
+                leases,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    execute_relay_operation(&mut store, configuration, operation, &leases)
                 };
                 let _ = reply.send(outcome);
             }

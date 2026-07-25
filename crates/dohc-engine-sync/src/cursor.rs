@@ -24,6 +24,13 @@ pub struct SharedPeerPosition {
     pub dense_seq: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareCursor {
+    pub kind: CursorKind,
+    pub share_id: String,
+    pub cursor: i64,
+}
+
 pub fn read_relay_cursor(
     store: &EngineStore,
     workspace_id: &str,
@@ -149,6 +156,75 @@ pub fn read_shared_peer_position(
     })
 }
 
+pub fn read_share_cursor(
+    store: &EngineStore,
+    workspace_id: &str,
+    share_id: &str,
+    kind: CursorKind,
+) -> Result<i64, SyncError> {
+    bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
+    bounded(share_id, "share_id must be non-empty and bounded")?;
+    let table = share_cursor_table(kind)?;
+    store.read_with(|conn| {
+        let sql = format!("SELECT cursor FROM {table} WHERE workspace_id=?1 AND share_id=?2");
+        let value = conn
+            .query_row(&sql, params![workspace_id, share_id], |row| {
+                row.get::<_, String>(0)
+            })
+            .optional()
+            .map_err(SyncError::corrupt)?;
+        value.map_or(Ok(0), |cursor| parse_share_cursor(&cursor))
+    })
+}
+
+pub fn commit_share_cursor(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    cursor: &ShareCursor,
+    faults: &dyn FaultInjector,
+) -> Result<TxnOutcome<()>, SyncError> {
+    bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
+    bounded(&cursor.share_id, "share_id must be non-empty and bounded")?;
+    if !(0..=crate::MAX_WIRE_INTEGER).contains(&cursor.cursor) {
+        return Err(SyncError::InvalidInput {
+            reason: "cursor is outside the wire integer range",
+        });
+    }
+    let table = share_cursor_table(cursor.kind)?;
+    store.write_with(faults, |tx| {
+        let sql = format!(
+            "INSERT INTO {table} (workspace_id,share_id,cursor) VALUES (?1,?2,?3) \
+             ON CONFLICT(workspace_id,share_id) DO UPDATE SET cursor=excluded.cursor"
+        );
+        tx.execute(
+            &sql,
+            params![workspace_id, cursor.share_id, cursor.cursor.to_string()],
+        )
+        .map_err(SyncError::persist)?;
+        Ok::<(), SyncError>(())
+    })
+}
+
+fn share_cursor_table(kind: CursorKind) -> Result<&'static str, SyncError> {
+    match kind {
+        CursorKind::SharedChannel => Ok("shared_channel_cursors"),
+        CursorKind::ShareView => Ok("share_view_cursors"),
+        CursorKind::RelayFetch => Err(SyncError::InvalidInput {
+            reason: "relay cursor cannot use a share cursor table",
+        }),
+    }
+}
+
+fn parse_share_cursor(value: &str) -> Result<i64, SyncError> {
+    value
+        .parse::<i64>()
+        .ok()
+        .filter(|cursor| (0..=crate::MAX_WIRE_INTEGER).contains(cursor))
+        .ok_or(SyncError::InvalidInput {
+            reason: "persisted share cursor is invalid",
+        })
+}
+
 pub(crate) fn advance_shared_peer_tx(
     tx: &rusqlite::Transaction<'_>,
     workspace_id: &str,
@@ -179,14 +255,9 @@ pub(crate) fn advance_shared_peer_tx(
             reason: "shared source sequence is invalid",
         });
     }
-    let max_dense: i64 = tx
-        .query_row(
-            "SELECT COALESCE(MAX(dense_seq),-1) FROM shared_channel_peers WHERE workspace_id=?1 AND share_id=?2",
-            params![workspace_id, share_id],
-            |row| row.get(0),
-        )
-        .map_err(SyncError::corrupt)?;
-    let dense = max_dense
+    let dense = current
+        .as_ref()
+        .map_or(-1, |position| position.dense_seq)
         .checked_add(1)
         .ok_or(SyncError::CoordinateDiverged)?;
     tx.execute(

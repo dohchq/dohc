@@ -32,6 +32,10 @@ pub enum RuntimeError {
     #[error("synchronization error: {0}")]
     Sync(#[from] dohc_engine_sync::SyncError),
 
+    /// A relay request or relay-client state transition failed.
+    #[error("relay error: {0}")]
+    Relay(#[from] dohc_engine_sync::RelayError),
+
     /// An index-backed search failed on the actor-owned connection.
     #[error("search error: {0}")]
     Search(#[from] crate::search::SearchError),
@@ -84,6 +88,7 @@ impl RuntimeError {
             RuntimeError::Domain(err) => err.code(),
             RuntimeError::Collab(err) => err.code(),
             RuntimeError::Sync(err) => err.code(),
+            RuntimeError::Relay(_) => "relay-failed",
             RuntimeError::Search(err) => err.code(),
             RuntimeError::Materialize(_) => "materialize-failed",
             RuntimeError::ThreadSpawn(_) => "thread-spawn-failed",

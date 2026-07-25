@@ -25,13 +25,16 @@ mod share;
 mod version_apply;
 mod ydoc_apply;
 
-pub use apply::{ApplyOutcome, apply_chat_envelope, apply_envelope_with};
+pub use apply::{
+    ApplyOutcome, RefusalReason, ReplicationRefusal, apply_chat_envelope, apply_envelope_with,
+};
 pub use conflict_apply::{
     ConflictApplyResult, PendingResolve, PendingResolveReason, apply_conflict_envelope,
 };
 pub use cursor::{
-    CursorKind, RelayCursor, SharedPeerPosition, commit_relay_cursor, read_pushed_seq,
-    read_relay_cursor, read_shared_peer_position,
+    CursorKind, RelayCursor, ShareCursor, SharedPeerPosition, commit_relay_cursor,
+    commit_share_cursor, read_pushed_seq, read_relay_cursor, read_share_cursor,
+    read_shared_peer_position,
 };
 pub use error::{RelayError, SyncError};
 pub use hydration::{BlobContent, BlobHydration, hydrate_blob_content};
@@ -50,11 +53,12 @@ pub use relay::{
     BlobUploadRequest, ClaimRequest, ClaimResponse, EpochRequest, EpochResponse,
     KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
     KeyEnvelopeResponse, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
-    PushResponse, RelaySyncClient, RelayTransport, ShareBlobRequest, ShareReplicationEnvelope,
-    ShareViewRequest, ShareViewResponse, SharedChannelRequest, SharedChannelResponse,
-    SyncPassOutcome,
+    PushResponse, RecoverResponse, RelaySyncClient, RelayTransport, ShareBlobRequest,
+    ShareReplicationEnvelope, ShareViewChangedPath, ShareViewPullOutcome, ShareViewRequest,
+    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRequest,
+    SharedChannelResponse, SyncPassOutcome,
 };
-pub use router::apply_replication_envelope;
+pub use router::{RoutedApply, apply_replication_envelope};
 pub use secret_apply::apply_secret_envelope;
 pub use share::{ShareBoundary, ShareSurface, apply_shared_envelope};
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};

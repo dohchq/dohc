@@ -1,3 +1,4 @@
+use dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES;
 use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, hex_sha256};
 use rusqlite::{OptionalExtension, params};
 
@@ -56,7 +57,7 @@ pub fn hydrate_blob_content(
                 }
             }
             BlobContent::Binary(bytes) => {
-                if bytes.len() > 5 * 1024 * 1024 {
+                if bytes.len() > MAX_CAPTURE_BINARY_FILE_BYTES {
                     return Err(SyncError::BlobInvalid);
                 }
                 let existing: Option<(i64, Vec<u8>)> = tx

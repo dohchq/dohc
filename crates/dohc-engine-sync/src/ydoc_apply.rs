@@ -10,7 +10,9 @@ use dohc_engine_storage::{EngineStore, FaultInjector, Preimage, TxnOutcome};
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 
-use crate::{ApplyOutcome, PathClass, ReplicationEnvelope, SyncError};
+use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized};
+
+use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +48,10 @@ impl LeaseProbe for dohc_engine_collab::LeaseRegistry {
     }
 }
 
+/// Direct-applier diagnostic result. A deferred update needs no caller action:
+/// its coordinate is durably parked with the ack and is replayed by
+/// [`drain_deferred_ydoc_for_key`] on lease teardown/open or before the next
+/// non-leased update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YdocApplyResult {
     pub deferred: bool,
@@ -364,25 +370,44 @@ pub fn apply_ydoc_envelope(
     if envelope.op_kind != "ydoc.update" {
         return Err(SyncError::UnsupportedOperation);
     }
-    let payload: YdocUpdatePayload =
-        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
-            reason: "ydoc.update payload is malformed",
-        })?;
-    if crate::classify_share_path(&payload.path) != PathClass::Tracked
+    let payload: YdocUpdatePayload = match serde_json::from_value(envelope.payload.clone()) {
+        Ok(payload) => payload,
+        Err(_) => {
+            return refuse_ydoc(store, envelope, faults, "ydoc.update payload is malformed");
+        }
+    };
+    // Gate on the SAME floor the projection sink applies
+    // (`validate_plaintext_storable_path`) rather than R10's narrow
+    // share-boundary classifier, which misses reserved 8.3 aliases (`dohc~1`
+    // aliases `.dohc`) and dots-and-spaces segments. The path is persisted as a
+    // durable alias key, so it must already be canonical.
+    let (classification, normalized) = classify_engine_file_path_normalized(&payload.path);
+    if classification != PathClassification::Tracked
+        || normalized.as_deref() != Some(payload.path.as_str())
         || !matches!(payload.content_kind.as_str(), "plaintext" | "richdoc")
     {
-        return Err(SyncError::InvalidInput {
-            reason: "ydoc.update path or content kind is invalid",
-        });
+        return refuse_ydoc(
+            store,
+            envelope,
+            faults,
+            "ydoc.update path or content kind is invalid",
+        );
     }
-    let key = DocKey::new(
+    let key = match DocKey::new(
         envelope.workspace_id.clone(),
         payload.version_id,
         payload.object_id,
-    )
-    .map_err(|_| SyncError::InvalidInput {
-        reason: "ydoc.update coordinates are invalid",
-    })?;
+    ) {
+        Ok(key) => key,
+        Err(_) => {
+            return refuse_ydoc(
+                store,
+                envelope,
+                faults,
+                "ydoc.update coordinates are invalid",
+            );
+        }
+    };
     // The blob is validated BEFORE any ack path — including the live-lease
     // defer. A defer acks the coordinate with the imported log as the durable
     // queue; if the referenced blob were missing or tampered, the peer cursor
@@ -403,11 +428,12 @@ pub fn apply_ydoc_envelope(
         return Err(SyncError::BlobInvalid);
     }
     if leases.is_live(&key) {
-        // FULL durable validation BEFORE the ack: byte caps, abort-safe
+        // FULL durable validation BEFORE admission: byte caps, abort-safe
         // prevalidation, AND the replay-parity gate — replayed on top of the
         // ALREADY-QUEUED deferred predecessors, because a later update can
         // only become invalid after they apply, and the drain will apply
-        // them first. Anything the drain would refuse must stay unacked.
+        // them first. Anything the drain would reject becomes a refusal, not a
+        // deferred update.
         let queued: Vec<Vec<u8>> = {
             let mut queued = Vec::new();
             let rows: Vec<String> = store.read_with(|conn| {
@@ -438,10 +464,16 @@ pub fn apply_ydoc_envelope(
             }
             queued
         };
-        dohc_engine_collab::validate_remote_update_with_pending(store, &key, &queued, &bytes)
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc.update bytes fail durable validation",
-            })?;
+        if dohc_engine_collab::validate_remote_update_with_pending(store, &key, &queued, &bytes)
+            .is_err()
+        {
+            return refuse_ydoc(
+                store,
+                envelope,
+                faults,
+                "ydoc.update bytes fail durable validation",
+            );
+        }
         // A deferred coordinate is ACKED — it must be drainable later, which
         // the close/open drains only do for REPLICATED markers. A live lease
         // over an absent or local-only lineage cannot accept a remote update
@@ -452,9 +484,12 @@ pub fn apply_ydoc_envelope(
                 reason: "ydoc marker read failed",
             })?;
         if !marker.is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated) {
-            return Err(SyncError::InvalidInput {
-                reason: "live lease on a non-replicated lineage",
-            });
+            return refuse_ydoc(
+                store,
+                envelope,
+                faults,
+                "live lease on a non-replicated lineage",
+            );
         }
         let deferred_key = key.clone();
         return crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
@@ -493,9 +528,14 @@ pub fn apply_ydoc_envelope(
         let kind = dohc_engine_collab::ContentKind::parse(&payload.content_kind);
         let sv_bytes = {
             let doc = dohc_engine_collab::Ydoc::wire();
-            doc.apply(&bytes).map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc.update base bytes fail validation",
-            })?;
+            if doc.apply(&bytes).is_err() {
+                return refuse_ydoc(
+                    store,
+                    envelope,
+                    faults,
+                    "ydoc.update base bytes fail validation",
+                );
+            }
             doc.encode_state_vector()
         };
         let claim_key = key.clone();
@@ -513,10 +553,14 @@ pub fn apply_ydoc_envelope(
                 Some(persisted) => persisted.doc,
                 None => dohc_engine_collab::Ydoc::wire(),
             };
-            doc.apply(&claim_bytes)
-                .map_err(|_| SyncError::InvalidInput {
-                    reason: "ydoc.update base bytes fail validation",
-                })?;
+            if doc.apply(&claim_bytes).is_err() {
+                return refuse_ydoc(
+                    store,
+                    envelope,
+                    faults,
+                    "ydoc.update base bytes fail validation",
+                );
+            }
             doc
         };
         let base_path = payload.path.clone();
@@ -571,19 +615,27 @@ pub fn apply_ydoc_envelope(
     // the in-tx apply of the same bytes yields the same converged state, and
     // a dedup changes nothing).
     let projected_doc = {
-        let persisted = dohc_engine_collab::load_persisted(store, &key)
-            .map_err(|_| SyncError::InvalidInput {
+        let Some(persisted) = dohc_engine_collab::load_persisted(store, &key).map_err(|_| {
+            SyncError::InvalidInput {
                 reason: "ydoc lineage load failed",
-            })?
-            .ok_or(SyncError::InvalidInput {
-                reason: "ydoc.update targets an absent lineage",
-            })?;
-        persisted
-            .doc
-            .apply(&bytes)
-            .map_err(|_| SyncError::InvalidInput {
-                reason: "ydoc.update bytes fail durable validation",
-            })?;
+            }
+        })?
+        else {
+            return refuse_ydoc(
+                store,
+                envelope,
+                faults,
+                "ydoc.update targets an absent lineage",
+            );
+        };
+        if persisted.doc.apply(&bytes).is_err() {
+            return refuse_ydoc(
+                store,
+                envelope,
+                faults,
+                "ydoc.update bytes fail durable validation",
+            );
+        }
         persisted
     };
     let update_path = payload.path.clone();
@@ -636,7 +688,19 @@ pub fn apply_ydoc_envelope(
             deferred: false,
             reason: None,
         }),
+        ApplyOutcome::Refused(refusal) => ApplyOutcome::Refused(refusal),
         ApplyOutcome::Skipped => ApplyOutcome::Skipped,
         ApplyOutcome::Crashed { committed } => ApplyOutcome::Crashed { committed },
+    })
+}
+
+fn refuse_ydoc(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+    reason: &'static str,
+) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
+    crate::apply_envelope_with(store, envelope, faults, move |_tx, _op| {
+        Err(SyncError::InvalidInput { reason })
     })
 }
