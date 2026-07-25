@@ -347,9 +347,9 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // shadow-clone migration (ordinal 8), binary conflict sides (ordinal 9),
     // binary heads (ordinal 10), the path-aliases reverse-alias index
     // (ordinal 11), the deferred Y.Doc coordinates table (ordinal 12), the
-    // request-ledger kind discriminator (ordinal 13), and secret capture
-    // ownership (ordinal 14).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 15);
+    // request-ledger kind discriminator (ordinal 13), secret capture ownership
+    // (ordinal 14), and moment payload provenance (ordinal 15).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 16);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(

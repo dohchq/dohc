@@ -1085,10 +1085,16 @@ pub fn persist_binary_head_in_tx(
              recorded_at_ms, operation, after_blob_sha256, before_present,
              before_blob_sha256, before_latest_moment_id, metadata_origin, author_json,
              sync_record_only, after_content_kind, after_binary_sha256,
-             before_content_kind, before_binary_sha256
+             before_content_kind, before_binary_sha256,
+             payload_before_path, payload_before_content_kind,
+             payload_before_blob_sha256,
+             payload_after_path, payload_after_content_kind,
+             payload_after_blob_sha256
          ) VALUES (
              ?1, ?2, ?3, ?4, ?5, ?6, ?7, 'write', NULL, ?8,
-             ?9, ?10, ?11, ?12, NULL, 'binary', ?13, ?14, ?15
+             ?9, ?10, ?11, ?12, NULL, 'binary', ?13, ?14, ?15,
+             CASE WHEN ?8 = 2 THEN ?6 END, CASE WHEN ?8 = 2 THEN ?14 END,
+             CASE ?14 WHEN 'binary' THEN ?15 ELSE ?9 END, ?6, 'binary', ?13
          )",
         params![
             head.workspace_id,
