@@ -356,15 +356,33 @@ same process the TS oracle trusts to DERIVE author/owner identity before
 touching the store (main.ts:5215-5225 derives authorship; the renderer
 payload carries no identity fields, bridgeContract.ts:971-977; the relay
 separately verifies authorUserId === actor.userId for replicated ops,
-linkedChatStore.ts:4492-4498). The daemon transport is inherited STDIO
-pipes, not a listener socket: another process cannot connect to a namespace
-entry because none exists, and the renderer never reaches the pipes. Chat RPC
-identity params (authorUserId/ownerUserId) therefore sit in the SAME trust
-position as the oracle's function arguments. PR #241 (IN REVIEW, not merged)
-hardens the handshake token comparison; R13b-rest still owns generating a
-real per-launch random token when it wires lifecycle. A future
-multi-principal transport would require a fresh recorded authorization
-decision and platform peer-identity design.
+linkedChatStore.ts:4492-4498). Chat RPC identity params
+(authorUserId/ownerUserId) therefore sit in the SAME trust position as
+the oracle's function arguments.
+
+TRANSPORT CORRECTION (R15-6): earlier rounds called this a "socket". It
+is NOT one. The daemon is a STDIO CHILD PROCESS — it reads fd 0 and
+writes fd 1, both inherited pipes handed to it by the desktop main
+process at spawn. There is no listener, no bind, no filesystem path, and
+no namespace another process can connect to. `run_transport` is generic
+over AsyncRead/AsyncWrite and a socket transport is possible, but nothing
+constructs one.
+
+That distinction decides the R15-6 identity question. Ice's decision #5
+(DECISIONS.md) was made because OTHER OS USER ACCOUNTS may share the
+host. Against exactly that threat, inherited pipes are already
+unreachable — another user cannot open a pipe they did not inherit.
+ADDING a unix socket or named pipe would INCREASE the attack surface it
+was meant to reduce, because it creates a namespace entry that must then
+be defended with peer-uid checks or a DACL. So the posture is: KEEP
+STDIO, and harden what the handshake actually does — a constant-time
+token comparison (landed), and a real per-launch random token generated
+by the desktop (owned by R13b-rest's daemon-lifecycle work, since that is
+where the spawn lives).
+
+Per-user authorization becomes meaningful only if the daemon ever accepts
+multi-principal clients — which is a socket decision, not a token one,
+and must be recorded in DECISIONS.md before anyone builds it.
 
 CROSS-ENGINE OBLIGATION (declined-with-citation at #218 round 12; owned
 by RPC-E/sync, recorded so it is owned rather than lost): well-known

@@ -89,6 +89,13 @@ ENFORCED, not merely documented (sharing and per-user socket auth stay OFF).
 dogfood window (RECOMMENDED for the MVP); (b) land the dirfd/`openat2` + `renameat`
 closure before the flip.** Closure is REQUIRED before any shared-secret model ships.
 
+ICE CHOSE (b) — see DECISIONS.md. Two corrections recorded after that choice:
+the "per-user socket auth stays OFF" clause above is WITHDRAWN because there is
+no socket (the daemon reads inherited stdio pipes; see the transport correction
+in RPC_GAP.md and the finding under decision 5 in DECISIONS.md), and the TOCTOU
+closure itself is owned by R15-5 (#237) — it is NOT closed by the docs PR that
+recorded these corrections.
+
 ### 6. Cutover scope + THE GO/NO-GO ITSELF
 - **RPC-E** (relay/replication) and **R13b-rest** (desktop-adapter remainder):
   in-scope for cutover, or explicitly deferred post-cutover?

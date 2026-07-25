@@ -169,11 +169,21 @@ post-R15 (the reset wipes pre-existing rows).
   oracle's per-file skip; decrypt/key failures are tolerated (skip, leave pending)
   — deliberately broader than the oracle (open-replay is crash-recovery, not a user
   action), while KEEPING fail-closed (no plaintext from unauthenticated bytes).
-- **Secret rename-TOCTOU — baseline residual; real closure #237 IN REVIEW** (D2,
-  BEHAVIOR_DELTA.md): the merged baseline's path-based ancestor checks are not
-  fd-relative. Ice rejected the single-user assumption because other OS users may
-  share the host and chose the descriptor/handle-based closure. #237 implements
-  that choice but is not merged; the residual remains open until it lands.
+- **Secret rename-TOCTOU — ACCEPTED RESIDUAL, ENFORCEMENT CUTOVER-GATING** (D2,
+  BEHAVIOR_DELTA.md): path-based ancestor checks are not fd-relative; a potential
+  secret-disclosure/overwrite risk accepted ONLY under the single-user/local-first/
+  owner-only/no-sharing assumption. That assumption must be ENFORCED, not just
+  documented: sharing/multi-user secret access must stay OFF while the residual is
+  open. RESOLUTION REQUIRED at R15: either land the dirfd/openat2 + renameat closure
+  before the cutover, OR confirm + enforce (in code/config, not prose) that no
+  shared/ACL-partitioned secret path is reachable.
+  TRANSPORT CORRECTION (this PR): the "per-user socket auth" clause that used to
+  ride along with this item is WITHDRAWN, not deferred — there is no socket. The
+  daemon reads inherited stdio pipes, which another OS user cannot open, so a
+  socket ACL was never the control protecting this boundary (RPC_GAP.md). The
+  TOCTOU half of this item is UNCHANGED and STILL GATING here; R15-5 (#237) owns
+  its closure and owns flipping this entry when that lands. Closure is REQUIRED before any
+  shared-secret model ships regardless.
 - **Secret re-materialization on mid-session version SWITCH — CUTOVER-GATING gap**
   (D2, RPC_GAP): the daemon lacks the oracle's switch-time secret rebuild
   (SetActiveVersion is DB-only; only open-replay materializes). Open-time projection
@@ -185,35 +195,29 @@ post-R15 (the reset wipes pre-existing rows).
   explicitly accept + surface the stale-until-reopen behavior. Non-secret files
   share the same switch-materialization dependency on the desktop/daemon layer, so
   this is a general version-switch-projection obligation, tracked cutover-gating.
-- **PR #239 upper-layer deferrals — R13b work, not closed by the materializer:**
-  (1) quiesce every live Y.Doc session before switching so an old-version session
-  cannot settle across the switch, and (2) reconcile unreconciled disk edits into
-  the version being left before changing the active version. `capture.flush` is
-  NOT sufficient for (2): Rust's `reconcile_if_dirty` returns `Converged` without
-  scanning when nothing is marked dirty, while the TypeScript oracle always scans
-  and hard-fails the switch on a degraded scan. The capture driver also resolves
-  the active version at apply time, so a reconcile apply can straddle the
-  set-active transaction and target the wrong side of the switch unless R13b
-  quiesces and sequences it.
-- **RPC-E review state — NOT LANDED:** the nine chat replicated-path validation
-  gaps (#244) and the refuse-and-ack disposition (#245) are both in review,
-  stacked on RPC-E-1. Neither may be described as merged behavior yet.
-- **Identity posture / daemon auth (#241 IN REVIEW):** the daemon's DOP1 client
-  is the desktop main process over inherited stdio pipes, not a listener socket.
-  #241 hardens the handshake token comparison; R13b-rest still owns generating a
-  real per-launch random token when it wires daemon lifecycle. Do not describe
-  #241 as merged yet.
+- **Identity posture** (recorded across shards): the daemon's DOP1 client IS the
+  desktop main process; per-user socket auth is R15+ scope. CORRECTED at
+  R15-6: the transport is STDIO (inherited pipes), not a socket — see the
+  transport correction in RPC_GAP.md. Another OS user cannot reach an
+  inherited pipe, so the honest hardening is a constant-time token compare
+  (landed) plus a real per-launch token, not a socket ACL.
 
-### 6.CUTOVER-GATING — Ice decided the path; implementation still must land
-These are correctness/security items, not accepted flags:
-1. **Version-switch secret+file re-materialization** — Ice chose to wire it;
-   #239 is in review and the two R13b upper-layer deferrals remain.
-2. **Richdoc→markdown fidelity** — Ice chose full fidelity; #238 and its
-   separate live-TS prerequisite/fix #240 are in review.
-3. **Secret rename-TOCTOU** — Ice chose the real descriptor/handle-based fix;
-   #237 is in review.
-4. **Pre-R15 migration** — secret ownership landed as #233 / ordinal 14;
-   moment provenance is #236 / ordinal 15 in review.
+### 6.CUTOVER-GATING — must be resolved at the R15 go/no-go (NOT closed by GATE6)
+These are correctness/security items, not accepted flags. GATE6 surfaces them; the
+R15 go/no-go decides each:
+1. **Version-switch secret+file re-materialization** — stale/wrong disk secrets
+   after a mid-session switch until reopen (wire it, or explicitly accept+surface).
+2. **Richdoc→markdown fidelity** — the paragraphs+bold/italic subset DROPS
+   unsupported richdoc content (data loss on projection); land full-fidelity
+   projection or disable richdoc editing at cutover.
+3. **Secret rename-TOCTOU assumption enforcement** — STILL GATING: enforce
+   owner-only/no-sharing while the residual is open, OR land the dirfd/openat2
+   closure. R15-5 (#237) owns that closure and owns flipping this entry once it
+   merges; nothing in THIS PR closes it. The former "per-user socket auth OFF"
+   half of this item is withdrawn — the transport is stdio, not a socket
+   (RPC_GAP.md transport correction), so it was never the control here.
+4. **Pre-R15 migration** (secret-ownership column + moments payload-provenance) —
+   cheap before the reset, expensive after.
 Accepted flags (NOT gating): soak monitored-not-proven; the 3 marginal RPC-D2 P2
 declines; BINHEAD (discharged). See §8.
 
