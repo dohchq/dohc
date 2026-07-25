@@ -1686,6 +1686,71 @@ UPDATE moments SET
 
 pub(crate) const MOMENT_ROLLBACK_PREIMAGE_MIGRATION_ID: &str = "v1-moment-rollback-preimage";
 
+/// Ordinal 21. An update from one origin can precede the base-state envelope
+/// from another origin. Such a coordinate must be durably parked without
+/// inventing a Y.Doc lineage, so the queue is rooted by the file object rather
+/// than by `ydoc_docs`. Existing leased-lineage rows already have that parent
+/// through the marker's own foreign key and copy across unchanged.
+const V1_YDOC_PREBASE_DEFERRED_DDL: &str = "\
+ALTER TABLE ydoc_deferred_updates RENAME TO ydoc_deferred_updates_old;
+DROP INDEX ydoc_deferred_updates_by_doc;
+CREATE TABLE ydoc_deferred_updates (
+    workspace_id   TEXT    NOT NULL,
+    version_id     TEXT    NOT NULL,
+    object_id      TEXT    NOT NULL,
+    origin_id      TEXT    NOT NULL,
+    origin_seq     INTEGER NOT NULL,
+    recorded_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, origin_id, origin_seq),
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES file_objects(workspace_id, object_id)
+      ON DELETE CASCADE
+) STRICT;
+INSERT INTO ydoc_deferred_updates
+    (workspace_id, version_id, object_id, origin_id, origin_seq, recorded_at_ms)
+SELECT workspace_id, version_id, object_id, origin_id, origin_seq, recorded_at_ms
+  FROM ydoc_deferred_updates_old;
+DROP TABLE ydoc_deferred_updates_old;
+CREATE INDEX ydoc_deferred_updates_by_doc
+    ON ydoc_deferred_updates (workspace_id, version_id, object_id);
+";
+
+/// The `id` of the pre-base Y.Doc deferral migration.
+pub(crate) const YDOC_PREBASE_DEFERRED_MIGRATION_ID: &str = "v1-ydoc-prebase-deferred-updates";
+
+/// Ordinal 22. Persists every structured refusal until the relay pull cursor
+/// commits. Envelope application and peer ACK happen before cursor commit, so
+/// a later hard failure in the same batch otherwise makes the already-ACKed
+/// refusal unobservable on retry. The retry columns bound receiver-state
+/// secret-fork mismatches without prematurely retiring a short ordering race.
+const V1_REPLICATION_PENDING_REFUSALS_DDL: &str = "\
+ALTER TABLE replication_peers ADD COLUMN retry_origin_seq INTEGER
+    CHECK (retry_origin_seq IS NULL OR retry_origin_seq >= 0);
+ALTER TABLE replication_peers ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0
+    CHECK (retry_count >= 0);
+CREATE TABLE replication_pending_refusals (
+    workspace_id   TEXT    NOT NULL,
+    origin_id      TEXT    NOT NULL,
+    origin_seq     INTEGER NOT NULL CHECK (origin_seq >= 0),
+    op_kind        TEXT    NOT NULL,
+    reason_code    TEXT    NOT NULL CHECK (reason_code IN (
+        'invalid-input'
+    )),
+    reason_message TEXT    NOT NULL,
+    report_id      TEXT,
+    PRIMARY KEY (workspace_id, origin_id, origin_seq),
+    FOREIGN KEY (workspace_id, origin_id, origin_seq)
+      REFERENCES replication_log(workspace_id, origin_id, origin_seq)
+      ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+CREATE INDEX replication_pending_refusals_by_report
+    ON replication_pending_refusals (workspace_id, report_id);
+";
+
+/// The `id` of the persisted replication-refusal migration.
+pub(crate) const REPLICATION_PENDING_REFUSALS_MIGRATION_ID: &str =
+    "v1-replication-pending-refusals";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1831,6 +1896,22 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: MOMENT_ROLLBACK_PREIMAGE_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_MOMENT_ROLLBACK_PREIMAGE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        // PR #263 owns ordinal 20 and merges first. This branch deliberately
+        // leaves that slot reserved until its merge base advances.
+        ordinal: 21,
+        id: YDOC_PREBASE_DEFERRED_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_YDOC_PREBASE_DEFERRED_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 22,
+        id: REPLICATION_PENDING_REFUSALS_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_REPLICATION_PENDING_REFUSALS_DDL,
         sets_user_version: None,
     },
 ];
@@ -2363,7 +2444,13 @@ mod tests {
 
         let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
             .expect("rollback preimage migration");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+        assert_eq!(
+            outcome,
+            MigrationOutcome::Applied {
+                newly_applied: BASELINE_COUNT - 19
+            },
+            "the fixture seeds exactly the first 19 migration entries"
+        );
 
         type Preimage = (
             Option<String>,
@@ -2653,6 +2740,199 @@ mod tests {
         .expect("query table dump")
         .collect::<Result<_, _>>()
         .expect("collect table dump")
+    }
+
+    #[test]
+    fn ydoc_prebase_deferred_migration_preserves_every_column_and_changes_only_the_parent() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(2_100);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+
+        let migration_index = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == YDOC_PREBASE_DEFERRED_MIGRATION_ID)
+            .expect("pre-base queue migration");
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("migrate up to the pre-base queue rebuild");
+        conn.execute_batch(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+                 VALUES ('ws', 'main');
+             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
+                 VALUES ('ws', 'object-one', 101), ('ws', 'object-two', 102);
+             INSERT INTO ydoc_docs (
+                 workspace_id, version_id, object_id, content_kind, regime,
+                 head_update_seq, head_snapshot_seq, base_claimed, settle_seq,
+                 last_settled_sha, updated_at_ms
+             ) VALUES
+                 ('ws', 'main', 'object-one', 'plaintext', 'replicated',
+                  7, 6, 1, 5, 'settled-one', 103),
+                 ('ws', 'feature', 'object-two', 'richdoc', 'replicated',
+                  17, 16, 1, 15, NULL, 104);
+             INSERT INTO ydoc_deferred_updates (
+                 workspace_id, version_id, object_id, origin_id, origin_seq,
+                 recorded_at_ms
+             ) VALUES
+                 ('ws', 'main', 'object-one', 'origin-one', 11, 1001),
+                 ('ws', 'feature', 'object-two', 'origin-two', 22, 2002);",
+        )
+        .expect("seed every deferred column");
+        let before = dump_table_rows(&conn, "ydoc_deferred_updates");
+
+        let outcome = run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..=migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("apply pre-base queue rebuild");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+        assert_eq!(
+            dump_table_rows(&conn, "ydoc_deferred_updates"),
+            before,
+            "every value and column must survive the rebuild"
+        );
+
+        let fk_parent: String = conn
+            .query_row(
+                "SELECT \"table\" FROM pragma_foreign_key_list('ydoc_deferred_updates')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("rebuilt FK parent");
+        assert_eq!(fk_parent, "file_objects");
+        let index_columns: Vec<String> = conn
+            .prepare(
+                "SELECT name FROM pragma_index_info('ydoc_deferred_updates_by_doc')
+                 ORDER BY seqno",
+            )
+            .expect("prepare rebuilt index")
+            .query_map([], |row| row.get(0))
+            .expect("query rebuilt index")
+            .collect::<rusqlite::Result<_>>()
+            .expect("collect rebuilt index");
+        assert_eq!(index_columns, ["workspace_id", "version_id", "object_id"]);
+    }
+
+    #[test]
+    fn ydoc_prebase_deferred_migration_rolls_back_when_fk_revalidation_fails() {
+        let dir = tempdir();
+        let path = dir.join("engine.db");
+        let ctx = MigrationContext::current(2_100);
+        let mut conn = open_bare(&path);
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("enable foreign keys");
+
+        let migration_index = BASELINE_MIGRATIONS
+            .iter()
+            .position(|migration| migration.id == YDOC_PREBASE_DEFERRED_MIGRATION_ID)
+            .expect("pre-base queue migration");
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("migrate up to the pre-base queue rebuild");
+        conn.execute(
+            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
+             VALUES ('ws', 'main')",
+            [],
+        )
+        .expect("seed workspace");
+        conn.pragma_update(None, "foreign_keys", false)
+            .expect("disable foreign keys");
+        conn.execute_batch(
+            "INSERT INTO ydoc_docs (
+                 workspace_id, version_id, object_id, content_kind, regime,
+                 head_update_seq, head_snapshot_seq, base_claimed, updated_at_ms
+             ) VALUES (
+                 'ws', 'main', 'missing-object', 'plaintext', 'replicated',
+                 0, 0, 1, 10
+             );
+             INSERT INTO ydoc_deferred_updates (
+                 workspace_id, version_id, object_id, origin_id, origin_seq,
+                 recorded_at_ms
+             ) VALUES (
+                 'ws', 'main', 'missing-object', 'origin', 4, 11
+             );",
+        )
+        .expect("seed latent missing file-object parent");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("re-enable foreign keys");
+
+        run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..=migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect_err("new file_objects FK must revalidate historical rows");
+        let fk_parent: String = conn
+            .query_row(
+                "SELECT \"table\" FROM pragma_foreign_key_list('ydoc_deferred_updates')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("rolled-back FK parent");
+        assert_eq!(
+            fk_parent, "ydoc_docs",
+            "rollback must restore the old table"
+        );
+        let row_present: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ydoc_deferred_updates
+                 WHERE workspace_id='ws' AND origin_id='origin' AND origin_seq=4",
+                [],
+                |row| row.get(0),
+            )
+            .expect("seed row survives");
+        assert_eq!(row_present, 1);
+        let orphan_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema
+                 WHERE name='ydoc_deferred_updates_old'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("no orphan rebuild table");
+        assert_eq!(orphan_table, 0);
+        let max_ordinal: i64 = conn
+            .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("ledger after rollback");
+        assert_eq!(max_ordinal, 19);
+
+        conn.execute(
+            "INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
+             VALUES ('ws', 'missing-object', 9)",
+            [],
+        )
+        .expect("restore missing parent");
+        let outcome = run_migrations(
+            &mut conn,
+            &BASELINE_MIGRATIONS[..=migration_index],
+            &ctx,
+            &NoFaults,
+        )
+        .expect("remediated rebuild");
+        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
+        let repaired_parent: String = conn
+            .query_row(
+                "SELECT \"table\" FROM pragma_foreign_key_list('ydoc_deferred_updates')",
+                [],
+                |row| row.get(0),
+            )
+            .expect("repaired FK parent");
+        assert_eq!(repaired_parent, "file_objects");
     }
 
     #[test]

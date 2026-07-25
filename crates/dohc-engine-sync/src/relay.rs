@@ -139,6 +139,7 @@ pub enum SyncPassOutcome {
         pushed: usize,
         fetched: usize,
         applied: usize,
+        refused: usize,
         skipped: usize,
         conflicts_opened: i64,
         pending_cursor: Option<RelayCursor>,
@@ -146,14 +147,20 @@ pub enum SyncPassOutcome {
         /// deliberately did not apply. The cursor advances past them, so they
         /// only exist here — a caller that drops this loses them.
         pending_resolves: Vec<crate::PendingResolve>,
+        /// Per-operation validation failures that were journaled and acked.
+        /// The rejected mutations were rolled back before those coordinates
+        /// were retired.
+        refusals: Vec<crate::ReplicationRefusal>,
     },
     CrashedAfterRemoteCommit,
     CrashedAfterApply {
         applied: usize,
+        refused: usize,
         skipped: usize,
         conflicts_opened: i64,
         pending_cursor: RelayCursor,
         pending_resolves: Vec<crate::PendingResolve>,
+        refusals: Vec<crate::ReplicationRefusal>,
     },
 }
 
@@ -244,10 +251,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             pushed,
             fetched: 0,
             applied: 0,
+            refused: 0,
             skipped: 0,
             conflicts_opened: 0,
             pending_cursor: None,
             pending_resolves: Vec::new(),
+            refusals: Vec::new(),
         })
     }
 
@@ -285,9 +294,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         }
         let fetched = response.ops.len();
         let mut applied = 0_usize;
+        let mut refused = 0_usize;
         let mut skipped = 0_usize;
         let mut conflicts_opened = 0_i64;
         let mut pending_resolves = Vec::new();
+        let mut refusals = Vec::new();
         for op in &response.ops {
             // Workspace scoping: a buggy/compromised transport must never make a
             // pull for workspace A apply an op targeting workspace B (which would
@@ -296,7 +307,13 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             if op.workspace_id != workspace_id {
                 return Err(RelayError::InvalidResponse);
             }
-            match crate::apply_replication_envelope(store, op, faults, leases).map_err(local)? {
+            let routed =
+                crate::apply_replication_envelope(store, op, faults, leases).map_err(local)?;
+            let (primary, drain_refusals) = routed.into_primary_and_refusals();
+            for refusal in drain_refusals {
+                push_refusal_once(&mut refusals, refusal);
+            }
+            match primary {
                 ApplyOutcome::Applied(routed) => {
                     if let Some(pending) = routed.pending_resolve() {
                         pending_resolves.push(pending.clone());
@@ -306,7 +323,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                         .ok_or(RelayError::InvalidResponse)?;
                     applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?
                 }
+                ApplyOutcome::Refused(refusal) => {
+                    refused = refused.checked_add(1).ok_or(RelayError::InvalidResponse)?;
+                    push_refusal_once(&mut refusals, refusal);
+                }
                 ApplyOutcome::Skipped => {
+                    if let Some(refusal) =
+                        crate::apply::read_replayed_refusal(store, op).map_err(local)?
+                    {
+                        push_refusal_once(&mut refusals, refusal);
+                    }
                     if let Some(pending) =
                         crate::conflict_apply::read_replayed_pending_resolve(store, op)
                             .map_err(local)?
@@ -318,30 +344,46 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 ApplyOutcome::Crashed { .. } => {
                     return Err(RelayError::Local("injected-crash".to_owned()));
                 }
+                ApplyOutcome::WithRefusals { .. } => unreachable!("refusals were flattened"),
             }
+        }
+        // A drain refusal can commit before a later envelope fails hard, or
+        // outside a pull during open/resync/close. Claim every pending sidecar
+        // under a unique local report token and return it here. Cursor commit
+        // clears only that token; a later drain remains unowned, while a newer
+        // pull retags rows so a stale cursor cannot destroy an unread refusal.
+        let (pending_refusals, refusal_report_id) =
+            crate::apply::claim_pending_refusals(store, workspace_id, faults).map_err(local)?;
+        for refusal in pending_refusals {
+            push_refusal_once(&mut refusals, refusal);
         }
         let pending_cursor = RelayCursor {
             cursor: response.next_cursor,
             replication_epoch: identity.replication_epoch,
             stream_identity: identity.stream_identity,
+            refusal_report_id,
         };
         if crashes(faults, FaultPoint::SyncBetweenApplyAndCursorCommit) {
             return Ok(SyncPassOutcome::CrashedAfterApply {
                 applied,
+                refused,
                 skipped,
                 conflicts_opened,
                 pending_cursor,
                 pending_resolves,
+                refusals,
             });
         }
         Ok(SyncPassOutcome::Complete {
             pushed: 0,
             fetched,
             applied,
+            refused,
             skipped,
             conflicts_opened,
             pending_cursor: Some(pending_cursor),
             pending_resolves,
+            refusals,
         })
     }
 
@@ -401,6 +443,19 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             }
         }
         Err(RelayError::Conflict)
+    }
+}
+
+fn push_refusal_once(
+    refusals: &mut Vec<crate::ReplicationRefusal>,
+    refusal: crate::ReplicationRefusal,
+) {
+    if !refusals.iter().any(|existing| {
+        existing.workspace_id == refusal.workspace_id
+            && existing.origin_id == refusal.origin_id
+            && existing.origin_seq == refusal.origin_seq
+    }) {
+        refusals.push(refusal);
     }
 }
 

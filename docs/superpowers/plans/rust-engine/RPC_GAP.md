@@ -204,6 +204,47 @@ refuses some handles its own scanner indexes (agent.ops_v2 throws on
 JS, succeeds on Rust). Deliberate oracle-bug fix; parity suites must
 expect it; moot for data post-R15.
 
+CROSS-ENGINE DELTA (RPC-E replication refusal): PER-OPERATION REJECTION
+ADVANCES IN RUST. The TypeScript oracle applies an operation before
+`journalImportedReplicationOp` / `ackReplicationPeer`
+(`versionedTextStore.ts:5131-5389`, `linkedChatStore.ts:4185-4797`,
+`secretFileStore.ts:1039-1250`). A validation throw therefore rolls the
+transaction back, rejects `applySyncQueues` at its awaited store call
+(`syncApply.ts:347-370`), and prevents `pullWorkspaceFromRelay` from returning
+the deferred fetch-cursor commit (`syncRelay.ts:938-999`). One malformed
+per-operation payload permanently wedges that origin in the oracle.
+
+Rust deliberately does not preserve that DoS behavior. Per-operation
+`InvalidInput` (including Y.Doc preflight validation),
+`MomentAppendNotImplemented`, and operation kinds unknown to an older receiver
+become `ApplyOutcome::Refused`:
+the mutation savepoint is rolled back, then the envelope is journaled and its
+workspace-scoped origin coordinate acked. Relay outcomes count refusals and
+surface their structured coordinate, op kind, code, and reason in `refusals`;
+the next operation from the origin remains admissible. Exact redelivery skips
+from the recorded row. Structural envelope validation, pulled-workspace
+mismatch, sequence gaps, coordinate divergence, missing/unhydrated blobs,
+share-boundary authorization, storage failures, and injected crashes remain
+hard failures with no new ack. In particular, `CoordinateDiverged` still stops
+the pull pass. Receiver-local Y.Doc identity pins remain retryable until a
+later delete/rename frees the path; already-ACKed deferred rows instead retain
+their CRDT bytes and surface a terminal refusal during drain. A
+`secret.version.fork` whose sealed snapshot does not yet match local source
+tips remains hard/retryable for two retries so cross-origin source updates can
+arrive; durable per-coordinate attempt three revalidates, then refuses and ACKs
+a still-bad fork instead of wedging the actor indefinitely. This is a
+deliberate availability fix, not bug-for-bug parity.
+Regression coverage:
+`malformed_moment_append_is_refused_and_acked_before_the_origin_continues`,
+`ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges`,
+`secret_version_fork_mismatch_is_refused_after_the_durable_retry_budget`,
+`central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compatibly`,
+`refused_op_acks_and_the_next_same_origin_op_applies`,
+`relay_pull_surfaces_refusal_reason_to_the_caller`,
+`secret_version_fork_with_no_rows_cannot_erase_the_destination_secrets`,
+`coordinate_divergence_still_stops_a_pass_after_an_acked_refusal`, and
+`redelivered_refusal_is_recorded_once_and_skipped` (dohc-engine-sync).
+
 CROSS-ENGINE DELTA (PR #225 codex r4/r6 + CodeRabbit): linked thread
 timestamp — RUST REJECTS-ON-APPLY, DELIBERATELY STRICTER THAN THE
 ORACLE. An imported `chat.thread.create` with `linkedObjectId` but no
@@ -219,11 +260,10 @@ durable-unreadable linked thread is ever persisted. This is a
 deliberate stricter-than-oracle divergence: the oracle's
 accept-then-brick is a latent bug we do NOT replicate. It costs no
 honest-data parity — well-behaved mint always pairs the fields
-(:2122/:2157), so only a corrupt/hostile op is refused (its origin's
-ack stream fail-closed halts at that op, the correct response to a
-malformed replicated write; the relay/RPC-E layer owns hostile-origin
-quarantine). Differential/parity suites MUST expect the delta: a
-half-linked import → oracle acks-then-bricks, Rust refuses.
+(:2122/:2157), so only a corrupt/hostile op is refused. Under the RPC-E
+refusal contract above, Rust records and acks that refusal without persisting
+the unreadable thread. Differential/parity suites MUST expect the delta: a
+half-linked import → oracle acks-then-bricks, Rust refuses-and-acks.
 REGRESSION TEST: `imported_thread_rejects_linked_object_without_linked_timestamp`
 (dohc-engine-sync). Moot for data post-R15 (the reset wipes any
 pre-existing NULL-linked rows).
@@ -237,7 +277,7 @@ recomputation behind `payload.objectId !== undefined && (...)`
 absent; Rust intentionally matches. This is adversarial-only because
 well-behaved minting always carries `objectId`, and it is moot post-R15.
 Rust does not add an import-side object-id requirement: doing so would
-diverge from the oracle and stall the origin's ack stream. Any attachment-id
+diverge from the oracle and create an acknowledged refusal. Any attachment-id
 forgery hardening belongs at the relay/RPC-E trust boundary and must cover
 both engines; there is no Rust code change for this finding.
 
@@ -259,7 +299,7 @@ legitimately arrive over replication; bounding the apply makes the domain
 consistent with the wire it must round-trip. It costs no honest-data parity
 (real clocks are ~13 orders of magnitude below `2^53` ms ≈ year 285000).
 Differential/parity suites MUST expect the delta on a hand-fed `2^53` cell
-op. REGRESSION: `imported_follow_refuses_unsafe_at_ms_without_row_or_ack`
+op. REGRESSION: `imported_follow_refuses_unsafe_at_ms_without_row_and_acks`
 (dohc-engine-sync) + the sibling cell tests. Moot for data post-R15.
 
   SUB-NOTE (claude r-opus, P3, RECORDED NOT FIXED): the LOCAL LWW mints

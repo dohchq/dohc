@@ -11,7 +11,9 @@ use crate::{ApplyOutcome, ConflictApplyResult, LeaseProbe, ReplicationEnvelope, 
 /// coordinate is committed to `ydoc_deferred_updates` with the ack, and lease
 /// teardown/open (or the next non-leased update) replays it through
 /// `drain_deferred_ydoc_for_key`. It requires no caller action, so the router
-/// deliberately does not carry its transient `YdocApplyResult`.
+/// deliberately does not carry its transient `YdocApplyResult`. A terminal
+/// refusal discovered by that drain is different and remains attached to the
+/// routed outcome until the relay cursor commits.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RoutedApply {
     pub conflict: Option<ConflictApplyResult>,
@@ -69,10 +71,20 @@ pub fn apply_replication_envelope(
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
-    let route = OWNED_OP_ROUTES
+    let Some(route) = OWNED_OP_ROUTES
         .iter()
         .find_map(|(kind, route)| (*kind == envelope.op_kind).then_some(*route))
-        .ok_or(SyncError::UnsupportedOperation)?;
+    else {
+        // Forward compatibility: an older client cannot interpret a newer
+        // peer's operation, but permanently wedging that origin prevents it
+        // from receiving every later operation it *does* understand.
+        return plain(crate::apply_envelope_with(
+            store,
+            envelope,
+            faults,
+            |_tx, _op| Err(SyncError::UnsupportedOperation),
+        ));
+    };
     match route {
         OwnedRoute::Chat => plain(crate::apply_chat_envelope(store, envelope, faults)),
         OwnedRoute::Secret => plain(crate::apply_secret_envelope(store, envelope, faults)),
@@ -116,9 +128,15 @@ fn map_applied<T>(
     result: Result<ApplyOutcome<T>, SyncError>,
     wrap: impl FnOnce(T) -> RoutedApply,
 ) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
-    result.map(|outcome| match outcome {
-        ApplyOutcome::Applied(value) => ApplyOutcome::Applied(wrap(value)),
-        ApplyOutcome::Skipped => ApplyOutcome::Skipped,
-        ApplyOutcome::Crashed { committed } => ApplyOutcome::Crashed { committed },
+    result.map(|outcome| {
+        let (primary, refusals) = outcome.into_primary_and_refusals();
+        let mapped = match primary {
+            ApplyOutcome::Applied(value) => ApplyOutcome::Applied(wrap(value)),
+            ApplyOutcome::Refused(refusal) => ApplyOutcome::Refused(refusal),
+            ApplyOutcome::Skipped => ApplyOutcome::Skipped,
+            ApplyOutcome::Crashed { committed } => ApplyOutcome::Crashed { committed },
+            ApplyOutcome::WithRefusals { .. } => unreachable!("refusals were flattened"),
+        };
+        mapped.with_refusals(refusals)
     })
 }

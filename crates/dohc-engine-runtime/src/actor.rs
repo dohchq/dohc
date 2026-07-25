@@ -77,6 +77,7 @@ use dohc_engine_storage::{
 };
 use dohc_engine_sync::{
     ApplyOutcome, ConflictApplyResult, ReplicationEnvelope, apply_conflict_envelope,
+    read_replayed_refusal,
 };
 use rusqlite::{OptionalExtension, params};
 use std::collections::HashSet;
@@ -6015,8 +6016,14 @@ fn worker_main(
                 let outcome = if token.is_cancelled() {
                     Err(RuntimeError::Cancelled)
                 } else {
-                    apply_conflict_envelope(&mut store, &envelope, faults.as_ref())
-                        .map_err(RuntimeError::from)
+                    match apply_conflict_envelope(&mut store, &envelope, faults.as_ref()) {
+                        Ok(ApplyOutcome::Skipped) => read_replayed_refusal(&store, &envelope)
+                            .map(|refusal| {
+                                refusal.map_or(ApplyOutcome::Skipped, ApplyOutcome::Refused)
+                            })
+                            .map_err(RuntimeError::from),
+                        outcome => outcome.map_err(RuntimeError::from),
+                    }
                 };
                 let _ = reply.send(outcome);
             }
@@ -7473,7 +7480,7 @@ fn ydoc_settle_on_store(
             // never saw while they keep editing stale state. Refuse; the
             // client resyncs (which also drains) and settles again.
             if marker.regime == Regime::Replicated
-                && dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)? > 0
+                && dohc_engine_sync::drain_deferred_ydoc_for_key(store, key, faults)?.drained > 0
             {
                 return Err(dohc_engine_domain::DomainError::InvalidInput {
                     reason: "ydoc-remote-updates-pending",

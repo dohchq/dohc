@@ -12,6 +12,8 @@ pub enum SyncError {
     SequenceGap,
     #[error("replication coordinate contains different content")]
     CoordinateDiverged,
+    #[error("replication state is not ready: {reason}")]
+    RetryableState { reason: &'static str },
     #[error("operation kind is not owned by this apply surface")]
     UnsupportedOperation,
     #[error("replicated operation is outside the share boundary")]
@@ -28,6 +30,7 @@ impl SyncError {
             SyncError::Storage(err) => err.code(),
             SyncError::InvalidInput { .. } => "invalid-input",
             SyncError::SequenceGap | SyncError::CoordinateDiverged => "state-corrupt",
+            SyncError::RetryableState { .. } => "retryable-state",
             SyncError::UnsupportedOperation => "invalid-input",
             SyncError::ShareBoundaryViolation => "share-boundary-violation",
             SyncError::BlobInvalid => "invalid-input",

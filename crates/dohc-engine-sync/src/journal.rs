@@ -304,7 +304,12 @@ pub(crate) fn ack_tx(
     }
     tx.execute(
         "INSERT INTO replication_peers (workspace_id, origin_id, acked_seq) VALUES (?1, ?2, ?3) \
-         ON CONFLICT(workspace_id, origin_id) DO UPDATE SET acked_seq = MAX(acked_seq, excluded.acked_seq)",
+         ON CONFLICT(workspace_id, origin_id) DO UPDATE SET \
+           acked_seq = MAX(acked_seq, excluded.acked_seq), \
+           retry_origin_seq = CASE \
+             WHEN retry_origin_seq <= excluded.acked_seq THEN NULL ELSE retry_origin_seq END, \
+           retry_count = CASE \
+             WHEN retry_origin_seq <= excluded.acked_seq THEN 0 ELSE retry_count END",
         params![workspace_id, origin_id, origin_seq],
     )
     .map_err(SyncError::persist)?;

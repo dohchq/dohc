@@ -8565,12 +8565,46 @@ fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value
                 "pendingResolve": result.pending_resolve
             })
         }
+        ApplyOutcome::Refused(refusal) => json!({
+            "replicated": true,
+            "status": "refused",
+            "workspaceId": refusal.workspace_id,
+            "originId": refusal.origin_id,
+            "originSeq": refusal.origin_seq,
+            "opKind": refusal.op_kind,
+            "code": refusal.reason.code(),
+            "reason": refusal.reason.message()
+        }),
         ApplyOutcome::Skipped => json!({ "replicated": true, "status": "skipped" }),
         ApplyOutcome::Crashed { committed } => json!({
             "replicated": true,
             "status": "crashed",
             "committed": committed
         }),
+        ApplyOutcome::WithRefusals { outcome, refusals } => {
+            let mut value = replicated_conflict_json(*outcome);
+            if let Some(object) = value.as_object_mut() {
+                object.insert(
+                    "refusals".to_owned(),
+                    Value::Array(
+                        refusals
+                            .into_iter()
+                            .map(|refusal| {
+                                json!({
+                                    "workspaceId": refusal.workspace_id,
+                                    "originId": refusal.origin_id,
+                                    "originSeq": refusal.origin_seq,
+                                    "opKind": refusal.op_kind,
+                                    "code": refusal.reason.code(),
+                                    "reason": refusal.reason.message()
+                                })
+                            })
+                            .collect(),
+                    ),
+                );
+            }
+            value
+        }
     }
 }
 
@@ -8880,6 +8914,9 @@ fn map_sync_code(error: SyncError) -> ErrorCode {
         SyncError::Storage(_)
         | SyncError::SequenceGap
         | SyncError::CoordinateDiverged
+        // Retryable state conditions are transient by definition; Internal is
+        // the retry-eligible class on this surface (InvalidParams is terminal).
+        | SyncError::RetryableState { .. }
         | SyncError::FaultCrash => ErrorCode::Internal,
         SyncError::InvalidInput { .. }
         | SyncError::UnsupportedOperation
@@ -9010,6 +9047,35 @@ mod tests {
                 "localConflictId": "local-c",
                 "path": "doc.md",
                 "reason": "binary-unhydrated"
+            })
+        );
+    }
+
+    #[test]
+    fn replicated_conflict_json_surfaces_an_acked_refusal() {
+        let value = replicated_conflict_json(ApplyOutcome::Refused(
+            dohc_engine_sync::ReplicationRefusal {
+                workspace_id: "ws".to_owned(),
+                origin_id: "peer".to_owned(),
+                origin_seq: 7,
+                op_kind: "conflict.open".to_owned(),
+                reason: dohc_engine_sync::RefusalReason::InvalidInput {
+                    reason: "conflict.open must describe an unresolved conflict".to_owned(),
+                },
+            },
+        ));
+
+        assert_eq!(
+            value,
+            json!({
+                "replicated": true,
+                "status": "refused",
+                "workspaceId": "ws",
+                "originId": "peer",
+                "originSeq": 7,
+                "opKind": "conflict.open",
+                "code": "invalid-input",
+                "reason": "conflict.open must describe an unresolved conflict"
             })
         );
     }

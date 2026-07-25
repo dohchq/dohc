@@ -2,12 +2,16 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use dohc_engine_domain::{MAX_SECRET_FILE_BYTES, SECRET_IV_BYTES, SECRET_TAG_BYTES};
 use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized};
-use dohc_engine_storage::{EngineStore, FaultInjector};
+use dohc_engine_storage::{EngineStore, FaultInjector, StorageError};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
 use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
+
+const SECRET_FORK_RETRY_LIMIT: i64 = 3;
+const SECRET_FORK_MISMATCH_REASON: &str =
+    "secret fork payload does not match the local sealed source state";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,14 +79,75 @@ pub fn apply_secret_envelope(
     ) {
         return Err(SyncError::UnsupportedOperation);
     }
+    let first = apply_secret_envelope_once(store, envelope, faults, false);
+    if !matches!(
+        &first,
+        Err(SyncError::RetryableState {
+            reason: SECRET_FORK_MISMATCH_REASON
+        })
+    ) {
+        return first;
+    }
+    let attempts = record_secret_fork_retry(store, envelope, faults)?;
+    if attempts < SECRET_FORK_RETRY_LIMIT {
+        return first;
+    }
+    // Re-run the full admission and fork validation after recording the final
+    // attempt. The source may have converged between transactions; if so the
+    // fork applies. Only a still-live mismatch becomes a refusal and ACK,
+    // bounding a genuinely bad coordinate without sacrificing short ordering
+    // races.
+    apply_secret_envelope_once(store, envelope, faults, true)
+}
+
+fn apply_secret_envelope_once(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+    refuse_fork_mismatch: bool,
+) -> Result<ApplyOutcome<()>, SyncError> {
     crate::apply_envelope_with(store, envelope, faults, |tx, op| {
         match op.op_kind.as_str() {
             "secret.file.put" => apply_put(tx, op, decode(&op.payload)?),
             "secret.file.delete" => apply_delete(tx, op, decode(&op.payload)?),
-            "secret.version.fork" => apply_fork(tx, op, decode(&op.payload)?),
+            "secret.version.fork" => apply_fork(tx, op, decode(&op.payload)?, refuse_fork_mismatch),
             _ => Err(SyncError::UnsupportedOperation),
         }
     })
+}
+
+fn record_secret_fork_retry(
+    store: &mut EngineStore,
+    envelope: &ReplicationEnvelope,
+    faults: &dyn FaultInjector,
+) -> Result<i64, SyncError> {
+    match store.write_with(faults, |tx| {
+        tx.execute(
+            "INSERT INTO replication_peers \
+             (workspace_id,origin_id,acked_seq,retry_origin_seq,retry_count) \
+             VALUES (?1,?2,-1,?3,1) \
+             ON CONFLICT(workspace_id,origin_id) DO UPDATE SET \
+               retry_count = CASE WHEN retry_origin_seq=excluded.retry_origin_seq \
+                 THEN retry_count+1 ELSE 1 END, \
+               retry_origin_seq=excluded.retry_origin_seq",
+            params![
+                envelope.workspace_id,
+                envelope.origin_id,
+                envelope.origin_seq
+            ],
+        )
+        .map_err(SyncError::persist)?;
+        tx.query_row(
+            "SELECT retry_count FROM replication_peers \
+             WHERE workspace_id=?1 AND origin_id=?2",
+            params![envelope.workspace_id, envelope.origin_id],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)
+    })? {
+        dohc_engine_storage::TxnOutcome::Committed(attempts) => Ok(attempts),
+        dohc_engine_storage::TxnOutcome::Crashed { .. } => Err(SyncError::FaultCrash),
+    }
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(value: &serde_json::Value) -> Result<T, SyncError> {
@@ -195,6 +260,7 @@ fn apply_fork(
     tx: &Transaction<'_>,
     op: &ReplicationEnvelope,
     payload: SecretFork,
+    refuse_mismatch: bool,
 ) -> Result<(), SyncError> {
     crate::model::bounded(
         &payload.from_version_id,
@@ -248,28 +314,29 @@ fn apply_fork(
             .map_err(SyncError::corrupt)?
     };
     if payload.rows.len() != source_by_path.len() {
-        return Err(secret_fork_mismatch());
+        return Err(secret_fork_mismatch(refuse_mismatch));
     }
     let mut seen = HashSet::with_capacity(payload.rows.len());
     for row in &payload.rows {
         if !seen.insert(row.path.as_str()) {
-            return Err(secret_fork_mismatch());
+            return Err(SyncError::InvalidInput {
+                reason: "secret fork contains duplicate paths",
+            });
         }
         let source = source_by_path
             .get(&row.path)
-            .ok_or_else(secret_fork_mismatch)?;
-        let source_ciphertext =
-            STANDARD
-                .decode(&source.ciphertext_base64)
-                .map_err(|_| SyncError::InvalidInput {
-                    reason: "local sealed source state is invalid",
-                })?;
+            .ok_or_else(|| secret_fork_mismatch(refuse_mismatch))?;
+        let source_ciphertext = STANDARD.decode(&source.ciphertext_base64).map_err(|_| {
+            SyncError::Storage(StorageError::corrupt_public(std::io::Error::other(
+                "sealed source ciphertext is malformed",
+            )))
+        })?;
         if source.iv_base64 != row.iv_base64
             || source.auth_tag_base64 != row.auth_tag_base64
             || dohc_engine_storage::hex_sha256(&source_ciphertext) != row.ciphertext_sha256
             || source.byte_length != row.byte_length
         {
-            return Err(secret_fork_mismatch());
+            return Err(secret_fork_mismatch(refuse_mismatch));
         }
     }
 
@@ -402,18 +469,35 @@ fn load_ciphertext(
         .optional()
         .map_err(SyncError::corrupt)?
         .ok_or(SyncError::BlobInvalid)?;
-    if stored_len != byte_length
-        || ciphertext.len() as i64 != byte_length
-        || dohc_engine_storage::hex_sha256(&ciphertext) != sha256
-    {
-        return Err(SyncError::BlobInvalid);
+    if ciphertext.len() as i64 != stored_len {
+        return Err(SyncError::Storage(StorageError::corrupt_public(
+            std::io::Error::other("secret ciphertext blob length metadata is corrupt"),
+        )));
+    }
+    if stored_len != byte_length {
+        return Err(SyncError::InvalidInput {
+            reason: "secret ciphertext blob does not match declared metadata",
+        });
+    }
+    if dohc_engine_storage::hex_sha256(&ciphertext) != sha256 {
+        return Err(SyncError::Storage(
+            dohc_engine_storage::StorageError::BlobIntegrity {
+                sha256: sha256.to_owned(),
+            },
+        ));
     }
     Ok(ciphertext)
 }
 
-const fn secret_fork_mismatch() -> SyncError {
-    SyncError::InvalidInput {
-        reason: "secret fork payload does not match the local sealed source state",
+const fn secret_fork_mismatch(refuse: bool) -> SyncError {
+    if refuse {
+        SyncError::InvalidInput {
+            reason: SECRET_FORK_MISMATCH_REASON,
+        }
+    } else {
+        SyncError::RetryableState {
+            reason: SECRET_FORK_MISMATCH_REASON,
+        }
     }
 }
 

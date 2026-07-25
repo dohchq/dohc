@@ -173,23 +173,26 @@ pub fn apply_moment_envelope(
     if envelope.op_kind != "moment.append" {
         return Err(SyncError::UnsupportedOperation);
     }
+    envelope.validate()?;
     let search_policy =
         workspace_root_from_database(store.database_path()).map(read_engine_search_policy);
     apply_envelope_with(store, envelope, faults, |tx, envelope| {
-        apply_moment_append(tx, envelope, search_policy.as_ref())
+        let payload: MomentAppendPayload = serde_json::from_value(envelope.payload.clone())
+            .map_err(|_| SyncError::InvalidInput {
+                reason: "moment.append payload is malformed",
+            })?;
+        validate_payload_bounds(&payload)?;
+        apply_moment_append(tx, envelope, &payload, search_policy.as_ref())
     })
 }
 
 fn apply_moment_append(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,
+    payload: &MomentAppendPayload,
     search_policy: Option<&SearchPolicySnapshot>,
 ) -> Result<i64, SyncError> {
-    let payload: MomentAppendPayload =
-        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
-            reason: "moment.append payload is malformed",
-        })?;
-    validate_payload(&payload)?;
+    validate_payload(payload)?;
     require_version(tx, &envelope.workspace_id, &payload.version_id)?;
 
     let duplicate: bool = tx
@@ -256,12 +259,12 @@ fn apply_moment_append(
             })
         };
 
-    validate_payload_sides(tx, &payload)?;
-    let remote_before = moment_before_from_payload(tx, &payload)?;
+    validate_payload_sides(tx, payload)?;
+    let remote_before = moment_before_from_payload(tx, payload)?;
 
     if content_fast_forward && payload.operation == "delete" {
-        ensure_file_object(tx, &envelope.workspace_id, &payload)?;
-        insert_moment(tx, &envelope.workspace_id, &payload, &remote_before, true)?;
+        ensure_file_object(tx, &envelope.workspace_id, payload)?;
+        insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
         return Ok(0);
     }
 
@@ -273,8 +276,8 @@ fn apply_moment_append(
         } else {
             remote_before
         };
-        ensure_file_object(tx, &envelope.workspace_id, &payload)?;
-        insert_moment(tx, &envelope.workspace_id, &payload, &adopted_before, false)?;
+        ensure_file_object(tx, &envelope.workspace_id, payload)?;
+        insert_moment(tx, &envelope.workspace_id, payload, &adopted_before, false)?;
         if payload.operation == "delete" {
             let alias_path = local
                 .as_ref()
@@ -344,17 +347,11 @@ fn apply_moment_append(
                 .payload_after_byte_length
                 .unwrap_or(require_binary_blob(tx, &payload.payload_after_blob_sha256)?),
         };
-        upsert_snapshot(
-            tx,
-            &envelope.workspace_id,
-            &payload,
-            after_kind,
-            byte_length,
-        )?;
+        upsert_snapshot(tx, &envelope.workspace_id, payload, after_kind, byte_length)?;
         upsert_search_row(
             tx,
             &envelope.workspace_id,
-            &payload,
+            payload,
             after_kind,
             after_text.as_deref().unwrap_or(""),
             search_policy,
@@ -362,8 +359,8 @@ fn apply_moment_append(
         return Ok(0);
     }
 
-    ensure_file_object(tx, &envelope.workspace_id, &payload)?;
-    insert_moment(tx, &envelope.workspace_id, &payload, &remote_before, true)?;
+    ensure_file_object(tx, &envelope.workspace_id, payload)?;
+    insert_moment(tx, &envelope.workspace_id, payload, &remote_before, true)?;
     let current_snapshot = local.as_ref().or(conflicting_occupant.as_ref());
     let current = current_snapshot.map_or_else(
         || {
@@ -377,7 +374,7 @@ fn apply_moment_append(
         },
         side_from_snapshot,
     );
-    let incoming = incoming_side(&payload);
+    let incoming = incoming_side(payload);
     let base_moment_id = payload.before_latest_moment_id.as_deref();
     let local_root = local_branch_root(
         tx,
@@ -393,7 +390,7 @@ fn apply_moment_append(
         base_moment_id,
         Some((local_root.as_deref(), Some(payload.moment_id.as_str()))),
     );
-    let base = before_conflict_side(&payload);
+    let base = before_conflict_side(payload);
     let mut opened = open_or_coalesce(
         tx,
         &envelope.workspace_id,
@@ -447,14 +444,6 @@ fn apply_moment_append(
 }
 
 fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
-    crate::model::bounded(
-        &payload.moment_id,
-        "moment.append moment id must be non-empty and bounded",
-    )?;
-    crate::model::bounded(
-        &payload.object_id,
-        "moment.append object id must be non-empty and bounded",
-    )?;
     if !matches!(payload.operation.as_str(), "write" | "rename" | "delete")
         || !matches!(
             payload.before_present.as_str(),
@@ -492,6 +481,18 @@ fn validate_payload(payload: &MomentAppendPayload) -> Result<(), SyncError> {
         }
     }
     validate_every_path_field(payload)?;
+    Ok(())
+}
+
+fn validate_payload_bounds(payload: &MomentAppendPayload) -> Result<(), SyncError> {
+    crate::model::bounded(
+        &payload.moment_id,
+        "moment.append moment id must be non-empty and bounded",
+    )?;
+    crate::model::bounded(
+        &payload.object_id,
+        "moment.append object id must be non-empty and bounded",
+    )?;
     Ok(())
 }
 
@@ -569,7 +570,9 @@ fn require_version(
     if exists {
         return Ok(());
     }
-    Err(SyncError::InvalidInput {
+    // A cross-origin moment can arrive before its version.create. Refusing and
+    // acking here would make that ordering race permanent instead of retryable.
+    Err(SyncError::RetryableState {
         reason: "moment.append target version is missing",
     })
 }

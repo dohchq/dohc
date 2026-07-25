@@ -16,6 +16,9 @@ pub struct RelayCursor {
     pub cursor: String,
     pub replication_epoch: String,
     pub stream_identity: String,
+    /// Local-only ownership token for refusal rows surfaced with this pending
+    /// cursor. Persisted relay positions never carry one.
+    pub refusal_report_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,6 +41,7 @@ pub fn read_relay_cursor(
                     cursor: row.get(0)?,
                     replication_epoch: row.get(1)?,
                     stream_identity: row.get(2)?,
+                    refusal_report_id: None,
                 })
             },
         )
@@ -72,16 +76,27 @@ pub fn commit_relay_cursor(
             )
             .map_err(SyncError::persist)?;
             // A committed cursor means the stream never replays coordinates
-            // at or before this pull, so the persisted pending-resolve
-            // decisions kept for retry reconstruction are dead. Workspace
-            // pulls serialize through the engine actor, so a per-workspace
-            // sweep is exact; without it every deferred resolve leaves a row
-            // forever.
+            // at or before this pull, so persisted pending-resolve decisions
+            // kept for retry reconstruction are dead.
             tx.execute(
                 "DELETE FROM replication_pending_resolves WHERE workspace_id=?1",
                 params![workspace_id],
             )
             .map_err(SyncError::persist)?;
+            // Refusals can also be created OUTSIDE a pull when open/resync/
+            // close drains an already-ACKed Y.Doc coordinate. Delete only the
+            // rows that this exact pull claimed and surfaced. A later drain is
+            // unowned (report_id NULL), and a newer pull retags all pending
+            // rows, so neither a delayed nor stale cursor commit can destroy
+            // a refusal its caller never received.
+            if let Some(report_id) = &cursor.refusal_report_id {
+                tx.execute(
+                    "DELETE FROM replication_pending_refusals \
+                     WHERE workspace_id=?1 AND report_id=?2",
+                    params![workspace_id, report_id],
+                )
+                .map_err(SyncError::persist)?;
+            }
             Ok::<(), SyncError>(())
         })
 }
