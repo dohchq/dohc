@@ -130,6 +130,48 @@ pub fn enqueue_delete_job(
     enqueue_operation(tx, spec, MaterializationOperation::Delete)
 }
 
+/// Insert or refresh a durable projection intent. Active-version switching
+/// uses stable job ids so the same destination can be projected repeatedly
+/// after another version has occupied the workspace folder.
+pub fn upsert_projection_job(
+    tx: &Transaction<'_>,
+    spec: &MaterializationJobSpec,
+    operation: MaterializationOperation,
+) -> Result<(), StorageError> {
+    let (present, preimage_sha): (i64, Option<&str>) = match &spec.preimage {
+        Preimage::Absent => (0, None),
+        Preimage::Present(sha) => (1, Some(sha.as_str())),
+    };
+    tx.execute(
+        "INSERT INTO materialization_jobs \
+         (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
+          target_generation, status, created_at_ms, completed_at_ms, operation) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, NULL, ?8) \
+         ON CONFLICT(job_id) DO UPDATE SET \
+             target_path = excluded.target_path, \
+             content_sha256 = excluded.content_sha256, \
+             preimage_present = excluded.preimage_present, \
+             preimage_sha256 = excluded.preimage_sha256, \
+             target_generation = excluded.target_generation, \
+             status = 'pending', \
+             created_at_ms = excluded.created_at_ms, \
+             completed_at_ms = NULL, \
+             operation = excluded.operation",
+        rusqlite::params![
+            spec.job_id,
+            spec.target_path,
+            spec.content_sha256,
+            present,
+            preimage_sha,
+            spec.target_generation,
+            spec.now_ms,
+            operation.as_str(),
+        ],
+    )
+    .map_err(StorageError::persist)?;
+    Ok(())
+}
+
 /// Record a write job that is ALREADY satisfied on disk, as `'complete'`.
 /// Capture uses this: its bytes came FROM the file, so nothing must ever run —
 /// but the completed-generation marker is what lets the materializer's
@@ -348,11 +390,13 @@ pub fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> {
     .map_err(StorageError::corrupt)
 }
 
-/// The highest `target_generation` among COMPLETE jobs for `path`, or `None` if
-/// nothing has been materialized there yet. The materialization pipeline uses
-/// this to skip a pending job whose generation is superseded by an already-
-/// materialized newer generation for the same path (concurrent/out-of-order
-/// jobs must never regress a path to older content).
+/// The highest ordinary moment-order `target_generation` among COMPLETE jobs
+/// for `path`, or `None` if nothing has been materialized there yet. Active
+/// version projections use snapshot timestamps, which are a different
+/// namespace and therefore cannot participate in this ordering fence. The
+/// materialization pipeline uses this to skip a pending ordinary job whose
+/// generation is superseded by an already-materialized newer generation for
+/// the same path (concurrent/out-of-order jobs must never regress a path).
 pub fn max_completed_generation_for_path(
     conn: &Connection,
     path: &str,
@@ -360,7 +404,8 @@ pub fn max_completed_generation_for_path(
     // MAX over an empty set yields a single NULL row → `None`.
     conn.query_row(
         "SELECT MAX(target_generation) FROM materialization_jobs \
-         WHERE target_path = ?1 AND status = 'complete'",
+         WHERE target_path = ?1 AND status = 'complete' \
+           AND job_id NOT LIKE 'version-switch-%'",
         [path],
         |r| r.get::<_, Option<i64>>(0),
     )

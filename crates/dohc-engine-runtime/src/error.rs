@@ -40,6 +40,11 @@ pub enum RuntimeError {
     #[error("materialization error: {0}")]
     Materialize(#[from] dohc_engine_files::MaterializeError),
 
+    /// An active-version switch committed, but one or more durable projection
+    /// jobs could not be applied. The destination remains active for replay.
+    #[error("active-version materialization left {failed_jobs} job(s) incomplete")]
+    ActiveVersionMaterializationIncomplete { failed_jobs: usize },
+
     /// The actor's worker thread could not be spawned.
     #[error("could not spawn actor worker thread")]
     ThreadSpawn(#[source] std::io::Error),
@@ -86,6 +91,7 @@ impl RuntimeError {
             RuntimeError::Sync(err) => err.code(),
             RuntimeError::Search(err) => err.code(),
             RuntimeError::Materialize(_) => "materialize-failed",
+            RuntimeError::ActiveVersionMaterializationIncomplete { .. } => "materialize-failed",
             RuntimeError::ThreadSpawn(_) => "thread-spawn-failed",
             RuntimeError::ActorUnavailable => "actor-unavailable",
             RuntimeError::Overloaded => "overloaded",

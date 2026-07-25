@@ -32,6 +32,7 @@ use crate::search::{
     SearchResult, delete_file_search_index, ensure_search_index_for_version, search_workspace,
     upsert_file_search_index,
 };
+use crate::search::{read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
     AppendOutcome, CloseOutcome, ContentKind, DocKey, Projection, Regime, Ydoc,
 };
@@ -51,31 +52,34 @@ use dohc_engine_domain::{
     RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
     RollbackTextFileMutation, RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete,
     SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretRestoreResult,
-    SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction, SnapshotMetadata,
-    SnapshotView, StartChannelThread, TextConflict, TextSnapshot, ThreadDispatchPause,
-    VersionFileChangePage, VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary,
-    WriteResult, WriteText, apply_secret_file_from_version, binary_delete_job_id,
-    binary_rename_delete_job_id, binary_rename_write_job_id, capture_manifest_seed,
-    capture_secret_retire, compare_secret_files_page_keyless, delete_secret_file_keyless,
-    derive_capture_object_id, enqueue_binary_delete, enqueue_binary_rename, enqueue_write,
-    fork_version_keyless, get_secret_moment_keyless, has_secret_state,
-    insert_text_conflict_if_absent, list_secret_files_keyless, list_secret_files_keyless_page,
-    list_secret_moments_page_keyless, restore_secret_file_verbatim, secret_file_len_keyless,
-    select_snapshot_by_path_in_tx, validate_addressable_plaintext_path, write_binary_in_tx,
-    write_projected_text_in_tx, write_text_in_tx,
+    SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction, SnapshotContent,
+    SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict, TextSnapshot,
+    ThreadDispatchPause, VersionFileChangePage, VersionRecord, VersionedTextComparison,
+    VersionedTextStore, WriteBinary, WriteResult, WriteText, apply_secret_file_from_version,
+    binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
+    capture_manifest_seed, capture_secret_retire, compare_secret_files_page_keyless,
+    delete_secret_file_keyless, derive_capture_object_id, enqueue_binary_delete,
+    enqueue_binary_rename, enqueue_write, fork_version_keyless, get_secret_moment_keyless,
+    has_secret_state, insert_text_conflict_if_absent, list_secret_files_keyless,
+    list_secret_files_keyless_page, list_secret_moments_page_keyless, restore_secret_file_verbatim,
+    secret_file_len_keyless, select_snapshot_by_path_in_tx, validate_addressable_plaintext_path,
+    write_binary_in_tx, write_projected_text_in_tx, write_text_in_tx,
 };
 use dohc_engine_files::{
-    DurabilityPolicy, JobOutcome, StdBackoff, StdReplacer, materialize_one,
-    materialize_secret_delete_one, materialize_secret_one,
+    DurabilityPolicy, JobOutcome, ProjectionTargetKind, ProjectionTargetState, StdBackoff,
+    StdReplacer, materialize_one, materialize_secret_delete_one, materialize_secret_one,
+    probe_projection_target,
 };
 use dohc_engine_storage::{
-    CompoundWrite, Document, EngineStore, FaultInjector, JobStatus, MaterializationJob, NoFaults,
-    Preimage, StorageError, TxnOutcome, WriteOutcome,
+    CompoundWrite, Document, EngineStore, FaultInjector, FaultPoint, JobStatus, MaterializationJob,
+    MaterializationJobSpec, MaterializationOperation, NoFaults, Preimage, StorageError, TxnOutcome,
+    WriteOutcome, hex_sha256, put_binary_blob, upsert_projection_job,
 };
 use dohc_engine_sync::{
     ApplyOutcome, ConflictApplyResult, ReplicationEnvelope, apply_conflict_envelope,
 };
 use rusqlite::{OptionalExtension, params};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -120,6 +124,14 @@ pub struct RollbackExecutionResult {
     pub materialize_enqueued: bool,
     pub materialized: bool,
     pub materialize_outcome: PostCommitMaterializeOutcome,
+}
+
+pub struct ActiveVersionSwitch {
+    pub workspace_id: String,
+    pub version_id: String,
+    pub root_dir: PathBuf,
+    pub self_writes: Arc<dyn SelfWriteRecorder>,
+    pub now_ms: i64,
 }
 
 /// Physical channel capacity: the data bound plus ONE slot reserved at spawn
@@ -533,8 +545,7 @@ enum Command {
         reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
     },
     SetActiveVersion {
-        workspace_id: String,
-        version_id: String,
+        input: ActiveVersionSwitch,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
@@ -2304,16 +2315,14 @@ impl ActorHandle {
 
     pub async fn set_active_version(
         &self,
-        workspace_id: String,
-        version_id: String,
+        input: ActiveVersionSwitch,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<VersionRecord, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::SetActiveVersion {
-                workspace_id,
-                version_id,
+                input,
                 faults,
                 token,
                 reply,
@@ -4246,6 +4255,733 @@ fn secret_plaintext_for_job(
         .map_err(RuntimeError::from)
 }
 
+struct SwitchProjection {
+    spec: MaterializationJobSpec,
+    operation: MaterializationOperation,
+    inline_content: Option<Vec<u8>>,
+}
+
+fn projection_preimage(state: &ProjectionTargetState) -> Option<Preimage> {
+    match state {
+        ProjectionTargetState::Absent => Some(Preimage::Absent),
+        ProjectionTargetState::Text { sha256 } | ProjectionTargetState::Binary { sha256 } => {
+            Some(Preimage::Present(sha256.clone()))
+        }
+        ProjectionTargetState::UntrackedContent | ProjectionTargetState::Unreadable => None,
+    }
+}
+
+fn projection_matches(
+    state: &ProjectionTargetState,
+    content: &SnapshotContent,
+    desired_sha256: &str,
+) -> bool {
+    matches!(
+        (state, content),
+        (
+            ProjectionTargetState::Text { sha256 },
+            SnapshotContent::Text { .. }
+        ) if sha256 == desired_sha256
+    ) || matches!(
+        (state, content),
+        (
+            ProjectionTargetState::Binary { sha256 },
+            SnapshotContent::Binary { .. }
+        ) if sha256 == desired_sha256
+    )
+}
+
+fn switch_projection_job_id(
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+    operation: MaterializationOperation,
+    content_sha256: &str,
+    secret: bool,
+) -> String {
+    let operation = match operation {
+        MaterializationOperation::Write => "write",
+        MaterializationOperation::Delete => "delete",
+    };
+    let identity = format!(
+        "{workspace_id}\0{version_id}\0{path}\0{operation}\0{content_sha256}\0{}",
+        if secret { "secret" } else { "plain" }
+    );
+    let prefix = if secret {
+        "version-switch-secret-mat_"
+    } else {
+        "version-switch-mat_"
+    };
+    format!("{prefix}{}", hex_sha256(identity.as_bytes()))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "durable projection fields remain explicit at each planner branch"
+)]
+fn planned_projection(
+    workspace_id: &str,
+    version_id: &str,
+    path: String,
+    operation: MaterializationOperation,
+    content_sha256: String,
+    preimage: Preimage,
+    target_generation: i64,
+    now_ms: i64,
+    secret: bool,
+    inline_content: Option<Vec<u8>>,
+) -> SwitchProjection {
+    SwitchProjection {
+        spec: MaterializationJobSpec {
+            job_id: switch_projection_job_id(
+                workspace_id,
+                version_id,
+                &path,
+                operation,
+                &content_sha256,
+                secret,
+            ),
+            target_path: path,
+            content_sha256,
+            preimage,
+            target_generation,
+            now_ms,
+        },
+        operation,
+        inline_content,
+    }
+}
+
+fn plan_plaintext_switch(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    target_version_id: &str,
+    previous_version_id: &str,
+    root_dir: &std::path::Path,
+    now_ms: i64,
+    token: &CancellationToken,
+) -> Result<Vec<SwitchProjection>, RuntimeError> {
+    let target = VersionedTextStore::new(store)
+        .list_snapshots(workspace_id, target_version_id)
+        .map_err(RuntimeError::from)?;
+    let target_paths: HashSet<&str> = target
+        .iter()
+        .map(|snapshot| snapshot.path.as_str())
+        .collect();
+    let policy = read_engine_search_policy(root_dir);
+    if policy.is_degraded() {
+        return Err(DomainError::StateCorrupt {
+            reason: "workspace file policy is unavailable during version switch",
+        }
+        .into());
+    }
+    let mut projections = Vec::new();
+    if !policy.is_degraded() {
+        for snapshot in &target {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            if !resolve_effective_policy(
+                &snapshot.path,
+                policy.files_policy.as_deref(),
+                policy.visibility_policy.as_deref(),
+            )
+            .tracked
+            {
+                continue;
+            }
+            let state =
+                probe_projection_target(root_dir, &snapshot.path, ProjectionTargetKind::Plaintext);
+            let Some(preimage) = projection_preimage(&state) else {
+                continue;
+            };
+            let (desired_sha256, inline_content) = match &snapshot.content {
+                SnapshotContent::Text { text } => {
+                    (hex_sha256(text.as_bytes()), Some(text.as_bytes().to_vec()))
+                }
+                SnapshotContent::Binary { sha256 } => (sha256.clone(), None),
+            };
+            if projection_matches(&state, &snapshot.content, &desired_sha256) {
+                continue;
+            }
+            projections.push(planned_projection(
+                workspace_id,
+                target_version_id,
+                snapshot.path.clone(),
+                MaterializationOperation::Write,
+                desired_sha256,
+                preimage,
+                snapshot.updated_at_ms,
+                now_ms,
+                false,
+                inline_content,
+            ));
+        }
+    }
+    let previous = VersionedTextStore::new(store)
+        .list_snapshots(workspace_id, previous_version_id)
+        .map_err(RuntimeError::from)?;
+    if !policy.is_degraded() {
+        let empty_sha = hex_sha256(&[]);
+        for snapshot in previous {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            if target_paths.contains(snapshot.path.as_str())
+                || !resolve_effective_policy(
+                    &snapshot.path,
+                    policy.files_policy.as_deref(),
+                    policy.visibility_policy.as_deref(),
+                )
+                .tracked
+            {
+                continue;
+            }
+            let state =
+                probe_projection_target(root_dir, &snapshot.path, ProjectionTargetKind::Plaintext);
+            let Some(preimage @ Preimage::Present(_)) = projection_preimage(&state) else {
+                continue;
+            };
+            projections.push(planned_projection(
+                workspace_id,
+                target_version_id,
+                snapshot.path,
+                MaterializationOperation::Delete,
+                empty_sha.clone(),
+                preimage,
+                snapshot.updated_at_ms,
+                now_ms,
+                false,
+                Some(Vec::new()),
+            ));
+        }
+    }
+    Ok(projections)
+}
+
+fn secret_ciphertext_sha(
+    store: &EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    path: &str,
+) -> Result<String, RuntimeError> {
+    let ciphertext_base64: Option<String> = store.read_with(|connection| {
+        connection
+            .query_row(
+                "SELECT ciphertext_base64 FROM secret_files \
+                 WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+                params![workspace_id, version_id, path],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StorageError::corrupt_public)
+    })?;
+    let ciphertext_base64 = ciphertext_base64.ok_or(DomainError::StateCorrupt {
+        reason: "secret tip has no ciphertext identity",
+    })?;
+    let ciphertext = dohc_engine_crypto::base64::forgiving_decode(&ciphertext_base64);
+    Ok(hex_sha256(&ciphertext))
+}
+
+fn load_projection_secret_key(root_dir: &std::path::Path) -> Result<SecretDataKey, RuntimeError> {
+    load_key_file(root_dir)
+        .map_err(DomainError::from)?
+        .ok_or_else(|| {
+            RuntimeError::from(DomainError::StateCorrupt {
+                reason: "workspace secret key is unavailable",
+            })
+        })
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the planner keeps key custody and switch coordinates explicit"
+)]
+fn plan_secret_switch(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    target_version_id: &str,
+    previous_version_id: &str,
+    root_dir: &std::path::Path,
+    now_ms: i64,
+    token: &CancellationToken,
+    secret_key: &mut Option<SecretDataKey>,
+) -> Result<Vec<SwitchProjection>, RuntimeError> {
+    let target = list_secret_files_keyless(store, workspace_id, target_version_id)?;
+    let target_paths: HashSet<&str> = target.iter().map(|stat| stat.path.as_str()).collect();
+    let mut projections = Vec::new();
+    for stat in &target {
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        let state = probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret);
+        let Some(preimage) = projection_preimage(&state) else {
+            continue;
+        };
+        if secret_key.is_none() {
+            *secret_key = Some(load_projection_secret_key(root_dir)?);
+        }
+        let plaintext =
+            SecretFileStore::new(store, secret_key.as_ref().expect("secret key loaded"))
+                .materialize_secret_file(workspace_id, target_version_id, &stat.path)?
+                .ok_or(DomainError::StateCorrupt {
+                    reason: "secret tip could not be materialized",
+                })?;
+        let desired_plaintext_sha = hex_sha256(plaintext.as_bytes());
+        let already_equal = matches!(
+            &state,
+            ProjectionTargetState::Text { sha256 } if sha256 == &desired_plaintext_sha
+        );
+        drop(plaintext);
+        if already_equal {
+            continue;
+        }
+        let ciphertext_sha =
+            secret_ciphertext_sha(store, workspace_id, target_version_id, &stat.path)?;
+        projections.push(planned_projection(
+            workspace_id,
+            target_version_id,
+            stat.path.clone(),
+            MaterializationOperation::Write,
+            ciphertext_sha,
+            preimage,
+            stat.updated_at_ms,
+            now_ms,
+            true,
+            None,
+        ));
+    }
+    let previous = list_secret_files_keyless(store, workspace_id, previous_version_id)?;
+    let empty_sha = hex_sha256(&[]);
+    for stat in previous {
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        if target_paths.contains(stat.path.as_str()) {
+            continue;
+        }
+        let state = probe_projection_target(root_dir, &stat.path, ProjectionTargetKind::Secret);
+        let Some(preimage @ Preimage::Present(_)) = projection_preimage(&state) else {
+            continue;
+        };
+        projections.push(planned_projection(
+            workspace_id,
+            target_version_id,
+            stat.path,
+            MaterializationOperation::Delete,
+            empty_sha.clone(),
+            preimage,
+            stat.updated_at_ms,
+            now_ms,
+            true,
+            Some(Vec::new()),
+        ));
+    }
+    Ok(projections)
+}
+
+fn active_projection_coordinates(
+    store: &EngineStore,
+) -> Result<Vec<(String, String)>, RuntimeError> {
+    store
+        .read_with(|connection| {
+            let mut statement = connection
+                .prepare(
+                    "SELECT workspace_id, version_id FROM active_versions ORDER BY workspace_id",
+                )
+                .map_err(StorageError::corrupt_public)?;
+            let rows = statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(StorageError::corrupt_public)?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(StorageError::corrupt_public)
+        })
+        .map_err(RuntimeError::from)
+}
+
+fn switch_projection_matches_active(
+    store: &EngineStore,
+    job: &MaterializationJob,
+    secret: bool,
+) -> Result<Option<SecretJobCoordinates>, RuntimeError> {
+    for (workspace_id, version_id) in active_projection_coordinates(store)? {
+        let expected_job_id = switch_projection_job_id(
+            &workspace_id,
+            &version_id,
+            &job.target_path,
+            job.operation,
+            &job.content_sha256,
+            secret,
+        );
+        if job.job_id != expected_job_id {
+            continue;
+        }
+        let matches = if secret {
+            let ciphertext_base64: Option<String> = store.read_with(|connection| {
+                connection
+                    .query_row(
+                        "SELECT ciphertext_base64 FROM secret_files \
+                         WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+                        params![workspace_id, version_id, job.target_path],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(StorageError::corrupt_public)
+            })?;
+            let tip_sha = ciphertext_base64
+                .map(|encoded| hex_sha256(&dohc_engine_crypto::base64::forgiving_decode(&encoded)));
+            match job.operation {
+                MaterializationOperation::Write => tip_sha.as_deref() == Some(&job.content_sha256),
+                MaterializationOperation::Delete => tip_sha.is_none(),
+            }
+        } else {
+            let tip_sha: Option<String> = store.read_with(|connection| {
+                connection
+                    .query_row(
+                        "SELECT CASE COALESCE(content_kind, 'text') \
+                                  WHEN 'binary' THEN binary_sha256 ELSE blob_sha256 END \
+                         FROM snapshots \
+                         WHERE workspace_id = ?1 AND version_id = ?2 AND path = ?3",
+                        params![workspace_id, version_id, job.target_path],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(StorageError::corrupt_public)
+            })?;
+            match job.operation {
+                MaterializationOperation::Write => tip_sha.as_deref() == Some(&job.content_sha256),
+                MaterializationOperation::Delete => tip_sha.is_none(),
+            }
+        };
+        if matches {
+            return Ok(Some(SecretJobCoordinates {
+                workspace_id,
+                version_id,
+                path: job.target_path.clone(),
+            }));
+        }
+        return Ok(None);
+    }
+    Ok(None)
+}
+
+struct MaterializationReplaySummary {
+    completed: usize,
+    failed: usize,
+    selected_seen: usize,
+}
+
+fn replay_pending_materializations(
+    store: &mut EngineStore,
+    root_dir: &std::path::Path,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    selected: Option<&HashSet<String>>,
+    switch_suppression: Option<(&str, &dyn SelfWriteRecorder)>,
+) -> Result<MaterializationReplaySummary, RuntimeError> {
+    let jobs = store.list_pending_materialization_jobs()?;
+    let mut summary = MaterializationReplaySummary {
+        completed: 0,
+        failed: 0,
+        selected_seen: 0,
+    };
+    let mut secret_key: Option<SecretDataKey> = None;
+    for job in jobs {
+        if selected.is_some_and(|selected| !selected.contains(&job.job_id)) {
+            continue;
+        }
+        summary.selected_seen += usize::from(selected.is_some());
+        let switch_secret = job.job_id.starts_with("version-switch-secret-mat_");
+        let ordinary_secret = job.job_id.starts_with("secret-mat_");
+        if switch_secret || ordinary_secret {
+            let coordinates = if switch_secret {
+                match switch_projection_matches_active(store, &job, true)? {
+                    Some(coordinates) => coordinates,
+                    None => {
+                        store.mark_materialization_complete(&job.job_id, now_ms)?;
+                        if selected.is_some() {
+                            summary.failed += 1;
+                        }
+                        continue;
+                    }
+                }
+            } else {
+                let Some(coordinates) = secret_job_coordinates(store, &job)? else {
+                    store.mark_materialization_complete(&job.job_id, now_ms)?;
+                    continue;
+                };
+                let active_version_id = VersionedTextStore::new(store)
+                    .get_active_version(&coordinates.workspace_id)?
+                    .version_id;
+                if coordinates.version_id != active_version_id {
+                    continue;
+                }
+                let tip_present = secret_tip_exists(store, &coordinates)?;
+                match (job.operation, tip_present) {
+                    (MaterializationOperation::Write, false)
+                    | (MaterializationOperation::Delete, true) => {
+                        store.mark_materialization_complete(&job.job_id, now_ms)?;
+                        continue;
+                    }
+                    (MaterializationOperation::Delete, false)
+                    | (MaterializationOperation::Write, true) => {}
+                }
+                coordinates
+            };
+            if job.operation == MaterializationOperation::Delete {
+                match materialize_secret_delete_one(
+                    store,
+                    root_dir,
+                    &job,
+                    DurabilityPolicy::per_os(),
+                    now_ms,
+                    faults,
+                ) {
+                    Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
+                        summary.completed += 1;
+                    }
+                    Ok(JobOutcome::Conflict | JobOutcome::Superseded | JobOutcome::Crashed(_))
+                    | Err(_) => summary.failed += 1,
+                }
+                continue;
+            }
+            if secret_key.is_none() {
+                let Ok(Some(key)) = load_key_file(root_dir) else {
+                    summary.failed += 1;
+                    continue;
+                };
+                secret_key = Some(key);
+            }
+            let plaintext = match secret_plaintext_for_job(
+                store,
+                secret_key.as_ref().expect("secret key loaded"),
+                &coordinates,
+            ) {
+                Ok(Some(plaintext)) => plaintext,
+                Ok(None) => {
+                    store.mark_materialization_complete(&job.job_id, now_ms)?;
+                    continue;
+                }
+                Err(_) => {
+                    summary.failed += 1;
+                    continue;
+                }
+            };
+            let plaintext_sha = hex_sha256(plaintext.as_bytes());
+            if let Some((workspace_id, self_writes)) = switch_suppression {
+                self_writes.record(workspace_id, &job.target_path, &plaintext_sha);
+            }
+            let outcome = materialize_secret_one(
+                store,
+                root_dir,
+                &job,
+                plaintext.as_bytes(),
+                DurabilityPolicy::per_os(),
+                &StdReplacer,
+                &StdBackoff,
+                now_ms,
+                faults,
+            );
+            match outcome {
+                Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
+                    summary.completed += 1;
+                }
+                Ok(JobOutcome::Conflict | JobOutcome::Superseded | JobOutcome::Crashed(_))
+                | Err(_) => {
+                    if let Some((workspace_id, self_writes)) = switch_suppression {
+                        self_writes.retract(workspace_id, &job.target_path, &plaintext_sha);
+                    }
+                    summary.failed += 1;
+                }
+            }
+            continue;
+        }
+        if job.job_id.starts_with("version-switch-mat_")
+            && switch_projection_matches_active(store, &job, false)?.is_none()
+        {
+            store.mark_materialization_complete(&job.job_id, now_ms)?;
+            if selected.is_some() {
+                summary.failed += 1;
+            }
+            continue;
+        }
+        if let Some(moment_id) = job.job_id.strip_prefix("binary-rename-1-delete-mat_") {
+            let write_job_id = binary_rename_write_job_id(moment_id);
+            let destination_ready = store
+                .load_materialization_job(&write_job_id)?
+                .is_some_and(|write_job| write_job.status == JobStatus::Complete);
+            if !destination_ready {
+                if selected.is_some() {
+                    summary.failed += 1;
+                }
+                continue;
+            }
+        }
+        let outcome = if let Some((workspace_id, self_writes)) = switch_suppression {
+            let (materialized, reported) = materialize_pending_job(
+                store,
+                root_dir,
+                workspace_id,
+                &job,
+                self_writes,
+                now_ms,
+                faults,
+            );
+            if materialized {
+                Ok(JobOutcome::Completed)
+            } else {
+                Ok(match reported {
+                    PostCommitMaterializeOutcome::Conflict => JobOutcome::Conflict,
+                    PostCommitMaterializeOutcome::Superseded => JobOutcome::Superseded,
+                    PostCommitMaterializeOutcome::Applied
+                    | PostCommitMaterializeOutcome::Skipped
+                    | PostCommitMaterializeOutcome::Error => {
+                        JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit)
+                    }
+                })
+            }
+        } else {
+            materialize_one(
+                store,
+                root_dir,
+                &job,
+                DurabilityPolicy::per_os(),
+                &StdReplacer,
+                &StdBackoff,
+                now_ms,
+                faults,
+            )
+            .map_err(RuntimeError::from)
+        };
+        match outcome {
+            Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
+                summary.completed += 1;
+            }
+            Ok(JobOutcome::Conflict | JobOutcome::Superseded) => {
+                summary.failed += 1;
+                if let Some(moment_id) = job.job_id.strip_prefix("ydoc-mat_") {
+                    let coords: Option<(String, String, String)> =
+                        store.read_with(|connection| {
+                            connection
+                                .query_row(
+                                    "SELECT workspace_id, version_id, object_id \
+                                 FROM moments WHERE moment_id = ?1",
+                                    [moment_id],
+                                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                                )
+                                .optional()
+                                .map_err(StorageError::corrupt_public)
+                        })?;
+                    if let Some((workspace_id, version_id, object_id)) = coords {
+                        store.write_with(&NoFaults, |transaction| {
+                            transaction
+                                .execute(
+                                    "UPDATE ydoc_docs SET last_settled_sha = NULL, updated_at_ms = ?4 \
+                                     WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                                    params![workspace_id, version_id, object_id, now_ms],
+                                )
+                                .map_err(StorageError::persist_public)?;
+                            Ok::<_, StorageError>(())
+                        })?;
+                    }
+                }
+            }
+            Ok(JobOutcome::Crashed(_)) | Err(_) => summary.failed += 1,
+        }
+    }
+    Ok(summary)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "switch ordering, disk root, suppression, faults, and cancellation are independent"
+)]
+fn switch_active_version_on_store(
+    store: &mut EngineStore,
+    workspace_id: &str,
+    version_id: &str,
+    root_dir: &std::path::Path,
+    self_writes: &dyn SelfWriteRecorder,
+    now_ms: i64,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+) -> Result<VersionRecord, RuntimeError> {
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let previous = VersionedTextStore::new(store).get_active_version(workspace_id)?;
+    let target = VersionedTextStore::new(store)
+        .list_versions(workspace_id)?
+        .into_iter()
+        .find(|version| version.version_id == version_id)
+        .ok_or(DomainError::VersionNotFound)?;
+    if previous.version_id == version_id {
+        return Ok(target);
+    }
+    let mut secret_key = None;
+    let mut projections = plan_plaintext_switch(
+        store,
+        workspace_id,
+        version_id,
+        &previous.version_id,
+        root_dir,
+        now_ms,
+        token,
+    )?;
+    projections.extend(plan_secret_switch(
+        store,
+        workspace_id,
+        version_id,
+        &previous.version_id,
+        root_dir,
+        now_ms,
+        token,
+        &mut secret_key,
+    )?);
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    let outcome = store.write_with(faults, |tx| {
+        tx.execute(
+            "INSERT INTO active_versions (workspace_id, version_id) VALUES (?1, ?2) \
+             ON CONFLICT(workspace_id) DO UPDATE SET version_id = excluded.version_id",
+            params![workspace_id, version_id],
+        )
+        .map_err(StorageError::persist_public)?;
+        for projection in &projections {
+            if let Some(content) = projection.inline_content.as_deref() {
+                let stored_sha = put_binary_blob(tx, content)?;
+                if stored_sha != projection.spec.content_sha256 {
+                    return Err(StorageError::corrupt_public(rusqlite::Error::InvalidQuery));
+                }
+            }
+            upsert_projection_job(tx, &projection.spec, projection.operation)?;
+        }
+        Ok::<_, StorageError>(())
+    })?;
+    if matches!(outcome, TxnOutcome::Crashed { .. }) {
+        return Err(RuntimeError::OperationCrashed);
+    }
+    drop(secret_key);
+    let selected: HashSet<String> = projections
+        .iter()
+        .map(|projection| projection.spec.job_id.clone())
+        .collect();
+    let replay = replay_pending_materializations(
+        store,
+        root_dir,
+        now_ms,
+        faults,
+        Some(&selected),
+        Some((workspace_id, self_writes)),
+    )?;
+    let failed_jobs = replay.failed + selected.len().saturating_sub(replay.selected_seen);
+    if failed_jobs > 0 {
+        return Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs });
+    }
+    Ok(target)
+}
+
 fn worker_main(
     db_path: PathBuf,
     now_ms: i64,
@@ -4882,19 +5618,21 @@ fn worker_main(
                 let _ = reply.send(outcome);
             }
             Command::SetActiveVersion {
-                workspace_id,
-                version_id,
+                input,
                 faults,
                 token,
                 reply,
             } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    VersionedTextStore::new(&mut store)
-                        .set_active_version(&workspace_id, &version_id, faults.as_ref())
-                        .map_err(RuntimeError::from)
-                };
+                let outcome = switch_active_version_on_store(
+                    &mut store,
+                    &input.workspace_id,
+                    &input.version_id,
+                    &input.root_dir,
+                    input.self_writes.as_ref(),
+                    input.now_ms,
+                    faults.as_ref(),
+                    &token,
+                );
                 let _ = reply.send(outcome);
             }
             Command::CreateNamedVersion {
@@ -5079,176 +5817,13 @@ fn worker_main(
                 now_ms,
                 reply,
             } => {
-                // Open-time replay of jobs left pending by a crash, a
-                // transient settle failure, or a pulled replication apply.
-                // Runs BEFORE the files layer spawns, so no watcher observes
-                // the writes (no suppression needed) and the baseline scan
-                // sees the post-replay disk. Per-job failures are tolerated:
-                // the job stays pending for the next open or the settle
-                // no-op replay.
-                let outcome = (|| {
-                    let jobs = store.list_pending_materialization_jobs()?;
-                    let mut completed = 0_usize;
-                    // Per-call key custody: this local is dropped when the
-                    // replay command ends and is never retained by the actor.
-                    let mut secret_key: Option<SecretDataKey> = None;
-                    for job in jobs {
-                        if job.job_id.starts_with("secret-mat_") {
-                            let Some(coordinates) = secret_job_coordinates(&mut store, &job)?
-                            else {
-                                store.mark_materialization_complete(&job.job_id, now_ms)?;
-                                continue;
-                            };
-                            let active_version_id = VersionedTextStore::new(&mut store)
-                                .get_active_version(&coordinates.workspace_id)?
-                                .version_id;
-                            // Disk is the active-version projection. A mutation
-                            // in any other version is durable DB state only,
-                            // but its pending intent must survive until that
-                            // version is activated and a later open replays it.
-                            if coordinates.version_id != active_version_id {
-                                continue;
-                            }
-                            let tip_present = secret_tip_exists(&store, &coordinates)?;
-                            match (job.operation, tip_present) {
-                                (dohc_engine_storage::MaterializationOperation::Write, false)
-                                | (dohc_engine_storage::MaterializationOperation::Delete, true) => {
-                                    // A later mutation in this active version
-                                    // superseded the pending job. In particular,
-                                    // a gone write tip is not corrupt state.
-                                    store.mark_materialization_complete(&job.job_id, now_ms)?;
-                                    continue;
-                                }
-                                (dohc_engine_storage::MaterializationOperation::Delete, false) => {}
-                                (dohc_engine_storage::MaterializationOperation::Write, true) => {}
-                            }
-                            if matches!(
-                                job.operation,
-                                dohc_engine_storage::MaterializationOperation::Delete
-                            ) {
-                                match materialize_secret_delete_one(
-                                    &store,
-                                    &root_dir,
-                                    &job,
-                                    DurabilityPolicy::per_os(),
-                                    now_ms,
-                                    &NoFaults,
-                                ) {
-                                    Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
-                                        completed += 1;
-                                    }
-                                    Ok(
-                                        JobOutcome::Conflict
-                                        | JobOutcome::Superseded
-                                        | JobOutcome::Crashed(_),
-                                    )
-                                    | Err(_) => {}
-                                }
-                                continue;
-                            }
-                            if secret_key.is_none() {
-                                let Ok(Some(key)) = load_key_file(&root_dir) else {
-                                    continue;
-                                };
-                                secret_key = Some(key);
-                            }
-                            let plaintext = match secret_plaintext_for_job(
-                                &mut store,
-                                secret_key.as_ref().expect("secret key loaded"),
-                                &coordinates,
-                            ) {
-                                Ok(Some(plaintext)) => plaintext,
-                                Ok(None) => {
-                                    store.mark_materialization_complete(&job.job_id, now_ms)?;
-                                    continue;
-                                }
-                                Err(_) => continue,
-                            };
-                            match materialize_secret_one(
-                                &store,
-                                &root_dir,
-                                &job,
-                                plaintext.as_bytes(),
-                                DurabilityPolicy::per_os(),
-                                &StdReplacer,
-                                &StdBackoff,
-                                now_ms,
-                                &NoFaults,
-                            ) {
-                                Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
-                                    completed += 1;
-                                }
-                                Ok(
-                                    JobOutcome::Conflict
-                                    | JobOutcome::Superseded
-                                    | JobOutcome::Crashed(_),
-                                )
-                                | Err(_) => {}
-                            }
-                            continue;
-                        }
-                        if let Some(moment_id) =
-                            job.job_id.strip_prefix("binary-rename-1-delete-mat_")
-                        {
-                            let write_job_id = binary_rename_write_job_id(moment_id);
-                            let destination_ready = store
-                                .load_materialization_job(&write_job_id)?
-                                .is_some_and(|write_job| write_job.status == JobStatus::Complete);
-                            if !destination_ready {
-                                continue;
-                            }
-                        }
-                        match materialize_one(
-                            &store,
-                            &root_dir,
-                            &job,
-                            DurabilityPolicy::per_os(),
-                            &StdReplacer,
-                            &StdBackoff,
-                            now_ms,
-                            &NoFaults,
-                        ) {
-                            Ok(JobOutcome::Completed | JobOutcome::AlreadyMaterialized) => {
-                                completed += 1;
-                            }
-                            Ok(JobOutcome::Conflict | JobOutcome::Superseded) => {
-                                // The disk moved while the daemon was down:
-                                // a settle job's marker still claims bytes
-                                // that never replaced the file. Leave the
-                                // stale sha and every later settle inherits
-                                // a poisoned preimage expectation (and a
-                                // prune-close could discard the CRDT over an
-                                // unmaterialized artifact) — NULL it, the
-                                // same compensation the settle-time replay
-                                // arms apply.
-                                if let Some(moment_id) = job.job_id.strip_prefix("ydoc-mat_") {
-                                    let coords: Option<(String, String, String)> = store
-                                        .read_with(|conn| {
-                                            conn.query_row(
-                                                "SELECT workspace_id, version_id, object_id                                                  FROM moments WHERE moment_id = ?1",
-                                                [moment_id],
-                                                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                                            )
-                                            .optional()
-                                            .map_err(StorageError::corrupt_public)
-                                        })?;
-                                    if let Some((ws, version, object)) = coords {
-                                        store.write_with(&NoFaults, |tx| {
-                                            tx.execute(
-                                                "UPDATE ydoc_docs SET last_settled_sha = NULL,                                                  updated_at_ms = ?4                                                  WHERE workspace_id = ?1 AND version_id = ?2                                                    AND object_id = ?3",
-                                                params![ws, version, object, now_ms],
-                                            )
-                                            .map_err(StorageError::persist_public)?;
-                                            Ok::<_, StorageError>(())
-                                        })?;
-                                    }
-                                }
-                            }
-                            Ok(_) | Err(_) => {}
-                        }
-                    }
-                    Ok::<_, RuntimeError>(completed)
-                })();
+                // Open-time replay runs before the files layer starts. The
+                // switch path calls the same tolerant per-job executor with a
+                // selected durable job set and watcher suppression enabled.
+                let outcome = replay_pending_materializations(
+                    &mut store, &root_dir, now_ms, &NoFaults, None, None,
+                )
+                .map(|summary| summary.completed);
                 let _ = reply.send(outcome);
             }
             Command::ConflictList {
