@@ -830,6 +830,19 @@ async fn pull_returns_fast_forwarded_text_and_binary_paths_for_materialization()
         ])
     );
     assert!(pull["pendingCursor"].is_object());
+
+    let redelivered = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.pull",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    assert_eq!(
+        redelivered["changedPaths"], pull["changedPaths"],
+        "an uncommitted redelivery must repeat every path still requiring materialization"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1267,6 +1280,68 @@ async fn shared_channel_pull_drops_own_echo_and_renumbers_each_source_densely() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_channel_stale_selector_does_not_advance_rejected_cursor() {
+    let workspace_id = "rpc-shared-channel-stale-selector";
+    let share_id = "stale-selector-share";
+    let mut state = RelayState::default();
+    state.share_ops.insert(
+        share_id.to_owned(),
+        vec![share_row(
+            1,
+            "granter",
+            0,
+            "chat.channel.create",
+            json!({
+                "channelId": "channel",
+                "name": "Shared",
+                "slug": "shared",
+                "kind": "channel",
+                "createdAtMs": 1,
+                "wireId": "wire-current",
+            }),
+        )],
+    );
+    let relay = FakeRelay::start(state);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+
+    let _ = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "share.channel.pull",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": workspace_id,
+                    "shareId": share_id,
+                    "channelWireId": "wire-stale",
+                }),
+            ),
+        )
+        .await;
+    close(&transport, &handle, &mut id).await;
+
+    let db = Connection::open(scratch.engine_db_path().expect("engine db path"))
+        .expect("open engine db");
+    let cursor: Option<String> = db
+        .query_row(
+            "SELECT cursor FROM shared_channel_cursors WHERE workspace_id=?1 AND share_id=?2",
+            [workspace_id, share_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .expect("read shared channel cursor");
+    assert_eq!(
+        cursor, None,
+        "a selector-rejected entry was not consumed and cannot advance the cursor"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
     let workspace_id = "rpc-share-view";
     let share_id = "view-share";
@@ -1435,4 +1510,156 @@ async fn share_view_pull_skips_a_malformed_entry_and_reports_the_skip() {
         pulled["changedPaths"][0]["path"],
         "notes/after-malformed.md"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn share_view_rename_validates_replacement_before_removing_old_path() {
+    let workspace_id = "rpc-share-view-rename-integrity";
+    let share_id = "rename-integrity-share";
+    let old_bytes = b"old shared content".to_vec();
+    let old_sha = hex_sha256(&old_bytes);
+    let replacement_sha = hex_sha256(b"expected replacement");
+    let mut state = RelayState::default();
+    state.share_ops.insert(
+        share_id.to_owned(),
+        vec![share_row(
+            1,
+            "granter",
+            0,
+            "version.create",
+            json!({
+                "forkSnapshots": [{
+                    "path": "notes/old.md",
+                    "blobSha256": old_sha,
+                    "contentKind": "text",
+                }],
+            }),
+        )],
+    );
+    state
+        .share_blobs
+        .insert((share_id.to_owned(), old_sha), old_bytes);
+    state.share_blobs.insert(
+        (share_id.to_owned(), replacement_sha.clone()),
+        b"corrupt replacement".to_vec(),
+    );
+    let relay = FakeRelay::start(state);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+
+    let initial = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.view.pull",
+        json!({
+            "workspaceId": workspace_id,
+            "shareId": share_id,
+            "pathPrefix": "notes",
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.commitCursor",
+        json!({
+            "workspaceId": workspace_id,
+            "pendingCursor": initial["pendingCursor"].clone(),
+        }),
+    )
+    .await;
+    relay
+        .state
+        .lock()
+        .expect("relay state")
+        .share_ops
+        .get_mut(share_id)
+        .expect("share log")
+        .push(share_row(
+            2,
+            "granter",
+            1,
+            "moment.append",
+            json!({
+                "operation": "rename",
+                "path": "notes/new.md",
+                "payloadBeforePath": "notes/old.md",
+                "payloadAfterPath": "notes/new.md",
+                "payloadAfterBlobSha256": replacement_sha.clone(),
+                "payloadAfterContentKind": "text",
+            }),
+        ));
+
+    let rename = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                id,
+                "share.view.pull",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": workspace_id,
+                    "shareId": share_id,
+                    "pathPrefix": "notes",
+                }),
+            ),
+        )
+        .await
+        .expect_err("corrupt replacement must reject the rename");
+    assert_eq!(rename.code, ErrorCode::InvalidParams);
+
+    let db = Connection::open(scratch.engine_db_path().expect("engine db path"))
+        .expect("open engine db");
+    let old_exists: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM path_aliases \
+             WHERE workspace_id=?1 AND version_id='main' AND path='notes/old.md')",
+            [workspace_id],
+            |row| row.get(0),
+        )
+        .expect("read old projection");
+    assert!(
+        old_exists,
+        "a rejected rename must leave the old projected path intact"
+    );
+    drop(db);
+
+    relay.state.lock().expect("relay state").share_blobs.insert(
+        (share_id.to_owned(), replacement_sha),
+        b"expected replacement".to_vec(),
+    );
+    let retried = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.view.pull",
+        json!({
+            "workspaceId": workspace_id,
+            "shareId": share_id,
+            "pathPrefix": "notes",
+        }),
+    )
+    .await;
+    assert_eq!(retried["changedPaths"].as_array().map(Vec::len), Some(2));
+    close(&transport, &handle, &mut id).await;
+
+    let db = Connection::open(scratch.engine_db_path().expect("engine db path"))
+        .expect("open engine db");
+    let paths: (bool, bool) = db
+        .query_row(
+            "SELECT \
+               EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 \
+                 AND version_id='main' AND path='notes/old.md'), \
+               EXISTS(SELECT 1 FROM path_aliases WHERE workspace_id=?1 \
+                 AND version_id='main' AND path='notes/new.md')",
+            [workspace_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read retried rename projection");
+    assert_eq!(paths, (false, true));
 }

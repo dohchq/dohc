@@ -216,6 +216,74 @@ pub(crate) fn apply_moment_envelope_detailed(
     apply_envelope_with(store, envelope, faults, apply_moment_append)
 }
 
+pub(crate) fn redelivered_materialization_changes(
+    store: &EngineStore,
+    envelope: &ReplicationEnvelope,
+) -> Result<Vec<MomentMaterializationChange>, SyncError> {
+    if envelope.op_kind != "moment.append" {
+        return Ok(Vec::new());
+    }
+    let payload: MomentAppendPayload =
+        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
+            reason: "moment.append payload is malformed",
+        })?;
+    let materialized = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT EXISTS( \
+               SELECT 1 FROM moments m \
+               WHERE m.workspace_id=?1 AND m.moment_id=?2 AND m.version_id=?3 \
+                 AND m.object_id=?4 AND m.operation=?5 AND m.path=?6 \
+                 AND m.recorded_at_ms=?7 AND m.sync_record_only IS NULL \
+             ) AND COALESCE( \
+               (SELECT version_id FROM active_versions WHERE workspace_id=?1), \
+               (SELECT main_version_id FROM versioned_workspaces WHERE workspace_id=?1), \
+               '' \
+             )=?3",
+            params![
+                envelope.workspace_id,
+                payload.moment_id,
+                payload.version_id,
+                payload.object_id,
+                payload.operation,
+                payload.path,
+                payload.recorded_at_ms,
+            ],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(SyncError::corrupt)
+    })?;
+    if !materialized {
+        return Ok(Vec::new());
+    }
+
+    let kind = ContentKind::from_wire(payload.payload_after_content_kind.as_deref()).as_str();
+    let mut changes = Vec::new();
+    if payload.operation == "delete" {
+        changes.push(MomentMaterializationChange {
+            path: payload.path,
+            operation: "delete",
+            content_kind: kind,
+        });
+        return Ok(changes);
+    }
+    if payload.operation == "rename"
+        && let Some(before_path) = payload.payload_before_path
+        && before_path != payload.payload_after_path
+    {
+        changes.push(MomentMaterializationChange {
+            path: before_path,
+            operation: "delete",
+            content_kind: kind,
+        });
+    }
+    changes.push(MomentMaterializationChange {
+        path: payload.payload_after_path,
+        operation: "write",
+        content_kind: kind,
+    });
+    Ok(changes)
+}
+
 fn apply_moment_append(
     tx: &Transaction<'_>,
     envelope: &ReplicationEnvelope,

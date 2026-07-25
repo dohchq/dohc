@@ -84,7 +84,6 @@ use dohc_engine_sync::{
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use rusqlite::{OptionalExtension, params};
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::sync_channel as std_sync_channel;
@@ -346,15 +345,31 @@ impl DeferredRelayTransport {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some((_, result)) = state
+        if let Some(index) = state
             .completed
             .iter()
-            .find(|(completed, _)| completed == &request)
+            .position(|(completed, _)| completed == &request)
         {
-            return match result {
+            let release = matches!(
+                state.completed[index].0,
+                RelayIoRequest::UploadBlob(_)
+                    | RelayIoRequest::DownloadBlob(_)
+                    | RelayIoRequest::ShareBlob(_)
+            );
+            let uploaded = matches!(state.completed[index].0, RelayIoRequest::UploadBlob(_));
+            let projected = match &state.completed[index].1 {
                 Ok(response) => project(response).ok_or(RelayError::InvalidResponse),
                 Err(error) => Err(error.clone()),
             };
+            if release && projected.is_ok() {
+                let _ = state.completed.swap_remove(index);
+                if uploaded {
+                    state
+                        .completed
+                        .retain(|(request, _)| !matches!(request, RelayIoRequest::BlobsHave(_)));
+                }
+            }
+            return projected;
         }
         if state
             .pending
@@ -500,6 +515,51 @@ impl RelayTransport for DeferredRelayTransport {
         BlobDownloadResponse,
         ShareBlob
     );
+}
+
+#[cfg(test)]
+mod deferred_relay_tests {
+    use super::*;
+
+    #[test]
+    fn large_multi_blob_pull_does_not_retain_consumed_buffers() {
+        let transport = DeferredRelayTransport::default();
+        for index in 0..64 {
+            let request = ShareBlobRequest {
+                share_id: "share".to_owned(),
+                sha256: format!("{index:064x}"),
+            };
+            let bytes = vec![u8::try_from(index).expect("byte"); 256 * 1024];
+            transport.complete(
+                RelayIoRequest::ShareBlob(request.clone()),
+                Ok(RelayIoResponse::ShareBlob(BlobDownloadResponse {
+                    bytes: bytes.clone(),
+                })),
+            );
+            assert_eq!(
+                transport.share_blob(request).expect("consume blob").bytes,
+                bytes
+            );
+        }
+
+        let state = transport
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let retained = state
+            .completed
+            .iter()
+            .filter_map(|(_, result)| match result {
+                Ok(RelayIoResponse::DownloadBlob(response))
+                | Ok(RelayIoResponse::ShareBlob(response)) => Some(response.bytes.len()),
+                _ => None,
+            })
+            .sum::<usize>();
+        assert_eq!(
+            retained, 0,
+            "persisted blob responses must be released before the RPC completes"
+        );
+    }
 }
 
 #[derive(Debug)]
@@ -4412,21 +4472,6 @@ impl ActorHandle {
                             .map_err(|_| RuntimeError::Relay(RelayError::Partitioned))?,
                         () = token.cancelled() => return Err(RuntimeError::Cancelled),
                     };
-                    if let Ok(RelayIoResponse::ShareViewPull(response)) = &result {
-                        for blob_request in share_view_blob_requests(&request, response) {
-                            let io_configuration = configuration.clone();
-                            let io_request = blob_request.clone();
-                            let task = tokio::task::spawn_blocking(move || {
-                                execute_http_request(io_configuration, io_request)
-                            });
-                            let blob_result = tokio::select! {
-                                result = task => result
-                                    .map_err(|_| RuntimeError::Relay(RelayError::Partitioned))?,
-                                () = token.cancelled() => return Err(RuntimeError::Cancelled),
-                            };
-                            transport.complete(blob_request, blob_result);
-                        }
-                    }
                     transport.complete(request, result);
                 }
                 Ok(mut outcome) => {
@@ -4670,53 +4715,6 @@ fn execute_http_request(
             .share_blob(request)
             .map(RelayIoResponse::ShareBlob),
     }
-}
-
-fn share_view_blob_requests(
-    request: &RelayIoRequest,
-    response: &ShareViewResponse,
-) -> Vec<RelayIoRequest> {
-    let RelayIoRequest::ShareViewPull(request) = request else {
-        return Vec::new();
-    };
-    let mut sha256s = BTreeSet::new();
-    for op in &response.ops {
-        if op.op_kind == "moment.append"
-            && let Some(sha256) = op
-                .payload
-                .get("payloadAfterBlobSha256")
-                .and_then(serde_json::Value::as_str)
-            && !sha256.is_empty()
-        {
-            sha256s.insert(sha256.to_owned());
-        }
-        if op.op_kind == "version.create" {
-            for snapshot in op
-                .payload
-                .get("forkSnapshots")
-                .and_then(serde_json::Value::as_array)
-                .into_iter()
-                .flatten()
-            {
-                if let Some(sha256) = snapshot
-                    .get("blobSha256")
-                    .and_then(serde_json::Value::as_str)
-                    && !sha256.is_empty()
-                {
-                    sha256s.insert(sha256.to_owned());
-                }
-            }
-        }
-    }
-    sha256s
-        .into_iter()
-        .map(|sha256| {
-            RelayIoRequest::ShareBlob(ShareBlobRequest {
-                share_id: request.share_id.clone(),
-                sha256,
-            })
-        })
-        .collect()
 }
 
 fn execute_relay_operation(

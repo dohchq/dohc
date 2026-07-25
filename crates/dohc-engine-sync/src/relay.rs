@@ -156,6 +156,7 @@ pub struct ShareReplicationEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SharedChannelRequest {
     pub share_id: String,
+    pub channel_wire_id: String,
     pub origin_id: String,
     pub cursor: i64,
     pub ops: Vec<ShareReplicationEnvelope>,
@@ -506,6 +507,12 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     refusals.push(refusal);
                 }
                 ApplyOutcome::Skipped => {
+                    for change in
+                        crate::moment_apply::redelivered_materialization_changes(store, op)
+                            .map_err(local)?
+                    {
+                        changed_paths.insert(change.path.clone(), change);
+                    }
                     skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?;
                 }
                 ApplyOutcome::Crashed { .. } => {
@@ -843,6 +850,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         loop {
             let page = self.transport.shared_channel_pull(SharedChannelRequest {
                 share_id: share_id.to_owned(),
+                channel_wire_id: channel_wire_id.to_owned(),
                 origin_id: identity
                     .as_ref()
                     .map_or_else(String::new, |value| value.origin_id.clone()),
@@ -869,6 +877,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut applied = 0_usize;
         let mut refused = 0_usize;
         let mut skipped = 0_usize;
+        let mut boundary_rejected = false;
         for op in ops {
             if own_echo.as_deref() == Some(op.origin_id.as_str()) {
                 skipped += 1;
@@ -889,11 +898,18 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 Ok(ApplyOutcome::Crashed { .. }) => {
                     return Err(RelayError::Local("injected-crash".to_owned()));
                 }
-                Err(SyncError::ShareBoundaryViolation | SyncError::InvalidInput { .. }) => {
+                Err(SyncError::ShareBoundaryViolation) => {
+                    boundary_rejected = true;
+                    skipped += 1;
+                }
+                Err(SyncError::InvalidInput { .. }) => {
                     skipped += 1;
                 }
                 Err(error) => return Err(local(error)),
             }
+        }
+        if boundary_rejected {
+            return Err(RelayError::ShareOperationRejected);
         }
         let committed = crate::commit_share_cursor(
             store,
@@ -962,6 +978,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         for batch in pending.chunks(500) {
             let response = self.transport.shared_channel_push(SharedChannelRequest {
                 share_id: share_id.to_owned(),
+                channel_wire_id: channel_wire_id.to_owned(),
                 origin_id: identity.origin_id.clone(),
                 cursor: 0,
                 ops: batch.iter().map(|(_, op)| op.clone()).collect(),
@@ -1755,19 +1772,6 @@ fn replay_share_view_op<T: RelayTransport>(
                 let after = string_field(&envelope.payload, "payloadAfterPath").or(path);
                 let sha = string_field(&envelope.payload, "payloadAfterBlobSha256");
                 if let (Some(before), Some(after), Some(sha)) = (before, after, sha) {
-                    if before != after {
-                        replay_share_delete(
-                            &mut *context.store,
-                            context.workspace_id,
-                            &main_version_id,
-                            context.share_id,
-                            envelope,
-                            before,
-                            context.faults,
-                            &mut *context.applied,
-                            &mut *context.changed,
-                        )?;
-                    }
                     replay_share_write(
                         context.transport,
                         &mut *context.store,
@@ -1782,6 +1786,19 @@ fn replay_share_view_op<T: RelayTransport>(
                         &mut *context.applied,
                         &mut *context.changed,
                     )?;
+                    if before != after {
+                        replay_share_delete(
+                            &mut *context.store,
+                            context.workspace_id,
+                            &main_version_id,
+                            context.share_id,
+                            envelope,
+                            before,
+                            context.faults,
+                            &mut *context.applied,
+                            &mut *context.changed,
+                        )?;
+                    }
                 }
             }
             Some("write") => {
@@ -1937,10 +1954,9 @@ fn replay_share_delete(
     let existing_kind = store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT s.content_kind FROM aliases a \
-                 JOIN moments m ON m.workspace_id=a.workspace_id AND m.moment_id=a.head_moment_id \
-                 LEFT JOIN snapshots s ON s.workspace_id=m.workspace_id \
-                   AND s.snapshot_id=m.payload_after_snapshot_id \
+                "SELECT s.content_kind FROM path_aliases a \
+                 JOIN snapshots s ON s.workspace_id=a.workspace_id \
+                   AND s.version_id=a.version_id AND s.object_id=a.object_id \
                  WHERE a.workspace_id=?1 AND a.version_id=?2 AND a.path=?3",
                 params![workspace_id, version_id, path],
                 |row| row.get::<_, Option<String>>(0),
