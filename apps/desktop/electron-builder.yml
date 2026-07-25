@@ -56,6 +56,13 @@ extraResources:
     to: workspace-kernel
     filter:
       - "**/*"
+  # The opt-in Rust engine is staged by build-workspace-engine.mjs and kept
+  # outside app.asar so the main process can execute it directly.
+  - from: resources/workspace-engine
+    to: workspace-engine
+    filter:
+      - "dohc-workspace-engine"
+      - "dohc-workspace-engine.exe"
 artifactName: "${productName}-${version}-${os}-${arch}.${ext}"
 # Workspace deps are raw TS bundled into dist by electron-vite; nothing needs
 # a native rebuild against Electron headers.
