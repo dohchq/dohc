@@ -22,10 +22,10 @@ class FakeClient implements EngineDaemonClient {
   constructor(
     private readonly respond: (
       request: Request,
-    ) => Response | Promise<Response> = (request) => ({
-      id: request.id,
-      result: {},
-    }),
+    ) => Response | Promise<Response> = (request) =>
+      request.method === "workspace.open"
+        ? { id: request.id, result: { workspace: "health-handle" } }
+        : { id: request.id, result: null },
   ) {}
 
   async sendRequest(request: Request): Promise<Response> {
@@ -84,7 +84,9 @@ describe("Rust engine daemon lifecycle", () => {
         resolve(desktopDir, "../..", ".github/workflows/desktop-release.yml"),
         "utf8",
       ),
-    ).toContain("pnpm --filter @dohc/desktop run build:engine");
+    ).toContain(
+      "pnpm --filter @dohc/desktop run build:engine -- --target",
+    );
   });
 
   it("generates a distinct auth token for every launch", async () => {
@@ -225,6 +227,63 @@ describe("Rust engine daemon lifecycle", () => {
     }
   });
 
+  it("counts a replacement that handshakes then hangs as a failed restart", async () => {
+    let initialExit: EngineClientSpawnOptions["onExit"];
+    let launchCount = 0;
+    const failures: Array<{ error: Error; terminal: boolean }> = [];
+    const healthyClient = new FakeClient((request) => {
+      if (request.method === "workspace.open") {
+        return { id: request.id, result: { workspace: "health-handle" } };
+      }
+      return { id: request.id, result: null };
+    });
+    const hungClient = new FakeClient(
+      () =>
+        new Promise<Response>(() => {
+          // The replacement completed helloAck but cannot serve requests.
+        }),
+    );
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      maxRestarts: 1,
+      initialBackoffMs: 0,
+      healthyResetMs: 20,
+      requestTimeoutMs: 10,
+      launch: async (options) => {
+        launchCount += 1;
+        if (launchCount === 1) {
+          initialExit = options.onExit;
+          return healthyClient;
+        }
+        return hungClient;
+      },
+      onFailure: (error, terminal) => {
+        failures.push({ error, terminal });
+      },
+    });
+
+    try {
+      await lifecycle.start();
+      initialExit?.(1, null);
+      await vi.waitFor(() => expect(launchCount).toBe(2));
+      await vi.waitFor(
+        () => {
+          expect(
+            failures.some(
+              ({ error, terminal }) =>
+                !terminal &&
+                /workspace\.open timed out after 10ms/.test(error.message),
+            ),
+          ).toBe(true);
+          expect(failures.some(({ terminal }) => terminal)).toBe(true);
+        },
+        { timeout: 200 },
+      );
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
   it("waits for the daemon to exit during clean shutdown", async () => {
     let resolveExit!: () => void;
     const exited = new Promise<void>((resolve) => {
@@ -247,6 +306,45 @@ describe("Rust engine daemon lifecycle", () => {
     expect(stopped).toBe(false);
     resolveExit();
     await stop;
+    expect(stopped).toBe(true);
+  });
+
+  it("waits for an in-flight launch and leaves no daemon starting on shutdown", async () => {
+    let resolveLaunch!: (client: EngineDaemonClient) => void;
+    let resolveExit!: () => void;
+    const launched = new Promise<EngineDaemonClient>((resolve) => {
+      resolveLaunch = resolve;
+    });
+    const exited = new Promise<void>((resolve) => {
+      resolveExit = resolve;
+    });
+    let launchSignal: AbortSignal | undefined;
+    const client = new FakeClient();
+    client.waitForExit = () => exited;
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      launch: async (options) => {
+        launchSignal = options.signal;
+        return await launched;
+      },
+    });
+
+    const start = lifecycle.start();
+    await Promise.resolve();
+    let stopped = false;
+    const stop = lifecycle.stop().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    expect(launchSignal?.aborted).toBe(true);
+
+    resolveLaunch(client);
+    await vi.waitFor(() => expect(client.closed).toBe(true));
+    expect(stopped).toBe(false);
+
+    resolveExit();
+    await Promise.all([start, stop]);
     expect(stopped).toBe(true);
   });
 
@@ -276,6 +374,7 @@ describe("Rust engine daemon lifecycle", () => {
       launch: async () => client,
     });
     await lifecycle.start();
+    client.requests.length = 0;
 
     await expect(
       lifecycle.smokeWorkspace("C:\\shadow-workspace", "smoke-workspace"),
@@ -289,7 +388,7 @@ describe("Rust engine daemon lifecycle", () => {
     await lifecycle.stop();
   });
 
-  it("fails startup smoke within the request bound when the daemon hangs after helloAck", async () => {
+  it("fails initial generation health within the request bound after helloAck", async () => {
     const client = new FakeClient(
       () =>
         new Promise<Response>(() => {
@@ -302,13 +401,13 @@ describe("Rust engine daemon lifecycle", () => {
       requestTimeoutMs: 20,
       launch: async () => client,
     });
-    await lifecycle.start();
 
     const startedAt = Date.now();
-    await expect(
-      lifecycle.smokeWorkspace("C:\\shadow-workspace", "hung-smoke"),
-    ).rejects.toThrow(/workspace\.open timed out after 20ms/);
+    await expect(lifecycle.start()).rejects.toThrow(
+      /workspace\.open timed out after 20ms/,
+    );
     expect(Date.now() - startedAt).toBeLessThan(500);
+    expect(client.closed).toBe(true);
     await lifecycle.stop();
   });
 

@@ -484,6 +484,7 @@ export interface EngineClientSpawnOptions {
   maxFrameBytes?: number;
   maxBlobChunkBytes?: number;
   maxBlobBytes?: number;
+  signal?: AbortSignal;
   onStderr?: (text: string) => void;
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
 }
@@ -1251,7 +1252,9 @@ export async function createEngineClient(
     writable: child.stdin,
   });
   const termination = new Promise<void>((resolve) => {
-    child.once("exit", () => resolve());
+    // "close" follows both a normal exit and a spawn failure, and proves the
+    // process plus its stdio handles are gone before lifecycle shutdown settles.
+    child.once("close", () => resolve());
   });
   const clientConnection = new DuplexEngineClientConnection(connection);
   const client = new EngineClient(
@@ -1292,11 +1295,20 @@ export async function createEngineClient(
     options.onExit?.(code, signal);
   });
 
+  const abortLaunch = (): void => client.close();
+  if (options.signal?.aborted) {
+    abortLaunch();
+  } else {
+    options.signal?.addEventListener("abort", abortLaunch, { once: true });
+  }
   try {
     await client.ready();
     return client;
   } catch (error) {
     client.close();
+    await client.waitForExit();
     throw error;
+  } finally {
+    options.signal?.removeEventListener("abort", abortLaunch);
   }
 }

@@ -1,8 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 
 import {
   nextNightlyBaseVersion,
@@ -365,6 +373,133 @@ test("desktop release workflow keeps unsigned package smoke reliable in CI", asy
   assert.match(fuseSmoke, /^ {8}if: runner\.os == 'Linux'$/m);
   assert.match(fuseSmoke, /^ {10}DOHC_E2E_NO_CHROMIUM_SANDBOX: "1"$/m);
   assert.match(fuseSmoke, /^ {8}run: xvfb-run -a pnpm smoke:fuses:desktop$/m);
+});
+
+test("desktop release stages the Rust engine built for the packaged architecture", async () => {
+  const root = await mkdtemp(join(tmpdir(), "dohc-engine-cross-build-"));
+  const scriptDir = join(root, "apps/desktop/scripts");
+  await mkdir(scriptDir, { recursive: true });
+  const sourceScript = join(
+    process.cwd(),
+    "apps/desktop/scripts/build-workspace-engine.mjs",
+  );
+  const copiedScript = join(scriptDir, "build-workspace-engine.mjs");
+  await writeFile(copiedScript, await readFile(sourceScript, "utf8"));
+
+  const buildModule = await import(
+    `${pathToFileURL(copiedScript).href}?test=${Date.now()}`
+  );
+  assert.equal(typeof buildModule.buildWorkspaceEngine, "function");
+
+  const target =
+    process.platform === "darwin" && process.arch === "arm64"
+      ? "x86_64-apple-darwin"
+      : "aarch64-apple-darwin";
+  const cargoCalls = [];
+  buildModule.buildWorkspaceEngine({
+    repoRoot: root,
+    desktopDir: join(root, "apps/desktop"),
+    platform: "darwin",
+    target,
+    runCargo(command, args, options) {
+      cargoCalls.push({ command, args, cwd: options.cwd });
+      const output = join(
+        root,
+        "target",
+        target,
+        "release",
+        "dohc-workspace-engine",
+      );
+      mkdirSync(join(root, "target", target, "release"), { recursive: true });
+      writeFileSync(output, "target fixture");
+      return { status: 0, stdout: "", stderr: "" };
+    },
+  });
+
+  assert.deepEqual(cargoCalls, [
+    {
+      command: "cargo",
+      args: [
+        "build",
+        "--release",
+        "--bin",
+        "dohc-workspace-engine",
+        "--target",
+        target,
+      ],
+      cwd: root,
+    },
+  ]);
+  assert.equal(
+    await readFile(
+      join(
+        root,
+        "apps/desktop/resources/workspace-engine/dohc-workspace-engine",
+      ),
+      "utf8",
+    ),
+    "target fixture",
+  );
+
+  const mismatchRepoRoot = join(root, "mismatch");
+  const mismatchDesktopDir = join(mismatchRepoRoot, "apps/desktop");
+  assert.throws(
+    () =>
+      buildModule.buildWorkspaceEngine({
+        repoRoot: mismatchRepoRoot,
+        desktopDir: mismatchDesktopDir,
+        platform: "darwin",
+        target,
+        runCargo() {
+          const hostOutput = join(
+            mismatchRepoRoot,
+            "target",
+            "release",
+            "dohc-workspace-engine",
+          );
+          mkdirSync(join(mismatchRepoRoot, "target", "release"), {
+            recursive: true,
+          });
+          writeFileSync(hostOutput, "host fixture");
+          return { status: 0, stdout: "", stderr: "" };
+        },
+      }),
+    new RegExp(`for target ${target} is missing`),
+  );
+  assert.equal(
+    existsSync(
+      join(
+        mismatchDesktopDir,
+        "resources/workspace-engine/dohc-workspace-engine",
+      ),
+    ),
+    false,
+  );
+
+  const workflow = await readFile(
+    join(process.cwd(), ".github/workflows/desktop-release.yml"),
+    "utf8",
+  );
+  assert.match(
+    workflow,
+    /arch: x64\s+target: x86_64-apple-darwin/,
+  );
+  assert.match(
+    workflow,
+    /arch: arm64\s+target: aarch64-apple-darwin/,
+  );
+  assert.match(
+    workflow,
+    /arch: x64\s+target: x86_64-pc-windows-msvc/,
+  );
+  assert.match(
+    workflow,
+    /arch: x64\s+target: x86_64-unknown-linux-gnu/,
+  );
+  assert.match(
+    stepBlock(workflow, "Build workspace engine"),
+    /build:engine -- --target "\$\{\{ matrix\.target \}\}"/,
+  );
 });
 
 test("desktop release workflow uploads only distributable release assets", async () => {

@@ -166,21 +166,25 @@ jobs:
             os: macOS
             runner: macos-latest
             arch: x64
+            target: x86_64-apple-darwin
             require_signing: "1"
           - label: macOS arm64
             os: macOS
             runner: macos-latest
             arch: arm64
+            target: aarch64-apple-darwin
             require_signing: "1"
           - label: Windows x64
             os: Windows
             runner: windows-latest
             arch: x64
+            target: x86_64-pc-windows-msvc
             require_signing: "1"
           - label: Linux x64
             os: Linux
             runner: ubuntu-latest
             arch: x64
+            target: x86_64-unknown-linux-gnu
             require_signing: "0"
     steps:
       - name: Checkout
@@ -211,7 +215,10 @@ jobs:
         run: pnpm build:desktop
 
       - name: Build workspace engine
-        run: pnpm --filter @dohc/desktop run build:engine
+        shell: bash
+        run: |
+          rustup target add "${{ matrix.target }}"
+          pnpm --filter @dohc/desktop run build:engine -- --target "${{ matrix.target }}"
 
       - id: signing
         name: Resolve signing mode

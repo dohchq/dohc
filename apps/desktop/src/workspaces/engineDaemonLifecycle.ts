@@ -50,6 +50,11 @@ export interface EngineBinaryPathOptions {
   platform?: NodeJS.Platform;
 }
 
+interface InFlightLaunch {
+  readonly abortController: AbortController;
+  readonly promise: Promise<void>;
+}
+
 export class EngineDaemonUnavailableError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
@@ -122,6 +127,7 @@ export class EngineDaemonLifecycle {
   private readonly sleep: (delayMs: number) => Promise<void>;
   private client: EngineDaemonClient | null = null;
   private restartPromise: Promise<void> | null = null;
+  private stopPromise: Promise<void> | null = null;
   private launchGeneration = 0;
   private activeGeneration = 0;
   private nextRequestId = 1;
@@ -130,6 +136,8 @@ export class EngineDaemonLifecycle {
   private stopping = false;
   private healthyResetTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly exitedGenerations = new Set<number>();
+  private readonly inFlightLaunches = new Set<InFlightLaunch>();
+  private readonly launchingClients = new Set<EngineDaemonClient>();
 
   constructor(options: EngineDaemonLifecycleOptions) {
     this.options = options;
@@ -158,7 +166,7 @@ export class EngineDaemonLifecycle {
         "Rust engine lifecycle is already stopping.",
       );
     }
-    await this.launchOnce();
+    await this.launchTracked();
   }
 
   async smokeWorkspace(
@@ -166,6 +174,39 @@ export class EngineDaemonLifecycle {
     workspaceId: string,
   ): Promise<JsonValue> {
     const client = this.requireClient();
+    return await this.smokeWorkspaceWithClient(client, rootDir, workspaceId);
+  }
+
+  async stop(): Promise<void> {
+    if (!this.stopPromise) this.stopPromise = this.stopOnce();
+    await this.stopPromise;
+  }
+
+  private async stopOnce(): Promise<void> {
+    this.stopping = true;
+    this.running = false;
+    this.clearHealthyResetTimer();
+    for (const launch of this.inFlightLaunches) {
+      launch.abortController.abort();
+    }
+    const clients = new Set(this.launchingClients);
+    if (this.client) clients.add(this.client);
+    this.client = null;
+    for (const client of clients) client.close();
+    await Promise.allSettled(
+      [...clients].map(async (client) => await client.waitForExit?.()),
+    );
+    await Promise.allSettled(
+      [...this.inFlightLaunches].map(async ({ promise }) => await promise),
+    );
+    await this.restartPromise?.catch(() => undefined);
+  }
+
+  private async smokeWorkspaceWithClient(
+    client: EngineDaemonClient,
+    rootDir: string,
+    workspaceId: string,
+  ): Promise<JsonValue> {
     const opened = resultObject(
       await this.sendSmokeRequest(
         client,
@@ -208,18 +249,6 @@ export class EngineDaemonLifecycle {
         "workspace.close",
       );
     }
-  }
-
-  async stop(): Promise<void> {
-    if (this.stopping) return;
-    this.stopping = true;
-    this.running = false;
-    this.clearHealthyResetTimer();
-    const client = this.client;
-    this.client = null;
-    client?.close();
-    await client?.waitForExit?.();
-    await this.restartPromise?.catch(() => undefined);
   }
 
   private requestId(): number {
@@ -270,7 +299,19 @@ export class EngineDaemonLifecycle {
     }
   }
 
-  private async launchOnce(): Promise<void> {
+  private launchTracked(): Promise<void> {
+    const abortController = new AbortController();
+    const promise = this.launchOnce(abortController.signal);
+    const launch: InFlightLaunch = { abortController, promise };
+    this.inFlightLaunches.add(launch);
+    void promise.then(
+      () => this.inFlightLaunches.delete(launch),
+      () => this.inFlightLaunches.delete(launch),
+    );
+    return promise;
+  }
+
+  private async launchOnce(signal: AbortSignal): Promise<void> {
     this.assertBinaryPresent();
     if (this.stopping) return;
     const generation = ++this.launchGeneration;
@@ -284,26 +325,52 @@ export class EngineDaemonLifecycle {
         authToken,
         protocolVersion: ENGINE_PROTOCOL_VERSION,
         capabilities: ["blobs"],
+        signal,
         onExit: (code, signal) => {
           this.handleUnexpectedExit(generation, code, signal);
         },
       });
     } catch (error) {
+      if (this.stopping) return;
       throw new EngineDaemonUnavailableError(
         "Rust engine failed its startup handshake.",
         { cause: error },
       );
     }
-    if (this.stopping || this.exitedGenerations.has(generation)) {
-      client.close();
-      if (this.stopping) return;
-      throw new EngineDaemonUnavailableError(
-        "Rust engine exited during its startup handshake.",
+    this.launchingClients.add(client);
+    try {
+      if (this.stopping || this.exitedGenerations.has(generation)) {
+        await this.closeClient(client);
+        if (this.stopping) return;
+        throw new EngineDaemonUnavailableError(
+          "Rust engine exited during its startup handshake.",
+        );
+      }
+      await runEngineDaemonSmoke(async (rootDir, workspaceId) =>
+        await this.smokeWorkspaceWithClient(client, rootDir, workspaceId),
       );
+      if (this.stopping || this.exitedGenerations.has(generation)) {
+        await this.closeClient(client);
+        if (this.stopping) return;
+        throw new EngineDaemonUnavailableError(
+          "Rust engine exited during its startup health check.",
+        );
+      }
+      this.client = client;
+      this.running = true;
+      this.scheduleHealthyReset(generation);
+    } catch (error) {
+      await this.closeClient(client);
+      if (this.stopping) return;
+      throw error;
+    } finally {
+      this.launchingClients.delete(client);
     }
-    this.client = client;
-    this.running = true;
-    this.scheduleHealthyReset(generation);
+  }
+
+  private async closeClient(client: EngineDaemonClient): Promise<void> {
+    client.close();
+    await client.waitForExit?.();
   }
 
   private handleUnexpectedExit(
@@ -352,9 +419,10 @@ export class EngineDaemonLifecycle {
       if (delay > 0) await this.sleep(delay);
       if (this.stopping) return;
       try {
-        await this.launchOnce();
+        await this.launchTracked();
         return;
       } catch (error) {
+        if (this.stopping) return;
         lastError = asError(error);
         this.reportFailure(lastError, false);
       }
@@ -399,8 +467,8 @@ export class EngineDaemonLifecycle {
   }
 }
 
-export async function runEngineDaemonStartupSmoke(
-  lifecycle: EngineDaemonLifecycle,
+async function runEngineDaemonSmoke(
+  smokeWorkspace: (rootDir: string, workspaceId: string) => Promise<JsonValue>,
 ): Promise<JsonValue> {
   const rootDir = await mkdtemp(join(tmpdir(), "dohc-rust-engine-smoke-"));
   try {
@@ -411,13 +479,21 @@ export async function runEngineDaemonStartupSmoke(
       randomBytes(32).toString("hex"),
       { encoding: "utf8", flag: "wx", mode: 0o600 },
     );
-    return await lifecycle.smokeWorkspace(
+    return await smokeWorkspace(
       rootDir,
       `desktop-startup-smoke-${process.pid}`,
     );
   } finally {
     await rm(rootDir, { recursive: true, force: true });
   }
+}
+
+export async function runEngineDaemonStartupSmoke(
+  lifecycle: EngineDaemonLifecycle,
+): Promise<JsonValue> {
+  return await runEngineDaemonSmoke(async (rootDir, workspaceId) =>
+    await lifecycle.smokeWorkspace(rootDir, workspaceId),
+  );
 }
 
 export function createRustEngineDaemonIfEnabled(

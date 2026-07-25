@@ -371,7 +371,6 @@ import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture
 import {
   createRustEngineDaemonIfEnabled,
   defaultEngineBinaryPath,
-  runEngineDaemonStartupSmoke,
   type EngineDaemonLifecycle,
 } from "./workspaces/engineDaemonLifecycle";
 import { isRustEngineAdapterEnabled } from "./workspaces/engineClientFlag";
@@ -6990,7 +6989,6 @@ async function startRustEngineDaemon(): Promise<boolean> {
   if (!rustEngineDaemon) return true;
   try {
     await rustEngineDaemon.start();
-    await runEngineDaemonStartupSmoke(rustEngineDaemon);
     console.info("[desktop] Rust engine daemon startup smoke passed.");
     return true;
   } catch (error) {
