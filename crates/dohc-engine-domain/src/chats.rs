@@ -1110,7 +1110,11 @@ fn is_replicated_channel_slug(value: &str) -> bool {
         })
 }
 
-fn normalize_replicated_chat_id(value: &str, reason: &'static str) -> Result<String, DomainError> {
+/// Normalize a caller-minted id before it becomes a replicated chat identity.
+pub fn normalize_replicated_chat_id(
+    value: &str,
+    reason: &'static str,
+) -> Result<String, DomainError> {
     let normalized = value.trim_matches(is_js_trim_ws);
     if !is_bounded_replicated_chat_id(normalized, MAX_REPLICATED_CHAT_ID_UTF16_UNITS)
         || normalized.len() > MAX_REPLICATED_CHAT_ID_UTF8_BYTES
@@ -1437,7 +1441,8 @@ fn persisted_safe_integer(value: i64) -> bool {
     (-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&value)
 }
 
-fn normalize_feed_identity(value: &str, label: &str) -> Result<String, DomainError> {
+/// Trim and validate an owner or target identity used by feed state.
+pub fn normalize_feed_identity(value: &str, label: &str) -> Result<String, DomainError> {
     let normalized = value.trim_matches(is_js_trim_ws);
     if normalized.is_empty()
         || normalized.encode_utf16().count() > 256
@@ -1569,7 +1574,8 @@ pub fn upsert_chat_search_index_row(
 }
 
 /// `normalizeChannelName`: NFC then trim, 1..=80 chars, no control chars.
-fn normalize_channel_name(name: &str) -> Result<String, DomainError> {
+/// NFC-normalize and validate a channel display name.
+pub fn normalize_channel_name(name: &str) -> Result<String, DomainError> {
     let normalized = nfc(name);
     let normalized = normalized.trim_matches(is_js_trim_ws).to_owned();
     let count = normalized.encode_utf16().count();
@@ -1783,7 +1789,8 @@ fn attachment_fingerprint_bytes(attachments: &[LocalAttachmentInput]) -> Vec<u8>
 }
 
 /// `normalizeDisplayName`: trim, 1..=200 chars.
-fn normalize_display_name(display_name: &str) -> Result<String, DomainError> {
+/// Trim and validate a chat sender display name.
+pub fn normalize_display_name(display_name: &str) -> Result<String, DomainError> {
     let normalized = display_name.trim_matches(is_js_trim_ws);
     if normalized.is_empty() || normalized.encode_utf16().count() > MAX_DISPLAY_NAME_CHARS {
         return Err(DomainError::chat(
@@ -1795,7 +1802,8 @@ fn normalize_display_name(display_name: &str) -> Result<String, DomainError> {
 }
 
 /// `normalizeAuthorUserId`: absent -> None; else trim, 1..=200 chars.
-fn normalize_author_user_id(value: Option<&str>) -> Result<Option<String>, DomainError> {
+/// Trim and validate an optional opaque relay author identity.
+pub fn normalize_author_user_id(value: Option<&str>) -> Result<Option<String>, DomainError> {
     match value {
         None => Ok(None),
         Some(v) => {
@@ -1813,7 +1821,8 @@ fn normalize_author_user_id(value: Option<&str>) -> Result<Option<String>, Domai
 }
 
 /// `normalizeBody`: CRLF/CR -> LF, trimEnd, non-empty, <= 64 KiB UTF-8.
-fn normalize_body(body: &str) -> Result<String, DomainError> {
+/// Normalize line endings, trim the end, and enforce the chat body byte cap.
+pub fn normalize_body(body: &str) -> Result<String, DomainError> {
     let lf = body.replace("\r\n", "\n").replace('\r', "\n");
     let normalized = lf.trim_end_matches(is_js_trim_ws).to_owned();
     if normalized.is_empty() || normalized.len() > MAX_MESSAGE_BODY_BYTES {
@@ -1823,6 +1832,20 @@ fn normalize_body(body: &str) -> Result<String, DomainError> {
         ));
     }
     Ok(normalized)
+}
+
+/// Trim and validate the opaque identity used as a reaction cell key.
+pub fn normalize_reaction_author_id(author_id: &str) -> Result<String, DomainError> {
+    let normalized = author_id.trim_matches(is_js_trim_ws);
+    if normalized.is_empty()
+        || normalized.encode_utf16().count() > MAX_REACTION_AUTHOR_ID_UTF16_UNITS
+    {
+        return Err(DomainError::chat(
+            "invalid-sender",
+            "Reaction author id is invalid.",
+        ));
+    }
+    Ok(normalized.to_owned())
 }
 
 /// The ECMAScript `String.prototype.trimEnd` whitespace set (WhiteSpace +
@@ -2984,15 +3007,7 @@ impl<'a> LinkedChatStore<'a> {
         let thread_id = normalize_replicated_chat_id(&input.thread_id, "thread id is invalid")?;
         validate_message_id(&input.message_id)?;
         let emoji = normalize_reaction_emoji(&input.emoji)?;
-        let author_id = input.author_id.trim_matches(is_js_trim_ws).to_owned();
-        if author_id.is_empty()
-            || author_id.encode_utf16().count() > MAX_REACTION_AUTHOR_ID_UTF16_UNITS
-        {
-            return Err(DomainError::chat(
-                "invalid-sender",
-                "Reaction author id is invalid.",
-            ));
-        }
+        let author_id = normalize_reaction_author_id(&input.author_id)?;
         let author_display_name = normalize_display_name(&input.author_display_name)?;
         if input.now_ms < 0 {
             return Err(DomainError::chat(
@@ -4103,75 +4118,7 @@ impl<'a> LinkedChatStore<'a> {
         input.replication_owner_user_id = replication_owner_user_id;
         input.target_id = target_id;
         let outcome = self.store.write_with(faults, |tx| {
-            match input.target_kind {
-                FollowTargetKind::Channel => {
-                    let kind: Option<String> = tx
-                        .query_row(
-                            "SELECT c.kind FROM chat_channel_wire_ids w \
-                             JOIN chat_channels c \
-                               ON c.workspace_id = w.workspace_id AND c.channel_id = w.channel_id \
-                             WHERE w.workspace_id = ?1 AND w.wire_id = ?2",
-                            params![input.workspace_id, input.target_id],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .map_err(DomainError::sql_corrupt)?;
-                    if kind.as_deref().is_none_or(|kind| kind == "dm") {
-                        return Err(DomainError::chat(
-                            "invalid-follow-target",
-                            "Channel is not followable.",
-                        ));
-                    }
-                }
-                FollowTargetKind::Thread => {
-                    let thread = require_thread(tx, &input.workspace_id, &input.target_id)
-                        .map_err(|error| match error {
-                            DomainError::Chat { .. } => DomainError::chat(
-                                "invalid-follow-target",
-                                "Chat thread is not followable.",
-                            ),
-                            other => other,
-                        })?;
-                    if let Some(channel_id) = thread.channel_id {
-                        let channel = require_channel(tx, &input.workspace_id, &channel_id)?;
-                        if channel.kind == ChatChannelKind::Dm {
-                            return Err(DomainError::chat(
-                                "invalid-follow-target",
-                                "DM threads are not followable.",
-                            ));
-                        }
-                    }
-                }
-                FollowTargetKind::Person | FollowTargetKind::Agent => {
-                    let author_kind = match input.target_kind {
-                        FollowTargetKind::Agent => "agent",
-                        FollowTargetKind::Person => "human",
-                        _ => unreachable!(),
-                    };
-                    let found: Option<i64> = tx
-                        .query_row(
-                            "SELECT 1 FROM chat_messages m \
-                             JOIN chat_threads t \
-                               ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id \
-                             LEFT JOIN chat_channels c \
-                               ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
-                             WHERE m.workspace_id = ?1 AND m.author_user_id = ?2 \
-                               AND m.author_kind = ?3 \
-                               AND (t.channel_id IS NULL OR c.kind <> 'dm') \
-                             LIMIT 1",
-                            params![input.workspace_id, input.target_id, author_kind],
-                            |row| row.get(0),
-                        )
-                        .optional()
-                        .map_err(DomainError::sql_corrupt)?;
-                    if found.is_none() {
-                        return Err(DomainError::chat(
-                            "invalid-follow-target",
-                            "Chat author is not followable.",
-                        ));
-                    }
-                }
-            }
+            validate_follow_target(tx, &input.workspace_id, input.target_kind, &input.target_id)?;
             let prior_at_ms: Option<i64> = tx
                 .query_row(
                     "SELECT updated_at_ms FROM chat_follows \
@@ -6637,8 +6584,9 @@ fn hydrate_message_attachments(
 
 /// Whether a `(created_at_ms, message_id)` coordinate names a message currently
 /// visible to `owner_user_id` under the personal-feed predicate. Used to gate
-/// `mark_feed_seen` so receiver-private read state can't skip past unseen items.
-fn feed_coordinate_visible(
+/// `mark_feed_seen` and replicated read state so receiver-private state cannot
+/// skip past unseen items.
+pub fn feed_coordinate_visible(
     conn: &Connection,
     workspace_id: &str,
     owner_user_id: &str,
@@ -6654,6 +6602,84 @@ fn feed_coordinate_visible(
         .optional()
         .map_err(DomainError::sql_corrupt)?;
     Ok(found.is_some())
+}
+
+/// Apply the local follow-target existence and DM-visibility rule.
+pub fn validate_follow_target(
+    conn: &Connection,
+    workspace_id: &str,
+    target_kind: FollowTargetKind,
+    target_id: &str,
+) -> Result<(), DomainError> {
+    match target_kind {
+        FollowTargetKind::Channel => {
+            let kind: Option<String> = conn
+                .query_row(
+                    "SELECT c.kind FROM chat_channel_wire_ids w \
+                     JOIN chat_channels c \
+                       ON c.workspace_id = w.workspace_id AND c.channel_id = w.channel_id \
+                     WHERE w.workspace_id = ?1 AND w.wire_id = ?2",
+                    params![workspace_id, target_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            if kind.as_deref().is_none_or(|kind| kind == "dm") {
+                return Err(DomainError::chat(
+                    "invalid-follow-target",
+                    "Channel is not followable.",
+                ));
+            }
+        }
+        FollowTargetKind::Thread => {
+            let thread =
+                require_thread(conn, workspace_id, target_id).map_err(|error| match error {
+                    DomainError::Chat { .. } => {
+                        DomainError::chat("invalid-follow-target", "Chat thread is not followable.")
+                    }
+                    other => other,
+                })?;
+            if let Some(channel_id) = thread.channel_id {
+                let channel = require_channel(conn, workspace_id, &channel_id)?;
+                if channel.kind == ChatChannelKind::Dm {
+                    return Err(DomainError::chat(
+                        "invalid-follow-target",
+                        "DM threads are not followable.",
+                    ));
+                }
+            }
+        }
+        FollowTargetKind::Person | FollowTargetKind::Agent => {
+            let author_kind = match target_kind {
+                FollowTargetKind::Agent => "agent",
+                FollowTargetKind::Person => "human",
+                _ => unreachable!(),
+            };
+            let found: Option<i64> = conn
+                .query_row(
+                    "SELECT 1 FROM chat_messages m \
+                     JOIN chat_threads t \
+                       ON t.workspace_id = m.workspace_id AND t.thread_id = m.thread_id \
+                     LEFT JOIN chat_channels c \
+                       ON c.workspace_id = t.workspace_id AND c.channel_id = t.channel_id \
+                     WHERE m.workspace_id = ?1 AND m.author_user_id = ?2 \
+                       AND m.author_kind = ?3 \
+                       AND (t.channel_id IS NULL OR c.kind <> 'dm') \
+                     LIMIT 1",
+                    params![workspace_id, target_id, author_kind],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DomainError::sql_corrupt)?;
+            if found.is_none() {
+                return Err(DomainError::chat(
+                    "invalid-follow-target",
+                    "Chat author is not followable.",
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn insert_channel(
@@ -6777,7 +6803,8 @@ fn require_thread(
     .ok_or_else(|| DomainError::chat("thread-not-found", "Chat thread was not found."))
 }
 
-fn thread_has_message(
+/// Whether a message belongs to the named workspace-scoped chat thread.
+pub fn thread_has_message(
     conn: &Connection,
     workspace_id: &str,
     thread_id: &str,

@@ -3,9 +3,13 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Deserializer};
 
 use dohc_engine_domain::{
-    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, attachment_id_for, channel_slug_for_name,
-    has_projection_control_char, is_js_trim_ws, is_reaction_emoji_verbatim, parse_mention_handles,
-    validate_addressable_plaintext_path,
+    AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, CHAT_THREAD_HEADER_MESSAGE_ID, DomainError,
+    FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, attachment_id_for, channel_slug_for_name,
+    feed_coordinate_visible, has_projection_control_char, is_js_trim_ws,
+    is_reaction_emoji_verbatim, normalize_author_user_id, normalize_body, normalize_channel_name,
+    normalize_display_name, normalize_feed_identity, normalize_reaction_author_id,
+    normalize_replicated_chat_id, parse_mention_handles, thread_has_message,
+    validate_addressable_plaintext_path, validate_follow_target,
 };
 
 use crate::journal::{ack_tx, crashes, read_ack_tx};
@@ -135,8 +139,11 @@ where
     String::deserialize(deserializer).map(Some)
 }
 
-fn non_empty(value: &str) -> Result<(), SyncError> {
-    crate::model::bounded(value, "chat identifier must be non-empty and bounded")
+fn map_chat_rule(error: DomainError, reason: &'static str) -> SyncError {
+    match error {
+        DomainError::Storage(storage) => SyncError::Storage(storage),
+        _ => SyncError::InvalidInput { reason },
+    }
 }
 
 fn is_bounded_replicated_id(value: &str, max_utf16_units: usize) -> bool {
@@ -285,9 +292,31 @@ fn apply_channel(
     op: &ReplicationEnvelope,
     payload: ChannelCreate,
 ) -> Result<(), SyncError> {
-    non_empty(&payload.channel_id)?;
-    non_empty(&payload.name)?;
-    non_empty(&payload.slug)?;
+    let channel_id = normalize_replicated_chat_id(&payload.channel_id, "channel id is invalid")
+        .map_err(|error| map_chat_rule(error, "chat channel id is invalid"))?;
+    if channel_id != payload.channel_id
+        || matches!(
+            channel_id.as_str(),
+            GENERAL_CHANNEL_WIRE_ID | AGENT_CHANNEL_WIRE_ID
+        )
+    {
+        return Err(SyncError::InvalidInput {
+            reason: "chat channel id is invalid",
+        });
+    }
+    let name = normalize_channel_name(&payload.name)
+        .map_err(|error| map_chat_rule(error, "chat channel name is invalid"))?;
+    if !is_replicated_channel_slug(&payload.slug) {
+        return Err(SyncError::InvalidInput {
+            reason: "chat channel slug is invalid",
+        });
+    }
+    let requested_slug = channel_slug_for_name(&name);
+    if requested_slug.is_empty() {
+        return Err(SyncError::InvalidInput {
+            reason: "chat channel name has no usable slug",
+        });
+    }
     if !matches!(payload.kind.as_str(), "channel" | "dm" | "agent") {
         return Err(SyncError::InvalidInput {
             reason: "chat channel kind is invalid",
@@ -298,28 +327,30 @@ fn apply_channel(
             reason: "chat channel timestamp is invalid",
         });
     }
-    // Reserved agent-channel invariant (linkedChatStore.ts replicated apply):
-    // the agent kind, the reserved "My agent" name, and its canonical slug all
-    // hold IFF the op carries the reserved agent wire id — so a remote op can
-    // neither mint a rogue agent-dispatch channel under a non-agent wire nor
-    // squat the reserved name/slug on an ordinary channel.
     let carries_agent_wire = payload.wire_id.as_deref() == Some(AGENT_CHANNEL_WIRE_ID);
     let canonical_agent_slug = channel_slug_for_name(AGENT_CHANNEL_NAME);
     if (payload.kind == "agent") != carries_agent_wire
         || (payload.slug == canonical_agent_slug) != carries_agent_wire
-        || (payload.name == AGENT_CHANNEL_NAME) != carries_agent_wire
-        || (carries_agent_wire
-            && (payload.name != AGENT_CHANNEL_NAME || payload.slug != canonical_agent_slug))
+        || (requested_slug == canonical_agent_slug) != carries_agent_wire
+        || (name == AGENT_CHANNEL_NAME) != carries_agent_wire
     {
         return Err(SyncError::InvalidInput {
             reason: "reserved agent-channel invariant violated",
         });
     }
-    let wire_id = payload
-        .wire_id
-        .clone()
-        .unwrap_or_else(|| payload.channel_id.clone());
-    non_empty(&wire_id)?;
+    let wire_id = match payload.wire_id.as_deref() {
+        Some(value) => {
+            let normalized = normalize_replicated_chat_id(value, "channel wire id is invalid")
+                .map_err(|error| map_chat_rule(error, "chat channel wire id is invalid"))?;
+            if normalized != value {
+                return Err(SyncError::InvalidInput {
+                    reason: "chat channel wire id is invalid",
+                });
+            }
+            normalized
+        }
+        None => channel_id.clone(),
+    };
     let mapped: Option<String> = tx
         .query_row(
             "SELECT channel_id FROM chat_channel_wire_ids WHERE workspace_id = ?1 AND wire_id = ?2",
@@ -340,7 +371,7 @@ fn apply_channel(
             tx.execute(
                 "UPDATE chat_channels SET name = ?3, slug = ?4, kind = ?5, created_at_ms = ?6, updated_at_ms = ?6 \
                  WHERE workspace_id = ?1 AND channel_id = ?2",
-                params![op.workspace_id, channel_id, payload.name, payload.slug, payload.kind, payload.created_at_ms],
+                params![op.workspace_id, channel_id, name, requested_slug, payload.kind, payload.created_at_ms],
             )
             .map_err(SyncError::persist)?;
             tx.execute(
@@ -351,15 +382,15 @@ fn apply_channel(
         }
         return Ok(());
     }
-    let slug = free_slug(tx, &op.workspace_id, &payload.slug)?;
+    let slug = free_slug(tx, &op.workspace_id, &requested_slug)?;
     tx.execute(
         "INSERT OR IGNORE INTO chat_channels \
          (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
         params![
             op.workspace_id,
-            payload.channel_id,
-            payload.name,
+            channel_id,
+            name,
             slug,
             payload.kind,
             payload.created_at_ms
@@ -368,7 +399,7 @@ fn apply_channel(
     .map_err(SyncError::persist)?;
     tx.execute(
         "INSERT OR IGNORE INTO chat_channel_wire_ids (workspace_id, wire_id, channel_id) VALUES (?1, ?2, ?3)",
-        params![op.workspace_id, wire_id, payload.channel_id],
+        params![op.workspace_id, wire_id, channel_id],
     )
     .map_err(SyncError::persist)?;
     Ok(())
@@ -649,13 +680,9 @@ fn apply_message(
     payload: MessageAppend,
 ) -> Result<(), SyncError> {
     if payload.message_id.is_empty()
+        || payload.message_id == CHAT_THREAD_HEADER_MESSAGE_ID
         || payload.thread_id.is_empty()
         || !matches!(payload.author_kind.as_str(), "human" | "agent")
-        || payload.author_display_name.is_empty()
-        || payload
-            .author_user_id
-            .as_ref()
-            .is_some_and(String::is_empty)
         || payload
             .parent_message_id
             .as_ref()
@@ -664,13 +691,23 @@ fn apply_message(
             .origin
             .as_deref()
             .is_some_and(|origin| origin != "cli")
-        || payload.body.is_empty()
         || !is_persisted_safe_integer(payload.created_at_ms)
     {
         return Err(SyncError::InvalidInput {
             reason: "chat message payload is invalid",
         });
     }
+    let author_display_name = normalize_display_name(&payload.author_display_name)
+        .map_err(|error| map_chat_rule(error, "chat message display name is invalid"))?;
+    let author_user_id = normalize_author_user_id(payload.author_user_id.as_deref())
+        .map_err(|error| map_chat_rule(error, "chat message author id is invalid"))?;
+    if author_user_id != payload.author_user_id {
+        return Err(SyncError::InvalidInput {
+            reason: "chat message author id is invalid",
+        });
+    }
+    let body = normalize_body(&payload.body)
+        .map_err(|error| map_chat_rule(error, "chat message body is invalid"))?;
     let thread_exists: bool = tx
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM chat_threads WHERE workspace_id = ?1 AND thread_id = ?2)",
@@ -712,13 +749,13 @@ fn apply_message(
         "INSERT OR IGNORE INTO chat_messages \
          (workspace_id, thread_id, message_order, message_id, author_kind, author_display_name, author_user_id, parent_message_id, origin, body, created_at_ms) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![op.workspace_id, payload.thread_id, order, payload.message_id, payload.author_kind, payload.author_display_name, payload.author_user_id, stored_parent, payload.origin, payload.body, payload.created_at_ms],
+        params![op.workspace_id, payload.thread_id, order, payload.message_id, payload.author_kind, author_display_name, author_user_id, stored_parent, payload.origin, body, payload.created_at_ms],
     )
     .map_err(SyncError::persist)?;
     if inserted == 0 {
         return Ok(());
     }
-    for handle in parse_mention_handles(&payload.body) {
+    for handle in parse_mention_handles(&body) {
         tx.execute(
             "INSERT OR IGNORE INTO chat_mentions \
              (workspace_id, thread_id, message_id, handle, author_kind, created_at_ms) \
@@ -826,6 +863,15 @@ fn apply_reaction(
             reason: "chat reaction payload is invalid",
         });
     }
+    let author_id = normalize_reaction_author_id(&p.author_id)
+        .map_err(|error| map_chat_rule(error, "chat reaction author id is invalid"))?;
+    if author_id != p.author_id {
+        return Err(SyncError::InvalidInput {
+            reason: "chat reaction author id is invalid",
+        });
+    }
+    let author_display_name = normalize_display_name(&p.author_display_name)
+        .map_err(|error| map_chat_rule(error, "chat reaction display name is invalid"))?;
     tx.execute(
         "INSERT INTO chat_reactions \
          (workspace_id,reaction_id,thread_id,message_id,emoji,author_id,author_kind,author_display_name,state,at_ms,origin_id,origin_seq) \
@@ -836,7 +882,7 @@ fn apply_reaction(
            origin_id=excluded.origin_id,origin_seq=excluded.origin_seq \
          WHERE (excluded.at_ms, excluded.state, excluded.origin_id, excluded.origin_seq) > \
                (at_ms, state, origin_id, origin_seq)",
-        params![op.workspace_id,p.reaction_id,p.thread_id,p.message_id,p.emoji,p.author_id,p.author_kind,p.author_display_name,p.state,p.at_ms,op.origin_id,op.origin_seq],
+        params![op.workspace_id,p.reaction_id,p.thread_id,p.message_id,p.emoji,author_id,p.author_kind,author_display_name,p.state,p.at_ms,op.origin_id,op.origin_seq],
     )
     .map_err(SyncError::persist)?;
     Ok(())
@@ -847,21 +893,35 @@ fn apply_follow(
     op: &ReplicationEnvelope,
     p: FollowSet,
 ) -> Result<(), SyncError> {
-    if p.owner_user_id.is_empty()
-        || p.owner_user_id.encode_utf16().count() > 256
-        || !matches!(
-            p.target_kind.as_str(),
-            "person" | "agent" | "channel" | "thread"
-        )
-        || p.target_id.is_empty()
-        || p.target_id.encode_utf16().count() > 256
-        || !matches!(p.state.as_str(), "following" | "unfollowed")
+    let target_kind = match p.target_kind.as_str() {
+        "person" => FollowTargetKind::Person,
+        "agent" => FollowTargetKind::Agent,
+        "channel" => FollowTargetKind::Channel,
+        "thread" => FollowTargetKind::Thread,
+        _ => {
+            return Err(SyncError::InvalidInput {
+                reason: "chat follow payload is invalid",
+            });
+        }
+    };
+    if !matches!(p.state.as_str(), "following" | "unfollowed")
         || !is_persisted_safe_integer(p.at_ms)
     {
         return Err(SyncError::InvalidInput {
             reason: "chat follow payload is invalid",
         });
     }
+    let owner_user_id = normalize_feed_identity(&p.owner_user_id, "Feed owner")
+        .map_err(|error| map_chat_rule(error, "chat follow owner is invalid"))?;
+    let target_id = normalize_feed_identity(&p.target_id, "Follow target")
+        .map_err(|error| map_chat_rule(error, "chat follow target is invalid"))?;
+    if owner_user_id != p.owner_user_id || target_id != p.target_id {
+        return Err(SyncError::InvalidInput {
+            reason: "chat follow identity is invalid",
+        });
+    }
+    validate_follow_target(tx, &op.workspace_id, target_kind, &target_id)
+        .map_err(|error| map_chat_rule(error, "chat follow target is not followable"))?;
     tx.execute(
         "INSERT INTO chat_follows \
          (workspace_id,owner_user_id,target_kind,target_id,state,updated_at_ms,origin_id,origin_seq) \
@@ -870,7 +930,7 @@ fn apply_follow(
            state=excluded.state,updated_at_ms=excluded.updated_at_ms,origin_id=excluded.origin_id,origin_seq=excluded.origin_seq \
          WHERE (excluded.updated_at_ms, excluded.state, excluded.origin_id, excluded.origin_seq) > \
                (updated_at_ms, state, origin_id, origin_seq)",
-        params![op.workspace_id,p.owner_user_id,p.target_kind,p.target_id,p.state,p.at_ms,op.origin_id,op.origin_seq],
+        params![op.workspace_id,owner_user_id,p.target_kind,target_id,p.state,p.at_ms,op.origin_id,op.origin_seq],
     )
     .map_err(SyncError::persist)?;
     Ok(())
@@ -881,15 +941,33 @@ fn apply_feed_read(
     op: &ReplicationEnvelope,
     p: FeedReadSet,
 ) -> Result<(), SyncError> {
-    if p.owner_user_id.is_empty()
-        || p.owner_user_id.encode_utf16().count() > 256
-        || p.last_seen_message_id.is_empty()
+    if p.last_seen_message_id.is_empty()
         || p.last_seen_message_id.encode_utf16().count() > 256
         || !is_persisted_safe_integer(p.last_seen_created_at_ms)
         || !is_persisted_safe_integer(p.at_ms)
     {
         return Err(SyncError::InvalidInput {
             reason: "chat feed read payload is invalid",
+        });
+    }
+    let owner_user_id = normalize_feed_identity(&p.owner_user_id, "Feed owner")
+        .map_err(|error| map_chat_rule(error, "chat feed read owner is invalid"))?;
+    if owner_user_id != p.owner_user_id {
+        return Err(SyncError::InvalidInput {
+            reason: "chat feed read owner is invalid",
+        });
+    }
+    let visible = feed_coordinate_visible(
+        tx,
+        &op.workspace_id,
+        &owner_user_id,
+        p.last_seen_created_at_ms,
+        &p.last_seen_message_id,
+    )
+    .map_err(|error| map_chat_rule(error, "chat feed read coordinate is invalid"))?;
+    if !visible {
+        return Err(SyncError::InvalidInput {
+            reason: "chat feed read coordinate is not visible",
         });
     }
     tx.execute(
@@ -901,7 +979,7 @@ fn apply_feed_read(
            updated_at_ms=excluded.updated_at_ms,origin_id=excluded.origin_id,origin_seq=excluded.origin_seq \
          WHERE (excluded.last_seen_created_at_ms, excluded.last_seen_message_id, excluded.updated_at_ms, excluded.origin_id, excluded.origin_seq) > \
                (last_seen_created_at_ms, last_seen_message_id, updated_at_ms, origin_id, origin_seq)",
-        params![op.workspace_id,p.owner_user_id,p.last_seen_created_at_ms,p.last_seen_message_id,p.at_ms,op.origin_id,op.origin_seq],
+        params![op.workspace_id,owner_user_id,p.last_seen_created_at_ms,p.last_seen_message_id,p.at_ms,op.origin_id,op.origin_seq],
     )
     .map_err(SyncError::persist)?;
     Ok(())
@@ -959,6 +1037,13 @@ fn apply_attachment(
     {
         return Err(SyncError::InvalidInput {
             reason: "chat attachment payload is invalid",
+        });
+    }
+    let message_exists = thread_has_message(tx, &op.workspace_id, &p.thread_id, &p.message_id)
+        .map_err(|error| map_chat_rule(error, "chat attachment target is invalid"))?;
+    if !message_exists {
+        return Err(SyncError::InvalidInput {
+            reason: "chat attachment target message is missing",
         });
     }
     tx.execute(

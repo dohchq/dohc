@@ -1,14 +1,15 @@
 use std::sync::Mutex;
 
+use dohc_engine_domain::chats::{CHAT_THREAD_HEADER_MESSAGE_ID, upsert_chat_search_index_row};
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
-    ChatReactionState, FollowState, FollowTargetKind, LinkedChatStore, MAX_SECRET_FILE_BYTES,
-    ResolveDecision, SECRET_IV_BYTES, SECRET_TAG_BYTES, SaveBookmark, SetFollow, SetReaction,
-    VersionedTextStore, attachment_id_for, channel_slug_for_name,
+    ChatReactionState, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore,
+    MAX_SECRET_FILE_BYTES, ResolveDecision, SECRET_IV_BYTES, SECRET_TAG_BYTES, SaveBookmark,
+    SetFollow, SetReaction, VersionedTextStore, attachment_id_for, channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde_json::json;
 
 use crate::*;
@@ -303,10 +304,9 @@ fn imported_reaction_refuses_unsafe_at_ms_without_row_or_ack() {
 }
 
 #[test]
-fn reaction_import_accepts_negative_time_and_empty_display_name_and_preserves_lww_order() {
+fn reaction_import_accepts_negative_time_and_preserves_lww_order() {
     let (_scratch, _path, mut engine) = store();
-    let mut winner_payload = reaction_payload("added", "👍", -10, "Ada");
-    winner_payload["authorDisplayName"] = json!("");
+    let winner_payload = reaction_payload("added", "👍", -10, "Ada");
     let winner = envelope("peer", 0, "chat.reaction.set", winner_payload);
     apply_chat_envelope(&mut engine, &winner, &NoFaults).expect("negative-time reaction");
 
@@ -326,9 +326,9 @@ fn reaction_import_accepts_negative_time_and_empty_display_name_and_preserves_lw
             .map_err(dohc_engine_storage::StorageError::corrupt_public)
         })
         .expect("stored reaction");
-    // MUTATION: re-adding either imported-value rejection stalls the envelope;
-    // replacing the LWW comparison lets the later-arriving older row win.
-    assert_eq!(stored, ("added".to_owned(), String::new(), -10));
+    // MUTATION: rejecting negative imported time stalls the envelope; replacing
+    // the LWW comparison lets the later-arriving older row win.
+    assert_eq!(stored, ("added".to_owned(), "Ada".to_owned(), -10));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "peer").expect("ack"),
         1
@@ -991,7 +991,6 @@ fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
     let mut reaction = reaction_payload("added", "👍", -10, "Ada");
     reaction["threadId"] = json!("thread-imported");
     reaction["messageId"] = json!("message-imported");
-    reaction["authorDisplayName"] = json!("");
     let operations = [
         envelope("verbatim", 3, "chat.reaction.set", reaction),
         envelope(
@@ -1072,13 +1071,14 @@ fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
         .list_thread_attachments("ws", "thread-imported", None, 10)
         .expect("list imported attachment");
 
-    // MUTATION: re-tighten any verbatim row mapper -> its corresponding read fails here.
+    // MUTATION: reject the still-permitted negative timestamps or tighten their
+    // row mappers and the corresponding read fails here.
     assert_eq!(
         (
             reactions[0].at_ms,
             reactions[0].author_display_name.as_str()
         ),
-        (-10, "")
+        (-10, "Ada")
     );
     assert_eq!(feed.items[0].reactions[0].at_ms, -10);
     assert_eq!(decisions[0].at_ms, -9);
@@ -1284,53 +1284,555 @@ fn imported_message_refuses_unsafe_created_at_ms_without_row_or_ack() {
 }
 
 #[test]
-fn imported_message_append_applies_verbatim_without_a_body_cap() {
-    // Oracle parity (linkedChatStore.ts:4442-4464): the replicated
-    // chat.message.append validator checks body only for `length === 0` — it
-    // does NOT cap body size (the 64 KiB cap lives solely in the local-mint
-    // normalizeBody). Adding an import-path cap here would STALL an origin's
-    // ack stream on a body the oracle accepts. Oversized bodies are fronted by
-    // the DOP1 64 KiB per-string wire bound and both engines' mint caps.
+fn imported_message_normalizes_before_enforcing_the_local_body_cap() {
     let (_scratch, _path, mut engine) = store();
-    imported_chat_fixture(&mut engine, "large-message");
-    let operation = envelope(
-        "large-message",
+    imported_chat_fixture(&mut engine, "body-validation");
+    let boundary = envelope(
+        "body-validation",
         3,
         "chat.message.append",
         json!({
-            "messageId": "large",
+            "messageId": "normalized-boundary",
             "threadId": "thread-imported",
             "authorKind": "human",
             "authorDisplayName": "Ada",
-            "body": format!("@indexed {}", "x".repeat(64 * 1024)),
+            "body": format!("{}\r\n", "x".repeat(64 * 1024 - 1)),
             "createdAtMs": 30
         }),
     );
-    let result = apply_chat_envelope(&mut engine, &operation, &NoFaults);
-    let (messages, mentions): (i64, i64) = engine
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &boundary, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    let stored: String = engine
         .read_with(|conn| {
-            Ok::<_, rusqlite::Error>((
-                conn.query_row(
-                    "SELECT COUNT(*) FROM chat_messages WHERE message_id = 'large'",
-                    [],
-                    |row| row.get(0),
-                )?,
-                conn.query_row(
-                    "SELECT COUNT(*) FROM chat_mentions WHERE message_id = 'large' AND handle = 'indexed'",
-                    [],
-                    |row| row.get(0),
-                )?,
-            ))
+            conn.query_row(
+                "SELECT body FROM chat_messages WHERE workspace_id='ws' AND message_id='normalized-boundary'",
+                [],
+                |row| row.get(0),
+            )
         })
-        .expect("large persistence counts");
-    // MUTATION: re-add an import-path body cap -> this oracle-legal op refuses
-    // and wedges the origin's ack stream instead of applying+indexing.
-    assert!(matches!(result, Ok(ApplyOutcome::Applied(()))));
-    assert_eq!((messages, mentions), (1, 1));
+        .expect("normalized body");
+    assert_eq!(stored, "x".repeat(64 * 1024 - 1));
+
+    let oversized = envelope(
+        "body-validation",
+        4,
+        "chat.message.append",
+        json!({
+            "messageId": "oversized-after-normalization",
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": format!("{}\r\n", "x".repeat(64 * 1024 + 1)),
+            "createdAtMs": 31
+        }),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &oversized, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+    let oversized_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_messages WHERE workspace_id='ws' AND message_id='oversized-after-normalization'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("oversized body count");
+    assert_eq!(oversized_count, 0);
     assert_eq!(
-        read_replication_acked_seq(&engine, "ws", "large-message").expect("ack"),
+        read_replication_acked_seq(&engine, "ws", "body-validation").expect("ack"),
         3
     );
+}
+
+#[test]
+fn imported_feed_read_rejects_an_invisible_coordinate_without_changing_unread_state() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "feed-fixture");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_follows \
+                 (workspace_id,owner_user_id,target_kind,target_id,state,updated_at_ms,origin_id,origin_seq) \
+                 VALUES ('ws','owner','thread','thread-imported','following',1,'seed',0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_channels \
+                 (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) \
+                 VALUES ('ws','dm-channel','Private','private','dm',90,90)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_channel_wire_ids (workspace_id,wire_id,channel_id) \
+                 VALUES ('ws','dm-wire','dm-channel')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_threads \
+                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) \
+                 VALUES ('ws','dm-thread','Private',90,100,'dm-channel')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_messages \
+                 (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,author_user_id,body,created_at_ms) \
+                 VALUES ('ws','dm-thread',0,'dm-message','human','Private user','private-user','secret',100)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("feed visibility fixture");
+
+    let visible = envelope(
+        "read-peer",
+        0,
+        "chat.feed.read.set",
+        json!({
+            "ownerUserId": "owner",
+            "lastSeenCreatedAtMs": 20,
+            "lastSeenMessageId": "message-imported",
+            "atMs": 30
+        }),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &visible, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    let before: (i64, String, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT last_seen_created_at_ms,last_seen_message_id,updated_at_ms \
+                 FROM chat_feed_read_state WHERE workspace_id='ws' AND owner_user_id='owner'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .expect("visible feed read state");
+
+    let invisible_dm = envelope(
+        "read-peer",
+        1,
+        "chat.feed.read.set",
+        json!({
+            "ownerUserId": "owner",
+            "lastSeenCreatedAtMs": 100,
+            "lastSeenMessageId": "dm-message",
+            "atMs": 101
+        }),
+    );
+    let result = apply_chat_envelope(&mut engine, &invisible_dm, &NoFaults);
+    let after: (i64, String, i64) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT last_seen_created_at_ms,last_seen_message_id,updated_at_ms \
+                 FROM chat_feed_read_state WHERE workspace_id='ws' AND owner_user_id='owner'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .expect("feed read state after invisible coordinate");
+    assert_eq!(
+        after, before,
+        "invisible content must not clear unread state"
+    );
+    assert!(matches!(result, Err(SyncError::InvalidInput { .. })));
+    assert_eq!(
+        read_replication_acked_seq(&engine, "ws", "read-peer").expect("ack"),
+        0
+    );
+}
+
+#[test]
+fn imported_thread_header_message_id_cannot_replace_the_search_header() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "thread-header");
+    engine
+        .write_with(&NoFaults, |tx| {
+            upsert_chat_search_index_row(
+                tx,
+                "ws",
+                "thread-imported",
+                CHAT_THREAD_HEADER_MESSAGE_ID,
+                "Imported thread",
+            )
+            .map_err(SyncError::persist)
+        })
+        .expect("seed thread header search row");
+
+    let collision = envelope(
+        "thread-header",
+        3,
+        "chat.message.append",
+        json!({
+            "messageId": CHAT_THREAD_HEADER_MESSAGE_ID,
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Attacker",
+            "body": "replacement search text",
+            "createdAtMs": 30
+        }),
+    );
+    let result = apply_chat_envelope(&mut engine, &collision, &NoFaults);
+
+    let imported_collision: Option<(String, String)> = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT author_display_name,body FROM chat_messages \
+                 WHERE workspace_id='ws' AND thread_id='thread-imported' AND message_id='__thread__'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+        })
+        .expect("collision message lookup");
+    if let Some((display_name, body)) = imported_collision {
+        engine
+            .write_with(&NoFaults, |tx| {
+                upsert_chat_search_index_row(
+                    tx,
+                    "ws",
+                    "thread-imported",
+                    CHAT_THREAD_HEADER_MESSAGE_ID,
+                    &format!("{display_name}\n{body}"),
+                )
+                .map_err(SyncError::persist)
+            })
+            .expect("run the message indexing primitive");
+    }
+
+    let header_text: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT text FROM engine_search_chat_messages_fts \
+                 WHERE workspace_id='ws' AND thread_id='thread-imported' AND message_id='__thread__'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("thread header search row");
+    assert_eq!(header_text, "Imported thread");
+    assert!(matches!(result, Err(SyncError::InvalidInput { .. })));
+}
+
+#[test]
+fn imported_channel_create_reuses_the_local_channel_id_rule() {
+    for (origin, channel_id) in [
+        ("long-channel-id", "x".repeat(257)),
+        ("padded-channel-id", " padded-channel ".to_owned()),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        let operation = envelope(
+            origin,
+            0,
+            "chat.channel.create",
+            json!({
+                "channelId": channel_id,
+                "name": "Bounded",
+                "slug": "bounded",
+                "kind": "channel",
+                "createdAtMs": 1
+            }),
+        );
+        assert!(matches!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults),
+            Err(SyncError::InvalidInput { .. })
+        ));
+        let channel_count: i64 = engine
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM chat_channels", [], |row| row.get(0))
+            })
+            .expect("channel count");
+        assert_eq!(channel_count, 0);
+    }
+}
+
+#[test]
+fn imported_channel_create_refuses_reserved_local_channel_ids() {
+    for (origin, channel_id) in [
+        ("reserved-general-id", GENERAL_CHANNEL_WIRE_ID),
+        ("reserved-agent-id", AGENT_CHANNEL_WIRE_ID),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        let operation = envelope(
+            origin,
+            0,
+            "chat.channel.create",
+            json!({
+                "channelId": channel_id,
+                "name": "Ordinary",
+                "slug": "ordinary",
+                "kind": "channel",
+                "createdAtMs": 1
+            }),
+        );
+        assert!(matches!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults),
+            Err(SyncError::InvalidInput { .. })
+        ));
+        let channel_count: i64 = engine
+            .read_with(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM chat_channels", [], |row| row.get(0))
+            })
+            .expect("channel count");
+        assert_eq!(channel_count, 0);
+    }
+}
+
+#[test]
+fn imported_channel_name_uses_local_nfc_and_utf16_validation() {
+    let (_scratch, _path, mut engine) = store();
+    let decomposed = envelope(
+        "channel-name",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "channel-nfc",
+            "name": "Cafe\u{301}",
+            "slug": "cafe",
+            "kind": "channel",
+            "createdAtMs": 1
+        }),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &decomposed, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    let stored_name: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT name FROM chat_channels WHERE workspace_id='ws' AND channel_id='channel-nfc'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("normalized channel name");
+    assert_eq!(stored_name, "Café");
+
+    let overlong = envelope(
+        "overlong-channel-name",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "channel-overlong",
+            "name": "x".repeat(81),
+            "slug": "x".repeat(81),
+            "kind": "channel",
+            "createdAtMs": 1
+        }),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &overlong, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+}
+
+#[test]
+fn imported_channel_slug_is_validated_but_derived_from_the_normalized_name() {
+    let (_scratch, _path, mut engine) = store();
+    let caller_slug = envelope(
+        "derived-channel-slug",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "channel-derived",
+            "name": "Canonical Name",
+            "slug": "attacker-chosen",
+            "kind": "channel",
+            "createdAtMs": 1
+        }),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &caller_slug, &NoFaults),
+        Ok(ApplyOutcome::Applied(()))
+    ));
+    let stored_slug: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT slug FROM chat_channels WHERE workspace_id='ws' AND channel_id='channel-derived'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("derived channel slug");
+    assert_eq!(stored_slug, "canonical-name");
+
+    let malformed_slug = envelope(
+        "invalid-channel-slug",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "channel-invalid-slug",
+            "name": "Valid Name",
+            "slug": "NOT VALID",
+            "kind": "channel",
+            "createdAtMs": 1
+        }),
+    );
+    assert!(matches!(
+        apply_chat_envelope(&mut engine, &malformed_slug, &NoFaults),
+        Err(SyncError::InvalidInput { .. })
+    ));
+}
+
+#[test]
+fn imported_attachment_requires_its_workspace_thread_message_without_fabricating_a_row() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "attachment-owner");
+    let fabricated = envelope(
+        "attachment-owner",
+        3,
+        "chat.attachment.add",
+        json!({
+            "attachmentId": attachment_id_for("missing-message", "object", None, None),
+            "threadId": "thread-imported",
+            "messageId": "missing-message",
+            "targetKind": "file",
+            "objectId": "object",
+            "createdAtMs": 30
+        }),
+    );
+    let result = apply_chat_envelope(&mut engine, &fabricated, &NoFaults);
+    let attachment_count: i64 = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_attachments \
+                 WHERE workspace_id='ws' AND thread_id='thread-imported' AND message_id='missing-message'",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .expect("fabricated attachment count");
+    assert_eq!(
+        attachment_count, 0,
+        "no fabricated attachment row may survive"
+    );
+    assert!(matches!(result, Err(SyncError::InvalidInput { .. })));
+}
+
+#[test]
+fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() {
+    let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "follow-fixture");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_channels \
+                 (workspace_id,channel_id,name,slug,kind,created_at_ms,updated_at_ms) \
+                 VALUES ('ws','dm-channel','Private','private','dm',30,30)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_channel_wire_ids (workspace_id,wire_id,channel_id) \
+                 VALUES ('ws','dm-wire','dm-channel')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_threads \
+                 (workspace_id,thread_id,title,created_at_ms,updated_at_ms,channel_id) \
+                 VALUES ('ws','dm-thread','Private',30,30,'dm-channel')",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_messages \
+                 (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,author_user_id,body,created_at_ms) \
+                 VALUES ('ws','dm-thread',0,'dm-only-message','human','Private user','dm-only-user','secret',30)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("DM follow fixture");
+
+    for (origin, target_kind, target_id) in [
+        ("follow-dm-channel", "channel", "dm-wire"),
+        ("follow-dm-thread", "thread", "dm-thread"),
+        ("follow-dm-person", "person", "dm-only-user"),
+        ("follow-fabricated-channel", "channel", "fabricated-dm-wire"),
+    ] {
+        let operation = envelope(
+            origin,
+            0,
+            "chat.follow.set",
+            json!({
+                "ownerUserId": "owner",
+                "targetKind": target_kind,
+                "targetId": target_id,
+                "state": "following",
+                "atMs": 40
+            }),
+        );
+        assert!(matches!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults),
+            Err(SyncError::InvalidInput { .. })
+        ));
+    }
+    let leaked = LinkedChatStore::new(&mut engine)
+        .list_follows("ws", "owner", None)
+        .expect("list follows");
+    assert!(
+        leaked.is_empty(),
+        "unvalidated target ids must not appear in list_follows"
+    );
+}
+
+#[test]
+fn imported_authored_fields_reuse_local_display_and_author_id_bounds() {
+    for (origin, field, value) in [
+        (
+            "message-display-bound",
+            "authorDisplayName",
+            "x".repeat(201),
+        ),
+        ("message-author-bound", "authorUserId", "x".repeat(201)),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        imported_chat_fixture(&mut engine, origin);
+        let mut payload = json!({
+            "messageId": format!("message-{origin}"),
+            "threadId": "thread-imported",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "authorUserId": "user",
+            "body": "Body",
+            "createdAtMs": 30
+        });
+        payload[field] = json!(value);
+        let operation = envelope(origin, 3, "chat.message.append", payload);
+        assert!(matches!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults),
+            Err(SyncError::InvalidInput { .. })
+        ));
+    }
+
+    for (origin, field, value) in [
+        (
+            "reaction-display-bound",
+            "authorDisplayName",
+            "x".repeat(201),
+        ),
+        ("reaction-author-bound", "authorId", "x".repeat(201)),
+    ] {
+        let (_scratch, _path, mut engine) = store();
+        let mut payload = reaction_payload("added", "👍", 1, "user");
+        payload[field] = json!(value);
+        let operation = envelope(origin, 0, "chat.reaction.set", payload);
+        assert!(matches!(
+            apply_chat_envelope(&mut engine, &operation, &NoFaults),
+            Err(SyncError::InvalidInput { .. })
+        ));
+    }
 }
 
 #[test]
@@ -2437,6 +2939,27 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
 #[test]
 fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
     let (_scratch, _path, mut engine) = store();
+    imported_chat_fixture(&mut engine, "feed-rank-fixture");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_messages \
+                 (workspace_id,thread_id,message_order,message_id,author_kind,author_display_name,body,created_at_ms) \
+                 VALUES ('ws','thread-imported',1,'m1','human','Ada','Older',50), \
+                        ('ws','thread-imported',2,'m2','human','Ada','Ahead',100)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            tx.execute(
+                "INSERT INTO chat_follows \
+                 (workspace_id,owner_user_id,target_kind,target_id,state,updated_at_ms,origin_id,origin_seq) \
+                 VALUES ('ws','u','thread','thread-imported','following',1,'seed',0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("visible feed coordinates");
     let ahead = envelope(
         "peer",
         0,

@@ -324,6 +324,57 @@ outbox value. Clamping to `max(0, at_ms)` would DIVERGE from the oracle for no
 representability gain. Adversarial-only (a peer must send a negative createdAtMs,
 which both engines accept), moot post-R15. No Rust code change.
 
+CROSS-ENGINE DELTA (chat replication validation sweep, 2026-07-25) — the Rust
+`chat.*` replicated apply surface now reuses the LOCAL domain rules below and is
+DELIBERATELY STRICTER than `linkedChatStore.ts:4210-4769`. Honest local mints
+already produce the canonical forms, so these differences affect only malformed
+or hostile hand-fed envelopes. Differential suites must expect Rust to refuse
+or normalize them before journaling/acking:
+
+- `chat.feed.read.set` requires the cursor coordinate to satisfy the exact
+  personal-feed visibility predicate. The oracle replicated arm upserts any
+  structurally valid coordinate; Rust refuses future, DM, unfollowed, missing,
+  and cross-workspace coordinates without changing existing unread state.
+- `chat.message.append` runs the shared local `normalize_body` first
+  (CRLF/CR→LF, ECMAScript `trimEnd`) and then enforces the 64 KiB UTF-8 cap. The
+  oracle replicated arm stores any non-empty body verbatim.
+- `chat.message.append` refuses message id `__thread__`, preserving the
+  synthetic thread-header FTS key. The oracle replicated arm accepts it.
+- `chat.channel.create` validates `channelId` with the local replicated-id rule
+  (canonical trim, control refusal, at most 256 UTF-16 units) and refuses the
+  reserved `channel_wire_general_v1` / `channel_wire_agent_v1` values as local
+  channel ids. The oracle replicated arm checks only non-empty strings.
+- `chat.channel.create` NFC-normalizes and validates the name with the local
+  80-UTF-16-unit cap. Its incoming slug must pass the existing replicated-slug
+  grammar, but the persisted slug is always derived from the normalized name
+  and then collision-suffixed locally; the caller-supplied slug is never the
+  persisted source of truth. The oracle persists both fields verbatim.
+- `chat.attachment.add` requires its exact
+  `(workspace_id, thread_id, message_id)` owner to exist before inserting. The
+  oracle replicated arm can persist an orphan attachment and its attachment
+  reads have no compensating message join.
+- `chat.follow.set` calls the same local target validator: channel wires and
+  threads must exist and cannot be DMs; person/agent targets must have a
+  non-DM authored message. The oracle replicated arm accepts fabricated and DM
+  target ids, which can then surface verbatim through `listFollows`.
+- Replicated message/reaction display names use the local trimmed
+  1..=200-UTF-16-unit rule. Message `authorUserId` and reaction `authorId` use
+  their local 1..=200-unit rules and must already be canonical on the wire.
+  They remain relay-verified opaque wire identities: Rust does not derive,
+  replace, or map authorship.
+
+Named fail-then-pass coverage lives in `dohc-engine-sync/src/tests.rs`:
+`imported_feed_read_rejects_an_invisible_coordinate_without_changing_unread_state`,
+`imported_message_normalizes_before_enforcing_the_local_body_cap`,
+`imported_thread_header_message_id_cannot_replace_the_search_header`,
+`imported_channel_create_reuses_the_local_channel_id_rule`,
+`imported_channel_create_refuses_reserved_local_channel_ids`,
+`imported_channel_name_uses_local_nfc_and_utf16_validation`,
+`imported_channel_slug_is_validated_but_derived_from_the_normalized_name`,
+`imported_attachment_requires_its_workspace_thread_message_without_fabricating_a_row`,
+`imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks`,
+and `imported_authored_fields_reuse_local_display_and_author_id_bounds`.
+
 CROSS-ENGINE DELTA (RPC-A r18): secret path SPELLING — TS normalize-stores
 (percent-disguises collapse); Rust stores the spelling the write carried
 and resolves verbatim (the secretness gate still classifies via
