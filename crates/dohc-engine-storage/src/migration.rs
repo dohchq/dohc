@@ -988,7 +988,7 @@ CREATE TABLE replication_peers (
 
 CREATE TABLE sync_relay_cursors (
     workspace_id       TEXT NOT NULL PRIMARY KEY,
-    cursor             TEXT NOT NULL,
+    cursor             INTEGER NOT NULL CHECK (cursor >= 0),
     replication_epoch  TEXT NOT NULL,
     stream_identity    TEXT NOT NULL
 ) STRICT;

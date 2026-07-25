@@ -2003,13 +2003,13 @@ struct FakeRelay {
 impl RelayTransport for FakeRelay {
     fn push(&self, req: PushRequest) -> Result<PushResponse, RelayError> {
         *self.pushes.lock().expect("push lock") += 1;
-        let accepted = req
-            .ops
-            .last()
-            .map(|op| op.origin_seq)
-            .ok_or(RelayError::InvalidResponse)?;
+        let accepted = req.ops.len();
+        let current_max_origin_seq = req.ops.last().map_or(req.after_seq, |op| op.origin_seq);
         Ok(PushResponse {
-            accepted_through_seq: accepted,
+            accepted,
+            inserted: accepted,
+            skipped: 0,
+            current_max_origin_seq,
         })
     }
     fn pull(&self, _req: PullRequest) -> Result<PullResponse, RelayError> {
@@ -2019,14 +2019,25 @@ impl RelayTransport for FakeRelay {
             .clone()
             .ok_or(RelayError::InvalidResponse)
     }
-    fn recover_origin(&self, _req: RecoverRequest) -> Result<RecoverResponse, RelayError> {
-        Err(RelayError::InvalidResponse)
-    }
     fn probe(&self, _req: ProbeRequest) -> Result<ProbeResponse, RelayError> {
         Ok(ProbeResponse { has_content: false })
     }
     fn claim_workspace(&self, _req: ClaimRequest) -> Result<ClaimResponse, RelayError> {
         Ok(ClaimResponse)
+    }
+    fn rotate_epoch(&self, _req: EpochRequest) -> Result<EpochResponse, RelayError> {
+        Err(RelayError::InvalidResponse)
+    }
+    fn blobs_have(&self, _req: BlobHaveRequest) -> Result<BlobHaveResponse, RelayError> {
+        Ok(BlobHaveResponse {
+            missing: Vec::new(),
+        })
+    }
+    fn upload_blob(&self, _req: BlobUploadRequest) -> Result<(), RelayError> {
+        Ok(())
+    }
+    fn download_blob(&self, _req: BlobDownloadRequest) -> Result<BlobDownloadResponse, RelayError> {
+        Err(RelayError::BlobMissing)
     }
     fn upload_key_envelope(
         &self,
@@ -2035,6 +2046,12 @@ impl RelayTransport for FakeRelay {
         Ok(KeyEnvelopeResponse {
             etag: "etag".to_owned(),
         })
+    }
+    fn download_key_envelope(
+        &self,
+        _req: KeyEnvelopeDownloadRequest,
+    ) -> Result<KeyEnvelopeDownloadResponse, RelayError> {
+        Err(RelayError::KeyEnvelopeMissing)
     }
     fn shared_channel_pull(
         &self,
@@ -2050,6 +2067,9 @@ impl RelayTransport for FakeRelay {
     }
     fn share_view_pull(&self, _req: ShareViewRequest) -> Result<ShareViewResponse, RelayError> {
         Err(RelayError::InvalidResponse)
+    }
+    fn share_blob(&self, _req: ShareBlobRequest) -> Result<BlobDownloadResponse, RelayError> {
+        Err(RelayError::ShareUnavailable)
     }
 }
 
@@ -2111,7 +2131,8 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
         pushes: Mutex::new(0),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![remote],
-            next_cursor: "cursor-1".to_owned(),
+            next_cursor: 1,
+            has_more: false,
         })),
     };
     let client = RelaySyncClient::new(fake);
@@ -2316,7 +2337,8 @@ fn pull_rejects_op_for_foreign_workspace() {
         pushes: Mutex::new(0),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![foreign],
-            next_cursor: "cursor-1".to_owned(),
+            next_cursor: 1,
+            has_more: false,
         })),
     };
     let client = RelaySyncClient::new(fake);
@@ -3289,7 +3311,8 @@ fn relay_pull_routes_secret_and_conflict_ops_without_cursor_wedge() {
         pushes: Mutex::new(0),
         pull: Mutex::new(Some(PullResponse {
             ops: vec![secret, conflict],
-            next_cursor: "router-cursor".into(),
+            next_cursor: 2,
+            has_more: false,
         })),
     });
 

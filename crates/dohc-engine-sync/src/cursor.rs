@@ -13,7 +13,7 @@ pub enum CursorKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayCursor {
-    pub cursor: String,
+    pub cursor: i64,
     pub replication_epoch: String,
     pub stream_identity: String,
 }
@@ -53,7 +53,11 @@ pub fn commit_relay_cursor(
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<()>, SyncError> {
     bounded(workspace_id, "workspace_id must be non-empty and bounded")?;
-    bounded(&cursor.cursor, "cursor must be non-empty and bounded")?;
+    if !(0..=crate::MAX_WIRE_INTEGER).contains(&cursor.cursor) {
+        return Err(SyncError::InvalidInput {
+            reason: "cursor is outside the wire integer range",
+        });
+    }
     bounded(
         &cursor.replication_epoch,
         "replication_epoch must be non-empty and bounded",
@@ -99,7 +103,7 @@ pub(crate) fn write_pushed_seq(
     pushed_seq: i64,
     faults: &dyn FaultInjector,
 ) -> Result<TxnOutcome<()>, SyncError> {
-    if !(0..=crate::MAX_WIRE_INTEGER).contains(&pushed_seq) {
+    if !(-1..=crate::MAX_WIRE_INTEGER).contains(&pushed_seq) {
         return Err(SyncError::InvalidInput {
             reason: "pushed_seq is outside the wire integer range",
         });

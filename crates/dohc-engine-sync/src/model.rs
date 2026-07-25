@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_WIRE_INTEGER: i64 = (1_i64 << 53) - 1;
 pub const MAX_PUSH_OPS_PER_BATCH: usize = 500;
 pub const MAX_PULL_OPS: usize = 500;
+pub const MAX_BLOB_HAVE_BATCH: usize = 2_000;
 pub(crate) const MAX_IDENTIFIER_BYTES: usize = 512;
 pub(crate) const MAX_OP_KIND_BYTES: usize = 128;
 pub(crate) const MAX_PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
