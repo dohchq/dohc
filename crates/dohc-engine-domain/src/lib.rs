@@ -57,8 +57,9 @@ pub use chats::{
     normalize_author_user_id, normalize_body, normalize_channel_name, normalize_display_name,
     normalize_feed_identity, normalize_reaction_author_id, normalize_replicated_chat_id,
     parse_mention_handles, reaction_id_for, render_chat_thread_projection,
-    replay_pending_chat_coordinates_for_change, resolve_feed_coordinate, resolve_follow_target,
-    resolve_thread_message, thread_has_message, validate_follow_target,
+    replay_pending_chat_coordinates_for_change, replay_ready_pending_chat_coordinates,
+    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message, thread_has_message,
+    validate_follow_target,
 };
 pub use conflicts::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,

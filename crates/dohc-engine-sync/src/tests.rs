@@ -3,15 +3,16 @@ use std::sync::Mutex;
 use dohc_engine_domain::chats::{CHAT_THREAD_HEADER_MESSAGE_ID, upsert_chat_search_index_row};
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
-    ChatReactionState, CreateFileThread, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID,
-    LinkedChatStore, MAX_SECRET_FILE_BYTES, ResolveDecision, SECRET_IV_BYTES, SECRET_TAG_BYTES,
-    SaveBookmark, SetFollow, SetReaction, VersionedTextStore, attachment_id_for,
-    channel_slug_for_name,
+    ChatChannelKind, ChatReactionState, CreateFileThread, FollowState, FollowTargetKind,
+    GENERAL_CHANNEL_WIRE_ID, LinkedChatStore, MAX_SECRET_FILE_BYTES, ResolveDecision,
+    SECRET_IV_BYTES, SECRET_TAG_BYTES, SaveBookmark, SetFollow, SetReaction, StartChannelThread,
+    VersionedTextStore, attachment_id_for, channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 use rusqlite::{OptionalExtension, params};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use crate::*;
 
@@ -1524,6 +1525,210 @@ fn local_thread_write_replays_a_parked_remote_follow() {
         .expect("follow replayed by local write");
     assert_eq!(state, "following");
     assert_eq!(pending_chat_coordinate_count(&engine), 0);
+}
+
+#[test]
+fn general_wire_backfill_replays_a_parked_remote_follow() {
+    let (_scratch, _path, mut engine) = store();
+    LinkedChatStore::new(&mut engine)
+        .create_channel(
+            "ws",
+            "ordinary-general",
+            "general",
+            ChatChannelKind::Channel,
+            10,
+            &NoFaults,
+        )
+        .expect("ordinary general channel");
+    let follow = envelope(
+        "general-wire-follow",
+        0,
+        "chat.follow.set",
+        json!({
+            "ownerUserId": "owner",
+            "targetKind": "channel",
+            "targetId": GENERAL_CHANNEL_WIRE_ID,
+            "state": "following",
+            "atMs": 20
+        }),
+    );
+    apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park general follow");
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+
+    let general = LinkedChatStore::new(&mut engine)
+        .ensure_general_channel("ws", "unused-general-id", 30, &NoFaults)
+        .expect("backfill general wire id");
+    assert_eq!(general.channel_id, "ordinary-general");
+
+    let state: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state FROM chat_follows \
+                 WHERE workspace_id='ws' AND owner_user_id='owner' \
+                   AND target_kind='channel' AND target_id=?1",
+                [GENERAL_CHANNEL_WIRE_ID],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("replayed general follow");
+    assert_eq!(state, "following");
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+}
+
+#[test]
+fn default_follow_seed_replays_a_parked_remote_feed_read() {
+    let (_scratch, _path, mut engine) = store();
+    LinkedChatStore::new(&mut engine)
+        .create_channel(
+            "ws",
+            "default-channel",
+            "Default channel",
+            ChatChannelKind::Channel,
+            10,
+            &NoFaults,
+        )
+        .expect("default channel");
+    LinkedChatStore::new(&mut engine)
+        .start_channel_thread(
+            &StartChannelThread {
+                workspace_id: "ws".to_owned(),
+                thread_id: "default-thread".to_owned(),
+                message_id: "default-message".to_owned(),
+                channel_id: "default-channel".to_owned(),
+                title: Some("Default thread".to_owned()),
+                body: "Default opening message".to_owned(),
+                author_kind: ChatActorKind::Human,
+                author_display_name: "Ada".to_owned(),
+                author_user_id: Some("ada".to_owned()),
+                origin: None,
+                needs_decision: false,
+                attachments: Vec::new(),
+                now_ms: 20,
+                request_id: Some("default-thread-request".to_owned()),
+            },
+            &NoFaults,
+        )
+        .expect("default opening message");
+    let feed_read = envelope(
+        "default-feed-read",
+        0,
+        "chat.feed.read.set",
+        json!({
+            "ownerUserId": "owner",
+            "lastSeenCreatedAtMs": 20,
+            "lastSeenMessageId": "default-message",
+            "atMs": 30
+        }),
+    );
+    apply_chat_envelope(&mut engine, &feed_read, &NoFaults).expect("park default feed read");
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+
+    LinkedChatStore::new(&mut engine)
+        .ensure_default_channel_follows("ws", "owner", &NoFaults)
+        .expect("seed default follows");
+
+    let coordinate: (i64, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT last_seen_created_at_ms,last_seen_message_id \
+                 FROM chat_feed_read_state WHERE workspace_id='ws' AND owner_user_id='owner'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("replayed default feed read");
+    assert_eq!(coordinate, (20, "default-message".to_owned()));
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+}
+
+fn collision_slug_for_test(requested: &str, channel_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(requested.as_bytes());
+    hasher.update([0]);
+    hasher.update(channel_id.as_bytes());
+    format!("{requested}-{:x}", hasher.finalize())
+}
+
+#[test]
+fn preoccupied_channel_fallback_converges_across_peers() {
+    let requested = "x";
+    let occupied_fallback = collision_slug_for_test(requested, "channel-b");
+    let operations = [
+        envelope(
+            "fallback-preoccupier",
+            0,
+            "chat.channel.create",
+            json!({
+                "channelId": "channel-z",
+                "name": occupied_fallback,
+                "slug": occupied_fallback,
+                "kind": "channel",
+                "createdAtMs": 1
+            }),
+        ),
+        envelope(
+            "fallback-owner",
+            0,
+            "chat.channel.create",
+            json!({
+                "channelId": "channel-b",
+                "name": requested,
+                "slug": requested,
+                "kind": "channel",
+                "createdAtMs": 2
+            }),
+        ),
+        envelope(
+            "fallback-winner",
+            0,
+            "chat.channel.create",
+            json!({
+                "channelId": "channel-a",
+                "name": requested,
+                "slug": requested,
+                "kind": "channel",
+                "createdAtMs": 3
+            }),
+        ),
+    ];
+
+    let mut peer_slugs = Vec::new();
+    for order in [[0, 1, 2], [1, 2, 0]] {
+        let (scratch, _path, mut engine) = store();
+        for index in order {
+            apply_chat_envelope(&mut engine, &operations[index], &NoFaults)
+                .expect("collision-safe channel apply");
+        }
+        let slugs: Vec<(String, String)> = engine
+            .read_with(|conn| {
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT channel_id,slug FROM chat_channels \
+                         WHERE workspace_id='ws' ORDER BY channel_id",
+                    )
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+                let rows = stmt
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)
+            })
+            .expect("peer channel slugs");
+        assert_eq!(slugs.len(), 3);
+        assert_eq!(slugs[0], ("channel-a".to_owned(), requested.to_owned()));
+        assert_eq!(
+            slugs
+                .iter()
+                .map(|(_, slug)| slug)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            3
+        );
+        peer_slugs.push((scratch, slugs));
+    }
+    assert_eq!(peer_slugs[0].1, peer_slugs[1].1);
 }
 
 #[test]

@@ -2091,6 +2091,20 @@ impl<'a> LinkedChatStore<'a> {
         LinkedChatStore { store }
     }
 
+    fn write_with_pending_chat_replay<T>(
+        &mut self,
+        workspace_id: &str,
+        faults: &dyn FaultInjector,
+        mutation: impl FnOnce(&Transaction<'_>) -> Result<T, DomainError>,
+    ) -> Result<TxnOutcome<T>, DomainError> {
+        let workspace_id = workspace_id.to_owned();
+        self.store.write_with(faults, |tx| {
+            let value = mutation(tx)?;
+            replay_ready_pending_chat_coordinates(tx, &workspace_id)?;
+            Ok(value)
+        })
+    }
+
     // -------------------------------------------------------------- channels
 
     /// Create a channel: reserved-slug rules, per-workspace slug uniqueness, and
@@ -2144,7 +2158,7 @@ impl<'a> LinkedChatStore<'a> {
         let cid = channel_id;
         let slug_c = slug.clone();
         let name_c = name.clone();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             if channel_by_slug(tx, &ws, &slug_c)?.is_some() {
                 return Err(DomainError::chat(
                     "channel-exists",
@@ -2262,7 +2276,7 @@ impl<'a> LinkedChatStore<'a> {
         let slug_c = slug.clone();
         let name_c = name.to_owned();
         let wire = wire_id.to_owned();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             if let Some(existing) = channel_by_slug(tx, &ws, &slug_c)? {
                 // Backfill the well-known wire mapping so imported rows converge.
                 record_channel_wire_id(tx, &ws, &wire, &existing.channel_id)?;
@@ -2473,7 +2487,7 @@ impl<'a> LinkedChatStore<'a> {
         let title_c = title.clone();
         let object_id_c = object_id.clone();
         let path_hint_c = path_hint.clone();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             tx.execute(
                 "INSERT INTO chat_threads \
                  (workspace_id, thread_id, title, created_at_ms, updated_at_ms, \
@@ -2609,7 +2623,8 @@ impl<'a> LinkedChatStore<'a> {
         let author_user_c = author_user_id.clone();
         let origin_c = origin.clone();
         let attachments_c = attachments.clone();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome =
+            self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             let channel = require_channel(tx, &input.workspace_id, &input.channel_id)?;
             let channel_wire_id =
                 wire_id_for_channel_id(tx, &input.workspace_id, &channel.channel_id)?;
@@ -2849,7 +2864,8 @@ impl<'a> LinkedChatStore<'a> {
         let body_c = body.clone();
         let parent_c = parent.clone();
         let attachments_c = attachments.clone();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome =
+            self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             require_thread(tx, &input.workspace_id, &input.thread_id)?;
             if let Some(parent_id) = &parent_c
                 && !thread_has_message(tx, &input.workspace_id, &input.thread_id, parent_id)?
@@ -3048,7 +3064,7 @@ impl<'a> LinkedChatStore<'a> {
         }
 
         let input = input.clone();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             require_thread(tx, &input.workspace_id, &thread_id)?;
             if !thread_has_message(tx, &input.workspace_id, &thread_id, &input.message_id)? {
                 return Err(DomainError::chat(
@@ -3228,7 +3244,7 @@ impl<'a> LinkedChatStore<'a> {
         }
 
         let input = input.clone();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             require_thread(tx, &input.workspace_id, &thread_id)?;
             let current = require_decision(tx, &input.workspace_id, &thread_id, &input.message_id)?;
             if current.state == ChatDecisionState::Resolved {
@@ -3765,7 +3781,7 @@ impl<'a> LinkedChatStore<'a> {
         )?;
         let marker_id = mention_backfill_marker_id(workspace_id);
         let marker_hash = hash_fields(&[b"chat-mention-backfill-v1", workspace_id.as_bytes()]);
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(workspace_id, faults, |tx| {
             let complete: bool = tx
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM engine_requests \
@@ -4067,7 +4083,7 @@ impl<'a> LinkedChatStore<'a> {
         }
         let ws = workspace_id.to_owned();
         let tid = thread_id.to_owned();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             require_thread(tx, &ws, &tid)?;
             advance_read_cursor(tx, &ws, &tid, up_to, now_ms, expected_revision)
         })?;
@@ -4117,7 +4133,7 @@ impl<'a> LinkedChatStore<'a> {
         input.owner_user_id = owner_user_id;
         input.replication_owner_user_id = replication_owner_user_id;
         input.target_id = target_id;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             validate_follow_target(tx, &input.workspace_id, input.target_kind, &input.target_id)?;
             let prior_at_ms: Option<i64> = tx
                 .query_row(
@@ -4230,7 +4246,7 @@ impl<'a> LinkedChatStore<'a> {
     ) -> Result<(), DomainError> {
         let workspace_id = workspace_id.to_owned();
         let owner_user_id = normalize_feed_identity(owner_user_id, "Feed owner")?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             tx.execute(
                 "INSERT OR IGNORE INTO chat_follows \
                  (workspace_id, owner_user_id, target_kind, target_id, state, \
@@ -4276,7 +4292,7 @@ impl<'a> LinkedChatStore<'a> {
         let workspace_id = workspace_id.to_owned();
         let thread_id = thread_id.to_owned();
         let up_to_message_id = up_to_message_id.to_owned();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             require_thread(tx, &workspace_id, &thread_id)?;
             let current = agent_read_state_for_thread(tx, &workspace_id, &thread_id)?;
             if expected_revision.is_some_and(|revision| revision != current.revision) {
@@ -4378,7 +4394,7 @@ impl<'a> LinkedChatStore<'a> {
         let owner = owner_user_id;
         let msg = cursor.message_id;
         let last_seen_created_at_ms = cursor.created_at_ms;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             // Receiver-private read state must not be advanced past a coordinate
             // the owner cannot actually see: prove the (created_at_ms, message_id)
             // names a currently-visible feed item under the SAME predicate before
@@ -4704,7 +4720,7 @@ impl<'a> LinkedChatStore<'a> {
         input.target_id = target_id;
         input.destination_path = destination_path;
         let now = input.now_ms;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&input.workspace_id, faults, |tx| {
             // Resolve the thread (+ message) the bookmark targets.
             let (thread_id, message_id) = match input.target_kind {
                 BookmarkTargetKind::Thread => {
@@ -4956,7 +4972,7 @@ impl<'a> LinkedChatStore<'a> {
         let ws = workspace_id.to_owned();
         let owner = owner_user_id;
         let bid = bookmark_id.to_owned();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             let current = require_bookmark(tx, &ws, &owner, &bid)?;
             if current.state == "active" {
                 tx.execute(
@@ -5004,7 +5020,7 @@ impl<'a> LinkedChatStore<'a> {
             bookmark.generation = generation;
             return Ok(bookmark);
         }
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             require_bookmark(tx, &workspace_id, &owner_user_id, &bookmark_id)?;
             queue_bookmark_generation(tx, &workspace_id, &bookmark_id, now_ms)?;
             let bookmark = require_bookmark(tx, &workspace_id, &owner_user_id, &bookmark_id)?;
@@ -5081,7 +5097,7 @@ impl<'a> LinkedChatStore<'a> {
         let owner = normalize_feed_identity(owner_user_id, "Bookmark owner")?;
         let bid = bookmark_id.to_owned();
         let failure_reason = failure_reason.map(str::to_owned);
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             require_bookmark(tx, &ws, &owner, &bid)?;
             if !(1..=9_007_199_254_740_991).contains(&generation) {
                 return Err(DomainError::chat(
@@ -5179,7 +5195,7 @@ impl<'a> LinkedChatStore<'a> {
         let ws = workspace_id.to_owned();
         let owner = owner_user_id;
         let bid = bookmark_id.to_owned();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             let current = require_bookmark(tx, &ws, &owner, &bid)?;
             if let Some((projection_object_id, projection_path)) = &projection_identity
                 && current.generation == generation
@@ -5244,7 +5260,7 @@ impl<'a> LinkedChatStore<'a> {
             "workspace_id must not be empty",
         )?;
         let verified_user_id = normalize_verified_user_id(verified_user_id)?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(workspace_id, faults, |tx| {
             let prior: Option<i64> = tx
                 .query_row(
                     "SELECT max_created_at_ms FROM chat_dispatch_scan_cursor \
@@ -5319,7 +5335,7 @@ impl<'a> LinkedChatStore<'a> {
         let ws = workspace_id.to_owned();
         let trigger = normalize_dispatch_id(trigger_message_id, "Trigger message id is invalid.")?;
         let tid = normalize_dispatch_id(thread_id, "Thread id is invalid.")?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             let inserted = tx
                 .execute(
                     "INSERT INTO chat_dispatch_ledger \
@@ -5372,7 +5388,7 @@ impl<'a> LinkedChatStore<'a> {
         let ws = workspace_id.to_owned();
         let cmd = normalize_dispatch_command(command)?;
         let log = normalize_optional_dispatch_path(log_path)?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             // A response can be lost after commit. Recover that exact durable
             // claim before the workspace-wide single-flight guard rejects it.
             if let Some(existing) = running_dispatch_claim(tx, &ws, &run)? {
@@ -5831,7 +5847,7 @@ impl<'a> LinkedChatStore<'a> {
         let workspace_id = workspace_id.to_owned();
         let thread_id = normalize_dispatch_id(thread_id, "Thread id is invalid.")?;
         let reason = normalize_failure_reason(reason)?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             let changed = tx
                 .execute(
                     "UPDATE chat_dispatch_ledger SET state = 'failed', failure_reason = ?3, \
@@ -5855,7 +5871,7 @@ impl<'a> LinkedChatStore<'a> {
         let workspace_id = workspace_id.to_owned();
         let message_id = normalize_dispatch_id(message_id, "Message id is invalid.")?;
         let run_id = normalize_dispatch_run_id(run_id)?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             let runs = run_rows_by_global_id(tx, &run_id)?;
             if runs.len() > 1 {
                 return Err(dispatch_corrupt());
@@ -5912,7 +5928,7 @@ impl<'a> LinkedChatStore<'a> {
         } else {
             None
         };
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             tx.execute(
                 "INSERT INTO chat_dispatch_pause \
                  (workspace_id, thread_id, paused, reason, updated_at_ms) \
@@ -5942,7 +5958,7 @@ impl<'a> LinkedChatStore<'a> {
     ) -> Result<AgentRunRecord, DomainError> {
         let workspace_id = workspace_id.to_owned();
         let run_id = normalize_dispatch_run_id(run_id)?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             let mut runs = run_rows_by_global_id(tx, &run_id)?;
             if runs.len() > 1 {
                 return Err(dispatch_corrupt());
@@ -5981,7 +5997,7 @@ impl<'a> LinkedChatStore<'a> {
         let trigger_message_id =
             normalize_dispatch_id(trigger_message_id, "Trigger message id is invalid.")?;
         let run_id = normalize_dispatch_run_id(run_id)?;
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             let ended_at_ms: Option<Option<i64>> = tx
                 .query_row(
                     "SELECT ended_at_ms FROM agent_run_records \
@@ -6139,7 +6155,7 @@ impl<'a> LinkedChatStore<'a> {
         let run = normalize_dispatch_run_id(run_id)?;
         let workspace_id = workspace_id.to_owned();
         let reason = reason.map(str::to_owned);
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&workspace_id, faults, |tx| {
             let Some((trigger, ended, ledger_state)) =
                 dispatch_run_context(tx, &workspace_id, &run)?
             else {
@@ -6218,7 +6234,7 @@ impl<'a> LinkedChatStore<'a> {
         faults: &dyn FaultInjector,
     ) -> Result<Vec<String>, DomainError> {
         let ws = workspace_id.to_owned();
-        let outcome = self.store.write_with(faults, |tx| {
+        let outcome = self.write_with_pending_chat_replay(&ws, faults, |tx| {
             // Snapshot the running rows first (can't mutate while iterating).
             let running: Vec<(String, i64, Option<String>)> = {
                 let mut stmt = tx
@@ -6862,6 +6878,92 @@ pub fn replay_pending_chat_coordinates_for_change(
             }
         }
     }
+    Ok(())
+}
+
+/// Re-evaluate every parked coordinate in one workspace against the committed
+/// row state visible in the caller's transaction. Domain write boundaries use
+/// this after their mutation, so non-journal writers cannot omit a wake-up.
+pub fn replay_ready_pending_chat_coordinates(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+) -> Result<(), DomainError> {
+    loop {
+        let pending = pending_chat_operations_for_workspace(tx, workspace_id)?;
+        let mut applied = false;
+        for operation in pending {
+            match replay_pending_chat_operation(tx, workspace_id, &operation)? {
+                PendingReplayOutcome::Deferred => {}
+                PendingReplayOutcome::Applied => {
+                    delete_pending_chat_operation(tx, workspace_id, &operation)?;
+                    applied = true;
+                }
+                PendingReplayOutcome::Refused => {
+                    delete_pending_chat_operation(tx, workspace_id, &operation)?;
+                }
+            }
+        }
+        if !applied {
+            return Ok(());
+        }
+    }
+}
+
+fn pending_chat_operations_for_workspace(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+) -> Result<Vec<PendingChatOperation>, DomainError> {
+    let mut stmt = tx
+        .prepare(
+            "SELECT log.origin_id,log.origin_seq,log.op_kind,log.payload_json \
+             FROM chat_pending_replication pending \
+             JOIN replication_log log \
+               ON log.workspace_id=pending.workspace_id \
+              AND log.origin_id=pending.origin_id \
+              AND log.origin_seq=pending.origin_seq \
+             WHERE pending.workspace_id=?1 \
+             ORDER BY log.recorded_at_ms,log.origin_id,log.origin_seq",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let rows = stmt
+        .query_map([workspace_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(DomainError::sql_corrupt)?;
+    let mut operations = Vec::new();
+    for row in rows {
+        let (origin_id, origin_seq, op_kind, payload_json) =
+            row.map_err(DomainError::sql_corrupt)?;
+        let payload =
+            serde_json::from_str(&payload_json).map_err(|_| DomainError::StateCorrupt {
+                reason: "pending chat replication payload is corrupt",
+            })?;
+        operations.push(PendingChatOperation {
+            origin_id,
+            origin_seq,
+            op_kind,
+            payload,
+        });
+    }
+    Ok(operations)
+}
+
+fn delete_pending_chat_operation(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    operation: &PendingChatOperation,
+) -> Result<(), DomainError> {
+    tx.execute(
+        "DELETE FROM chat_pending_replication \
+         WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3",
+        params![workspace_id, operation.origin_id, operation.origin_seq],
+    )
+    .map_err(DomainError::sql_persist)?;
     Ok(())
 }
 
