@@ -3,9 +3,10 @@ use std::sync::Mutex;
 use dohc_engine_domain::chats::{CHAT_THREAD_HEADER_MESSAGE_ID, upsert_chat_search_index_row};
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, BookmarkMode, BookmarkTargetKind, ChatActorKind,
-    ChatReactionState, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID, LinkedChatStore,
-    MAX_SECRET_FILE_BYTES, ResolveDecision, SECRET_IV_BYTES, SECRET_TAG_BYTES, SaveBookmark,
-    SetFollow, SetReaction, VersionedTextStore, attachment_id_for, channel_slug_for_name,
+    ChatReactionState, CreateFileThread, FollowState, FollowTargetKind, GENERAL_CHANNEL_WIRE_ID,
+    LinkedChatStore, MAX_SECRET_FILE_BYTES, ResolveDecision, SECRET_IV_BYTES, SECRET_TAG_BYTES,
+    SaveBookmark, SetFollow, SetReaction, VersionedTextStore, attachment_id_for,
+    channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
@@ -1196,6 +1197,410 @@ fn imported_attachment_parks_until_its_cross_origin_message_arrives() {
 }
 
 #[test]
+fn imported_feed_read_waits_for_placeholder_channel_resolution() {
+    let (_scratch, _path, mut engine) = store();
+    let thread = envelope(
+        "placeholder-feed-thread",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "placeholder-feed-thread",
+            "title": "Placeholder feed",
+            "createdAtMs": 10,
+            "channelSlug": "placeholder-feed",
+            "channelWireId": "placeholder-feed-wire"
+        }),
+    );
+    let message = envelope(
+        "placeholder-feed-thread",
+        1,
+        "chat.message.append",
+        json!({
+            "messageId": "placeholder-feed-message",
+            "threadId": "placeholder-feed-thread",
+            "authorKind": "human",
+            "authorDisplayName": "Ada",
+            "body": "Waiting for its channel",
+            "createdAtMs": 20
+        }),
+    );
+    apply_chat_envelope(&mut engine, &thread, &NoFaults).expect("placeholder thread");
+    apply_chat_envelope(&mut engine, &message, &NoFaults).expect("placeholder message");
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO chat_follows \
+                 (workspace_id,owner_user_id,target_kind,target_id,state,updated_at_ms,origin_id,origin_seq) \
+                 VALUES ('ws','owner','thread','placeholder-feed-thread','following',21,'fixture',0)",
+                [],
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("enabling follow");
+
+    let read = envelope(
+        "placeholder-feed-read",
+        0,
+        "chat.feed.read.set",
+        json!({
+            "ownerUserId": "owner",
+            "lastSeenCreatedAtMs": 20,
+            "lastSeenMessageId": "placeholder-feed-message",
+            "atMs": 30
+        }),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &read, &NoFaults).expect("defer placeholder feed read"),
+        ApplyOutcome::Applied(())
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+
+    let channel = envelope(
+        "placeholder-feed-channel",
+        0,
+        "chat.channel.create",
+        json!({
+            "channelId": "placeholder-feed-authoritative",
+            "name": "Placeholder feed",
+            "slug": "placeholder-feed",
+            "kind": "channel",
+            "createdAtMs": 5,
+            "wireId": "placeholder-feed-wire"
+        }),
+    );
+    apply_chat_envelope(&mut engine, &channel, &NoFaults).expect("authoritative channel");
+
+    let coordinate: (i64, String) = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT last_seen_created_at_ms,last_seen_message_id \
+                 FROM chat_feed_read_state WHERE workspace_id='ws' AND owner_user_id='owner'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("replayed placeholder feed read");
+    assert_eq!(coordinate, (20, "placeholder-feed-message".to_owned()));
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+}
+
+#[test]
+fn imported_person_follow_waits_for_a_non_dm_message() {
+    let (_scratch, _path, mut engine) = store();
+    for operation in [
+        envelope(
+            "dm-person-source",
+            0,
+            "chat.channel.create",
+            json!({
+                "channelId": "dm-person-channel",
+                "name": "Private person",
+                "slug": "private-person",
+                "kind": "dm",
+                "createdAtMs": 10,
+                "wireId": "dm-person-wire"
+            }),
+        ),
+        envelope(
+            "dm-person-source",
+            1,
+            "chat.thread.create",
+            json!({
+                "threadId": "dm-person-thread",
+                "title": "Private person",
+                "createdAtMs": 11,
+                "channelSlug": "private-person",
+                "channelWireId": "dm-person-wire"
+            }),
+        ),
+        envelope(
+            "dm-person-source",
+            2,
+            "chat.message.append",
+            json!({
+                "messageId": "dm-person-message",
+                "threadId": "dm-person-thread",
+                "authorKind": "human",
+                "authorDisplayName": "Ada",
+                "authorUserId": "person-delayed-public",
+                "body": "Private first",
+                "createdAtMs": 12
+            }),
+        ),
+    ] {
+        apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("DM person fixture");
+    }
+    let follow = envelope(
+        "dm-person-follow",
+        0,
+        "chat.follow.set",
+        json!({
+            "ownerUserId": "owner",
+            "targetKind": "person",
+            "targetId": "person-delayed-public",
+            "state": "following",
+            "atMs": 20
+        }),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("defer DM-only person"),
+        ApplyOutcome::Applied(())
+    );
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+
+    for operation in [
+        envelope(
+            "public-person-source",
+            0,
+            "chat.thread.create",
+            json!({
+                "threadId": "public-person-thread",
+                "title": "Public person",
+                "createdAtMs": 30,
+                "linkedObjectId": "public-person-object",
+                "linkedAtMs": 30
+            }),
+        ),
+        envelope(
+            "public-person-source",
+            1,
+            "chat.message.append",
+            json!({
+                "messageId": "public-person-message",
+                "threadId": "public-person-thread",
+                "authorKind": "human",
+                "authorDisplayName": "Ada",
+                "authorUserId": "person-delayed-public",
+                "body": "Public later",
+                "createdAtMs": 31
+            }),
+        ),
+    ] {
+        apply_chat_envelope(&mut engine, &operation, &NoFaults).expect("public person fixture");
+    }
+
+    let state: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state FROM chat_follows \
+                 WHERE workspace_id='ws' AND owner_user_id='owner' \
+                   AND target_kind='person' AND target_id='person-delayed-public'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("replayed person follow");
+    assert_eq!(state, "following");
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+}
+
+#[test]
+fn authoritative_placeholder_slug_collision_converges_across_peers() {
+    let mut peers = Vec::new();
+    for reverse_prefix in [false, true] {
+        let (scratch, _path, mut engine) = store();
+        let occupied = envelope(
+            "slug-owner",
+            0,
+            "chat.channel.create",
+            json!({
+                "channelId": "slug-owner-channel",
+                "name": "Shared name",
+                "slug": "shared-name",
+                "kind": "channel",
+                "createdAtMs": 1
+            }),
+        );
+        let placeholder = envelope(
+            "slug-placeholder",
+            0,
+            "chat.thread.create",
+            json!({
+                "threadId": "slug-placeholder-thread",
+                "title": "Placeholder",
+                "createdAtMs": 2,
+                "channelSlug": "wire-alias",
+                "channelWireId": "slug-placeholder-wire"
+            }),
+        );
+        if reverse_prefix {
+            apply_chat_envelope(&mut engine, &placeholder, &NoFaults).expect("placeholder first");
+            apply_chat_envelope(&mut engine, &occupied, &NoFaults).expect("slug owner second");
+        } else {
+            apply_chat_envelope(&mut engine, &occupied, &NoFaults).expect("slug owner first");
+            apply_chat_envelope(&mut engine, &placeholder, &NoFaults).expect("placeholder second");
+        }
+        let authoritative = envelope(
+            "slug-authoritative",
+            0,
+            "chat.channel.create",
+            json!({
+                "channelId": "slug-authoritative-channel",
+                "name": "Shared name",
+                "slug": "wire-alias",
+                "kind": "channel",
+                "createdAtMs": 3,
+                "wireId": "slug-placeholder-wire"
+            }),
+        );
+        apply_chat_envelope(&mut engine, &authoritative, &NoFaults)
+            .expect("collision-safe authoritative channel");
+        let (slug, owner_slug): (String, String) = engine
+            .read_with(|conn| {
+                let slug = conn
+                    .query_row(
+                        "SELECT c.slug FROM chat_channel_wire_ids w \
+                         JOIN chat_channels c \
+                           ON c.workspace_id=w.workspace_id AND c.channel_id=w.channel_id \
+                         WHERE w.workspace_id='ws' AND w.wire_id='slug-placeholder-wire'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+                let owner_slug = conn
+                    .query_row(
+                        "SELECT slug FROM chat_channels \
+                         WHERE workspace_id='ws' AND channel_id='slug-owner-channel'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+                Ok::<_, dohc_engine_storage::StorageError>((slug, owner_slug))
+            })
+            .expect("authoritative slug");
+        assert_ne!(slug, owner_slug);
+        peers.push((scratch, slug));
+    }
+    assert_eq!(peers[0].1, peers[1].1);
+}
+
+#[test]
+fn local_thread_write_replays_a_parked_remote_follow() {
+    let (_scratch, _path, mut engine) = store();
+    let follow = envelope(
+        "local-wakeup-follow",
+        0,
+        "chat.follow.set",
+        json!({
+            "ownerUserId": "owner",
+            "targetKind": "thread",
+            "targetId": "local-wakeup-thread",
+            "state": "following",
+            "atMs": 20
+        }),
+    );
+    apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park remote follow");
+    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+
+    LinkedChatStore::new(&mut engine)
+        .create_thread(
+            &CreateFileThread {
+                workspace_id: "ws".to_owned(),
+                thread_id: "local-wakeup-thread".to_owned(),
+                title: "Local wakeup".to_owned(),
+                linked_object_id: "local-wakeup-object".to_owned(),
+                linked_path_hint: None,
+                now_ms: 30,
+                request_id: "local-wakeup-request".to_owned(),
+            },
+            &NoFaults,
+        )
+        .expect("local dependency write");
+
+    let state: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state FROM chat_follows \
+                 WHERE workspace_id='ws' AND owner_user_id='owner' \
+                   AND target_kind='thread' AND target_id='local-wakeup-thread'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("follow replayed by local write");
+    assert_eq!(state, "following");
+    assert_eq!(pending_chat_coordinate_count(&engine), 0);
+}
+
+#[test]
+fn replay_only_touches_coordinates_for_the_changed_dependency() {
+    let (_scratch, _path, mut engine) = store();
+    for (origin, target) in [
+        ("targeted-follow-a", "targeted-thread-a"),
+        ("targeted-follow-b", "targeted-thread-b"),
+    ] {
+        let follow = envelope(
+            origin,
+            0,
+            "chat.follow.set",
+            json!({
+                "ownerUserId": "owner",
+                "targetKind": "thread",
+                "targetId": target,
+                "state": "following",
+                "atMs": 20
+            }),
+        );
+        apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park targeted follow");
+    }
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "CREATE TABLE pending_touch_log (origin_id TEXT NOT NULL); \
+                 CREATE TRIGGER pending_touch_probe AFTER DELETE ON chat_pending_replication \
+                 BEGIN INSERT INTO pending_touch_log(origin_id) VALUES (OLD.origin_id); END;",
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("pending replay probe");
+
+    let target = envelope(
+        "targeted-thread-source",
+        0,
+        "chat.thread.create",
+        json!({
+            "threadId": "targeted-thread-a",
+            "title": "Target A",
+            "createdAtMs": 30,
+            "linkedObjectId": "targeted-object-a",
+            "linkedAtMs": 30
+        }),
+    );
+    apply_chat_envelope(&mut engine, &target, &NoFaults).expect("satisfy only target A");
+
+    let touched: Vec<String> = engine
+        .read_with(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT origin_id FROM pending_touch_log ORDER BY origin_id")
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+            let rows = stmt
+                .query_map([], |row| row.get(0))
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("touched pending coordinates");
+    assert_eq!(touched, vec!["targeted-follow-a".to_owned()]);
+    let still_pending: String = engine
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT origin_id FROM chat_pending_replication \
+                 WHERE workspace_id='ws' AND dependency_id='targeted-thread-b'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(dohc_engine_storage::StorageError::corrupt_public)
+        })
+        .expect("unrelated coordinate remains parked");
+    assert_eq!(still_pending, "targeted-follow-b");
+}
+
+#[test]
 fn imported_follow_refuses_a_resolved_dm_without_parking() {
     let (_scratch, _path, mut engine) = store();
     let channel = envelope(
@@ -2144,7 +2549,6 @@ fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() 
     for (origin, target_kind, target_id) in [
         ("follow-dm-channel", "channel", "dm-wire"),
         ("follow-dm-thread", "thread", "dm-thread"),
-        ("follow-dm-person", "person", "dm-only-user"),
     ] {
         let operation = envelope(
             origin,
@@ -2163,6 +2567,23 @@ fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() 
             Err(SyncError::InvalidInput { .. })
         ));
     }
+    let dm_only_person = envelope(
+        "follow-dm-person",
+        0,
+        "chat.follow.set",
+        json!({
+            "ownerUserId": "owner",
+            "targetKind": "person",
+            "targetId": "dm-only-user",
+            "state": "following",
+            "atMs": 40
+        }),
+    );
+    assert_eq!(
+        apply_chat_envelope(&mut engine, &dm_only_person, &NoFaults)
+            .expect("park DM-only person follow"),
+        ApplyOutcome::Applied(())
+    );
     let unresolved = envelope(
         "follow-fabricated-channel",
         0,
@@ -2179,7 +2600,7 @@ fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() 
         apply_chat_envelope(&mut engine, &unresolved, &NoFaults).expect("park unresolved follow"),
         ApplyOutcome::Applied(())
     );
-    assert_eq!(pending_chat_coordinate_count(&engine), 1);
+    assert_eq!(pending_chat_coordinate_count(&engine), 2);
     let leaked = LinkedChatStore::new(&mut engine)
         .list_follows("ws", "owner", None)
         .expect("list follows");

@@ -56,8 +56,9 @@ pub use chats::{
     is_js_trim_ws, is_reaction_emoji_verbatim, linked_chat_projection_path,
     normalize_author_user_id, normalize_body, normalize_channel_name, normalize_display_name,
     normalize_feed_identity, normalize_reaction_author_id, normalize_replicated_chat_id,
-    parse_mention_handles, reaction_id_for, render_chat_thread_projection, resolve_feed_coordinate,
-    resolve_follow_target, resolve_thread_message, thread_has_message, validate_follow_target,
+    parse_mention_handles, reaction_id_for, render_chat_thread_projection,
+    replay_pending_chat_coordinates_for_change, resolve_feed_coordinate, resolve_follow_target,
+    resolve_thread_message, thread_has_message, validate_follow_target,
 };
 pub use conflicts::{
     ConflictChoice, ConflictContentKind, ConflictFileState, ConflictMetadata, ConflictResolution,

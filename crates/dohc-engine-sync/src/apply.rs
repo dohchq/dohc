@@ -1,6 +1,7 @@
 use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Deserializer};
+use sha2::{Digest, Sha256};
 
 use dohc_engine_domain::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, CHAT_THREAD_HEADER_MESSAGE_ID, DomainError,
@@ -9,8 +10,8 @@ use dohc_engine_domain::{
     is_js_trim_ws, is_reaction_emoji_verbatim, normalize_author_user_id, normalize_body,
     normalize_channel_name, normalize_display_name, normalize_feed_identity,
     normalize_reaction_author_id, normalize_replicated_chat_id, parse_mention_handles,
-    resolve_feed_coordinate, resolve_follow_target, resolve_thread_message,
-    validate_addressable_plaintext_path,
+    replay_pending_chat_coordinates_for_change, resolve_feed_coordinate, resolve_follow_target,
+    resolve_thread_message, validate_addressable_plaintext_path,
 };
 
 use crate::journal::{ack_tx, crashes, read_ack_tx};
@@ -276,7 +277,19 @@ pub(crate) fn apply_chat_tx(
     op: &ReplicationEnvelope,
 ) -> Result<(), SyncError> {
     apply_chat_mutation(tx, op)?;
-    drain_pending_chat_coordinates(tx, &op.workspace_id)
+    let parked: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_pending_replication \
+             WHERE workspace_id=?1 AND origin_id=?2 AND origin_seq=?3)",
+            params![op.workspace_id, op.origin_id, op.origin_seq],
+            |row| row.get(0),
+        )
+        .map_err(SyncError::corrupt)?;
+    if !parked {
+        replay_pending_chat_coordinates_for_change(tx, &op.workspace_id, &op.op_kind, &op.payload)
+            .map_err(|error| map_chat_rule(error, "pending chat coordinate replay failed"))?;
+    }
+    Ok(())
 }
 
 fn apply_chat_mutation(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Result<(), SyncError> {
@@ -312,67 +325,6 @@ fn park_chat_coordinate(
         ],
     )
     .map_err(SyncError::persist)?;
-    Ok(())
-}
-
-fn drain_pending_chat_coordinates(
-    tx: &Transaction<'_>,
-    workspace_id: &str,
-) -> Result<(), SyncError> {
-    let pending: Vec<ReplicationEnvelope> = {
-        let mut stmt = tx
-            .prepare(
-                "SELECT log.origin_id,log.origin_seq,log.op_kind,log.payload_json,log.recorded_at_ms \
-                 FROM chat_pending_replication pending \
-                 JOIN replication_log log \
-                   ON log.workspace_id = pending.workspace_id \
-                  AND log.origin_id = pending.origin_id \
-                  AND log.origin_seq = pending.origin_seq \
-                 WHERE pending.workspace_id = ?1 \
-                 ORDER BY log.recorded_at_ms,log.origin_id,log.origin_seq",
-            )
-            .map_err(SyncError::corrupt)?;
-        let rows = stmt
-            .query_map([workspace_id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            })
-            .map_err(SyncError::corrupt)?;
-        let mut pending = Vec::new();
-        for row in rows {
-            let (origin_id, origin_seq, op_kind, payload_json, recorded_at_ms) =
-                row.map_err(SyncError::corrupt)?;
-            let payload =
-                serde_json::from_str(&payload_json).map_err(|_| SyncError::CoordinateDiverged)?;
-            pending.push(ReplicationEnvelope {
-                workspace_id: workspace_id.to_owned(),
-                origin_id,
-                origin_seq,
-                op_kind,
-                payload,
-                recorded_at_ms,
-            });
-        }
-        pending
-    };
-
-    for op in pending {
-        tx.execute(
-            "DELETE FROM chat_pending_replication \
-             WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
-            params![op.workspace_id, op.origin_id, op.origin_seq],
-        )
-        .map_err(SyncError::persist)?;
-        match apply_chat_mutation(tx, &op) {
-            Ok(()) | Err(SyncError::InvalidInput { .. }) => {}
-            Err(error) => return Err(error),
-        }
-    }
     Ok(())
 }
 
@@ -457,10 +409,12 @@ fn apply_channel(
             )
             .map_err(SyncError::corrupt)?;
         if placeholder {
+            let slug =
+                deterministic_channel_slug(tx, &op.workspace_id, &requested_slug, &channel_id)?;
             tx.execute(
                 "UPDATE chat_channels SET name = ?3, slug = ?4, kind = ?5, created_at_ms = ?6, updated_at_ms = ?6 \
                  WHERE workspace_id = ?1 AND channel_id = ?2",
-                params![op.workspace_id, channel_id, name, requested_slug, payload.kind, payload.created_at_ms],
+                params![op.workspace_id, channel_id, name, slug, payload.kind, payload.created_at_ms],
             )
             .map_err(SyncError::persist)?;
             tx.execute(
@@ -471,7 +425,7 @@ fn apply_channel(
         }
         return Ok(());
     }
-    let slug = free_slug(tx, &op.workspace_id, &requested_slug)?;
+    let slug = deterministic_channel_slug(tx, &op.workspace_id, &requested_slug, &channel_id)?;
     tx.execute(
         "INSERT OR IGNORE INTO chat_channels \
          (workspace_id, channel_id, name, slug, kind, created_at_ms, updated_at_ms) \
@@ -494,31 +448,96 @@ fn apply_channel(
     Ok(())
 }
 
-fn free_slug(
+fn deterministic_channel_slug(
     tx: &Transaction<'_>,
     workspace_id: &str,
     requested: &str,
+    channel_id: &str,
 ) -> Result<String, SyncError> {
-    for suffix in 1_i64..=100_i64 {
-        let candidate = if suffix == 1 {
-            requested.to_owned()
-        } else {
-            format!("{requested}-{suffix}")
-        };
-        let exists: bool = tx
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM chat_channels WHERE workspace_id = ?1 AND slug = ?2)",
-                params![workspace_id, candidate],
-                |row| row.get(0),
-            )
-            .map_err(SyncError::corrupt)?;
-        if !exists {
-            return Ok(candidate);
-        }
+    let owner: Option<String> = tx
+        .query_row(
+            "SELECT channel_id FROM chat_channels WHERE workspace_id = ?1 AND slug = ?2",
+            params![workspace_id, requested],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    let Some(owner) = owner else {
+        return Ok(requested.to_owned());
+    };
+    if owner == channel_id {
+        return Ok(requested.to_owned());
     }
-    Err(SyncError::InvalidInput {
-        reason: "channel slug collision limit exceeded",
-    })
+    if channel_id < owner.as_str() {
+        let displaced_slug = channel_collision_slug(requested, &owner);
+        ensure_collision_slug_available(tx, workspace_id, &displaced_slug, &owner)?;
+        tx.execute(
+            "UPDATE chat_channels SET slug = ?3 WHERE workspace_id = ?1 AND channel_id = ?2",
+            params![workspace_id, owner, displaced_slug],
+        )
+        .map_err(SyncError::persist)?;
+        return Ok(requested.to_owned());
+    }
+    let candidate = channel_collision_slug(requested, channel_id);
+    ensure_collision_slug_available(tx, workspace_id, &candidate, channel_id)?;
+    Ok(candidate)
+}
+
+fn deterministic_placeholder_slug(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    requested: &str,
+    channel_id: &str,
+) -> Result<String, SyncError> {
+    let owner: Option<String> = tx
+        .query_row(
+            "SELECT channel_id FROM chat_channels WHERE workspace_id = ?1 AND slug = ?2",
+            params![workspace_id, requested],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    if owner.as_deref().is_none_or(|owner| owner == channel_id) {
+        return Ok(requested.to_owned());
+    }
+    let candidate = channel_collision_slug(requested, channel_id);
+    ensure_collision_slug_available(tx, workspace_id, &candidate, channel_id)?;
+    Ok(candidate)
+}
+
+fn channel_collision_slug(requested: &str, channel_id: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(requested.as_bytes());
+    hasher.update([0]);
+    hasher.update(channel_id.as_bytes());
+    let suffix = hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{requested}-{suffix}")
+}
+
+fn ensure_collision_slug_available(
+    tx: &Transaction<'_>,
+    workspace_id: &str,
+    slug: &str,
+    channel_id: &str,
+) -> Result<(), SyncError> {
+    let owner: Option<String> = tx
+        .query_row(
+            "SELECT channel_id FROM chat_channels WHERE workspace_id = ?1 AND slug = ?2",
+            params![workspace_id, slug],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)?;
+    if owner.as_deref().is_some_and(|owner| owner != channel_id) {
+        return Err(SyncError::InvalidInput {
+            reason: "deterministic channel slug collision",
+        });
+    }
+    Ok(())
 }
 
 fn apply_thread(
@@ -720,7 +739,7 @@ fn resolve_or_create_placeholder(
     let slug = if agent_placeholder {
         canonical_agent_slug
     } else {
-        free_slug(tx, &op.workspace_id, requested_slug)?
+        deterministic_placeholder_slug(tx, &op.workspace_id, requested_slug, &channel_id)?
     };
     let name = if agent_placeholder {
         AGENT_CHANNEL_NAME
