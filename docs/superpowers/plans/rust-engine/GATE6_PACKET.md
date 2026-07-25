@@ -1,31 +1,32 @@
 # GATE 6 — release-candidate evidence packet
 
 **Status: PACKET ASSEMBLED 2026-07-24 — GATE NOT YET CLOSED.** GATE6 is the
-release-CANDIDATE gate. This packet is the EVIDENCE; the gate itself stays PENDING
-until BOTH remaining criteria are recorded:
-1. an end-to-end **clone-reset rehearsal on REAL dogfood workspace byte-clones**
-   (the machinery is built + gate-verified by its rehearsal-on-clones test suite,
-   but it has NOT been run against Ice's real data — that needs Ice's machine), and
-2. **explicit Ice authorization** at the R15 go/no-go.
-Do NOT treat `SHARDS.tsv`/this packet as gate-closed before both land.
+release-CANDIDATE gate. Ice explicitly authorized the cutover on 2026-07-25
+(`DECISIONS.md`, R15 go/no-go), so one criterion remains: an end-to-end
+**clone-reset rehearsal on REAL dogfood workspace byte-clones**. The machinery is
+built + gate-verified by its rehearsal-on-clones test suite, but it has NOT been
+run against Ice's real data. Do NOT treat `SHARDS.tsv`/this packet as gate-closed
+until that rehearsal is recorded.
 
 **WHAT GATE6 ASSERTS:** NO GATE6-BLOCKING IMPLEMENTATION SHARD REMAINS, and the
 engine is EVIDENCED (gate/soak/differential green, every claim below carrying its
 evidence and limitations). Every dependency (R14 robustness, R10b relay-epoch,
 R15-REHEARSE, and all RPC shards A/B/C/D/B2/D2) is `gate passed` / `done`.
-This is NOT "code-complete": deferred implementation remains (R13b-rest, RPC-E,
-switch-time re-materialization wiring, richdoc full-fidelity projection) — see §0.
+This is NOT "code-complete": cutover implementation remains in flight
+(R13b-rest, RPC-E, switch-time re-materialization wiring, richdoc full-fidelity
+projection) — see §0.
 
 **WHAT GATE6 DOES NOT ASSERT: cutover-READINESS.** The items in §6.CUTOVER-GATING
-below are real, not "non-blocking limitations," and MUST be resolved at the R15
-go/no-go (the ICE STOP) before the cutover flips — they are not closed here.
+below are real, not "non-blocking limitations." Ice resolved their policy choices
+at the R15 go/no-go, but their implementations are not closed until the
+corresponding review shards land.
 
-This packet is the evidence + the decision inputs; the R15 go/no-go package consumes
-the CUTOVER-GATING items and the "open decisions" (§7).
+This packet is the evidence + the current execution state. Section 7 records the
+six resolved R15 decisions and the new open relay sequencing decision.
 
 ---
 
-## 0. Completeness — no GATE6-BLOCKING implementation shard remains (deferred work listed)
+## 0. Completeness — no original GATE6-blocking shard remains (cutover work listed)
 
 | shard | PR | status |
 |---|---|---|
@@ -37,16 +38,26 @@ the CUTOVER-GATING items and the "open decisions" (§7).
 | RPC-B2 (production chat follow-ups, 40 behaviors) | #225 | done |
 | RPC-D2 (blob egress + secret-aware disk executor + slash norm) | #227 | done |
 | Integrator passes | #219/#221/#224/#226/#228 | merged |
+| R15-1a (secret capture ownership; migration 14) | #233 | gate passed / merged |
+| R15-1b (moment payload provenance; migration 15) | #236 | in review |
+| R15-2 / R15-3 / R15-4 / R15-5 | #235/#238/#239/#237 | in review |
+| Y.Doc serializer delimiter exception / daemon auth hardening | #240/#241 | in review |
+| RPC-E-1 / RPC-E-2 / RPC-E-3 | #242/#243/#246 | in review (stacked) |
+| RPC-E-4 (daemon RPC surface) | no PR yet | in progress |
+| Chat replication validation / refusal disposition | #244/#245 | in review; not merged |
 
-No **GATE6-blocking** implementation shard remains. Implementation that is
-DEFERRED (not done, deliberately out of GATE6 scope) — do NOT read this table as
-"code-complete, skip the cutover wiring":
-- **R13b-rest** — REST DEFERRED in SHARDS: remaining desktop-adapter surfaces
-  (main.ts / cli / mcp / shared-view + capture wiring). Scope decision at R15.
-- **RPC-E** (replication/relay cutover scope) — scoped at R15, not built.
-- **Switch-time secret+file re-materialization** — §6.CUTOVER-GATING item 1,
-  composition-layer wiring, not built.
-- **Richdoc full-fidelity projection** — §6.CUTOVER-GATING item 2, if option (a).
+No **GATE6-blocking** implementation shard remained in the packet's original
+scope. Ice subsequently brought the cutover work into scope; do NOT read this
+table as "code-complete, skip the cutover wiring":
+- **R13b-rest** — authorized for the remaining desktop-adapter surfaces
+  (main.ts / cli / mcp / shared-view + capture wiring); not yet landed.
+- **RPC-E** (replication/relay cutover scope) — parts 1-3 are in review
+  (#242/#243/#246), part 4 is in progress, and #244/#245 are unmerged review
+  adjuncts.
+- **Switch-time secret+file re-materialization** — implementation is in review
+  in #239, with two upper-layer R13b deferrals recorded in §6.
+- **Richdoc full-fidelity projection** — implementation is in review in #238;
+  the deliberate live-TS serializer fix #240 is separately in review.
 R16 (legacy deletion) is POST-cutover by design.
 
 ## 1. Soak (cutoverBlocking tier) — PASS
@@ -59,6 +70,12 @@ R16 (legacy deletion) is POST-cutover by design.
   window; this is not an unconditional leak-freedom proof. Real dogfood usage is
   orders of magnitude quieter than the soak's cycle rate. v1/v2 artifacts withdrawn
   (vacuous slope / pre-self-describing-format); v3 is the banked evidence.
+- **PLATFORM CALIBRATION LIMIT:** `handleSlack=48` and `threadSlack=8` were
+  calibrated on Windows only. The WSL-Linux soak evidence reports against those
+  Windows-derived bounds; a Linux or macOS run landing inside them does NOT make
+  its resource-leak verdict bankable. Bankable per-platform handle/thread
+  conclusions require bounds calibrated on that platform. The existing
+  WSL-Linux result remains scenario/portability evidence under this caveat.
 
 ## 2. Differential (TS-vs-Rust capture parity) — PASS
 - 10/10 scenarios green on BOTH engines; goldens committed
@@ -77,7 +94,7 @@ R16 (legacy deletion) is POST-cutover by design.
 - R15-REHEARSE machinery re-verified continuously: its lib tests run in every gate's
   `cargo test --workspace`; the canonical main gate above is the freshest citation.
 
-## 4. Migration ledger — 14 migrations, ordinals 0-13, monotone; **NEXT ORDINAL = 14**
+## 4. Migration ledger — ordinals 0-15 consumed/reserved; **NEXT ORDINAL = 16**
 | ordinal | id |
 |---|---|
 | 0 | baseline |
@@ -94,11 +111,17 @@ R16 (legacy deletion) is POST-cutover by design.
 | 11 | v1-path-aliases-object-index |
 | 12 | v1-ydoc-deferred-updates |
 | 13 | v1-engine-request-kind (RPC-D; kind-scoped ledger purge, every writer stamped) |
+| 14 | v1-secret-capture-ownership (R15-1a; #233 merged) |
+| 15 | v1-moment-payload-provenance (R15-1b; #236 in review, ordinal reserved/consumed) |
 
 RPC-B2 and RPC-D2 added NO new migrations (domain/logic only).
 
-**The pre-R15 migration decision (§7.1) MUST use ordinal 14** — treating 13 as free
-would collide with `v1-engine-request-kind`.
+Ordinal 14 is consumed by #233 and ordinal 15 by the open #236. **The next
+schema-touching shard MUST use ordinal 16.** Schema-touching shards run ONE AT A
+TIME through the append-only migration ledger: rebase on the latest migration,
+append exactly one ordinal, update both ledger-length assertions, and only then
+open the next schema shard. Two shards nearly collided by treating the same next
+ordinal as available.
 
 REPRODUCE THIS CLAIM (do it before authoring the migration; do not trust this table
 alone — it is a snapshot):
@@ -106,7 +129,9 @@ alone — it is a snapshot):
 rg -n 'MIGRATION_ID: &str|BASELINE_MIGRATIONS' crates/dohc-engine-storage/src/migration.rs
 cargo test -p dohc-engine-storage migration   # the ledger's own ordinal/monotonicity tests
 ```
-`BASELINE_MIGRATIONS` is the frozen ordered list; its length is the next ordinal.
+Run these on top of the latest schema shard (#236 while it is open, then `main`
+after it merges). `BASELINE_MIGRATIONS` is the frozen ordered list; its length is
+the next ordinal.
 
 ## 5. Review rigor
 - ~50 merged PRs across the program; the RPC shards alone drew a very high review
@@ -144,16 +169,11 @@ post-R15 (the reset wipes pre-existing rows).
   oracle's per-file skip; decrypt/key failures are tolerated (skip, leave pending)
   — deliberately broader than the oracle (open-replay is crash-recovery, not a user
   action), while KEEPING fail-closed (no plaintext from unauthenticated bytes).
-- **Secret rename-TOCTOU — ACCEPTED RESIDUAL, ENFORCEMENT CUTOVER-GATING** (D2,
-  BEHAVIOR_DELTA.md): path-based ancestor checks are not fd-relative; a potential
-  secret-disclosure/overwrite risk accepted ONLY under the single-user/local-first/
-  owner-only/no-sharing assumption. That assumption must be ENFORCED, not just
-  documented: sharing/multi-user secret access must stay OFF (and per-user socket
-  auth, currently deferred, is part of the same boundary) while the residual is
-  open. RESOLUTION REQUIRED at R15: either land the dirfd/openat2 + renameat closure
-  before the cutover, OR confirm + enforce (in code/config, not prose) that no
-  shared/ACL-partitioned secret path is reachable. Closure is REQUIRED before any
-  shared-secret model ships regardless.
+- **Secret rename-TOCTOU — baseline residual; real closure #237 IN REVIEW** (D2,
+  BEHAVIOR_DELTA.md): the merged baseline's path-based ancestor checks are not
+  fd-relative. Ice rejected the single-user assumption because other OS users may
+  share the host and chose the descriptor/handle-based closure. #237 implements
+  that choice but is not merged; the residual remains open until it lands.
 - **Secret re-materialization on mid-session version SWITCH — CUTOVER-GATING gap**
   (D2, RPC_GAP): the daemon lacks the oracle's switch-time secret rebuild
   (SetActiveVersion is DB-only; only open-replay materializes). Open-time projection
@@ -165,35 +185,51 @@ post-R15 (the reset wipes pre-existing rows).
   explicitly accept + surface the stale-until-reopen behavior. Non-secret files
   share the same switch-materialization dependency on the desktop/daemon layer, so
   this is a general version-switch-projection obligation, tracked cutover-gating.
-- **Identity posture** (recorded across shards): the daemon's DOP1 client IS the
-  desktop main process; per-user socket auth is R15+ scope.
+- **PR #239 upper-layer deferrals — R13b work, not closed by the materializer:**
+  (1) quiesce every live Y.Doc session before switching so an old-version session
+  cannot settle across the switch, and (2) reconcile unreconciled disk edits into
+  the version being left before changing the active version. `capture.flush` is
+  NOT sufficient for (2): Rust's `reconcile_if_dirty` returns `Converged` without
+  scanning when nothing is marked dirty, while the TypeScript oracle always scans
+  and hard-fails the switch on a degraded scan. The capture driver also resolves
+  the active version at apply time, so a reconcile apply can straddle the
+  set-active transaction and target the wrong side of the switch unless R13b
+  quiesces and sequences it.
+- **RPC-E review state — NOT LANDED:** the nine chat replicated-path validation
+  gaps (#244) and the refuse-and-ack disposition (#245) are both in review,
+  stacked on RPC-E-1. Neither may be described as merged behavior yet.
+- **Identity posture / daemon auth (#241 IN REVIEW):** the daemon's DOP1 client
+  is the desktop main process over inherited stdio pipes, not a listener socket.
+  #241 hardens the handshake token comparison; R13b-rest still owns generating a
+  real per-launch random token when it wires daemon lifecycle. Do not describe
+  #241 as merged yet.
 
-### 6.CUTOVER-GATING — must be resolved at the R15 go/no-go (NOT closed by GATE6)
-These are correctness/security items, not accepted flags. GATE6 surfaces them; the
-R15 go/no-go decides each:
-1. **Version-switch secret+file re-materialization** — stale/wrong disk secrets
-   after a mid-session switch until reopen (wire it, or explicitly accept+surface).
-2. **Richdoc→markdown fidelity** — the paragraphs+bold/italic subset DROPS
-   unsupported richdoc content (data loss on projection); land full-fidelity
-   projection or disable richdoc editing at cutover.
-3. **Secret rename-TOCTOU assumption enforcement** — enforce owner-only/no-sharing
-   (sharing + per-user socket auth OFF) while the residual is open, OR land the
-   dirfd/openat2 closure.
-4. **Pre-R15 migration** (secret-ownership column + moments payload-provenance) —
-   cheap before the reset, expensive after.
+### 6.CUTOVER-GATING — Ice decided the path; implementation still must land
+These are correctness/security items, not accepted flags:
+1. **Version-switch secret+file re-materialization** — Ice chose to wire it;
+   #239 is in review and the two R13b upper-layer deferrals remain.
+2. **Richdoc→markdown fidelity** — Ice chose full fidelity; #238 and its
+   separate live-TS prerequisite/fix #240 are in review.
+3. **Secret rename-TOCTOU** — Ice chose the real descriptor/handle-based fix;
+   #237 is in review.
+4. **Pre-R15 migration** — secret ownership landed as #233 / ordinal 14;
+   moment provenance is #236 / ordinal 15 in review.
 Accepted flags (NOT gating): soak monitored-not-proven; the 3 marginal RPC-D2 P2
 declines; BINHEAD (discharged). See §8.
 
-## 7. Open decisions for Ice — these feed the R15 go/no-go (present, don't decide)
+## 7. R15 decisions — six resolved; relay epoch sequencing remains OPEN
+Ice resolved items 1-6 on 2026-07-25 (`DECISIONS.md`). Their implementation is
+tracked in the R15 shard rows and remains mostly in review. Item 7 is a new
+cutover sequencing decision exposed by RPC-E-3 and remains for Ice.
+
 1. **Pre-R15 migration PR (secret ownership column + moments payload-provenance).**
-   (a) Secret ownership keys on metadata_origin=="local-file" (also a legit API
-   origin) — non-spoofable ownership needs a dedicated column. (b) The oracle's
-   moments payload_before_*/payload_after_* provenance columns were never ported.
-   Both are CHEAP before R15's reset, EXPENSIVE after. RECOMMEND one pre-R15
-   migration PR for both.
-2. **macOS evidence path** — BOTH tools now EXIST and ship in this PR: the
+   Ice chose DO IT. It was split for review: secret ownership ordinal 14 landed
+   in #233; moment payload provenance ordinal 15 is in review in #236.
+2. **macOS evidence path** — Ice chose Blacksmith
+   (`blacksmith-6vcpu-macos-15`). The tooling change is #235 in review; the
+   final full evidence run has not yet been banked. The two tools are the
    dispatchable CI workflow `.github/workflows/rust-engine-macos-evidence.yml`
-   (macos-latest, quick|full input) and the local `tools/rust-engine-program/
+   (quick|full input) and the local `tools/rust-engine-program/
    macos-evidence.sh` (run on a Mac). Each reproduces the full-workspace gate +
    the cutoverBlocking soak and emits the verdict logs + soak-evidence JSON.
    Both DEFAULT TO `full` (the bankable 30-60min soak); `quick` is explicitly
@@ -203,26 +239,27 @@ declines; BINHEAD (discharged). See §8.
    release binaries (the soak resolves the daemon as a sibling). The local script
    refuses non-Darwin hosts so a Linux/WSL run cannot masquerade as macOS proof.
    EXECUTION requires a Mac (a macOS CI runner or Ice's machine) — the Windows dev
-   box cannot produce it. DECISION for Ice: dispatch the CI workflow, or run the
-   script locally, before the R15 go/no-go. (This is a green-path confidence
+   box cannot produce it. Dispatch the CI workflow in `full` mode after the
+   final pre-cutover code lands. (This is a green-path confidence
    check, not expected to surface engine issues; the code is platform-portable
    Rust and the unix materialize/symlink paths already have `#[cfg(unix)]` tests.)
-3. **RPC-E scope for cutover** (replication/relay; backend-modes.md). Interacts with
-   RPC-C's sync-defer-while-open guard (fail-closed seam lands either way; live
-   convergence is later).
-4. **Richdoc at cutover (CUTOVER-GATING — data loss)** — Rust's richdoc→markdown
-   projection is a paragraphs+bold/italic subset that DROPS unsupported richdoc
-   content (headings/lists/links/code), so a cutover with richdoc editing live can
-   silently lose content. Options: (a) port full-fidelity yDocToMarkdown to Rust
-   before cutover — RECOMMENDED; (b) disable richdoc editing at cutover;
-   (c) dual-engine — not recommended. Not acceptable to ship as-is with richdoc live.
-5. **Secret rename-TOCTOU closure timing** — accepted as a documented residual for
-   single-user; MUST close (dirfd/openat2) before any shared-secret model. Decide
-   whether that lands pre-cutover or is explicitly deferred with the single-user
-   constraint enforced.
-6. **The R15 go/no-go itself** — dogfood reset, >=2-week dogfood plan,
-   member-share-log-across-epoch-reset semantics, and wiring switch-time secret
-   re-materialization (§6 gap) for a faithful desktop version-switch UX.
+3. **RPC-E scope for cutover** — IN SCOPE. Parts 1-3 are in review, part 4 is
+   in progress, and #244/#245 remain unmerged adjuncts.
+4. **Richdoc at cutover** — Ice chose full-fidelity `yDocToMarkdown`; #238 and
+   #240 are in review.
+5. **Secret rename-TOCTOU closure timing** — Ice chose the real pre-cutover fix;
+   #237 is in review.
+6. **The R15 go/no-go itself** — the flip/data wipe is authorized after the
+   chosen work lands and the real dogfood byte-clone rehearsal passes; the
+   >=2-week dogfood requirement remains before R16.
+7. **Relay epoch-identity adoption sequencing — OPEN FOR ICE.** TypeScript and
+   Rust relay clients CANNOT share a workspace after identity adoption. The
+   relay's `enforceWorkspaceIdentity` permanently returns
+   `409 identity_required` for identity-less requests after a coordinate adopts
+   identity, and the TypeScript relay client never sends identity. Therefore
+   every relay-using client/device for a workspace must move together in the
+   epoch-identity cutover; a mixed TS/Rust rollout is not a valid intermediate
+   state. This is a sequencing choice for Ice, not an implementation default.
 
 ## 8. Flagged items — ACCEPTED FLAGS only (the CUTOVER-GATING items are in §6.CUTOVER-GATING)
 These do NOT gate the cutover; they are honestly-recorded residuals/flags:
@@ -234,6 +271,7 @@ These do NOT gate the cutover; they are honestly-recorded residuals/flags:
 - Adversarial-only cross-engine deltas (§6): moot post-R15 (the reset wipes
   pre-existing rows); differential/parity suites expect them.
 
-The CUTOVER-GATING items (switch-materialization stale secrets, richdoc fidelity,
-TOCTOU-assumption enforcement, pre-R15 migration) are NOT here — they are in
-§6.CUTOVER-GATING and MUST be resolved at the R15 go/no-go.
+The CUTOVER-GATING items (switch materialization, richdoc fidelity, TOCTOU
+closure, pre-R15 migration) are NOT here — they are in §6.CUTOVER-GATING. Ice
+selected their resolutions; their open review shards still must land before the
+flip.

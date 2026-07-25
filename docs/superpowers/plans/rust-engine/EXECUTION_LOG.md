@@ -2247,9 +2247,12 @@ next round caught. The compounding lesson became structure:
   - Soak (cutoverBlocking tier) v3 = PASS (rssDisposition PASS, 5564 cycles, clean
     shutdown), with the honest monitored-not-proven memory flag.
   - Differential TS-vs-Rust capture: 10/10 green both engines, tamper-checked (#215).
-  - Migration ledger: 14 migrations, ordinals 0-13, monotone (12 =
-    v1-ydoc-deferred-updates, 13 = v1-engine-request-kind). NEXT ORDINAL = 14 —
-    the pre-R15 migration must not reuse 13.
+  - Migration ledger AT PACKET ASSEMBLY: 14 migrations, ordinals 0-13,
+    monotone (12 = v1-ydoc-deferred-updates, 13 = v1-engine-request-kind).
+    **CORRECTED 2026-07-25:** ordinal 14 is consumed by R15-1a / #233 (merged)
+    and ordinal 15 by R15-1b / #236 (in review). NEXT ORDINAL = **16**.
+    Schema-touching shards serialize through the append one at a time; two
+    concurrent migration appends must never claim the same next ordinal.
   - Gate discipline: full-workspace gate on EVERY pushed head program-wide; every
     supervision-grade guard carries a named MUTATION test, criticals
     orchestrator-mutation-verified per shard.
@@ -2290,3 +2293,57 @@ next round caught. The compounding lesson became structure:
   >=2-week dogfood plan, share-log-across-epoch-reset semantics).
 - Recommended order on a go: decisions 1-5 land -> rehearsal on real byte-clones ->
   Ice authorization (closes GATE6) -> flip -> >=2-week dogfood -> R16 deletion.
+
+
+## 2026-07-25 — R15 execution phase: migration 14 landed; cutover shards in review
+
+- Ice's six R15 go/no-go decisions are recorded (#232): RPC-E and R13b-rest are
+  in pre-cutover scope, the flip/data wipe is authorized after the remaining
+  work + real-clone rehearsal, and the >=2-week dogfood window still precedes
+  R16. GATE6 still awaits the real dogfood byte-clone rehearsal; authorization
+  is no longer the missing criterion.
+- **LANDED / gate passed:** R15-1a #233
+  (`codex/rust-engine-r15-1-secret-ownership`) merged migration ordinal 14,
+  replacing spoofable `metadata_origin == "local-file"` ownership with the
+  engine-stamped secret capture-ownership column. This is the ONLY new shard in
+  this phase marked `gate passed`.
+- **IN REVIEW (all GitHub states re-verified OPEN 2026-07-25):**
+  - R15-1b #236, moment payload provenance, consumes migration ordinal 15.
+  - R15-2 #235, Blacksmith macOS evidence tooling; the full final evidence run
+    has not yet been banked.
+  - R15-3 #238, full-fidelity richdoc projection; #240, the separate deliberate
+    live-TypeScript serializer delimiter fix.
+  - R15-4 #239, switch-time re-materialization; R15-5 #237, secret ancestor
+    redirection TOCTOU closure; daemon auth hardening #241.
+  - RPC-E-1 #242 (router + missing appliers), RPC-E-2 #243
+    (`moment.append`, stacked on -1), RPC-E-3 #246 (HTTP transport, stacked on
+    -2), chat replication validation #244 and refusal disposition #245 (both
+    stacked on -1). The nine chat gaps and refusal disposition are NOT merged.
+- **IN PROGRESS, NO PR:** RPC-E-4 daemon RPC surface on
+  `codex/rust-engine-rpc-e-daemon-rpc`, stacked after RPC-E-3. Its concrete
+  owned/test paths remain unknown until implementation opens the shard.
+- Migration control is now explicit: ordinal 14 is consumed by #233, ordinal 15
+  by open #236, so the NEXT ordinal is **16**. Schema-touching shards run one at
+  a time through the append-only ledger and update both length assertions;
+  parallel ordinal claims are forbidden after two shards nearly collided.
+- The live-TypeScript read-only rule is SCOPED, not deleted. R13b-rest may edit
+  only its allocated desktop/CLI/MCP/workspace adapter surfaces. #240 may edit
+  only `packages/ydoc-projection/src/import-export.ts` plus its regression test.
+  Every other shard still treats live TypeScript, including
+  `workspaceEngineCapture.ts`, as a read-only oracle.
+- #239 leaves two durable R13b obligations: quiesce live Y.Doc sessions before
+  switching, and reconcile unreconciled disk edits into the version being left.
+  `capture.flush` is insufficient for the latter because
+  `reconcile_if_dirty` may return `Converged` without a scan; the oracle always
+  scans and hard-fails on degradation. Capture also resolves the active version
+  at apply time, so an apply can straddle the set-active transaction.
+- RPC-E-3 exposed an **OPEN Ice sequencing decision**: after
+  epoch-identity adoption, `enforceWorkspaceIdentity` permanently 409s
+  identity-less requests and the TypeScript client never sends identity.
+  TypeScript and Rust relay clients cannot share that workspace; all
+  relay-using clients/devices must move together.
+- Soak evidence qualification: handle/thread slack (48/8) is calibrated on
+  Windows only. WSL-Linux and future macOS runs reporting within those same
+  bounds do not produce a bankable platform-specific resource-leak verdict
+  without per-platform calibration; the WSL result is scenario/portability
+  evidence under that caveat.

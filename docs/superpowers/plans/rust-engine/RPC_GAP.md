@@ -1,10 +1,10 @@
 # Daemon RPC gap analysis — desktop surface vs dispatched methods
 
-Snapshot 2026-07-23 (RPC-A MERGED #217; FCOMP-E merged #215; RPC-B MERGED
-#218; RPC-C MERGED #220; RPC-D MERGED #223 as a5b3a484 — the mutating
-text/version/secret surface, typed client contract, and loopback are on
-main; remaining daemon gaps are RPC-B2, RPC-D2 (blob egress + secret
-disk executor), and RPC-E).
+Snapshot updated 2026-07-25 (RPC-A/B/C/D/B2/D2 are merged; RPC-E-1 router +
+appliers #242, RPC-E-2 moment.append #243, and RPC-E-3 HTTP transport #246
+are in review; RPC-E-4 daemon RPC surface is in progress with no PR yet).
+The nine chat replication validation gaps #244 and refusal disposition #245
+are also in review, stacked on RPC-E-1 — neither is merged.
 Source: full sweep of the R13b dormant
 adapter, every desktop engine call site, and the daemon/actor/domain layers.
 This scopes the "grow daemon RPCs for cutover-needed desktop surfaces" shard
@@ -95,9 +95,13 @@ of scope here.
   compare/merge, create/fork/set-active version, secret writes via RPC.
   Interacts with the capture OWNERSHIP model — write RPCs must carry proper
   origins (never the reserved `capture`).
-- **RPC-E (replication/relay):** general applyReplicationOp + relay sync
-  orchestration. Coordinate with the backend-modes doc; may be post-cutover
-  depending on the R15 scope Ice picks.
+- **RPC-E (replication/relay):** Ice brought this into pre-cutover scope.
+  RPC-E-1 (#242, in review) owns the central router and missing appliers;
+  RPC-E-2 (#243, in review, stacked on -1) owns `moment.append`; RPC-E-3
+  (#246, in review, stacked on -2) owns the HTTP transport; RPC-E-4
+  (`codex/rust-engine-rpc-e-daemon-rpc`, in progress, no PR) owns the daemon
+  RPC surface. Chat validation #244 and refusal disposition #245 are sibling
+  review branches stacked on RPC-E-1.
 
 Cutover-blocking order per desktop usage weight: A → B → C, then D and
 B2 (production-called chat follow-ups — a GATE6 dependency like the rest); E per
@@ -352,13 +356,15 @@ same process the TS oracle trusts to DERIVE author/owner identity before
 touching the store (main.ts:5215-5225 derives authorship; the renderer
 payload carries no identity fields, bridgeContract.ts:971-977; the relay
 separately verifies authorUserId === actor.userId for replicated ops,
-linkedChatStore.ts:4492-4498). The DOP1 socket is shadow-fence
-token-authenticated and main-only; the renderer never reaches it. Chat
-RPC identity params (authorUserId/ownerUserId) therefore sit in the SAME
-trust position as the oracle's function arguments — per-user
-authorization on the socket becomes meaningful only if the daemon ever
-accepts multi-principal clients, which is R15+ scope and recorded here so
-review rounds stop re-litigating it.
+linkedChatStore.ts:4492-4498). The daemon transport is inherited STDIO
+pipes, not a listener socket: another process cannot connect to a namespace
+entry because none exists, and the renderer never reaches the pipes. Chat RPC
+identity params (authorUserId/ownerUserId) therefore sit in the SAME trust
+position as the oracle's function arguments. PR #241 (IN REVIEW, not merged)
+hardens the handshake token comparison; R13b-rest still owns generating a
+real per-launch random token when it wires lifecycle. A future
+multi-principal transport would require a fresh recorded authorization
+decision and platform peer-identity design.
 
 CROSS-ENGINE OBLIGATION (declined-with-citation at #218 round 12; owned
 by RPC-E/sync, recorded so it is owned rather than lost): well-known
@@ -398,6 +404,33 @@ MID-SESSION version switch does not refresh the on-disk secrets until the next o
 a switch-time (or set-active-time) secret materialization pass is daemon-composition
 (R13)/desktop-adapter scope, not the secret executor; tracked for GATE6. Non-secret files
 share the same switch-materialization dependency on the desktop/daemon composition layer.
+
+UPDATE — PR #239 implements switch-time file+secret projection and is IN REVIEW,
+not merged. It deliberately defers two upper-layer R13b obligations:
+1. Quiesce/settle and close live Y.Doc sessions before the version switch. A
+   session pinned to the old version can otherwise settle after the active-version
+   transaction and cross the switch boundary.
+2. Reconcile unreconciled disk edits into the version being left before the
+   active-version transaction. `capture.flush` does NOT satisfy this obligation:
+   `reconcile_if_dirty` returns `Converged` without touching the filesystem when
+   no dirty bit is set, while the TypeScript oracle's switch path always scans and
+   hard-fails on a degraded scan. The capture driver resolves the active version
+   at APPLY time; therefore a reconcile that begins before the switch can apply
+   after it and straddle the set-active transaction. R13b-rest must supply an
+   explicit quiesce + full-scan + sequencing barrier.
+
+OPEN CUTOVER SEQUENCING DECISION (RPC-E-3 / #246, for Ice): TypeScript and Rust
+relay clients cannot coexist on one workspace after epoch-identity adoption.
+The relay's `enforceWorkspaceIdentity` permanently rejects identity-less
+requests with `409 identity_required` after a coordinate adopts identity, while
+the TypeScript relay client never sends identity. Every relay-using client/device
+for the workspace must therefore move together; a mixed-client rollout is not a
+valid intermediate state.
+
+REVIEW STATE (not landed): #244 closes nine chat replicated-path validation gaps,
+and #245 adds the refuse-and-ack disposition for rejected replicated operations.
+Both are OPEN/in review on top of RPC-E-1 (#242). Do not describe either behavior
+as merged until its PR state changes.
 
 ## PR #227 codex-bot round-8 declines
 

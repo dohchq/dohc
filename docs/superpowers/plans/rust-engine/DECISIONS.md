@@ -156,3 +156,17 @@ deferred ONLY under it; they are now in-scope-or-revisit:
   which is now in scope (R15-6).
 - **BEHAVIOR_DELTA's TOCTOU note** must be updated from "accepted residual" to
   "closed" once R15-5 lands.
+
+## 2026-07-25 — Relay epoch-identity rollout sequencing — OPEN
+
+- **Decider:** Ice (pending).
+- **Decision required:** whether and how to coordinate a simultaneous move of
+  every relay-using client/device for a workspace. A mixed TypeScript/Rust relay
+  rollout is not a supported intermediate state after epoch-identity adoption.
+- **Constraint:** the relay's `enforceWorkspaceIdentity` permanently returns
+  `409 identity_required` for identity-less requests after a workspace
+  coordinate adopts identity, while the TypeScript relay client never sends
+  identity. TypeScript and Rust relay clients therefore cannot share that
+  workspace after adoption.
+- **Rationale pointer:** RPC-E-3 PR #246 ("T7 — a cutover sequencing decision"),
+  `RPC_GAP.md`, and the master plan Phase 7 epoch-reset requirement.
