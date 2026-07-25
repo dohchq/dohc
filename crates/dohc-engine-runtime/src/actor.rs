@@ -7268,7 +7268,7 @@ fn ydoc_settle_on_store(
     if doc.has_pending_dependencies() {
         return Err(dohc_engine_collab::CollabError::MissingDependencies.into());
     }
-    let projection = doc.project(content_kind);
+    let projection = doc.project(content_kind)?;
     // A successful settle must be REPORTABLE: the response carries the
     // markdown as one wire string, so a projection past the in-band cap
     // refuses BEFORE anything commits (a committed-but-undecodable settle

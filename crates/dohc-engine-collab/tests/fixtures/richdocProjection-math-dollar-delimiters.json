@@ -1,0 +1,24 @@
+{
+ "seed": -122,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-math-dollar-delimiters",
+ "updates": [
+  "AQenjtLaBgAHAQRib2R5AwlwYXJhZ3JhcGgHAKeO0toGAAYEAKeO0toGAQdpbmxpbmUgh6eO0toGAQMKbWF0aElubGluZSgAp47S2gYJA3RleAF3CHByaWNlICQ1h6eO0toGAAMJbWF0aEJsb2NrKACnjtLaBgsDdGV4AXcNbGVmdCAkJCByaWdodAA=",
+  "AQGnjtLaBg0oAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcWbWF0aC1kb2xsYXItZGVsaW1pdGVycwA="
+ ],
+ "mergedUpdateB64": "AQinjtLaBgAHAQRib2R5AwlwYXJhZ3JhcGgHAKeO0toGAAYEAKeO0toGAQdpbmxpbmUgh6eO0toGAQMKbWF0aElubGluZSgAp47S2gYJA3RleAF3CHByaWNlICQ1h6eO0toGAAMJbWF0aEJsb2NrKACnjtLaBgsDdGV4AXcNbGVmdCAkJCByaWdodCgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxZtYXRoLWRvbGxhci1kZWxpbWl0ZXJzAA==",
+ "stateVectorB64": "AaeO0toGDg==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "mathBlock",
+   "mathInline",
+   "paragraph",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "inline $price $5$\n\n$$left $$ right$$"
+ }
+}

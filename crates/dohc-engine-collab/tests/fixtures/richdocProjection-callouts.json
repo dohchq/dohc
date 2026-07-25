@@ -1,0 +1,29 @@
+{
+ "seed": -106,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-callouts",
+ "updates": [
+  "ASaywIEsACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDB2NhbGxvdXQHALLAgSwBAwlwYXJhZ3JhcGgHALLAgSwCBgQAssCBLAMGRmlyc3QghrLAgSwJBGJvbGQCe32EssCBLAoJcGFyYWdyYXBohrLAgSwTBGJvbGQEbnVsbISywIEsFAEuh7LAgSwCAwlwYXJhZ3JhcGgHALLAgSwWBgQAssCBLBcRU2Vjb25kIHBhcmFncmFwaC6HssCBLBYDCmJ1bGxldExpc3QHALLAgSwpAwhsaXN0SXRlbQcAssCBLCoDCXBhcmFncmFwaAcAssCBLCsGBACywIEsLAVmaXJzdIeywIEsKgMIbGlzdEl0ZW0HALLAgSwyAwlwYXJhZ3JhcGgHALLAgSwzBgQAssCBLDQMc2Vjb25kIHdpdGgghrLAgSxABGxpbmtieyJocmVmIjoidGFyZ2V0IiwidGFyZ2V0IjoiX2JsYW5rIiwicmVsIjoibm9vcGVuZXIgbm9yZWZlcnJlciBub2ZvbGxvdyIsImNsYXNzIjpudWxsLCJ0aXRsZSI6bnVsbH2EssCBLEEEbGlua4aywIEsRQRsaW5rBG51bGyHssCBLCkDCWNvZGVCbG9jawcAssCBLEcGBACywIEsSAtjb25zdCB4ID0gMSgAssCBLEcIbGFuZ3VhZ2UBdwJ0cygAssCBLAELY2FsbG91dFR5cGUBdwRpbmZvKACywIEsAQV0aXRsZQF3DUJsb2NrcyBpbnNpZGUoALLAgSwBBGZvbGQBdwErh7LAgSwBAwdjYWxsb3V0BwCywIEsWAMJcGFyYWdyYXBoBwCywIEsWQYEALLAgSxaC2N1c3RvbSBib2R5KACywIEsWAtjYWxsb3V0VHlwZQF3DGN1c3RvbS10aGluZygAssCBLFgFdGl0bGUBdwxDdXN0b20gdGl0bGUoALLAgSxYBGZvbGQBdwEtAA==",
+  "AQGywIEsaSgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdwhjYWxsb3V0cwA="
+ ],
+ "mergedUpdateB64": "ASeywIEsACgBBG1ldGENc2NoZW1hVmVyc2lvbgF9AQcBBGJvZHkDB2NhbGxvdXQHALLAgSwBAwlwYXJhZ3JhcGgHALLAgSwCBgQAssCBLAMGRmlyc3QghrLAgSwJBGJvbGQCe32EssCBLAoJcGFyYWdyYXBohrLAgSwTBGJvbGQEbnVsbISywIEsFAEuh7LAgSwCAwlwYXJhZ3JhcGgHALLAgSwWBgQAssCBLBcRU2Vjb25kIHBhcmFncmFwaC6HssCBLBYDCmJ1bGxldExpc3QHALLAgSwpAwhsaXN0SXRlbQcAssCBLCoDCXBhcmFncmFwaAcAssCBLCsGBACywIEsLAVmaXJzdIeywIEsKgMIbGlzdEl0ZW0HALLAgSwyAwlwYXJhZ3JhcGgHALLAgSwzBgQAssCBLDQMc2Vjb25kIHdpdGgghrLAgSxABGxpbmtieyJocmVmIjoidGFyZ2V0IiwidGFyZ2V0IjoiX2JsYW5rIiwicmVsIjoibm9vcGVuZXIgbm9yZWZlcnJlciBub2ZvbGxvdyIsImNsYXNzIjpudWxsLCJ0aXRsZSI6bnVsbH2EssCBLEEEbGlua4aywIEsRQRsaW5rBG51bGyHssCBLCkDCWNvZGVCbG9jawcAssCBLEcGBACywIEsSAtjb25zdCB4ID0gMSgAssCBLEcIbGFuZ3VhZ2UBdwJ0cygAssCBLAELY2FsbG91dFR5cGUBdwRpbmZvKACywIEsAQV0aXRsZQF3DUJsb2NrcyBpbnNpZGUoALLAgSwBBGZvbGQBdwErh7LAgSwBAwdjYWxsb3V0BwCywIEsWAMJcGFyYWdyYXBoBwCywIEsWQYEALLAgSxaC2N1c3RvbSBib2R5KACywIEsWAtjYWxsb3V0VHlwZQF3DGN1c3RvbS10aGluZygAssCBLFgFdGl0bGUBdwxDdXN0b20gdGl0bGUoALLAgSxYBGZvbGQBdwEtKAEEbWV0YRFwcm9qZWN0aW9uRml4dHVyZQF3CGNhbGxvdXRzAA==",
+ "stateVectorB64": "AbLAgSxq",
+ "coverage": {
+  "nodes": [
+   "bulletList",
+   "callout",
+   "codeBlock",
+   "doc",
+   "listItem",
+   "paragraph",
+   "text"
+  ],
+  "marks": [
+   "bold",
+   "link"
+  ]
+ },
+ "expected": {
+  "markdown": "> [!info]+ Blocks inside\n> First **paragraph**.\n>\n> Second paragraph.\n>\n> - first\n> - second with [link](target)\n>\n> ```ts\n> const x = 1\n> ```\n\n> [!custom-thing]- Custom title\n> custom body"
+ }
+}

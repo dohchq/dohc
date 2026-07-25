@@ -2,14 +2,14 @@
  "seed": 9,
  "contentKind": "plaintext",
  "updates": [
-  "AQH8jvLPBQAEAQlwbGFpblRleHQFd29ybGQA",
-  "AQH8jvLPBQXE/I7yzwUD/I7yzwUECWxpbmUKY29udAA=",
-  "AAH8jvLPBQEMAQ==",
-  "AQH8jvLPBQ7E/I7yzwUJ/I7yzwUKBAl0YWIB/I7yzwUBDAE=",
-  "AAH8jvLPBQEMAg=="
+  "AQGj6fuBDQAEAQlwbGFpblRleHQFd29ybGQA",
+  "AQGj6fuBDQXEo+n7gQ0Do+n7gQ0ECWxpbmUKY29udAA=",
+  "AAGj6fuBDQEMAQ==",
+  "AQGj6fuBDQ7Eo+n7gQ0Jo+n7gQ0KBAl0YWIBo+n7gQ0BDAE=",
+  "AAGj6fuBDQEMAg=="
  ],
- "mergedUpdateB64": "AQP8jvLPBQAEAQlwbGFpblRleHQFd29ybGTE/I7yzwUD/I7yzwUECWxpbmUKY29udMT8jvLPBQn8jvLPBQoECXRhYgH8jvLPBQEMAg==",
- "stateVectorB64": "AfyO8s8FEg==",
+ "mergedUpdateB64": "AQOj6fuBDQAEAQlwbGFpblRleHQFd29ybGTEo+n7gQ0Do+n7gQ0ECWxpbmUKY29udMSj6fuBDQmj6fuBDQoECXRhYgGj6fuBDQEMAg==",
+ "stateVectorB64": "AaPp+4ENEg==",
  "expected": {
   "text": "worlline\n\ttabcod"
  }

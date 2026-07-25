@@ -1,0 +1,27 @@
+{
+ "seed": -101,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-blocks",
+ "updates": [
+  "ARrWlZecDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHANaVl5wPAQYEANaVl5wPAh1wYXJhZ3JhcGggd2l0aCA8dGFnPiAmIGVudGl0eYfWlZecDwIDCWhhcmRCcmVha4fWlZecDyAGBADWlZecDyEKaGFyZCBicmVha4fWlZecDwEDDmhvcml6b250YWxSdWxlh9aVl5wPLAMKYmxvY2txdW90ZQcA1pWXnA8tAwlwYXJhZ3JhcGgHANaVl5wPLgYEANaVl5wPLxVmaXJzdCBwYXJhZ3JhcGggd2l0aCCG1pWXnA9EBGJvbGQCe32E1pWXnA9FBGJvbGSG1pWXnA9JBGJvbGQEbnVsbIfWlZecDy4DCXBhcmFncmFwaAcA1pWXnA9LBgQA1pWXnA9MInNlY29uZCBwYXJhZ3JhcGgKd2l0aCBhbm90aGVyIGxpbmWH1pWXnA8tAwpibG9ja3F1b3RlBwDWlZecD28DCXBhcmFncmFwaAcA1pWXnA9wBgQA1pWXnA9xBW91dGVyh9aVl5wPcAMKYmxvY2txdW90ZQcA1pWXnA93AwlwYXJhZ3JhcGgHANaVl5wPeAYEANaVl5wPeQxuZXN0ZWQgcXVvdGUA",
+  "AQHWlZecD4YBKAEEbWV0YRFwcm9qZWN0aW9uRml4dHVyZQF3BmJsb2NrcwA="
+ ],
+ "mergedUpdateB64": "ARvWlZecDwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHANaVl5wPAQYEANaVl5wPAh1wYXJhZ3JhcGggd2l0aCA8dGFnPiAmIGVudGl0eYfWlZecDwIDCWhhcmRCcmVha4fWlZecDyAGBADWlZecDyEKaGFyZCBicmVha4fWlZecDwEDDmhvcml6b250YWxSdWxlh9aVl5wPLAMKYmxvY2txdW90ZQcA1pWXnA8tAwlwYXJhZ3JhcGgHANaVl5wPLgYEANaVl5wPLxVmaXJzdCBwYXJhZ3JhcGggd2l0aCCG1pWXnA9EBGJvbGQCe32E1pWXnA9FBGJvbGSG1pWXnA9JBGJvbGQEbnVsbIfWlZecDy4DCXBhcmFncmFwaAcA1pWXnA9LBgQA1pWXnA9MInNlY29uZCBwYXJhZ3JhcGgKd2l0aCBhbm90aGVyIGxpbmWH1pWXnA8tAwpibG9ja3F1b3RlBwDWlZecD28DCXBhcmFncmFwaAcA1pWXnA9wBgQA1pWXnA9xBW91dGVyh9aVl5wPcAMKYmxvY2txdW90ZQcA1pWXnA93AwlwYXJhZ3JhcGgHANaVl5wPeAYEANaVl5wPeQxuZXN0ZWQgcXVvdGUoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcGYmxvY2tzAA==",
+ "stateVectorB64": "AdaVl5wPhwE=",
+ "coverage": {
+  "nodes": [
+   "blockquote",
+   "doc",
+   "hardBreak",
+   "horizontalRule",
+   "paragraph",
+   "text"
+  ],
+  "marks": [
+   "bold"
+  ]
+ },
+ "expected": {
+  "markdown": "paragraph with &lt;tag&gt; &amp; entity  \nhard break\n\n---\n\n> first paragraph with **bold**\n>\n> second paragraph\n> with another line\n\n> outer\n>\n> > nested quote"
+ }
+}

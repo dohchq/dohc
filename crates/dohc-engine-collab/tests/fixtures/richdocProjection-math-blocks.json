@@ -1,0 +1,21 @@
+{
+ "seed": -108,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-math-blocks",
+ "updates": [
+  "AQeJlZzNBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwltYXRoQmxvY2soAImVnM0HAQN0ZXgBdwhFID0gbWNeMoeJlZzNBwEDCW1hdGhCbG9jaygAiZWczQcDA3RleAF3LApcc3VtX3tpPTB9Xm4gaSA9IFxmcmFje24obisxKX17Mn0KRSA9IG1jXjIKh4mVnM0HAwMJbWF0aEJsb2NrKACJlZzNBwUDdGV4AXcAAA==",
+  "AQGJlZzNBwcoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcLbWF0aC1ibG9ja3MA"
+ ],
+ "mergedUpdateB64": "AQiJlZzNBwAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwltYXRoQmxvY2soAImVnM0HAQN0ZXgBdwhFID0gbWNeMoeJlZzNBwEDCW1hdGhCbG9jaygAiZWczQcDA3RleAF3LApcc3VtX3tpPTB9Xm4gaSA9IFxmcmFje24obisxKX17Mn0KRSA9IG1jXjIKh4mVnM0HAwMJbWF0aEJsb2NrKACJlZzNBwUDdGV4AXcAKAEEbWV0YRFwcm9qZWN0aW9uRml4dHVyZQF3C21hdGgtYmxvY2tzAA==",
+ "stateVectorB64": "AYmVnM0HCA==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "mathBlock"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "$$E = mc^2$$\n\n$$\n\\sum_{i=0}^n i = \\frac{n(n+1)}{2}\nE = mc^2\n$$\n\n$$$$"
+ }
+}

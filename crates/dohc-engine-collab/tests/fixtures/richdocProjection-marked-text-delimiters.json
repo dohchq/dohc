@@ -1,0 +1,28 @@
+{
+ "seed": -121,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-marked-text-delimiters",
+ "updates": [
+  "ARX2j+3rDAAHAQRib2R5AwlwYXJhZ3JhcGgHAPaP7esMAAYGAPaP7esMAQRib2xkAnt9hPaP7esMAhFib2xkICoqIGRlbGltaXRlcob2j+3rDBMEYm9sZARudWxshPaP7esMFAMgLyCG9o/t6wwXBml0YWxpYwJ7fYT2j+3rDBgSaXRhbGljICogZGVsaW1pdGVyhvaP7esMKgZpdGFsaWMEbnVsbIT2j+3rDCsDIC8ghvaP7esMLgZzdHJpa2UCe32E9o/t6wwvE3N0cmlrZSB+fiBkZWxpbWl0ZXKG9o/t6wxCBnN0cmlrZQRudWxshPaP7esMQwMgLyCG9o/t6wxGCXVuZGVybGluZQJ7fYT2j+3rDEcWdW5kZXJsaW5lICsrIGRlbGltaXRlcob2j+3rDF0JdW5kZXJsaW5lBG51bGyE9o/t6wxeAyAvIIb2j+3rDGEJaGlnaGxpZ2h0Ant9hPaP7esMYhZoaWdobGlnaHQgPT0gZGVsaW1pdGVyhvaP7esMeAloaWdobGlnaHQEbnVsbAA=",
+  "AQH2j+3rDHooAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcWbWFya2VkLXRleHQtZGVsaW1pdGVycwA="
+ ],
+ "mergedUpdateB64": "ARb2j+3rDAAHAQRib2R5AwlwYXJhZ3JhcGgHAPaP7esMAAYGAPaP7esMAQRib2xkAnt9hPaP7esMAhFib2xkICoqIGRlbGltaXRlcob2j+3rDBMEYm9sZARudWxshPaP7esMFAMgLyCG9o/t6wwXBml0YWxpYwJ7fYT2j+3rDBgSaXRhbGljICogZGVsaW1pdGVyhvaP7esMKgZpdGFsaWMEbnVsbIT2j+3rDCsDIC8ghvaP7esMLgZzdHJpa2UCe32E9o/t6wwvE3N0cmlrZSB+fiBkZWxpbWl0ZXKG9o/t6wxCBnN0cmlrZQRudWxshPaP7esMQwMgLyCG9o/t6wxGCXVuZGVybGluZQJ7fYT2j+3rDEcWdW5kZXJsaW5lICsrIGRlbGltaXRlcob2j+3rDF0JdW5kZXJsaW5lBG51bGyE9o/t6wxeAyAvIIb2j+3rDGEJaGlnaGxpZ2h0Ant9hPaP7esMYhZoaWdobGlnaHQgPT0gZGVsaW1pdGVyhvaP7esMeAloaWdobGlnaHQEbnVsbCgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxZtYXJrZWQtdGV4dC1kZWxpbWl0ZXJzAA==",
+ "stateVectorB64": "AfaP7esMew==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "paragraph",
+   "text"
+  ],
+  "marks": [
+   "bold",
+   "highlight",
+   "italic",
+   "strike",
+   "underline"
+  ]
+ },
+ "expected": {
+  "markdown": "**bold ** delimiter** / *italic * delimiter* / ~~strike ~~ delimiter~~ / ++underline ++ delimiter++ / ==highlight \\=\\= delimiter=="
+ }
+}

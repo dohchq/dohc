@@ -2,21 +2,21 @@
  "seed": 1014,
  "contentKind": "richdoc",
  "updates": [
-  "AQGm5Ke5DgAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BXdvcmxkAA==",
-  "AQGm5Ke5DgEoAQtmcm9udG1hdHRlcgVjb3VudAF9kQEA",
-  "AQWm5Ke5DgIHAQRib2R5AwlwYXJhZ3JhcGgHAKbkp7kOAgYGAKbkp7kOAwZpdGFsaWMEdHJ1ZYSm5Ke5DgQQ8J2UmPCdlKvwnZSmCXRhYoam5Ke5Dg4GaXRhbGljBG51bGwA",
-  "AQWm5Ke5DhCHpuSnuQ4CAwlwYXJhZ3JhcGgHAKbkp7kOEAYGAKbkp7kOEQZpdGFsaWMEdHJ1ZYSm5Ke5DhIHYcyBCXRhYoam5Ke5DhgGaXRhbGljBG51bGwA",
-  "AQOm5Ke5DhqHpuSnuQ4QAwlwYXJhZ3JhcGgHAKbkp7kOGgYEAKbkp7kOGw/wn5iA8J+OiVrDvHJpY2gA",
-  "AQem5Ke5DiaHpuSnuQ4aAwlwYXJhZ3JhcGgHAKbkp7kOJgYGAKbkp7kOJwRib2xkBHRydWWGpuSnuQ4oBml0YWxpYwR0cnVlhKbkp7kOKRPZhdix2K3YqNinbGluZQpjb250hqbkp7kONwRib2xkBG51bGyGpuSnuQ44Bml0YWxpYwRudWxsAA==",
-  "AQem5Ke5DjqHpuSnuQ4mAwlwYXJhZ3JhcGgHAKbkp7kOOgYGAKbkp7kOOwRib2xkBHRydWWGpuSnuQ48Bml0YWxpYwR0cnVlhKbkp7kOPRLwnZSY8J2Uq/CdlKZuYcOvdmWGpuSnuQ5IBGJvbGQEbnVsbIam5Ke5DkkGaXRhbGljBG51bGwA",
-  "AQOm5Ke5DktGpuSnuQ4EBGJvbGQEdHJ1ZcSm5Ke5Dkum5Ke5DgQBWMam5Ke5Dkym5Ke5DgQEYm9sZARudWxsAA=="
+  "AQHcuarlAwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTQA",
+  "AQHcuarlAwEoAQtmcm9udG1hdHRlcgVjb3VudAF9DwA=",
+  "AQPcuarlAwIHAQRib2R5AwlwYXJhZ3JhcGgHANy5quUDAgYEANy5quUDAxJuYcOvdmXwnZSY8J2Uq/CdlKYA",
+  "AQPcuarlAw+H3Lmq5QMCAwlwYXJhZ3JhcGgHANy5quUDDwYEANy5quUDEAvwn5iA8J+OiWHMgQA=",
+  "AQPcuarlAxeH3Lmq5QMPAwlwYXJhZ3JhcGgHANy5quUDFwYEANy5quUDGA5oZWxsbyDwn5iA8J+OiQA=",
+  "AQXcuarlAyOH3Lmq5QMXAwlwYXJhZ3JhcGgHANy5quUDIwYGANy5quUDJAZpdGFsaWMEdHJ1ZYTcuarlAyUNYcyB2YXYsdit2KjYp4bcuarlAywGaXRhbGljBG51bGwA",
+  "AQXcuarlAy6H3Lmq5QMjAwlwYXJhZ3JhcGgHANy5quUDLgYGANy5quUDLwZpdGFsaWMEdHJ1ZYTcuarlAzARd29ybGTwnZSY8J2Uq/CdlKaG3Lmq5QM7Bml0YWxpYwRudWxsAA==",
+  "AQPcuarlAz1G3Lmq5QMEBGJvbGQEdHJ1ZcTcuarlAz3cuarlAwQBWMbcuarlAz7cuarlAwQEYm9sZARudWxsAA=="
  ],
- "mergedUpdateB64": "ASCm5Ke5DgAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BXdvcmxkKAELZnJvbnRtYXR0ZXIFY291bnQBfZEBBwEEYm9keQMJcGFyYWdyYXBoBwCm5Ke5DgIGBgCm5Ke5DgMGaXRhbGljBHRydWWEpuSnuQ4EEPCdlJjwnZSr8J2Upgl0YWKGpuSnuQ4OBml0YWxpYwRudWxsh6bkp7kOAgMJcGFyYWdyYXBoBwCm5Ke5DhAGBgCm5Ke5DhEGaXRhbGljBHRydWWEpuSnuQ4SB2HMgQl0YWKGpuSnuQ4YBml0YWxpYwRudWxsh6bkp7kOEAMJcGFyYWdyYXBoBwCm5Ke5DhoGBACm5Ke5DhsP8J+YgPCfjolaw7xyaWNoh6bkp7kOGgMJcGFyYWdyYXBoBwCm5Ke5DiYGBgCm5Ke5DicEYm9sZAR0cnVlhqbkp7kOKAZpdGFsaWMEdHJ1ZYSm5Ke5DikT2YXYsdit2KjYp2xpbmUKY29udIam5Ke5DjcEYm9sZARudWxshqbkp7kOOAZpdGFsaWMEbnVsbIem5Ke5DiYDCXBhcmFncmFwaAcApuSnuQ46BgYApuSnuQ47BGJvbGQEdHJ1ZYam5Ke5DjwGaXRhbGljBHRydWWEpuSnuQ49EvCdlJjwnZSr8J2Upm5hw692ZYam5Ke5DkgEYm9sZARudWxshqbkp7kOSQZpdGFsaWMEbnVsbEam5Ke5DgQEYm9sZAR0cnVlxKbkp7kOS6bkp7kOBAFYxqbkp7kOTKbkp7kOBARib2xkBG51bGwA",
- "stateVectorB64": "Aabkp7kOTg==",
+ "mergedUpdateB64": "ARjcuarlAwAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTQoAQtmcm9udG1hdHRlcgVjb3VudAF9DwcBBGJvZHkDCXBhcmFncmFwaAcA3Lmq5QMCBgQA3Lmq5QMDEm5hw692ZfCdlJjwnZSr8J2UpofcuarlAwIDCXBhcmFncmFwaAcA3Lmq5QMPBgQA3Lmq5QMQC/CfmIDwn46JYcyBh9y5quUDDwMJcGFyYWdyYXBoBwDcuarlAxcGBADcuarlAxgOaGVsbG8g8J+YgPCfjomH3Lmq5QMXAwlwYXJhZ3JhcGgHANy5quUDIwYGANy5quUDJAZpdGFsaWMEdHJ1ZYTcuarlAyUNYcyB2YXYsdit2KjYp4bcuarlAywGaXRhbGljBG51bGyH3Lmq5QMjAwlwYXJhZ3JhcGgHANy5quUDLgYGANy5quUDLwZpdGFsaWMEdHJ1ZYTcuarlAzARd29ybGTwnZSY8J2Uq/CdlKaG3Lmq5QM7Bml0YWxpYwRudWxsRty5quUDBARib2xkBHRydWXE3Lmq5QM93Lmq5QMEAVjG3Lmq5QM+3Lmq5QMEBGJvbGQEbnVsbAA=",
+ "stateVectorB64": "Ady5quUDQA==",
  "expected": {
   "frontmatter": {
-   "title": "world",
-   "count": 81
+   "alpha": "value-1014",
+   "count": 15
   },
   "paragraphs": [
    {
@@ -27,25 +27,7 @@
       "italic": false
      },
      {
-      "text": "𝔘𝔫𝔦\ttab",
-      "bold": false,
-      "italic": true
-     }
-    ]
-   },
-   {
-    "runs": [
-     {
-      "text": "á\ttab",
-      "bold": false,
-      "italic": true
-     }
-    ]
-   },
-   {
-    "runs": [
-     {
-      "text": "😀🎉Zürich",
+      "text": "naïve𝔘𝔫𝔦",
       "bold": false,
       "italic": false
      }
@@ -54,8 +36,26 @@
    {
     "runs": [
      {
-      "text": "مرحباline\ncont",
-      "bold": true,
+      "text": "😀🎉á",
+      "bold": false,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "hello 😀🎉",
+      "bold": false,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "áمرحبا",
+      "bold": false,
       "italic": true
      }
     ]
@@ -63,12 +63,13 @@
    {
     "runs": [
      {
-      "text": "𝔘𝔫𝔦naïve",
-      "bold": true,
+      "text": "world𝔘𝔫𝔦",
+      "bold": false,
       "italic": true
      }
     ]
    }
-  ]
+  ],
+  "markdown": "---\nalpha: value-1014\ncount: 15\n---\n\n**X**naïve𝔘𝔫𝔦\n\n😀🎉á\n\nhello 😀🎉\n\n*áمرحبا*\n\n*world𝔘𝔫𝔦*"
  }
 }

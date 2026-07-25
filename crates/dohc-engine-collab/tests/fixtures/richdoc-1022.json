@@ -2,20 +2,19 @@
  "seed": 1022,
  "contentKind": "richdoc",
  "updates": [
-  "AQGS0aKQCgAoAQtmcm9udG1hdHRlcgV0aXRsZQF3Bm5hw692ZQA=",
-  "AQGS0aKQCgEoAQtmcm9udG1hdHRlcgVjb3VudAF9JQA=",
-  "AQOS0aKQCgIHAQRib2R5AwlwYXJhZ3JhcGgHAJLRopAKAgYEAJLRopAKAw9uYcOvdmVsaW5lCmNvbnQA",
-  "AQWS0aKQChKHktGikAoCAwlwYXJhZ3JhcGgHAJLRopAKEgYGAJLRopAKEwRib2xkBHRydWWEktGikAoUE1rDvHJpY2jwnZSY8J2Uq/CdlKaGktGikAogBGJvbGQEbnVsbAA=",
-  "AQOS0aKQCiKHktGikAoSAwlwYXJhZ3JhcGgHAJLRopAKIgYEAJLRopAKIxPwnZSY8J2Uq/CdlKZaw7xyaWNoAA==",
-  "AQOS0aKQCjCHktGikAoiAwlwYXJhZ3JhcGgHAJLRopAKMAYEAJLRopAKMRPZhdix2K3YqNin5pel5pys6KqeAA==",
-  "AQOS0aKQCjpGktGikAoEBGJvbGQEdHJ1ZcSS0aKQCjqS0aKQCgQBWMaS0aKQCjuS0aKQCgQEYm9sZARudWxsAA=="
+  "AQGV7ZaQCQAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMjIA",
+  "AQGV7ZaQCQEoAQtmcm9udG1hdHRlcgVjb3VudAF9mgEA",
+  "AQOV7ZaQCQIHAQRib2R5AwlwYXJhZ3JhcGgHAJXtlpAJAgYEAJXtlpAJAwoJdGFibmHDr3ZlAA==",
+  "AQWV7ZaQCQ2Hle2WkAkCAwlwYXJhZ3JhcGgHAJXtlpAJDQYGAJXtlpAJDgZpdGFsaWMEdHJ1ZYSV7ZaQCQ8QbGluZQpjb250WsO8cmljaIaV7ZaQCR4GaXRhbGljBG51bGwA",
+  "AQOV7ZaQCSCHle2WkAkNAwlwYXJhZ3JhcGgHAJXtlpAJIAYEAJXtlpAJIRAJdGFi8J2UmPCdlKvwnZSmAA==",
+  "AQOV7ZaQCSxGle2WkAkEBGJvbGQEdHJ1ZcSV7ZaQCSyV7ZaQCQQBWMaV7ZaQCS2V7ZaQCQQEYm9sZARudWxsAA=="
  ],
- "mergedUpdateB64": "AROS0aKQCgAoAQtmcm9udG1hdHRlcgV0aXRsZQF3Bm5hw692ZSgBC2Zyb250bWF0dGVyBWNvdW50AX0lBwEEYm9keQMJcGFyYWdyYXBoBwCS0aKQCgIGBACS0aKQCgMPbmHDr3ZlbGluZQpjb250h5LRopAKAgMJcGFyYWdyYXBoBwCS0aKQChIGBgCS0aKQChMEYm9sZAR0cnVlhJLRopAKFBNaw7xyaWNo8J2UmPCdlKvwnZSmhpLRopAKIARib2xkBG51bGyHktGikAoSAwlwYXJhZ3JhcGgHAJLRopAKIgYEAJLRopAKIxPwnZSY8J2Uq/CdlKZaw7xyaWNoh5LRopAKIgMJcGFyYWdyYXBoBwCS0aKQCjAGBACS0aKQCjET2YXYsdit2KjYp+aXpeacrOiqnkaS0aKQCgQEYm9sZAR0cnVlxJLRopAKOpLRopAKBAFYxpLRopAKO5LRopAKBARib2xkBG51bGwA",
- "stateVectorB64": "AZLRopAKPQ==",
+ "mergedUpdateB64": "ARCV7ZaQCQAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMjIoAQtmcm9udG1hdHRlcgVjb3VudAF9mgEHAQRib2R5AwlwYXJhZ3JhcGgHAJXtlpAJAgYEAJXtlpAJAwoJdGFibmHDr3Zlh5XtlpAJAgMJcGFyYWdyYXBoBwCV7ZaQCQ0GBgCV7ZaQCQ4GaXRhbGljBHRydWWEle2WkAkPEGxpbmUKY29udFrDvHJpY2iGle2WkAkeBml0YWxpYwRudWxsh5XtlpAJDQMJcGFyYWdyYXBoBwCV7ZaQCSAGBACV7ZaQCSEQCXRhYvCdlJjwnZSr8J2UpkaV7ZaQCQQEYm9sZAR0cnVlxJXtlpAJLJXtlpAJBAFYxpXtlpAJLZXtlpAJBARib2xkBG51bGwA",
+ "stateVectorB64": "AZXtlpAJLw==",
  "expected": {
   "frontmatter": {
-   "title": "naïve",
-   "count": 37
+   "alpha": "value-1022",
+   "count": 90
   },
   "paragraphs": [
    {
@@ -26,7 +25,7 @@
       "italic": false
      },
      {
-      "text": "naïveline\ncont",
+      "text": "\ttabnaïve",
       "bold": false,
       "italic": false
      }
@@ -35,30 +34,22 @@
    {
     "runs": [
      {
-      "text": "Zürich𝔘𝔫𝔦",
-      "bold": true,
-      "italic": false
-     }
-    ]
-   },
-   {
-    "runs": [
-     {
-      "text": "𝔘𝔫𝔦Zürich",
+      "text": "line\ncontZürich",
       "bold": false,
-      "italic": false
+      "italic": true
      }
     ]
    },
    {
     "runs": [
      {
-      "text": "مرحبا日本語",
+      "text": "\ttab𝔘𝔫𝔦",
       "bold": false,
       "italic": false
      }
     ]
    }
-  ]
+  ],
+  "markdown": "---\nalpha: value-1022\ncount: 90\n---\n\n**X**\ttabnaïve\n\n*line\ncontZürich*\n\n\ttab𝔘𝔫𝔦"
  }
 }

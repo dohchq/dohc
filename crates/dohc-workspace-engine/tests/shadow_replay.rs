@@ -208,7 +208,11 @@ async fn clone_marked_shadow_replay_composes_real_domains_end_to_end() {
         .expect("persisted Y.Doc load")
         .expect("persisted Y.Doc lineage");
     assert_eq!(
-        persisted.doc.project(ContentKind::Plaintext).markdown,
+        persisted
+            .doc
+            .project(ContentKind::Plaintext)
+            .expect("bounded plaintext projection")
+            .markdown,
         "benign"
     );
 }

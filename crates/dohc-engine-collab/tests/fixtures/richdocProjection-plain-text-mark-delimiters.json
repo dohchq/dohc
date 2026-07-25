@@ -1,0 +1,22 @@
+{
+ "seed": -120,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-plain-text-mark-delimiters",
+ "updates": [
+  "AQPPsv0YAAcBBGJvZHkDCXBhcmFncmFwaAcAz7L9GAAGBADPsv0YASAqc3RhcnMqIF91bmRlcnNjb3Jlc18gfn50aWxkZXN+fgA=",
+  "AQHPsv0YIigBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxpwbGFpbi10ZXh0LW1hcmstZGVsaW1pdGVycwA="
+ ],
+ "mergedUpdateB64": "AQTPsv0YAAcBBGJvZHkDCXBhcmFncmFwaAcAz7L9GAAGBADPsv0YASAqc3RhcnMqIF91bmRlcnNjb3Jlc18gfn50aWxkZXN+figBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxpwbGFpbi10ZXh0LW1hcmstZGVsaW1pdGVycwA=",
+ "stateVectorB64": "Ac+y/Rgj",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "paragraph",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "*stars* _underscores_ ~~tildes~~"
+ }
+}

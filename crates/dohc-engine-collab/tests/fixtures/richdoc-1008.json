@@ -2,20 +2,20 @@
  "seed": 1008,
  "contentKind": "richdoc",
  "updates": [
-  "AQHalo/9AQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3B1rDvHJpY2gA",
-  "AQHalo/9AQEoAQtmcm9udG1hdHRlcgVjb3VudAF9iAEA",
-  "AQXalo/9AQIHAQRib2R5AwlwYXJhZ3JhcGgHANqWj/0BAgYGANqWj/0BAwZpdGFsaWMEdHJ1ZYTalo/9AQQQbmHDr3Zl2YXYsdit2KjYp4balo/9AQ4GaXRhbGljBG51bGwA",
-  "AQXalo/9ARCH2paP/QECAwlwYXJhZ3JhcGgHANqWj/0BEAYGANqWj/0BEQRib2xkBHRydWWE2paP/QESDvCfmIDwn46JbmHDr3ZlhtqWj/0BGwRib2xkBG51bGwA",
-  "AQXalo/9AR2H2paP/QEQAwlwYXJhZ3JhcGgHANqWj/0BHQYGANqWj/0BHgRib2xkBHRydWWE2paP/QEfDFrDvHJpY2hjYWbDqYbalo/9ASkEYm9sZARudWxsAA==",
-  "AQXalo/9ASuH2paP/QEdAwlwYXJhZ3JhcGgHANqWj/0BKwYGANqWj/0BLARib2xkBHRydWWE2paP/QEtCm5hw692ZQl0YWKG2paP/QE2BGJvbGQEbnVsbAA=",
-  "AQPalo/9AThG2paP/QEEBGJvbGQEdHJ1ZcTalo/9ATjalo/9AQQBWMbalo/9ATnalo/9AQQEYm9sZARudWxsAA=="
+  "AQHCsqbFCAAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDgA",
+  "AQHCsqbFCAEoAQtmcm9udG1hdHRlcgVjb3VudAF9jQEA",
+  "AQPCsqbFCAIHAQRib2R5AwlwYXJhZ3JhcGgHAMKypsUIAgYEAMKypsUIAwlhzIFuYcOvdmUA",
+  "AQXCsqbFCAuHwrKmxQgCAwlwYXJhZ3JhcGgHAMKypsUICwYGAMKypsUIDAZpdGFsaWMEdHJ1ZYTCsqbFCA0Nd29ybGTwn5iA8J+OiYbCsqbFCBYGaXRhbGljBG51bGwA",
+  "AQfCsqbFCBiHwrKmxQgLAwlwYXJhZ3JhcGgHAMKypsUIGAYGAMKypsUIGQRib2xkBHRydWWGwrKmxQgaBml0YWxpYwR0cnVlhMKypsUIGwsJdGFiWsO8cmljaIbCsqbFCCUEYm9sZARudWxshsKypsUIJgZpdGFsaWMEbnVsbAA=",
+  "AQXCsqbFCCiHwrKmxQgYAwlwYXJhZ3JhcGgHAMKypsUIKAYGAMKypsUIKQZpdGFsaWMEdHJ1ZYTCsqbFCCoNWsO8cmljaG5hw692ZYbCsqbFCDUGaXRhbGljBG51bGwA",
+  "AQPCsqbFCDdGwrKmxQgEBGJvbGQEdHJ1ZcTCsqbFCDfCsqbFCAQBWMbCsqbFCDjCsqbFCAQEYm9sZARudWxsAA=="
  ],
- "mergedUpdateB64": "ARnalo/9AQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3B1rDvHJpY2goAQtmcm9udG1hdHRlcgVjb3VudAF9iAEHAQRib2R5AwlwYXJhZ3JhcGgHANqWj/0BAgYGANqWj/0BAwZpdGFsaWMEdHJ1ZYTalo/9AQQQbmHDr3Zl2YXYsdit2KjYp4balo/9AQ4GaXRhbGljBG51bGyH2paP/QECAwlwYXJhZ3JhcGgHANqWj/0BEAYGANqWj/0BEQRib2xkBHRydWWE2paP/QESDvCfmIDwn46JbmHDr3ZlhtqWj/0BGwRib2xkBG51bGyH2paP/QEQAwlwYXJhZ3JhcGgHANqWj/0BHQYGANqWj/0BHgRib2xkBHRydWWE2paP/QEfDFrDvHJpY2hjYWbDqYbalo/9ASkEYm9sZARudWxsh9qWj/0BHQMJcGFyYWdyYXBoBwDalo/9ASsGBgDalo/9ASwEYm9sZAR0cnVlhNqWj/0BLQpuYcOvdmUJdGFihtqWj/0BNgRib2xkBG51bGxG2paP/QEEBGJvbGQEdHJ1ZcTalo/9ATjalo/9AQQBWMbalo/9ATnalo/9AQQEYm9sZARudWxsAA==",
- "stateVectorB64": "AdqWj/0BOw==",
+ "mergedUpdateB64": "ARnCsqbFCAAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDgoAQtmcm9udG1hdHRlcgVjb3VudAF9jQEHAQRib2R5AwlwYXJhZ3JhcGgHAMKypsUIAgYEAMKypsUIAwlhzIFuYcOvdmWHwrKmxQgCAwlwYXJhZ3JhcGgHAMKypsUICwYGAMKypsUIDAZpdGFsaWMEdHJ1ZYTCsqbFCA0Nd29ybGTwn5iA8J+OiYbCsqbFCBYGaXRhbGljBG51bGyHwrKmxQgLAwlwYXJhZ3JhcGgHAMKypsUIGAYGAMKypsUIGQRib2xkBHRydWWGwrKmxQgaBml0YWxpYwR0cnVlhMKypsUIGwsJdGFiWsO8cmljaIbCsqbFCCUEYm9sZARudWxshsKypsUIJgZpdGFsaWMEbnVsbIfCsqbFCBgDCXBhcmFncmFwaAcAwrKmxQgoBgYAwrKmxQgpBml0YWxpYwR0cnVlhMKypsUIKg1aw7xyaWNobmHDr3ZlhsKypsUINQZpdGFsaWMEbnVsbEbCsqbFCAQEYm9sZAR0cnVlxMKypsUIN8KypsUIBAFYxsKypsUIOMKypsUIBARib2xkBG51bGwA",
+ "stateVectorB64": "AcKypsUIOg==",
  "expected": {
   "frontmatter": {
-   "title": "Zürich",
-   "count": 72
+   "alpha": "value-1008",
+   "count": 77
   },
   "paragraphs": [
    {
@@ -26,7 +26,16 @@
       "italic": false
      },
      {
-      "text": "naïveمرحبا",
+      "text": "ánaïve",
+      "bold": false,
+      "italic": false
+     }
+    ]
+   },
+   {
+    "runs": [
+     {
+      "text": "world😀🎉",
       "bold": false,
       "italic": true
      }
@@ -35,30 +44,22 @@
    {
     "runs": [
      {
-      "text": "😀🎉naïve",
+      "text": "\ttabZürich",
       "bold": true,
-      "italic": false
+      "italic": true
      }
     ]
    },
    {
     "runs": [
      {
-      "text": "Zürichcafé",
-      "bold": true,
-      "italic": false
-     }
-    ]
-   },
-   {
-    "runs": [
-     {
-      "text": "naïve\ttab",
-      "bold": true,
-      "italic": false
+      "text": "Zürichnaïve",
+      "bold": false,
+      "italic": true
      }
     ]
    }
-  ]
+  ],
+  "markdown": "---\nalpha: value-1008\ncount: 77\n---\n\n**X**ánaïve\n\n*world😀🎉*\n\n\t***tabZürich***\n\n*Zürichnaïve*"
  }
 }

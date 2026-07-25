@@ -1,0 +1,22 @@
+{
+ "seed": -118,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-heading-leading-hash",
+ "updates": [
+  "AQSJtLrfBAAHAQRib2R5AwdoZWFkaW5nBwCJtLrfBAAGBACJtLrfBAESIyBzdGFydHMgd2l0aCBoYXNoKACJtLrfBAAFbGV2ZWwBfQIA",
+  "AQGJtLrfBBUoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcUaGVhZGluZy1sZWFkaW5nLWhhc2gA"
+ ],
+ "mergedUpdateB64": "AQWJtLrfBAAHAQRib2R5AwdoZWFkaW5nBwCJtLrfBAAGBACJtLrfBAESIyBzdGFydHMgd2l0aCBoYXNoKACJtLrfBAAFbGV2ZWwBfQIoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcUaGVhZGluZy1sZWFkaW5nLWhhc2gA",
+ "stateVectorB64": "AYm0ut8EFg==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "heading",
+   "text"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "## # starts with hash"
+ }
+}

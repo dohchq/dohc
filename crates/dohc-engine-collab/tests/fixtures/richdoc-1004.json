@@ -2,34 +2,30 @@
  "seed": 1004,
  "contentKind": "richdoc",
  "updates": [
-  "AQHr3sisDAAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BWNhZsOpAA==",
-  "AQHr3sisDAEoAQtmcm9udG1hdHRlcgVjb3VudAF9GwA=",
-  "AQXr3sisDAIHAQRib2R5AwlwYXJhZ3JhcGgHAOveyKwMAgYGAOveyKwMAwRib2xkBHRydWWE697IrAwEBwl0YWJhzIGG697IrAwKBGJvbGQEbnVsbAA=",
-  "AQXr3sisDAyH697IrAwCAwlwYXJhZ3JhcGgHAOveyKwMDAYGAOveyKwMDQZpdGFsaWMEdHJ1ZYTr3sisDA4MCXRhYvCfmIDwn46JhuveyKwMFgZpdGFsaWMEbnVsbAA=",
-  "AQXr3sisDBiH697IrAwMAwlwYXJhZ3JhcGgHAOveyKwMGAYGAOveyKwMGQRib2xkBHRydWWE697IrAwaDG5hw692ZWhlbGxvIIbr3sisDCUEYm9sZARudWxsAA==",
-  "AQHr3sisDCfE697IrAwE697IrAwFAVgA"
+  "AQHR6K/UCAAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDQA",
+  "AQHR6K/UCAEoAQtmcm9udG1hdHRlcgVjb3VudAF9EQA=",
+  "AQXR6K/UCAIHAQRib2R5AwlwYXJhZ3JhcGgHANHor9QIAgYGANHor9QIAwZpdGFsaWMEdHJ1ZYTR6K/UCAQO2YXYsdit2KjYpwl0YWKG0eiv1AgNBml0YWxpYwRudWxsAA==",
+  "AQXR6K/UCA+H0eiv1AgCAwlwYXJhZ3JhcGgHANHor9QIDwYGANHor9QIEARib2xkBHRydWWE0eiv1AgRB2HMgQl0YWKG0eiv1AgXBGJvbGQEbnVsbAA=",
+  "AQfR6K/UCBmH0eiv1AgPAwlwYXJhZ3JhcGgHANHor9QIGQYGANHor9QIGgRib2xkBHRydWWG0eiv1AgbBml0YWxpYwR0cnVlhNHor9QIHA/ml6XmnKzoqp5uYcOvdmWG0eiv1AgkBGJvbGQEbnVsbIbR6K/UCCUGaXRhbGljBG51bGwA",
+  "AQPR6K/UCCdG0eiv1AgEBGJvbGQEdHJ1ZcTR6K/UCCfR6K/UCAQBWMbR6K/UCCjR6K/UCAQEYm9sZARudWxsAA=="
  ],
- "mergedUpdateB64": "ARLr3sisDAAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BWNhZsOpKAELZnJvbnRtYXR0ZXIFY291bnQBfRsHAQRib2R5AwlwYXJhZ3JhcGgHAOveyKwMAgYGAOveyKwMAwRib2xkBHRydWWE697IrAwEBwl0YWJhzIGG697IrAwKBGJvbGQEbnVsbIfr3sisDAIDCXBhcmFncmFwaAcA697IrAwMBgYA697IrAwNBml0YWxpYwR0cnVlhOveyKwMDgwJdGFi8J+YgPCfjomG697IrAwWBml0YWxpYwRudWxsh+veyKwMDAMJcGFyYWdyYXBoBwDr3sisDBgGBgDr3sisDBkEYm9sZAR0cnVlhOveyKwMGgxuYcOvdmVoZWxsbyCG697IrAwlBGJvbGQEbnVsbMTr3sisDATr3sisDAUBWAA=",
- "stateVectorB64": "AeveyKwMKA==",
+ "mergedUpdateB64": "ARbR6K/UCAAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMDQoAQtmcm9udG1hdHRlcgVjb3VudAF9EQcBBGJvZHkDCXBhcmFncmFwaAcA0eiv1AgCBgYA0eiv1AgDBml0YWxpYwR0cnVlhNHor9QIBA7Zhdix2K3YqNinCXRhYobR6K/UCA0GaXRhbGljBG51bGyH0eiv1AgCAwlwYXJhZ3JhcGgHANHor9QIDwYGANHor9QIEARib2xkBHRydWWE0eiv1AgRB2HMgQl0YWKG0eiv1AgXBGJvbGQEbnVsbIfR6K/UCA8DCXBhcmFncmFwaAcA0eiv1AgZBgYA0eiv1AgaBGJvbGQEdHJ1ZYbR6K/UCBsGaXRhbGljBHRydWWE0eiv1AgcD+aXpeacrOiqnm5hw692ZYbR6K/UCCQEYm9sZARudWxshtHor9QIJQZpdGFsaWMEbnVsbEbR6K/UCAQEYm9sZAR0cnVlxNHor9QIJ9Hor9QIBAFYxtHor9QIKNHor9QIBARib2xkBG51bGwA",
+ "stateVectorB64": "AdHor9QIKg==",
  "expected": {
   "frontmatter": {
-   "title": "café",
-   "count": 27
+   "alpha": "value-1004",
+   "count": 17
   },
   "paragraphs": [
    {
     "runs": [
      {
-      "text": "X\ttabá",
+      "text": "X",
       "bold": true,
       "italic": false
-     }
-    ]
-   },
-   {
-    "runs": [
+     },
      {
-      "text": "\ttab😀🎉",
+      "text": "مرحبا\ttab",
       "bold": false,
       "italic": true
      }
@@ -38,12 +34,22 @@
    {
     "runs": [
      {
-      "text": "naïvehello ",
+      "text": "á\ttab",
       "bold": true,
       "italic": false
      }
     ]
+   },
+   {
+    "runs": [
+     {
+      "text": "日本語naïve",
+      "bold": true,
+      "italic": true
+     }
+    ]
    }
-  ]
+  ],
+  "markdown": "---\nalpha: value-1004\ncount: 17\n---\n\n**X***مرحبا\ttab*\n\n**á\ttab**\n\n***日本語naïve***"
  }
 }

@@ -21,7 +21,7 @@ use dohc_engine_storage::{
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use crate::error::CollabError;
-use crate::limits::{DEFAULT_COMPACTION_THRESHOLD, MAX_PROJECTION_BYTES, MAX_YDOC_UPDATE_BYTES};
+use crate::limits::{DEFAULT_COMPACTION_THRESHOLD, MAX_YDOC_UPDATE_BYTES};
 use crate::ydoc::{ContentKind, Projection, Ydoc};
 use crate::DocKey;
 
@@ -821,13 +821,7 @@ pub fn settle(
         Some(p) => p,
         None => return Err(CollabError::NoMarker),
     };
-    let projection = persisted.doc.project(persisted.marker.content_kind);
-    if projection.markdown.len() > MAX_PROJECTION_BYTES {
-        return Err(CollabError::UpdateTooLarge {
-            actual: projection.markdown.len(),
-            max: MAX_PROJECTION_BYTES,
-        });
-    }
+    let projection = persisted.doc.project(persisted.marker.content_kind)?;
     let markdown_bytes = projection.markdown.clone().into_bytes();
     let content_sha = crate::hex_sha256(&markdown_bytes);
     let sv_bytes = persisted.doc.encode_state_vector();
@@ -955,7 +949,7 @@ pub fn close_session(
         let content_sha = crate::hex_sha256(
             persisted
                 .doc
-                .project(marker.content_kind)
+                .project(marker.content_kind)?
                 .markdown
                 .as_bytes(),
         );

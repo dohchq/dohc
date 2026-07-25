@@ -1,0 +1,22 @@
+{
+ "seed": -116,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-image-alt-delimiter",
+ "updates": [
+  "AQXcxOnJBAAHAQRib2R5AwlwYXJhZ3JhcGgHANzE6ckEAAMFaW1hZ2UoANzE6ckEAQNzcmMBdxBhc3NldHMvaW1hZ2UucG5nKADcxOnJBAEDYWx0AXcMbGVmdCBdIHJpZ2h0KADcxOnJBAEFdGl0bGUBfgA=",
+  "AQHcxOnJBAUoAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcTaW1hZ2UtYWx0LWRlbGltaXRlcgA="
+ ],
+ "mergedUpdateB64": "AQbcxOnJBAAHAQRib2R5AwlwYXJhZ3JhcGgHANzE6ckEAAMFaW1hZ2UoANzE6ckEAQNzcmMBdxBhc3NldHMvaW1hZ2UucG5nKADcxOnJBAEDYWx0AXcMbGVmdCBdIHJpZ2h0KADcxOnJBAEFdGl0bGUBfigBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdxNpbWFnZS1hbHQtZGVsaW1pdGVyAA==",
+ "stateVectorB64": "AdzE6ckEBg==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "image",
+   "paragraph"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "![left \\] right](assets/image.png)"
+ }
+}

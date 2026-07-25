@@ -1,0 +1,27 @@
+{
+ "seed": -105,
+ "contentKind": "richdoc",
+ "kind": "richdocProjection-inline-atoms",
+ "updates": [
+  "AR6ZwJ+GAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAJnAn4YBAQYEAJnAn4YBAgJBIIeZwJ+GAQIDEmVzY2FwZWRQdW5jdHVhdGlvbigAmcCfhgEFBXZhbHVlAXcBKoeZwJ+GAQUGBACZwJ+GAQcKIGxpdGVyYWwsIIeZwJ+GAQcDCHdpa2lsaW5rKACZwJ+GARIGdGFyZ2V0AXcKbm90ZXMvcGxhbigAmcCfhgESBWxhYmVsAXcEUGxhboeZwJ+GARIGBACZwJ+GARUCLCCHmcCfhgEVAwppbmxpbmVBdG9tKACZwJ+GARgGYXRvbUlkAXcFY2hhcnQoAJnAn4YBGAZwYXJhbXMBdwtyYW5nZT10b2RheSgAmcCfhgEYBnNvdXJjZQF3FmF0b206Y2hhcnQgcmFuZ2U9dG9kYXmHmcCfhgEYBgQAmcCfhgEcBiwgYW5kIIeZwJ+GARwDCm1hdGhJbmxpbmUoAJnAn4YBIwN0ZXgBdwl4XjIgKyB5XjKHmcCfhgEjBgQAmcCfhgElAS6HmcCfhgEBAwVpbWFnZSgAmcCfhgEnA3NyYwF3E2Fzc2V0cy9teSBpbWFnZS5wbmcoAJnAn4YBJwNhbHQBdwphbHQgW3RleHRdKACZwJ+GAScFdGl0bGUBdwtpbWFnZSB0aXRsZYeZwJ+GAScDBWltYWdlKACZwJ+GASsDc3JjAXccaHR0cHM6Ly9leGFtcGxlLmNvbS9hKGIpLnBuZygAmcCfhgErA2FsdAF3BnJlbW90ZQA=",
+  "AQGZwJ+GAS4oAQRtZXRhEXByb2plY3Rpb25GaXh0dXJlAXcMaW5saW5lLWF0b21zAA=="
+ ],
+ "mergedUpdateB64": "AR+ZwJ+GAQAoAQRtZXRhDXNjaGVtYVZlcnNpb24BfQEHAQRib2R5AwlwYXJhZ3JhcGgHAJnAn4YBAQYEAJnAn4YBAgJBIIeZwJ+GAQIDEmVzY2FwZWRQdW5jdHVhdGlvbigAmcCfhgEFBXZhbHVlAXcBKoeZwJ+GAQUGBACZwJ+GAQcKIGxpdGVyYWwsIIeZwJ+GAQcDCHdpa2lsaW5rKACZwJ+GARIGdGFyZ2V0AXcKbm90ZXMvcGxhbigAmcCfhgESBWxhYmVsAXcEUGxhboeZwJ+GARIGBACZwJ+GARUCLCCHmcCfhgEVAwppbmxpbmVBdG9tKACZwJ+GARgGYXRvbUlkAXcFY2hhcnQoAJnAn4YBGAZwYXJhbXMBdwtyYW5nZT10b2RheSgAmcCfhgEYBnNvdXJjZQF3FmF0b206Y2hhcnQgcmFuZ2U9dG9kYXmHmcCfhgEYBgQAmcCfhgEcBiwgYW5kIIeZwJ+GARwDCm1hdGhJbmxpbmUoAJnAn4YBIwN0ZXgBdwl4XjIgKyB5XjKHmcCfhgEjBgQAmcCfhgElAS6HmcCfhgEBAwVpbWFnZSgAmcCfhgEnA3NyYwF3E2Fzc2V0cy9teSBpbWFnZS5wbmcoAJnAn4YBJwNhbHQBdwphbHQgW3RleHRdKACZwJ+GAScFdGl0bGUBdwtpbWFnZSB0aXRsZYeZwJ+GAScDBWltYWdlKACZwJ+GASsDc3JjAXccaHR0cHM6Ly9leGFtcGxlLmNvbS9hKGIpLnBuZygAmcCfhgErA2FsdAF3BnJlbW90ZSgBBG1ldGERcHJvamVjdGlvbkZpeHR1cmUBdwxpbmxpbmUtYXRvbXMA",
+ "stateVectorB64": "AZnAn4YBLw==",
+ "coverage": {
+  "nodes": [
+   "doc",
+   "escapedPunctuation",
+   "image",
+   "inlineAtom",
+   "mathInline",
+   "paragraph",
+   "text",
+   "wikilink"
+  ],
+  "marks": []
+ },
+ "expected": {
+  "markdown": "A \\* literal, [[notes/plan|Plan]], {{atom:chart range=today}}, and $x^2 + y^2$.\n\n![alt \\[text\\]](<assets/my image.png> \"image title\")\n\n![remote](https://example.com/a\\(b\\).png)"
+ }
+}

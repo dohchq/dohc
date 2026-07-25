@@ -2,63 +2,39 @@
  "seed": 1013,
  "contentKind": "richdoc",
  "updates": [
-  "AQGTkaG1DQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BWhlbGxvAA==",
-  "AQGTkaG1DQEoAQtmcm9udG1hdHRlcgVjb3VudAF9EwA=",
-  "AQOTkaG1DQIHAQRib2R5AwlwYXJhZ3JhcGgHAJORobUNAgYEAJORobUNAwxaw7xyaWNod29ybGQA",
-  "AQOTkaG1DQ+Hk5GhtQ0CAwlwYXJhZ3JhcGgHAJORobUNDwYEAJORobUNEAxhzIFsaW5lCmNvbnQA",
-  "AQOTkaG1DRyHk5GhtQ0PAwlwYXJhZ3JhcGgHAJORobUNHAYEAJORobUNHRJsaW5lCmNvbnTml6XmnKzoqp4A",
-  "AQeTkaG1DSqHk5GhtQ0cAwlwYXJhZ3JhcGgHAJORobUNKgYGAJORobUNKwRib2xkBHRydWWGk5GhtQ0sBml0YWxpYwR0cnVlhJORobUNLQp3b3JsZGNhZsOphpORobUNNgRib2xkBG51bGyGk5GhtQ03Bml0YWxpYwRudWxsAA==",
-  "AQOTkaG1DTlGk5GhtQ0EBGJvbGQEdHJ1ZcSTkaG1DTmTkaG1DQQBWMaTkaG1DTqTkaG1DQQEYm9sZARudWxsAA=="
+  "AQGlgqinBgAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTMA",
+  "AQGlgqinBgEoAQtmcm9udG1hdHRlcgVjb3VudAF9AgA=",
+  "AQWlgqinBgIHAQRib2R5AwlwYXJhZ3JhcGgHAKWCqKcGAgYGAKWCqKcGAwRib2xkBHRydWWEpYKopwYEEGxpbmUKY29udFrDvHJpY2iGpYKopwYTBGJvbGQEbnVsbAA=",
+  "AQOlgqinBhWHpYKopwYCAwlwYXJhZ3JhcGgHAKWCqKcGFQYEAKWCqKcGFgvwn5iA8J+OiWHMgQA=",
+  "AQGlgqinBh3EpYKopwYEpYKopwYFAVgA"
  ],
- "mergedUpdateB64": "ARWTkaG1DQAoAQtmcm9udG1hdHRlcgV0aXRsZQF3BWhlbGxvKAELZnJvbnRtYXR0ZXIFY291bnQBfRMHAQRib2R5AwlwYXJhZ3JhcGgHAJORobUNAgYEAJORobUNAwxaw7xyaWNod29ybGSHk5GhtQ0CAwlwYXJhZ3JhcGgHAJORobUNDwYEAJORobUNEAxhzIFsaW5lCmNvbnSHk5GhtQ0PAwlwYXJhZ3JhcGgHAJORobUNHAYEAJORobUNHRJsaW5lCmNvbnTml6XmnKzoqp6Hk5GhtQ0cAwlwYXJhZ3JhcGgHAJORobUNKgYGAJORobUNKwRib2xkBHRydWWGk5GhtQ0sBml0YWxpYwR0cnVlhJORobUNLQp3b3JsZGNhZsOphpORobUNNgRib2xkBG51bGyGk5GhtQ03Bml0YWxpYwRudWxsRpORobUNBARib2xkBHRydWXEk5GhtQ05k5GhtQ0EAVjGk5GhtQ06k5GhtQ0EBGJvbGQEbnVsbAA=",
- "stateVectorB64": "AZORobUNPA==",
+ "mergedUpdateB64": "AQulgqinBgAoAQtmcm9udG1hdHRlcgVhbHBoYQF3CnZhbHVlLTEwMTMoAQtmcm9udG1hdHRlcgVjb3VudAF9AgcBBGJvZHkDCXBhcmFncmFwaAcApYKopwYCBgYApYKopwYDBGJvbGQEdHJ1ZYSlgqinBgQQbGluZQpjb250WsO8cmljaIalgqinBhMEYm9sZARudWxsh6WCqKcGAgMJcGFyYWdyYXBoBwClgqinBhUGBAClgqinBhYL8J+YgPCfjolhzIHEpYKopwYEpYKopwYFAVgA",
+ "stateVectorB64": "AaWCqKcGHg==",
  "expected": {
   "frontmatter": {
-   "title": "hello",
-   "count": 19
+   "alpha": "value-1013",
+   "count": 2
   },
   "paragraphs": [
    {
     "runs": [
      {
-      "text": "X",
+      "text": "Xline\ncontZürich",
       "bold": true,
       "italic": false
-     },
-     {
-      "text": "Zürichworld",
-      "bold": false,
-      "italic": false
      }
     ]
    },
    {
     "runs": [
      {
-      "text": "áline\ncont",
+      "text": "😀🎉á",
       "bold": false,
       "italic": false
-     }
-    ]
-   },
-   {
-    "runs": [
-     {
-      "text": "line\ncont日本語",
-      "bold": false,
-      "italic": false
-     }
-    ]
-   },
-   {
-    "runs": [
-     {
-      "text": "worldcafé",
-      "bold": true,
-      "italic": true
      }
     ]
    }
-  ]
+  ],
+  "markdown": "---\nalpha: value-1013\ncount: 2\n---\n\n**Xline\ncontZürich**\n\n😀🎉á"
  }
 }
