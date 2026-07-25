@@ -396,7 +396,7 @@ fn create_recovery_dir(dir: &Path) -> Result<(), StorageError> {
                 .create(dir)
                 .map_err(StorageError::classify_io)?;
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(unix))]
     {

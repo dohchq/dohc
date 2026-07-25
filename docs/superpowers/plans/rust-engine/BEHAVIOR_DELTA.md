@@ -433,31 +433,29 @@ that wrote *before* the pipeline ran — IS detected and preserved-both. The
 sub-op race is an inherent, narrow residual; it is documented in
 `dohc-engine-files::materialize` module docs and is NOT claimed closed.
 
-Secret materialization has a second accepted, narrowed rename-TOCTOU: its
-no-follow ancestor checks are path-based `symlink_metadata` checks, not
-fd-relative `openat2(RESOLVE_NO_SYMLINKS)` / `renameat` operations. A local
-attacker with workspace-directory WRITE access could swap a checked parent
-directory for a symlink in the microsecond between the final path check and the
-`rename`. The entry, post-`create_dir_all`, pre-revalidation, and pre-replace
-checks narrow that window but do not close it.
-CLASSIFICATION — this is a POTENTIAL SECRET-DISCLOSURE and UNAUTHORIZED-OVERWRITE
-risk, NOT a no-op. Winning the race can redirect the 0600 plaintext `.env` write
-through the swapped-parent symlink to an attacker-chosen path — disclosing the
-secret to a location the attacker can read EVEN WHEN they could not read the
-owner-only 0600 file — or overwrite an unrelated target. It is accepted for the
-current release under an EXPLICIT assumption, not a general filesystem-ACL
-guarantee: the MVP is SINGLE-USER, local-first, one owner, owner-only 0600
-secrets, with NO shared or ACL-partitioned workspaces (the sharing/members
-surface is retired pre-R15), and exploiting it additionally requires
-workspace-dir write access plus winning a microsecond check→rename race. In a
-SHARED or ACL-PARTITIONED workspace — an attacker with directory-write but not
-file-read access — this residual WOULD escalate confidentiality/integrity and
-MUST be closed before any such multi-user/shared-secret model ships. Concrete
-closure path (tracked, REQUIRED before shared secrets): fd-relative resolution —
-`openat2(RESOLVE_NO_SYMLINKS)` or per-component `openat(O_NOFOLLOW)` to a pinned
-parent dirfd + `renameat` on unix, and the handle-relative equivalent on Windows
-— so the temp create and rename bind the real parent inode regardless of a
-concurrent swap.
+The former secret ancestor-redirection residual is now CLOSED. On Linux the
+engine opens the parent from a pinned workspace-root dirfd with
+`openat2(RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH)`; `ENOSYS`/`EINVAL` select the
+portable fallback at runtime. Missing directories and other Unix platforms use
+a component-at-a-time `openat(O_NOFOLLOW | O_DIRECTORY)` walk. Temp creation,
+target revalidation, orphan cleanup, `renameat`, and directory fsync all use the
+resulting parent dirfd, so a concurrent rename of a checked ancestor cannot
+redirect plaintext.
+
+Windows still performs the final replace by name because safe `std` exposes no
+root-handle-relative rename. It opens the canonical root and every parent
+component with `FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS`,
+rejects `FILE_ATTRIBUTE_REPARSE_POINT`, and retains every handle without
+`FILE_SHARE_DELETE` through temp creation and replacement. Those handles pin the
+workspace root and every below-root parent directly. The Windows regression
+`secret_workspace_grandparent_rename_is_blocked_by_descendant_handles` also
+places the workspace under a separately renameable grandparent (with the
+database outside that tree) and proves that Windows refuses to rename that
+grandparent while the descendant guard handles are open. This closes the
+ancestor-swap attack without claiming that directories above the root are
+opened or validated by the engine, or that the replace API itself is
+handle-relative. The preimage-content race described above remains on every
+platform.
 
 ### 8.3 DECISION: preserve-both `.conflict` artifacts are floor-excluded
 
