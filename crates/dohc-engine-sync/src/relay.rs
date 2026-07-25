@@ -222,6 +222,7 @@ pub struct ShareViewChangedPath {
 pub struct ShareViewPullOutcome {
     pub fetched: usize,
     pub applied: usize,
+    pub skipped: usize,
     pub changed_paths: Vec<ShareViewChangedPath>,
     pub pending_cursor: crate::ShareCursor,
 }
@@ -266,6 +267,7 @@ pub enum SyncPassOutcome {
         refused: usize,
         skipped: usize,
         pending_cursor: Option<RelayCursor>,
+        changed_paths: Vec<crate::MomentMaterializationChange>,
         /// Replicated resolutions acked in this pass that the receiver
         /// deliberately did not apply. The cursor advances past them, so they
         /// only exist here — a caller that drops this loses them.
@@ -281,6 +283,7 @@ pub enum SyncPassOutcome {
         refused: usize,
         skipped: usize,
         pending_cursor: RelayCursor,
+        changed_paths: Vec<crate::MomentMaterializationChange>,
         pending_resolves: Vec<crate::PendingResolve>,
         refusals: Vec<crate::ReplicationRefusal>,
     },
@@ -417,6 +420,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             refused: 0,
             skipped: 0,
             pending_cursor: None,
+            changed_paths: Vec::new(),
             pending_resolves: Vec::new(),
             refusals: Vec::new(),
         })
@@ -484,12 +488,16 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut skipped = 0_usize;
         let mut pending_resolves = Vec::new();
         let mut refusals = Vec::new();
+        let mut changed_paths = BTreeMap::new();
         let mut pulled_foreign_max = BTreeMap::<String, i64>::new();
         for op in &ordered {
             match crate::apply_replication_envelope(store, op, faults, leases).map_err(local)? {
                 ApplyOutcome::Applied(routed) => {
                     if let Some(pending) = routed.pending_resolve() {
                         pending_resolves.push(pending.clone());
+                    }
+                    for change in routed.materialization_changes {
+                        changed_paths.insert(change.path.clone(), change);
                     }
                     applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?;
                 }
@@ -535,6 +543,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 refused,
                 skipped,
                 pending_cursor,
+                changed_paths: changed_paths.into_values().collect(),
                 pending_resolves,
                 refusals,
             });
@@ -546,6 +555,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             refused,
             skipped,
             pending_cursor: Some(pending_cursor),
+            changed_paths: changed_paths.into_values().collect(),
             pending_resolves,
             refusals,
         })
@@ -864,7 +874,14 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 skipped += 1;
                 continue;
             }
-            let envelope = share_envelope(workspace_id, op)?;
+            let envelope = match share_envelope(workspace_id, op) {
+                Ok(envelope) => envelope,
+                Err(RelayError::InvalidResponse) => {
+                    skipped += 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             match crate::apply_shared_envelope(store, &boundary, &envelope, faults) {
                 Ok(ApplyOutcome::Applied(_)) => applied += 1,
                 Ok(ApplyOutcome::Refused(_)) => refused += 1,
@@ -1006,14 +1023,28 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             path_prefix: Some(path_prefix.to_owned()),
         };
         let mut applied = 0_usize;
+        let mut skipped = 0_usize;
         let mut changed = BTreeMap::<String, ShareViewChangedPath>::new();
         for op in ops {
-            let envelope = share_envelope(workspace_id, op)?;
+            let envelope = match share_envelope(workspace_id, op) {
+                Ok(envelope) => envelope,
+                Err(RelayError::InvalidResponse) => {
+                    skipped += 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             match crate::apply_shared_envelope(store, &boundary, &envelope, faults) {
                 Ok(ApplyOutcome::Applied(_)) => {}
-                Err(SyncError::ShareBoundaryViolation | SyncError::InvalidInput { .. }) => continue,
+                Err(SyncError::ShareBoundaryViolation | SyncError::InvalidInput { .. }) => {
+                    skipped += 1;
+                    continue;
+                }
                 Err(error) => return Err(local(error)),
-                _ => continue,
+                _ => {
+                    skipped += 1;
+                    continue;
+                }
             }
             let mut replay = ShareViewReplayContext {
                 transport: &self.transport,
@@ -1029,6 +1060,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         Ok(ShareViewPullOutcome {
             fetched,
             applied,
+            skipped,
             changed_paths: changed.into_values().collect(),
             pending_cursor: crate::ShareCursor {
                 kind: crate::CursorKind::ShareView,

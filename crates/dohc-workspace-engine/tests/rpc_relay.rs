@@ -93,12 +93,15 @@ impl TestResponse {
 #[derive(Default)]
 struct RelayState {
     workspace_ops: Vec<Value>,
+    workspace_blobs: HashMap<String, Vec<u8>>,
     share_ops: HashMap<String, Vec<Value>>,
     share_blobs: HashMap<(String, String), Vec<u8>>,
     requests: Vec<(String, String)>,
     pushed_workspace_ops: Vec<Value>,
     local_origin_id: Option<String>,
     share_posts: HashMap<String, usize>,
+    workspace_log_delay: Option<Duration>,
+    workspace_log_started: Option<Arc<AtomicBool>>,
 }
 
 struct FakeRelay {
@@ -229,6 +232,17 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
     if path.ends_with("/blobs/have") {
         return TestResponse::json(json!({ "missing": [] }));
     }
+    if method == "GET"
+        && let Some((_, sha256)) = path.rsplit_once("/blobs/")
+    {
+        return TestResponse::bytes(
+            state
+                .workspace_blobs
+                .get(sha256)
+                .cloned()
+                .expect("workspace blob"),
+        );
+    }
     if path.ends_with("/log") {
         if method == "POST" {
             let body = request.json();
@@ -246,6 +260,12 @@ fn handle_request(state: &Arc<Mutex<RelayState>>, request: TestRequest) -> TestR
                 "skipped": 0,
                 "currentMaxOriginSeq": current,
             }));
+        }
+        if let Some(started) = &state.workspace_log_started {
+            started.store(true, Ordering::SeqCst);
+        }
+        if let Some(delay) = state.workspace_log_delay {
+            thread::sleep(delay);
         }
         let since = request.query_i64("since");
         let rows = state
@@ -462,6 +482,33 @@ fn share_row(
         "opKind": op_kind,
         "payload": payload,
         "recordedAtMs": 1000 + relay_seq,
+    })
+}
+
+fn absent_moment_payload(
+    moment_id: &str,
+    object_id: &str,
+    path: &str,
+    sha256: &str,
+    content_kind: &str,
+    byte_length: usize,
+) -> Value {
+    json!({
+        "momentId": moment_id,
+        "versionId": "main",
+        "objectId": object_id,
+        "objectCreatedAtMs": 1,
+        "path": path,
+        "recordedAtMs": 2_000,
+        "operation": "write",
+        "payloadBeforeBlobSha256": null,
+        "payloadBeforePath": null,
+        "payloadAfterBlobSha256": sha256,
+        "payloadAfterPath": path,
+        "payloadAfterContentKind": content_kind,
+        "payloadAfterByteLength": byte_length,
+        "metadata": {"origin": "sync"},
+        "beforePresent": "absent"
     })
 }
 
@@ -710,6 +757,143 @@ async fn pull_rpc_surfaces_pending_resolves_and_refusals() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pull_returns_fast_forwarded_text_and_binary_paths_for_materialization() {
+    let workspace_id = "rpc-relay-changed-paths";
+    let text = b"remote text".to_vec();
+    let binary = b"\0remote binary\xff".to_vec();
+    let text_sha = hex_sha256(&text);
+    let binary_sha = hex_sha256(&binary);
+    let relay = FakeRelay::start(RelayState {
+        workspace_ops: vec![
+            workspace_row(
+                1,
+                workspace_id,
+                "remote",
+                0,
+                "moment.append",
+                absent_moment_payload(
+                    "remote-text",
+                    "text-object",
+                    "notes/remote.md",
+                    &text_sha,
+                    "text",
+                    text.len(),
+                ),
+            ),
+            workspace_row(
+                2,
+                workspace_id,
+                "remote",
+                1,
+                "moment.append",
+                absent_moment_payload(
+                    "remote-binary",
+                    "binary-object",
+                    "assets/remote.bin",
+                    &binary_sha,
+                    "binary",
+                    binary.len(),
+                ),
+            ),
+        ],
+        workspace_blobs: HashMap::from([(text_sha, text), (binary_sha, binary)]),
+        ..RelayState::default()
+    });
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+    seed_sync_identity(&transport, &handle, &mut id).await;
+
+    let pull = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.pull",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    assert_eq!(
+        pull["changedPaths"],
+        json!([
+            {
+                "path": "assets/remote.bin",
+                "operation": "write",
+                "contentKind": "binary",
+            },
+            {
+                "path": "notes/remote.md",
+                "operation": "write",
+                "contentKind": "text",
+            },
+        ])
+    );
+    assert!(pull["pendingCursor"].is_object());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_relay_pull_does_not_block_a_concurrent_workspace_write() {
+    let workspace_id = "rpc-relay-nonblocking-http";
+    let started = Arc::new(AtomicBool::new(false));
+    let relay = FakeRelay::start(RelayState {
+        workspace_log_delay: Some(Duration::from_secs(1)),
+        workspace_log_started: Some(Arc::clone(&started)),
+        ..RelayState::default()
+    });
+    let scratch = ScratchDir::new().expect("scratch");
+    let service = Arc::new(EngineService::new());
+    let transport = Arc::new(InProcessTransport::new(service));
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+    seed_sync_identity(&transport, &handle, &mut id).await;
+
+    let pulling_transport = Arc::clone(&transport);
+    let pulling_handle = handle.clone();
+    let pull = tokio::spawn(async move {
+        pulling_transport
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    10_000,
+                    "sync.pull",
+                    Some(pulling_handle),
+                    json!({ "workspaceId": workspace_id }),
+                ),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !started.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("relay pull started");
+
+    let write = transport.call(
+        RequestContext::unbounded(),
+        request(
+            10_001,
+            "chats.channels.create",
+            Some(handle.clone()),
+            json!({
+                "channelId": "concurrent",
+                "name": "Concurrent",
+                "kind": "channel",
+                "nowMs": 50,
+            }),
+        ),
+    );
+    tokio::time::timeout(Duration::from_millis(250), write)
+        .await
+        .expect("workspace write was blocked by relay HTTP")
+        .expect("concurrent write");
+    pull.await.expect("join pull").expect("pull");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn pull_without_commit_keeps_persisted_cursor_unmoved_and_redelivers() {
     let workspace_id = "rpc-relay-deferred-cursor";
     let relay = FakeRelay::start(RelayState {
@@ -786,6 +970,111 @@ async fn pull_without_commit_keeps_persisted_cursor_unmoved_and_redelivers() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn commit_cursor_accepts_only_the_server_issued_pending_token() {
+    let workspace_id = "rpc-relay-issued-cursor";
+    let relay = FakeRelay::start(RelayState {
+        workspace_ops: vec![workspace_row(
+            1,
+            workspace_id,
+            "remote",
+            0,
+            "workspace.init",
+            json!({}),
+        )],
+        ..RelayState::default()
+    });
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+    seed_sync_identity(&transport, &handle, &mut id).await;
+    let pull = call(
+        &transport,
+        &handle,
+        &mut id,
+        "sync.pull",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    let issued = pull["pendingCursor"].clone();
+
+    let mut forged_fields = issued.clone();
+    forged_fields["cursor"] = json!(10_000);
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                20_000,
+                "sync.commitCursor",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": workspace_id,
+                    "pendingCursor": forged_fields,
+                }),
+            ),
+        )
+        .await
+        .expect_err("mutated pending cursor must be rejected");
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                20_001,
+                "sync.commitCursor",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": workspace_id,
+                    "pendingCursor": {
+                        "kind": "relay",
+                        "token": "never-issued",
+                    },
+                }),
+            ),
+        )
+        .await
+        .expect_err("unknown pending token must be rejected");
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+
+    let committed = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                20_002,
+                "sync.commitCursor",
+                Some(handle.clone()),
+                json!({
+                    "workspaceId": workspace_id,
+                    "pendingCursor": issued,
+                }),
+            ),
+        )
+        .await
+        .expect("issued pending token commits");
+    assert_eq!(committed.result["committed"], true);
+
+    let error = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                20_003,
+                "sync.commitCursor",
+                Some(handle),
+                json!({
+                    "workspaceId": workspace_id,
+                    "pendingCursor": issued,
+                }),
+            ),
+        )
+        .await
+        .expect_err("consumed pending token must be stale");
+    assert_eq!(error.code, ErrorCode::InvalidParams);
+    assert_eq!(error.message, "invalid-pending-cursor");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_new_rpc_refuses_a_cross_workspace_handle_before_transport() {
     let relay = FakeRelay::start(RelayState::default());
     let scratch = ScratchDir::new().expect("scratch");
@@ -800,9 +1089,7 @@ async fn every_new_rpc_refuses_a_cross_workspace_handle_before_transport() {
                 "workspaceId": "other",
                 "pendingCursor": {
                     "kind": "relay",
-                    "cursor": 0,
-                    "replicationEpoch": "epoch",
-                    "streamIdentity": "stream",
+                    "token": "not-issued",
                 },
             }),
         ),
@@ -1052,7 +1339,6 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
         None
     );
     let pending = pulled["pendingCursor"].clone();
-    close(&transport, &handle, &mut id).await;
 
     let db_path = scratch.engine_db_path().expect("engine db path");
     let db = Connection::open(&db_path).expect("open engine db");
@@ -1076,7 +1362,6 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
     assert_eq!(materialized, "shared view body");
     drop(db);
 
-    let handle = open_workspace(&transport, &scratch, &relay, id + 1, workspace_id).await;
     call(
         &transport,
         &handle,
@@ -1095,4 +1380,59 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
         )
         .expect("persisted share view cursor");
     assert_eq!(cursor, "2");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn share_view_pull_skips_a_malformed_entry_and_reports_the_skip() {
+    let workspace_id = "rpc-share-view-malformed";
+    let share_id = "malformed-view-share";
+    let bytes = b"valid after malformed".to_vec();
+    let sha = hex_sha256(&bytes);
+    let mut state = RelayState::default();
+    state.share_ops.insert(
+        share_id.to_owned(),
+        vec![
+            share_row(1, "", 0, "workspace.init", json!({})),
+            share_row(
+                2,
+                "granter",
+                0,
+                "version.create",
+                json!({
+                    "forkSnapshots": [{
+                        "path": "notes/after-malformed.md",
+                        "blobSha256": sha,
+                        "contentKind": "text",
+                    }],
+                }),
+            ),
+        ],
+    );
+    state.share_blobs.insert((share_id.to_owned(), sha), bytes);
+    let relay = FakeRelay::start(state);
+    let scratch = ScratchDir::new().expect("scratch");
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let handle = open_workspace(&transport, &scratch, &relay, 1, workspace_id).await;
+    let mut id = 1;
+    seed_main(&transport, &handle, &mut id, workspace_id).await;
+
+    let pulled = call(
+        &transport,
+        &handle,
+        &mut id,
+        "share.view.pull",
+        json!({
+            "workspaceId": workspace_id,
+            "shareId": share_id,
+            "pathPrefix": "notes",
+        }),
+    )
+    .await;
+    assert_eq!(pulled["fetched"], 2);
+    assert_eq!(pulled["applied"], 1);
+    assert_eq!(pulled["skipped"], 1);
+    assert_eq!(
+        pulled["changedPaths"][0]["path"],
+        "notes/after-malformed.md"
+    );
 }

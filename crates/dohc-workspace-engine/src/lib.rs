@@ -41,8 +41,8 @@ use dohc_engine_runtime::{
     RuntimeError, SearchError, SearchSurface, WorkspaceSupervisor,
 };
 use dohc_engine_sync::{
-    CursorKind, RelayCursor, RelayError, ReplicationEnvelope, ReplicationRefusal, ShareCursor,
-    SyncError, SyncPassOutcome,
+    RelayCursor, RelayError, ReplicationEnvelope, ReplicationRefusal, ShareCursor, SyncError,
+    SyncPassOutcome,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -273,6 +273,19 @@ struct OpenWorkspace {
     capture: Arc<Mutex<Option<capture_driver::CaptureDriver>>>,
 }
 
+#[derive(Clone)]
+enum IssuedCursor {
+    Relay(RelayCursor),
+    ShareView(ShareCursor),
+}
+
+#[derive(Clone)]
+struct PendingCursor {
+    handle: WorkspaceHandle,
+    workspace_id: String,
+    cursor: IssuedCursor,
+}
+
 struct YdocSession {
     workspace: WorkspaceHandle,
     key: DocKey,
@@ -324,6 +337,7 @@ impl OpenWorkspace {
 pub struct EngineService {
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, OpenWorkspace>>,
+    pending_cursors: Mutex<HashMap<String, PendingCursor>>,
     open_lock: tokio::sync::Mutex<()>,
     next_handle: std::sync::atomic::AtomicU64,
     sessions: Arc<Mutex<HashMap<String, YdocSession>>>,
@@ -362,6 +376,7 @@ impl EngineService {
         EngineService {
             supervisor,
             handles: Mutex::new(HashMap::new()),
+            pending_cursors: Mutex::new(HashMap::new()),
             open_lock: tokio::sync::Mutex::new(()),
             next_handle: std::sync::atomic::AtomicU64::new(1),
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -1138,6 +1153,7 @@ impl EngineService {
             // for a fresh actor instead of the one being torn down.
             let closing = supervisor.begin_close(&db_path).map_err(map_runtime)?;
             let removed = lock(&self.handles).remove(&handle);
+            lock(&self.pending_cursors).retain(|_, pending| pending.handle != handle);
             // Sessions (and their lease guards) evict only AFTER this close
             // owns the teardown — evicting earlier meant a close future
             // dropped while waiting on open_lock had already stranded live
@@ -1201,6 +1217,67 @@ impl EngineService {
         Ok((open, configuration))
     }
 
+    fn issue_pending_cursor(
+        &self,
+        handle: &WorkspaceHandle,
+        workspace_id: &str,
+        cursor: IssuedCursor,
+    ) -> Result<Value, WireError> {
+        for _ in 0..4 {
+            let mut bytes = [0_u8; 32];
+            getrandom::fill(&mut bytes)
+                .map_err(|_| wire(ErrorCode::Internal, "pending-cursor-token-failed"))?;
+            let token = bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let kind = match &cursor {
+                IssuedCursor::Relay(_) => "relay",
+                IssuedCursor::ShareView(_) => "shareView",
+            };
+            let mut pending = lock(&self.pending_cursors);
+            if pending.contains_key(&token) {
+                continue;
+            }
+            pending.insert(
+                token.clone(),
+                PendingCursor {
+                    handle: handle.clone(),
+                    workspace_id: workspace_id.to_owned(),
+                    cursor,
+                },
+            );
+            return Ok(json!({ "kind": kind, "token": token }));
+        }
+        Err(wire(ErrorCode::Internal, "pending-cursor-token-collision"))
+    }
+
+    fn consume_pending_cursor(
+        &self,
+        handle: &WorkspaceHandle,
+        workspace_id: &str,
+        kind: PendingCursorKind,
+        token: &str,
+    ) -> Result<IssuedCursor, WireError> {
+        let mut pending = lock(&self.pending_cursors);
+        let valid = pending.get(token).is_some_and(|issued| {
+            issued.handle == *handle
+                && issued.workspace_id == workspace_id
+                && matches!(
+                    (&issued.cursor, kind),
+                    (IssuedCursor::Relay(_), PendingCursorKind::Relay)
+                        | (IssuedCursor::ShareView(_), PendingCursorKind::ShareView)
+                )
+        });
+        if !valid {
+            return Err(wire(ErrorCode::InvalidParams, "invalid-pending-cursor"));
+        }
+        pending
+            .remove(token)
+            .map(|issued| issued.cursor)
+            .ok_or_else(|| wire(ErrorCode::InvalidParams, "invalid-pending-cursor"))
+    }
+
     async fn relay_execute(
         &self,
         ctx: &RequestContext,
@@ -1252,6 +1329,7 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: RelayWorkspaceParams = parse(params)?;
+        let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let outcome = self
             .relay_execute(
@@ -1264,7 +1342,23 @@ impl EngineService {
                 "sync.pull",
             )
             .await?;
-        relay_outcome_json(outcome)
+        let pending = match &outcome {
+            RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
+                pending_cursor: Some(cursor),
+                ..
+            })
+            | RelayOperationOutcome::Sync(SyncPassOutcome::CrashedAfterApply {
+                pending_cursor: cursor,
+                ..
+            }) => Some(IssuedCursor::Relay(cursor.clone())),
+            _ => None,
+        };
+        let mut result = relay_outcome_json(outcome)?;
+        if let Some(cursor) = pending {
+            result["pendingCursor"] =
+                self.issue_pending_cursor(bound_handle, &open.workspace_id, cursor)?;
+        }
+        Ok(result)
     }
 
     async fn sync_commit_cursor(
@@ -1274,30 +1368,22 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: CommitCursorParams = parse(params)?;
+        let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
-        let operation = match params.pending_cursor {
-            PendingCursorParams::Relay {
-                cursor,
-                replication_epoch,
-                stream_identity,
-            } => RelayOperation::CommitCursor {
+        let (kind, token) = match params.pending_cursor {
+            PendingCursorParams::Relay { token } => (PendingCursorKind::Relay, token),
+            PendingCursorParams::ShareView { token } => (PendingCursorKind::ShareView, token),
+        };
+        let issued = self.consume_pending_cursor(bound_handle, &open.workspace_id, kind, &token)?;
+        let operation = match issued {
+            IssuedCursor::Relay(cursor) => RelayOperation::CommitCursor {
                 workspace_id: open.workspace_id.clone(),
-                cursor: RelayCursor {
-                    cursor,
-                    replication_epoch,
-                    stream_identity,
-                },
+                cursor,
             },
-            PendingCursorParams::ShareView { share_id, cursor } => {
-                RelayOperation::CommitShareViewCursor {
-                    workspace_id: open.workspace_id.clone(),
-                    cursor: ShareCursor {
-                        kind: CursorKind::ShareView,
-                        share_id,
-                        cursor,
-                    },
-                }
-            }
+            IssuedCursor::ShareView(cursor) => RelayOperation::CommitShareViewCursor {
+                workspace_id: open.workspace_id.clone(),
+                cursor,
+            },
         };
         let outcome = self
             .relay_execute(ctx, &open, configuration, operation, "sync.commitCursor")
@@ -1477,6 +1563,7 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: ShareViewParams = parse(params)?;
+        let bound_handle = handle.as_ref().ok_or_else(workspace_unavailable)?;
         let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
         let outcome = self
             .relay_execute(
@@ -1491,7 +1578,18 @@ impl EngineService {
                 "share.view.pull",
             )
             .await?;
-        relay_outcome_json(outcome)
+        let pending = match &outcome {
+            RelayOperationOutcome::ShareViewPulled(outcome) => {
+                Some(IssuedCursor::ShareView(outcome.pending_cursor.clone()))
+            }
+            _ => None,
+        };
+        let mut result = relay_outcome_json(outcome)?;
+        if let Some(cursor) = pending {
+            result["pendingCursor"] =
+                self.issue_pending_cursor(bound_handle, &open.workspace_id, cursor)?;
+        }
+        Ok(result)
     }
 
     fn generated_rpc_id(
@@ -6337,15 +6435,14 @@ struct CommitCursorParams {
     deny_unknown_fields
 )]
 enum PendingCursorParams {
-    Relay {
-        cursor: i64,
-        replication_epoch: String,
-        stream_identity: String,
-    },
-    ShareView {
-        share_id: String,
-        cursor: i64,
-    },
+    Relay { token: String },
+    ShareView { token: String },
+}
+
+#[derive(Clone, Copy)]
+enum PendingCursorKind {
+    Relay,
+    ShareView,
 }
 
 #[derive(Deserialize)]
@@ -8365,6 +8462,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             refused,
             skipped,
             pending_cursor,
+            changed_paths,
             pending_resolves,
             refusals,
         } => json!({
@@ -8375,6 +8473,11 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             "refused": refused,
             "skipped": skipped,
             "pendingCursor": pending_cursor.as_ref().map(relay_cursor_json),
+            "changedPaths": changed_paths.iter().map(|change| json!({
+                "path": change.path,
+                "operation": change.operation,
+                "contentKind": change.content_kind,
+            })).collect::<Vec<_>>(),
             "pendingResolves": pending_resolves,
             "refusals": refusals.iter().map(refusal_json).collect::<Vec<_>>(),
         }),
@@ -8386,6 +8489,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             refused,
             skipped,
             pending_cursor,
+            changed_paths,
             pending_resolves,
             refusals,
         } => json!({
@@ -8394,6 +8498,11 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             "refused": refused,
             "skipped": skipped,
             "pendingCursor": relay_cursor_json(&pending_cursor),
+            "changedPaths": changed_paths.iter().map(|change| json!({
+                "path": change.path,
+                "operation": change.operation,
+                "contentKind": change.content_kind,
+            })).collect::<Vec<_>>(),
             "pendingResolves": pending_resolves,
             "refusals": refusals.iter().map(refusal_json).collect::<Vec<_>>(),
         }),
@@ -8433,6 +8542,7 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
         RelayOperationOutcome::ShareViewPulled(outcome) => json!({
             "fetched": outcome.fetched,
             "applied": outcome.applied,
+            "skipped": outcome.skipped,
             "changedPaths": outcome.changed_paths.into_iter().map(|change| json!({
                 "path": change.path,
                 "operation": change.operation,

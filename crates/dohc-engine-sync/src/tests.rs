@@ -446,10 +446,7 @@ fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
     );
     let outcome = apply_replication_envelope(&mut engine, &op, &NoFaults, &AlwaysLive)
         .expect("live lineage defers");
-    assert_eq!(
-        outcome,
-        ApplyOutcome::Applied(RoutedApply { conflict: None })
-    );
+    assert_eq!(outcome, ApplyOutcome::Applied(RoutedApply::default()));
     let deferred_rows: i64 = engine
         .read_with(|conn| {
             conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
@@ -2824,13 +2821,13 @@ fn workspace_init_router_apply_is_idempotent_on_replay() {
     let seed = envelope("workspace-seed-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &seed, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
 
     let operation = envelope("workspace-replay-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let main: (String, String, String, i64) = engine
         .read_with(|conn| {
@@ -2870,7 +2867,7 @@ fn workspace_init_repairs_a_workspace_row_missing_its_main_version() {
     let operation = envelope("partial-workspace-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let main: (String, String, String, i64) = engine
         .read_with(|conn| {
@@ -2975,7 +2972,7 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
 
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     type CopiedSnapshot = (String, String, String, Option<String>, Option<String>);
     let copied: Vec<CopiedSnapshot> = engine
@@ -3042,7 +3039,7 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
     applier_replay.origin_id = "version-applier-replay-peer".into();
     assert!(matches!(
         apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let replay_counts: (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -3272,7 +3269,7 @@ fn version_create_secret_fork_snapshot_never_becomes_readable_plaintext() {
     );
     assert!(matches!(
         apply_replication_envelope(&mut engine, &honest, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
 
     assert_eq!(
@@ -3447,7 +3444,7 @@ fn version_create_legacy_payload_copies_workspace_scoped_source_tables() {
 
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let counts: (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -3629,7 +3626,7 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
 
     assert!(matches!(
         apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let rows: (Vec<String>, Vec<String>) = engine
         .read_with(|conn| {
@@ -3659,7 +3656,7 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
     applier_replay.origin_id = "secret-fork-applier-replay-peer".into();
     assert!(matches!(
         apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let replayed_rows: (i64, i64) = engine
         .read_with(|conn| {
@@ -3978,7 +3975,7 @@ fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
     );
     assert!(matches!(
         apply_replication_envelope(&mut engine, &admitted, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None }))
+        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
 }
 

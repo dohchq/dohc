@@ -46,7 +46,7 @@ pub use model::{
     MAX_BLOB_HAVE_BATCH, MAX_PULL_OPS, MAX_PUSH_OPS_PER_BATCH, MAX_WIRE_INTEGER,
     ReplicationEnvelope,
 };
-pub use moment_apply::apply_moment_envelope;
+pub use moment_apply::{MomentMaterializationChange, apply_moment_envelope};
 pub use path_policy::{PathClass, classify_share_path};
 pub use relay::{
     BlobDownloadRequest, BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse,

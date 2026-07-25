@@ -73,17 +73,22 @@ use dohc_engine_storage::{
     Preimage, StorageError, TxnOutcome, WriteOutcome,
 };
 use dohc_engine_sync::{
-    ApplyOutcome, ClaimRequest, ConflictApplyResult, KeyEnvelopeDownloadRequest,
-    KeyEnvelopeRequest, ProbeRequest, RecoverResponse, RelayCursor, RelaySyncClient,
-    ReplicationEnvelope, ShareCursor, ShareViewPullOutcome, SharedChannelPullOutcome,
-    SharedChannelPushOutcome, SyncPassOutcome, apply_conflict_envelope, read_sync_identity,
+    ApplyOutcome, BlobDownloadRequest, BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse,
+    BlobUploadRequest, ClaimRequest, ClaimResponse, ConflictApplyResult, EpochRequest,
+    EpochResponse, KeyEnvelopeDownloadRequest, KeyEnvelopeDownloadResponse, KeyEnvelopeRequest,
+    KeyEnvelopeResponse, ProbeRequest, ProbeResponse, PullRequest, PullResponse, PushRequest,
+    PushResponse, RecoverResponse, RelayCursor, RelayError, RelaySyncClient, RelayTransport,
+    ReplicationEnvelope, ShareBlobRequest, ShareCursor, ShareViewPullOutcome, ShareViewRequest,
+    ShareViewResponse, SharedChannelPullOutcome, SharedChannelPushOutcome, SharedChannelRequest,
+    SharedChannelResponse, SyncPassOutcome, apply_conflict_envelope, read_sync_identity,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
 use rusqlite::{OptionalExtension, params};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::sync_channel as std_sync_channel;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, OwnedPermit};
@@ -229,7 +234,7 @@ impl std::fmt::Debug for RelayConfiguration {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum RelayOperation {
     Push {
         workspace_id: String,
@@ -278,6 +283,223 @@ pub enum RelayOperation {
         workspace_id: String,
         cursor: ShareCursor,
     },
+}
+
+const RELAY_IO_PENDING: &str = "relay-io-pending";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RelayIoRequest {
+    Push(PushRequest),
+    Pull(PullRequest),
+    Probe(ProbeRequest),
+    Claim(ClaimRequest),
+    RotateEpoch(EpochRequest),
+    BlobsHave(BlobHaveRequest),
+    UploadBlob(BlobUploadRequest),
+    DownloadBlob(BlobDownloadRequest),
+    UploadKeyEnvelope(KeyEnvelopeRequest),
+    DownloadKeyEnvelope(KeyEnvelopeDownloadRequest),
+    SharedChannelPull(SharedChannelRequest),
+    SharedChannelPush(SharedChannelRequest),
+    ShareViewPull(ShareViewRequest),
+    ShareBlob(ShareBlobRequest),
+}
+
+#[derive(Debug, Clone)]
+enum RelayIoResponse {
+    Push(PushResponse),
+    Pull(PullResponse),
+    Probe(ProbeResponse),
+    Claim(ClaimResponse),
+    RotateEpoch(EpochResponse),
+    BlobsHave(BlobHaveResponse),
+    UploadBlob,
+    DownloadBlob(BlobDownloadResponse),
+    UploadKeyEnvelope(KeyEnvelopeResponse),
+    DownloadKeyEnvelope(KeyEnvelopeDownloadResponse),
+    SharedChannelPull(SharedChannelResponse),
+    SharedChannelPush(SharedChannelResponse),
+    ShareViewPull(ShareViewResponse),
+    ShareBlob(BlobDownloadResponse),
+}
+
+#[derive(Default)]
+struct DeferredRelayState {
+    completed: Vec<(RelayIoRequest, Result<RelayIoResponse, RelayError>)>,
+    pending: Option<RelayIoRequest>,
+    workspace_pushed: usize,
+    shared_channel_pushed: usize,
+}
+
+#[derive(Clone, Default)]
+struct DeferredRelayTransport {
+    state: Arc<Mutex<DeferredRelayState>>,
+}
+
+impl DeferredRelayTransport {
+    fn resolve<T>(
+        &self,
+        request: RelayIoRequest,
+        project: impl Fn(&RelayIoResponse) -> Option<T>,
+    ) -> Result<T, RelayError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, result)) = state
+            .completed
+            .iter()
+            .find(|(completed, _)| completed == &request)
+        {
+            return match result {
+                Ok(response) => project(response).ok_or(RelayError::InvalidResponse),
+                Err(error) => Err(error.clone()),
+            };
+        }
+        if state
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending != &request)
+        {
+            return Err(RelayError::InvalidResponse);
+        }
+        state.pending = Some(request);
+        Err(RelayError::Local(RELAY_IO_PENDING.to_owned()))
+    }
+
+    fn take_pending(&self) -> Option<RelayIoRequest> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+            .take()
+    }
+
+    fn complete(&self, request: RelayIoRequest, result: Result<RelayIoResponse, RelayError>) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Ok(RelayIoResponse::Push(response)) = &result
+            && let RelayIoRequest::Push(request) = &request
+            && !request.ops.is_empty()
+        {
+            state.workspace_pushed = state.workspace_pushed.saturating_add(response.inserted);
+        }
+        if let Ok(RelayIoResponse::SharedChannelPush(response)) = &result
+            && let Some(push) = &response.push
+        {
+            state.shared_channel_pushed = state.shared_channel_pushed.saturating_add(push.inserted);
+        }
+        state.completed.push((request, result));
+    }
+
+    fn apply_progress(&self, outcome: &mut RelayOperationOutcome) {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match outcome {
+            RelayOperationOutcome::Sync(SyncPassOutcome::Complete { pushed, .. }) => {
+                *pushed = state.workspace_pushed;
+            }
+            RelayOperationOutcome::SharedChannelPushed(outcome) => {
+                outcome.pushed = state.shared_channel_pushed;
+            }
+            _ => {}
+        }
+    }
+}
+
+macro_rules! relay_transport_method {
+    ($name:ident, $request:ty, $request_variant:ident, $response:ty, $response_variant:ident) => {
+        fn $name(&self, request: $request) -> Result<$response, RelayError> {
+            self.resolve(
+                RelayIoRequest::$request_variant(request),
+                |response| match response {
+                    RelayIoResponse::$response_variant(value) => Some(value.clone()),
+                    _ => None,
+                },
+            )
+        }
+    };
+}
+
+impl RelayTransport for DeferredRelayTransport {
+    relay_transport_method!(push, PushRequest, Push, PushResponse, Push);
+    relay_transport_method!(pull, PullRequest, Pull, PullResponse, Pull);
+    relay_transport_method!(probe, ProbeRequest, Probe, ProbeResponse, Probe);
+    relay_transport_method!(claim_workspace, ClaimRequest, Claim, ClaimResponse, Claim);
+    relay_transport_method!(
+        rotate_epoch,
+        EpochRequest,
+        RotateEpoch,
+        EpochResponse,
+        RotateEpoch
+    );
+    relay_transport_method!(
+        blobs_have,
+        BlobHaveRequest,
+        BlobsHave,
+        BlobHaveResponse,
+        BlobsHave
+    );
+
+    fn upload_blob(&self, request: BlobUploadRequest) -> Result<(), RelayError> {
+        self.resolve(RelayIoRequest::UploadBlob(request), |response| {
+            matches!(response, RelayIoResponse::UploadBlob).then_some(())
+        })
+    }
+
+    relay_transport_method!(
+        download_blob,
+        BlobDownloadRequest,
+        DownloadBlob,
+        BlobDownloadResponse,
+        DownloadBlob
+    );
+    relay_transport_method!(
+        upload_key_envelope,
+        KeyEnvelopeRequest,
+        UploadKeyEnvelope,
+        KeyEnvelopeResponse,
+        UploadKeyEnvelope
+    );
+    relay_transport_method!(
+        download_key_envelope,
+        KeyEnvelopeDownloadRequest,
+        DownloadKeyEnvelope,
+        KeyEnvelopeDownloadResponse,
+        DownloadKeyEnvelope
+    );
+    relay_transport_method!(
+        shared_channel_pull,
+        SharedChannelRequest,
+        SharedChannelPull,
+        SharedChannelResponse,
+        SharedChannelPull
+    );
+    relay_transport_method!(
+        shared_channel_push,
+        SharedChannelRequest,
+        SharedChannelPush,
+        SharedChannelResponse,
+        SharedChannelPush
+    );
+    relay_transport_method!(
+        share_view_pull,
+        ShareViewRequest,
+        ShareViewPull,
+        ShareViewResponse,
+        ShareViewPull
+    );
+    relay_transport_method!(
+        share_blob,
+        ShareBlobRequest,
+        ShareBlob,
+        BlobDownloadResponse,
+        ShareBlob
+    );
 }
 
 #[derive(Debug)]
@@ -1162,7 +1384,7 @@ enum Command {
         reply: oneshot::Sender<Result<Vec<String>, RuntimeError>>,
     },
     Relay {
-        configuration: RelayConfiguration,
+        transport: DeferredRelayTransport,
         operation: RelayOperation,
         leases: LeaseRegistry,
         token: CancellationToken,
@@ -4156,18 +4378,64 @@ impl ActorHandle {
         leases: LeaseRegistry,
         token: CancellationToken,
     ) -> Result<RelayOperationOutcome, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::Relay {
-                configuration,
-                operation,
-                leases,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        let transport = DeferredRelayTransport::default();
+        loop {
+            if token.is_cancelled() {
+                return Err(RuntimeError::Cancelled);
+            }
+            let (reply, reply_rx) = oneshot::channel();
+            self.tx
+                .send(Command::Relay {
+                    transport: transport.clone(),
+                    operation: operation.clone(),
+                    leases: leases.clone(),
+                    token: token.clone(),
+                    reply,
+                })
+                .await
+                .map_err(|_| RuntimeError::ActorUnavailable)?;
+            let outcome = reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?;
+            match outcome {
+                Err(RuntimeError::Relay(RelayError::Local(reason)))
+                    if reason == RELAY_IO_PENDING =>
+                {
+                    let request = transport
+                        .take_pending()
+                        .ok_or(RuntimeError::Relay(RelayError::InvalidResponse))?;
+                    let io_configuration = configuration.clone();
+                    let io_request = request.clone();
+                    let task = tokio::task::spawn_blocking(move || {
+                        execute_http_request(io_configuration, io_request)
+                    });
+                    let result = tokio::select! {
+                        result = task => result
+                            .map_err(|_| RuntimeError::Relay(RelayError::Partitioned))?,
+                        () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                    };
+                    if let Ok(RelayIoResponse::ShareViewPull(response)) = &result {
+                        for blob_request in share_view_blob_requests(&request, response) {
+                            let io_configuration = configuration.clone();
+                            let io_request = blob_request.clone();
+                            let task = tokio::task::spawn_blocking(move || {
+                                execute_http_request(io_configuration, io_request)
+                            });
+                            let blob_result = tokio::select! {
+                                result = task => result
+                                    .map_err(|_| RuntimeError::Relay(RelayError::Partitioned))?,
+                                () = token.cancelled() => return Err(RuntimeError::Cancelled),
+                            };
+                            transport.complete(blob_request, blob_result);
+                        }
+                    }
+                    transport.complete(request, result);
+                }
+                Ok(mut outcome) => {
+                    transport.apply_progress(&mut outcome);
+                    return Ok(outcome);
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Run a long operation as a sequence of bounded units, cancellable at each
@@ -4359,13 +4627,104 @@ fn secret_plaintext_for_job(
         .map_err(RuntimeError::from)
 }
 
+fn execute_http_request(
+    configuration: RelayConfiguration,
+    request: RelayIoRequest,
+) -> Result<RelayIoResponse, RelayError> {
+    let transport = HttpRelayTransport::new(configuration.base_url, configuration.bearer_token)?;
+    match request {
+        RelayIoRequest::Push(request) => transport.push(request).map(RelayIoResponse::Push),
+        RelayIoRequest::Pull(request) => transport.pull(request).map(RelayIoResponse::Pull),
+        RelayIoRequest::Probe(request) => transport.probe(request).map(RelayIoResponse::Probe),
+        RelayIoRequest::Claim(request) => transport
+            .claim_workspace(request)
+            .map(RelayIoResponse::Claim),
+        RelayIoRequest::RotateEpoch(request) => transport
+            .rotate_epoch(request)
+            .map(RelayIoResponse::RotateEpoch),
+        RelayIoRequest::BlobsHave(request) => transport
+            .blobs_have(request)
+            .map(RelayIoResponse::BlobsHave),
+        RelayIoRequest::UploadBlob(request) => transport
+            .upload_blob(request)
+            .map(|()| RelayIoResponse::UploadBlob),
+        RelayIoRequest::DownloadBlob(request) => transport
+            .download_blob(request)
+            .map(RelayIoResponse::DownloadBlob),
+        RelayIoRequest::UploadKeyEnvelope(request) => transport
+            .upload_key_envelope(request)
+            .map(RelayIoResponse::UploadKeyEnvelope),
+        RelayIoRequest::DownloadKeyEnvelope(request) => transport
+            .download_key_envelope(request)
+            .map(RelayIoResponse::DownloadKeyEnvelope),
+        RelayIoRequest::SharedChannelPull(request) => transport
+            .shared_channel_pull(request)
+            .map(RelayIoResponse::SharedChannelPull),
+        RelayIoRequest::SharedChannelPush(request) => transport
+            .shared_channel_push(request)
+            .map(RelayIoResponse::SharedChannelPush),
+        RelayIoRequest::ShareViewPull(request) => transport
+            .share_view_pull(request)
+            .map(RelayIoResponse::ShareViewPull),
+        RelayIoRequest::ShareBlob(request) => transport
+            .share_blob(request)
+            .map(RelayIoResponse::ShareBlob),
+    }
+}
+
+fn share_view_blob_requests(
+    request: &RelayIoRequest,
+    response: &ShareViewResponse,
+) -> Vec<RelayIoRequest> {
+    let RelayIoRequest::ShareViewPull(request) = request else {
+        return Vec::new();
+    };
+    let mut sha256s = BTreeSet::new();
+    for op in &response.ops {
+        if op.op_kind == "moment.append"
+            && let Some(sha256) = op
+                .payload
+                .get("payloadAfterBlobSha256")
+                .and_then(serde_json::Value::as_str)
+            && !sha256.is_empty()
+        {
+            sha256s.insert(sha256.to_owned());
+        }
+        if op.op_kind == "version.create" {
+            for snapshot in op
+                .payload
+                .get("forkSnapshots")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(sha256) = snapshot
+                    .get("blobSha256")
+                    .and_then(serde_json::Value::as_str)
+                    && !sha256.is_empty()
+                {
+                    sha256s.insert(sha256.to_owned());
+                }
+            }
+        }
+    }
+    sha256s
+        .into_iter()
+        .map(|sha256| {
+            RelayIoRequest::ShareBlob(ShareBlobRequest {
+                share_id: request.share_id.clone(),
+                sha256,
+            })
+        })
+        .collect()
+}
+
 fn execute_relay_operation(
     store: &mut EngineStore,
-    configuration: RelayConfiguration,
+    transport: DeferredRelayTransport,
     operation: RelayOperation,
     leases: &LeaseRegistry,
 ) -> Result<RelayOperationOutcome, RuntimeError> {
-    let transport = HttpRelayTransport::new(configuration.base_url, configuration.bearer_token)?;
     let client = RelaySyncClient::new(transport);
     match operation {
         RelayOperation::Push { workspace_id } => client
@@ -6556,7 +6915,7 @@ fn worker_main(
                 let _ = reply.send(outcome);
             }
             Command::Relay {
-                configuration,
+                transport,
                 operation,
                 leases,
                 token,
@@ -6565,7 +6924,7 @@ fn worker_main(
                 let outcome = if token.is_cancelled() {
                     Err(RuntimeError::Cancelled)
                 } else {
-                    execute_relay_operation(&mut store, configuration, operation, &leases)
+                    execute_relay_operation(&mut store, transport, operation, &leases)
                 };
                 let _ = reply.send(outcome);
             }
