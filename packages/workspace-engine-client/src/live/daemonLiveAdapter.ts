@@ -7,6 +7,9 @@ import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
 
 export interface MinimalDaemonClient {
   sendRequest(request: Request): Promise<Response>;
+  readonly helloAck?: {
+    readonly capabilities: readonly string[];
+  };
   onBlob?(handler: (blob: CompletedDaemonBlob) => void): () => void;
   close(): void;
 }
@@ -28,7 +31,7 @@ export class DaemonClientCapabilityError extends Error {
 
   constructor() {
     super(
-      'The daemon client does not expose the negotiated "blobs" capability.',
+      'The daemon session did not negotiate the "blobs" capability.',
     );
     this.name = "DaemonClientCapabilityError";
     this.capability = "blobs";
@@ -110,10 +113,29 @@ function wireErrorFrom(error: unknown): WireError | null {
   };
 }
 
-export class WorkspaceDaemonRequester {
-  private nextRequestId = 1;
+interface SharedRequestIdState {
+  nextRequestId: number;
+}
 
-  constructor(private readonly client: MinimalDaemonClient) {}
+const requestIdsByClient = new WeakMap<
+  MinimalDaemonClient,
+  SharedRequestIdState
+>();
+
+function sharedRequestIds(client: MinimalDaemonClient): SharedRequestIdState {
+  const existing = requestIdsByClient.get(client);
+  if (existing !== undefined) return existing;
+  const created = { nextRequestId: 1 };
+  requestIdsByClient.set(client, created);
+  return created;
+}
+
+export class WorkspaceDaemonRequester {
+  private readonly requestIds: SharedRequestIdState;
+
+  constructor(private readonly client: MinimalDaemonClient) {
+    this.requestIds = sharedRequestIds(client);
+  }
 
   async request(
     method: string,
@@ -124,7 +146,7 @@ export class WorkspaceDaemonRequester {
       deadlineMs?: number;
     },
   ): Promise<Response["result"]> {
-    const id = this.nextRequestId++;
+    const id = this.allocateRequestId();
     return this.send(id, method, params, options);
   }
 
@@ -141,18 +163,27 @@ export class WorkspaceDaemonRequester {
     result: Response["result"];
     blob: CompletedDaemonBlob | null;
   }> {
-    const id = this.nextRequestId++;
+    const id = this.allocateRequestId();
+    const blobCapabilityNegotiated =
+      this.client.helloAck?.capabilities.includes("blobs") === true;
     let completedBlob: CompletedDaemonBlob | null = null;
-    const unsubscribe = this.client.onBlob?.((blob) => {
-      if (blob.requestId !== id) return;
-      completedBlob = blob;
-    });
+    const unsubscribe = blobCapabilityNegotiated
+      ? this.client.onBlob?.((blob) => {
+          if (blob.requestId !== id) return;
+          completedBlob = blob;
+        })
+      : undefined;
 
     try {
       const result = await this.send(id, method, params, options);
       if (!expectsBlob(result)) return { result, blob: null };
-      if (unsubscribe === undefined) {
+      if (!blobCapabilityNegotiated) {
         throw new DaemonClientCapabilityError();
+      }
+      if (unsubscribe === undefined) {
+        throw new DaemonProtocolError(
+          'The daemon client negotiated "blobs" without exposing completed blob delivery.',
+        );
       }
       if (completedBlob === null) {
         throw new DaemonProtocolError(
@@ -163,6 +194,10 @@ export class WorkspaceDaemonRequester {
     } finally {
       unsubscribe?.();
     }
+  }
+
+  private allocateRequestId(): number {
+    return this.requestIds.nextRequestId++;
   }
 
   private async send(
@@ -206,9 +241,5 @@ export class WorkspaceDaemonRequester {
 
   closeTransport(): void {
     this.client.close();
-  }
-
-  nextRequestIdFrom(previous: WorkspaceDaemonRequester): void {
-    this.nextRequestId = Math.max(this.nextRequestId, previous.nextRequestId);
   }
 }

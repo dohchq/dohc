@@ -241,6 +241,15 @@ function captureClient(requests: Request[]): MinimalDaemonClient {
 }
 
 describe("VersionedLiveAdapter", () => {
+  it("requires a workspace binding before the adapter can issue requests", () => {
+    const requests: Request[] = [];
+    expect(() => {
+      // @ts-expect-error The logical workspace binding is intentionally required.
+      new VersionedLiveAdapter(captureClient(requests), WORKSPACE);
+    }).toThrow(VersionedAdapterCapabilityError);
+    expect(requests).toEqual([]);
+  });
+
   it("consumes the matching out-of-band blob for an over-cap binary read", async () => {
     const bytes = new Uint8Array([0, 255, 17, 42, 99]);
     const sha256 = "a".repeat(64);
@@ -250,6 +259,7 @@ describe("VersionedLiveAdapter", () => {
     >();
     const client: MinimalDaemonClient = {
       close: () => undefined,
+      helloAck: { capabilities: ["blobs"] },
       onBlob(handler) {
         blobHandlers.add(handler);
         return () => blobHandlers.delete(handler);
@@ -315,6 +325,8 @@ describe("VersionedLiveAdapter", () => {
   it("fails with a typed capability error when blob egress is unavailable", async () => {
     const client: MinimalDaemonClient = {
       close: () => undefined,
+      helloAck: { capabilities: [] },
+      onBlob: () => () => undefined,
       async sendRequest(request): Promise<Response> {
         return {
           id: request.id,
@@ -346,6 +358,101 @@ describe("VersionedLiveAdapter", () => {
         path: "large.bin",
       }),
     ).rejects.toBeInstanceOf(VersionedAdapterCapabilityError);
+  });
+
+  it("correlates concurrent blob reads across adapters sharing a transport", async () => {
+    const blobHandlers = new Set<
+      Parameters<NonNullable<MinimalDaemonClient["onBlob"]>>[0]
+    >();
+    const pending: Array<{
+      request: Request;
+      resolve: (response: Response) => void;
+    }> = [];
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      helloAck: { capabilities: ["blobs"] },
+      onBlob(handler) {
+        blobHandlers.add(handler);
+        return () => blobHandlers.delete(handler);
+      },
+      sendRequest(request): Promise<Response> {
+        return new Promise((resolve) => {
+          pending.push({ request, resolve });
+          if (pending.length !== 2) return;
+          for (const entry of pending) {
+            const sha256 = (entry.request.params as { sha256: string }).sha256;
+            const bytes = new Uint8Array([
+              sha256 === "a".repeat(64) ? 1 : 2,
+            ]);
+            for (const handler of blobHandlers) {
+              handler({
+                requestId: entry.request.id,
+                streamId: entry.request.id,
+                totalBytes: bytes.byteLength,
+                sha256,
+                bytes,
+              });
+            }
+          }
+          for (const entry of pending) {
+            entry.resolve({
+              id: entry.request.id,
+              result: {
+                bytesBase64: null,
+                byteLength: 1,
+                inbandLimitBytes: 48 * 1024,
+              },
+            });
+          }
+        });
+      },
+    };
+    const first = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+    const second = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    await expect(
+      Promise.all([
+        first.readBinaryBlob({
+          workspaceId: WORKSPACE,
+          sha256: "a".repeat(64),
+        }),
+        second.readBinaryBlob({
+          workspaceId: WORKSPACE,
+          sha256: "b".repeat(64),
+        }),
+      ]),
+    ).resolves.toEqual([new Uint8Array([1]), new Uint8Array([2])]);
+    expect(new Set(pending.map(({ request }) => request.id)).size).toBe(2);
+    expect(blobHandlers.size).toBe(0);
+  });
+
+  it("returns null when the daemon reports a missing binary blob", async () => {
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest(): Promise<Response> {
+        throw {
+          wireError: {
+            code: "INVALID_PARAMS",
+            message: "file-not-found",
+            retry: "no",
+          },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    await expect(
+      adapter.readBinaryBlob({
+        workspaceId: WORKSPACE,
+        sha256: "c".repeat(64),
+      }),
+    ).resolves.toBeNull();
   });
 
   it("rejects a caller-supplied delete moment id the daemon cannot preserve", async () => {
@@ -493,7 +600,11 @@ describe("VersionedLiveAdapter", () => {
   it("encodes every one of the 30 versioned methods with exact params", async () => {
     expect(VERSIONED_REQUEST_CASES).toHaveLength(30);
     const requests: Request[] = [];
-    const adapter = new VersionedLiveAdapter(captureClient(requests), WORKSPACE);
+    const adapter = new VersionedLiveAdapter(
+      captureClient(requests),
+      WORKSPACE,
+      { workspaceId: WORKSPACE },
+    );
 
     for (const entry of VERSIONED_REQUEST_CASES) {
       await expect(
@@ -522,7 +633,11 @@ describe("VersionedLiveAdapter", () => {
     expect(openRequests[0]?.workspace).toBeUndefined();
 
     const requests: Request[] = [];
-    const adapter = new VersionedLiveAdapter(captureClient(requests), WORKSPACE);
+    const adapter = new VersionedLiveAdapter(
+      captureClient(requests),
+      WORKSPACE,
+      { workspaceId: WORKSPACE },
+    );
     for (const entry of WORKSPACE_REQUEST_CASES) {
       await expect(
         adapter.workspaceRequest(entry.method as never, entry.params as never),
@@ -607,7 +722,9 @@ describe("VersionedLiveAdapter", () => {
     };
 
     await expect(
-      new VersionedLiveAdapter(client, WORKSPACE).request(
+      new VersionedLiveAdapter(client, WORKSPACE, {
+        workspaceId: WORKSPACE,
+      }).request(
         VERSIONED_METHOD.versionsActive,
         {},
       ),

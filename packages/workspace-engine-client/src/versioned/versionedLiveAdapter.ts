@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   DaemonClientCapabilityError,
   DaemonProtocolError,
+  DaemonRefusalError,
   WorkspaceDaemonRequester,
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
@@ -52,7 +53,7 @@ export interface AdapterWriteMetadata {
 }
 
 export interface VersionedLiveAdapterOptions {
-  workspaceId?: string;
+  workspaceId: string;
   createId?: (
     kind: "conflict" | "moment" | "object" | "version",
   ) => string;
@@ -60,7 +61,7 @@ export interface VersionedLiveAdapterOptions {
 
 export class VersionedLiveAdapter {
   readonly workspace: WorkspaceHandle;
-  readonly workspaceId?: string;
+  readonly workspaceId: string;
   private readonly requester: WorkspaceDaemonRequester;
   private readonly createId: NonNullable<
     VersionedLiveAdapterOptions["createId"]
@@ -69,8 +70,13 @@ export class VersionedLiveAdapter {
   constructor(
     client: MinimalDaemonClient,
     workspace: WorkspaceHandle,
-    options: VersionedLiveAdapterOptions = {},
+    options: VersionedLiveAdapterOptions,
   ) {
+    if (typeof options?.workspaceId !== "string") {
+      throw new VersionedAdapterCapabilityError(
+        "VersionedLiveAdapter requires a workspaceId binding.",
+      );
+    }
     this.requester = new WorkspaceDaemonRequester(client);
     this.workspace = workspace;
     this.workspaceId = options.workspaceId;
@@ -91,7 +97,6 @@ export class VersionedLiveAdapter {
       opened.workspace,
       { ...options, workspaceId: input.workspaceId },
     );
-    adapter.requester.nextRequestIdFrom(requester);
     return adapter;
   }
 
@@ -291,6 +296,13 @@ export class VersionedLiveAdapter {
         { workspace: this.workspace },
       );
     } catch (error) {
+      if (
+        error instanceof DaemonRefusalError &&
+        error.wireCode === "INVALID_PARAMS" &&
+        error.message === "file-not-found"
+      ) {
+        return null;
+      }
       if (error instanceof DaemonClientCapabilityError) {
         throw new VersionedAdapterCapabilityError(error.message);
       }
@@ -782,7 +794,7 @@ export class VersionedLiveAdapter {
   }
 
   private assertWorkspace(workspaceId: string): void {
-    if (this.workspaceId !== undefined && workspaceId !== this.workspaceId) {
+    if (workspaceId !== this.workspaceId) {
       throw new VersionedAdapterCapabilityError(
         `Workspace ${workspaceId} does not match this adapter's workspace.`,
       );
