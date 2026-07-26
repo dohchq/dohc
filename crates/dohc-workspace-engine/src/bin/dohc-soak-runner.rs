@@ -58,7 +58,7 @@ const DRAIN_RECLAIMED_MIN_FRACTION: f64 = 0.75;
 /// documented constant.
 const HANDLE_SLACK: i64 = 48;
 const THREAD_SLACK: i64 = 8;
-/// A true leak over a 30–60 minute run dwarfs this; transient allocator
+/// A true leak over a 30–90 minute run dwarfs this; transient allocator
 /// behavior does not.
 const MAX_RSS_SLOPE_BYTES_PER_SEC: f64 = 20.0 * 1024.0;
 /// A trend fit is only evidence with enough samples behind it.
@@ -335,6 +335,7 @@ async fn read_loop(
 #[derive(Debug, Clone, serde::Serialize)]
 struct Sample {
     at_secs: f64,
+    cycles_completed: u64,
     rss_bytes: u64,
     handles: u64,
     threads: u64,
@@ -474,22 +475,35 @@ fn sample_process(pid: u32) -> Option<(u64, u64, u64)> {
     }
 }
 
-/// Least-squares slope of RSS over time, bytes/second.
-fn rss_slope(samples: &[Sample]) -> f64 {
+fn linear_slope(
+    samples: &[Sample],
+    x_at: impl Fn(&Sample) -> f64,
+    y_at: impl Fn(&Sample) -> f64,
+) -> Option<f64> {
     let n = samples.len() as f64;
     if n < 3.0 {
-        return 0.0;
+        return None;
     }
-    let mean_t = samples.iter().map(|s| s.at_secs).sum::<f64>() / n;
-    let mean_y = samples.iter().map(|s| s.rss_bytes as f64).sum::<f64>() / n;
+    let mean_x = samples.iter().map(&x_at).sum::<f64>() / n;
+    let mean_y = samples.iter().map(&y_at).sum::<f64>() / n;
     let mut cov = 0.0;
     let mut var = 0.0;
     for sample in samples {
-        let dt = sample.at_secs - mean_t;
-        cov += dt * (sample.rss_bytes as f64 - mean_y);
-        var += dt * dt;
+        let dx = x_at(sample) - mean_x;
+        cov += dx * (y_at(sample) - mean_y);
+        var += dx * dx;
     }
-    if var == 0.0 { 0.0 } else { cov / var }
+    (var != 0.0).then_some(cov / var)
+}
+
+/// Least-squares slope of RSS over time, bytes/second.
+fn rss_slope(samples: &[Sample]) -> f64 {
+    linear_slope(
+        samples,
+        |sample| sample.at_secs,
+        |sample| sample.rss_bytes as f64,
+    )
+    .unwrap_or(0.0)
 }
 
 fn trend_span_secs(samples: &[Sample]) -> f64 {
@@ -511,6 +525,50 @@ fn rss_slopes_by_quarter(samples: &[Sample]) -> Vec<f64> {
             let start = quarter * samples.len() / 4;
             let end = (quarter + 1) * samples.len() / 4;
             rss_slope(&samples[start..end])
+        })
+        .collect()
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkloadQuarterTrend {
+    samples: usize,
+    cycles_completed_start: u64,
+    cycles_completed_end: u64,
+    rss_slope_bytes_per_sec: f64,
+    cycle_rate_per_sec: Option<f64>,
+    rss_slope_bytes_per_cycle: Option<f64>,
+}
+
+fn workload_trends_by_quarter(samples: &[Sample]) -> Vec<WorkloadQuarterTrend> {
+    (0..4)
+        .map(|quarter| {
+            let start = quarter * samples.len() / 4;
+            let end = (quarter + 1) * samples.len() / 4;
+            let quarter_samples = &samples[start..end];
+            let cycle_rate_per_sec = linear_slope(
+                quarter_samples,
+                |sample| sample.at_secs,
+                |sample| sample.cycles_completed as f64,
+            )
+            .filter(|rate| *rate > 0.0);
+            let rss_slope_bytes_per_cycle = linear_slope(
+                quarter_samples,
+                |sample| sample.cycles_completed as f64,
+                |sample| sample.rss_bytes as f64,
+            );
+            WorkloadQuarterTrend {
+                samples: quarter_samples.len(),
+                cycles_completed_start: quarter_samples
+                    .first()
+                    .map_or(0, |sample| sample.cycles_completed),
+                cycles_completed_end: quarter_samples
+                    .last()
+                    .map_or(0, |sample| sample.cycles_completed),
+                rss_slope_bytes_per_sec: rss_slope(quarter_samples),
+                cycle_rate_per_sec,
+                rss_slope_bytes_per_cycle,
+            }
         })
         .collect()
 }
@@ -1011,6 +1069,7 @@ async fn main() {
             if let Some((rss, handles, threads)) = sample_process(daemon.pid()) {
                 samples.push(Sample {
                     at_secs: started.elapsed().as_secs_f64(),
+                    cycles_completed: cycle,
                     rss_bytes: rss,
                     handles,
                     threads,
@@ -1056,6 +1115,7 @@ async fn main() {
         sample_process(daemon.pid()).expect("drain start process sample");
     let drain_start_sample = Sample {
         at_secs: started.elapsed().as_secs_f64(),
+        cycles_completed: cycle,
         rss_bytes: rss_drain_start,
         handles: handles_drain_start,
         threads: threads_drain_start,
@@ -1063,6 +1123,7 @@ async fn main() {
     samples.push(drain_start_sample.clone());
     let trend = classify_rss_trend(&samples);
     let quarter_slopes = rss_slopes_by_quarter(&samples);
+    let workload_quarter_trends = workload_trends_by_quarter(&samples);
     eprintln!(
         "soak: phase 3 — {}s unaided idle drain (no allocator release request)",
         DRAIN_WINDOW.as_secs()
@@ -1078,6 +1139,7 @@ async fn main() {
             sample_process(daemon.pid()).expect("idle-drain process sample");
         drain_samples.push(Sample {
             at_secs: started.elapsed().as_secs_f64(),
+            cycles_completed: cycle,
             rss_bytes: rss,
             handles,
             threads,
@@ -1205,6 +1267,7 @@ async fn main() {
         "rssSlopeBytesPerSecWholeRun": trend.whole_run_slope_bytes_per_sec,
         "rssSlopeBytesPerSecTail": trend.tail_slope_bytes_per_sec,
         "rssSlopeBytesPerSecByQuarter": quarter_slopes,
+        "workloadTrendByQuarter": workload_quarter_trends,
         "assertions": {
             // The keys SAY what they CHECK: within the recorded slack —
             // never "exactly baseline", which no Windows run can hold.
@@ -1364,6 +1427,7 @@ mod tests {
             .enumerate()
             .map(|(index, rss_bytes)| Sample {
                 at_secs: index as f64 * SAMPLE_EVERY.as_secs_f64(),
+                cycles_completed: index as u64,
                 rss_bytes: *rss_bytes,
                 handles: 10,
                 threads: 10,
@@ -1381,6 +1445,7 @@ mod tests {
                 let at_secs = index as f64 * interval_secs;
                 Sample {
                     at_secs,
+                    cycles_completed: index as u64,
                     rss_bytes: rss_at(at_secs).round() as u64,
                     handles: 10,
                     threads: 10,
@@ -1437,6 +1502,40 @@ mod tests {
         assert_eq!(trend.tail_samples, MIN_TREND_SAMPLES - 1);
         assert!(trend.tail_span_secs >= MIN_TREND_SPAN_SECS);
         assert_eq!(trend.disposition, RssTrendDisposition::NotEvaluated);
+    }
+
+    #[test]
+    fn quarter_rss_trends_are_least_squares_fits_not_endpoint_secants() {
+        let mut samples = synthetic_trend(16, 1.0, |_| 1_000.0);
+        for (offset, rss_bytes) in [1_000, 2_000, 2_100, 999].into_iter().enumerate() {
+            samples[8 + offset].rss_bytes = rss_bytes;
+        }
+
+        let quarter_slopes = rss_slopes_by_quarter(&samples);
+
+        assert!(samples[11].rss_bytes < samples[8].rss_bytes);
+        assert!(quarter_slopes[2] > 0.0);
+    }
+
+    #[test]
+    fn quarter_workload_trends_normalize_rss_growth_by_completed_cycles() {
+        let samples = (0..16)
+            .map(|index| {
+                let cycles_completed = (index * index + index) as u64;
+                Sample {
+                    at_secs: index as f64,
+                    cycles_completed,
+                    rss_bytes: 1_000_000 + 512 * cycles_completed,
+                    handles: 10,
+                    threads: 10,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for trend in workload_trends_by_quarter(&samples) {
+            assert!(trend.cycle_rate_per_sec.is_some());
+            assert_eq!(trend.rss_slope_bytes_per_cycle, Some(512.0));
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@
 #
 #   tools/rust-engine-program/macos-evidence.sh [full|quick]
 #
-#   full (default): the 30-60 min cutoverBlocking soak — the BANKABLE evidence.
+#   full (default): a 30 min cutoverBlocking soak — the BANKABLE evidence.
 #   quick:          short smoke. NON-GATING: the runner exits 0 with verdict
 #                   PASS-SCENARIOS-ONLY(trend-not-evaluated); it CANNOT satisfy
 #                   the GATE6 cutoverBlocking evidence. Use for a fast sanity run.

@@ -39,14 +39,18 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "full = the 30-60min cutoverBlocking soak (BANKABLE evidence). quick = short smoke, NON-GATING, cannot satisfy GATE6."
+        description: "full = the 30-90min cutoverBlocking soak (BANKABLE evidence). quick = short smoke, NON-GATING, cannot satisfy GATE6."
         type: choice
         default: full
         options: [full, quick]
       soak_minutes:
-        description: "full-mode soak duration in minutes. Longer runs are how a decelerating fragmentation curve is told apart from a constant-rate leak."
-        type: string
+        description: "Full-mode soak duration. Bounded so the 2x runner hard cap plus gate/build/drain fit the job timeout."
+        type: choice
         default: "30"
+        options:
+          - "30"
+          - "60"
+          - "90"
 
 permissions:
   contents: read
@@ -69,7 +73,10 @@ jobs:
     # macos-15 rather than -latest so a rolling OS bump cannot silently change
     # what the cited evidence ran on.
     runs-on: blacksmith-6vcpu-macos-15
-    timeout-minutes: 150
+    # The runner can use up to 2x the requested duration while satisfying both
+    # its cycle and time targets. At the 90-minute maximum, 240 minutes leaves
+    # 60 minutes for setup, the full gate, release builds, and idle drain.
+    timeout-minutes: 240
     permissions:
       contents: read
     steps:
@@ -164,13 +171,19 @@ jobs:
       - name: Soak (${{ inputs.mode }} mode; self-describing evidence JSON)
         env:
           SOAK_MODE: ${{ inputs.mode }}
+          SOAK_MINUTES: ${{ inputs.soak_minutes }}
         run: |
-          set -o pipefail
+          set -euo pipefail
           mkdir -p tools/rust-engine-program/soak-evidence
           if [ "$SOAK_MODE" = "full" ]; then
             EVIDENCE_TIER="cutoverBlocking"
-            SOAK_MINUTES="${{ inputs.soak_minutes }}"
-            case "$SOAK_MINUTES" in ''|*[!0-9]*) SOAK_MINUTES=30 ;; esac
+            case "$SOAK_MINUTES" in
+              30|60|90) ;;
+              *)
+                echo "::error::full-mode soak_minutes must be 30, 60, or 90; got '$SOAK_MINUTES'"
+                exit 1
+                ;;
+            esac
             ARGS="--minutes $SOAK_MINUTES --cycles 1000"
           else
             EVIDENCE_TIER="quick-smoke"
@@ -225,9 +238,28 @@ jobs:
             if (s.length < 8) {
               console.log("too few samples to shape-check: " + s.length);
             } else {
-              console.log("RSS TREND SHAPE (per-quarter linear fits):");
-              d.rssSlopeBytesPerSecByQuarter.forEach((slope, i) => {
-                console.log("  quarter " + (i + 1) + ": " + Math.round(slope) + " B/s");
+              console.log("RSS TREND SHAPE (informational per-quarter least-squares fits):");
+              d.workloadTrendByQuarter.forEach((quarter, i) => {
+                const cycleRate = quarter.cycleRatePerSec == null
+                  ? "n/a"
+                  : quarter.cycleRatePerSec.toFixed(3);
+                const bytesPerCycle = quarter.rssSlopeBytesPerCycle == null
+                  ? "n/a"
+                  : Math.round(quarter.rssSlopeBytesPerCycle);
+                console.log(
+                  "  quarter " +
+                    (i + 1) +
+                    ": rss=" +
+                    Math.round(quarter.rssSlopeBytesPerSec) +
+                    " B/s workload=" +
+                    cycleRate +
+                    " cycles/s normalized=" +
+                    bytesPerCycle +
+                    " B/cycle cycles=" +
+                    quarter.cyclesCompletedStart +
+                    "->" +
+                    quarter.cyclesCompletedEnd
+                );
               });
               console.log("  rss first=" + mb(s[0].rss_bytes) + "MB last=" + mb(s[s.length - 1].rss_bytes) + "MB peak=" + mb(Math.max.apply(null, s.map((x) => x.rss_bytes))) + "MB samples=" + s.length);
               console.log("  handles " + s[0].handles + "->" + s[s.length - 1].handles + " threads " + s[0].threads + "->" + s[s.length - 1].threads);
@@ -243,8 +275,9 @@ jobs:
               console.log("  rss start=" + mb(drain.rssAtStartBytes) + "MB end=" + mb(drain.rssAtEndBytes) + "MB min=" + mb(drain.rssMinBytes) + "MB drop=" + mb(drain.rssDropBytes) + "MB (" + dropPercent + ")");
               console.log("  samples=" + drain.samplesCollected + " allocatorReleaseRequested=" + drain.allocatorReleaseRequested);
             }
-            console.log("RSS DISPOSITION: " + d.rssDisposition);
+            console.log("RSS DISPOSITION (final-half B/s threshold): " + d.rssDisposition);
             console.log("WARMUP-DOMINATED WHOLE-RUN FIT: " + d.warmupDominatedWholeRunFit);
+            console.log("RUN VERDICT: " + d.verdict);
           ' "$SOAK_EVIDENCE_PATH"
 
       - name: Upload macOS evidence artifacts

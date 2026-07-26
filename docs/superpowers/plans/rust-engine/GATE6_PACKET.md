@@ -77,42 +77,55 @@ R16 (legacy deletion) is POST-cutover by design.
   conclusions require bounds calibrated on that platform. The existing
   WSL-Linux result remains scenario/portability evidence under this caveat.
 
-## 1b. macOS soak RSS growth — RESOLVED 2026-07-26 (methodology defect, not an engine leak)
+## 1b. macOS soak RSS growth — TAIL-BOUND PASS; cause remains open
 
 The cutoverBlocking soak failed its RSS bound on macOS and passed on Windows.
-A 90-minute run settled it: the failure was the **verdict methodology**, not the
-engine.
+A 90-minute run showed that the whole-run fit was dominated by early growth.
+The verdict methodology is resolved: it now evaluates the final half of the
+workload samples against the unchanged 20 KiB/s wall-clock bound. The trace's
+cause is **not** resolved by that verdict.
 
-| run | quarter slopes (B/s) | whole-run fit | RSS |
+| run | quarter evidence (B/s) | whole-run fit | RSS |
 |---|---|---|---|
-| macOS 30 min (×3) | +133k, +57k, +27k, +36k | +43–46 KB/s | 11.7 → 122 MB |
-| **macOS 90 min** | **+72.8k, +35.4k, +16.9k, +6.7k** | +25.8 KB/s | 11.9 → 183.9 MB (peak 184.8, ended BELOW peak) |
-| Windows 30 min | +49k, +13k, −31k, +4k | +13.2 KB/s | 8.8 → 41.6 MB |
+| macOS 30 min (×3) | legacy endpoint secants withdrawn as trend evidence | +43–46 KB/s | 11.7 → 122 MB |
+| **macOS 90 min** | legacy endpoint secants withdrawn as trend evidence | +25.8 KB/s | 11.9 → 183.9 MB (peak 184.8, ended BELOW peak) |
+| Windows 30 min | least-squares: +39.6k, +16.1k, **+10.0k**, +3.1k | +13.2 KB/s | 8.8 → 41.6 MB |
 
-Over 90 minutes each macOS quarter roughly **halves**, and the final quarter
-(6.7 KB/s) is already well under the 20 KiB/s bound. That is an asymptotic
-curve approaching a plateau. A constant-rate leak against a constant cycle rate
-holds a constant slope; this does not. Handles were clean throughout
-(11 → 11) and threads ended lower than they started (12 → 9).
+The original workflow printed two-point endpoint secants for each quarter.
+Those macOS numbers are withdrawn rather than relabelled as trends. For the
+banked Windows JSON, recomputing every quarter over all its samples changes the
+third quarter from the cited −30.8 KB/s secant to a +10.0 KB/s least-squares
+fit. The workflow and evidence schema now use least-squares fits throughout.
 
-The whole-run linear fit is dominated by warm-up, so it reported FAIL for a
-process whose steady-state growth was inside the bound. **The verdict now
-evaluates the post-warm-up tail slope against the same unchanged 20 KiB/s
-bound**, while the whole-run fit and the per-quarter series remain in the
-evidence as informational, and a run whose tail passes while its whole-run fit
-does not is recorded as such rather than silently laundered into a bare PASS.
-A synthetic constant-slope leak still FAILS the tail test (unit-tested and
-mutation-proven), so the change does not weaken leak detection.
+Under the current classifier the 90-minute macOS trace's final-half fit produces
+`rssDisposition: PASS`; the whole-run fit and properly fitted quarter series
+remain informational and are printed beside that disposition. The runner also
+records when a passing tail masks an over-bound whole-run fit. Handles were
+clean throughout (11 → 11) and threads ended lower than they started (12 → 9).
+
+The old traces did not record completed-cycle count at each RSS sample. Because
+scenario latency can change as files and database state accumulate, declining
+bytes/second does not establish a fragmentation plateau: a fixed leak per cycle
+can show the same shape if cycle throughput declines. The existing 90-minute
+trace therefore cannot distinguish fragmentation from a per-cycle leak.
+
+New evidence records completed cycles in every workload sample and reports, for
+each quarter, least-squares RSS bytes/second, cycles/second, and RSS bytes/cycle.
+The workflow prints those normalized diagnostics. They do not silently change
+the verdict: **PASS means only that the final-half wall-clock RSS growth met the
+recorded 20 KiB/s resource bound**. A synthetic constant wall-clock slope above
+that bound still fails the unit-tested tail classifier; variable-throughput
+per-cycle leak detection requires the new normalized evidence.
 
 The idle-drain phase reports RETAINED (≈0% returned in 120 s) on macOS. That is
 consistent with `libmalloc`, which releases only under memory pressure — the
 drain deliberately does not call `malloc_zone_pressure_relief`, to measure
 unaided behavior — and it is not evidence of a leak on its own.
 
-**Residual, recorded honestly:** the tail method cannot detect a leak that only
-begins after the warm-up cutoff, and 184 MB steady-state RSS after 10,858
-cycles at ~2 cycles/second is a fragmentation plateau whose absolute height was
-never calibrated for macOS. Real dogfood usage is orders of magnitude quieter
+**Residual, recorded honestly:** 184 MB RSS after 10,858 cycles at an overall
+~2 cycles/second was never calibrated for macOS, and the unnormalized historical
+trace cannot establish whether the retained growth is allocator fragmentation
+or a workload-linked leak. Real dogfood usage is orders of magnitude quieter
 (the same caveat §1 records for Windows).
 
 ## 2. Differential (TS-vs-Rust capture parity) — PASS
@@ -275,7 +288,7 @@ cutover sequencing decision exposed by RPC-E-3 and remains for Ice.
    (quick|full input) and the local `tools/rust-engine-program/
    macos-evidence.sh` (run on a Mac). Each reproduces the full-workspace gate +
    the cutoverBlocking soak and emits the verdict logs + soak-evidence JSON.
-   Both DEFAULT TO `full` (the bankable 30-60min soak); `quick` is explicitly
+   Both DEFAULT TO `full` (the bankable 30-90min soak); `quick` is explicitly
    NON-GATING (the runner exits 0 with PASS-SCENARIOS-ONLY(trend-not-evaluated),
    which CANNOT satisfy this packet's soak evidence). Both install cargo-deny and
    FAIL on a `cargo-deny=SKIP` gate line, and both build the daemon + runner
