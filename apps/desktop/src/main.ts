@@ -489,6 +489,7 @@ import { rgPath } from "@vscode/ripgrep";
 import {
   startCliServer,
   type CliRegistryWorkspace,
+  type CliRunMessageLink,
   type CliServerHandle,
   type CliWorkspaceContext,
 } from "./cli/cliServer";
@@ -1925,6 +1926,20 @@ async function publishAgentPresence(
   );
 }
 
+const pendingCliRunMessageLinks = new Set<string>();
+
+function cliRunMessageLinkKey(link: CliRunMessageLink): string {
+  return `${link.workspaceId}\u0000${link.runId}\u0000${link.messageId}`;
+}
+
+function hasPendingCliRunMessageLink(
+  workspaceId: string,
+  runId: string,
+): boolean {
+  const prefix = `${workspaceId}\u0000${runId}\u0000`;
+  return [...pendingCliRunMessageLinks].some((key) => key.startsWith(prefix));
+}
+
 const chatDispatchService = createChatDispatchService({
   workspaceFor: workspaceForDispatch,
   listOpenWorkspaces: openDispatchWorkspaces,
@@ -2000,6 +2015,7 @@ const chatDispatchService = createChatDispatchService({
     dispatchAgentRunSlots.delete(workspaceId);
   },
   runSlotOccupied: (workspaceId) => activity.hasAgentRun(workspaceId),
+  hasPendingRunMessageLink: hasPendingCliRunMessageLink,
   publishPresence: publishAgentPresence,
   requeueFailedTrigger: (input) => {
     const workspace = workspaceForDispatch(input.workspaceId);
@@ -2123,6 +2139,15 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
       void syncWorkspaceSharedChannels(workspace.workspaceId);
       void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
         console.error("[desktop] CLI dispatch scan:", error);
+      });
+    },
+    onRunMessageLinkPending: (link) => {
+      pendingCliRunMessageLinks.add(cliRunMessageLinkKey(link));
+    },
+    onRunMessageLinkSettled: (link) => {
+      pendingCliRunMessageLinks.delete(cliRunMessageLinkKey(link));
+      void chatDispatchService.scanWorkspace(link.workspaceId).catch((error) => {
+        console.error("[desktop] CLI provenance recovery scan:", error);
       });
     },
     onError: (error) => {

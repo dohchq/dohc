@@ -30,6 +30,7 @@ import { nativeTmpdir } from "../workspaces/testTemp";
 import {
   CLI_SOCKET_FILE,
   cliThreadId,
+  disposeCliServerRuntime,
   handleCliRequestLine,
   startCliServer,
   type CliRegistryWorkspace,
@@ -277,6 +278,7 @@ describe("CLI socket server", () => {
   afterEach(async () => {
     await server?.close();
     server = null;
+    disposeCliServerRuntime(serverOptions);
     dispatchDb?.close();
     dispatchDb = null;
     await store?.close();
@@ -669,6 +671,58 @@ describe("CLI socket server", () => {
       originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId),
     ).toBe(claim.run.runId);
     expect(errors).toEqual([]);
+  });
+
+  it("keeps retrying an exhausted provenance link until the posted reply is linked", async () => {
+    // MUTATION: remove the recovery enqueue after the third foreground failure
+    // -> the durable chat reply remains permanently absent from the run ledger.
+    dispatchStore.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: "message_recovery_trigger",
+      threadId: "thread_recovery",
+    });
+    const claim = dispatchStore.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!claim) throw new Error("Expected a dispatch run for recovery linkage.");
+    let attempts = 0;
+    const pending: string[] = [];
+    const settled: string[] = [];
+    const originalDispatch = dispatchStore;
+    context = {
+      ...context,
+      dispatchStore: {
+        ...originalDispatch,
+        async recordRunMessage(input) {
+          attempts += 1;
+          if (attempts <= 3) throw new Error("daemon restart in progress");
+          return originalDispatch.recordRunMessage(input);
+        },
+      },
+    };
+    serverOptions.runMessageLinkRetryMs = 0;
+    serverOptions.runMessageLinkRecoveryRetryMs = 0;
+    serverOptions.onRunMessageLinkPending = (link) => pending.push(link.messageId);
+    serverOptions.onRunMessageLinkSettled = (link) => settled.push(link.messageId);
+
+    const result = await post({
+      actor: "agent",
+      runId: claim.run.runId,
+      title: "Recover provenance",
+      body: "This posted reply must remain recoverable.",
+    });
+    for (let index = 0; index < 50 && attempts < 4; index += 1) {
+      await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, 5));
+    }
+
+    const engineMessageId = result.messageId.replace(/^msg_/u, "message_");
+    expect(result.warning).toContain("recovery will continue in the background");
+    expect(attempts).toBe(4);
+    expect(pending).toEqual([engineMessageId]);
+    expect(settled).toEqual([engineMessageId]);
+    expect(
+      originalDispatch.runIdForMessage(WORKSPACE_ID, engineMessageId),
+    ).toBe(claim.run.runId);
   });
 
   it("returns a visible warning when run-message provenance retries are exhausted", async () => {

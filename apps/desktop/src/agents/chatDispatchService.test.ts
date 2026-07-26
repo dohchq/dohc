@@ -105,6 +105,9 @@ interface FixtureOptions {
     chat: LinkedChatStore,
   ) => void | boolean | Promise<void | boolean>;
   temporaryRunActivity?: boolean;
+  requeueFailures?: Error[];
+  recordEligibleTriggerFailures?: Error[];
+  hasPendingRunMessageLink?: (workspaceId: string, runId: string) => boolean;
 }
 
 interface Fixture {
@@ -496,6 +499,17 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     liveRecoveries = live.listAppQuitRecoveries;
     closeDispatch = live.close;
   }
+  if (options.recordEligibleTriggerFailures) {
+    const baseDispatch = serviceDispatch;
+    serviceDispatch = {
+      ...baseDispatch,
+      recordEligibleTriggers(input) {
+        const error = options.recordEligibleTriggerFailures?.shift();
+        if (error) throw error;
+        return baseDispatch.recordEligibleTriggers(input);
+      },
+    };
+  }
 
   const service = createChatDispatchService({
     workspaceFor: (workspaceId) => (workspaceId === WORKSPACE_ID ? workspace : null),
@@ -539,8 +553,13 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
     publishPresence: async (input) => {
       presence.push(input);
     },
+    ...(options.hasPendingRunMessageLink
+      ? { hasPendingRunMessageLink: options.hasPendingRunMessageLink }
+      : {}),
     requeueFailedTrigger: (input) => {
       requeues.push(input);
+      const error = options.requeueFailures?.shift();
+      if (error) throw error;
       return liveRequeue?.(input) ?? requeueRaw(input);
     },
     listAppQuitRecoveries: (workspaceId) =>
@@ -1557,6 +1576,42 @@ describe("chatDispatchService", () => {
     });
   });
 
+  it("does not report no reply while CLI provenance recovery is pending", async () => {
+    vi.useFakeTimers();
+    let linkPending = true;
+    const fixture = await createFixture({
+      hasPendingRunMessageLink: () => linkPending,
+    });
+    const trigger = await createAgentThread(fixture, {
+      body: "Wait for my CLI reply provenance.",
+      authorUserId: "user_local",
+    });
+    await activate(fixture);
+    const claim = fixture.dispatch.openRuns(WORKSPACE_ID)[0];
+    if (!claim) throw new Error("Expected a live run.");
+
+    fixture.spawnCalls[0]!.process.emitExit(0);
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    let messages = await fixture.chat.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: trigger.threadId,
+    });
+    expect(
+      messages.some((message) => message.body.includes("produced no reply")),
+    ).toBe(false);
+
+    linkPending = false;
+    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
+    await flushMicrotasks();
+    messages = await fixture.chat.listMessages({
+      workspaceId: WORKSPACE_ID,
+      threadId: trigger.threadId,
+    });
+    expect(
+      messages.filter((message) => message.body.includes("produced no reply")),
+    ).toHaveLength(1);
+  });
+
   it("fails an interrupted startup run and re-dispatches its trigger once", async () => {
     const fixture = await createFixture();
     const trigger = await createAgentThread(fixture, {
@@ -1591,6 +1646,80 @@ describe("chatDispatchService", () => {
       triggerMessageId: trigger.messageId,
       attemptCount: 2,
     });
+    expect(fixture.spawnCalls).toHaveLength(1);
+  });
+
+  it("retains an interrupted requeue intent until the ledger transition persists", async () => {
+    // MUTATION: remove pendingInterruptedRequeues or mark the workspace swept
+    // after the first failed requeue -> the terminal trigger is undiscoverable
+    // and this test never observes the second attempt or a replacement runner.
+    vi.useFakeTimers();
+    const fixture = await createFixture({
+      requeueFailures: [new Error("daemon unavailable during requeue")],
+    });
+    const trigger = await createAgentThread(fixture, {
+      body: "Retry this interrupted recovery.",
+      authorUserId: "user_local",
+    });
+    fixture.dispatch.recordTrigger({
+      workspaceId: WORKSPACE_ID,
+      triggerMessageId: trigger.messageId,
+      threadId: trigger.threadId,
+    });
+    const interrupted = fixture.dispatch.claimNextPending(WORKSPACE_ID, {
+      command: "claude -p",
+    });
+    if (!interrupted) throw new Error("Expected an interrupted run.");
+
+    fixture.service.start();
+    await fixture.service.scanWorkspace(WORKSPACE_ID);
+    expect(fixture.dispatch.getRunRecord(interrupted.run.runId)).toMatchObject({
+      failureReason: "app restart during run",
+    });
+    expect(fixture.spawnCalls).toEqual([]);
+    expect(fixture.requeues).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
+    await flushMicrotasks();
+
+    expect(fixture.requeues).toEqual([
+      {
+        workspaceId: WORKSPACE_ID,
+        triggerMessageId: trigger.messageId,
+        runId: interrupted.run.runId,
+      },
+      {
+        workspaceId: WORKSPACE_ID,
+        triggerMessageId: trigger.messageId,
+        runId: interrupted.run.runId,
+      },
+    ]);
+    expect(fixture.spawnCalls).toHaveLength(1);
+    expect(fixture.dispatch.openRuns(WORKSPACE_ID)[0]?.dispatch).toMatchObject({
+      triggerMessageId: trigger.messageId,
+      attemptCount: 2,
+    });
+  });
+
+  it("retries a failed local-only trigger scan after the daemon recovers", async () => {
+    vi.useFakeTimers();
+    const fixture = await createFixture({
+      recordEligibleTriggerFailures: [new Error("daemon restarted during scan")],
+    });
+    await createAgentThread(fixture, {
+      body: "Dispatch after the local scan recovers.",
+      authorUserId: "user_local",
+    });
+
+    fixture.service.start();
+    await expect(
+      fixture.service.scanWorkspace(WORKSPACE_ID),
+    ).rejects.toThrow("daemon restarted during scan");
+    expect(fixture.spawnCalls).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_RECOVERY_BACKOFF_MS);
+    await flushMicrotasks();
+
     expect(fixture.spawnCalls).toHaveLength(1);
   });
 

@@ -118,6 +118,12 @@ export interface CliMainIdentity {
   reactionAuthorId: string;
 }
 
+export interface CliRunMessageLink {
+  workspaceId: string;
+  runId: string;
+  messageId: string;
+}
+
 export interface CliServerOptions {
   stateDir: string;
   listWorkspaces(): readonly CliRegistryWorkspace[];
@@ -130,6 +136,9 @@ export interface CliServerOptions {
   regexScanTimeoutMs?: number;
   runMessageLinkRetryMs?: number;
   runMessageLinkDeadlineMs?: number;
+  runMessageLinkRecoveryRetryMs?: number;
+  onRunMessageLinkPending?(link: CliRunMessageLink): void;
+  onRunMessageLinkSettled?(link: CliRunMessageLink): void;
 }
 
 export interface CliServerHandle {
@@ -756,9 +765,148 @@ async function notifyWrite(
   }
 }
 
+type RunMessageLinkInput = {
+  actor: CliActor;
+  runId?: string;
+  messageId: string;
+};
+
+async function tryRunMessageLink(
+  context: CliWorkspaceContext,
+  input: RunMessageLinkInput,
+  deadlineMs: number,
+): Promise<void> {
+  if (input.actor !== "agent" || !input.runId) return;
+  const requestOptions = { deadlineMs };
+  const run = await context.dispatchStore.getRunRecord(
+    input.runId,
+    requestOptions,
+  );
+  if (!run || run.workspaceId !== context.workspaceId) return;
+  await context.dispatchStore.recordRunMessage(
+    {
+      workspaceId: context.workspaceId,
+      messageId: input.messageId,
+      runId: input.runId,
+    },
+    requestOptions,
+  );
+}
+
+interface PendingRunMessageLink {
+  context: CliWorkspaceContext;
+  input: RunMessageLinkInput & { runId: string };
+  link: CliRunMessageLink;
+  attempt: number;
+  timer: ReturnType<typeof setTimeout> | null;
+}
+
+class RunMessageLinkRecoveryQueue {
+  private readonly pending = new Map<string, PendingRunMessageLink>();
+  private closed = false;
+
+  constructor(private readonly options: CliServerOptions) {}
+
+  enqueue(
+    context: CliWorkspaceContext,
+    input: RunMessageLinkInput & { runId: string },
+  ): void {
+    if (this.closed) return;
+    const link = {
+      workspaceId: context.workspaceId,
+      runId: input.runId,
+      messageId: input.messageId,
+    };
+    const key = `${link.workspaceId}\u0000${link.runId}\u0000${link.messageId}`;
+    if (this.pending.has(key)) return;
+    const pending = { context, input, link, attempt: 0, timer: null };
+    this.pending.set(key, pending);
+    try {
+      this.options.onRunMessageLinkPending?.(link);
+    } catch {}
+    this.schedule(key, pending);
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    for (const pending of this.pending.values()) {
+      if (pending.timer) clearTimeout(pending.timer);
+      this.notifySettled(pending.link);
+    }
+    this.pending.clear();
+  }
+
+  private schedule(key: string, pending: PendingRunMessageLink): void {
+    if (this.closed || this.pending.get(key) !== pending) return;
+    const baseDelay =
+      this.options.runMessageLinkRecoveryRetryMs ??
+      Math.max(250, this.options.runMessageLinkRetryMs ?? RUN_MESSAGE_LINK_RETRY_MS);
+    const delay = Math.min(baseDelay * 2 ** pending.attempt, 5_000);
+    pending.timer = setTimeout(() => {
+      pending.timer = null;
+      void this.retry(key, pending);
+    }, delay);
+    pending.timer.unref?.();
+  }
+
+  private async retry(
+    key: string,
+    pending: PendingRunMessageLink,
+  ): Promise<void> {
+    if (this.closed || this.pending.get(key) !== pending) return;
+    pending.attempt += 1;
+    try {
+      await tryRunMessageLink(
+        pending.context,
+        pending.input,
+        this.options.runMessageLinkDeadlineMs ?? RUN_MESSAGE_LINK_DEADLINE_MS,
+      );
+      this.pending.delete(key);
+      this.notifySettled(pending.link);
+    } catch (error) {
+      if (
+        error instanceof AgentDispatchStoreError &&
+        (error.code === "invalid-input" || error.code === "run-not-found")
+      ) {
+        this.pending.delete(key);
+        this.notifySettled(pending.link);
+        return;
+      }
+      this.schedule(key, pending);
+    }
+  }
+
+  private notifySettled(link: CliRunMessageLink): void {
+    try {
+      this.options.onRunMessageLinkSettled?.(link);
+    } catch {}
+  }
+}
+
+const runMessageLinkRecoveryQueues = new WeakMap<
+  CliServerOptions,
+  RunMessageLinkRecoveryQueue
+>();
+
+function runMessageLinkRecoveryQueue(
+  options: CliServerOptions,
+): RunMessageLinkRecoveryQueue {
+  const existing = runMessageLinkRecoveryQueues.get(options);
+  if (existing) return existing;
+  const created = new RunMessageLinkRecoveryQueue(options);
+  runMessageLinkRecoveryQueues.set(options, created);
+  return created;
+}
+
+export function disposeCliServerRuntime(options: CliServerOptions): void {
+  runMessageLinkRecoveryQueues.get(options)?.close();
+  runMessageLinkRecoveryQueues.delete(options);
+}
+
 async function linkRunMessage(
   context: CliWorkspaceContext,
-  input: { actor: CliActor; runId?: string; messageId: string },
+  input: RunMessageLinkInput,
   options: CliServerOptions,
 ): Promise<string | null> {
   if (input.actor !== "agent" || !input.runId) return null;
@@ -767,20 +915,7 @@ async function linkRunMessage(
     options.runMessageLinkDeadlineMs ?? RUN_MESSAGE_LINK_DEADLINE_MS;
   for (let attempt = 1; attempt <= RUN_MESSAGE_LINK_ATTEMPTS; attempt += 1) {
     try {
-      const requestOptions = { deadlineMs };
-      const run = await context.dispatchStore.getRunRecord(
-        input.runId,
-        requestOptions,
-      );
-      if (!run || run.workspaceId !== context.workspaceId) return null;
-      await context.dispatchStore.recordRunMessage(
-        {
-          workspaceId: context.workspaceId,
-          messageId: input.messageId,
-          runId: input.runId,
-        },
-        requestOptions,
-      );
+      await tryRunMessageLink(context, input, deadlineMs);
       return null;
     } catch (error) {
       if (
@@ -797,7 +932,11 @@ async function linkRunMessage(
       }
       const warning =
         `Message posted, but agent-run provenance could not be recorded after ` +
-        `${RUN_MESSAGE_LINK_ATTEMPTS} attempts.`;
+        `${RUN_MESSAGE_LINK_ATTEMPTS} attempts; recovery will continue in the background.`;
+      runMessageLinkRecoveryQueue(options).enqueue(context, {
+        ...input,
+        runId: input.runId,
+      });
       try {
         options.onError?.(
           new Error(
@@ -1461,6 +1600,7 @@ export async function startCliServer(
   if (platform === "win32") {
     throw new Error("dohc: CLI socket server is not yet supported on this platform");
   }
+  runMessageLinkRecoveryQueue(options);
 
   await mkdir(options.stateDir, { recursive: true, mode: 0o700 });
   await chmod(options.stateDir, 0o700);
@@ -1495,6 +1635,7 @@ export async function startCliServer(
       rm(socketPath, { force: true }),
       rm(tokenPath, { force: true }),
     ]);
+    disposeCliServerRuntime(options);
     throw error;
   }
   server.unref();
@@ -1520,6 +1661,7 @@ export async function startCliServer(
         rm(socketPath, { force: true }),
         rm(tokenPath, { force: true }),
       ]);
+      disposeCliServerRuntime(options);
     },
   };
 }

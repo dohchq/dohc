@@ -41,6 +41,7 @@ export interface EngineWorkspaceSessionsOptions {
 const TRANSPORT_REBIND_ATTEMPTS = 6;
 const TRANSPORT_REBIND_INITIAL_BACKOFF_MS = 100;
 const TRANSPORT_REBIND_MAX_BACKOFF_MS = 1_000;
+export const WORKSPACE_OPEN_DEADLINE_MS = 2_000;
 
 export class EngineWorkspaceRebindError extends Error {
   readonly workspaceId: string;
@@ -211,14 +212,18 @@ export class EngineWorkspaceSessions {
     workspace: EngineWorkspace,
   ): Promise<EngineWorkspaceBinding> {
     const requester = new WorkspaceDaemonRequester(client);
-    const raw = await requester.request(WORKSPACE_METHOD.open, {
-      rootDir: workspace.rootPath,
-      workspaceId: workspace.workspaceId,
-      // The desktop recovery sweep owns user-visible crash reconciliation.
-      // A daemon-side open must therefore preserve running claims on both a
-      // fresh desktop boot and a sidecar-only rebind.
-      recoverRunningDispatches: false,
-    });
+    const raw = await requester.request(
+      WORKSPACE_METHOD.open,
+      {
+        rootDir: workspace.rootPath,
+        workspaceId: workspace.workspaceId,
+        // The desktop recovery sweep owns user-visible crash reconciliation.
+        // A daemon-side open must therefore preserve running claims on both a
+        // fresh desktop boot and a sidecar-only rebind.
+        recoverRunningDispatches: false,
+      },
+      { deadlineMs: WORKSPACE_OPEN_DEADLINE_MS },
+    );
     const opened = decodeWorkspaceResult(WORKSPACE_METHOD.open, raw);
     return { client, workspace: opened.workspace as WorkspaceHandle };
   }

@@ -265,11 +265,24 @@ export function createLiveAgentDispatchStore(
     store,
     requeueFailedTrigger: async (input) =>
       await invoke(
-        async (adapter) =>
-          await adapter.request(CHATS_METHOD.dispatchRequeueFailedTrigger, {
-            triggerMessageId: input.triggerMessageId,
-            runId: input.runId,
-          }),
+        async (adapter) => {
+          const requeued = await adapter.request(
+            CHATS_METHOD.dispatchRequeueFailedTrigger,
+            {
+              triggerMessageId: input.triggerMessageId,
+              runId: input.runId,
+            },
+            { deadlineMs: AGENT_DISPATCH_RPC_DEADLINE_MS },
+          );
+          if (requeued) return true;
+          const pending = await adapter.listPending(input.workspaceId);
+          return pending.some(
+            (candidate) =>
+              candidate.triggerMessageId === input.triggerMessageId &&
+              candidate.state === "pending",
+          );
+        },
+        { retryTransportErrors: true },
       ),
     listAppQuitRecoveries: async (workspaceId) => {
       if (workspaceId !== workspace.workspaceId) {

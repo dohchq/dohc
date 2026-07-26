@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   EngineWorkspaceRebindError,
   EngineWorkspaceSessions,
+  WORKSPACE_OPEN_DEADLINE_MS,
 } from "../workspaces/engineWorkspaceSessions";
 import {
   TERMINAL_DISPATCH_DEADLINE_MS,
@@ -405,6 +406,58 @@ describe("live agent dispatch store", () => {
     ]);
   });
 
+  it("verifies an ambiguously committed interrupted-run requeue", async () => {
+    // MUTATION: remove transport retries or the pending-state verification ->
+    // a committed requeue whose first response is lost is reported as false.
+    let requeueAttempts = 0;
+    const client = mockClient((request) => {
+      if (request.method === "workspace.open") {
+        return { workspace: `handle-requeue-${requeueAttempts}` };
+      }
+      if (request.method === "workspace.close") return { closed: true };
+      if (request.method === "chats.dispatch.requeueFailedTrigger") {
+        requeueAttempts += 1;
+        if (requeueAttempts === 1) {
+          throw {
+            code: "transport-error",
+            message: "requeue response was lost after commit",
+          };
+        }
+        return false;
+      }
+      if (request.method === "chats.dispatch.listPending") {
+        return {
+          dispatches: [{ ...dispatch, state: "pending" }],
+          nextCursor: null,
+        };
+      }
+      throw new Error(`Unexpected request: ${request.method}`);
+    });
+    const sessions = new EngineWorkspaceSessions(
+      { currentClient: () => client },
+      { sleep: async () => undefined },
+    );
+    openSessions.push(sessions);
+    const handle = createLiveAgentDispatchStore(WORKSPACE, sessions);
+
+    await expect(
+      handle.requeueFailedTrigger({
+        workspaceId: WORKSPACE.workspaceId,
+        triggerMessageId: dispatch.triggerMessageId,
+        runId: run.runId,
+      }),
+    ).resolves.toBe(true);
+
+    const requests = client.requests.filter(
+      ({ method }) => method === "chats.dispatch.requeueFailedTrigger",
+    );
+    expect(requests).toHaveLength(2);
+    expect(requests.map(({ deadlineMs }) => deadlineMs)).toEqual([
+      TERMINAL_DISPATCH_DEADLINE_MS,
+      TERMINAL_DISPATCH_DEADLINE_MS,
+    ]);
+  });
+
   it("live_dispatch_rejects_a_corrupt_dispatch_decode", async () => {
     const client = mockClient((request) =>
       request.method === "workspace.open"
@@ -505,6 +558,24 @@ describe("live agent dispatch store", () => {
         recoverRunningDispatches: false,
       },
     ]);
+  });
+
+  it("workspace_sessions_deadline_every_workspace_open", async () => {
+    // MUTATION: omit the workspace.open deadline -> a non-responsive daemon
+    // can wedge every bounded dispatch operation before that operation starts.
+    const client = mockClient(dispatchResult);
+    const sessions = new EngineWorkspaceSessions({
+      currentClient: () => client,
+    });
+    openSessions.push(sessions);
+    const { store } = createLiveAgentDispatchStore(WORKSPACE, sessions);
+
+    await expect(store.getRunRecord(run.runId)).resolves.toEqual(run);
+
+    expect(
+      client.requests.find(({ method }) => method === "workspace.open")
+        ?.deadlineMs,
+    ).toBe(WORKSPACE_OPEN_DEADLINE_MS);
   });
 
   it("workspace_sessions_surface_typed_error_when_reopen_fails", async () => {
