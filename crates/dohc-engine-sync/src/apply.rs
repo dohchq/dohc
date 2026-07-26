@@ -947,7 +947,7 @@ fn apply_attachment(
                     && !has_projection_control_char(value)
             })
             && p.heading_occurrence
-                .is_some_and(|value| (0..=9_007_199_254_740_991).contains(&value)));
+                .is_some_and(|value| (0..=crate::MAX_WIRE_INTEGER).contains(&value)));
     if p.attachment_id.is_empty()
         || p.thread_id.is_empty()
         || p.message_id.is_empty()

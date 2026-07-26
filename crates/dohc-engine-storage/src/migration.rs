@@ -1523,6 +1523,46 @@ UPDATE moments SET
 /// The `id` of the moment payload-provenance migration.
 pub(crate) const MOMENT_PAYLOAD_PROVENANCE_MIGRATION_ID: &str = "v1-moment-payload-provenance";
 
+/// Ordinal 16. Persists the structured outcome of a replicated
+/// `conflict.resolve` that was deliberately acknowledged without being
+/// applied. Relay cursor advancement is intentionally later than envelope
+/// application, so a later envelope can fail after this coordinate's imported
+/// log row and peer ack have committed. The coordinate-keyed sidecar lets an
+/// idempotent retry surface the exact original decision instead of trying to
+/// infer it from conflict state that later envelopes may have changed.
+///
+/// The deferred foreign key permits the conflict applier to record the outcome
+/// before the generic envelope wrapper inserts the matching replication-log
+/// row; both happen in one transaction and the relationship is checked at
+/// commit.
+const V1_REPLICATION_PENDING_RESOLVES_DDL: &str = "\
+CREATE TABLE replication_pending_resolves (
+    workspace_id       TEXT    NOT NULL,
+    origin_id          TEXT    NOT NULL,
+    origin_seq         INTEGER NOT NULL CHECK (origin_seq >= 0),
+    remote_conflict_id TEXT    NOT NULL,
+    local_conflict_id  TEXT,
+    path               TEXT,
+    reason             TEXT    NOT NULL CHECK (reason IN (
+        'path-change',
+        'merged',
+        'stale-head',
+        'binary-unhydrated',
+        'binary-apply-failed',
+        'text-apply-rejected',
+        'unmatched-target'
+    )),
+    PRIMARY KEY (workspace_id, origin_id, origin_seq),
+    FOREIGN KEY (workspace_id, origin_id, origin_seq)
+      REFERENCES replication_log(workspace_id, origin_id, origin_seq)
+      ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+";
+
+/// The `id` of the replication pending-resolve migration.
+pub(crate) const REPLICATION_PENDING_RESOLVES_MIGRATION_ID: &str =
+    "v1-replication-pending-resolves";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -1636,6 +1676,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: MOMENT_PAYLOAD_PROVENANCE_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_MOMENT_PAYLOAD_PROVENANCE_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 16,
+        id: REPLICATION_PENDING_RESOLVES_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_REPLICATION_PENDING_RESOLVES_DDL,
         sets_user_version: None,
     },
 ];
@@ -2048,7 +2095,7 @@ mod tests {
         )
         .expect("legacy moment rows");
 
-        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..16], &ctx, &NoFaults)
             .expect("provenance migration");
         assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
 

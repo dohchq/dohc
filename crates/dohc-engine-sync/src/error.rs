@@ -14,6 +14,8 @@ pub enum SyncError {
     CoordinateDiverged,
     #[error("operation kind is not owned by this apply surface")]
     UnsupportedOperation,
+    #[error("moment.append replication apply is not implemented")]
+    MomentAppendNotImplemented,
     #[error("replicated operation is outside the share boundary")]
     ShareBoundaryViolation,
     #[error("referenced blob is missing or invalid")]
@@ -29,6 +31,7 @@ impl SyncError {
             SyncError::InvalidInput { .. } => "invalid-input",
             SyncError::SequenceGap | SyncError::CoordinateDiverged => "state-corrupt",
             SyncError::UnsupportedOperation => "invalid-input",
+            SyncError::MomentAppendNotImplemented => "not-implemented",
             SyncError::ShareBoundaryViolation => "share-boundary-violation",
             SyncError::BlobInvalid => "invalid-input",
             SyncError::FaultCrash => "injected-crash",

@@ -10,7 +10,9 @@ use dohc_engine_storage::{EngineStore, FaultInjector, Preimage, TxnOutcome};
 use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 
-use crate::{ApplyOutcome, PathClass, ReplicationEnvelope, SyncError};
+use dohc_engine_files::{PathClassification, classify_engine_file_path_normalized};
+
+use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +48,10 @@ impl LeaseProbe for dohc_engine_collab::LeaseRegistry {
     }
 }
 
+/// Direct-applier diagnostic result. A deferred update needs no caller action:
+/// its coordinate is durably parked with the ack and is replayed by
+/// [`drain_deferred_ydoc_for_key`] on lease teardown/open or before the next
+/// non-leased update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct YdocApplyResult {
     pub deferred: bool,
@@ -372,7 +378,14 @@ pub fn apply_ydoc_envelope(
         serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
             reason: "ydoc.update payload is malformed",
         })?;
-    if crate::classify_share_path(&payload.path) != PathClass::Tracked
+    // Gate on the SAME floor the projection sink applies
+    // (`validate_plaintext_storable_path`) rather than R10's narrow
+    // share-boundary classifier, which misses reserved 8.3 aliases (`dohc~1`
+    // aliases `.dohc`) and dots-and-spaces segments. The path is persisted as a
+    // durable alias key, so it must already be canonical.
+    let (classification, normalized) = classify_engine_file_path_normalized(&payload.path);
+    if classification != PathClassification::Tracked
+        || normalized.as_deref() != Some(payload.path.as_str())
         || !matches!(payload.content_kind.as_str(), "plaintext" | "richdoc")
     {
         return Err(SyncError::InvalidInput {

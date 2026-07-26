@@ -116,8 +116,9 @@ R16 (legacy deletion) is POST-cutover by design.
 
 RPC-B2 and RPC-D2 added NO new migrations (domain/logic only).
 
-Ordinal 14 is consumed by #233 and ordinal 15 by the open #236. **The next
-schema-touching shard MUST use ordinal 16.** Schema-touching shards run ONE AT A
+Ordinal 14 is consumed by #233, ordinal 15 by #236, and ordinal 16 by
+RPC-E-1 / #242 (replication_pending_resolves). **The next schema-touching
+shard MUST use ordinal 17.** Schema-touching shards run ONE AT A
 TIME through the append-only migration ledger: rebase on the latest migration,
 append exactly one ordinal, update both ledger-length assertions, and only then
 open the next schema shard. Two shards nearly collided by treating the same next

@@ -2,7 +2,7 @@ use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome};
 
 use crate::cursor::{RelayCursor, commit_relay_cursor, read_pushed_seq, write_pushed_seq};
 use crate::journal::{crashes, list_replication_ops, read_sync_identity};
-use crate::{ApplyOutcome, RelayError, ReplicationEnvelope, SyncError, apply_chat_envelope};
+use crate::{ApplyOutcome, RelayError, ReplicationEnvelope, SyncError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushRequest {
@@ -141,12 +141,17 @@ pub enum SyncPassOutcome {
         applied: usize,
         skipped: usize,
         pending_cursor: Option<RelayCursor>,
+        /// Replicated resolutions acked in this pass that the receiver
+        /// deliberately did not apply. The cursor advances past them, so they
+        /// only exist here — a caller that drops this loses them.
+        pending_resolves: Vec<crate::PendingResolve>,
     },
     CrashedAfterRemoteCommit,
     CrashedAfterApply {
         applied: usize,
         skipped: usize,
         pending_cursor: RelayCursor,
+        pending_resolves: Vec<crate::PendingResolve>,
     },
 }
 
@@ -239,10 +244,11 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             applied: 0,
             skipped: 0,
             pending_cursor: None,
+            pending_resolves: Vec::new(),
         })
     }
 
-    /// Pull and apply replicated operations (chat.* AND ydoc.update),
+    /// Pull and apply replicated operations,
     /// returning a cursor token the caller must commit only after
     /// filesystem/materialization work succeeds. `leases` defers ydoc
     /// envelopes targeting live-leased docs.
@@ -277,6 +283,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let fetched = response.ops.len();
         let mut applied = 0_usize;
         let mut skipped = 0_usize;
+        let mut pending_resolves = Vec::new();
         for op in &response.ops {
             // Workspace scoping: a buggy/compromised transport must never make a
             // pull for workspace A apply an op targeting workspace B (which would
@@ -285,29 +292,20 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             if op.workspace_id != workspace_id {
                 return Err(RelayError::InvalidResponse);
             }
-            // Dispatch by op kind: the stream carries chat.* AND ydoc.update
-            // once live replicated sessions journal deltas. Feeding a ydoc op
-            // to the chat applier errors UnsupportedOperation and wedges the
-            // cursor.
-            if op.op_kind == "ydoc.update" {
-                match crate::apply_ydoc_envelope(store, op, faults, leases).map_err(local)? {
-                    ApplyOutcome::Applied(_) => {
-                        applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?
+            match crate::apply_replication_envelope(store, op, faults, leases).map_err(local)? {
+                ApplyOutcome::Applied(routed) => {
+                    if let Some(pending) = routed.pending_resolve() {
+                        pending_resolves.push(pending.clone());
                     }
-                    ApplyOutcome::Skipped => {
-                        skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?
-                    }
-                    ApplyOutcome::Crashed { .. } => {
-                        return Err(RelayError::Local("injected-crash".to_owned()));
-                    }
-                }
-                continue;
-            }
-            match apply_chat_envelope(store, op, faults).map_err(local)? {
-                ApplyOutcome::Applied(()) => {
                     applied = applied.checked_add(1).ok_or(RelayError::InvalidResponse)?
                 }
                 ApplyOutcome::Skipped => {
+                    if let Some(pending) =
+                        crate::conflict_apply::read_replayed_pending_resolve(store, op)
+                            .map_err(local)?
+                    {
+                        pending_resolves.push(pending);
+                    }
                     skipped = skipped.checked_add(1).ok_or(RelayError::InvalidResponse)?
                 }
                 ApplyOutcome::Crashed { .. } => {
@@ -325,6 +323,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 applied,
                 skipped,
                 pending_cursor,
+                pending_resolves,
             });
         }
         Ok(SyncPassOutcome::Complete {
@@ -333,6 +332,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             applied,
             skipped,
             pending_cursor: Some(pending_cursor),
+            pending_resolves,
         })
     }
 

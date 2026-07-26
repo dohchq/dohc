@@ -473,3 +473,23 @@ as merged until its PR state changes.
   are tests; production in-process callers do not negotiate `blobs`, so there
   is no production impact. If an in-process production consumer ever opts into
   `blobs`, wire the in-process egress drain then.
+
+CROSS-ENGINE DELTA (PR #242 claude adversarial review): fork-snapshot
+contentKind FAIL-CLOSED vs the oracle's silent coercion — the oracle's
+RUNTIME coerces any unknown `contentKind` to text
+(`versionedTextStore.ts:4318` `(snapshot.contentKind ?? "text") === "binary"`;
+same coercion in `syncApply.ts:135` and `syncShareView.ts:351`), so a
+`"richdoc"` or garbage value APPLIES as a text snapshot on a TS peer. The
+Rust engine rejects it (`validate_shipped_snapshots` allowlists
+absent/"text"/"binary" → `SyncError::InvalidInput`), consistent with the
+adjacent conflict-side content-kind allowlist. NOTE the erased-type
+argument ("the TS type only declares text|binary") is NOT a valid
+justification — the delta is real and deliberate: silent kind coercion
+permanently changes the sender's content semantics, which is the exact
+defect class the finding targeted. Sequencing consequence: within #242
+alone this rejection is a hard pull error (cursor never advances — a
+one-op stream wedge a TS peer would not experience). #245 in the same
+stack converts every mutation `InvalidInput` into refuse-and-ack
+(journaled, acked, rolled back), which unwedges the stream and surfaces
+the refusal; a #245 regression test for exactly this contentKind case is
+owed at its rebase (recorded in the integrator notes).
