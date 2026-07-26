@@ -54,6 +54,12 @@ struct CaptureApplyProbeInner {
     armed: std::sync::atomic::AtomicBool,
     entered: tokio::sync::Semaphore,
     release: tokio::sync::Semaphore,
+    fence_armed: std::sync::atomic::AtomicBool,
+    fence_entered: tokio::sync::Semaphore,
+    fence_release: tokio::sync::Semaphore,
+    commit_armed: std::sync::atomic::AtomicBool,
+    commit_entered: tokio::sync::Semaphore,
+    commit_release: tokio::sync::Semaphore,
 }
 
 #[cfg(feature = "harness")]
@@ -63,6 +69,12 @@ impl Default for CaptureApplyProbeInner {
             armed: std::sync::atomic::AtomicBool::new(false),
             entered: tokio::sync::Semaphore::new(0),
             release: tokio::sync::Semaphore::new(0),
+            fence_armed: std::sync::atomic::AtomicBool::new(false),
+            fence_entered: tokio::sync::Semaphore::new(0),
+            fence_release: tokio::sync::Semaphore::new(0),
+            commit_armed: std::sync::atomic::AtomicBool::new(false),
+            commit_entered: tokio::sync::Semaphore::new(0),
+            commit_release: tokio::sync::Semaphore::new(0),
         }
     }
 }
@@ -86,6 +98,40 @@ impl CaptureApplyProbe {
         self.inner.release.add_permits(1);
     }
 
+    pub fn pause_next_version_fence(&self) {
+        self.inner.fence_armed.store(true, Ordering::Release);
+    }
+
+    pub async fn wait_until_version_fence_paused(&self) {
+        self.inner
+            .fence_entered
+            .acquire()
+            .await
+            .expect("version fence probe remains open")
+            .forget();
+    }
+
+    pub fn release_version_fence(&self) {
+        self.inner.fence_release.add_permits(1);
+    }
+
+    pub fn pause_next_version_commit(&self) {
+        self.inner.commit_armed.store(true, Ordering::Release);
+    }
+
+    pub async fn wait_until_version_commit_paused(&self) {
+        self.inner
+            .commit_entered
+            .acquire()
+            .await
+            .expect("version commit probe remains open")
+            .forget();
+    }
+
+    pub fn release_version_commit(&self) {
+        self.inner.commit_release.add_permits(1);
+    }
+
     async fn pause_if_armed(&self) {
         if self.inner.armed.swap(false, Ordering::AcqRel) {
             self.inner.entered.add_permits(1);
@@ -97,13 +143,37 @@ impl CaptureApplyProbe {
                 .forget();
         }
     }
+
+    pub(crate) async fn pause_version_fence_if_armed(&self) {
+        if self.inner.fence_armed.swap(false, Ordering::AcqRel) {
+            self.inner.fence_entered.add_permits(1);
+            self.inner
+                .fence_release
+                .acquire()
+                .await
+                .expect("version fence probe remains open")
+                .forget();
+        }
+    }
+
+    pub(crate) async fn pause_version_commit_if_armed(&self) {
+        if self.inner.commit_armed.swap(false, Ordering::AcqRel) {
+            self.inner.commit_entered.add_permits(1);
+            self.inner
+                .commit_release
+                .acquire()
+                .await
+                .expect("version commit probe remains open")
+                .forget();
+        }
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SwitchReconcileError {
     Cancelled,
     Unavailable,
-    Degraded,
+    Degraded(Vec<String>),
     ApplyFailed,
 }
 
@@ -2305,10 +2375,11 @@ pub(crate) async fn reconcile_full_for_switch(
     let seed = manifest_seed(root, actor, workspace_id)
         .await
         .map_err(|_| SwitchReconcileError::Unavailable)?;
-    let mut files =
+    let files =
         FilesActor::spawn_async_with_manifest(root.to_path_buf(), ScanBounds::default(), seed)
             .await
             .map_err(|_| SwitchReconcileError::Unavailable)?;
+    let files = FilesActorCloseGuard::new(files);
     let handle = files.handle();
     let run = handle
         .reconcile(token.clone())
@@ -2317,10 +2388,17 @@ pub(crate) async fn reconcile_full_for_switch(
     let result = match run {
         Err(error) => Err(error),
         Ok(ReconcileRun::Cancelled) => Err(SwitchReconcileError::Cancelled),
+        // `reconcile` is unconditional; only `reconcile_if_dirty` can report
+        // Converged. Treat an impossible future contract drift as unavailable
+        // rather than silently skipping the mandatory scan.
         Ok(ReconcileRun::Converged) => Err(SwitchReconcileError::Unavailable),
         Ok(ReconcileRun::Completed(plan)) if plan.degraded => {
             status.mark_degraded();
-            Err(SwitchReconcileError::Degraded)
+            let mut degraded_paths = plan.degraded_paths;
+            degraded_paths.sort();
+            degraded_paths.dedup();
+            degraded_paths.truncate(8);
+            Err(SwitchReconcileError::Degraded(degraded_paths))
         }
         Ok(run) => {
             if apply_run_with_handle(root, actor, workspace_id, &handle, run, status, self_writes)
@@ -2332,8 +2410,55 @@ pub(crate) async fn reconcile_full_for_switch(
             }
         }
     };
-    let _ = tokio::task::spawn_blocking(move || files.close()).await;
+    files.close().await;
     result
+}
+
+/// Cancellation-safe owner for a temporary [`FilesActor`].
+///
+/// Its `Drop` path must never run `FilesActor::drop` on a Tokio worker because
+/// that synchronously joins the actor thread. Ownership is first wrapped in
+/// `ManuallyDrop`, then handed to a dedicated plain thread. If thread creation
+/// itself fails, the actor is intentionally leaked rather than blocking the
+/// runtime during cancellation.
+struct FilesActorCloseGuard {
+    actor: Option<FilesActor>,
+}
+
+impl FilesActorCloseGuard {
+    fn new(actor: FilesActor) -> Self {
+        Self { actor: Some(actor) }
+    }
+
+    fn handle(&self) -> FilesHandle {
+        self.actor
+            .as_ref()
+            .expect("files actor is present")
+            .handle()
+    }
+
+    fn hand_off_close(&mut self) -> Option<std::thread::JoinHandle<()>> {
+        let actor = std::mem::ManuallyDrop::new(self.actor.take()?);
+        std::thread::Builder::new()
+            .name("dohc-switch-files-close".to_owned())
+            .spawn(move || {
+                let mut actor = std::mem::ManuallyDrop::into_inner(actor);
+                let _ = actor.close();
+            })
+            .ok()
+    }
+
+    async fn close(mut self) {
+        if let Some(joiner) = self.hand_off_close() {
+            let _ = tokio::task::spawn_blocking(move || joiner.join()).await;
+        }
+    }
+}
+
+impl Drop for FilesActorCloseGuard {
+    fn drop(&mut self) {
+        let _ = self.hand_off_close();
+    }
 }
 
 /// Apply one reconcile run through the capture sink and acknowledge it.

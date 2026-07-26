@@ -1693,7 +1693,11 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: VersionsCreateNamedParams = parse(params)?;
-        let open = self.open(request.workspace.as_ref())?;
+        let handle = request
+            .workspace
+            .as_ref()
+            .ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(handle))?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let new_version_id = self.generated_rpc_id(
             "version",
@@ -1702,6 +1706,15 @@ impl EngineService {
             &params.name,
         );
         let cancellation = OperationCancellation::new(ctx);
+        let _fence = self
+            .fence_version_snapshot(
+                &cancellation,
+                &open,
+                handle,
+                "versions.createNamed",
+                "Saved latest edits before creating a version",
+            )
+            .await?;
         let version = open
             .actor
             .create_named_version(
@@ -1719,6 +1732,119 @@ impl EngineService {
             .await
             .map_err(map_runtime)?;
         Ok(version_record_json(&version))
+    }
+
+    /// Freeze the active workspace snapshot before a version fork or switch.
+    ///
+    /// Lock order is deliberately per-workspace capture gate FIRST, then the
+    /// service-global Y.Doc/session mutation gate. Waiting for a long capture
+    /// pass therefore cannot stop mutations in unrelated workspaces. Once both
+    /// are held, no capture apply or session admission can straddle the session
+    /// sweep, forced reconcile, and caller's version transaction.
+    async fn fence_version_snapshot(
+        &self,
+        cancellation: &OperationCancellation,
+        open: &OpenWorkspace,
+        handle: &WorkspaceHandle,
+        operation: &str,
+        settle_summary: &str,
+    ) -> Result<
+        (
+            tokio::sync::OwnedMutexGuard<()>,
+            tokio::sync::OwnedMutexGuard<()>,
+        ),
+        WireError,
+    > {
+        let capture_barrier = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption(
+                    &format!("{operation} (capture barrier)")
+                ));
+            }
+            barrier = Arc::clone(&open.capture_apply_gate).lock_owned() => barrier,
+        };
+        let session_barrier = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption(
+                    &format!("{operation} (ydoc barrier)")
+                ));
+            }
+            serial = Arc::clone(&self.session_ops).lock_owned() => serial,
+        };
+
+        #[cfg(feature = "harness")]
+        if let Some(probe) = &self.capture_apply_probe {
+            probe.pause_version_fence_if_armed().await;
+        }
+
+        let session_ids: Vec<String> = lock(&self.sessions)
+            .iter()
+            .filter(|(_, session)| session.workspace == *handle)
+            .map(|(session_id, _)| session_id.clone())
+            .collect();
+        for session_id in session_ids {
+            self.ydoc_close_inner(
+                cancellation,
+                Some(handle),
+                YdocCloseParams {
+                    session_id,
+                    settle: None,
+                    summary: Some(settle_summary.to_owned()),
+                },
+            )
+            .await?;
+        }
+
+        let capture_status = lock(&open.capture)
+            .as_ref()
+            .map(|driver| Arc::clone(driver.status()))
+            .ok_or_else(|| {
+                wire(
+                    ErrorCode::WorkspaceUnavailable,
+                    "capture driver unavailable",
+                )
+            })?;
+        capture_driver::reconcile_full_for_switch(
+            &open.root,
+            &open.actor,
+            &open.workspace_id,
+            &capture_status,
+            &self.self_writes.scoped(&open.root),
+            cancellation.token(),
+        )
+        .await
+        .map_err(|error| match error {
+            capture_driver::SwitchReconcileError::Cancelled => {
+                cancellation.interruption(&format!("{operation} (full scan)"))
+            }
+            capture_driver::SwitchReconcileError::Degraded(paths) => {
+                let message = if paths.is_empty() {
+                    "Could not scan workspace paths".to_owned()
+                } else {
+                    format!("Could not scan workspace paths: {}", paths.join(", "))
+                };
+                // The protocol has no non-retryable operational-refusal code:
+                // InvalidParams blames valid caller input and
+                // WorkspaceUnavailable incorrectly prescribes reconnecting.
+                WireError::new(ErrorCode::Internal, message)
+            }
+            capture_driver::SwitchReconcileError::Unavailable => wire(
+                ErrorCode::WorkspaceUnavailable,
+                "capture driver unavailable",
+            ),
+            capture_driver::SwitchReconcileError::ApplyFailed => {
+                wire(ErrorCode::Internal, "pre-version-reconcile-failed")
+            }
+        })?;
+
+        #[cfg(feature = "harness")]
+        if let Some(probe) = &self.capture_apply_probe {
+            probe.pause_version_commit_if_armed().await;
+        }
+
+        Ok((capture_barrier, session_barrier))
     }
 
     async fn versions_compare_files(
@@ -1986,21 +2112,10 @@ impl EngineService {
         if params.version_id.is_empty() || params.version_id.trim() != params.version_id {
             return Err(wire(ErrorCode::InvalidParams, "invalid-version"));
         }
-        let open = self.open(handle.as_ref())?;
+        let handle = handle.ok_or_else(workspace_unavailable)?;
+        let open = self.open(Some(&handle))?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let cancellation = OperationCancellation::new(ctx);
-        let handle = handle.ok_or_else(workspace_unavailable)?;
-        // THE Y.Doc admission gate. Every session mutation, including open,
-        // owns `session_ops`; retaining it through the sweep, full scan, and
-        // active-version transaction makes an open between sweep and commit
-        // impossible.
-        let _session_barrier = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption("versions.setActive (ydoc barrier)"));
-            }
-            serial = self.session_ops.lock() => serial,
-        };
         // Oracle ordering: reject an unknown target, and return a true no-op
         // for the already-active version, before disturbing live sessions.
         let versions = Self::read_under_ctx(
@@ -2023,67 +2138,15 @@ impl EngineService {
             return Ok(version_record_json(&target));
         }
 
-        let session_ids: Vec<String> = lock(&self.sessions)
-            .iter()
-            .filter(|(_, session)| session.workspace == handle)
-            .map(|(session_id, _)| session_id.clone())
-            .collect();
-        for session_id in session_ids {
-            self.ydoc_close_inner(
+        let _fence = self
+            .fence_version_snapshot(
                 &cancellation,
-                Some(&handle),
-                YdocCloseParams {
-                    session_id,
-                    settle: None,
-                    summary: Some("Saved latest edits before switching versions".to_owned()),
-                },
+                &open,
+                &handle,
+                "versions.setActive",
+                "Saved latest edits before switching versions",
             )
             .await?;
-        }
-
-        // Drain an in-flight capture reconcile+apply, then prevent new ones
-        // until the forced full scan has applied into the version being left
-        // and the active-version transaction has committed.
-        let _capture_barrier = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption("versions.setActive (capture barrier)"));
-            }
-            barrier = Arc::clone(&open.capture_apply_gate).lock_owned() => barrier,
-        };
-        let capture_status = lock(&open.capture)
-            .as_ref()
-            .map(|driver| Arc::clone(driver.status()))
-            .ok_or_else(|| {
-                wire(
-                    ErrorCode::WorkspaceUnavailable,
-                    "capture driver unavailable",
-                )
-            })?;
-        capture_driver::reconcile_full_for_switch(
-            &open.root,
-            &open.actor,
-            &open.workspace_id,
-            &capture_status,
-            &self.self_writes.scoped(&open.root),
-            cancellation.token(),
-        )
-        .await
-        .map_err(|error| match error {
-            capture_driver::SwitchReconcileError::Cancelled => {
-                cancellation.interruption("versions.setActive (full scan)")
-            }
-            capture_driver::SwitchReconcileError::Degraded => {
-                wire(ErrorCode::Internal, "pre-switch-scan-degraded")
-            }
-            capture_driver::SwitchReconcileError::Unavailable => wire(
-                ErrorCode::WorkspaceUnavailable,
-                "capture driver unavailable",
-            ),
-            capture_driver::SwitchReconcileError::ApplyFailed => {
-                wire(ErrorCode::Internal, "pre-switch-reconcile-failed")
-            }
-        })?;
         let version = open
             .actor
             .set_active_version(
