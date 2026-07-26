@@ -28,6 +28,8 @@ import {
   openEngineYDocProviderSession,
   type EngineYDocProviderSession,
 } from "../collab/ydocEngineProviderSession";
+import { openEngineYdocProviderSessionRust } from "../collab/ydocEngineProviderSessionRust";
+import type { EngineTransport } from "@dohc/workspace-engine-client";
 import {
   isTextMediaType,
   mediaTypeForPath,
@@ -51,6 +53,13 @@ import {
   readWorkspaceEnginePolicy,
   type WorkspaceEnginePolicySnapshot,
 } from "./workspaceEnginePolicyFile";
+import { isRustEngineAdapterEnabled } from "./engineClientFlag";
+import type { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
+import {
+  createCaptureLiveStores,
+  type CaptureTextFileMetadata,
+  type CaptureVersionedTextStore,
+} from "./workspaceEngineCaptureLiveStore";
 
 export const WORKSPACE_KERNEL_FAILURE_DISABLE_THRESHOLD = 3;
 
@@ -432,11 +441,10 @@ export interface WorkspaceEngineCaptureOptions {
   // never read the slot — only physically observed watcher batches carry an
   // author.
   activeAgentRun?: () => ActiveAgentRun | null;
-  // Dormant R13b composition slot. Accepted for future construction-time
-  // wiring but intentionally never read by any capture or Y.Doc path here.
-  rustEngineAdapter?: {
-    transport: import("@dohc/workspace-engine-client").EngineTransport;
-  };
+  // R13b dual-engine composition: when DOHC_RUST_ENGINE_ADAPTER=1 this
+  // reconnect-safe session owner supplies the daemon-backed text, secret, and
+  // Y.Doc paths. Injectable stores still take precedence in focused tests.
+  rustEngineSessions?: EngineWorkspaceSessions;
 }
 
 export interface EngineDiskWriter {
@@ -901,7 +909,35 @@ export function createWorkspaceEngineCapture(
     });
   const diskWriter = options.diskWriter ?? createDefaultDiskWriter(rootPath);
 
-  let store: VersionedTextStore | null = options.store ?? null;
+  const rustEngineEnabled = isRustEngineAdapterEnabled();
+  if (
+    rustEngineEnabled &&
+    !options.store &&
+    !options.secretStore &&
+    !options.rustEngineSessions
+  ) {
+    throw new Error(
+      "DOHC_RUST_ENGINE_ADAPTER requires Rust engine workspace sessions.",
+    );
+  }
+  const useRustEngine =
+    !options.store &&
+    !options.secretStore &&
+    options.rustEngineSessions !== undefined &&
+    rustEngineEnabled;
+  let liveStores: ReturnType<typeof createCaptureLiveStores> | null = null;
+  function daemonStores() {
+    if (!options.rustEngineSessions) {
+      throw new Error("Rust engine workspace sessions are unavailable.");
+    }
+    liveStores ??= createCaptureLiveStores(
+      { workspaceId, rootPath },
+      options.rustEngineSessions,
+    );
+    return liveStores;
+  }
+
+  let store: CaptureVersionedTextStore | null = options.store ?? null;
   let secretStore: SecretFileStore | null = options.secretStore ?? null;
   let expectedEvents: RegisteredExpectedEngineEvent[] = [];
   let stopped = false;
@@ -963,7 +999,9 @@ export function createWorkspaceEngineCapture(
   // The encrypted secret store (PR 08) shares engine.db; opened lazily so
   // workspaces without secret files never touch the key path.
   function secretStoreFor(): SecretFileStore {
-    secretStore ??= createSecretFileStore(rootPath);
+    secretStore ??= useRustEngine
+      ? daemonStores().secretStore
+      : createSecretFileStore(rootPath);
     return secretStore;
   }
 
@@ -1061,10 +1099,12 @@ export function createWorkspaceEngineCapture(
   }
 
   let initialized: Promise<VersionedTextStore> | null = null;
-  function engineStore(): Promise<VersionedTextStore> {
+  function engineStore(): Promise<CaptureVersionedTextStore> {
     if (!initialized) {
       const attempt = (async () => {
-        store ??= createVersionedTextStore(rootPath);
+        store ??= useRustEngine
+          ? daemonStores().store
+          : createVersionedTextStore(rootPath);
         await store.ensureMainVersion({ workspaceId });
         return store;
       })();
@@ -1085,6 +1125,30 @@ export function createWorkspaceEngineCapture(
   async function activeVersionIdOf(engine: VersionedTextStore): Promise<string> {
     const active = await engine.getActiveVersion({ workspaceId });
     return active?.id ?? ENGINE_MAIN_VERSION_ID;
+  }
+
+  async function listTextFileMetadata(
+    engine: VersionedTextStore,
+    versionId: string,
+  ): Promise<CaptureTextFileMetadata[]> {
+    const captureEngine = engine as CaptureVersionedTextStore;
+    if (captureEngine.listTextFileMetadata) {
+      return await captureEngine.listTextFileMetadata({ workspaceId, versionId });
+    }
+    const snapshots = await engine.listTextFiles({ workspaceId, versionId });
+    return snapshots.map((snapshot) => ({
+      path: snapshot.path,
+      objectId: snapshot.objectId,
+      contentKind: snapshot.contentKind ?? "text",
+      byteLength: snapshot.byteLength ?? Buffer.byteLength(snapshot.text, "utf8"),
+      sha256:
+        snapshot.sha256 ??
+        (snapshot.contentKind === "binary"
+          ? null
+          : sha256Utf8(snapshot.text)),
+      updatedAtMs: snapshot.updatedAtMs,
+      latestMomentId: snapshot.latestMomentId,
+    }));
   }
 
   function consumeExpectedEvent(
@@ -1375,14 +1439,14 @@ export function createWorkspaceEngineCapture(
     // path the tolerant scan FAILED to read (unreadable directory, racy
     // delete) is left alone: absent-from-a-degraded-listing is not evidence
     // of deletion, and retiring it here would record a false delete moment.
-    const tracked = await engine.listTextFiles({ workspaceId, versionId });
-    for (const snapshot of tracked) {
-      if (diskPaths.has(snapshot.path)) continue;
-      if (isUnderScanFailedPath(snapshot.path, failedPaths)) continue;
+    const tracked = await listTextFileMetadata(engine, versionId);
+    for (const file of tracked) {
+      if (diskPaths.has(file.path)) continue;
+      if (isUnderScanFailedPath(file.path, failedPaths)) continue;
       // TS-confirm the absence before retiring: the scan (kernel or TS) is
       // trusted for adds/updates but never to authorize a delete on its own.
-      if (!(await pathConfirmedAbsentOnDisk(rootPath, snapshot.path))) continue;
-      await deleteIfTracked(engine, versionId, snapshot.path, metadata);
+      if (!(await pathConfirmedAbsentOnDisk(rootPath, file.path))) continue;
+      await deleteIfTracked(engine, versionId, file.path, metadata);
     }
     // Same rule for the encrypted store: protected files deleted while dohc
     // was closed retire from the secret state (metadata-only moment).
@@ -1498,11 +1562,33 @@ export function createWorkspaceEngineCapture(
     previousVersionId: string,
     policy: WorkspaceEnginePolicySnapshot,
   ): Promise<MaterializeOperation[]> {
-    const targetFiles = await engine.listTextFiles({
-      workspaceId,
-      versionId: targetVersionId,
-    });
+    const targetFiles = await listTextFileMetadata(engine, targetVersionId);
     const targetPaths = new Set(targetFiles.map((file) => file.path));
+    const targetTextSnapshots = new Map(
+      (
+        await Promise.all(
+          targetFiles
+            .filter(
+              (file) =>
+                file.contentKind === "text" &&
+                policyTracksPath(file.path, policy),
+            )
+            .map(async (file) => {
+              const snapshot = await engine.readTextFile({
+                workspaceId,
+                versionId: targetVersionId,
+                path: file.path,
+              });
+              if (!snapshot || snapshot.contentKind === "binary") {
+                throw new Error(
+                  `Text content for ${file.path} is no longer available.`,
+                );
+              }
+              return [file.path, snapshot] as const;
+            }),
+        )
+      ),
+    );
     const operations: MaterializeOperation[] = [];
     for (const file of targetFiles) {
       if (!policyTracksPath(file.path, policy)) continue;
@@ -1521,16 +1607,27 @@ export function createWorkspaceEngineCapture(
         operations.push({ kind: "write-binary", path: file.path, bytes });
         continue;
       }
-      if (disk.kind === "text" && disk.text === file.text) continue;
-      operations.push({ kind: "write", path: file.path, text: file.text });
+      const snapshot = targetTextSnapshots.get(file.path);
+      if (!snapshot) {
+        throw new Error(`Text content for ${file.path} is no longer available.`);
+      }
+      if (
+        disk.kind === "text" &&
+        (file.sha256 !== null
+          ? disk.sha256 === file.sha256
+          : disk.sha256 === sha256Utf8(snapshot.text))
+      ) {
+        continue;
+      }
+      operations.push({ kind: "write", path: file.path, text: snapshot.text });
     }
     // Only paths the PREVIOUS version tracked are deletable: the pre-switch
     // reconcile captured every engine-ownable text file into it, so this set
     // is exactly "text files the engine owns on disk right now".
-    const previousFiles = await engine.listTextFiles({
-      workspaceId,
-      versionId: previousVersionId,
-    });
+    const previousFiles = await listTextFileMetadata(
+      engine,
+      previousVersionId,
+    );
     for (const file of previousFiles) {
       if (targetPaths.has(file.path)) continue;
       if (!policyTracksPath(file.path, policy)) continue;
@@ -1687,30 +1784,77 @@ export function createWorkspaceEngineCapture(
       // write connection and node:sqlite deadlocks.
       const engine = await engineStore();
       const versionId = await activeVersionIdOf(engine);
-      const session = await openEngineYDocProviderSession({
-        store: engine,
-        rootDir: rootPath,
-        workspaceId,
-        versionId,
-        path: input.path,
-        ...(input.contentKind ? { contentKind: input.contentKind } : {}),
-        onRemoteUpdate: input.onRemoteUpdate,
-        onSettled: async (result) => {
-          // Register the settle's self-write (sha of the projected markdown) so
-          // even a watcher event that lands after the live-path guard lifts on
-          // close is recognized as our own; then write the on-disk .md the
-          // user/agent sees, through the contained disk writer.
-          const cancel = registerExpectedEngineEvents([
-            { path: input.path, operation: "write", sha256: result.sha256 },
-          ]);
-          try {
-            await diskWriter.writeTextFile(join(rootPath, input.path), result.markdown);
-          } catch (error) {
-            cancel();
-            onError(`ydoc settle disk write of ${input.path}`, error);
-          }
-        },
-      });
+      const onSettled = async (result: {
+        sha256: string;
+        markdown: string;
+      }) => {
+        // Register the settle's self-write (sha of the projected markdown) so
+        // even a watcher event that lands after the live-path guard lifts on
+        // close is recognized as our own; then write the on-disk .md the
+        // user/agent sees, through the contained disk writer.
+        const cancel = registerExpectedEngineEvents([
+          { path: input.path, operation: "write", sha256: result.sha256 },
+        ]);
+        try {
+          await diskWriter.writeTextFile(
+            join(rootPath, input.path),
+            result.markdown,
+          );
+        } catch (error) {
+          cancel();
+          onError(`ydoc settle disk write of ${input.path}`, error);
+        }
+      };
+      const session = useRustEngine
+        ? await options.rustEngineSessions!.run(
+            { workspaceId, rootPath },
+            async (binding) => {
+              if (typeof binding.client.onEvent !== "function") {
+                throw new Error(
+                  "Rust engine client does not expose Y.Doc event delivery.",
+                );
+              }
+              const rustSession = await openEngineYdocProviderSessionRust({
+                transport: binding.client as EngineTransport,
+                workspace: binding.workspace,
+                versionId,
+                path: input.path,
+                ...(input.contentKind
+                  ? { contentKind: input.contentKind }
+                  : {}),
+                onRemoteUpdate: input.onRemoteUpdate,
+                onSettled,
+              });
+              const compatibleSession: EngineYDocProviderSession = {
+                doc: rustSession.doc,
+                initialUpdate: rustSession.initialUpdate,
+                contentKind: rustSession.contentKind,
+                path: rustSession.path,
+                applyLocalUpdate: (update) =>
+                  rustSession.applyLocalUpdate(update),
+                settleNow: async (settleOptions) =>
+                  await rustSession.settleNow(settleOptions),
+                applyExternalMarkdownEdit: async (markdown) => {
+                  const result =
+                    await rustSession.applyExternalMarkdownEdit(markdown);
+                  return { supported: result.kind === "merged" };
+                },
+                close: async (closeOptions) =>
+                  await rustSession.close(closeOptions),
+              };
+              return compatibleSession;
+            },
+          )
+        : await openEngineYDocProviderSession({
+            store: engine,
+            rootDir: rootPath,
+            workspaceId,
+            versionId,
+            path: input.path,
+            ...(input.contentKind ? { contentKind: input.contentKind } : {}),
+            onRemoteUpdate: input.onRemoteUpdate,
+            onSettled,
+          });
       // Register the live session only after the open succeeds (a secret/
       // not-found/already-live rejection propagates to the caller and never
       // guards a path that has no session). The close below drops the entry
@@ -1834,7 +1978,7 @@ export function createWorkspaceEngineCapture(
           return { activeVersionId: fromVersionId, changedFileCount: 0 };
         }
         // Fail closed before any mutation: an unknown target throws here.
-        await engine.listTextFiles({ workspaceId, versionId });
+        await listTextFileMetadata(engine, versionId);
         // WS-G2-C-2 (gate fix 2): a live Y.Doc session pins its OLD versionId+
         // path. Materializing another version into the same folder while it
         // stays live would let a later settle write a STALE projection into the

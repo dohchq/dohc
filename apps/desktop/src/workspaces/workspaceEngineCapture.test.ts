@@ -27,7 +27,14 @@ import {
 } from "./workspaceEngineCapture";
 import { createChangeSetStore } from "@dohc/workspace-engine";
 import { WorkspaceKernelClient } from "@dohc/workspace-kernel-client";
+import {
+  VersionedLoopbackEngine,
+  type JsonValue,
+  type Request,
+  type Response,
+} from "@dohc/workspace-engine-client";
 import { startWorkspaceWatch } from "./workspaceWatcher";
+import { EngineWorkspaceSessions } from "./engineWorkspaceSessions";
 
 // node:sqlite via createRequire, matching the engine store: vitest's vite
 // pipeline cannot statically resolve the node:sqlite builtin yet.
@@ -45,6 +52,7 @@ const { DatabaseSync } = requireModule("node:sqlite") as {
 const roots: string[] = [];
 const ORIGINAL_KERNEL_SIDECAR = process.env.DOHC_KERNEL_SIDECAR;
 const ORIGINAL_KERNEL_BINARY_PATH = process.env.DOHC_KERNEL_BINARY_PATH;
+const ORIGINAL_RUST_ENGINE_ADAPTER = process.env.DOHC_RUST_ENGINE_ADAPTER;
 
 async function tempRoot(): Promise<string> {
   const root = await mkdtemp(join(nativeTmpdir(), "dohc-engine-capture-"));
@@ -62,6 +70,11 @@ afterEach(async () => {
   else process.env.DOHC_KERNEL_SIDECAR = ORIGINAL_KERNEL_SIDECAR;
   if (ORIGINAL_KERNEL_BINARY_PATH === undefined) delete process.env.DOHC_KERNEL_BINARY_PATH;
   else process.env.DOHC_KERNEL_BINARY_PATH = ORIGINAL_KERNEL_BINARY_PATH;
+  if (ORIGINAL_RUST_ENGINE_ADAPTER === undefined) {
+    delete process.env.DOHC_RUST_ENGINE_ADAPTER;
+  } else {
+    process.env.DOHC_RUST_ENGINE_ADAPTER = ORIGINAL_RUST_ENGINE_ADAPTER;
+  }
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -138,11 +151,34 @@ function capture(root: string, options: {
   onError?: (context: string, error: unknown) => void;
   onCaptureOutcome?: (outcome: { ok: boolean }) => void;
   activeAgentRun?: () => { agentId: string; onBehalfOf: string; agentRunId: string } | null;
+  rustEngineSessions?: EngineWorkspaceSessions;
 } = {}) {
   return createWorkspaceEngineCapture({
     workspaceId: "engine-capture-test",
     rootPath: root,
     ...options,
+  });
+}
+
+function mockLiveSessions(loopback: VersionedLoopbackEngine) {
+  const client = {
+    close: () => undefined,
+    async sendRequest(request: Request): Promise<Response> {
+      const params = request.params as Record<string, JsonValue | undefined>;
+      if (request.method === "workspace.open") {
+        return {
+          id: request.id,
+          result: { workspace: String(params.workspaceId) },
+        };
+      }
+      if (request.method === "workspace.close") {
+        return { id: request.id, result: { closed: true } };
+      }
+      return await loopback.sendRequest(request);
+    },
+  };
+  return new EngineWorkspaceSessions({
+    currentClient: () => client,
   });
 }
 
@@ -198,22 +234,203 @@ function readEngineMomentAuthors(rootPath: string): Array<Record<string, unknown
 }
 
 describe("workspaceEngineCapture batch capture", () => {
-  it("accepts the dormant Rust adapter composition slot without reading it", async () => {
+  it("leaves the TypeScript stores untouched when Rust sessions exist but the flag is off", async () => {
     const root = await tempRoot();
-    const transport = {
-      sendRequest: vi.fn(),
-      onEvent: vi.fn(() => () => {}),
-    };
+    const loopback = new VersionedLoopbackEngine();
+    delete process.env.DOHC_RUST_ENGINE_ADAPTER;
     const engine = createWorkspaceEngineCapture({
       workspaceId: "engine-capture-test",
       rootPath: root,
-      rustEngineAdapter: { transport },
+      rustEngineSessions: mockLiveSessions(loopback),
     });
 
     engine.start();
     await engine.flush();
-    expect(transport.sendRequest).not.toHaveBeenCalled();
-    expect(transport.onEvent).not.toHaveBeenCalled();
+    await engine.stop();
+    expect(loopback.requests).toHaveLength(0);
+    expect(existsSync(join(root, ".dohc", "engine", "engine.db"))).toBe(true);
+  });
+
+  it.each(["typescript", "live"] as const)(
+    "captures, reads back, and switches materialized text with the %s backend",
+    async (backend) => {
+      const root = await tempRoot();
+      const loopback = new VersionedLoopbackEngine();
+      const rustEngineSessions =
+        backend === "live" ? mockLiveSessions(loopback) : undefined;
+      if (backend === "live") process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+
+      await write(root, "notes.md", "main text\n");
+      const engine = capture(root, {
+        ...(rustEngineSessions ? { rustEngineSessions } : {}),
+      });
+      engine.captureBatch([{ path: "notes.md", operation: "update" }]);
+      await engine.flush();
+      expect(await engine.fileObjectIdForPath("notes.md")).toBeTruthy();
+
+      const created = await engine.createVersion("Draft");
+      const draftId = created.activeVersionId;
+      await write(root, "notes.md", "draft text\n");
+      engine.captureBatch([{ path: "notes.md", operation: "update" }]);
+      await engine.flush();
+
+      await engine.switchVersion("main");
+      expect(await readFile(join(root, "notes.md"), "utf8")).toBe("main text\n");
+      await engine.switchVersion(draftId);
+      expect(await readFile(join(root, "notes.md"), "utf8")).toBe("draft text\n");
+      await engine.stop();
+
+      if (backend === "live") {
+        expect(
+          loopback.requests.some(
+            (request) => request.method === "versionedText.list",
+          ),
+        ).toBe(true);
+        expect(
+          loopback.requests.some(
+            (request) => request.method === "versionedText.read",
+          ),
+        ).toBe(true);
+      }
+    },
+  );
+
+  it("hydrates target text after the daemon metadata-only list before materialization", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+    });
+    await write(root, "note.md", "main\n");
+    engine.captureBatch([{ path: "note.md", operation: "update" }]);
+    await engine.flush();
+    const draft = await engine.createVersion("Draft");
+    await write(root, "note.md", "draft\n");
+    engine.captureBatch([{ path: "note.md", operation: "update" }]);
+    await engine.flush();
+    loopback.requests.length = 0;
+
+    await engine.switchVersion("main");
+    const targetListIndex = loopback.requests.findIndex(
+      (request) =>
+        request.method === "versionedText.list" &&
+        (request.params as { versionId?: string }).versionId === "main",
+    );
+    const targetReadIndex = loopback.requests.findIndex(
+      (request) =>
+        request.method === "versionedText.read" &&
+        (request.params as { versionId?: string; path?: string }).versionId ===
+          "main" &&
+        (request.params as { path?: string }).path === "note.md",
+    );
+    expect(targetListIndex).toBeGreaterThanOrEqual(0);
+    expect(targetReadIndex).toBeGreaterThan(targetListIndex);
+    expect(await readFile(join(root, "note.md"), "utf8")).toBe("main\n");
+    await engine.stop();
+    expect(draft.activeVersionId).not.toBe("main");
+  });
+
+  it("uses list metadata sha to avoid binary hydration when target bytes already match", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+    });
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    await write(root, "logo.png", bytes);
+    engine.captureBatch([{ path: "logo.png", operation: "update" }]);
+    await engine.flush();
+    await engine.createVersion("Draft");
+    loopback.requests.length = 0;
+
+    await engine.switchVersion("main");
+    expect(
+      loopback.requests.filter(
+        (request) => request.method === "versionedBinary.read",
+      ),
+    ).toHaveLength(0);
+    expect(await readFile(join(root, "logo.png"))).toEqual(bytes);
+    await engine.stop();
+  });
+
+  it("validates an unknown switch target from metadata without attempting text hydration", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+    });
+    loopback.requests.length = 0;
+
+    await expect(engine.switchVersion("missing-version")).rejects.toThrow();
+    expect(
+      loopback.requests.filter(
+        (request) => request.method === "versionedText.read",
+      ),
+    ).toHaveLength(0);
+    await engine.stop();
+  });
+
+  it("reconciles the tracked set from metadata and hydrates only the path being deleted", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    loopback.seedTextFile({
+      workspace: "engine-capture-test",
+      versionId: "main",
+      path: "closed-period-delete.md",
+      text: "gone from disk\n",
+    });
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+    });
+    loopback.requests.length = 0;
+
+    engine.start();
+    await engine.flush();
+    const listIndex = loopback.requests.findIndex(
+      (request) => request.method === "versionedText.list",
+    );
+    const readIndexes = loopback.requests
+      .map((request, index) => ({ request, index }))
+      .filter(({ request }) => request.method === "versionedText.read")
+      .map(({ index }) => index);
+    expect(listIndex).toBeGreaterThanOrEqual(0);
+    // Two reads belong to the delete itself: deleteIfTracked checks presence,
+    // then the live facade captures the preimage for the TS-compatible result.
+    // Hydrating listTextFiles here would add a third, pre-delete read.
+    expect(readIndexes).toHaveLength(2);
+    expect(readIndexes.every((index) => index > listIndex)).toBe(true);
+    await engine.stop();
+  });
+
+  it("uses previous-version metadata for deletion planning without hydrating its text", async () => {
+    const root = await tempRoot();
+    const loopback = new VersionedLoopbackEngine();
+    process.env.DOHC_RUST_ENGINE_ADAPTER = "1";
+    const engine = capture(root, {
+      rustEngineSessions: mockLiveSessions(loopback),
+    });
+    await engine.createVersion("Draft");
+    await write(root, "draft-only.md", "draft only\n");
+    engine.captureBatch([{ path: "draft-only.md", operation: "update" }]);
+    await engine.flush();
+    loopback.requests.length = 0;
+
+    await engine.switchVersion("main");
+    const previousListIndex = loopback.requests.findLastIndex(
+      (request) =>
+        request.method === "versionedText.list" &&
+        (request.params as { versionId?: string }).versionId !== "main",
+    );
+    const readAfterPreviousList = loopback.requests
+      .slice(previousListIndex + 1)
+      .some((request) => request.method === "versionedText.read");
+    expect(previousListIndex).toBeGreaterThanOrEqual(0);
+    expect(readAfterPreviousList).toBe(false);
+    expect(existsSync(join(root, "draft-only.md"))).toBe(false);
     await engine.stop();
   });
 

@@ -373,6 +373,7 @@ import {
   defaultEngineBinaryPath,
   type EngineDaemonLifecycle,
 } from "./workspaces/engineDaemonLifecycle";
+import { EngineWorkspaceSessions } from "./workspaces/engineWorkspaceSessions";
 import { isRustEngineAdapterEnabled } from "./workspaces/engineClientFlag";
 import {
   captureForFlaggedWorkspace,
@@ -1515,7 +1516,11 @@ const activity = createWorkspaceActivity(notifyRenderer, {
   captureFor: async (workspace, hooks) =>
     findWorkspace(workspace.workspaceId)?.shareView
       ? null
-      : captureForFlaggedWorkspace(workspace, hooks),
+      : captureForFlaggedWorkspace(
+          workspace,
+          hooks,
+          rustEngineWorkspaceSessions,
+        ),
 });
 const panelAgentRunSlots = new Map<string, string>();
 // Local agent integration: owns the per-workspace MCP child + active-run slot
@@ -1777,10 +1782,14 @@ async function syncWorkspaceForDispatch(workspaceId: string): Promise<boolean> {
   const workspace = findWorkspace(workspaceId);
   if (!workspace || sharedViewOf(workspaceId)) return false;
   const scoped = (async () => {
-    const capture = await captureForFlaggedWorkspace(workspace, {
-      activeAgentRun: () => null,
-      onCaptureOutcome: () => undefined,
-    });
+    const capture = await captureForFlaggedWorkspace(
+      workspace,
+      {
+        activeAgentRun: () => null,
+        onCaptureOutcome: () => undefined,
+      },
+      rustEngineWorkspaceSessions,
+    );
     if (!capture) return false;
     try {
       // A normal open may have started while the scoped capture was built.
@@ -2365,6 +2374,7 @@ async function refreshDispatchTray(): Promise<boolean> {
 // Bounded so a wedged disk can't make the app unquittable.
 let quitting = false;
 let rustEngineDaemon: EngineDaemonLifecycle | null = null;
+let rustEngineWorkspaceSessions: EngineWorkspaceSessions | null = null;
 app.on("will-quit", (event) => {
   if (quitting) return;
   quitting = true;
@@ -2400,7 +2410,10 @@ app.on("will-quit", (event) => {
   // Close live engine Y.Doc sessions (settle + release reservations) before the
   // engine stores stop — a session must never settle onto a closed store.
   const engineYDocStop = closeAllEngineYDocSessions();
-  const rustEngineStop = rustEngineDaemon?.stop() ?? Promise.resolve();
+  const rustEngineStop = (async () => {
+    await rustEngineWorkspaceSessions?.closeAll();
+    await rustEngineDaemon?.stop();
+  })();
   void Promise.race([
     Promise.all([
       agentSessionStop,
@@ -6989,6 +7002,7 @@ async function startRustEngineDaemon(): Promise<boolean> {
   if (!rustEngineDaemon) return true;
   try {
     await rustEngineDaemon.start();
+    rustEngineWorkspaceSessions = new EngineWorkspaceSessions(rustEngineDaemon);
     console.info("[desktop] Rust engine daemon startup smoke passed.");
     return true;
   } catch (error) {
@@ -7001,6 +7015,7 @@ async function startRustEngineDaemon(): Promise<boolean> {
     );
     await rustEngineDaemon.stop();
     rustEngineDaemon = null;
+    rustEngineWorkspaceSessions = null;
     app.quit();
     return false;
   }

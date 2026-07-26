@@ -360,6 +360,7 @@ describe("VersionedLiveAdapter", () => {
     ).rejects.toBeInstanceOf(VersionedAdapterCapabilityError);
   });
 
+<<<<<<< HEAD
   it("correlates concurrent blob reads across adapters sharing a transport", async () => {
     const blobHandlers = new Set<
       Parameters<NonNullable<MinimalDaemonClient["onBlob"]>>[0]
@@ -453,6 +454,62 @@ describe("VersionedLiveAdapter", () => {
         sha256: "c".repeat(64),
       }),
     ).resolves.toBeNull();
+  });
+
+  it("preserves the store null contract when an older daemon refuses a text-headed binary read", async () => {
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest() {
+        throw {
+          wireError: {
+            code: "INVALID_PARAMS",
+            message: "text-head-not-binary",
+            retry: "no",
+          },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    await expect(
+      adapter.readBinaryFile({
+        workspaceId: WORKSPACE,
+        versionId: "main",
+        path: "note.md",
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("does not hide unrelated invalid binary-read parameters as an absent value", async () => {
+    const client: MinimalDaemonClient = {
+      close: () => undefined,
+      async sendRequest() {
+        throw {
+          wireError: {
+            code: "INVALID_PARAMS",
+            message: "invalid-version",
+            retry: "no",
+          },
+        };
+      },
+    };
+    const adapter = new VersionedLiveAdapter(client, WORKSPACE, {
+      workspaceId: WORKSPACE,
+    });
+
+    await expect(
+      adapter.readBinaryFile({
+        workspaceId: WORKSPACE,
+        versionId: "missing",
+        path: "note.md",
+      }),
+    ).rejects.toMatchObject({
+      name: "DaemonRefusalError",
+      wireCode: "INVALID_PARAMS",
+      message: "invalid-version",
+    });
   });
 
   it("rejects a caller-supplied delete moment id the daemon cannot preserve", async () => {

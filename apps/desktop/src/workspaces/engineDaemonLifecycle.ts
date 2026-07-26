@@ -4,6 +4,8 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
 import type {
+  CompletedDaemonBlob,
+  Event,
   JsonValue,
   Request,
   Response,
@@ -25,6 +27,8 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 
 export interface EngineDaemonClient {
   sendRequest(request: Request): Promise<Response>;
+  onBlob?(handler: (blob: CompletedDaemonBlob) => void): () => void;
+  onEvent?(handler: (event: Event) => void): () => void;
   close(): void;
   waitForExit?(): Promise<void>;
 }
@@ -175,6 +179,10 @@ export class EngineDaemonLifecycle {
   ): Promise<JsonValue> {
     const client = this.requireClient();
     return await this.smokeWorkspaceWithClient(client, rootDir, workspaceId);
+  }
+
+  currentClient(): EngineDaemonClient {
+    return this.requireClient();
   }
 
   async stop(): Promise<void> {

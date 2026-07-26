@@ -35,6 +35,7 @@ import {
   type VersionedMethodParamsMap,
   type VersionedMethodResultMap,
   type VersionedOrigin,
+  type VersionedTextListEntry,
   type VersionedTextReadValue,
   type VersionRecord,
 } from "./versionedWireContract";
@@ -264,10 +265,27 @@ export class VersionedLiveAdapter {
     path: string;
   }): Promise<Uint8Array | null> {
     this.assertWorkspace(input.workspaceId);
-    const result = await this.request(VERSIONED_METHOD.binaryRead, {
-      versionId: input.versionId,
-      path: input.path,
-    });
+    let result: VersionedMethodResultMap["versionedBinary.read"];
+    try {
+      result = await this.request(VERSIONED_METHOD.binaryRead, {
+        versionId: input.versionId,
+        path: input.path,
+      });
+    } catch (error) {
+      // Older daemon rounds exposed the domain's content-kind mismatch as an
+      // INVALID_PARAMS refusal. The TypeScript store contract has always
+      // treated a text-headed path as "not a binary value", exactly like an
+      // absent head or missing blob, so preserve that null contract here.
+      if (
+        error instanceof DaemonRefusalError &&
+        error.wireCode === "INVALID_PARAMS" &&
+        (error.message === "text-head-not-binary" ||
+          error.message === "content at path is a text head, not binary")
+      ) {
+        return null;
+      }
+      throw error;
+    }
     if (result === null) return null;
     if (result.bytesBase64 !== null) {
       return this.decodeBase64(result.bytesBase64);
@@ -425,7 +443,27 @@ export class VersionedLiveAdapter {
     versionId: string;
   }): Promise<VersionedTextReadValue[]> {
     this.assertWorkspace(input.workspaceId);
-    const files: VersionedTextReadValue[] = [];
+    const metadata = await this.listTextFileMetadata(input);
+    const snapshots = await Promise.all(
+      metadata.map(async (row) =>
+        await this.readTextFile({
+          workspaceId: input.workspaceId,
+          versionId: input.versionId,
+          path: row.path,
+        }),
+      ),
+    );
+    return snapshots.filter(
+      (snapshot): snapshot is VersionedTextReadValue => snapshot !== null,
+    );
+  }
+
+  async listTextFileMetadata(input: {
+    workspaceId: string;
+    versionId: string;
+  }): Promise<VersionedTextListEntry[]> {
+    this.assertWorkspace(input.workspaceId);
+    const files: VersionedTextListEntry[] = [];
     let afterPath: string | undefined;
     do {
       const page = await this.request(VERSIONED_METHOD.textList, {
@@ -433,14 +471,7 @@ export class VersionedLiveAdapter {
         limit: 500,
         ...(afterPath !== undefined ? { afterPath } : {}),
       });
-      for (const row of page.files) {
-        const snapshot = await this.readTextFile({
-          workspaceId: input.workspaceId,
-          versionId: input.versionId,
-          path: row.path,
-        });
-        if (snapshot !== null) files.push(snapshot);
-      }
+      files.push(...page.files);
       afterPath = page.nextAfterPath ?? undefined;
     } while (afterPath !== undefined);
     return files;
