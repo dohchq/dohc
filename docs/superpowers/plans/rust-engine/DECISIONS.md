@@ -187,3 +187,31 @@ deferred ONLY under it; they are now in-scope-or-revisit:
   workspace after adoption.
 - **Rationale pointer:** RPC-E-3 PR #246 ("T7 — a cutover sequencing decision"),
   `RPC_GAP.md`, and the master plan Phase 7 epoch-reset requirement.
+
+## 2026-07-26 — R13b-rest surfaced decisions — OPEN (for Ice)
+
+### MCP transport to the daemon — OPEN
+- **Finding (R13b-rest mapping pass):** `dohc-mcp` is a separate OS process
+  spawned by the USER'S AGENT (per `mcpConfigFor`), not by desktop main. The
+  daemon is a stdio child of desktop main with inherited pipes only (decision
+  #5 closed the socket question deliberately). MCP therefore has NO ROUTE to
+  the daemon, and `packages/mcp/src/tools.ts` performs WRITES
+  (sendMessage/startChannelThread/resolveChatDecision) — a second writer on
+  engine.db after cutover.
+- **Options:** (a) proxy MCP tool calls through desktop main (preserves the
+  no-socket posture; adds a desktop IPC hop), (b) a named pipe/socket with
+  token auth (reopens decision #5's surface), (c) keep MCP on direct
+  read-only db opens and route its writes through the CLI server (hybrid).
+- **Recorded posture until decided:** MCP keeps its current TS store path in
+  dual-engine mode; cutover CANNOT flip MCP writes to daemon-owned engine.db
+  without this decision. Proxy-through-main (a) is the posture-consistent
+  default recommendation.
+
+### Key-envelope custody over RPC — OPEN
+- The envelope crypto is byte-exact ported (`dohc-engine-crypto/envelope.rs`)
+  but exposing wrap/unwrap over daemon RPC contradicts RPC_GAP's recorded
+  "no daemon key custody" posture. Relay-sync shard (S8/RPC-E-4) needs a
+  ruling: keep key custody desktop-side (daemon never sees the data key —
+  envelope ops stay in TS/desktop, only ciphertext crosses the RPC), or
+  grant the daemon custody. Desktop-side custody is the posture-consistent
+  default recommendation.
