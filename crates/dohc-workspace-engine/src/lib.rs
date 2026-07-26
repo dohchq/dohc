@@ -327,14 +327,19 @@ struct WorkspaceBarriers {
 }
 
 enum VersionFenceIntent {
-    Fork { input: CreateNamedVersion },
-    Switch { target_version_id: String },
+    Fork {
+        input: CreateNamedVersion,
+    },
+    Switch {
+        target_version_id: String,
+        now_ms: i64,
+    },
 }
 
 enum VersionFenceOutcome {
-    Ready(WorkspaceBarriers),
     AlreadyActive,
     CreateReplay(VersionRecord),
+    Committed(VersionRecord),
 }
 
 /// Protocol service composing domain operations on the runtime actor's sole
@@ -346,6 +351,7 @@ enum VersionFenceOutcome {
 pub struct EngineService {
     supervisor: &'static WorkspaceSupervisor,
     handles: Mutex<HashMap<WorkspaceHandle, OpenWorkspace>>,
+    runtime: Mutex<Option<tokio::runtime::Handle>>,
     open_lock: tokio::sync::Mutex<()>,
     next_handle: std::sync::atomic::AtomicU64,
     sessions: Arc<Mutex<HashMap<String, YdocSession>>>,
@@ -371,6 +377,50 @@ pub struct EngineService {
     blob_egress_budget: BlobEgressBudget,
 }
 
+impl Drop for EngineService {
+    fn drop(&mut self) {
+        let open: Vec<(WorkspaceHandle, OpenWorkspace)> = match self.handles.get_mut() {
+            Ok(handles) => handles.drain().collect(),
+            Err(poisoned) => poisoned.into_inner().drain().collect(),
+        };
+        if open.is_empty() {
+            return;
+        }
+
+        let sessions = Arc::clone(&self.sessions);
+        let session_ops = Arc::clone(&self.session_ops);
+        let self_writes = self.self_writes.clone();
+        let supervisor = self.supervisor;
+        let runtime = tokio::runtime::Handle::try_current()
+            .ok()
+            .or_else(|| lock(&self.runtime).clone());
+        if let Some(runtime) = runtime {
+            runtime.spawn(async move {
+                for (handle, workspace) in open {
+                    let _capture = Arc::clone(&workspace.capture_apply_gate).lock_owned().await;
+                    let _sessions = Arc::clone(&session_ops).lock_owned().await;
+                    lock(&sessions).retain(|_, session| session.workspace != handle);
+                    workspace.shutdown_capture().await;
+                    let db_path = workspace.db_path.clone();
+                    let root = workspace.root.clone();
+                    let workspace_id = workspace.workspace_id.clone();
+                    let _ = tokio::task::spawn_blocking(move || supervisor.close(&db_path)).await;
+                    self_writes.scoped(&root).clear_workspace(&workspace_id);
+                }
+            });
+        } else {
+            // An opened service normally drops on its owning runtime. This
+            // fallback still releases actors for construction/drop paths that
+            // never entered a runtime; no capture task can be live there.
+            for (handle, workspace) in open {
+                lock(&sessions).retain(|_, session| session.workspace != handle);
+                let _ = workspace.begin_capture_shutdown();
+                let _ = supervisor.close(&workspace.db_path);
+            }
+        }
+    }
+}
+
 impl Default for EngineService {
     fn default() -> Self {
         Self::new()
@@ -386,6 +436,7 @@ impl EngineService {
         EngineService {
             supervisor,
             handles: Mutex::new(HashMap::new()),
+            runtime: Mutex::new(None),
             open_lock: tokio::sync::Mutex::new(()),
             next_handle: std::sync::atomic::AtomicU64::new(1),
             sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -938,6 +989,7 @@ impl EngineService {
         ctx: &RequestContext,
         params: Value,
     ) -> Result<Value, WireError> {
+        *lock(&self.runtime) = Some(tokio::runtime::Handle::current());
         let params: WorkspaceOpenParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
         let _open_serial = tokio::select! {
@@ -1829,21 +1881,13 @@ impl EngineService {
                 },
             )
             .await?;
-        let _fence = match fence {
-            VersionFenceOutcome::Ready(fence) => fence,
-            VersionFenceOutcome::CreateReplay(version) => {
-                return Ok(version_record_json(&version));
-            }
+        match fence {
+            VersionFenceOutcome::CreateReplay(version) => Ok(version_record_json(&version)),
             VersionFenceOutcome::AlreadyActive => {
                 unreachable!("fork fences never return AlreadyActive");
             }
-        };
-        let version = open
-            .actor
-            .create_named_version(input, Arc::new(NoFaults), cancellation.token())
-            .await
-            .map_err(map_runtime)?;
-        Ok(version_record_json(&version))
+            VersionFenceOutcome::Committed(version) => Ok(version_record_json(&version)),
+        }
     }
 
     /// Freeze the active workspace snapshot before a version fork or switch.
@@ -1851,7 +1895,10 @@ impl EngineService {
     /// Lock order is per-workspace capture gate FIRST, then the service-global
     /// Y.Doc/session mutation gate — the same helper used by workspace.close.
     /// Once both are held, no capture apply or session admission can straddle
-    /// the session sweep, forced reconcile, and caller's version transaction.
+    /// the session sweep, forced reconcile, and version transaction. After the
+    /// fenced preflight, the destructive continuation moves into an owned task:
+    /// dropping the request future detaches it instead of releasing either
+    /// guard over a partially completed switch.
     async fn fence_version_snapshot(
         &self,
         cancellation: &OperationCancellation,
@@ -1865,7 +1912,7 @@ impl EngineService {
             .acquire_workspace_barriers(open, Some(cancellation), operation, true)
             .await?;
 
-        match &intent {
+        let source_version_id = match &intent {
             VersionFenceIntent::Fork { input } => {
                 // The preflight is intentionally repeated while the fence is
                 // held: a competing create may have won between the cheap
@@ -1881,8 +1928,11 @@ impl EngineService {
                 {
                     return Ok(VersionFenceOutcome::CreateReplay(version));
                 }
+                input.from_version_id.clone()
             }
-            VersionFenceIntent::Switch { target_version_id } => {
+            VersionFenceIntent::Switch {
+                target_version_id, ..
+            } => {
                 let active = Self::read_under_ctx(
                     cancellation,
                     "versions.setActive (fenced active recheck)",
@@ -1892,17 +1942,22 @@ impl EngineService {
                 if active.version_id == *target_version_id {
                     return Ok(VersionFenceOutcome::AlreadyActive);
                 }
+                active.version_id
             }
-        }
+        };
 
         let session_ids: Vec<String> = lock(&self.sessions)
             .iter()
-            .filter(|(_, session)| session.workspace == *handle)
+            .filter(|(_, session)| {
+                session.workspace == *handle && session.key.version_id == source_version_id
+            })
             .map(|(session_id, _)| session_id.clone())
             .collect();
         if matches!(intent, VersionFenceIntent::Fork { .. })
             && lock(&self.sessions).iter().any(|(_, session)| {
-                session.workspace == *handle && session.content_kind == ContentKind::Richdoc
+                session.workspace == *handle
+                    && session.key.version_id == source_version_id
+                    && session.content_kind == ContentKind::Richdoc
             })
         {
             // The lower projection layer is full-fidelity, but the daemon RPC
@@ -1910,18 +1965,6 @@ impl EngineService {
             // version-keyed CRDT rows, so closing and forking would silently
             // snapshot stale markdown. Refuse before touching any session.
             return Err(wire(ErrorCode::InvalidParams, "richdoc-settle-unsupported"));
-        }
-        for session_id in session_ids {
-            self.ydoc_close_inner(
-                cancellation,
-                Some(handle),
-                YdocCloseParams {
-                    session_id,
-                    settle: None,
-                    summary: Some(settle_summary.to_owned()),
-                },
-            )
-            .await?;
         }
 
         let capture_status = lock(&open.capture)
@@ -1933,49 +1976,91 @@ impl EngineService {
                     "capture driver unavailable",
                 )
             })?;
+        let open = open.clone();
+        let handle = handle.clone();
+        let sessions = Arc::clone(&self.sessions);
+        let self_writes = self.self_writes.clone();
+        let operation = operation.to_owned();
+        let settle_summary = settle_summary.to_owned();
         #[cfg(feature = "harness")]
-        if let Some(probe) = &self.capture_apply_probe {
-            probe.record_version_scan();
-        }
-        capture_driver::reconcile_full_for_switch(
-            &open.root,
-            &open.actor,
-            &open.workspace_id,
-            &capture_status,
-            &self.self_writes.scoped(&open.root),
-            cancellation.token(),
-        )
+        let probe = self.capture_apply_probe.clone();
+        tokio::spawn(async move {
+            let _barriers = barriers;
+            let token = CancellationToken::new();
+            for session_id in session_ids {
+                close_ydoc_session_for_version_fence(
+                    &sessions,
+                    &self_writes,
+                    &open,
+                    &handle,
+                    &session_id,
+                    &settle_summary,
+                    &token,
+                )
+                .await?;
+            }
+
+            #[cfg(feature = "harness")]
+            if let Some(probe) = &probe {
+                probe.record_version_scan();
+            }
+            let manifest_changed = capture_driver::reconcile_full_for_switch(
+                &open.root,
+                &open.actor,
+                &open.workspace_id,
+                &capture_status,
+                &self_writes.scoped(&open.root),
+                token.clone(),
+            )
+            .await
+            .map_err(|error| map_switch_reconcile_error(error, &operation))?;
+
+            if manifest_changed {
+                let capture = lock(&open.capture);
+                let driver = capture.as_ref().ok_or_else(|| {
+                    wire(
+                        ErrorCode::WorkspaceUnavailable,
+                        "capture driver unavailable",
+                    )
+                })?;
+                driver.request_manifest_refresh();
+            }
+
+            #[cfg(feature = "harness")]
+            if let Some(probe) = &probe {
+                probe.pause_version_commit_if_armed().await;
+            }
+
+            let version = match intent {
+                VersionFenceIntent::Fork { input } => {
+                    open.actor
+                        .create_named_version(input, Arc::new(NoFaults), token)
+                        .await
+                }
+                VersionFenceIntent::Switch {
+                    target_version_id,
+                    now_ms,
+                } => {
+                    open.actor
+                        .set_active_version(
+                            dohc_engine_runtime::ActiveVersionSwitch {
+                                workspace_id: open.workspace_id.clone(),
+                                version_id: target_version_id,
+                                root_dir: open.root.clone(),
+                                self_writes: Arc::new(self_writes.scoped(&open.root)),
+                                now_ms,
+                            },
+                            Arc::new(NoFaults),
+                            token,
+                        )
+                        .await
+                }
+            }
+            .map_err(map_runtime)?;
+            Ok(VersionFenceOutcome::Committed(version))
+        })
         .await
-        .map_err(|error| match error {
-            capture_driver::SwitchReconcileError::Cancelled => {
-                cancellation.interruption(&format!("{operation} (full scan)"))
-            }
-            capture_driver::SwitchReconcileError::Degraded(paths) => {
-                let message = if paths.is_empty() {
-                    "Could not scan workspace paths".to_owned()
-                } else {
-                    format!("Could not scan workspace paths: {}", paths.join(", "))
-                };
-                // The protocol has no non-retryable operational-refusal code:
-                // InvalidParams blames valid caller input and
-                // WorkspaceUnavailable incorrectly prescribes reconnecting.
-                WireError::new(ErrorCode::Internal, message)
-            }
-            capture_driver::SwitchReconcileError::Unavailable => wire(
-                ErrorCode::WorkspaceUnavailable,
-                "capture driver unavailable",
-            ),
-            capture_driver::SwitchReconcileError::ApplyFailed => {
-                wire(ErrorCode::Internal, "pre-version-reconcile-failed")
-            }
-        })?;
-
-        #[cfg(feature = "harness")]
-        if let Some(probe) = &self.capture_apply_probe {
-            probe.pause_version_commit_if_armed().await;
-        }
-
-        Ok(VersionFenceOutcome::Ready(barriers))
+        .map_err(|_| wire(ErrorCode::Internal, "version fence task failed"))?
     }
 
     async fn versions_compare_files(
@@ -2278,32 +2363,17 @@ impl EngineService {
                 "Saved latest edits before switching versions",
                 VersionFenceIntent::Switch {
                     target_version_id: target.version_id.clone(),
+                    now_ms: now_ms()?,
                 },
             )
             .await?;
-        let _fence = match fence {
-            VersionFenceOutcome::Ready(fence) => fence,
-            VersionFenceOutcome::AlreadyActive => return Ok(version_record_json(&target)),
+        match fence {
+            VersionFenceOutcome::AlreadyActive => Ok(version_record_json(&target)),
             VersionFenceOutcome::CreateReplay(_) => {
                 unreachable!("switch fences never return CreateReplay");
             }
-        };
-        let version = open
-            .actor
-            .set_active_version(
-                dohc_engine_runtime::ActiveVersionSwitch {
-                    workspace_id: open.workspace_id.clone(),
-                    version_id: params.version_id,
-                    root_dir: open.root.clone(),
-                    self_writes: Arc::new(self.self_writes.scoped(&open.root)),
-                    now_ms: now_ms()?,
-                },
-                Arc::new(NoFaults),
-                cancellation.token(),
-            )
-            .await
-            .map_err(map_runtime)?;
-        Ok(version_record_json(&version))
+            VersionFenceOutcome::Committed(version) => Ok(version_record_json(&version)),
+        }
     }
 
     async fn versions_list(
@@ -6157,6 +6227,160 @@ impl EngineService {
             .get(handle)
             .cloned()
             .ok_or_else(workspace_unavailable)
+    }
+}
+
+async fn close_ydoc_session_for_version_fence(
+    sessions: &Arc<Mutex<HashMap<String, YdocSession>>>,
+    self_writes: &SelfWriteSuppression,
+    open: &OpenWorkspace,
+    handle: &WorkspaceHandle,
+    session_id: &str,
+    _summary: &str,
+    token: &CancellationToken,
+) -> Result<(), WireError> {
+    let session = version_fence_session_view(sessions, handle, session_id)?;
+    let settle = session.content_kind != ContentKind::Richdoc
+        && !(session.lineage_absent && session.first_update_pending);
+    if settle {
+        let first = settle_ydoc_session_for_version_fence(
+            sessions,
+            self_writes,
+            open,
+            session_id,
+            &session,
+            token,
+        )
+        .await;
+        match first {
+            Ok(()) => {}
+            Err(error) if error.message == "ydoc-remote-updates-pending" => {
+                let refreshed = version_fence_session_view(sessions, handle, session_id)?;
+                settle_ydoc_session_for_version_fence(
+                    sessions,
+                    self_writes,
+                    open,
+                    session_id,
+                    &refreshed,
+                    token,
+                )
+                .await?;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    let session = version_fence_session_view(sessions, handle, session_id)?;
+    let now = now_ms()?;
+    let taken = lock(sessions).remove(session_id);
+    let close = open
+        .actor
+        .ydoc_close_session(
+            session.key,
+            now,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await;
+    if matches!(
+        close,
+        Err(RuntimeError::Collab(_)) | Err(RuntimeError::Domain(_))
+    ) && let Some(entry) = taken
+    {
+        lock(sessions).insert(session_id.to_owned(), entry);
+    }
+    close.map_err(map_runtime)?;
+    Ok(())
+}
+
+fn version_fence_session_view(
+    sessions: &Arc<Mutex<HashMap<String, YdocSession>>>,
+    handle: &WorkspaceHandle,
+    session_id: &str,
+) -> Result<YdocSessionView, WireError> {
+    let sessions = lock(sessions);
+    let session = sessions
+        .get(session_id)
+        .filter(|session| session.workspace == *handle)
+        .ok_or_else(|| wire(ErrorCode::InvalidParams, "ydoc-session-not-found"))?;
+    Ok(YdocSessionView {
+        key: session.key.clone(),
+        path: session.path.clone(),
+        content_kind: session.content_kind,
+        regime: session.regime,
+        lineage_absent: session.lineage_absent,
+        first_update_pending: session.first_update_pending,
+        open_head_sha: session.open_head_sha.clone(),
+    })
+}
+
+async fn settle_ydoc_session_for_version_fence(
+    sessions: &Arc<Mutex<HashMap<String, YdocSession>>>,
+    self_writes: &SelfWriteSuppression,
+    open: &OpenWorkspace,
+    session_id: &str,
+    session: &YdocSessionView,
+    token: &CancellationToken,
+) -> Result<(), WireError> {
+    let settled = open
+        .actor
+        .ydoc_settle(
+            open.root.clone(),
+            session.key.clone(),
+            session.path.clone(),
+            session.content_kind,
+            session.open_head_sha.clone(),
+            session_id.to_owned(),
+            Arc::new(self_writes.scoped(&open.root)),
+            now_ms()?,
+            Arc::new(NoFaults),
+            token.clone(),
+        )
+        .await
+        .map_err(|error| {
+            if matches!(
+                &error,
+                RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
+                    reason: "ydoc-remote-updates-pending",
+                })
+            ) {
+                wire(ErrorCode::InvalidParams, "ydoc-remote-updates-pending")
+            } else {
+                map_runtime(error)
+            }
+        })?;
+    if let Some(session) = lock(sessions).get_mut(session_id) {
+        session.last_settled_sha = Some(settled.sha256);
+    }
+    Ok(())
+}
+
+fn map_switch_reconcile_error(
+    error: capture_driver::SwitchReconcileError,
+    operation: &str,
+) -> WireError {
+    match error {
+        capture_driver::SwitchReconcileError::Cancelled => WireError::new(
+            ErrorCode::Internal,
+            format!("{operation} detached full scan was interrupted"),
+        ),
+        capture_driver::SwitchReconcileError::Degraded(mut paths) => {
+            paths.sort();
+            paths.dedup();
+            let message = if paths.is_empty() {
+                "Could not scan workspace paths".to_owned()
+            } else {
+                format!("Could not scan workspace paths: {}", paths.join(", "))
+            };
+            WireError::new(ErrorCode::Internal, message)
+        }
+        capture_driver::SwitchReconcileError::Unavailable => wire(
+            ErrorCode::WorkspaceUnavailable,
+            "capture driver unavailable",
+        ),
+        capture_driver::SwitchReconcileError::ApplyFailed => {
+            wire(ErrorCode::Internal, "pre-version-reconcile-failed")
+        }
     }
 }
 

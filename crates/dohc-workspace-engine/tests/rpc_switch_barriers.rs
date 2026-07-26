@@ -185,6 +185,22 @@ async fn read_path(
     value["text"].as_str().map(str::to_owned)
 }
 
+async fn flush_until_settled(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    mut id: u64,
+) {
+    for _ in 0..20 {
+        let status = call(transport, handle, id, "capture.flush", json!({})).await;
+        if status["settled"] == json!(true) {
+            return;
+        }
+        id += 1;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("capture did not settle");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn set_active_settles_live_ydoc_into_old_version_and_closes_session() {
     let (scratch, transport, handle, workspace_id) = fixture("ydoc", EngineService::new()).await;
@@ -308,6 +324,62 @@ async fn set_active_forced_scan_captures_edit_while_live_driver_is_gated() {
             .as_deref(),
         Some("main base")
     );
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn set_active_fails_closed_when_the_forced_scan_is_degraded() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    struct RestoreMode {
+        path: std::path::PathBuf,
+        mode: u32,
+    }
+    impl Drop for RestoreMode {
+        fn drop(&mut self) {
+            let _ =
+                std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(self.mode));
+        }
+    }
+
+    let (scratch, transport, handle, workspace_id) =
+        fixture("degraded-unix", EngineService::new()).await;
+    let feature = create_feature(&transport, &handle, &workspace_id, 2).await;
+    let unreadable = scratch.path().join("unreadable");
+    std::fs::create_dir(&unreadable).expect("unreadable directory");
+    std::fs::write(unreadable.join("held.md"), "cannot scan this").expect("held file");
+    let original_mode = std::fs::metadata(&unreadable)
+        .expect("directory metadata")
+        .permissions()
+        .mode();
+    let _restore = RestoreMode {
+        path: unreadable.clone(),
+        mode: original_mode,
+    };
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0))
+        .expect("remove directory permissions");
+    if std::fs::read_dir(&unreadable).is_ok() {
+        // Root and some sandboxed CI identities bypass mode bits, so this
+        // fixture cannot exercise a degraded listing there.
+        return;
+    }
+
+    let error = switch_to(&transport, &handle, &workspace_id, &feature, 3)
+        .await
+        .expect_err("degraded scan must fail the switch");
+    assert_eq!(error.code, ErrorCode::Internal);
+    assert_eq!(error.message, "Could not scan workspace paths: unreadable");
+    let status = call(&transport, &handle, 4, "watcher.status", json!({})).await;
+    assert_eq!(status["degraded"], json!(true));
+    let active = call(
+        &transport,
+        &handle,
+        5,
+        "versions.active",
+        json!({ "workspaceId": workspace_id }),
+    )
+    .await;
+    assert_eq!(active["id"], json!("main"));
 }
 
 #[cfg(windows)]
@@ -476,6 +548,89 @@ async fn set_active_blocks_ydoc_admission_between_sweep_and_switch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_set_active_keeps_the_owned_fence_until_the_switch_finishes() {
+    // MUTATION: run the destructive continuation in the request future instead
+    // of the owned task -> abort drops both guards and the switch never commits.
+    let probe = CaptureApplyProbe::default();
+    let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
+    let (_scratch, transport, handle, workspace_id) = fixture("cancel-owned", service).await;
+    let feature = create_feature(&transport, &handle, &workspace_id, 2).await;
+
+    probe.pause_next_version_commit();
+    let switch_transport = Arc::clone(&transport);
+    let switch_handle = handle.clone();
+    let switch_workspace = workspace_id.clone();
+    let switch_feature = feature.clone();
+    let switching = tokio::spawn(async move {
+        switch_to(
+            &switch_transport,
+            &switch_handle,
+            &switch_workspace,
+            &switch_feature,
+            3,
+        )
+        .await
+    });
+    bounded(
+        "setActive detached commit pause",
+        probe.wait_until_version_commit_paused(),
+    )
+    .await;
+    switching.abort();
+    assert!(
+        switching
+            .await
+            .expect_err("request future was cancelled")
+            .is_cancelled()
+    );
+
+    probe.observe_next_apply_gate_wait();
+    let flush_transport = Arc::clone(&transport);
+    let flush_handle = handle.clone();
+    let mut flushing = tokio::spawn(async move {
+        call(
+            &flush_transport,
+            &flush_handle,
+            4,
+            "capture.flush",
+            json!({}),
+        )
+        .await
+    });
+    bounded(
+        "live driver waiting behind detached fence",
+        probe.wait_until_apply_gate_waiting(),
+    )
+    .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut flushing)
+            .await
+            .is_err(),
+        "capture must remain fenced after the request future is cancelled"
+    );
+
+    probe.release_version_commit();
+    bounded("capture after detached switch", flushing)
+        .await
+        .expect("flush task");
+    for id in 5..25 {
+        let active = call(
+            &transport,
+            &handle,
+            id,
+            "versions.active",
+            json!({ "workspaceId": workspace_id }),
+        )
+        .await;
+        if active["id"] == json!(feature) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the detached setActive continuation did not commit");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_named_fences_live_ydoc_and_unannounced_disk_edits_into_fork() {
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
@@ -552,6 +707,198 @@ async fn create_named_fences_live_ydoc_and_unannounced_disk_edits_into_fork() {
             "{version} must contain the forced-scan disk edit"
         );
     }
+
+    // MUTATION: omit the live-manifest refresh -> the driver's old manifest
+    // never learned this forced-scan-only add, so its deletion emits no Retire.
+    std::fs::remove_file(scratch.path().join("disk-only.md")).expect("delete forced-scan add");
+    flush_until_settled(&transport, &handle, 7).await;
+    assert_eq!(
+        read_path(&transport, &handle, "main", "disk-only.md", 30).await,
+        None,
+        "the refreshed live manifest must retire a later deletion"
+    );
+    assert_eq!(
+        read_path(&transport, &handle, fork, "disk-only.md", 31)
+            .await
+            .as_deref(),
+        Some("unannounced disk edit"),
+        "the immutable fork retains the forced-scan snapshot"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn set_active_leaves_sessions_for_unrelated_versions_open_and_unprojected() {
+    // MUTATION: remove the source-version filter from the sweep -> this session
+    // closes and its inactive bytes can be captured into the version being left.
+    let (scratch, transport, handle, workspace_id) =
+        fixture("switch-session-scope", EngineService::new()).await;
+    let unrelated = create_feature(&transport, &handle, &workspace_id, 2).await;
+    let destination = create_feature(&transport, &handle, &workspace_id, 3).await;
+    let opened = call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.open",
+        json!({
+            "versionId": unrelated,
+            "path": "notes.md",
+            "contentKind": "plaintext",
+        }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+    let doc = Ydoc::wire();
+    let first =
+        base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "inactive edit"));
+    call(
+        &transport,
+        &handle,
+        5,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": first }),
+    )
+    .await;
+
+    switch_to(&transport, &handle, &workspace_id, &destination, 6)
+        .await
+        .expect("switch");
+    assert_eq!(
+        std::fs::read_to_string(scratch.path().join("notes.md")).expect("projection"),
+        "main base"
+    );
+    assert_eq!(
+        read_path(&transport, &handle, "main", "notes.md", 7)
+            .await
+            .as_deref(),
+        Some("main base")
+    );
+    let second =
+        base64::engine::general_purpose::STANDARD.encode(doc.plaintext_insert(0, "still "));
+    call(
+        &transport,
+        &handle,
+        8,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": second }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn create_named_ignores_and_preserves_an_unrelated_richdoc_session() {
+    // MUTATION: make the richdoc refusal or session sweep workspace-wide ->
+    // this valid fork is refused or the unrelated session disappears.
+    let (_scratch, transport, handle, workspace_id) =
+        fixture("fork-session-scope", EngineService::new()).await;
+    let unrelated = create_feature(&transport, &handle, &workspace_id, 2).await;
+    let opened = call(
+        &transport,
+        &handle,
+        3,
+        "ydoc.open",
+        json!({
+            "versionId": unrelated,
+            "path": "notes.md",
+            "contentKind": "richdoc",
+        }),
+    )
+    .await;
+    let session_id = opened["sessionId"].as_str().expect("session id").to_owned();
+    let doc = Ydoc::wire();
+    let first = base64::engine::general_purpose::STANDARD
+        .encode(doc.richdoc_append_paragraph("unrelated edit"));
+    call(
+        &transport,
+        &handle,
+        4,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": first }),
+    )
+    .await;
+
+    call(
+        &transport,
+        &handle,
+        5,
+        "versions.createNamed",
+        json!({
+            "workspaceId": workspace_id,
+            "name": "fork with unrelated editor",
+            "fromVersionId": "main",
+        }),
+    )
+    .await;
+    let second = base64::engine::general_purpose::STANDARD
+        .encode(doc.richdoc_append_paragraph("session survived"));
+    call(
+        &transport,
+        &handle,
+        6,
+        "ydoc.recordUpdate",
+        json!({ "sessionId": session_id, "updateBase64": second }),
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropping_engine_service_releases_its_single_actor_attachment() {
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let workspace_id = "ws-switch-barrier-drop-release";
+    let transport = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
+    transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                }),
+            ),
+        )
+        .await
+        .expect("initial open");
+    drop(transport);
+
+    for id in 2..42 {
+        let replacement = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
+        match replacement
+            .call(
+                RequestContext::unbounded(),
+                request(
+                    id,
+                    "workspace.open",
+                    None,
+                    json!({
+                        "rootDir": scratch.path().to_string_lossy(),
+                        "workspaceId": workspace_id,
+                    }),
+                ),
+            )
+            .await
+        {
+            Ok(opened) => {
+                let handle: WorkspaceHandle =
+                    serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
+                replacement
+                    .call(
+                        RequestContext::unbounded(),
+                        request(id + 100, "workspace.close", Some(handle), json!({})),
+                    )
+                    .await
+                    .expect("replacement close");
+                return;
+            }
+            Err(error) => {
+                assert_eq!(error.code, ErrorCode::WorkspaceUnavailable);
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+    }
+    panic!("dropping EngineService did not release its actor attachment");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

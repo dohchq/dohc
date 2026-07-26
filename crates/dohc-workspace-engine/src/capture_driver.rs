@@ -1500,6 +1500,10 @@ pub(crate) struct CaptureDriver {
     /// caller's first RPC write can never be overwritten by a later capture
     /// of stale closed-period disk bytes.
     baseline: tokio::sync::watch::Receiver<bool>,
+    /// Invalidates the live files layer after an out-of-band forced reconcile.
+    /// The epoch is sampled into each layer; a mismatch makes the old layer
+    /// restart before it may apply again.
+    refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// A dropped-but-untaken driver must never keep running: cancel on Drop (the
@@ -1527,6 +1531,7 @@ impl CaptureDriver {
         let status = Arc::new(DriverStatus::default());
         let (baseline_tx, baseline) = tokio::sync::watch::channel(false);
         let (flush_tx, flush_rx) = tokio::sync::mpsc::channel(8);
+        let refresh_epoch = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let task = tokio::spawn(drive(
             root,
             actor,
@@ -1537,6 +1542,7 @@ impl CaptureDriver {
             baseline_tx,
             flush_rx,
             apply_gate,
+            Arc::clone(&refresh_epoch),
             #[cfg(feature = "harness")]
             apply_probe,
         ));
@@ -1546,6 +1552,7 @@ impl CaptureDriver {
             status,
             flush_tx,
             baseline,
+            refresh_epoch,
         }
     }
 
@@ -1573,6 +1580,13 @@ impl CaptureDriver {
         &self.status
     }
 
+    /// Force the live driver to discard its manifest and rehydrate from the
+    /// domain before its next apply. Called while the workspace apply gate is
+    /// held, so the epoch change is ordered before that next apply.
+    pub(crate) fn request_manifest_refresh(&self) {
+        self.refresh_epoch.fetch_add(1, Ordering::AcqRel);
+    }
+
     /// Cancel the loop SYNCHRONOUSLY and hand back the join handle; the
     /// driver winds itself down (watcher joined, files actor closed) whether
     /// or not the caller awaits. Callers that need ordered teardown await
@@ -1588,6 +1602,7 @@ struct FilesLayer {
     files: FilesActor,
     watcher: NativeWatcher,
     policy_fingerprint: Option<u64>,
+    refresh_epoch: u64,
 }
 
 impl FilesLayer {
@@ -1604,6 +1619,7 @@ impl FilesLayer {
         cancel: &CancellationToken,
         seed: Option<(ScanManifest, ScanGeneration)>,
         policy_fingerprint: Option<u64>,
+        refresh_epoch: u64,
     ) -> Result<(FilesLayer, ReconcileRun), FilesError> {
         let files =
             FilesActor::spawn_async_with_manifest(root.to_path_buf(), ScanBounds::default(), seed)
@@ -1615,6 +1631,7 @@ impl FilesLayer {
                     files,
                     watcher: start.watcher,
                     policy_fingerprint,
+                    refresh_epoch,
                 },
                 start.initial_reconcile,
             )),
@@ -1829,6 +1846,10 @@ trait DriverEnv {
     /// would be silently swallowed. The loop re-reports whenever the count
     /// moves.
     fn watch_disruptions(&self, layer: &Self::Layer) -> u64;
+    /// An out-of-band reconcile invalidated this layer's manifest.
+    fn refresh_due(&self, _layer: &Self::Layer) -> bool {
+        false
+    }
 
     /// Build a fresh layer and drive its startup baseline to settle.
     async fn start_layer(&mut self, cancel: &CancellationToken) -> Result<Self::Layer, ()>;
@@ -1850,6 +1871,8 @@ enum TickIo {
     /// racing teardown must answer `settled: false`, never read a cancelled
     /// scan as quiescence.
     Cancelled,
+    /// The layer was invalidated while this tick waited on the apply gate.
+    RefreshRequired,
     /// Reconciled and applied one plan; `clean` is false when the apply
     /// reported failures or the scan itself was degraded.
     Applied { clean: bool },
@@ -2047,7 +2070,9 @@ async fn drive_loop<E: DriverEnv>(
         // An unknown fingerprint carries the state forward by itself; a
         // consumed hold under a still-unknown fingerprint needs no re-arm.
         policy_was_unknown = fingerprint.is_none();
-        let observation = if env.watch_lost(current) {
+        let observation = if env.refresh_due(current) {
+            TickObservation::PolicyChanged
+        } else if env.watch_lost(current) {
             // A permanently lost watch tears the layer down; the rebuild
             // re-seeds via its own baseline reconcile, so no change is lost
             // across the gap.
@@ -2115,6 +2140,10 @@ async fn drive_loop<E: DriverEnv>(
                         // next loop iteration exits on the cancel token. No
                         // supervision observation either — a cancelled tick
                         // proves nothing about the layer's health.
+                        break;
+                    }
+                    TickIo::RefreshRequired => {
+                        outcome = Some(TickObservation::PolicyChanged);
                         break;
                     }
                     TickIo::Applied { clean } => {
@@ -2208,6 +2237,7 @@ struct RealEnv {
     status: Arc<DriverStatus>,
     self_writes: SelfWriteSuppression,
     apply_gate: ApplyGate,
+    refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(feature = "harness")]
     apply_probe: Option<CaptureApplyProbe>,
 }
@@ -2228,6 +2258,9 @@ impl DriverEnv for RealEnv {
     }
     fn watch_disruptions(&self, layer: &FilesLayer) -> u64 {
         layer.watcher.disruption_count()
+    }
+    fn refresh_due(&self, layer: &FilesLayer) -> bool {
+        layer.refresh_epoch != self.refresh_epoch.load(Ordering::Acquire)
     }
 
     async fn start_layer(&mut self, cancel: &CancellationToken) -> Result<FilesLayer, ()> {
@@ -2254,10 +2287,16 @@ impl DriverEnv for RealEnv {
             .await
             .ok()
             .flatten();
-        let (fresh, initial) =
-            FilesLayer::start_with_fingerprint(&self.root, cancel, seed, fingerprint_before_seed)
-                .await
-                .map_err(|_| ())?;
+        let refresh_epoch = self.refresh_epoch.load(Ordering::Acquire);
+        let (fresh, initial) = FilesLayer::start_with_fingerprint(
+            &self.root,
+            cancel,
+            seed,
+            fingerprint_before_seed,
+            refresh_epoch,
+        )
+        .await
+        .map_err(|_| ())?;
 
         let mut settled = apply_run(
             &self.root,
@@ -2316,6 +2355,9 @@ impl DriverEnv for RealEnv {
             () = cancel.cancelled() => return TickIo::Cancelled,
             guard = self.apply_gate.lock() => guard,
         };
+        if self.refresh_due(layer) {
+            return TickIo::RefreshRequired;
+        }
         let run = layer
             .files
             .handle()
@@ -2409,6 +2451,7 @@ async fn drive(
     baseline_tx: tokio::sync::watch::Sender<bool>,
     flush_rx: tokio::sync::mpsc::Receiver<tokio::sync::oneshot::Sender<FlushOutcome>>,
     apply_gate: ApplyGate,
+    refresh_epoch: Arc<std::sync::atomic::AtomicU64>,
     #[cfg(feature = "harness")] apply_probe: Option<CaptureApplyProbe>,
 ) {
     let mut env = RealEnv {
@@ -2418,6 +2461,7 @@ async fn drive(
         status: Arc::clone(&status),
         self_writes,
         apply_gate,
+        refresh_epoch,
         #[cfg(feature = "harness")]
         apply_probe,
     };
@@ -2436,7 +2480,7 @@ pub(crate) async fn reconcile_full_for_switch(
     status: &Arc<DriverStatus>,
     self_writes: &SelfWriteSuppression,
     token: CancellationToken,
-) -> Result<(), SwitchReconcileError> {
+) -> Result<bool, SwitchReconcileError> {
     if token.is_cancelled() {
         return Err(SwitchReconcileError::Cancelled);
     }
@@ -2469,10 +2513,15 @@ pub(crate) async fn reconcile_full_for_switch(
             Err(SwitchReconcileError::Degraded(degraded_paths))
         }
         Ok(run) => {
+            let manifest_changed = matches!(
+                &run,
+                ReconcileRun::Completed(plan)
+                    if !plan.ops.is_empty() || !plan.retained_over_cap.is_empty()
+            );
             if apply_run_with_handle(root, actor, workspace_id, &handle, run, status, self_writes)
                 .await
             {
-                Ok(())
+                Ok(manifest_changed)
             } else {
                 Err(SwitchReconcileError::ApplyFailed)
             }
